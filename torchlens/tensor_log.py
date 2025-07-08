@@ -195,6 +195,9 @@ class TensorLogEntry:
             "module_entry_exit_thread_output"
         ]
 
+        # FLOPs info:
+        self.flops = fields_dict["flops"]
+
     # ********************************************
     # *********** User-Facing Functions **********
     # ********************************************
