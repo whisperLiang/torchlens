@@ -4,3 +4,4 @@ tqdm
 ipython
 graphviz
 torch
+torchvision
