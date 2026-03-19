@@ -18,6 +18,7 @@ from .user_funcs import (
     validate_forward_pass,
     validate_saved_activations,
     validate_batch_of_models_and_inputs,
+    replay_forward_pass,
 )
 from .validation.invariants import check_metadata_invariants, MetadataInvariantError
 

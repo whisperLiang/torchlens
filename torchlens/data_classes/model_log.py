@@ -224,6 +224,11 @@ class ModelLog:
         # that equivalence type (populated by loop_detection.py).
         self.equivalent_operations: Dict[str, set] = defaultdict(set)
 
+        # Output structure template captured from the model's original forward output.
+        # Replay uses this lightweight template to reconstruct the same container shape
+        # (list/dict/tuple/namedtuple/ModelOutput-like dict subclasses).
+        self._output_structure_template: Any = None
+
         # Aggregate tensor statistics (computed during postprocessing):
         self.total_activation_memory: int = 0
         self.num_tensors_saved: int = 0  # layers with has_saved_activations=True
