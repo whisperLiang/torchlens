@@ -352,7 +352,46 @@ def _extract_and_mark_outputs(
             self.output_layers.append(t.tl_tensor_label_raw)
         self._raw_layer_dict[t.tl_tensor_label_raw].feeds_output = True
 
+    if self.logging_mode == "exhaustive":
+        self._output_structure_template = _build_output_structure_template(outputs)
+
     return output_tensors, output_tensor_addresses
+
+
+def _build_output_structure_template(outputs: Any) -> Any:
+    """Build a lightweight template of the model's output container structure.
+
+    Tensor leaves are replaced by marker tuples ``("__tl_output_ref__", layer_label)``.
+    The template is later used by replay to rebuild outputs in the same format.
+    """
+    if isinstance(outputs, torch.Tensor):
+        layer_label = getattr(outputs, "tl_tensor_label_raw", None)
+        if layer_label is None:
+            return outputs
+        return ("__tl_output_ref__", layer_label)
+
+    if isinstance(outputs, list):
+        return [_build_output_structure_template(v) for v in outputs]
+
+    if isinstance(outputs, tuple):
+        return {
+            "__tl_tuple_type__": type(outputs),
+            "items": [_build_output_structure_template(v) for v in outputs],
+        }
+
+    if isinstance(outputs, dict):
+        dict_type = type(outputs)
+        template = {
+            "__tl_dict_type__": dict_type,
+            "items": [(k, _build_output_structure_template(v)) for k, v in outputs.items()],
+        }
+        # Store additional metadata for dict-like classes to help reconstruction
+        if dict_type is not dict:
+            template["__tl_dict_module__"] = getattr(dict_type, "__module__", None)
+            template["__tl_dict_name__"] = getattr(dict_type, "__name__", None)
+        return template
+
+    return outputs
 
 
 def run_and_log_inputs_through_model(

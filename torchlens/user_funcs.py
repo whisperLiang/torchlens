@@ -30,6 +30,8 @@ from .utils.introspection import get_vars_of_type_from_obj
 from .utils.rng import set_random_seed
 from .utils.display import warn_parallel, _vprint
 from .utils.arg_handling import safe_copy_args, safe_copy_kwargs, normalize_input_args
+from .utils.collections import assign_to_sequence_or_dict, index_nested
+from .utils.tensor_utils import tensor_nanequal
 from .data_classes.model_log import (
     ModelLog,
 )
@@ -687,3 +689,263 @@ def validate_batch_of_models_and_inputs(
         current_csv.to_csv(out_path, index=False)
         del model
     return current_csv
+
+
+def _deep_clone_tensors(val: Any) -> Any:
+    """Recursively clone all tensors in a nested structure of lists/tuples/dicts."""
+    if isinstance(val, torch.Tensor):
+        return val.detach().clone()
+    elif isinstance(val, (list, tuple)):
+        cloned = [_deep_clone_tensors(v) for v in val]
+        return type(val)(cloned)
+    elif isinstance(val, dict):
+        return {k: _deep_clone_tensors(v) for k, v in val.items()}
+    return val
+
+def _apply_value_to_args(
+    args_list: Union[List[Any], Dict[str, Any]],
+    pos: Union[int, str, tuple],
+    value: Any,
+) -> None:
+    """
+    Helper function to apply a computed value to the correct position in args
+    (handles nested tuple/dict structures).
+    """
+    if not isinstance(pos, tuple):
+        args_list[pos] = value
+    else:
+        # Mirrors validation replay semantics for nested arg positions.
+        args_list[pos[0]] = assign_to_sequence_or_dict(args_list[pos[0]], pos[1], value)
+
+
+def _index_nested(obj: Any, path: Tuple[Any, ...]) -> Any:
+    """Index a nested tuple/list/dict by following ``path`` keys in order."""
+    out = obj
+    for key in path:
+        out = out[key]
+    return out
+
+
+def _find_tensor_path(container: Any, target: torch.Tensor) -> Optional[Tuple[Any, ...]]:
+    """Find the nested path of ``target`` tensor within ``container``.
+
+    Comparison uses exact tensor equality semantics with NaN-aware handling.
+    """
+    if isinstance(container, torch.Tensor):
+        if tensor_nanequal(container, target, allow_tolerance=False):
+            return ()
+        return None
+
+    if isinstance(container, (list, tuple)):
+        for idx, val in enumerate(container):
+            subpath = _find_tensor_path(val, target)
+            if subpath is not None:
+                return (idx,) + subpath
+        return None
+
+    if isinstance(container, dict):
+        for key, val in container.items():
+            subpath = _find_tensor_path(val, target)
+            if subpath is not None:
+                return (key,) + subpath
+        return None
+
+    return None
+
+
+def _resolve_parent_value_for_child(
+    model_log: "ModelLog",
+    parent_label: str,
+    child_label: str,
+    parent_replay_value: Any,
+    route_cache: Dict[Tuple[str, str], Optional[Tuple[Any, ...]]],
+) -> Any:
+    """Resolve which portion of a parent's replay output should feed a specific child."""
+    cache_key = (parent_label, child_label)
+    if cache_key not in route_cache:
+        parent_layer = model_log[parent_label]
+        cached_path: Optional[Tuple[Any, ...]] = None
+        if child_label in parent_layer.children_tensor_versions:
+            child_saved_value = parent_layer.children_tensor_versions[child_label]
+            if isinstance(child_saved_value, torch.Tensor):
+                cached_path = _find_tensor_path(parent_layer.activation, child_saved_value)
+        route_cache[cache_key] = cached_path
+
+    path = route_cache[cache_key]
+    if path is None:
+        return parent_replay_value
+    return _index_nested(parent_replay_value, path)
+
+
+def _reconstruct_output_from_template(
+    template: Any,
+    computed_activations: Dict[str, Any],
+    model_log: "ModelLog",
+) -> Any:
+    """Reconstruct model output with the original container format from a lightweight template."""
+    if isinstance(template, tuple) and len(template) == 2 and template[0] == "__tl_output_ref__":
+        layer_label = template[1]
+        if layer_label in computed_activations:
+            return computed_activations[layer_label]
+        raw_to_final = getattr(model_log, "_raw_to_final_layer_labels", {})
+        final_label = raw_to_final.get(layer_label, layer_label)
+        return computed_activations[final_label]
+
+    if isinstance(template, list):
+        return [_reconstruct_output_from_template(v, computed_activations, model_log) for v in template]
+
+    if isinstance(template, dict):
+        if "__tl_tuple_type__" in template and "items" in template:
+            items = [
+                _reconstruct_output_from_template(v, computed_activations, model_log)
+                for v in template["items"]
+            ]
+            tuple_type = template["__tl_tuple_type__"]
+            if tuple_type is tuple:
+                return tuple(items)
+            try:
+                return tuple_type(*items)
+            except Exception:
+                return tuple_type(items)
+
+        if "__tl_dict_type__" in template and "items" in template:
+            rebuilt_items = [
+                (k, _reconstruct_output_from_template(v, computed_activations, model_log))
+                for k, v in template["items"]
+            ]
+            dict_type = template["__tl_dict_type__"]
+            rebuilt_dict = {k: v for k, v in rebuilt_items}
+            if dict_type is dict:
+                return rebuilt_dict
+            
+            # Try multiple strategies to reconstruct the dict-like object
+            # Strategy 1: Try calling with **kwargs (works for many dataclass-like objects)
+            try:
+                return dict_type(**rebuilt_dict)
+            except Exception:
+                pass
+            
+            # Strategy 2: Try calling with dict as single arg (works for some dict subclasses)
+            try:
+                return dict_type(rebuilt_dict)
+            except Exception:
+                pass
+            
+            # Strategy 3: Try creating empty instance and updating (works for OrderedDict, etc.)
+            try:
+                instance = dict_type()
+                instance.update(rebuilt_dict)
+                return instance
+            except Exception:
+                pass
+            
+            # Strategy 4: For transformers ModelOutput-like classes, try positional args
+            # These classes often accept values in the order they were defined
+            try:
+                return dict_type(*rebuilt_dict.values())
+            except Exception:
+                pass
+            
+            # Fallback: return plain dict with a warning attribute
+            # This preserves data even if we can't reconstruct the exact type
+            return rebuilt_dict
+
+        return {
+            k: _reconstruct_output_from_template(v, computed_activations, model_log)
+            for k, v in template.items()
+        }
+
+    return template
+
+def replay_forward_pass(
+    model_log: "ModelLog",
+    new_input: Union[torch.Tensor, List[Any]],
+    new_input_kwargs: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """
+    Replay the computation using the saved graph structure and new input.
+    
+    Args:
+        model_log: ModelLog object returned by log_forward_pass (must have 
+                   save_function_args=True to capture non-tensor args).
+        new_input: New input tensor(s) to substitute for the original.
+        new_input_kwargs: Optional kwargs for the input layer.
+        
+    Returns:
+        The final output tensor from the replayed forward pass.
+    """
+    if new_input_kwargs is None:
+        new_input_kwargs = {}
+    
+    computed_activations: Dict[str, Any] = {}
+    parent_child_route_cache: Dict[Tuple[str, str], Optional[Tuple[Any, ...]]] = {}
+    output: Any = None
+        
+    for layer_pass_log in model_log.layer_list:
+        layer_label = layer_pass_log.layer_label
+        
+        # Clone tensors in captured_args/kwargs to prevent in-place modification crashes in batch-norm layers
+        raw_args = layer_pass_log.captured_args if getattr(layer_pass_log, "captured_args", None) is not None else []
+        raw_kwargs = layer_pass_log.captured_kwargs if getattr(layer_pass_log, "captured_kwargs", None) is not None else {}
+        
+        args_list = _deep_clone_tensors(list(raw_args))
+        kwargs_dict = _deep_clone_tensors(dict(raw_kwargs))
+        
+        parent_arg_locs = getattr(layer_pass_log, "parent_layer_arg_locs", {})
+        
+        for arg_pos, parent_label in parent_arg_locs.get("args", {}).items():
+            if parent_label in computed_activations:
+                parent_value = _resolve_parent_value_for_child(
+                    model_log,
+                    parent_label,
+                    layer_label,
+                    computed_activations[parent_label],
+                    parent_child_route_cache,
+                )
+                _apply_value_to_args(args_list, arg_pos, parent_value)
+            elif layer_pass_log.is_input_layer:
+                _apply_value_to_args(args_list, arg_pos, new_input)
+                
+        for kwarg_name, parent_label in parent_arg_locs.get("kwargs", {}).items():
+            if parent_label in computed_activations:
+                kwargs_dict[kwarg_name] = _resolve_parent_value_for_child(
+                    model_log,
+                    parent_label,
+                    layer_label,
+                    computed_activations[parent_label],
+                    parent_child_route_cache,
+                )
+            elif layer_pass_log.is_input_layer:
+                kwargs_dict[kwarg_name] = new_input_kwargs.get(kwarg_name, kwargs_dict.get(kwarg_name))
+        
+        func = getattr(layer_pass_log, "func_applied", None)
+        if func is not None:
+            output = func(*args_list, **kwargs_dict)
+            if output is None:
+                # Some in-place ops (e.g., tensor.__setitem__) return None.
+                # In those cases, the mutated first arg is the semantic output.
+                if getattr(layer_pass_log, "func_is_inplace", False) and len(args_list) > 0:
+                    output = args_list[0]
+                else:
+                    output = _deep_clone_tensors(layer_pass_log.activation)
+            if layer_pass_log.iterable_output_index is not None:
+                output = index_nested(output, layer_pass_log.iterable_output_index)
+        else:
+            if layer_pass_log.is_input_layer:
+                output = _deep_clone_tensors(new_input)
+            else:
+                output = _deep_clone_tensors(layer_pass_log.activation)
+        
+        computed_activations[layer_label] = output
+    
+    output_template = getattr(model_log, "_output_structure_template", None)
+    if output_template is not None:
+        return _reconstruct_output_from_template(output_template, computed_activations, model_log)
+
+    if model_log.output_layers:
+        if len(model_log.output_layers) == 1:
+            return computed_activations[model_log.output_layers[0]]
+        return [computed_activations[layer_label] for layer_label in model_log.output_layers]
+    
+    return output
+
