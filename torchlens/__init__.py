@@ -19,6 +19,9 @@ from .user_funcs import (
     validate_saved_activations,
     validate_batch_of_models_and_inputs,
     replay_forward_pass,
+    split_graph,
+    replay_subgraph,
+    split_and_replay_graph,
 )
 from .validation.invariants import check_metadata_invariants, MetadataInvariantError
 
