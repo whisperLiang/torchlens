@@ -53,6 +53,30 @@ def _pick_spread_indices(total_layers: int) -> List[int]:
     return sorted(set(min(total_layers - 1, idx) for idx in candidates))
 
 
+def _collect_successful_split_point_combinations(model_log, new_input, atol: float = 1e-5):
+    """Collect successful split-point index combinations across all boundaries."""
+    full_output = replay_forward_pass(model_log, new_input)
+    successful_combinations = []
+    seen = set()
+
+    for split_idx in range(len(model_log.layer_list)):
+        _, split_output = split_and_replay_graph(
+            model_log,
+            split_layer_indices=split_idx,
+            new_input=new_input,
+        )
+        if not _compare_outputs(full_output, split_output, atol=atol):
+            continue
+
+        _, _, split_labels = split_graph(model_log, split_idx)
+        combination = tuple(sorted(model_log[label].creation_order - 1 for label in split_labels))
+        if combination not in seen:
+            successful_combinations.append(combination)
+            seen.add(combination)
+
+    return successful_combinations
+
+
 @pytest.mark.smoke
 def test_split_simple_sequential():
     """Test splitting a simple sequential model."""
@@ -200,6 +224,45 @@ def test_split_branching_model():
     )
 
     assert _compare_outputs(full_output, split_output, atol=1e-5)
+
+
+def test_split_multi_input_branching_model():
+    """Split replay should preserve correctness for DAGs with multiple inputs."""
+
+    class MultiInputBranchingModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.left = nn.Linear(10, 8)
+            self.right = nn.Linear(6, 8)
+            self.merge = nn.Linear(16, 4)
+
+        def forward(self, x, y):
+            left = torch.relu(self.left(x))
+            right = torch.sigmoid(self.right(y))
+            merged = torch.cat([left, right], dim=-1)
+            return self.merge(merged)
+
+    model = MultiInputBranchingModel()
+    model.eval()
+
+    original_input = (torch.randn(2, 10), torch.randn(2, 6))
+    model_log = log_forward_pass(
+        model,
+        original_input,
+        layers_to_save="all",
+        save_function_args=True,
+    )
+
+    new_input = (torch.randn(2, 10), torch.randn(2, 6))
+    full_output = replay_forward_pass(model_log, new_input)
+
+    for split_idx in _pick_spread_indices(len(model_log.layer_list)):
+        _, split_output = split_and_replay_graph(
+            model_log,
+            split_layer_indices=split_idx,
+            new_input=new_input,
+        )
+        assert _compare_outputs(full_output, split_output, atol=1e-5)
 
 
 def test_split_resnet_block():
@@ -362,6 +425,44 @@ def test_split_preserves_intermediate_features():
 
     # Verify final outputs match
     assert _compare_outputs(full_replay_output, split_output, atol=1e-5)
+
+
+@pytest.mark.smoke
+def test_collect_successful_split_point_combinations():
+    """Report real cross-boundary split-point combinations for successful boundaries."""
+
+    class ResidualBranchModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fc1 = nn.Linear(10, 12)
+            self.fc2 = nn.Linear(12, 12)
+            self.fc3 = nn.Linear(12, 12)
+            self.out = nn.Linear(12, 4)
+
+        def forward(self, x):
+            base = torch.relu(self.fc1(x))
+            branch1 = torch.relu(self.fc2(base))
+            branch2 = torch.relu(self.fc3(base))
+            merged = branch1 + branch2
+            return self.out(merged)
+
+    model = ResidualBranchModel()
+    model.eval()
+
+    original_input = torch.randn(2, 10)
+    model_log = log_forward_pass(
+        model,
+        original_input,
+        layers_to_save="all",
+        save_function_args=True,
+    )
+
+    new_input = torch.randn(2, 10)
+    combinations = _collect_successful_split_point_combinations(model_log, new_input)
+
+    assert combinations
+    assert all(len(combo) > 0 for combo in combinations)
+    assert any(len(combo) > 1 for combo in combinations)
 
 
 @pytest.mark.parametrize(

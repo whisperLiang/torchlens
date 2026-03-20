@@ -1,21 +1,15 @@
-"""Report successful graph-split index combinations for torchvision models.
-
-This script runs functional replay checks for graph splitting and prints all
-successful single split indices. For multi-index input, the current split
-implementation uses the maximum index as the actual split boundary, so successful
-multi-index combinations are determined by successful max indices.
-"""
+"""Report successful topological split boundaries and boundary-layer combinations."""
 
 from __future__ import annotations
 
 import argparse
-import itertools
 import json
 from typing import Any, Dict, List, Sequence, Tuple
 
 import torch
 
 from torchlens import log_forward_pass, replay_forward_pass, split_and_replay_graph
+from torchlens.user_funcs import split_graph
 
 
 def _tensor_allclose(t1: torch.Tensor, t2: torch.Tensor, atol: float = 1e-4) -> bool:
@@ -46,6 +40,18 @@ def _compare_outputs(output1: Any, output2: Any, atol: float = 1e-4) -> bool:
 
 def _build_model_and_inputs(model_key: str) -> Tuple[torch.nn.Module, Any, Any]:
     import torchvision
+
+    if model_key == "alexnet":
+        model = torchvision.models.alexnet(weights=None)
+        original_input = torch.rand(1, 3, 224, 224)
+        new_input = torch.rand(1, 3, 224, 224)
+        return model, original_input, new_input
+
+    if model_key == "resnet18":
+        model = torchvision.models.resnet18(weights=None)
+        original_input = torch.rand(1, 3, 224, 224)
+        new_input = torch.rand(1, 3, 224, 224)
+        return model, original_input, new_input
 
     if model_key == "fasterrcnn_mobilenet_v3_large_320_fpn":
         model = torchvision.models.detection.fasterrcnn_mobilenet_v3_large_320_fpn(
@@ -90,38 +96,41 @@ def _find_successful_single_indices(model_key: str, atol: float) -> Dict[str, An
     full_output = replay_forward_pass(model_log, new_input)
 
     total_layers = len(model_log.layer_list)
-    successful: List[int] = []
-    failed: List[int] = []
+    successful_boundaries: List[Dict[str, Any]] = []
+    failed_indices: List[int] = []
+    seen_split_point_combinations = set()
+    successful_split_point_combinations: List[List[int]] = []
 
     for idx in range(total_layers):
+        _, _, split_labels = split_graph(model_log, idx)
         _, split_output = split_and_replay_graph(
             model_log,
             split_layer_indices=idx,
             new_input=new_input,
         )
         if _compare_outputs(full_output, split_output, atol=atol):
-            successful.append(idx)
+            split_point_indices = sorted(model_log[label].creation_order - 1 for label in split_labels)
+            successful_boundaries.append(
+                {
+                    "boundary_index": idx,
+                    "split_point_indices": split_point_indices,
+                    "split_point_labels": split_labels,
+                }
+            )
+            combo_key = tuple(split_point_indices)
+            if combo_key not in seen_split_point_combinations:
+                successful_split_point_combinations.append(split_point_indices)
+                seen_split_point_combinations.add(combo_key)
         else:
-            failed.append(idx)
-
-    # Current split logic treats multi-index split as max(split_indices).
-    # Therefore, any tuple whose max is in successful is also successful.
-    max_index = total_layers - 1
-    representative_pairs: List[Tuple[int, int]] = []
-    for i, j in itertools.combinations(range(total_layers), 2):
-        if j in successful:
-            representative_pairs.append((i, j))
-        if len(representative_pairs) >= 50:
-            break
+            failed_indices.append(idx)
 
     return {
         "model": model_key,
         "total_layers": total_layers,
-        "successful_single_indices": successful,
-        "failed_single_indices": failed,
-        "num_successful_single_indices": len(successful),
-        "multi_index_rule": "multi-index split uses max index as boundary",
-        "representative_successful_pairs": representative_pairs,
+        "successful_boundary_count": len(successful_boundaries),
+        "successful_boundaries": successful_boundaries,
+        "failed_boundary_indices": failed_indices,
+        "successful_split_point_index_combinations": successful_split_point_combinations,
     }
 
 
@@ -142,8 +151,8 @@ if __name__ == "__main__":
         "--models",
         nargs="+",
         default=[
-            "fasterrcnn_mobilenet_v3_large_320_fpn",
-            "ssdlite320_mobilenet_v3_large",
+            "alexnet",
+            "resnet18",
             "deeplabv3_resnet50",
         ],
     )
