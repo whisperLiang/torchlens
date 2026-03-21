@@ -43,12 +43,12 @@ def _deep_clone_tensors(val: Any, device: Optional[Union[str, torch.device]] = N
     return val
 
 
-def _clone_tensors_preserve_graph(val: Any) -> Any:
+def _clone_tensors_preserve_graph(val: Any, device: Optional[Union[str, torch.device]] = None) -> Any:
     """Recursively clone tensors while preserving their autograd connections."""
-    return _clone_tensors_preserve_graph_with_memo(val, {})
+    return _clone_tensors_preserve_graph_with_memo(val, {}, device=device)
 
 
-def _clone_tensors_preserve_graph_with_memo(val: Any, memo: Dict[int, Any]) -> Any:
+def _clone_tensors_preserve_graph_with_memo(val: Any, memo: Dict[int, Any], device: Optional[Union[str, torch.device]] = None) -> Any:
     """Clone tensors while preserving graph links and shared-reference topology."""
     obj_id = id(val)
     if obj_id in memo:
@@ -59,20 +59,22 @@ def _clone_tensors_preserve_graph_with_memo(val: Any, memo: Dict[int, Any]) -> A
             memo[obj_id] = val
             return val
         cloned_tensor = val.clone()
+        if device is not None:
+            cloned_tensor = cloned_tensor.to(device)
         memo[obj_id] = cloned_tensor
         return cloned_tensor
 
     if isinstance(val, list):
         cloned_list: List[Any] = []
         memo[obj_id] = cloned_list
-        cloned_list.extend(_clone_tensors_preserve_graph_with_memo(v, memo) for v in val)
+        cloned_list.extend(_clone_tensors_preserve_graph_with_memo(v, memo, device=device) for v in val)
         return cloned_list
 
     if isinstance(val, tuple):
         placeholder: List[Any] = []
         memo[obj_id] = placeholder
         cloned_tuple = type(val)(
-            _clone_tensors_preserve_graph_with_memo(v, memo) for v in val
+            _clone_tensors_preserve_graph_with_memo(v, memo, device=device) for v in val
         )
         memo[obj_id] = cloned_tuple
         return cloned_tuple
@@ -81,7 +83,7 @@ def _clone_tensors_preserve_graph_with_memo(val: Any, memo: Dict[int, Any]) -> A
         cloned_dict: Dict[Any, Any] = {}
         memo[obj_id] = cloned_dict
         cloned_dict.update(
-            {k: _clone_tensors_preserve_graph_with_memo(v, memo) for k, v in val.items()}
+            {k: _clone_tensors_preserve_graph_with_memo(v, memo, device=device) for k, v in val.items()}
         )
         return cloned_dict
 
@@ -600,6 +602,7 @@ def _execute_replay_differentiable(
     model: nn.Module,
     layer_labels: List[str],
     seeded_values: Dict[str, Any],
+    device: Optional[Union[str, torch.device]] = None,
 ) -> Dict[str, Any]:
     """Replay layers while preserving autograd links through inputs and live parameters."""
     replay_cache = _get_replay_cache(model_log)
@@ -616,8 +619,8 @@ def _execute_replay_differentiable(
         raw_args = getattr(layer, "captured_args", None)
         raw_kwargs = getattr(layer, "captured_kwargs", None)
 
-        args_list = _clone_tensors_preserve_graph(list(raw_args) if raw_args is not None else [])
-        kwargs_dict = _clone_tensors_preserve_graph(dict(raw_kwargs) if raw_kwargs is not None else {})
+        args_list = _clone_tensors_preserve_graph(list(raw_args) if raw_args is not None else [], device=device)
+        kwargs_dict = _clone_tensors_preserve_graph(dict(raw_kwargs) if raw_kwargs is not None else {}, device=device)
         args_list = _swap_copied_params_for_live_params(args_list, live_params_by_addr)
         kwargs_dict = _swap_copied_params_for_live_params(kwargs_dict, live_params_by_addr)
 
@@ -653,7 +656,7 @@ def _execute_replay_differentiable(
                 if getattr(layer, "func_is_inplace", False) and len(args_list) > 0:
                     output = args_list[0]
                 else:
-                    output = _clone_tensors_preserve_graph(layer.activation)
+                    output = _clone_tensors_preserve_graph(layer.activation, device=device)
             if layer.iterable_output_index is not None:
                 output = index_nested(output, layer.iterable_output_index)
         else:
@@ -662,7 +665,7 @@ def _execute_replay_differentiable(
             elif layer.is_buffer_layer and layer.buffer_address in live_buffers_by_addr:
                 output = live_buffers_by_addr[layer.buffer_address]
             else:
-                output = _clone_tensors_preserve_graph(layer.activation)
+                output = _clone_tensors_preserve_graph(layer.activation, device=device)
 
         computed[label] = output
 
@@ -790,6 +793,7 @@ def replay_forward_pass_differentiable(
     model: nn.Module,
     new_input: Union[torch.Tensor, List[Any], Tuple[Any, ...]],
     new_input_kwargs: Optional[Dict[str, Any]] = None,
+    device: Optional[Union[str, torch.device]] = None,
 ) -> Any:
     """Replay the full graph while preserving autograd through inputs and live params."""
     input_layer_values = _build_replay_input_layer_values(model_log, new_input, new_input_kwargs)
@@ -798,6 +802,7 @@ def replay_forward_pass_differentiable(
         model,
         [layer.layer_label for layer in model_log.layer_list],
         input_layer_values,
+        device=device,
     )
 
     output_template = getattr(model_log, "_output_structure_template", None)
@@ -818,6 +823,7 @@ def split_and_replay_graph_differentiable(
     split_layer_indices: Union[int, List[int]],
     new_input: Union[torch.Tensor, List[Any], Tuple[Any, ...]],
     new_input_kwargs: Optional[Dict[str, Any]] = None,
+    device: Optional[Union[str, torch.device]] = None,
 ) -> Tuple[Dict[str, Any], Any]:
     """Split the graph and replay both halves while preserving autograd connectivity."""
     subgraph1_labels, subgraph2_labels, split_labels = split_graph(model_log, split_layer_indices)
@@ -828,6 +834,7 @@ def split_and_replay_graph_differentiable(
         model,
         subgraph1_labels,
         input_layer_values,
+        device=device,
     )
     intermediate_features = {label: subgraph1_outputs[label] for label in split_labels}
     subgraph2_outputs = _execute_replay_differentiable(
@@ -835,6 +842,7 @@ def split_and_replay_graph_differentiable(
         model,
         subgraph2_labels,
         intermediate_features,
+        device=device,
     )
 
     combined_outputs = {**subgraph1_outputs, **subgraph2_outputs}
