@@ -385,3 +385,39 @@ def test_replay_t5_encoder_model() -> None:
     assert type(replayed_output) == type(real_output)
     _assert_outputs_equal(replayed_output.to_tuple(), real_output.to_tuple(), atol=1e-5)
 
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("target_device", ["cpu", "cuda"])
+@pytest.mark.parametrize("model_ctor", ["resnet18", "vit_b_16"])
+def test_replay_device_placement_real_models(model_ctor, target_device):
+    if target_device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+        
+    torchvision = pytest.importorskip("torchvision")
+    model = getattr(torchvision.models, model_ctor)(weights=None)
+    model.eval()
+    
+    test_input = torch.randn(1, 3, 224, 224)
+    
+    # Base log on CPU
+    model_log = log_forward_pass(model, test_input, layers_to_save="all", save_function_args=True)
+    
+    new_input = torch.randn(1, 3, 224, 224)
+    
+    # Replay on target device
+    replayed_output = replay_forward_pass(model_log, new_input, device=target_device)
+    
+    # Real model on target device
+    model_target = model.to(target_device)
+    new_input_target = new_input.to(target_device)
+    with torch.no_grad():
+        real_output = model_target(new_input_target)
+    
+    _assert_outputs_equal(replayed_output, real_output, atol=1e-4)
+    
+    if isinstance(replayed_output, torch.Tensor):
+        assert str(replayed_output.device).startswith(target_device)
+        
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()

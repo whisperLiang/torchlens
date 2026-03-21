@@ -1652,3 +1652,59 @@ def test_split_error_handling():
             split_layer_indices=-1000,
             new_input=original_input,
         )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("target_device", ["cpu", "cuda"])
+@pytest.mark.parametrize("model_name", ["resnet18", "mobilenet_v3_small"])
+def test_split_differentiable_device_placement_real_models(model_name, target_device):
+    if target_device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+        
+    torchvision = pytest.importorskip("torchvision")
+    model = getattr(torchvision.models, model_name)(weights=None).train()
+    
+    original_input = torch.randn(2, 3, 224, 224)
+    model_log = log_forward_pass(model, original_input, layers_to_save="all", save_function_args=True)
+    split_idx = len(model_log.layer_list) // 2
+    
+    # Setup real backward on target device
+    import copy
+    model_real = copy.deepcopy(model).to(target_device)
+    model_real.train()
+    opt_real = torch.optim.SGD(model_real.parameters(), lr=0.01)
+    opt_real.zero_grad(set_to_none=True)
+    new_input_real = torch.randn(2, 3, 224, 224).to(target_device)
+    
+    cpu_rng_state = torch.random.get_rng_state()
+    if target_device == "cuda":
+        cuda_rng_state = torch.cuda.get_rng_state()
+    
+    out_real = model_real(new_input_real)
+    out_real.sum().backward()
+    opt_real.step()
+    params_real = {n: p.detach().clone() for n, p in model_real.named_parameters()}
+    
+    # Setup split backward on target device
+    model_split = copy.deepcopy(model).to(target_device)
+    model_split.train()
+    opt_split = torch.optim.SGD(model_split.parameters(), lr=0.01)
+    opt_split.zero_grad(set_to_none=True)
+    new_input_split = new_input_real.clone() # already on target device
+    
+    torch.random.set_rng_state(cpu_rng_state)
+    if target_device == "cuda":
+        torch.cuda.set_rng_state(cuda_rng_state)
+        
+    _, out_split = split_and_replay_graph_differentiable(
+        model_log, model_split, split_layer_indices=split_idx, new_input=new_input_split, device=target_device
+    )
+    out_split.sum().backward()
+    opt_split.step()
+    params_split = {n: p.detach().clone() for n, p in model_split.named_parameters()}
+    
+    for name in params_real:
+        _assert_tensor_close(params_real[name], params_split[name], atol=1e-4)
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
