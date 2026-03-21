@@ -34,7 +34,11 @@ def _assert_outputs_equal(lhs, rhs, atol: float = 1e-5) -> None:
 
 
 @pytest.mark.smoke
-def test_replay_simple_sequential() -> None:
+@pytest.mark.parametrize("target_device", ["cpu", "cuda"])
+def test_replay_simple_sequential(target_device) -> None:
+    if target_device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+        
     model = nn.Sequential(
         nn.Linear(10, 20),
         nn.ReLU(),
@@ -49,10 +53,15 @@ def test_replay_simple_sequential() -> None:
     )
 
     new_input = torch.randn(2, 10)
-    replayed_output = replay_forward_pass(model_log, new_input)
-    real_output = model(new_input)
+    replayed_output = replay_forward_pass(model_log, new_input, device=target_device)
+    
+    # We must run the real model on the target device to compare
+    model = model.to(target_device)
+    real_output = model(new_input.to(target_device))
 
     _assert_outputs_equal(replayed_output, real_output, atol=1e-5)
+    if isinstance(replayed_output, torch.Tensor):
+        assert str(replayed_output.device).startswith(target_device)
 
 
 @pytest.mark.smoke

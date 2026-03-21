@@ -277,7 +277,11 @@ def _collect_successful_split_point_combinations(model_log, new_input, atol: flo
 
 
 @pytest.mark.smoke
-def test_split_simple_sequential():
+@pytest.mark.parametrize("target_device", ["cpu", "cuda"])
+def test_split_simple_sequential(target_device):
+    if target_device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
     """Test splitting a simple sequential model."""
     model = nn.Sequential(
         nn.Linear(10, 20),
@@ -299,19 +303,22 @@ def test_split_simple_sequential():
     # Test split at middle layer
     new_input = torch.randn(2, 10)
 
-    # Full replay
-    full_output = replay_forward_pass(model_log, new_input)
+    # Full replay on target device
+    full_output = replay_forward_pass(model_log, new_input, device=target_device)
 
-    # Split replay at layer index 5 (middle of network)
+    # Split replay at layer index 5 (middle of network) on target device
     intermediate_features, split_output = split_and_replay_graph(
         model_log,
         split_layer_indices=5,
         new_input=new_input,
+        device=target_device,
     )
 
-    # Outputs should match
+    # Outputs should match (they will be on the target device)
     assert _compare_outputs(full_output, split_output, atol=1e-5)
     assert len(intermediate_features) > 0
+    if isinstance(full_output, torch.Tensor):
+        assert str(full_output.device).startswith(target_device)
 
 
 @pytest.mark.smoke
