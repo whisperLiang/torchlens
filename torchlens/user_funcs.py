@@ -32,8 +32,10 @@ from .utils.display import warn_parallel, _vprint
 from .utils.arg_handling import safe_copy_args, safe_copy_kwargs, normalize_input_args
 from .graph_split import (
     replay_forward_pass,
+    replay_forward_pass_differentiable,
     replay_subgraph,
     split_and_replay_graph,
+    split_and_replay_graph_differentiable,
     split_graph,
 )
 from .data_classes.model_log import (

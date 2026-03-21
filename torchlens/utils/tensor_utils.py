@@ -79,6 +79,12 @@ def tensor_nanequal(tensor_a: torch.Tensor, tensor_b: torch.Tensor, allow_tolera
     """
     from .._state import pause_logging
 
+    def _copy_tl_attrs(src, dst):
+        for attr_name in ("tl_tensor_label_raw", "tl_param_address", "tl_buffer_parent"):
+            if hasattr(src, attr_name):
+                setattr(dst, attr_name, getattr(src, attr_name))
+        return dst
+
     if tensor_a.shape != tensor_b.shape:
         return False
 
@@ -199,10 +205,19 @@ def safe_copy(x, detach_tensor: bool = False):
     """
     from .._state import pause_logging
 
+    def _copy_tl_attrs(src, dst):
+        for attr_name in ("tl_tensor_label_raw", "tl_param_address", "tl_buffer_parent"):
+            if hasattr(src, attr_name):
+                setattr(dst, attr_name, getattr(src, attr_name))
+        return dst
+
     if isinstance(x, (torch.Tensor, torch.nn.Parameter)):
         with pause_logging():
             if not detach_tensor:
-                return x.clone()
+                vals_tensor = x.clone()
+                if isinstance(x, torch.nn.Parameter):
+                    vals_tensor = torch.nn.Parameter(vals_tensor, requires_grad=x.requires_grad)
+                return _copy_tl_attrs(x, vals_tensor)
             # Detach path: use pure-torch ops — no numpy round-trip.
             # This avoids crashes on sparse, quantized, complex32, meta, float8, etc.
             try:
@@ -216,11 +231,9 @@ def safe_copy(x, detach_tensor: bool = False):
                     vals_tensor = torch.zeros(x.shape, dtype=torch.float32)
             # Preserve the raw label so postprocessing can map this tensor
             # back to its ModelLog entry.
-            if hasattr(x, "tl_tensor_label_raw"):
-                setattr(vals_tensor, "tl_tensor_label_raw", getattr(x, "tl_tensor_label_raw"))
             if isinstance(x, torch.nn.Parameter):
-                return torch.nn.Parameter(vals_tensor)
-            return vals_tensor
+                vals_tensor = torch.nn.Parameter(vals_tensor, requires_grad=x.requires_grad)
+            return _copy_tl_attrs(x, vals_tensor)
     else:
         # Non-tensor: shallow copy is sufficient and avoids deepcopy's
         # circular-reference pitfalls.
