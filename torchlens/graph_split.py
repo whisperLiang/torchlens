@@ -672,6 +672,14 @@ def _execute_replay_differentiable(
     return computed
 
 
+
+def _ensure_save_function_args_enabled(model_log: "ModelLog") -> None:
+    if getattr(model_log, "save_function_args", False) is False:
+        raise ValueError(
+            "Graph replay requires model_log to be created with save_function_args=True.\n"
+            "Please explicitly set `save_function_args=True` when calling `log_forward_pass`."
+        )
+
 def replay_forward_pass(
     model_log: "ModelLog",
     new_input: Union[torch.Tensor, List[Any], Tuple[Any, ...]],
@@ -687,6 +695,7 @@ def replay_forward_pass(
     returned tensors are suitable for forward-value validation but are not connected
     to the original model's autograd graph for training-time backward passes.
     """
+    _ensure_save_function_args_enabled(model_log)
     input_layer_values = _build_replay_input_layer_values(model_log, new_input, new_input_kwargs)
     computed_activations = _execute_replay(
         model_log,
@@ -766,6 +775,7 @@ def split_and_replay_graph(
     split replay is not currently differentiable end-to-end with respect to the
     original model parameters or the pre-split inputs.
     """
+    _ensure_save_function_args_enabled(model_log)
     subgraph1_labels, subgraph2_labels, split_labels = split_graph(model_log, split_layer_indices)
     input_layer_values = _build_replay_input_layer_values(model_log, new_input, new_input_kwargs)
 
@@ -796,6 +806,7 @@ def replay_forward_pass_differentiable(
     device: Optional[Union[str, torch.device]] = None,
 ) -> Any:
     """Replay the full graph while preserving autograd through inputs and live params."""
+    _ensure_save_function_args_enabled(model_log)
     input_layer_values = _build_replay_input_layer_values(model_log, new_input, new_input_kwargs)
     computed_activations = _execute_replay_differentiable(
         model_log,
@@ -826,6 +837,7 @@ def split_and_replay_graph_differentiable(
     device: Optional[Union[str, torch.device]] = None,
 ) -> Tuple[Dict[str, Any], Any]:
     """Split the graph and replay both halves while preserving autograd connectivity."""
+    _ensure_save_function_args_enabled(model_log)
     subgraph1_labels, subgraph2_labels, split_labels = split_graph(model_log, split_layer_indices)
     input_layer_values = _build_replay_input_layer_values(model_log, new_input, new_input_kwargs)
 
