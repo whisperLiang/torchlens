@@ -30,15 +30,16 @@ def _get_replay_cache(model_log: "ModelLog") -> Dict[str, Any]:
     return cache
 
 
-def _deep_clone_tensors(val: Any) -> Any:
+def _deep_clone_tensors(val: Any, device: Optional[Union[str, torch.device]] = None) -> Any:
     """Recursively clone all tensors in a nested structure of lists/tuples/dicts."""
     if isinstance(val, torch.Tensor):
-        return val.detach().clone()
+        t = val.detach().clone()
+        return t if device is None else t.to(device)
     if isinstance(val, (list, tuple)):
-        cloned = [_deep_clone_tensors(v) for v in val]
+        cloned = [_deep_clone_tensors(v, device) for v in val]
         return type(val)(cloned)
     if isinstance(val, dict):
-        return {k: _deep_clone_tensors(v) for k, v in val.items()}
+        return {k: _deep_clone_tensors(v, device) for k, v in val.items()}
     return val
 
 
@@ -533,10 +534,11 @@ def _execute_replay(
     model_log: "ModelLog",
     layer_labels: List[str],
     seeded_values: Dict[str, Any],
+    device: Optional[Union[str, torch.device]] = None,
 ) -> Dict[str, Any]:
     """Replay the requested layers in topological order with provided seed values."""
     replay_cache = _get_replay_cache(model_log)
-    computed = {key: _deep_clone_tensors(val) for key, val in seeded_values.items()}
+    computed = {key: _deep_clone_tensors(val, device) for key, val in seeded_values.items()}
     label_to_layer = replay_cache["label_to_layer"]
     parent_child_route_cache = replay_cache["parent_child_route_cache"]
 
@@ -548,8 +550,8 @@ def _execute_replay(
         raw_args = getattr(layer, "captured_args", None)
         raw_kwargs = getattr(layer, "captured_kwargs", None)
 
-        args_list = _deep_clone_tensors(list(raw_args) if raw_args is not None else [])
-        kwargs_dict = _deep_clone_tensors(dict(raw_kwargs) if raw_kwargs is not None else {})
+        args_list = _deep_clone_tensors(list(raw_args) if raw_args is not None else [], device)
+        kwargs_dict = _deep_clone_tensors(dict(raw_kwargs) if raw_kwargs is not None else {}, device)
 
         parent_arg_locs = getattr(layer, "parent_layer_arg_locs", {})
         for arg_pos, parent_label in parent_arg_locs.get("args", {}).items():
@@ -582,11 +584,11 @@ def _execute_replay(
                 if getattr(layer, "func_is_inplace", False) and len(args_list) > 0:
                     output = args_list[0]
                 else:
-                    output = _deep_clone_tensors(layer.activation)
+                    output = _deep_clone_tensors(layer.activation, device)
             if layer.iterable_output_index is not None:
                 output = index_nested(output, layer.iterable_output_index)
         else:
-            output = _deep_clone_tensors(layer.activation)
+            output = _deep_clone_tensors(layer.activation, device)
 
         computed[label] = output
 
@@ -671,6 +673,7 @@ def replay_forward_pass(
     model_log: "ModelLog",
     new_input: Union[torch.Tensor, List[Any], Tuple[Any, ...]],
     new_input_kwargs: Optional[Dict[str, Any]] = None,
+    device: Optional[Union[str, torch.device]] = None,
 ) -> Any:
     """Replay the full computation using the saved graph structure and new input.
 
@@ -686,6 +689,7 @@ def replay_forward_pass(
         model_log,
         [layer.layer_label for layer in model_log.layer_list],
         input_layer_values,
+        device=device,
     )
 
     output_template = getattr(model_log, "_output_structure_template", None)
@@ -736,13 +740,14 @@ def replay_subgraph(
     model_log: "ModelLog",
     subgraph_labels: List[str],
     input_values: Dict[str, Any],
+    device: Optional[Union[str, torch.device]] = None,
 ) -> Dict[str, Any]:
     """Replay a subgraph with provided input values.
 
     Like :func:`replay_forward_pass`, this reconstructs values only and does not
     preserve a training-time autograd graph across the replayed subgraph boundary.
     """
-    return _execute_replay(model_log, subgraph_labels, input_values)
+    return _execute_replay(model_log, subgraph_labels, input_values, device=device)
 
 
 def split_and_replay_graph(
@@ -750,6 +755,7 @@ def split_and_replay_graph(
     split_layer_indices: Union[int, List[int]],
     new_input: Union[torch.Tensor, List[Any], Tuple[Any, ...]],
     new_input_kwargs: Optional[Dict[str, Any]] = None,
+    device: Optional[Union[str, torch.device]] = None,
 ) -> Tuple[Dict[str, Any], Any]:
     """Split graph at specified layers and replay both subgraphs with new input.
 
@@ -760,9 +766,9 @@ def split_and_replay_graph(
     subgraph1_labels, subgraph2_labels, split_labels = split_graph(model_log, split_layer_indices)
     input_layer_values = _build_replay_input_layer_values(model_log, new_input, new_input_kwargs)
 
-    subgraph1_outputs = replay_subgraph(model_log, subgraph1_labels, input_layer_values)
+    subgraph1_outputs = replay_subgraph(model_log, subgraph1_labels, input_layer_values, device=device)
     intermediate_features = {label: subgraph1_outputs[label] for label in split_labels}
-    subgraph2_outputs = replay_subgraph(model_log, subgraph2_labels, intermediate_features)
+    subgraph2_outputs = replay_subgraph(model_log, subgraph2_labels, intermediate_features, device=device)
 
     combined_outputs = {**subgraph1_outputs, **subgraph2_outputs}
     output_template = getattr(model_log, "_output_structure_template", None)

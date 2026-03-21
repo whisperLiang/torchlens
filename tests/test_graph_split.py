@@ -1436,6 +1436,8 @@ def test_split_real_world_models(model_name, split_indices, default_input1):
     "model_name",
     [
         "fasterrcnn_mobilenet_v3_large_320_fpn",
+        "fasterrcnn_resnet50_fpn",
+        "maskrcnn_resnet50_fpn",
         "retinanet_resnet50_fpn",
         "ssdlite320_mobilenet_v3_large",
     ],
