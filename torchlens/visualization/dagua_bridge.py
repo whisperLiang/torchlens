@@ -6,6 +6,8 @@ documents exactly which ModelLog fields are consumed by the visualization.
 
 from __future__ import annotations
 
+import html
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -81,6 +83,124 @@ MODULE_FIELD_USAGE: Dict[str, str] = {
     "params_memory": "Collapsed summary text.",
     "all_layers": "Collapsed summary node membership.",
 }
+
+
+@dataclass
+class _FallbackNodeStyle:
+    """Minimal NodeStyle substitute when dagua is unavailable."""
+
+    shape: str = "ellipse"
+    corner_radius: float = 0.0
+    stroke_dash: Optional[str] = None
+
+
+@dataclass
+class _FallbackEdgeStyle:
+    """Minimal EdgeStyle substitute when dagua is unavailable."""
+
+    style: str = "solid"
+
+
+@dataclass
+class _FallbackLayoutConfig:
+    """Minimal LayoutConfig substitute when dagua is unavailable."""
+
+    device: str
+    direction: str
+    steps: int
+    edge_opt_steps: int
+    node_sep: int
+    rank_sep: int
+    seed: int
+
+
+class _FallbackDaguaGraph:
+    """Small compatibility graph used when the dagua package is not installed."""
+
+    def __init__(self, direction: str):
+        self.direction = direction
+        self.node_ids: List[str] = []
+        self.node_labels: List[str] = []
+        self.node_types: List[str] = []
+        self.node_styles: List[Optional[_FallbackNodeStyle]] = []
+        self.edges: List[Dict[str, Any]] = []
+        self.clusters: Dict[str, Dict[str, Any]] = {}
+        self._id_to_index: Dict[str, int] = {}
+        self._theme: Any = None
+
+    @property
+    def num_nodes(self) -> int:
+        return len(self.node_ids)
+
+    def add_node(self, node_id: str, label: str, type: str = "default") -> None:
+        if node_id in self._id_to_index:
+            idx = self._id_to_index[node_id]
+            self.node_labels[idx] = label
+            self.node_types[idx] = type
+            return
+        self._id_to_index[node_id] = len(self.node_ids)
+        self.node_ids.append(node_id)
+        self.node_labels.append(label)
+        self.node_types.append(type)
+        self.node_styles.append(None)
+
+    def add_edge(
+        self,
+        source: str,
+        target: str,
+        label: Optional[str] = None,
+        type: str = "default",
+        style: Optional[_FallbackEdgeStyle] = None,
+    ) -> None:
+        self.edges.append(
+            {
+                "source": source,
+                "target": target,
+                "label": label,
+                "type": type,
+                "style": style,
+            }
+        )
+
+    def add_cluster(
+        self,
+        name: str,
+        members: Iterable[str],
+        label: Optional[str] = None,
+        parent: Optional[str] = None,
+        strict: bool = False,
+    ) -> None:
+        self.clusters[name] = {
+            "members": list(members),
+            "label": label or name,
+            "parent": parent,
+            "strict": strict,
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "direction": self.direction,
+                "nodes": [
+                    {
+                        "id": node_id,
+                        "label": self.node_labels[idx],
+                        "type": self.node_types[idx],
+                    }
+                    for idx, node_id in enumerate(self.node_ids)
+                ],
+                "edges": [
+                    {
+                        **edge,
+                        "style": None
+                        if edge.get("style") is None
+                        else {"style": getattr(edge["style"], "style", "solid")},
+                    }
+                    for edge in self.edges
+                ],
+                "clusters": self.clusters,
+            }
+        )
 
 
 @dataclass
@@ -373,8 +493,119 @@ def _resolve_output_path(vis_outpath: str, vis_fileformat: str) -> str:
     return str(p.with_suffix(f".{vis_fileformat}"))
 
 
+def _get_dagua_module() -> Optional[Any]:
+    try:
+        import dagua
+    except ModuleNotFoundError:
+        return None
+    return dagua
+
+
+def _draw_fallback_graph(graph: _FallbackDaguaGraph, output: str, title: str) -> None:
+    """Write a minimal SVG when dagua is unavailable."""
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    width = 1200
+    line_height = 16
+    box_height = 52
+    vertical_gap = 20
+    left_margin = 60
+    top_margin = 80
+    node_width = 560
+    height = max(200, top_margin + (box_height + vertical_gap) * max(graph.num_nodes, 1) + 80)
+
+    y_positions = {
+        node_id: top_margin + idx * (box_height + vertical_gap)
+        for idx, node_id in enumerate(graph.node_ids)
+    }
+
+    svg_lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
+        f'<text x="{left_margin}" y="36" font-size="22" font-family="Arial, sans-serif" font-weight="700">{html.escape(title)}</text>',
+    ]
+
+    for cluster_name, cluster in graph.clusters.items():
+        member_positions = [
+            y_positions[node_id] for node_id in cluster["members"] if node_id in y_positions
+        ]
+        if not member_positions:
+            continue
+        min_y = min(member_positions) - 18
+        max_y = max(member_positions) + box_height + 18
+        svg_lines.append(
+            (
+                f'<rect x="{left_margin - 24}" y="{min_y}" width="{node_width + 48}" '
+                f'height="{max_y - min_y}" rx="14" ry="14" fill="none" stroke="#d8d8d8" stroke-width="1.5"/>'
+            )
+        )
+        svg_lines.append(
+            (
+                f'<text x="{left_margin - 8}" y="{min_y - 6}" font-size="14" '
+                f'font-family="Arial, sans-serif" fill="#555555">{html.escape(str(cluster.get("label", cluster_name)))}</text>'
+            )
+        )
+
+    for edge in graph.edges:
+        src = edge["source"]
+        dst = edge["target"]
+        if src not in y_positions or dst not in y_positions:
+            continue
+        src_y = y_positions[src] + box_height
+        dst_y = y_positions[dst]
+        x = left_margin + node_width / 2
+        dash = (
+            ' stroke-dasharray="6,4"'
+            if getattr(edge.get("style"), "style", "solid") == "dashed"
+            else ""
+        )
+        svg_lines.append(
+            f'<line x1="{x}" y1="{src_y}" x2="{x}" y2="{dst_y}" stroke="#9a9a9a" stroke-width="1.2"{dash}/>'
+        )
+
+    for idx, node_id in enumerate(graph.node_ids):
+        y = y_positions[node_id]
+        node_type = graph.node_types[idx]
+        fill = {
+            "input": "#def7e5",
+            "output": "#fde2e2",
+            "buffer": "#f1f1f1",
+            "bool": "#ffe6bf",
+            "trainable_params": "#e3efff",
+            "mixed_params": "#e3efff",
+            "frozen_params": "#ececec",
+        }.get(node_type, "#ffffff")
+        stroke = "#b5b5b5"
+        svg_lines.append(
+            f'<rect x="{left_margin}" y="{y}" width="{node_width}" height="{box_height}" rx="12" ry="12" fill="{fill}" stroke="{stroke}" stroke-width="1.4"/>'
+        )
+        for line_idx, line in enumerate(graph.node_labels[idx].split("\n")[:3]):
+            text_y = y + 20 + line_idx * line_height
+            svg_lines.append(
+                (
+                    f'<text x="{left_margin + 16}" y="{text_y}" font-size="13" '
+                    f'font-family="Arial, sans-serif" fill="#202020">{html.escape(line)}</text>'
+                )
+            )
+
+    svg_lines.append("</svg>")
+    output_path.write_text("\n".join(svg_lines), encoding="utf-8")
+
+
 def _torchlens_layout_config(num_nodes: int, direction: str):
-    import dagua
+    dagua = _get_dagua_module()
+    if dagua is None:
+        device = "cuda" if torch.cuda.is_available() and num_nodes <= 25_000 else "cpu"
+        return _FallbackLayoutConfig(
+            device=device,
+            direction=direction,
+            steps=40,
+            edge_opt_steps=-1,
+            node_sep=22,
+            rank_sep=42,
+            seed=42,
+        )
 
     if torch.cuda.is_available() and num_nodes <= 25_000:
         device = "cuda"
@@ -430,17 +661,23 @@ def model_log_to_dagua_graph(
     include_gradient_edges: Optional[bool] = None,
 ):
     """Translate a TorchLens ModelLog into a DaguaGraph."""
-    import dagua
-
-    g = dagua.DaguaGraph(direction=_to_dagua_direction(direction))
+    dagua = _get_dagua_module()
+    if dagua is None:
+        g: Any = _FallbackDaguaGraph(direction=_to_dagua_direction(direction))
+        node_style_cls = _FallbackNodeStyle
+        edge_style_cls = _FallbackEdgeStyle
+    else:
+        g = dagua.DaguaGraph(direction=_to_dagua_direction(direction))
+        node_style_cls = dagua.NodeStyle
+        edge_style_cls = dagua.EdgeStyle
     entries = _entries_for_mode(model_log, vis_mode)
     if not show_buffer_layers:
         entries = [e for e in entries if not getattr(e, "is_buffer_layer", False)]
     entries_by_label = {getattr(e, "layer_label"): e for e in entries}
 
-    module_shape = dagua.NodeStyle(shape="roundrect", corner_radius=8.0)
-    op_shape = dagua.NodeStyle(shape="ellipse")
-    buffer_shape = dagua.NodeStyle(shape="rect", corner_radius=3.0)
+    module_shape = node_style_cls(shape="roundrect", corner_radius=8.0)
+    op_shape = node_style_cls(shape="ellipse")
+    buffer_shape = node_style_cls(shape="rect", corner_radius=3.0)
 
     for entry in entries:
         node_id = getattr(entry, "layer_label")
@@ -456,7 +693,7 @@ def model_log_to_dagua_graph(
             shape_override = module_shape
 
         if not getattr(entry, "has_input_ancestor", True):
-            shape_override = dagua.NodeStyle(
+            shape_override = node_style_cls(
                 shape=shape_override.shape,
                 corner_radius=shape_override.corner_radius,
                 stroke_dash="dashed",
@@ -486,7 +723,7 @@ def model_log_to_dagua_graph(
 
             style = None
             if not getattr(parent, "has_input_ancestor", True):
-                style = dagua.EdgeStyle(style="dashed")
+                style = edge_style_cls(style="dashed")
             g.add_edge(parent_label, child_id, label=edge_label, type=edge_type, style=style)
 
     if include_gradient_edges is None:
@@ -555,7 +792,7 @@ def render_model_log_with_dagua(
     vis_theme: str = "torchlens",
 ):
     """Render a TorchLens ModelLog with Dagua."""
-    import dagua
+    dagua = _get_dagua_module()
 
     graph = model_log_to_dagua_graph(
         model_log,
@@ -564,13 +801,18 @@ def render_model_log_with_dagua(
         show_buffer_layers=vis_buffer_layers,
         direction=vis_direction,
     )
-    graph._theme = dagua.get_theme(vis_theme)
     output = _resolve_output_path(vis_outpath, vis_fileformat)
-    config = _torchlens_layout_config(graph.num_nodes, graph.direction)
-    dagua.draw(
-        graph,
-        config=config,
-        output=output,
-        title=build_torchlens_caption(model_log),
-    )
+    title = build_torchlens_caption(model_log)
+    if dagua is None:
+        graph._theme = vis_theme
+        _draw_fallback_graph(graph, output=output, title=title)
+    else:
+        graph._theme = dagua.get_theme(vis_theme)
+        config = _torchlens_layout_config(graph.num_nodes, graph.direction)
+        dagua.draw(
+            graph,
+            config=config,
+            output=output,
+            title=title,
+        )
     return graph.to_json() if hasattr(graph, "to_json") else output

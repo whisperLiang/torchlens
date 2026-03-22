@@ -18,6 +18,16 @@ from .user_funcs import (
     validate_forward_pass,
     validate_saved_activations,
     validate_batch_of_models_and_inputs,
+    compile_execution_plan,
+    replay_forward,
+    enumerate_frontier_splits,
+    replay_partitioned,
+    train_partitioned,
+    backward_prefix_from_boundary,
+    validate_replay_equivalence,
+    validate_split_equivalence,
+    validate_gradient_equivalence,
+    benchmark_replay,
 )
 from .validation.invariants import check_metadata_invariants, MetadataInvariantError
 

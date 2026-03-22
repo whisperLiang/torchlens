@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 from ..utils.introspection import get_vars_of_type_from_obj, nested_assign
 from ..utils.rng import set_random_seed, log_current_rng_states, set_rng_from_saved_states
 from ..utils.arg_handling import safe_copy_args, safe_copy_kwargs, normalize_input_args
+from ..replay_utils import OUTPUT_REF_TAG, build_output_structure_template
 from .source_tensors import log_source_tensor
 from ..data_classes.interface import _give_user_feedback_about_lookup_key
 from ..utils.display import _vprint, _vtimed
@@ -351,6 +352,20 @@ def _extract_and_mark_outputs(
         if self.logging_mode == "exhaustive":
             self.output_layers.append(t.tl_tensor_label_raw)
         self._raw_layer_dict[t.tl_tensor_label_raw].feeds_output = True
+
+    if self.logging_mode == "exhaustive":
+        setattr(
+            self,
+            "_output_structure_template",
+            build_output_structure_template(
+                outputs,
+                tensor_encoder=lambda tensor: (
+                    (OUTPUT_REF_TAG, getattr(tensor, "tl_tensor_label_raw"))
+                    if hasattr(tensor, "tl_tensor_label_raw")
+                    else tensor
+                ),
+            ),
+        )
 
     return output_tensors, output_tensor_addresses
 

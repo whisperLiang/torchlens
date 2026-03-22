@@ -202,7 +202,16 @@ def safe_copy(x, detach_tensor: bool = False):
     if isinstance(x, (torch.Tensor, torch.nn.Parameter)):
         with pause_logging():
             if not detach_tensor:
-                return x.clone()
+                copied = x.clone()
+                for attr_name in (
+                    "tl_tensor_label_raw",
+                    "tl_param_address",
+                    "tl_buffer_address",
+                    "tl_buffer_parent",
+                ):
+                    if hasattr(x, attr_name):
+                        setattr(copied, attr_name, getattr(x, attr_name))
+                return copied
             # Detach path: use pure-torch ops — no numpy round-trip.
             # This avoids crashes on sparse, quantized, complex32, meta, float8, etc.
             try:
@@ -216,10 +225,24 @@ def safe_copy(x, detach_tensor: bool = False):
                     vals_tensor = torch.zeros(x.shape, dtype=torch.float32)
             # Preserve the raw label so postprocessing can map this tensor
             # back to its ModelLog entry.
-            if hasattr(x, "tl_tensor_label_raw"):
-                setattr(vals_tensor, "tl_tensor_label_raw", getattr(x, "tl_tensor_label_raw"))
+            for attr_name in (
+                "tl_tensor_label_raw",
+                "tl_param_address",
+                "tl_buffer_address",
+                "tl_buffer_parent",
+            ):
+                if hasattr(x, attr_name):
+                    setattr(vals_tensor, attr_name, getattr(x, attr_name))
             if isinstance(x, torch.nn.Parameter):
-                return torch.nn.Parameter(vals_tensor)
+                copied_param = torch.nn.Parameter(vals_tensor)
+                for attr_name in (
+                    "tl_param_address",
+                    "tl_buffer_address",
+                    "tl_buffer_parent",
+                ):
+                    if hasattr(x, attr_name):
+                        setattr(copied_param, attr_name, getattr(x, attr_name))
+                return copied_param
             return vals_tensor
     else:
         # Non-tensor: shallow copy is sufficient and avoids deepcopy's

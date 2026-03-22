@@ -16,23 +16,29 @@ import gc
 import json
 import os
 import re
-import resource
 import subprocess
 import tempfile
 import warnings
-from typing import Optional
+from typing import Any, Optional
+
+try:
+    import resource
+except ModuleNotFoundError:
+    resource = None  # type: ignore[assignment]
 
 # Set the soft stack limit to match the hard limit once at import time.
 # Child processes (Node.js) inherit this, removing the need for preexec_fn
 # which forces fork+exec and COW-doubles virtual memory of large parent processes.
-try:
-    _soft, _hard = resource.getrlimit(resource.RLIMIT_STACK)
-    if _hard == resource.RLIM_INFINITY:
-        resource.setrlimit(resource.RLIMIT_STACK, (resource.RLIM_INFINITY, _hard))
-    elif _soft < _hard:
-        resource.setrlimit(resource.RLIMIT_STACK, (_hard, _hard))
-except (ValueError, resource.error):
-    pass
+if resource is not None:
+    try:
+        resource_mod: Any = resource
+        _soft, _hard = resource_mod.getrlimit(resource_mod.RLIMIT_STACK)
+        if _hard == resource_mod.RLIM_INFINITY:
+            resource_mod.setrlimit(resource_mod.RLIMIT_STACK, (resource_mod.RLIM_INFINITY, _hard))
+        elif _soft < _hard:
+            resource_mod.setrlimit(resource_mod.RLIMIT_STACK, (_hard, _hard))
+    except (ValueError, OSError):
+        pass
 
 
 def _available_memory_mb() -> int:
@@ -45,10 +51,11 @@ def _available_memory_mb() -> int:
     except (OSError, ValueError, IndexError):
         pass
     try:
-        pages = os.sysconf("SC_AVPHYS_PAGES")
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        if pages > 0 and page_size > 0:
-            return (pages * page_size) // (1024 * 1024)
+        if hasattr(os, "sysconf"):
+            pages = os.sysconf("SC_AVPHYS_PAGES")
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            if pages > 0 and page_size > 0:
+                return (pages * page_size) // (1024 * 1024)
     except (ValueError, OSError):
         pass
     return 0

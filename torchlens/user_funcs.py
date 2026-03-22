@@ -33,6 +33,15 @@ from .utils.arg_handling import safe_copy_args, safe_copy_kwargs, normalize_inpu
 from .data_classes.model_log import (
     ModelLog,
 )
+from .replay_engine import compile_execution_plan, replay_forward, replay_partitioned
+from .split_engine import enumerate_frontier_splits
+from .replay_train import train_partitioned, backward_prefix_from_boundary
+from .validation_replay import (
+    validate_gradient_equivalence,
+    validate_replay_equivalence,
+    validate_split_equivalence,
+)
+from .benchmark_replay import benchmark_replay
 
 
 def _unwrap_data_parallel(model: nn.Module) -> nn.Module:
