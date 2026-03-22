@@ -1,8 +1,8 @@
 """Tests for graph splitting functionality."""
 
 import copy
-from typing import Tuple
 from typing import List
+from typing import Tuple
 
 import pytest
 import torch
@@ -43,6 +43,117 @@ def _compare_outputs(output1, output2, atol: float = 1e-5) -> bool:
             return False
         return all(_compare_outputs(output1[k], output2[k], atol) for k in output1)
     return output1 == output2
+
+
+def _reduce_output_to_scalar(output):
+    """Reduce nested tensor outputs to a differentiable scalar."""
+    if hasattr(output, "to_tuple"):
+        return _reduce_output_to_scalar(output.to_tuple())
+
+    if isinstance(output, torch.Tensor):
+        if output.is_floating_point() or output.is_complex():
+            return output.sum()
+        return None
+
+    if isinstance(output, dict):
+        scalar_terms = [_reduce_output_to_scalar(v) for v in output.values()]
+    elif isinstance(output, (list, tuple)):
+        scalar_terms = [_reduce_output_to_scalar(v) for v in output]
+    else:
+        return None
+
+    scalar_terms = [term for term in scalar_terms if term is not None]
+    if not scalar_terms:
+        return None
+    total = scalar_terms[0]
+    for term in scalar_terms[1:]:
+        total = total + term
+    return total
+
+
+def _normalize_model_output(output):
+    """Convert HF ModelOutput objects to tuples for stable comparisons."""
+    if hasattr(output, "to_tuple"):
+        return output.to_tuple()
+    return output
+
+
+def _build_lightweight_vision_model(model_family: str, *, train_mode: bool = False):
+    """Build a lightweight vision model and representative image input."""
+    if model_family == "deit":
+        transformers = pytest.importorskip("transformers")
+        config = transformers.DeiTConfig(
+            image_size=32,
+            patch_size=16,
+            num_channels=3,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+        )
+        model = transformers.DeiTModel(config)
+        model.train(mode=train_mode)
+        return model, torch.randn(1, 3, 32, 32)
+
+    if model_family == "detr":
+        transformers = pytest.importorskip("transformers")
+        config = transformers.DetrConfig(
+            d_model=64,
+            encoder_layers=2,
+            decoder_layers=2,
+            encoder_attention_heads=4,
+            decoder_attention_heads=4,
+            encoder_ffn_dim=128,
+            decoder_ffn_dim=128,
+            num_queries=20,
+            num_labels=5,
+            use_pretrained_backbone=False,
+            backbone="resnet18",
+        )
+        model = transformers.DetrForObjectDetection(config)
+        model.train(mode=train_mode)
+        return model, torch.randn(1, 3, 64, 64)
+
+    if model_family in {"yolov8", "yolov10"}:
+        ultralytics = pytest.importorskip("ultralytics")
+        cfg_name = "yolov8n.yaml" if model_family == "yolov8" else "yolov10n.yaml"
+        model = ultralytics.YOLO(cfg_name).model
+        model.train(mode=train_mode)
+        return model, torch.randn(1, 3, 64, 64)
+
+    raise ValueError(f"Unknown model family: {model_family}")
+
+
+def _build_lightweight_torchvision_detection_model(model_name: str, *, train_mode: bool = False):
+    """Build a lightweight torchvision detection model."""
+    torchvision = pytest.importorskip("torchvision")
+    model = getattr(torchvision.models.detection, model_name)(
+        weights=None,
+        weights_backbone=None,
+    )
+    model.train(mode=train_mode)
+    return model
+
+
+def _build_lightweight_torchvision_detection_input(model_name: str, *, train_mode: bool):
+    """Build representative inputs for lightweight torchvision detection models."""
+    image_count = 2 if train_mode and model_name == "ssdlite320_mobilenet_v3_large" else 1
+    images = [torch.rand(3, 96, 96) for _ in range(image_count)]
+    if not train_mode:
+        return [images]
+
+    targets = []
+    for image_idx in range(image_count):
+        box_offset = float(8 + 4 * image_idx)
+        targets.append(
+            {
+                "boxes": torch.tensor(
+                    [[box_offset, box_offset, box_offset + 40.0, box_offset + 40.0]]
+                ),
+                "labels": torch.tensor([1], dtype=torch.int64),
+            }
+        )
+    return images, targets
 
 
 def _assert_tensor_close(t1: torch.Tensor, t2: torch.Tensor, atol: float = 1e-5) -> None:
@@ -159,26 +270,6 @@ def _assert_one_step_weight_update_matches_split_replay(
             and all(isinstance(item, dict) for item in val)
             and all(("boxes" in item and "labels" in item) for item in val)
         )
-
-    def _reduce_output_to_scalar(output):
-        if isinstance(output, torch.Tensor):
-            if output.is_floating_point() or output.is_complex():
-                return output.sum()
-            return None
-        if isinstance(output, dict):
-            scalar_terms = [_reduce_output_to_scalar(v) for v in output.values()]
-        elif isinstance(output, (list, tuple)):
-            scalar_terms = [_reduce_output_to_scalar(v) for v in output]
-        else:
-            return None
-
-        scalar_terms = [term for term in scalar_terms if term is not None]
-        if not scalar_terms:
-            return None
-        total = scalar_terms[0]
-        for term in scalar_terms[1:]:
-            total = total + term
-        return total
 
     initial_state = copy.deepcopy(model.state_dict())
     model.train(mode=train_mode)
@@ -1238,95 +1329,71 @@ def test_split_replay_matches_one_step_weight_update_on_residual_dag():
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize(
-    "model_name, atol",
-    [
-        ("resnet18", 1e-5),
-        ("densenet121", 1e-5),
-        ("googlenet", 1e-5),
-    ],
-)
-def test_split_replay_matches_one_step_weight_update_real_models(model_name, atol):
-    """A single optimizer step should match on representative real-world models."""
-    torchvision = pytest.importorskip("torchvision")
+@pytest.mark.parametrize("model_family", ["deit", "detr", "yolov8", "yolov10"])
+def test_differentiable_split_lightweight_vision_models(model_family: str):
+    """Differentiable split replay should preserve forward/backward on lightweight models."""
+    train_mode = model_family in {"yolov8", "yolov10"}
+    model, sample_input = _build_lightweight_vision_model(
+        model_family,
+        train_mode=train_mode,
+    )
 
-    model = getattr(torchvision.models, model_name)(weights=None)
-    model.eval()
-
-    if model_name == "googlenet":
-        sample_input = torch.rand(1, 3, 224, 224)
-    else:
-        sample_input = torch.rand(1, 3, 224, 224)
-
-    base_log = log_forward_pass(
+    model_log = log_forward_pass(
         model,
         sample_input,
         layers_to_save="all",
         save_function_args=True,
     )
-    split_indices = _pick_spread_indices(len(base_log.layer_list))
-    if len(split_indices) > 2:
-        split_indices = [split_indices[1], split_indices[-2]]
+    split_indices = _pick_spread_indices(len(model_log.layer_list))
+    split_idx = split_indices[len(split_indices) // 2]
 
-    for split_idx in split_indices:
-        train_input = torch.randn_like(sample_input)
-        _assert_one_step_weight_update_matches_split_replay(
-            model,
-            train_input,
-            split_idx=split_idx,
-            atol=atol,
-        )
+    direct_input = sample_input.detach().clone().requires_grad_(True)
+    model.zero_grad(set_to_none=True)
+    direct_output = model(direct_input)
+    direct_loss = _reduce_output_to_scalar(direct_output)
+    if direct_loss is None:
+        raise ValueError("Could not reduce direct model output to a differentiable scalar loss.")
+    direct_loss.backward()
+    direct_input_grad = direct_input.grad.detach().clone()
+    direct_param_grads = {
+        name: (param.grad.detach().clone() if param.grad is not None else None)
+        for name, param in model.named_parameters()
+    }
+
+    split_input = sample_input.detach().clone().requires_grad_(True)
+    model.zero_grad(set_to_none=True)
+    _, split_output = split_and_replay_graph_differentiable(
+        model_log,
+        model,
+        split_layer_indices=split_idx,
+        new_input=split_input,
+    )
+    split_loss = _reduce_output_to_scalar(split_output)
+    if split_loss is None:
+        raise ValueError("Could not reduce split replay output to a differentiable scalar loss.")
+    split_loss.backward()
+
+    assert split_output is not None
+    assert _compare_outputs(
+        _normalize_model_output(split_output),
+        _normalize_model_output(direct_output),
+        atol=1e-5,
+    )
+    _assert_tensor_close(split_input.grad, direct_input_grad)
+    _assert_param_grads_close(model, direct_param_grads)
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize(
-    "model_name, atol",
-    [
-        ("alexnet", 1e-5),
-        ("vgg16", 1e-5),
-        ("vgg19", 1e-5),
-        ("resnet18", 1e-5),
-        ("resnet50", 1e-5),
-        ("wide_resnet50_2", 1e-5),
-        ("wide_resnet101_2", 1e-5),
-        ("resnext50_32x4d", 1e-5),
-        ("resnext101_64x4d", 1e-5),
-        ("squeezenet1_0", 1e-5),
-        ("squeezenet1_1", 1e-5),
-        ("mobilenet_v2", 1e-5),
-        ("mobilenet_v3_small", 1e-5),
-        ("mobilenet_v3_large", 1e-5),
-        ("shufflenet_v2_x1_0", 1e-5),
-        ("shufflenet_v2_x1_5", 1e-5),
-        ("mnasnet0_5", 1e-5),
-        ("mnasnet1_3", 1e-5),
-        ("googlenet", 1e-5),
-        ("densenet121", 1e-5),
-        ("densenet169", 1e-5),
-        ("efficientnet_b0", 1e-5),
-        ("efficientnet_b3", 1e-5),
-        ("efficientnet_b6", 1e-5),
-        ("convnext_tiny", 1e-5),
-        ("convnext_large", 1e-5),
-        ("regnet_x_400mf", 1e-5),
-        ("regnet_y_400mf", 1e-5),
-        ("regnet_x_32gf", 1e-5),
-        ("vit_b_16", 1e-5),
-        ("swin_v2_b", 1e-5),
-        ("maxvit_t", 1e-5),
-    ],
-)
-def test_split_replay_matches_one_step_weight_update_all_replay_real_world_models(model_name, atol):
-    """One-step parameter updates should match for the real-world models covered by test_replay."""
-    torchvision = pytest.importorskip("torchvision")
-
-    model = getattr(torchvision.models, model_name)(weights=None)
-    model.eval()
-
-    if model_name == "googlenet":
-        sample_input = torch.rand(1, 3, 224, 224)
-    else:
-        sample_input = torch.rand(1, 3, 224, 224)
+@pytest.mark.parametrize("model_family", ["deit", "detr", "yolov8", "yolov10"])
+def test_split_replay_matches_one_step_weight_update_lightweight_vision_models(
+    model_family: str,
+):
+    """One-step updates should match on lightweight vision models."""
+    train_mode = model_family in {"yolov8", "yolov10"}
+    model, sample_input = _build_lightweight_vision_model(
+        model_family,
+        train_mode=train_mode,
+    )
 
     base_log = log_forward_pass(
         model,
@@ -1342,132 +1409,130 @@ def test_split_replay_matches_one_step_weight_update_all_replay_real_world_model
         model,
         train_input,
         split_idx=split_idx,
-        atol=atol,
+        atol=1e-5,
+        train_mode=train_mode,
     )
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize(
-    "model_name, atol",
-    [
-        ("fasterrcnn_resnet50_fpn", 1e-5),
-        ("maskrcnn_resnet50_fpn", 1e-5),
-    ],
-)
-def test_split_replay_matches_one_step_weight_update_detection_models(model_name, atol):
-    """Detection replay should preserve the same one-step training signal on the captured batch."""
-    torchvision = pytest.importorskip("torchvision")
+@pytest.mark.parametrize("model_family", ["deit", "detr", "yolov8", "yolov10"])
+def test_split_lightweight_vision_models(model_family: str):
+    """Split replay should match direct execution on lightweight vision models."""
+    model, sample_input = _build_lightweight_vision_model(model_family)
+    comparison_atol = 1e-4 if model_family == "yolov10" else 1e-5
 
-    model = getattr(torchvision.models.detection, model_name)(
-        weights=None,
-        weights_backbone=None,
-    )
-    model.train()
-
-    sample_images = [torch.rand(3, 64, 64), torch.rand(3, 64, 64)]
-    sample_targets = [
-        {
-            "boxes": torch.tensor([[5.0, 5.0, 40.0, 40.0]], dtype=torch.float32),
-            "labels": torch.tensor([1], dtype=torch.int64),
-        },
-        {
-            "boxes": torch.tensor([[8.0, 8.0, 44.0, 44.0]], dtype=torch.float32),
-            "labels": torch.tensor([1], dtype=torch.int64),
-        },
-    ]
-    if model_name == "maskrcnn_resnet50_fpn":
-        sample_targets[0]["masks"] = torch.randint(0, 2, (1, 64, 64), dtype=torch.uint8)
-        sample_targets[1]["masks"] = torch.randint(0, 2, (1, 64, 64), dtype=torch.uint8)
-
-    base_log = log_forward_pass(
+    model_log = log_forward_pass(
         model,
-        (sample_images, sample_targets),
+        sample_input,
         layers_to_save="all",
         save_function_args=True,
     )
-    split_indices = _pick_spread_indices(len(base_log.layer_list))
-    split_idx = split_indices[len(split_indices) // 2]
 
-    _assert_one_step_weight_update_matches_split_replay(
-        model,
-        (sample_images, sample_targets),
-        split_idx=split_idx,
-        atol=atol,
-        train_mode=True,
-        allow_stochastic_update_mismatch=True,
+    new_input = torch.randn_like(sample_input)
+    full_output = replay_forward_pass(model_log, new_input)
+    with torch.no_grad():
+        direct_output = model(new_input)
+
+    normalized_full_output = _normalize_model_output(full_output)
+    normalized_direct_output = _normalize_model_output(direct_output)
+    assert _compare_outputs(
+        normalized_full_output,
+        normalized_direct_output,
+        atol=comparison_atol,
     )
+
+    split_indices = _pick_spread_indices(len(model_log.layer_list))
+    if len(split_indices) > 2:
+        split_indices = [split_indices[1], split_indices[-2]]
+
+    for split_idx in split_indices:
+        intermediate_features, split_output = split_and_replay_graph(
+            model_log,
+            split_layer_indices=split_idx,
+            new_input=new_input,
+        )
+        normalized_split_output = _normalize_model_output(split_output)
+        assert _compare_outputs(
+            normalized_full_output,
+            normalized_split_output,
+            atol=comparison_atol,
+        )
+        assert _compare_outputs(
+            normalized_direct_output,
+            normalized_split_output,
+            atol=comparison_atol,
+        )
+        assert intermediate_features
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize(
-    "model_name, atol",
-    [
-        ("fasterrcnn_mobilenet_v3_large_320_fpn", 1e-5),
-        ("retinanet_resnet50_fpn", 1e-5),
-        ("ssdlite320_mobilenet_v3_large", 1e-5),
-    ],
+    "model_name",
+    ["fasterrcnn_mobilenet_v3_large_320_fpn", "ssdlite320_mobilenet_v3_large"],
 )
-def test_split_replay_matches_one_step_weight_update_additional_detection_models(model_name, atol):
-    """Additional detection models should preserve the same one-step training signal."""
-    torchvision = pytest.importorskip("torchvision")
+def test_differentiable_split_lightweight_torchvision_detection_models(model_name: str):
+    """Differentiable split replay should preserve training-time gradients on lightweight detection models."""
+    model = _build_lightweight_torchvision_detection_model(model_name, train_mode=True)
+    sample_input = _build_lightweight_torchvision_detection_input(model_name, train_mode=True)
 
-    model = getattr(torchvision.models.detection, model_name)(
-        weights=None,
-        weights_backbone=None,
-    )
-    model.train()
-
-    sample_images = [torch.rand(3, 64, 64), torch.rand(3, 64, 64)]
-    sample_targets = [
-        {
-            "boxes": torch.tensor([[5.0, 5.0, 40.0, 40.0]], dtype=torch.float32),
-            "labels": torch.tensor([1], dtype=torch.int64),
-        },
-        {
-            "boxes": torch.tensor([[8.0, 8.0, 44.0, 44.0]], dtype=torch.float32),
-            "labels": torch.tensor([1], dtype=torch.int64),
-        },
-    ]
-
-    base_log = log_forward_pass(
+    model_log = log_forward_pass(
         model,
-        (sample_images, sample_targets),
+        sample_input,
         layers_to_save="all",
         save_function_args=True,
     )
-    split_indices = _pick_spread_indices(len(base_log.layer_list))
+    split_indices = _pick_spread_indices(len(model_log.layer_list))
     split_idx = split_indices[len(split_indices) // 2]
+    cpu_rng_state = torch.random.get_rng_state()
 
-    _assert_one_step_weight_update_matches_split_replay(
+    direct_images = _clone_input_structure_for_grad(sample_input[0])
+    direct_targets = copy.deepcopy(sample_input[1])
+    model.zero_grad(set_to_none=True)
+    torch.random.set_rng_state(cpu_rng_state)
+    direct_output = model(direct_images, direct_targets)
+    direct_loss = _reduce_output_to_scalar(direct_output)
+    if direct_loss is None:
+        raise ValueError("Could not reduce direct model output to a differentiable scalar loss.")
+    direct_loss.backward()
+    direct_image_grads = [image.grad.detach().clone() for image in direct_images]
+    direct_param_grads = {
+        name: (param.grad.detach().clone() if param.grad is not None else None)
+        for name, param in model.named_parameters()
+    }
+
+    split_images = _clone_input_structure_for_grad(sample_input[0])
+    split_targets = copy.deepcopy(sample_input[1])
+    model.zero_grad(set_to_none=True)
+    torch.random.set_rng_state(cpu_rng_state)
+    _, split_output = split_and_replay_graph_differentiable(
+        model_log,
         model,
-        (sample_images, sample_targets),
-        split_idx=split_idx,
-        atol=atol,
-        train_mode=True,
-        allow_stochastic_update_mismatch=True,
+        split_layer_indices=split_idx,
+        new_input=(split_images, split_targets),
     )
+    split_loss = _reduce_output_to_scalar(split_output)
+    if split_loss is None:
+        raise ValueError("Could not reduce split replay output to a differentiable scalar loss.")
+    split_loss.backward()
+
+    assert _compare_outputs(split_output, direct_output, atol=1e-5)
+    for actual_grad, expected_grad in zip((image.grad for image in split_images), direct_image_grads):
+        _assert_tensor_close(actual_grad, expected_grad)
+    _assert_param_grads_close(model, direct_param_grads)
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize(
-    "model_name, atol",
-    [
-        ("fcn_resnet50", 1e-5),
-        ("deeplabv3_resnet50", 1e-5),
-        ("lraspp_mobilenet_v3_large", 1e-5),
-    ],
+    "model_name",
+    ["fasterrcnn_mobilenet_v3_large_320_fpn", "ssdlite320_mobilenet_v3_large"],
 )
-def test_split_replay_matches_one_step_weight_update_segmentation_models(model_name, atol):
-    """One-step parameter updates should match on representative segmentation models."""
-    torchvision = pytest.importorskip("torchvision")
+def test_split_replay_matches_one_step_weight_update_lightweight_torchvision_detection_models(
+    model_name: str,
+):
+    """One-step updates should match on lightweight torchvision detection models."""
+    model = _build_lightweight_torchvision_detection_model(model_name, train_mode=True)
+    sample_input = _build_lightweight_torchvision_detection_input(model_name, train_mode=True)
 
-    model = getattr(torchvision.models.segmentation, model_name)(
-        weights=None,
-        weights_backbone=None,
-    )
-    model.train()
-
-    sample_input = torch.rand(2, 3, 128, 128)
     base_log = log_forward_pass(
         model,
         sample_input,
@@ -1477,320 +1542,54 @@ def test_split_replay_matches_one_step_weight_update_segmentation_models(model_n
     split_indices = _pick_spread_indices(len(base_log.layer_list))
     split_idx = split_indices[len(split_indices) // 2]
 
-    train_input = torch.rand_like(sample_input)
+    train_input = _build_lightweight_torchvision_detection_input(model_name, train_mode=True)
     _assert_one_step_weight_update_matches_split_replay(
         model,
         train_input,
         split_idx=split_idx,
-        atol=atol,
+        atol=1e-5,
+        lr=1e-5,
         train_mode=True,
     )
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize(
-    "model_name, atol",
-    [
-        ("alexnet", 1e-5),
-        ("resnet18", 1e-5),
-        ("densenet121", 1e-5),
-    ],
+    "model_name",
+    ["fasterrcnn_mobilenet_v3_large_320_fpn", "ssdlite320_mobilenet_v3_large"],
 )
-def test_differentiable_split_real_world_models(model_name, atol, default_input1):
-    """Differentiable split replay should match forward/backward on real torchvision models."""
-    torchvision = pytest.importorskip("torchvision")
+def test_split_lightweight_torchvision_detection_models(model_name: str):
+    """Split replay should match direct execution on lightweight torchvision detection models."""
+    model = _build_lightweight_torchvision_detection_model(model_name)
+    sample_input = _build_lightweight_torchvision_detection_input(model_name, train_mode=False)
 
-    model = getattr(torchvision.models, model_name)(weights=None)
-    model.eval()
-
-    model_input = default_input1[:2].clone()
     model_log = log_forward_pass(
         model,
-        model_input,
+        sample_input,
         layers_to_save="all",
         save_function_args=True,
     )
+
+    new_input = _build_lightweight_torchvision_detection_input(model_name, train_mode=False)
+    full_output = replay_forward_pass(model_log, new_input)
+    with torch.no_grad():
+        direct_output = model(new_input[0])
+
+    assert _compare_outputs(full_output, direct_output, atol=1e-5)
 
     split_indices = _pick_spread_indices(len(model_log.layer_list))
     if len(split_indices) > 2:
         split_indices = [split_indices[1], split_indices[-2]]
 
     for split_idx in split_indices:
-        new_input = torch.randn_like(model_input)
-        _assert_differentiable_split_matches_reference(
-            model,
-            model_log,
-            split_idx,
-            new_input,
-            atol=atol,
-        )
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    "model_name, atol",
-    [
-        ("alexnet", 1e-5),
-        ("vgg16", 1e-5),
-        ("vgg19", 1e-5),
-        ("resnet18", 1e-5),
-        ("resnet50", 1e-5),
-        ("wide_resnet50_2", 1e-5),
-        ("wide_resnet101_2", 1e-5),
-        ("resnext50_32x4d", 1e-5),
-        ("resnext101_64x4d", 1e-5),
-        ("squeezenet1_0", 1e-5),
-        ("squeezenet1_1", 1e-5),
-        ("mobilenet_v2", 1e-5),
-        ("mobilenet_v3_small", 1e-5),
-        ("mobilenet_v3_large", 1e-5),
-        ("shufflenet_v2_x1_0", 1e-5),
-        ("shufflenet_v2_x1_5", 1e-5),
-        ("mnasnet0_5", 1e-5),
-        ("mnasnet1_3", 1e-5),
-        ("googlenet", 1e-5),
-        ("densenet121", 1e-5),
-        ("densenet169", 1e-5),
-        ("efficientnet_b0", 1e-5),
-        ("efficientnet_b3", 1e-5),
-        ("efficientnet_b6", 1e-5),
-        ("convnext_tiny", 1e-5),
-        ("convnext_large", 1e-5),
-        ("regnet_x_400mf", 1e-5),
-        ("regnet_y_400mf", 1e-5),
-        ("regnet_x_32gf", 1e-5),
-        ("vit_b_16", 1e-5),
-        ("swin_v2_b", 1e-5),
-        ("maxvit_t", 1e-5),
-    ],
-)
-def test_differentiable_split_all_replay_real_world_models(model_name, atol, default_input1):
-    """Run differentiable split forward/backward checks on the real-world models from test_replay."""
-    torchvision = pytest.importorskip("torchvision")
-
-    model = getattr(torchvision.models, model_name)(weights=None)
-    model.eval()
-
-    if model_name == "googlenet":
-        model_input = torch.rand(1, 3, 224, 224)
-    else:
-        model_input = default_input1[:1].clone()
-
-    model_log = log_forward_pass(
-        model,
-        model_input,
-        layers_to_save="all",
-        save_function_args=True,
-    )
-
-    split_indices = _pick_spread_indices(len(model_log.layer_list))
-    if len(split_indices) > 2:
-        split_indices = [split_indices[1], split_indices[-2]]
-
-    for split_idx in split_indices:
-        new_input = torch.randn_like(model_input)
-        _assert_differentiable_split_matches_reference(
-            model,
-            model_log,
-            split_idx,
-            new_input,
-            atol=atol,
-        )
-
-
-@pytest.mark.parametrize(
-    "model_name,split_indices",
-    [
-        ("alexnet", [10, 20]),
-        ("vgg16", [15, 30]),
-        ("resnet18", [20, 40]),
-        ("resnet50", [30, 60]),
-        ("mobilenet_v2", [15, 30]),
-        ("squeezenet1_0", [10, 20]),
-        ("densenet121", [25, 50]),
-        ("efficientnet_b0", [20, 40]),
-        ("googlenet", [20, 50]),
-        ("shufflenet_v2_x1_0", [15, 35]),
-        ("convnext_tiny", [20, 60]),
-        ("mnasnet1_0", [30, 50]),
-        ("swin_t", [30, 80]),
-    ],
-)
-def test_split_real_world_models(model_name, split_indices, default_input1):
-    """Test graph splitting on real-world torchvision models."""
-    torchvision = pytest.importorskip("torchvision")
-
-    model = getattr(torchvision.models, model_name)(weights=None)
-    model.eval()
-
-    model_log = log_forward_pass(
-        model,
-        default_input1,
-        layers_to_save="all",
-        save_function_args=True,
-    )
-
-    new_input = torch.randn_like(default_input1)
-    full_output = replay_forward_pass(model_log, new_input)
-
-    # Test each split index
-    for split_idx in split_indices:
-        if split_idx >= len(model_log.layer_list):
-            continue
-
         intermediate_features, split_output = split_and_replay_graph(
             model_log,
             split_layer_indices=split_idx,
             new_input=new_input,
         )
-
-        assert _compare_outputs(full_output, split_output, atol=1e-4)
-        assert len(intermediate_features) > 0
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    "model_name",
-    [
-        "fasterrcnn_mobilenet_v3_large_320_fpn",
-        "fasterrcnn_resnet50_fpn",
-        "maskrcnn_resnet50_fpn",
-        "retinanet_resnet50_fpn",
-        "ssdlite320_mobilenet_v3_large",
-    ],
-)
-def test_split_detection_models_multi_indices(model_name):
-    """Test graph splitting on detection models with multiple split indices."""
-    torchvision = pytest.importorskip("torchvision")
-
-    model = getattr(torchvision.models.detection, model_name)(weights=None, weights_backbone=None)
-    model.eval()
-
-    # Detection models consume list[Tensor] as a single positional argument.
-    original_input = [[torch.rand(3, 224, 224)]]
-    model_log = log_forward_pass(
-        model,
-        original_input,
-        layers_to_save="all",
-        save_function_args=True,
-    )
-
-    new_input = [[original_input[0][0].clone()]]
-    full_output = replay_forward_pass(model_log, new_input)
-
-    split_indices = _pick_spread_indices(len(model_log.layer_list))
-    for split_idx in split_indices:
-        intermediate_features, split_output = split_and_replay_graph(
-            model_log,
-            split_layer_indices=split_idx,
-            new_input=new_input,
-        )
-        assert _compare_outputs(full_output, split_output, atol=1e-4)
-        assert len(intermediate_features) > 0
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    "model_name",
-    [
-        "fcn_resnet50",
-        "deeplabv3_resnet50",
-        "lraspp_mobilenet_v3_large",
-    ],
-)
-def test_split_segmentation_models_multi_indices(model_name):
-    """Test graph splitting on segmentation models with multiple split indices."""
-    torchvision = pytest.importorskip("torchvision")
-
-    model = getattr(torchvision.models.segmentation, model_name)(
-        weights=None, weights_backbone=None
-    )
-    model.eval()
-
-    original_input = torch.rand(1, 3, 224, 224)
-    model_log = log_forward_pass(
-        model,
-        original_input,
-        layers_to_save="all",
-        save_function_args=True,
-    )
-
-    new_input = torch.rand_like(original_input)
-    full_output = replay_forward_pass(model_log, new_input)
-
-    split_indices = _pick_spread_indices(len(model_log.layer_list))
-    for split_idx in split_indices:
-        intermediate_features, split_output = split_and_replay_graph(
-            model_log,
-            split_layer_indices=split_idx,
-            new_input=new_input,
-        )
-        assert _compare_outputs(full_output, split_output, atol=1e-4)
-        assert len(intermediate_features) > 0
-
-
-@pytest.mark.slow
-def test_split_inception_v3():
-    """Test splitting Inception v3 with auxiliary outputs."""
-    torchvision = pytest.importorskip("torchvision")
-
-    model = torchvision.models.inception_v3(weights=None, aux_logits=False)
-    model.eval()
-
-    original_input = torch.rand(1, 3, 299, 299)
-    model_log = log_forward_pass(
-        model,
-        original_input,
-        layers_to_save="all",
-        save_function_args=True,
-    )
-
-    new_input = torch.rand(1, 3, 299, 299)
-    full_output = replay_forward_pass(model_log, new_input)
-
-    # Split at multiple points
-    total_layers = len(model_log.layer_list)
-    split_indices = [total_layers // 4, total_layers // 2, 3 * total_layers // 4]
-
-    for split_idx in split_indices:
-        intermediate_features, split_output = split_and_replay_graph(
-            model_log,
-            split_layer_indices=split_idx,
-            new_input=new_input,
-        )
-        assert _compare_outputs(full_output, split_output, atol=1e-4)
-
-
-@pytest.mark.slow
-def test_split_transformer_model():
-    """Test splitting a transformer model (ViT)."""
-    torchvision = pytest.importorskip("torchvision")
-
-    model = torchvision.models.vit_b_16(weights=None)
-    model.eval()
-
-    original_input = torch.rand(1, 3, 224, 224)
-    model_log = log_forward_pass(
-        model,
-        original_input,
-        layers_to_save="all",
-        save_function_args=True,
-    )
-
-    new_input = torch.rand(1, 3, 224, 224)
-    full_output = replay_forward_pass(model_log, new_input)
-
-    # Split at various points in the transformer
-    total_layers = len(model_log.layer_list)
-    split_indices = [total_layers // 3, total_layers // 2, 2 * total_layers // 3]
-
-    for split_idx in split_indices:
-        intermediate_features, split_output = split_and_replay_graph(
-            model_log,
-            split_layer_indices=split_idx,
-            new_input=new_input,
-        )
-        assert _compare_outputs(full_output, split_output, atol=1e-4)
+        assert _compare_outputs(full_output, split_output, atol=1e-5)
+        assert _compare_outputs(direct_output, split_output, atol=1e-5)
+        assert intermediate_features
 
 
 def test_split_multiple_outputs_model():
@@ -1863,65 +1662,3 @@ def test_split_error_handling():
             new_input=original_input,
         )
 
-
-@pytest.mark.slow
-@pytest.mark.parametrize("target_device", ["cpu", "cuda"])
-@pytest.mark.parametrize("model_name", ["resnet18", "mobilenet_v3_small"])
-def test_split_differentiable_device_placement_real_models(model_name, target_device):
-    if target_device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-
-    torchvision = pytest.importorskip("torchvision")
-    model = getattr(torchvision.models, model_name)(weights=None).train()
-
-    original_input = torch.randn(2, 3, 224, 224)
-    model_log = log_forward_pass(
-        model, original_input, layers_to_save="all", save_function_args=True
-    )
-    split_idx = len(model_log.layer_list) // 2
-
-    # Setup real backward on target device
-    import copy
-
-    model_real = copy.deepcopy(model).to(target_device)
-    model_real.train()
-    opt_real = torch.optim.SGD(model_real.parameters(), lr=0.01)
-    opt_real.zero_grad(set_to_none=True)
-    new_input_real = torch.randn(2, 3, 224, 224).to(target_device)
-
-    cpu_rng_state = torch.random.get_rng_state()
-    if target_device == "cuda":
-        cuda_rng_state = torch.cuda.get_rng_state()
-
-    out_real = model_real(new_input_real)
-    out_real.sum().backward()
-    opt_real.step()
-    params_real = {n: p.detach().clone() for n, p in model_real.named_parameters()}
-
-    # Setup split backward on target device
-    model_split = copy.deepcopy(model).to(target_device)
-    model_split.train()
-    opt_split = torch.optim.SGD(model_split.parameters(), lr=0.01)
-    opt_split.zero_grad(set_to_none=True)
-    new_input_split = new_input_real.clone()  # already on target device
-
-    torch.random.set_rng_state(cpu_rng_state)
-    if target_device == "cuda":
-        torch.cuda.set_rng_state(cuda_rng_state)
-
-    _, out_split = split_and_replay_graph_differentiable(
-        model_log,
-        model_split,
-        split_layer_indices=split_idx,
-        new_input=new_input_split,
-        device=target_device,
-    )
-    out_split.sum().backward()
-    opt_split.step()
-    params_split = {n: p.detach().clone() for n, p in model_split.named_parameters()}
-
-    for name in params_real:
-        _assert_tensor_close(params_real[name], params_split[name], atol=1e-4)
-
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
