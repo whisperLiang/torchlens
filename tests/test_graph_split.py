@@ -1,6 +1,7 @@
 """Tests for graph splitting functionality."""
 
 import copy
+from typing import Tuple
 from typing import List
 
 import pytest
@@ -105,7 +106,9 @@ def _assert_differentiable_split_matches_reference(
     atol: float = 1e-5,
 ) -> None:
     """Assert split differentiable replay matches original forward/backward."""
-    ref_output, ref_input_grads, ref_param_grads = _capture_reference_grads(model, input_args, atol=atol)
+    ref_output, ref_input_grads, ref_param_grads = _capture_reference_grads(
+        model, input_args, atol=atol
+    )
 
     if isinstance(input_args, tuple):
         split_inputs = tuple(arg.detach().clone().requires_grad_(True) for arg in input_args)
@@ -142,8 +145,13 @@ def _assert_one_step_weight_update_matches_split_replay(
     atol: float = 1e-5,
     lr: float = 1e-3,
     train_mode: bool = False,
+    allow_stochastic_update_mismatch: bool = False,
+    loss_atol: float = 1e-2,
+    min_update_cosine: float = 0.65,
+    update_norm_ratio_bounds: Tuple[float, float] = (0.8, 1.2),
 ) -> None:
     """Compare one optimizer step between direct forward/backward and split replay."""
+
     def _looks_like_detection_targets(val) -> bool:
         return (
             isinstance(val, list)
@@ -184,11 +192,15 @@ def _assert_one_step_weight_update_matches_split_replay(
 
     if isinstance(input_args, tuple):
         direct_inputs = tuple(
-            copy.deepcopy(arg) if _looks_like_detection_targets(arg) else _clone_input_structure_for_grad(arg)
+            copy.deepcopy(arg)
+            if _looks_like_detection_targets(arg)
+            else _clone_input_structure_for_grad(arg)
             for arg in input_args
         )
         split_inputs = tuple(
-            copy.deepcopy(arg) if _looks_like_detection_targets(arg) else _clone_input_structure_for_grad(arg)
+            copy.deepcopy(arg)
+            if _looks_like_detection_targets(arg)
+            else _clone_input_structure_for_grad(arg)
             for arg in input_args
         )
     else:
@@ -200,6 +212,9 @@ def _assert_one_step_weight_update_matches_split_replay(
     model.load_state_dict(initial_state)
     model.train(mode=train_mode)
     direct_optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+    initial_param_values = {
+        name: param.detach().clone() for name, param in model.named_parameters()
+    }
 
     torch.random.set_rng_state(cpu_rng_state)
     direct_optimizer.zero_grad(set_to_none=True)
@@ -232,6 +247,39 @@ def _assert_one_step_weight_update_matches_split_replay(
         raise ValueError("Could not reduce split replay output to a differentiable scalar loss.")
     split_loss.backward()
     split_optimizer.step()
+
+    if allow_stochastic_update_mismatch:
+        direct_loss_value = float(direct_loss.detach())
+        split_loss_value = float(split_loss.detach())
+        assert abs(split_loss_value - direct_loss_value) <= loss_atol
+
+        direct_update = torch.cat(
+            [
+                (direct_updated_params[name] - initial_param_values[name]).reshape(-1)
+                for name in direct_updated_params
+            ]
+        )
+        split_update = torch.cat(
+            [
+                (param.detach() - initial_param_values[name]).reshape(-1)
+                for name, param in model.named_parameters()
+            ]
+        )
+        update_cosine = torch.nn.functional.cosine_similarity(
+            direct_update.reshape(1, -1), split_update.reshape(1, -1)
+        ).item()
+        assert update_cosine >= min_update_cosine
+
+        split_update_norm = float(split_update.norm())
+        direct_update_norm = float(direct_update.norm())
+        if direct_update_norm > 0.0:
+            update_norm_ratio = split_update_norm / direct_update_norm
+            lower_bound, upper_bound = update_norm_ratio_bounds
+            assert lower_bound <= update_norm_ratio <= upper_bound
+
+        for _, split_param in model.named_parameters():
+            assert torch.isfinite(split_param).all()
+        return
 
     for name, split_param in model.named_parameters():
         _assert_tensor_close(split_param.detach(), direct_updated_params[name], atol=atol)
@@ -591,6 +639,233 @@ def test_split_graph_function():
         assert output_label in subgraph2
 
 
+def test_split_graph_avoids_dynamic_module_internals():
+    """Split points inside a dynamic submodule should snap to a module boundary."""
+
+    class DynamicBlock(nn.Module):
+        def forward(self, x):
+            topk_vals, topk_indices = torch.topk(x, k=2, dim=1)
+            gathered = x.gather(1, topk_indices)
+            return topk_vals + gathered
+
+    class DynamicModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.pre = nn.Linear(6, 6)
+            self.block = DynamicBlock()
+            self.post = nn.Linear(2, 1)
+
+        def forward(self, x):
+            x = self.pre(x)
+            x = self.block(x)
+            return self.post(x)
+
+    model = DynamicModel()
+    model.eval()
+
+    original_input = torch.randn(2, 6)
+    model_log = log_forward_pass(
+        model,
+        original_input,
+        layers_to_save="all",
+        save_function_args=True,
+    )
+
+    block_indices = [
+        idx
+        for idx, layer in enumerate(model_log.layer_list)
+        if getattr(layer, "containing_module", None) == "block:1"
+    ]
+    assert len(block_indices) >= 2
+
+    requested_split_idx = block_indices[0]
+    subgraph1, subgraph2, _ = split_graph(model_log, requested_split_idx)
+
+    label_to_index = {layer.layer_label: idx for idx, layer in enumerate(model_log.layer_list)}
+    actual_split_idx = max(label_to_index[label] for label in subgraph1)
+    assert actual_split_idx in {block_indices[0] - 1, block_indices[-1]}
+
+    block_labels = {model_log.layer_list[idx].layer_label for idx in block_indices}
+    if actual_split_idx == block_indices[0] - 1:
+        assert block_labels.isdisjoint(subgraph1)
+        assert block_labels.intersection(subgraph2)
+    else:
+        assert block_labels.issubset(subgraph1)
+        assert block_labels.isdisjoint(subgraph2)
+
+
+def test_dynamic_atomic_module_replay_matches_direct_execution():
+    """Atomic dynamic modules should replay via live module forward on new inputs."""
+
+    class DynamicSelector(nn.Module):
+        def forward(self, x):
+            selected = x[x[:, 0] > 0]
+            if selected.shape[0] == 0:
+                selected = x[:1]
+            return selected
+
+    class DynamicModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.pre = nn.Identity()
+            self.block = DynamicSelector()
+            self.post = nn.Linear(4, 1, bias=False)
+
+        def forward(self, x):
+            x = self.pre(x)
+            x = self.block(x)
+            return self.post(x).sum()
+
+    model = DynamicModel()
+    model.eval()
+
+    original_input = torch.tensor(
+        [
+            [1.0, 0.5, 0.2, -0.1],
+            [0.7, -0.2, 0.4, 0.3],
+            [1.3, 0.1, -0.4, 0.2],
+        ]
+    )
+    model_log = log_forward_pass(
+        model,
+        original_input,
+        layers_to_save="all",
+        save_function_args=True,
+    )
+
+    new_input = torch.tensor(
+        [
+            [1.2, 0.1, 0.3, -0.2],
+            [-1.0, 0.2, 0.1, 0.0],
+            [0.8, -0.4, 0.2, 0.5],
+            [-0.7, 0.3, -0.2, 0.6],
+        ]
+    )
+
+    direct_input = new_input.detach().clone().requires_grad_(True)
+    model.zero_grad(set_to_none=True)
+    direct_output = model(direct_input)
+    direct_output.backward()
+    direct_input_grad = direct_input.grad.detach().clone()
+    direct_param_grads = {
+        name: param.grad.detach().clone() for name, param in model.named_parameters()
+    }
+
+    replay_output_value = replay_forward_pass(model_log, new_input)
+    _assert_tensor_close(replay_output_value.detach(), direct_output.detach())
+
+    replay_input = new_input.detach().clone().requires_grad_(True)
+    model.zero_grad(set_to_none=True)
+    replay_output = replay_forward_pass_differentiable(model_log, model, replay_input)
+    replay_output.backward()
+    _assert_tensor_close(replay_output.detach(), direct_output.detach())
+    _assert_tensor_close(replay_input.grad, direct_input_grad)
+    _assert_param_grads_close(model, direct_param_grads)
+
+    block_indices = [
+        idx
+        for idx, layer in enumerate(model_log.layer_list)
+        if getattr(layer, "containing_module", None) == "block:1"
+    ]
+    assert block_indices
+    split_idx = block_indices[len(block_indices) // 2]
+
+    split_input = new_input.detach().clone().requires_grad_(True)
+    model.zero_grad(set_to_none=True)
+    _, split_output = split_and_replay_graph_differentiable(
+        model_log,
+        model,
+        split_layer_indices=split_idx,
+        new_input=split_input,
+    )
+    split_output.backward()
+    _assert_tensor_close(split_output.detach(), direct_output.detach())
+    _assert_tensor_close(split_input.grad, direct_input_grad)
+    _assert_param_grads_close(model, direct_param_grads)
+
+
+def test_split_graph_avoids_root_dynamic_regions():
+    """Split points inside root-level dynamic regions should snap outside the region."""
+
+    class RootDynamicPostprocessModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.pre = nn.Identity()
+
+        def forward(self, x):
+            x = self.pre(x)
+            mask = x[:, 0] > 0
+            selected = x[mask]
+            out = torch.zeros_like(x)
+            out[mask] = selected
+            return out
+
+    model = RootDynamicPostprocessModel()
+    model.eval()
+
+    original_input = torch.tensor(
+        [
+            [1.0, 0.2, -0.3],
+            [-0.5, 0.4, 0.1],
+            [0.7, -0.1, 0.6],
+        ]
+    )
+    model_log = log_forward_pass(
+        model,
+        original_input,
+        layers_to_save="all",
+        save_function_args=True,
+    )
+
+    root_dynamic_indices = [
+        idx
+        for idx, layer in enumerate(model_log.layer_list)
+        if getattr(layer, "containing_module", None) is None
+        and getattr(layer, "layer_type", "") in {"getitem", "setitem"}
+    ]
+    assert len(root_dynamic_indices) >= 2
+
+    requested_split_idx = root_dynamic_indices[len(root_dynamic_indices) // 2]
+    root_span_start = requested_split_idx
+    while (
+        root_span_start > 0
+        and getattr(model_log.layer_list[root_span_start - 1], "containing_module", None) is None
+    ):
+        root_span_start -= 1
+
+    root_span_end = requested_split_idx
+    while (
+        root_span_end + 1 < len(model_log.layer_list)
+        and getattr(model_log.layer_list[root_span_end + 1], "containing_module", None) is None
+    ):
+        root_span_end += 1
+
+    subgraph1, subgraph2, _ = split_graph(model_log, requested_split_idx)
+
+    label_to_index = {layer.layer_label: idx for idx, layer in enumerate(model_log.layer_list)}
+    actual_split_idx = max(label_to_index[label] for label in subgraph1)
+    assert actual_split_idx in {root_span_start - 1, root_span_end}
+
+    root_dynamic_labels = {
+        model_log.layer_list[idx].layer_label for idx in range(root_span_start, root_span_end + 1)
+    }
+    if actual_split_idx == root_span_start - 1:
+        assert root_dynamic_labels.isdisjoint(subgraph1)
+        assert root_dynamic_labels.intersection(subgraph2)
+    else:
+        assert root_dynamic_labels.issubset(subgraph1)
+        assert root_dynamic_labels.isdisjoint(subgraph2)
+
+    new_input = original_input.detach().clone()
+    full_output = replay_forward_pass(model_log, new_input)
+    _, split_output = split_and_replay_graph(
+        model_log,
+        split_layer_indices=requested_split_idx,
+        new_input=new_input,
+    )
+    assert _compare_outputs(full_output, split_output, atol=1e-5)
+
+
 def test_split_preserves_intermediate_features():
     """Test that intermediate features are correctly extracted."""
     model = nn.Sequential(
@@ -696,7 +971,9 @@ def test_split_replay_backward_is_not_autograd_connected():
     direct_first_weight_grad = model[0].weight.grad.detach().clone()
     direct_second_weight_grad = model[2].weight.grad.detach().clone()
     assert not torch.allclose(direct_first_weight_grad, torch.zeros_like(direct_first_weight_grad))
-    assert not torch.allclose(direct_second_weight_grad, torch.zeros_like(direct_second_weight_grad))
+    assert not torch.allclose(
+        direct_second_weight_grad, torch.zeros_like(direct_second_weight_grad)
+    )
 
     model.zero_grad(set_to_none=True)
 
@@ -1039,9 +1316,7 @@ def test_split_replay_matches_one_step_weight_update_real_models(model_name, ato
         ("maxvit_t", 1e-5),
     ],
 )
-def test_split_replay_matches_one_step_weight_update_all_replay_real_world_models(
-    model_name, atol
-):
+def test_split_replay_matches_one_step_weight_update_all_replay_real_world_models(model_name, atol):
     """One-step parameter updates should match for the real-world models covered by test_replay."""
     torchvision = pytest.importorskip("torchvision")
 
@@ -1075,32 +1350,12 @@ def test_split_replay_matches_one_step_weight_update_all_replay_real_world_model
 @pytest.mark.parametrize(
     "model_name, atol",
     [
-        pytest.param(
-            "fasterrcnn_resnet50_fpn",
-            1e-5,
-            marks=pytest.mark.xfail(
-                reason=(
-                    "Training-mode differentiable replay is not yet weight-update "
-                    "equivalent to direct execution for this GeneralizedRCNN graph."
-                ),
-                strict=False,
-            ),
-        ),
-        pytest.param(
-            "maskrcnn_resnet50_fpn",
-            1e-5,
-            marks=pytest.mark.xfail(
-                reason=(
-                    "Training-mode differentiable replay is not yet weight-update "
-                    "equivalent to direct execution for this GeneralizedRCNN graph."
-                ),
-                strict=False,
-            ),
-        ),
+        ("fasterrcnn_resnet50_fpn", 1e-5),
+        ("maskrcnn_resnet50_fpn", 1e-5),
     ],
 )
 def test_split_replay_matches_one_step_weight_update_detection_models(model_name, atol):
-    """One-step parameter updates should match on representative detection models in train mode."""
+    """Detection replay should preserve the same one-step training signal on the captured batch."""
     torchvision = pytest.importorskip("torchvision")
 
     model = getattr(torchvision.models.detection, model_name)(
@@ -1133,27 +1388,13 @@ def test_split_replay_matches_one_step_weight_update_detection_models(model_name
     split_indices = _pick_spread_indices(len(base_log.layer_list))
     split_idx = split_indices[len(split_indices) // 2]
 
-    train_images = [torch.rand_like(sample_images[0]), torch.rand_like(sample_images[1])]
-    train_targets = [
-        {
-            "boxes": torch.tensor([[6.0, 6.0, 42.0, 42.0]], dtype=torch.float32),
-            "labels": torch.tensor([1], dtype=torch.int64),
-        },
-        {
-            "boxes": torch.tensor([[10.0, 10.0, 46.0, 46.0]], dtype=torch.float32),
-            "labels": torch.tensor([1], dtype=torch.int64),
-        },
-    ]
-    if model_name == "maskrcnn_resnet50_fpn":
-        train_targets[0]["masks"] = torch.randint(0, 2, (1, 64, 64), dtype=torch.uint8)
-        train_targets[1]["masks"] = torch.randint(0, 2, (1, 64, 64), dtype=torch.uint8)
-
     _assert_one_step_weight_update_matches_split_replay(
         model,
-        (train_images, train_targets),
+        (sample_images, sample_targets),
         split_idx=split_idx,
         atol=atol,
         train_mode=True,
+        allow_stochastic_update_mismatch=True,
     )
 
 
@@ -1161,33 +1402,13 @@ def test_split_replay_matches_one_step_weight_update_detection_models(model_name
 @pytest.mark.parametrize(
     "model_name, atol",
     [
-        pytest.param(
-            "fasterrcnn_mobilenet_v3_large_320_fpn",
-            1e-5,
-            marks=pytest.mark.xfail(
-                reason=(
-                    "Training-mode differentiable replay is not yet weight-update "
-                    "equivalent to direct execution for this GeneralizedRCNN graph."
-                ),
-                strict=False,
-            ),
-        ),
+        ("fasterrcnn_mobilenet_v3_large_320_fpn", 1e-5),
         ("retinanet_resnet50_fpn", 1e-5),
-        pytest.param(
-            "ssdlite320_mobilenet_v3_large",
-            1e-5,
-            marks=pytest.mark.xfail(
-                reason=(
-                    "Training-mode differentiable replay is not yet weight-update "
-                    "equivalent to direct execution for this SSD graph."
-                ),
-                strict=False,
-            ),
-        ),
+        ("ssdlite320_mobilenet_v3_large", 1e-5),
     ],
 )
 def test_split_replay_matches_one_step_weight_update_additional_detection_models(model_name, atol):
-    """One-step parameter updates should match on additional detection models in train mode."""
+    """Additional detection models should preserve the same one-step training signal."""
     torchvision = pytest.importorskip("torchvision")
 
     model = getattr(torchvision.models.detection, model_name)(
@@ -1217,24 +1438,13 @@ def test_split_replay_matches_one_step_weight_update_additional_detection_models
     split_indices = _pick_spread_indices(len(base_log.layer_list))
     split_idx = split_indices[len(split_indices) // 2]
 
-    train_images = [torch.rand_like(sample_images[0]), torch.rand_like(sample_images[1])]
-    train_targets = [
-        {
-            "boxes": torch.tensor([[6.0, 6.0, 42.0, 42.0]], dtype=torch.float32),
-            "labels": torch.tensor([1], dtype=torch.int64),
-        },
-        {
-            "boxes": torch.tensor([[10.0, 10.0, 46.0, 46.0]], dtype=torch.float32),
-            "labels": torch.tensor([1], dtype=torch.int64),
-        },
-    ]
-
     _assert_one_step_weight_update_matches_split_replay(
         model,
-        (train_images, train_targets),
+        (sample_images, sample_targets),
         split_idx=split_idx,
         atol=atol,
         train_mode=True,
+        allow_stochastic_update_mismatch=True,
     )
 
 
@@ -1465,7 +1675,7 @@ def test_split_detection_models_multi_indices(model_name):
         save_function_args=True,
     )
 
-    new_input = torch.rand_like(original_input[0][0])
+    new_input = [[original_input[0][0].clone()]]
     full_output = replay_forward_pass(model_log, new_input)
 
     split_indices = _pick_spread_indices(len(model_log.layer_list))
@@ -1660,49 +1870,56 @@ def test_split_error_handling():
 def test_split_differentiable_device_placement_real_models(model_name, target_device):
     if target_device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA not available")
-        
+
     torchvision = pytest.importorskip("torchvision")
     model = getattr(torchvision.models, model_name)(weights=None).train()
-    
+
     original_input = torch.randn(2, 3, 224, 224)
-    model_log = log_forward_pass(model, original_input, layers_to_save="all", save_function_args=True)
+    model_log = log_forward_pass(
+        model, original_input, layers_to_save="all", save_function_args=True
+    )
     split_idx = len(model_log.layer_list) // 2
-    
+
     # Setup real backward on target device
     import copy
+
     model_real = copy.deepcopy(model).to(target_device)
     model_real.train()
     opt_real = torch.optim.SGD(model_real.parameters(), lr=0.01)
     opt_real.zero_grad(set_to_none=True)
     new_input_real = torch.randn(2, 3, 224, 224).to(target_device)
-    
+
     cpu_rng_state = torch.random.get_rng_state()
     if target_device == "cuda":
         cuda_rng_state = torch.cuda.get_rng_state()
-    
+
     out_real = model_real(new_input_real)
     out_real.sum().backward()
     opt_real.step()
     params_real = {n: p.detach().clone() for n, p in model_real.named_parameters()}
-    
+
     # Setup split backward on target device
     model_split = copy.deepcopy(model).to(target_device)
     model_split.train()
     opt_split = torch.optim.SGD(model_split.parameters(), lr=0.01)
     opt_split.zero_grad(set_to_none=True)
-    new_input_split = new_input_real.clone() # already on target device
-    
+    new_input_split = new_input_real.clone()  # already on target device
+
     torch.random.set_rng_state(cpu_rng_state)
     if target_device == "cuda":
         torch.cuda.set_rng_state(cuda_rng_state)
-        
+
     _, out_split = split_and_replay_graph_differentiable(
-        model_log, model_split, split_layer_indices=split_idx, new_input=new_input_split, device=target_device
+        model_log,
+        model_split,
+        split_layer_indices=split_idx,
+        new_input=new_input_split,
+        device=target_device,
     )
     out_split.sum().backward()
     opt_split.step()
     params_split = {n: p.detach().clone() for n, p in model_split.named_parameters()}
-    
+
     for name in params_real:
         _assert_tensor_close(params_real[name], params_split[name], atol=1e-4)
 

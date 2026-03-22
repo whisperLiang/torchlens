@@ -23,6 +23,7 @@ fast mode, it skips entry/exit tracking entirely but still handles
 ``nn.Identity`` and pass-through detection via ``torch.identity``.
 """
 
+import copy
 import inspect
 import itertools
 import warnings
@@ -548,6 +549,43 @@ def _tag_untagged_buffers(module: nn.Module) -> None:
             delattr(buffer_tensor, "tl_tensor_label_raw")
 
 
+def _build_module_output_template(outputs):
+    """Build a lightweight template of a module output container structure."""
+    if isinstance(outputs, torch.Tensor):
+        layer_label = getattr(outputs, "tl_tensor_label_raw", None)
+        if layer_label is None:
+            return outputs
+        return ("__tl_output_ref__", layer_label)
+
+    if isinstance(outputs, list):
+        return [_build_module_output_template(v) for v in outputs]
+
+    if isinstance(outputs, tuple):
+        return {
+            "__tl_tuple_type__": type(outputs),
+            "items": [_build_module_output_template(v) for v in outputs],
+        }
+
+    if isinstance(outputs, dict):
+        dict_type = type(outputs)
+        template = {
+            "__tl_dict_type__": dict_type,
+            "items": [(k, _build_module_output_template(v)) for k, v in outputs.items()],
+        }
+        if dict_type is not dict:
+            template["__tl_dict_module__"] = getattr(dict_type, "__module__", None)
+            template["__tl_dict_name__"] = getattr(dict_type, "__name__", None)
+        return template
+
+    if hasattr(outputs, "__dict__") and not isinstance(outputs, type):
+        copied_obj = copy.copy(outputs)
+        for attr_name, attr_value in vars(outputs).items():
+            setattr(copied_obj, attr_name, _build_module_output_template(attr_value))
+        return copied_obj
+
+    return outputs
+
+
 def _handle_module_entry(model_log, module, args, kwargs):
     """Pre-forward bookkeeping for exhaustive mode.
 
@@ -650,6 +688,9 @@ def _handle_module_exit(model_log, module, out, input_tensor_labels, input_tenso
     mod_id = id(module)
     module_pass_num = model_log._mod_pass_num[mod_id]
     module_entry_label = model_log._mod_pass_labels[mod_id].pop()
+    model_log._module_build_data["module_output_templates"][
+        f"{module_address}:{module_pass_num}"
+    ] = _build_module_output_template(out)
     output_tensors = get_vars_of_type_from_obj(out, torch.Tensor, search_depth=4)
     for t in output_tensors:
         # nn.Identity modules and pass-through tensors (output is same object

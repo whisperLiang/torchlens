@@ -86,6 +86,7 @@ def _init_module_build_data() -> dict:
         "module_layers": defaultdict(list),
         "module_pass_layers": defaultdict(list),
         "module_layer_argnames": defaultdict(list),
+        "module_output_templates": {},
         "module_training_modes": {},
     }
 
@@ -261,6 +262,8 @@ class ModelLog:
         # Temporary storage for module metadata capture (consumed by _build_module_logs):
         self._module_metadata: Dict = {}
         self._module_forward_args: Dict = {}
+        self._module_replay_templates: Dict = {}
+        self._source_model_ref: Any = None
 
         # Time elapsed:
         self.pass_start_time: float = 0

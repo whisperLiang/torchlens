@@ -48,9 +48,14 @@ _LAYER_PASS_LOG_FIELD_ORDER_SET = frozenset(LAYER_PASS_LOG_FIELD_ORDER)
 
 
 def _recursive_safe_copy(val):
-    """Deep-copy nested structures, cloning tensors instead of using copy.deepcopy (#44)."""
+    """Deep-copy nested structures, detaching tensor values for replay snapshots.
+
+    Captured args/kwargs are used for value replay and structural metadata, not
+    for preserving the original autograd graph. Detaching here avoids retaining
+    large training graphs and is more robust on Windows for dynamic models.
+    """
     if isinstance(val, torch.Tensor):
-        return safe_copy(val)
+        return safe_copy(val, detach_tensor=True)
     elif isinstance(val, (list, tuple)):
         return type(val)(_recursive_safe_copy(v) for v in val)
     elif isinstance(val, dict):

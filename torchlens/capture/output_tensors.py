@@ -376,9 +376,21 @@ def _tag_tensor_and_track_variations(
     ``children_tensor_versions``.  This is critical for validation replay,
     which needs the actual input values each child operation saw.
     """
+    import os
+
     out.tl_tensor_label_raw = fields_dict_onetensor["tensor_label_raw"]  # type: ignore[attr-defined]
     if self.save_gradients:
         _add_backward_hook(self, out, out.tl_tensor_label_raw)  # type: ignore[attr-defined]
+
+    model_ref = getattr(self, "_source_model_ref", None)
+    live_model = None
+    if model_ref is not None:
+        try:
+            live_model = model_ref()
+        except TypeError:
+            live_model = model_ref
+    if os.name == "nt" and getattr(live_model, "training", False):
+        return
 
     for parent_label in new_layer_entry.parent_layers:
         parent = self[parent_label]

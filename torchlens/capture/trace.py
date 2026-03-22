@@ -29,6 +29,7 @@ Key functions:
 import inspect
 import random
 import time
+import weakref
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple, Union
 
@@ -425,6 +426,7 @@ def run_and_log_inputs_through_model(
         random_seed = random.randint(1, 4294967294)
     self.random_seed_used = random_seed  # type: ignore[assignment]
     set_random_seed(random_seed)
+    self._source_model_ref = weakref.ref(model)
 
     self._layer_nums_to_save = _get_op_nums_from_user_labels(self, layers_to_save)  # type: ignore[assignment, arg-type]
 

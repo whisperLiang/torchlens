@@ -18,6 +18,7 @@ Step 18 (_set_pass_finished): Marks ModelLog and all LayerPassLogs as finished, 
     to user-facing mode for display and access methods.
 """
 
+import copy
 import time
 from collections import defaultdict, deque
 from typing import Optional, Dict, NamedTuple, TYPE_CHECKING
@@ -30,6 +31,125 @@ from ..utils.introspection import get_vars_of_type_from_obj
 
 if TYPE_CHECKING:
     from ..data_classes.model_log import ModelLog
+
+
+_MODULE_INPUT_REF_MARKER = "__tl_module_input_ref__"
+
+
+def _remap_template_refs(template, raw_to_final):
+    """Replace raw layer-label refs inside a replay template with final labels."""
+    if isinstance(template, tuple) and len(template) == 2:
+        marker, layer_label = template
+        if marker in {"__tl_output_ref__", _MODULE_INPUT_REF_MARKER}:
+            return (marker, raw_to_final.get(layer_label, layer_label))
+        return template
+
+    if isinstance(template, list):
+        return [_remap_template_refs(v, raw_to_final) for v in template]
+
+    if isinstance(template, dict):
+        remapped = {}
+        for key, value in template.items():
+            if key == "items" and "__tl_dict_type__" in template:
+                remapped[key] = [
+                    (item_key, _remap_template_refs(item_value, raw_to_final))
+                    for item_key, item_value in value
+                ]
+            else:
+                remapped[key] = _remap_template_refs(value, raw_to_final)
+        return remapped
+
+    if hasattr(template, "__dict__") and not isinstance(template, type):
+        remapped_obj = copy.copy(template)
+        for attr_name, attr_value in vars(template).items():
+            setattr(remapped_obj, attr_name, _remap_template_refs(attr_value, raw_to_final))
+        return remapped_obj
+
+    return template
+
+
+def _build_module_call_template(val, raw_to_final, memo):
+    """Convert module forward args/kwargs into a replay template."""
+    obj_id = id(val)
+    if obj_id in memo:
+        return memo[obj_id]
+
+    if isinstance(val, torch.Tensor):
+        raw_label = getattr(val, "tl_tensor_label_raw", None)
+        if raw_label is None:
+            memo[obj_id] = val
+            return val
+        template_ref = (_MODULE_INPUT_REF_MARKER, raw_to_final.get(raw_label, raw_label))
+        memo[obj_id] = template_ref
+        return template_ref
+
+    if isinstance(val, list):
+        copied_list = []
+        memo[obj_id] = copied_list
+        copied_list.extend(_build_module_call_template(v, raw_to_final, memo) for v in val)
+        return copied_list
+
+    if isinstance(val, tuple):
+        placeholder = []
+        memo[obj_id] = placeholder
+        copied_tuple = type(val)(_build_module_call_template(v, raw_to_final, memo) for v in val)
+        memo[obj_id] = copied_tuple
+        return copied_tuple
+
+    if isinstance(val, dict):
+        copied_dict = type(val)()
+        memo[obj_id] = copied_dict
+        copied_dict.update(
+            {
+                key: _build_module_call_template(value, raw_to_final, memo)
+                for key, value in val.items()
+            }
+        )
+        return copied_dict
+
+    if hasattr(val, "__dict__"):
+        copied_obj = copy.copy(val)
+        memo[obj_id] = copied_obj
+        for attr_name, attr_value in vars(val).items():
+            setattr(
+                copied_obj, attr_name, _build_module_call_template(attr_value, raw_to_final, memo)
+            )
+        return copied_obj
+
+    memo[obj_id] = val
+    return val
+
+
+def _build_module_replay_templates(self: "ModelLog") -> None:
+    """Compile replay templates for module passes before temporary args are cleared."""
+    raw_to_final = getattr(self, "_raw_to_final_layer_labels", {})
+    output_templates_raw = self._module_build_data.get("module_output_templates", {})
+    module_layer_argnames = self._module_build_data.get("module_layer_argnames", {})
+    replay_templates = {}
+
+    for (address, pass_num), (args, kwargs) in self._module_forward_args.items():
+        pass_label = f"{address}:{pass_num}"
+        output_template_raw = output_templates_raw.get(pass_label)
+        if output_template_raw is None:
+            continue
+
+        args_template = _build_module_call_template(list(args), raw_to_final, {})
+        kwargs_template = _build_module_call_template(dict(kwargs), raw_to_final, {})
+        for raw_label, arg_key in module_layer_argnames.get(pass_label, []):
+            final_label = raw_to_final.get(raw_label, raw_label)
+            placeholder = (_MODULE_INPUT_REF_MARKER, final_label)
+            if isinstance(arg_key, int):
+                args_template[arg_key] = placeholder
+            else:
+                kwargs_template[arg_key] = placeholder
+
+        replay_templates[pass_label] = {
+            "args_template": args_template,
+            "kwargs_template": kwargs_template,
+            "output_template": _remap_template_refs(output_template_raw, raw_to_final),
+        }
+
+    self._module_replay_templates = replay_templates
 
 
 def _undecorate_all_saved_tensors(self) -> None:
@@ -371,6 +491,7 @@ def _build_module_logs(self: "ModelLog") -> None:
     Clears temporary state (_module_metadata, _module_forward_args, _module_build_data)
     after building.
     """
+    _build_module_replay_templates(self)
     mbd = self._module_build_data
     module_dict = {}  # address -> ModuleLog
     pass_dict: Dict[str, ModulePassLog] = {}  # "addr:pass" -> ModulePassLog
