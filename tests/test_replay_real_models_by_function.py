@@ -232,26 +232,32 @@ def _enumerate_case_splits(case_name: str, plan) -> list[Any]:
     return enumerate_frontier_splits(plan, max_frontier_size=2, max_splits=8)
 
 
-def _select_training_split(
+def _select_training_splits(
     case_name: str,
     plan,
     inputs: Any,
     input_kwargs: Optional[Dict[str, Any]],
 ):
+    import random
     splits = _enumerate_case_splits(case_name, plan)
     assert splits
 
-    if case_name == "vit":
-        return splits[min(1, len(splits) - 1)], None, None, None
-
     if case_name == "yolo_v8n":
-        return _select_yolo_training_split(plan, inputs)
+        return _select_yolo_training_splits(plan, inputs)
 
-    return splits[0], None, None, None
+    num_samples = min(3, len(splits))
+    selected_splits = random.sample(splits, num_samples)
+
+    return [(split, None, None, None) for split in selected_splits]
 
 
-def _select_yolo_training_split(plan, batch):
-    for split in _enumerate_case_splits("yolo_v8n", plan):
+def _select_yolo_training_splits(plan, batch):
+    import random
+    results = []
+    splits = _enumerate_case_splits("yolo_v8n", plan)
+    shuffled_splits = random.sample(splits, len(splits))
+
+    for split in shuffled_splits:
         try:
             raw_result = train_partitioned(
                 plan,
@@ -283,9 +289,13 @@ def _select_yolo_training_split(plan, batch):
             continue
 
         if torch.allclose(raw_result["loss"], suffix_result["loss"], atol=1e-4, rtol=1e-3):
-            return split, raw_result, suffix_result, prefix_result
+            results.append((split, raw_result, suffix_result, prefix_result))
+            if len(results) >= 3:
+                break
 
-    raise AssertionError("No YOLO training split produced matching raw/suffix replay losses.")
+    if not results:
+        raise AssertionError("No YOLO training split produced matching raw/suffix replay losses.")
+    return results
 
 
 def _assert_full_training_loss(case_name: str, result: dict[str, Any]) -> None:
@@ -320,29 +330,35 @@ def test_replay_function_inference_equivalence(case_name: str) -> None:
 @pytest.mark.slow
 @pytest.mark.parametrize("case_name", INFERENCE_CASES)
 def test_replay_function_partitioned_inference(case_name: str) -> None:
+    import random
     model, inputs, input_kwargs = _build_inference_case(case_name)
     plan = compile_execution_plan(model, inputs, input_kwargs=input_kwargs)
     splits = _enumerate_case_splits(case_name, plan)
 
     assert splits
-    split = splits[0]
-    assert validate_split_equivalence(
-        plan,
-        split,
-        model,
-        inputs,
-        input_kwargs=input_kwargs,
-        atol=1e-4,
-        rtol=1e-3,
-    )
 
     full_output = replay_partitioned(plan, inputs, input_kwargs=input_kwargs, split=None)
-    split_output = replay_partitioned(plan, inputs, input_kwargs=input_kwargs, split=split)
-    assert tree_allclose(split_output, full_output, atol=1e-4, rtol=1e-3)
 
-    if case_name == "vit":
-        replay_output = replay_forward(plan, inputs, input_kwargs=input_kwargs)
-        assert tree_allclose(replay_output, split_output, atol=1e-5, rtol=1e-4)
+    num_samples = min(3, len(splits))
+    selected_splits = random.sample(splits, num_samples)
+
+    for split in selected_splits:
+        assert validate_split_equivalence(
+            plan,
+            split,
+            model,
+            inputs,
+            input_kwargs=input_kwargs,
+            atol=1e-4,
+            rtol=1e-3,
+        )
+
+        split_output = replay_partitioned(plan, inputs, input_kwargs=input_kwargs, split=split)
+        assert tree_allclose(split_output, full_output, atol=1e-4, rtol=1e-3)
+
+        if case_name == "vit":
+            replay_output = replay_forward(plan, inputs, input_kwargs=input_kwargs)
+            assert tree_allclose(replay_output, split_output, atol=1e-5, rtol=1e-4)
 
 
 @pytest.mark.slow
@@ -389,61 +405,64 @@ def test_replay_function_full_training(case_name: str) -> None:
 def test_replay_function_split_training_and_prefix_backward(case_name: str) -> None:
     model, inputs, input_kwargs, targets, loss_fn = _build_training_case(case_name)
     plan = compile_execution_plan(model, inputs, input_kwargs=input_kwargs)
-    split, cached_raw_result, cached_suffix_result, cached_prefix_result = _select_training_split(
+    
+    selected_splits = _select_training_splits(
         case_name,
         plan,
         inputs,
         input_kwargs,
     )
 
-    raw_result = cached_raw_result or train_partitioned(
-        plan,
-        inputs,
-        input_kwargs=input_kwargs,
-        split=split,
-        input_mode="raw",
-        targets=targets,
-        loss_fn=loss_fn,
-        return_boundary=True,
-        return_boundary_grad=True,
-        step_optimizer=False,
-    )
-    boundary_inputs = {"boundary": raw_result["boundary"], "raw_inputs": inputs}
-    if input_kwargs is not None:
-        boundary_inputs["input_kwargs"] = input_kwargs
-    suffix_result = cached_suffix_result or train_partitioned(
-        plan,
-        boundary_inputs,
-        split=split,
-        input_mode="boundary",
-        targets=targets,
-        loss_fn=loss_fn,
-        return_boundary_grad=True,
-        step_optimizer=False,
-    )
-    prefix_result = cached_prefix_result or backward_prefix_from_boundary(
-        plan,
-        inputs,
-        split,
-        suffix_result["boundary_grad"],
-        input_kwargs=input_kwargs,
-        step_optimizer=False,
-        match_boundary=True,
-        cached_boundary=raw_result["boundary"],
-    )
+    for split, cached_raw_result, cached_suffix_result, cached_prefix_result in selected_splits:
+        raw_result = cached_raw_result or train_partitioned(
+            plan,
+            inputs,
+            input_kwargs=input_kwargs,
+            split=split,
+            input_mode="raw",
+            targets=targets,
+            loss_fn=loss_fn,
+            return_boundary=True,
+            return_boundary_grad=True,
+            step_optimizer=False,
+        )
+        boundary_inputs = {"boundary": raw_result["boundary"], "raw_inputs": inputs}
+        if input_kwargs is not None:
+            boundary_inputs["input_kwargs"] = input_kwargs
+        suffix_result = cached_suffix_result or train_partitioned(
+            plan,
+            boundary_inputs,
+            split=split,
+            input_mode="boundary",
+            targets=targets,
+            loss_fn=loss_fn,
+            return_boundary_grad=True,
+            step_optimizer=False,
+        )
+        prefix_result = cached_prefix_result or backward_prefix_from_boundary(
+            plan,
+            inputs,
+            split,
+            suffix_result["boundary_grad"],
+            input_kwargs=input_kwargs,
+            step_optimizer=False,
+            match_boundary=True,
+            cached_boundary=raw_result["boundary"],
+        )
 
-    assert raw_result["loss"].ndim == 0
-    assert suffix_result["loss"].ndim == 0
-    assert prefix_result["boundary"]["cut_id"] == split.split_id
-    assert torch.allclose(raw_result["loss"], suffix_result["loss"], atol=1e-4, rtol=1e-3)
-    assert validate_gradient_equivalence(
-        plan,
-        split,
-        model,
-        inputs,
-        targets=targets,
-        loss_fn=loss_fn,
-        input_kwargs=input_kwargs,
-        atol=1e-4,
-        rtol=1e-3,
-    )
+        assert raw_result["loss"].ndim == 0
+        assert suffix_result["loss"].ndim == 0
+        assert prefix_result["boundary"]["cut_id"] == split.split_id
+        assert torch.allclose(raw_result["loss"], suffix_result["loss"], atol=1e-4, rtol=1e-3)
+        assert validate_gradient_equivalence(
+            plan,
+            split,
+            model,
+            inputs,
+            targets=targets,
+            loss_fn=loss_fn,
+            input_kwargs=input_kwargs,
+            atol=1e-4,
+            rtol=1e-3,
+        )
+
