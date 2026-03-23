@@ -106,6 +106,11 @@ def train_partitioned(
         for tensor in boundary_tensors.values():
             if isinstance(tensor, torch.Tensor) and tensor.requires_grad:
                 tensor.retain_grad()
+        boundary_payload = (
+            _pack_boundary_payload(plan, split, boundary_tensors, runtime_device)
+            if return_boundary
+            else None
+        )
 
         suffix_seed_map = {idx: prefix_computed[idx] for idx in split.boundary_indices}
         suffix_seed_map.update(
@@ -137,9 +142,7 @@ def train_partitioned(
 
         result = {"output": output, "loss": loss}
         if return_boundary:
-            result["boundary"] = _pack_boundary_payload(
-                plan, split, boundary_tensors, runtime_device
-            )
+            result["boundary"] = boundary_payload
         if return_boundary_grad:
             result["boundary_grad"] = {
                 label: tensor.grad
@@ -155,6 +158,11 @@ def train_partitioned(
             split,
             boundary_inputs,
             runtime_device,
+        )
+        boundary_payload = (
+            _pack_boundary_payload(plan, split, boundary_tensors, runtime_device)
+            if return_boundary
+            else None
         )
         boundary_seed_map.update(
             _prepare_passthrough_seed_map(
@@ -184,9 +192,7 @@ def train_partitioned(
 
         result = {"output": output, "loss": loss}
         if return_boundary:
-            result["boundary"] = _pack_boundary_payload(
-                plan, split, boundary_tensors, runtime_device
-            )
+            result["boundary"] = boundary_payload
         if return_boundary_grad:
             result["boundary_grad"] = {
                 label: tensor.grad
@@ -236,7 +242,12 @@ def backward_prefix_from_boundary(
         label: prefix_computed[idx]
         for label, idx in zip(split.boundary_labels, split.boundary_indices)
     }
-    boundary_grad_map = _normalize_boundary_grad_map(split, boundary_grads, runtime_device)
+    boundary_grad_map = _normalize_boundary_grad_map(
+        split,
+        boundary_grads,
+        boundary_tensors,
+        runtime_device,
+    )
 
     if match_boundary and cached_boundary is not None:
         cached_boundary_map = _coerce_boundary_label_map(split, cached_boundary)
@@ -245,9 +256,15 @@ def backward_prefix_from_boundary(
                 "Recomputed boundary tensors did not match the cached boundary payload."
             )
 
-    boundary_values = [boundary_tensors[label] for label in split.boundary_labels]
-    grad_values = [boundary_grad_map[label] for label in split.boundary_labels]
-    torch.autograd.backward(boundary_values, grad_tensors=grad_values)
+    backprop_labels = [
+        label
+        for label in split.boundary_labels
+        if isinstance(boundary_tensors[label], torch.Tensor) and boundary_tensors[label].requires_grad
+    ]
+    if backprop_labels:
+        boundary_values = [boundary_tensors[label] for label in backprop_labels]
+        grad_values = [boundary_grad_map[label] for label in backprop_labels]
+        torch.autograd.backward(boundary_values, grad_tensors=grad_values)
     if optimizer is not None and step_optimizer:
         optimizer.step()
 
@@ -430,14 +447,20 @@ def _coerce_boundary_label_map(split: FrontierSplit, boundary_inputs: Any) -> Di
 def _normalize_boundary_grad_map(
     split: FrontierSplit,
     boundary_grads: Any,
+    boundary_tensors: Dict[str, Any],
     device: torch.device,
 ) -> Dict[str, torch.Tensor]:
     grad_map = _coerce_boundary_label_map(split, boundary_grads)
     normalized = {}
     for label, grad in grad_map.items():
+        if isinstance(grad, torch.Tensor):
+            normalized[label] = grad.to(device)
+            continue
+        if grad is None and isinstance(boundary_tensors[label], torch.Tensor):
+            normalized[label] = torch.zeros_like(boundary_tensors[label], device=device)
+            continue
         if not isinstance(grad, torch.Tensor):
             raise ValueError(f"Boundary gradient for {label!r} must be a tensor.")
-        normalized[label] = grad.to(device)
     return normalized
 
 

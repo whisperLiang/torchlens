@@ -12,6 +12,7 @@ from torchlens import (
     replay_partitioned,
     validate_split_equivalence,
 )
+from torchlens.replay_engine import _execute_nodes, _prepare_runtime, _prepare_seed_map
 
 
 class BranchToy(nn.Module):
@@ -42,6 +43,13 @@ class IndependentPassthroughToy(nn.Module):
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         boundary = torch.relu(x + 1)
         return boundary + (y * 2)
+
+
+class InplaceSuffixReplayToy(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        boundary = x + 1
+        boundary.add_(2)
+        return boundary * 3
 
 
 @pytest.mark.smoke
@@ -115,3 +123,43 @@ def test_replay_partitioned_boundary_with_independent_passthrough_input() -> Non
     assert torch.allclose(raw_result["output"], boundary_output)
     with pytest.raises(ValueError):
         replay_partitioned(plan, raw_result["boundary"], split=split, input_mode="boundary")
+
+
+@pytest.mark.smoke
+def test_replay_partitioned_snapshots_boundary_before_inplace_suffix() -> None:
+    model = InplaceSuffixReplayToy().eval()
+    example_inputs = torch.randn(2, 4)
+    plan = compile_execution_plan(model, example_inputs)
+    split = next(
+        split
+        for split in enumerate_frontier_splits(plan, max_frontier_size=1, max_splits=8)
+        if split.boundary_labels == ["add_1_1"]
+    )
+
+    raw_result = replay_partitioned(plan, example_inputs, split=split, return_boundary=True)
+    boundary_output = replay_partitioned(
+        plan,
+        raw_result["boundary"],
+        split=split,
+        input_mode="boundary",
+    )
+    runtime_model, runtime_device = _prepare_runtime(plan, example_inputs, "auto")
+    seed_map = _prepare_seed_map(plan, example_inputs, None, runtime_device)
+    prefix_computed, _ = _execute_nodes(
+        plan,
+        node_indices=split.prefix_node_indices,
+        seeded_values=seed_map,
+        device=runtime_device,
+        preserve_rng=True,
+        differentiable=False,
+        retain_nodes=set(split.boundary_indices),
+        return_intermediates=False,
+        model=runtime_model,
+    )
+    boundary_label = split.boundary_labels[0]
+
+    assert torch.allclose(
+        raw_result["boundary"]["tensors"][boundary_label],
+        prefix_computed[split.boundary_indices[0]],
+    )
+    assert torch.allclose(raw_result["output"], boundary_output)

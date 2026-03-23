@@ -1322,10 +1322,13 @@ def _pack_boundary_payload(
     boundary_tensors: Dict[str, Any],
     device: torch.device,
 ) -> BoundaryPayload:
+    # Snapshot the boundary immediately so later in-place suffix ops cannot mutate
+    # the payload that callers feed back into boundary-mode replay/training.
+    frozen_tensors = clone_tree_tensors(boundary_tensors, device=device, detach=True)
     return {
         "cut_id": split.split_id,
         "labels": list(split.boundary_labels),
-        "tensors": boundary_tensors,
+        "tensors": frozen_tensors,
         "meta": {
             "graph_signature": plan.graph_signature,
             "device": str(device),
@@ -1333,11 +1336,11 @@ def _pack_boundary_payload(
                 label: str(tensor.dtype)
                 if isinstance(tensor, torch.Tensor)
                 else type(tensor).__name__
-                for label, tensor in boundary_tensors.items()
+                for label, tensor in frozen_tensors.items()
             },
             "shapes": {
                 label: tuple(tensor.shape) if isinstance(tensor, torch.Tensor) else None
-                for label, tensor in boundary_tensors.items()
+                for label, tensor in frozen_tensors.items()
             },
         },
     }
@@ -1429,6 +1432,6 @@ def _normalize_boundary_inputs(
         )
 
     return {
-        node_idx: _move_tree_to_device(boundary_tensors[label], device)
+        node_idx: clone_tree_tensors(boundary_tensors[label], device=device, detach=True)
         for label, node_idx in zip(split.boundary_labels, split.boundary_indices)
     }
