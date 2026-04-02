@@ -25,6 +25,7 @@ from .replay_utils import (
     OUTPUT_REF_TAG,
     apply_value_at_location,
     build_input_seed_map,
+    canonicalize_batch_agnostic_shape,
     clone_constant_tensor,
     clone_tree_tensors,
     hash_graph_signature,
@@ -35,6 +36,19 @@ from .replay_utils import (
     tree_allclose,
 )
 from .utils.rng import AutocastRestore, log_current_rng_states, set_rng_from_saved_states
+
+_BATCH_DYNAMIC_RESHAPE_FUNCS = {"_reshape_alias", "reshape", "view"}
+_BATCH_DYNAMIC_FACTORY_FUNCS = {
+    "arange",
+    "empty",
+    "new_empty",
+    "new_ones",
+    "new_zeros",
+    "ones",
+    "rand",
+    "randn",
+    "zeros",
+}
 
 
 def compile_execution_plan(
@@ -578,7 +592,7 @@ def _build_graph_signature(plan: ExecutionPlan) -> str:
             "is_buffer": node.is_buffer,
             "is_internal_init": node.is_internal_init,
             "output_selector": node.output_selector,
-            "shape": node.meta.get("tensor_shape"),
+            "shape": canonicalize_batch_agnostic_shape(node.meta.get("tensor_shape")),
             "dtype": node.meta.get("tensor_dtype"),
             "io_role": node.meta.get("io_role"),
         }
@@ -1099,6 +1113,7 @@ def _execute_nodes(
         )
         try:
             output = _execute_single_node(
+                plan,
                 node,
                 args,
                 kwargs,
@@ -1140,6 +1155,7 @@ def _execute_nodes(
 
 
 def _execute_single_node(
+    plan: ExecutionPlan,
     node: ExecNode,
     args: Any,
     kwargs: Any,
@@ -1171,9 +1187,10 @@ def _execute_single_node(
 
     autocast_state = node.meta.get("func_autocast_state") or {}
     model_training = model.training if model is not None else None
-    args_list = list(args) if isinstance(args, tuple) else args
+    args_list = list(args) if isinstance(args, tuple) else list(args)
     kwargs_dict = dict(kwargs)
     _sync_runtime_training_flag(node.op, args_list, kwargs_dict, model_training)
+    _adapt_batch_sensitive_call_args(plan, node, args_list, kwargs_dict, computed)
 
     try:
         with AutocastRestore(autocast_state):
@@ -1204,6 +1221,239 @@ def _execute_single_node(
         output = index_nested(output, selector)
 
     return output
+
+
+def _adapt_batch_sensitive_call_args(
+    plan: ExecutionPlan,
+    node: ExecNode,
+    args_list: List[Any],
+    kwargs_dict: Dict[str, Any],
+    computed: Dict[int, Any],
+) -> None:
+    """Adjust replay-time args for ops whose leading size dim tracks batch."""
+
+    func_name = node.meta.get("func_name")
+    if not isinstance(func_name, str):
+        return
+
+    if func_name in _BATCH_DYNAMIC_RESHAPE_FUNCS:
+        _adapt_batch_sensitive_reshape_args(plan, node, args_list)
+        return
+
+    if func_name in _BATCH_DYNAMIC_FACTORY_FUNCS:
+        _adapt_batch_sensitive_factory_args(plan, node, args_list, kwargs_dict, computed)
+
+
+def _adapt_batch_sensitive_reshape_args(
+    plan: ExecutionPlan,
+    node: ExecNode,
+    args_list: List[Any],
+) -> None:
+    """Rewrite the leading reshape dim when only the source batch changed."""
+
+    if not args_list or not isinstance(args_list[0], torch.Tensor) or not node.parents:
+        return
+
+    traced_source_shape = plan.nodes[node.parents[0]].meta.get("tensor_shape")
+    source_tensor = args_list[0]
+    batch_context = _resolve_batch_context_from_shapes(traced_source_shape, tuple(source_tensor.shape))
+    if batch_context is None:
+        return
+
+    shape_spec, update_shape_spec = _extract_shape_spec(args_list, start_index=1)
+    if shape_spec is None or not shape_spec:
+        return
+
+    updated_first_dim = _scale_batch_dependent_dim(shape_spec[0], *batch_context)
+    if updated_first_dim is None or updated_first_dim == shape_spec[0]:
+        return
+
+    updated_shape = [updated_first_dim, *shape_spec[1:]]
+    if not _shape_spec_matches_numel(source_tensor.numel(), updated_shape):
+        return
+
+    update_shape_spec(updated_shape)
+
+
+def _adapt_batch_sensitive_factory_args(
+    plan: ExecutionPlan,
+    node: ExecNode,
+    args_list: List[Any],
+    kwargs_dict: Dict[str, Any],
+    computed: Dict[int, Any],
+) -> None:
+    """Rewrite factory size args whose first dim equals the traced batch."""
+
+    func_name = node.meta.get("func_name")
+    if func_name == "arange":
+        _adapt_batch_sensitive_arange_args(plan, args_list, computed)
+        return
+
+    if func_name in {"new_empty", "new_ones", "new_zeros"}:
+        if not args_list or not isinstance(args_list[0], torch.Tensor) or not node.parents:
+            return
+        traced_source_shape = plan.nodes[node.parents[0]].meta.get("tensor_shape")
+        batch_context = _resolve_batch_context_from_shapes(
+            traced_source_shape,
+            tuple(args_list[0].shape),
+        )
+        shape_spec, update_shape_spec = _extract_shape_spec(args_list, start_index=1)
+    else:
+        batch_context = _resolve_primary_input_batch_context(plan, computed)
+        shape_spec, update_shape_spec = _extract_shape_spec(args_list, start_index=0)
+
+    if batch_context is None or shape_spec is None or not shape_spec:
+        return
+
+    old_batch, new_batch = batch_context
+    if shape_spec[0] != old_batch:
+        return
+
+    update_shape_spec([new_batch, *shape_spec[1:]])
+
+
+def _adapt_batch_sensitive_arange_args(
+    plan: ExecutionPlan,
+    args_list: List[Any],
+    computed: Dict[int, Any],
+) -> None:
+    """Rewrite ``arange`` bounds when they encode the traced batch length."""
+
+    batch_context = _resolve_primary_input_batch_context(plan, computed)
+    if batch_context is None:
+        return
+
+    old_batch, new_batch = batch_context
+    if len(args_list) == 1 and args_list[0] == old_batch:
+        args_list[0] = new_batch
+        return
+
+    if len(args_list) >= 2 and args_list[0] == 0 and args_list[1] == old_batch:
+        args_list[1] = new_batch
+
+
+def _extract_shape_spec(
+    args_list: List[Any],
+    *,
+    start_index: int,
+) -> Tuple[Optional[List[Any]], Any]:
+    """Return a mutable size spec plus a callback that writes it back."""
+
+    if len(args_list) <= start_index:
+        return None, lambda updated: None
+
+    first_shape_arg = args_list[start_index]
+    if isinstance(first_shape_arg, (list, tuple)):
+
+        def _update_container(updated_shape: List[Any]) -> None:
+            args_list[start_index] = type(first_shape_arg)(updated_shape)
+
+        return list(first_shape_arg), _update_container
+
+    shape_values = list(args_list[start_index:])
+
+    def _update_varargs(updated_shape: List[Any]) -> None:
+        args_list[start_index:] = updated_shape
+
+    return shape_values, _update_varargs
+
+
+def _resolve_primary_input_batch_context(
+    plan: ExecutionPlan,
+    computed: Dict[int, Any],
+) -> Optional[Tuple[int, int]]:
+    """Return traced/current batch sizes for the first replay input tensor."""
+
+    if not plan.input_node_indices:
+        return None
+
+    input_idx = plan.input_node_indices[0]
+    traced_shape = plan.nodes[input_idx].meta.get("tensor_shape")
+    current_value = computed.get(input_idx)
+    if isinstance(current_value, torch.Tensor):
+        return _resolve_batch_context_from_shapes(traced_shape, tuple(current_value.shape))
+
+    fallback_tensor = next(
+        (value for value in computed.values() if isinstance(value, torch.Tensor) and value.ndim > 0),
+        None,
+    )
+    if fallback_tensor is None or traced_shape is None:
+        return None
+
+    traced_shape_tuple = tuple(traced_shape)
+    if not traced_shape_tuple or traced_shape_tuple[0] <= 0:
+        return None
+
+    return traced_shape_tuple[0], int(fallback_tensor.shape[0])
+
+
+def _resolve_batch_context_from_shapes(
+    traced_shape: Optional[Sequence[int]],
+    current_shape: Tuple[int, ...],
+) -> Optional[Tuple[int, int]]:
+    """Return traced/current batch sizes when only dim0 changed."""
+
+    if traced_shape is None:
+        return None
+
+    traced_shape_tuple = tuple(traced_shape)
+    if not traced_shape_tuple or not current_shape:
+        return None
+    if len(traced_shape_tuple) != len(current_shape):
+        return None
+    if traced_shape_tuple[0] <= 0:
+        return None
+    if traced_shape_tuple[1:] != current_shape[1:]:
+        return None
+
+    return traced_shape_tuple[0], current_shape[0]
+
+
+def _scale_batch_dependent_dim(
+    value: Any,
+    old_batch: int,
+    new_batch: int,
+) -> Optional[int]:
+    """Scale a traced size value by the runtime batch ratio when possible."""
+
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    if value <= 0:
+        return None
+    if value % old_batch != 0:
+        return None
+
+    scaled_value = value * new_batch
+    if scaled_value % old_batch != 0:
+        return None
+
+    return scaled_value // old_batch
+
+
+def _shape_spec_matches_numel(
+    source_numel: int,
+    shape_spec: Sequence[Any],
+) -> bool:
+    """Return whether a proposed reshape target is compatible with ``source_numel``."""
+
+    unknown_dims = 0
+    known_product = 1
+    for dim in shape_spec:
+        if not isinstance(dim, int) or isinstance(dim, bool):
+            return False
+        if dim == -1:
+            unknown_dims += 1
+            continue
+        if dim < 0:
+            return False
+        known_product *= dim
+
+    if unknown_dims > 1:
+        return False
+    if unknown_dims == 1:
+        return known_product > 0 and source_numel % known_product == 0
+
+    return known_product == source_numel
 
 
 def _compute_remaining_users(plan: ExecutionPlan, node_indices: Sequence[int]) -> Dict[int, int]:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .replay_plan import ExecutionPlan, FrontierSplit
-from .replay_utils import hash_graph_signature
+from .replay_utils import canonicalize_batch_agnostic_shape, hash_graph_signature
 
 UNBOUNDED_ALL_FRONTIER_MAX_CANDIDATES = 18
 
@@ -471,7 +471,7 @@ def _build_frontier_split(
     boundary_schema = {
         label: {
             "idx": idx,
-            "shape": plan.nodes[idx].meta.get("tensor_shape"),
+            "shape": canonicalize_batch_agnostic_shape(plan.nodes[idx].meta.get("tensor_shape")),
             "dtype": plan.nodes[idx].meta.get("tensor_dtype"),
         }
         for label, idx in zip(boundary_labels, boundary)

@@ -438,6 +438,21 @@ def hash_graph_signature(payload: Any) -> str:
     return hashlib.sha1(payload_repr).hexdigest()
 
 
+def canonicalize_batch_agnostic_shape(
+    shape: Optional[Sequence[int]],
+) -> Optional[Tuple[Any, ...]]:
+    """Normalize a tensor shape so the leading batch dimension is shape-agnostic."""
+
+    if shape is None:
+        return None
+
+    shape_tuple = tuple(shape)
+    if not shape_tuple:
+        return shape_tuple
+
+    return ("B",) + shape_tuple[1:]
+
+
 def parse_input_io_role(io_role: str) -> Tuple[str, Tuple[Any, ...]]:
     """Parse an input-layer role like ``input.x.0`` into root name and nested path."""
 

@@ -28,6 +28,20 @@ class BranchToy(nn.Module):
         return self.head(torch.cat([left, right], dim=-1))
 
 
+class BatchReshapeBranchToy(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.left = nn.Linear(4, 4)
+        self.right = nn.Linear(4, 4)
+        self.head = nn.Linear(8, 2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        flattened = x.view(x.size(0), -1)
+        left = torch.relu(self.left(flattened))
+        right = torch.sigmoid(self.right(flattened))
+        return self.head(torch.cat([left, right], dim=-1))
+
+
 class WideToy(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         a = x + 1
@@ -163,3 +177,24 @@ def test_replay_partitioned_snapshots_boundary_before_inplace_suffix() -> None:
         prefix_computed[split.boundary_indices[0]],
     )
     assert torch.allclose(raw_result["output"], boundary_output)
+
+
+@pytest.mark.smoke
+def test_replay_partitioned_allows_batch_size_change_for_reshape_graphs() -> None:
+    model = BatchReshapeBranchToy().eval()
+    example_inputs = torch.randn(2, 2, 2)
+    new_inputs = torch.randn(5, 2, 2)
+    plan = compile_execution_plan(model, example_inputs)
+    split = enumerate_frontier_splits(plan, max_frontier_size=2, max_splits=8)[0]
+
+    raw_result = replay_partitioned(plan, new_inputs, split=split, return_boundary=True)
+    boundary_output = replay_partitioned(
+        plan,
+        raw_result["boundary"],
+        split=split,
+        input_mode="boundary",
+    )
+    direct_output = model(new_inputs)
+
+    assert torch.allclose(raw_result["output"], direct_output)
+    assert torch.allclose(boundary_output, direct_output)
