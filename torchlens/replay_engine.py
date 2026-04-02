@@ -5,7 +5,8 @@ from __future__ import annotations
 import copy
 import dataclasses
 import inspect
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+import weakref
+from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Set, Tuple
 
 import torch
 from torch import nn
@@ -49,6 +50,96 @@ _BATCH_DYNAMIC_FACTORY_FUNCS = {
     "randn",
     "zeros",
 }
+_RNG_SENSITIVE_FUNC_NAMES = {
+    "bernoulli",
+    "bernoulli_",
+    "dropout",
+    "dropout_",
+    "dropout1d",
+    "dropout2d",
+    "dropout3d",
+    "alpha_dropout",
+    "alpha_dropout_",
+    "alphadropout",
+    "feature_alpha_dropout",
+    "feature_alpha_dropout_",
+    "featurealphadropout",
+    "feature_dropout",
+    "feature_dropout_",
+    "gumbel_softmax",
+    "multinomial",
+    "native_dropout",
+    "normal",
+    "normal_",
+    "poisson",
+    "rand",
+    "rand_like",
+    "randint",
+    "randint_like",
+    "randn",
+    "randn_like",
+    "randperm",
+    "rrelu",
+    "rrelu_",
+}
+_TRAINING_FLAG_CACHE: Dict[Any, Tuple[Optional[str], Optional[int]]] = {}
+_MISSING = object()
+_LIVE_STATE_MAP_CACHE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+class _ComputedStore(Protocol):
+    def __contains__(self, idx: object) -> bool: ...
+
+    def __getitem__(self, idx: int) -> Any: ...
+
+    def get(self, idx: int, default: Any = None) -> Any: ...
+
+    def pop(self, idx: int, default: Any = None) -> Any: ...
+
+    def values(self) -> Iterable[Any]: ...
+
+
+class _NodeValueStore:
+    __slots__ = ("_values",)
+
+    def __init__(self, size: int, seeded_values: Optional[Dict[int, Any]] = None) -> None:
+        self._values = [_MISSING] * size
+        if seeded_values is not None:
+            for idx, value in seeded_values.items():
+                self._values[idx] = value
+
+    def __contains__(self, idx: object) -> bool:
+        return isinstance(idx, int) and 0 <= idx < len(self._values) and self._values[idx] is not _MISSING
+
+    def __getitem__(self, idx: int) -> Any:
+        value = self._values[idx]
+        if value is _MISSING:
+            raise KeyError(idx)
+        return value
+
+    def __setitem__(self, idx: int, value: Any) -> None:
+        self._values[idx] = value
+
+    def get(self, idx: int, default: Any = None) -> Any:
+        value = self._values[idx]
+        return default if value is _MISSING else value
+
+    def pop(self, idx: int, default: Any = None) -> Any:
+        value = self._values[idx]
+        if value is _MISSING:
+            return default
+        self._values[idx] = _MISSING
+        return value
+
+    def values(self) -> Iterable[Any]:
+        return (value for value in self._values if value is not _MISSING)
+
+    def materialize(self, indices: Iterable[int]) -> Dict[int, Any]:
+        return {
+            idx: self._values[idx]
+            for idx in indices
+            if 0 <= idx < len(self._values) and self._values[idx] is not _MISSING
+        }
 
 
 def compile_execution_plan(
@@ -212,6 +303,7 @@ def compile_execution_plan(
             },
             meta={
                 "trace_device": str(trace_device),
+                "has_rng_nodes": any(bool(node.meta.get("uses_rng")) for node in nodes),
                 "preserve_rng": preserve_rng,
                 "retrace_if_needed": retrace_if_needed,
                 "strict": strict,
@@ -487,11 +579,47 @@ def _tensor_exact_match(candidate: Any, target: torch.Tensor) -> bool:
     )
 
 
+def _func_uses_rng(func_name: Optional[str]) -> bool:
+    if not isinstance(func_name, str):
+        return False
+    if func_name in _RNG_SENSITIVE_FUNC_NAMES:
+        return True
+    if func_name.startswith("rand"):
+        return True
+    return "dropout" in func_name
+
+
+def _resolve_training_flag_binding(func: Any) -> Tuple[Optional[str], Optional[int]]:
+    if func is None or not callable(func):
+        return None, None
+
+    cached = _TRAINING_FLAG_CACHE.get(func)
+    if cached is not None:
+        return cached
+
+    training_binding: Tuple[Optional[str], Optional[int]] = (None, None)
+    try:
+        signature = inspect.signature(func)
+    except Exception:
+        _TRAINING_FLAG_CACHE[func] = training_binding
+        return training_binding
+
+    param_names = list(signature.parameters.keys())
+    for training_name in ("training", "train"):
+        if training_name in param_names:
+            training_binding = (training_name, param_names.index(training_name))
+            break
+
+    _TRAINING_FLAG_CACHE[func] = training_binding
+    return training_binding
+
+
 def _build_node_meta(
     layer: LayerPassLog,
     *,
     store_minimal_metadata: bool,
 ) -> Dict[str, Any]:
+    training_flag_name, training_flag_index = _resolve_training_flag_binding(layer.func_applied)
     meta = {
         "func_name": layer.func_name,
         "tensor_shape": tuple(layer.tensor_shape) if layer.tensor_shape is not None else None,
@@ -501,6 +629,9 @@ def _build_node_meta(
         "buffer_parent": layer.buffer_parent,
         "func_autocast_state": layer.func_autocast_state,
         "func_config": layer.func_config,
+        "uses_rng": _func_uses_rng(layer.func_name),
+        "training_flag_name": training_flag_name,
+        "training_flag_index": training_flag_index,
     }
     if not store_minimal_metadata:
         meta.update(
@@ -816,7 +947,9 @@ def _prepare_runtime(
     model = plan.model
     runtime_device = resolve_device(device, model=model, inputs=inputs, default=plan.default_device)
     if model is not None:
-        model.to(runtime_device)
+        model_device = _peek_model_device(model)
+        if model_device is not None and model_device != runtime_device:
+            model.to(runtime_device)
     return model, runtime_device
 
 
@@ -830,6 +963,14 @@ def _prepare_seed_map(
     return {idx: _move_tree_to_device(value, device) for idx, value in seed_map.items()}
 
 
+def _peek_model_device(model: nn.Module) -> Optional[torch.device]:
+    for param in model.parameters():
+        return param.device
+    for buffer in model.buffers():
+        return buffer.device
+    return None
+
+
 def _build_live_state_maps(
     model: Optional[nn.Module],
 ) -> Tuple[Dict[str, torch.nn.Parameter], Dict[str, torch.Tensor]]:
@@ -838,6 +979,11 @@ def _build_live_state_maps(
 
     if model is None:
         return param_map, buffer_map
+
+    cached_maps = _LIVE_STATE_MAP_CACHE.get(model)
+    if cached_maps is not None:
+        cached_param_map, cached_buffer_map = cached_maps
+        return cached_param_map, cached_buffer_map
 
     for name, param in model.named_parameters():
         param_map[name] = param
@@ -851,6 +997,7 @@ def _build_live_state_maps(
         if tl_addr is not None:
             buffer_map[tl_addr] = buffer
 
+    _LIVE_STATE_MAP_CACHE[model] = (param_map, buffer_map)
     return param_map, buffer_map
 
 
@@ -878,7 +1025,7 @@ def _resolve_tensor_address(model: Optional[nn.Module], address: str) -> Optiona
 def _materialize_template(
     template: Any,
     *,
-    computed: Dict[int, Any],
+    computed: _ComputedStore,
     device: torch.device,
     param_map: Dict[str, torch.nn.Parameter],
     buffer_map: Dict[str, torch.Tensor],
@@ -995,7 +1142,7 @@ def _materialize_template(
 
 
 def _sync_runtime_training_flag(
-    func: Any,
+    node: ExecNode,
     args_list: List[Any],
     kwargs_dict: Dict[str, Any],
     model_training: Optional[bool],
@@ -1003,22 +1150,17 @@ def _sync_runtime_training_flag(
     if model_training is None:
         return
 
-    try:
-        signature = inspect.signature(func)
-    except Exception:
+    training_name = node.meta.get("training_flag_name")
+    training_idx = node.meta.get("training_flag_index")
+    if not isinstance(training_name, str) or not isinstance(training_idx, int):
         return
 
-    param_names = list(signature.parameters.keys())
-    for training_name in ("training", "train"):
-        if training_name not in param_names:
-            continue
-        if training_name in kwargs_dict and isinstance(kwargs_dict[training_name], bool):
-            kwargs_dict[training_name] = model_training
-            return
-        training_idx = param_names.index(training_name)
-        if training_idx < len(args_list) and isinstance(args_list[training_idx], bool):
-            args_list[training_idx] = model_training
-            return
+    if training_name in kwargs_dict and isinstance(kwargs_dict[training_name], bool):
+        kwargs_dict[training_name] = model_training
+        return
+
+    if training_idx < len(args_list) and isinstance(args_list[training_idx], bool):
+        args_list[training_idx] = model_training
 
 
 def _maybe_retry_getitem_with_safe_indexing(
@@ -1058,100 +1200,116 @@ def _execute_nodes(
 ) -> Tuple[Dict[int, Any], Dict[str, Any]]:
     node_set = set(node_indices)
     remaining_users = _compute_remaining_users(plan, node_indices)
-    computed = dict(seeded_values)
+    computed = _NodeValueStore(len(plan.nodes), seeded_values=seeded_values)
     intermediates: Dict[str, Any] = {}
     saved_values: Dict[int, Any] = {}
     param_map, buffer_map = _build_live_state_maps(model)
+    needs_rng_restore = preserve_rng and bool(plan.meta.get("has_rng_nodes", True))
+    initial_rng_state = log_current_rng_states() if needs_rng_restore else None
 
-    for idx in node_indices:
-        if idx in computed:
-            if return_intermediates:
-                intermediates[plan.nodes[idx].label] = clone_tree_tensors(
+    try:
+        for idx in retain_nodes:
+            if idx in computed and remaining_users.get(idx, 0) > 0:
+                saved_values[idx] = clone_tree_tensors(
                     computed[idx],
                     device=device,
                     detach=not differentiable,
                 )
-            continue
 
-        node = plan.nodes[idx]
-        parent_clone_indices = {
-            parent_idx
-            for parent_idx in node.parents
-            if node.is_inplace
-            and (
-                remaining_users.get(parent_idx, 0) > 1
-                or (
-                    differentiable
-                    and parent_idx in computed
-                    and _tree_has_leaf_grad_tensors(computed[parent_idx])
-                )
-            )
-        }
-        parent_clone_cache: Dict[int, Any] = {}
-
-        args = _materialize_template(
-            node.const_args_template if node.const_args_template is not None else [],
-            computed=computed,
-            device=device,
-            param_map=param_map,
-            buffer_map=buffer_map,
-            model=model,
-            differentiable=differentiable,
-            parent_clone_indices=parent_clone_indices,
-            parent_clone_cache=parent_clone_cache,
-        )
-        kwargs = _materialize_template(
-            node.const_kwargs_template if node.const_kwargs_template is not None else {},
-            computed=computed,
-            device=device,
-            param_map=param_map,
-            buffer_map=buffer_map,
-            model=model,
-            differentiable=differentiable,
-            parent_clone_indices=parent_clone_indices,
-            parent_clone_cache=parent_clone_cache,
-        )
-        try:
-            output = _execute_single_node(
-                plan,
-                node,
-                args,
-                kwargs,
-                computed=computed,
-                preserve_rng=preserve_rng,
-                model=model,
-                buffer_map=buffer_map,
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                f"Replay failed at node {node.idx} ({node.label}, func={node.meta.get('func_name')})."
-            ) from exc
-        computed[idx] = output
-        if idx in retain_nodes:
-            saved_values[idx] = clone_tree_tensors(
-                output,
-                device=device,
-                detach=not differentiable,
-            )
-        if return_intermediates:
-            intermediates[node.label] = clone_tree_tensors(
-                output,
-                device=device,
-                detach=not differentiable,
-            )
-
-        for parent_idx in node.parents:
-            if parent_idx not in remaining_users or parent_idx not in node_set:
+        for idx in node_indices:
+            if idx in computed:
+                if return_intermediates:
+                    intermediates[plan.nodes[idx].label] = clone_tree_tensors(
+                        computed[idx],
+                        device=device,
+                        detach=not differentiable,
+                    )
                 continue
-            remaining_users[parent_idx] -= 1
-            if (
-                remaining_users[parent_idx] <= 0
-                and not return_intermediates
-            ):
-                computed.pop(parent_idx, None)
 
-    computed.update(saved_values)
-    return computed, intermediates
+            node = plan.nodes[idx]
+            parent_clone_indices = {
+                parent_idx
+                for parent_idx in node.parents
+                if node.is_inplace
+                and (
+                    remaining_users.get(parent_idx, 0) > 1
+                    or (
+                        differentiable
+                        and parent_idx in computed
+                        and _tree_has_leaf_grad_tensors(computed[parent_idx])
+                    )
+                )
+            }
+            parent_clone_cache: Dict[int, Any] = {}
+
+            args = _materialize_template(
+                node.const_args_template if node.const_args_template is not None else [],
+                computed=computed,
+                device=device,
+                param_map=param_map,
+                buffer_map=buffer_map,
+                model=model,
+                differentiable=differentiable,
+                parent_clone_indices=parent_clone_indices,
+                parent_clone_cache=parent_clone_cache,
+            )
+            kwargs = _materialize_template(
+                node.const_kwargs_template if node.const_kwargs_template is not None else {},
+                computed=computed,
+                device=device,
+                param_map=param_map,
+                buffer_map=buffer_map,
+                model=model,
+                differentiable=differentiable,
+                parent_clone_indices=parent_clone_indices,
+                parent_clone_cache=parent_clone_cache,
+            )
+            try:
+                output = _execute_single_node(
+                    plan,
+                    node,
+                    args,
+                    kwargs,
+                    computed=computed,
+                    preserve_rng=preserve_rng,
+                    model=model,
+                    buffer_map=buffer_map,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Replay failed at node {node.idx} ({node.label}, func={node.meta.get('func_name')})."
+                ) from exc
+            computed[idx] = output
+            if idx in retain_nodes and remaining_users.get(idx, 0) > 0:
+                saved_values[idx] = clone_tree_tensors(
+                    output,
+                    device=device,
+                    detach=not differentiable,
+                )
+            if return_intermediates:
+                intermediates[node.label] = clone_tree_tensors(
+                    output,
+                    device=device,
+                    detach=not differentiable,
+                )
+
+            for parent_idx in node.parents:
+                if parent_idx not in remaining_users or parent_idx not in node_set:
+                    continue
+                remaining_users[parent_idx] -= 1
+                if (
+                    remaining_users[parent_idx] <= 0
+                    and not return_intermediates
+                    and parent_idx not in retain_nodes
+                ):
+                    computed.pop(parent_idx, None)
+    finally:
+        if initial_rng_state is not None:
+            set_rng_from_saved_states(initial_rng_state)
+
+    for idx, value in saved_values.items():
+        computed[idx] = value
+    return computed.materialize(retain_nodes), intermediates
 
 
 def _execute_single_node(
@@ -1160,7 +1318,7 @@ def _execute_single_node(
     args: Any,
     kwargs: Any,
     *,
-    computed: Dict[int, Any],
+    computed: _ComputedStore,
     preserve_rng: bool,
     model: Optional[nn.Module],
     buffer_map: Dict[str, torch.Tensor],
@@ -1181,28 +1339,23 @@ def _execute_single_node(
             return computed[node.parents[0]]
         raise ValueError(f"Cannot execute source-less node {node.label!r}.")
 
-    current_rng_state = log_current_rng_states() if preserve_rng else None
-    if preserve_rng and node.rng_state is not None:
+    if preserve_rng and node.meta.get("uses_rng") and node.rng_state is not None:
         set_rng_from_saved_states(node.rng_state)
 
     autocast_state = node.meta.get("func_autocast_state") or {}
     model_training = model.training if model is not None else None
     args_list = list(args) if isinstance(args, tuple) else list(args)
     kwargs_dict = dict(kwargs)
-    _sync_runtime_training_flag(node.op, args_list, kwargs_dict, model_training)
+    _sync_runtime_training_flag(node, args_list, kwargs_dict, model_training)
     _adapt_batch_sensitive_call_args(plan, node, args_list, kwargs_dict, computed)
 
-    try:
-        with AutocastRestore(autocast_state):
-            try:
-                output = node.op(*args_list, **kwargs_dict)
-            except IndexError:
-                output = _maybe_retry_getitem_with_safe_indexing(node.op, args_list, kwargs_dict)
-                if output is None:
-                    raise
-    finally:
-        if current_rng_state is not None:
-            set_rng_from_saved_states(current_rng_state)
+    with AutocastRestore(autocast_state):
+        try:
+            output = node.op(*args_list, **kwargs_dict)
+        except IndexError:
+            output = _maybe_retry_getitem_with_safe_indexing(node.op, args_list, kwargs_dict)
+            if output is None:
+                raise
 
     if output is None:
         if node.is_inplace and len(args_list) > 0:
@@ -1228,7 +1381,7 @@ def _adapt_batch_sensitive_call_args(
     node: ExecNode,
     args_list: List[Any],
     kwargs_dict: Dict[str, Any],
-    computed: Dict[int, Any],
+    computed: _ComputedStore,
 ) -> None:
     """Adjust replay-time args for ops whose leading size dim tracks batch."""
 
@@ -1280,7 +1433,7 @@ def _adapt_batch_sensitive_factory_args(
     node: ExecNode,
     args_list: List[Any],
     kwargs_dict: Dict[str, Any],
-    computed: Dict[int, Any],
+    computed: _ComputedStore,
 ) -> None:
     """Rewrite factory size args whose first dim equals the traced batch."""
 
@@ -1315,7 +1468,7 @@ def _adapt_batch_sensitive_factory_args(
 def _adapt_batch_sensitive_arange_args(
     plan: ExecutionPlan,
     args_list: List[Any],
-    computed: Dict[int, Any],
+    computed: _ComputedStore,
 ) -> None:
     """Rewrite ``arange`` bounds when they encode the traced batch length."""
 
@@ -1360,7 +1513,7 @@ def _extract_shape_spec(
 
 def _resolve_primary_input_batch_context(
     plan: ExecutionPlan,
-    computed: Dict[int, Any],
+    computed: _ComputedStore,
 ) -> Optional[Tuple[int, int]]:
     """Return traced/current batch sizes for the first replay input tensor."""
 
