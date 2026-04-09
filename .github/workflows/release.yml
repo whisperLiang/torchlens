@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    branches: ["codex/replay-split-runtime"]
 
 permissions:
   contents: write
