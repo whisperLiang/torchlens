@@ -16,18 +16,22 @@ concurrency:
 jobs:
   ruff:
     runs-on: ubuntu-latest
+    env:
+      APP_ID: ${{ vars.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
     steps:
       - name: Generate app token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        if: ${{ env.APP_ID != '' && env.APP_PRIVATE_KEY != '' }}
+        uses: actions/create-github-app-token@v2
         with:
-          app-id: ${{ vars.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          app-id: ${{ env.APP_ID }}
+          private-key: ${{ env.APP_PRIVATE_KEY }}
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref || github.ref_name }}
-          token: ${{ steps.app-token.outputs.token }}
+          ref: ${{ github.event_name == 'push' && github.ref_name || github.sha }}
+          token: ${{ steps.app-token.outputs.token || github.token }}
 
       - uses: actions/setup-python@v5
         with:
@@ -38,12 +42,23 @@ jobs:
       - run: uv pip install --system ruff
 
       - name: Ruff format
+        if: ${{ github.event_name == 'push' }}
         run: ruff format .
 
       - name: Ruff check --fix
+        if: ${{ github.event_name == 'push' }}
         run: ruff check --fix .
 
+      - name: Ruff format check
+        if: ${{ github.event_name == 'pull_request' }}
+        run: ruff format --check .
+
+      - name: Ruff check
+        if: ${{ github.event_name == 'pull_request' }}
+        run: ruff check .
+
       - name: Commit fixes
+        if: ${{ github.event_name == 'push' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
