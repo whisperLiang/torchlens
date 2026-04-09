@@ -3,7 +3,7 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "torchlens"
+name = "tl-split"
 version = "1.0.2"
 description = "A package for extracting activations from PyTorch models"
 readme = "README.md"

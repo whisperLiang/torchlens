@@ -63,11 +63,17 @@ visualizations in this [model menagerie](https://drive.google.com/drive/u/0/fold
 ## Installation
 
 To install *TorchLens*, first install graphviz if you haven't already (required to generate the network visualizations),
-and then install *TorchLens* using pip:
+and then install the package from PyPI:
 
 ```bash
 sudo apt install graphviz
-pip install torchlens
+pip install tl-split
+```
+
+The published package name is `tl-split`, while the Python import stays:
+
+```python
+import torchlens as tl
 ```
 
 *TorchLens* is compatible with versions 1.8.0+ of PyTorch.
