@@ -16,6 +16,7 @@ Step 7 (_fix_buffer_layers): Connects buffer parents, deduplicates identical
 
 import ast
 from collections import defaultdict
+import tokenize
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import torch
@@ -120,7 +121,9 @@ def _detect_then_branches(self, terminal_bool_nodes: List[str]) -> None:
         # Parse AST for this file (cached)
         if file_b not in ast_cache:
             try:
-                with open(file_b, "r") as f:
+                # Respect the source file's declared encoding instead of the
+                # process locale, which can differ on Windows.
+                with tokenize.open(file_b) as f:
                     source = f.read()
                 ast_cache[file_b] = ast.parse(source)
             except Exception:

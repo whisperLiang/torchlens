@@ -172,19 +172,23 @@ def _profile_model(name, model, input_tensor, description):
 
     # validate_forward_pass may fail for models that trigger known bugs
     # (e.g. loop detection param-sharing fragmentation) or hang
-    # on large tensor comparisons.  Use a 60s signal-based timeout.
-    def _alarm_handler(signum, frame):
-        raise _ValidationTimeout()
+    # on large tensor comparisons. Use a 60s SIGALRM timeout when the
+    # platform supports it; otherwise degrade to N/A like other failures.
+    if hasattr(signal, "SIGALRM"):
+        def _alarm_handler(signum, frame):
+            raise _ValidationTimeout()
 
-    old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
-    try:
-        signal.alarm(60)
-        _, val_time = _time_fn(validate_forward_pass, model, input_tensor, random_seed=42)
-    except (MetadataInvariantError, _ValidationTimeout, Exception):
+        old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+        try:
+            signal.alarm(60)
+            _, val_time = _time_fn(validate_forward_pass, model, input_tensor, random_seed=42)
+        except (MetadataInvariantError, _ValidationTimeout, Exception):
+            val_time = None
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+    else:
         val_time = None
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
 
     safe_raw = raw_time if raw_time > 0 else 1e-9
     return {
@@ -210,7 +214,7 @@ def _fmt_time(seconds):
     if seconds is None:
         return "N/A"
     if seconds < 0.001:
-        return f"{seconds * 1_000_000:.0f}\u00b5s"
+        return f"{seconds * 1_000_000:.0f}us"
     if seconds < 1:
         return f"{seconds * 1_000:.1f}ms"
     if seconds < 60:
@@ -498,7 +502,7 @@ def test_profiling_report():
     report += _generate_overhead_report(overhead_results)
 
     os.makedirs(REPORTS_DIR, exist_ok=True)
-    with open(REPORT_PATH, "w") as f:
+    with open(REPORT_PATH, "w", encoding="utf-8") as f:
         f.write(report)
 
     # Print to stdout when running with -s
