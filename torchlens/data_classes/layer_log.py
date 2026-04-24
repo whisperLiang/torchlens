@@ -16,18 +16,25 @@ through to ``__getattr__``.  Using ``ValueError`` avoids this trap and gives
 the user a clear error message.
 
 **_build_layer_logs merge rules** (in postprocess/layer_log.py):
-When merging multiple passes into one LayerLog, only 3 fields are merged:
+When merging multiple passes into one LayerLog, these aggregate fields are merged:
   - ``has_input_ancestor``: OR across passes
   - ``io_role``: character-level merge of "I", "O", "IO" strings
   - ``is_leaf_module_output``: OR across passes
+  - ``in_cond_branch``: OR across passes
+  - ``conditional_branch_stacks`` / ``conditional_branch_stack_passes``:
+    unique per-pass stack signatures and their pass numbers
+  - ``cond_branch_children_by_cond`` and derived child views:
+    pass-stripped ordered unions across passes
 All other 78+ fields use the first pass's values only.
 ``modules_exited`` / ``module_passes_exited`` are NOT updated across passes
 (correct because same-layer grouping requires identical structural position).
 """
 
 import weakref
-from typing import Dict, List, Optional, Union, TYPE_CHECKING
+from os import PathLike
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Union
 
+from .._io import FieldPolicy, IO_FORMAT_VERSION, default_fill_state, read_io_format_version
 from ..utils.display import human_readable_size
 
 if TYPE_CHECKING:
@@ -52,6 +59,74 @@ class LayerLog:
     ``__getattr__`` delegation (e.g. ``layer_log.activation`` transparently
     reads from ``passes[1].activation``).
     """
+
+    PORTABLE_STATE_SPEC: dict[str, FieldPolicy] = {
+        "layer_label": FieldPolicy.KEEP,
+        "layer_label_short": FieldPolicy.KEEP,
+        "layer_type": FieldPolicy.KEEP,
+        "layer_type_num": FieldPolicy.KEEP,
+        "layer_total_num": FieldPolicy.KEEP,
+        "num_passes": FieldPolicy.KEEP,
+        "_source_model_log_ref": FieldPolicy.WEAKREF_STRIP,
+        "func_applied": FieldPolicy.DROP,
+        "func_name": FieldPolicy.KEEP,
+        "func_is_inplace": FieldPolicy.KEEP,
+        "grad_fn_name": FieldPolicy.KEEP,
+        "func_argnames": FieldPolicy.KEEP,
+        "num_args": FieldPolicy.KEEP,
+        "num_positional_args": FieldPolicy.KEEP,
+        "num_keyword_args": FieldPolicy.KEEP,
+        "is_part_of_iterable_output": FieldPolicy.KEEP,
+        "iterable_output_index": FieldPolicy.KEEP,
+        "tensor_shape": FieldPolicy.KEEP,
+        "tensor_dtype": FieldPolicy.KEEP,
+        "tensor_memory": FieldPolicy.KEEP,
+        "output_device": FieldPolicy.KEEP,
+        "activation_postfunc": FieldPolicy.DROP,
+        "detach_saved_tensor": FieldPolicy.KEEP,
+        "save_gradients": FieldPolicy.KEEP,
+        "flops_forward": FieldPolicy.KEEP,
+        "flops_backward": FieldPolicy.KEEP,
+        "parent_param_barcodes": FieldPolicy.KEEP,
+        "parent_param_logs": FieldPolicy.KEEP,
+        "parent_param_shapes": FieldPolicy.KEEP,
+        "num_params_total": FieldPolicy.KEEP,
+        "num_params_trainable": FieldPolicy.KEEP,
+        "num_params_frozen": FieldPolicy.KEEP,
+        "params_memory": FieldPolicy.KEEP,
+        "func_config": FieldPolicy.BLOB_RECURSIVE,
+        "operation_equivalence_type": FieldPolicy.KEEP,
+        "equivalent_operations": FieldPolicy.KEEP,
+        "is_input_layer": FieldPolicy.KEEP,
+        "is_output_layer": FieldPolicy.KEEP,
+        "is_final_output": FieldPolicy.KEEP,
+        "is_buffer_layer": FieldPolicy.KEEP,
+        "buffer_address": FieldPolicy.KEEP,
+        "buffer_parent": FieldPolicy.KEEP,
+        "is_internally_initialized": FieldPolicy.KEEP,
+        "is_internally_terminated": FieldPolicy.KEEP,
+        "is_terminal_bool_layer": FieldPolicy.KEEP,
+        "is_scalar_bool": FieldPolicy.KEEP,
+        "scalar_bool_value": FieldPolicy.KEEP,
+        "in_cond_branch": FieldPolicy.KEEP,
+        "conditional_branch_stacks": FieldPolicy.KEEP,
+        "conditional_branch_stack_passes": FieldPolicy.KEEP,
+        "cond_branch_children_by_cond": FieldPolicy.KEEP,
+        "containing_module": FieldPolicy.KEEP,
+        "containing_modules": FieldPolicy.KEEP,
+        "modules_exited": FieldPolicy.KEEP,
+        "module_passes_exited": FieldPolicy.KEEP,
+        "cond_branch_start_children": FieldPolicy.KEEP,
+        "cond_branch_then_children": FieldPolicy.KEEP,
+        "cond_branch_elif_children": FieldPolicy.KEEP,
+        "cond_branch_else_children": FieldPolicy.KEEP,
+        "has_input_ancestor": FieldPolicy.KEEP,
+        "io_role": FieldPolicy.KEEP,
+        "buffer_pass": FieldPolicy.KEEP,
+        "is_leaf_module_output": FieldPolicy.KEEP,
+        "passes": FieldPolicy.KEEP,
+        "pass_labels": FieldPolicy.KEEP,
+    }
 
     def __init__(self, first_pass: "LayerPassLog"):
         """Initialize from the first pass of this layer.
@@ -127,6 +202,10 @@ class LayerLog:
         self.is_terminal_bool_layer = first_pass.is_terminal_bool_layer
         self.is_scalar_bool = first_pass.is_scalar_bool
         self.scalar_bool_value = first_pass.scalar_bool_value
+        self.in_cond_branch = first_pass.in_cond_branch
+        self.conditional_branch_stacks: List[List[Tuple[int, str]]] = []
+        self.conditional_branch_stack_passes: Dict[Tuple[Tuple[int, str], ...], List[int]] = {}
+        self.cond_branch_children_by_cond: Dict[int, Dict[str, List[str]]] = {}
 
         # Module (static containment)
         self.containing_module = first_pass.containing_module
@@ -140,6 +219,8 @@ class LayerLog:
         self.module_passes_exited = first_pass.module_passes_exited
         self.cond_branch_start_children = first_pass.cond_branch_start_children
         self.cond_branch_then_children = first_pass.cond_branch_then_children
+        self.cond_branch_elif_children = first_pass.cond_branch_elif_children
+        self.cond_branch_else_children = first_pass.cond_branch_else_children
         self.has_input_ancestor = first_pass.has_input_ancestor
         self.io_role = first_pass.io_role
         self.buffer_pass = first_pass.buffer_pass
@@ -201,6 +282,19 @@ class LayerLog:
     @source_model_log.setter
     def source_model_log(self, value):
         self._source_model_log_ref = weakref.ref(value) if value is not None else None
+
+    def __getstate__(self) -> Dict[str, Any]:
+        """Return pickle state with weakrefs stripped."""
+        state = self.__dict__.copy()
+        state["_source_model_log_ref"] = None
+        state["io_format_version"] = IO_FORMAT_VERSION
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        """Restore pickle state produced by ``__getstate__``."""
+        read_io_format_version(state, cls_name=type(self).__name__)
+        default_fill_state(state, defaults={"_source_model_log_ref": None})
+        self.__dict__.update(state)
 
     # ********************************************
     # ******* Single-pass delegation *************
@@ -587,6 +681,12 @@ class LayerAccessor:
     Available as ``model_log.layers``.
     """
 
+    PORTABLE_STATE_SPEC: dict[str, FieldPolicy] = {
+        "_dict": FieldPolicy.KEEP,
+        "_list": FieldPolicy.KEEP,
+        "_source_ref": FieldPolicy.WEAKREF_STRIP,
+    }
+
     def __init__(
         self,
         layer_logs: Dict[str, "LayerLog"],
@@ -664,3 +764,58 @@ class LayerAccessor:
                 }
             )
         return pd.DataFrame(rows)
+
+    def to_csv(self, filepath: str | PathLike[str], **kwargs: Any) -> None:
+        """Write the layer table to CSV.
+
+        Parameters
+        ----------
+        filepath:
+            Output CSV path.
+        **kwargs:
+            Additional keyword arguments forwarded to ``DataFrame.to_csv``.
+        """
+        self.to_pandas().to_csv(filepath, index=False, **kwargs)
+
+    def to_parquet(self, filepath: str | PathLike[str], **kwargs: Any) -> None:
+        """Write the layer table to Parquet.
+
+        Parameters
+        ----------
+        filepath:
+            Output Parquet path.
+        **kwargs:
+            Additional keyword arguments forwarded to ``DataFrame.to_parquet``.
+
+        Raises
+        ------
+        ImportError
+            If ``pyarrow`` is unavailable.
+        """
+        try:
+            import pyarrow  # noqa: F401
+        except ImportError as exc:
+            raise ImportError(
+                "to_parquet requires pyarrow. Install with: pip install torchlens[io]"
+            ) from exc
+        self.to_pandas().to_parquet(filepath, **kwargs)
+
+    def to_json(
+        self,
+        filepath: str | PathLike[str],
+        *,
+        orient: Literal["split", "records", "index", "columns", "values", "table"] = "records",
+        **kwargs: Any,
+    ) -> None:
+        """Write the layer table to JSON.
+
+        Parameters
+        ----------
+        filepath:
+            Output JSON path.
+        orient:
+            JSON orientation passed to ``DataFrame.to_json``.
+        **kwargs:
+            Additional keyword arguments forwarded to ``DataFrame.to_json``.
+        """
+        self.to_pandas().to_json(filepath, orient=orient, **kwargs)

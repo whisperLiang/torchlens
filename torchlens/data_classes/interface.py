@@ -23,7 +23,8 @@ For slice keys: returns a list slice of ``layer_list``.
 """
 
 import random
-from typing import TYPE_CHECKING, Union
+from os import PathLike
+from typing import TYPE_CHECKING, Any, List, Literal, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -403,6 +404,21 @@ def print_all_fields(self) -> None:
             print(f"{field}: {attr}")
 
 
+def _format_conditional_branch_stack(conditional_branch_stack: List[Tuple[int, str]]) -> str:
+    """Render a compact string form for a conditional branch stack.
+
+    Args:
+        conditional_branch_stack: Outer-to-inner ``(cond_id, branch_kind)`` pairs.
+
+    Returns:
+        Compact string form, or an empty string when the stack is empty.
+    """
+    return ",".join(
+        f"cond_{conditional_id}:{branch_kind}"
+        for conditional_id, branch_kind in conditional_branch_stack
+    )
+
+
 def to_pandas(self) -> pd.DataFrame:
     """Returns a pandas dataframe with info about each layer.
 
@@ -435,6 +451,7 @@ def to_pandas(self) -> pd.DataFrame:
         "tensor_memory",
         "tensor_memory_str",
         "func_name",
+        "func_config",
         "func_time",
         "func_is_inplace",
         "grad_fn_name",
@@ -469,6 +486,15 @@ def to_pandas(self) -> pd.DataFrame:
         "is_submodule_output",
         "containing_module",
         "containing_modules",
+        "conditional_branch_depth",
+        "bool_is_branch",
+        "bool_context_kind",
+        "bool_wrapper_kind",
+        "bool_conditional_id",
+        "conditional_branch_stack",
+        "cond_branch_then_children",
+        "cond_branch_elif_children",
+        "cond_branch_else_children",
     ]
 
     fields_to_change_type = {
@@ -492,17 +518,83 @@ def to_pandas(self) -> pd.DataFrame:
         "tensor_memory": int,
         "is_submodule_input": bool,
         "is_submodule_output": bool,
+        "conditional_branch_depth": int,
+        "bool_is_branch": bool,
     }
 
     model_df_dictlist = []
     for layer_entry in self.layer_list:
         layer_dict = {}
         for field_name in fields_for_df:
-            layer_dict[field_name] = getattr(layer_entry, field_name)
+            if field_name == "conditional_branch_stack":
+                layer_dict[field_name] = _format_conditional_branch_stack(
+                    layer_entry.conditional_branch_stack
+                )
+            else:
+                layer_dict[field_name] = getattr(layer_entry, field_name)
         model_df_dictlist.append(layer_dict)
     model_df = pd.DataFrame(model_df_dictlist)
 
     for field in fields_to_change_type:
         model_df[field] = model_df[field].astype(fields_to_change_type[field])
+    model_df["bool_conditional_id"] = model_df["bool_conditional_id"].astype("Int64")
 
     return model_df
+
+
+def to_csv(self: "ModelLog", filepath: str | PathLike[str], **kwargs: Any) -> None:
+    """Write the layer table to CSV.
+
+    Parameters
+    ----------
+    filepath:
+        Output CSV path.
+    **kwargs:
+        Additional keyword arguments forwarded to ``DataFrame.to_csv``.
+    """
+    self.to_pandas().to_csv(filepath, index=False, **kwargs)
+
+
+def to_parquet(self: "ModelLog", filepath: str | PathLike[str], **kwargs: Any) -> None:
+    """Write the layer table to Parquet.
+
+    Parameters
+    ----------
+    filepath:
+        Output Parquet path.
+    **kwargs:
+        Additional keyword arguments forwarded to ``DataFrame.to_parquet``.
+
+    Raises
+    ------
+    ImportError
+        If ``pyarrow`` is unavailable.
+    """
+    try:
+        import pyarrow  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "to_parquet requires pyarrow. Install with: pip install torchlens[io]"
+        ) from exc
+    self.to_pandas().to_parquet(filepath, **kwargs)
+
+
+def to_json(
+    self: "ModelLog",
+    filepath: str | PathLike[str],
+    *,
+    orient: Literal["split", "records", "index", "columns", "values", "table"] = "records",
+    **kwargs: Any,
+) -> None:
+    """Write the layer table to JSON.
+
+    Parameters
+    ----------
+    filepath:
+        Output JSON path.
+    orient:
+        JSON orientation passed to ``DataFrame.to_json``.
+    **kwargs:
+        Additional keyword arguments forwarded to ``DataFrame.to_json``.
+    """
+    self.to_pandas().to_json(filepath, orient=orient, **kwargs)
