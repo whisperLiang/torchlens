@@ -169,6 +169,13 @@ funcs_not_to_log = ["numpy", "__array__", "size", "dim"]
 # info to the repr without creating a new logged operation.
 print_funcs = ["__repr__", "__str__", "_str"]
 
+
+def _func_may_mutate_args(func_name: str, kwargs: dict) -> bool:
+    """Return whether a function should keep pre-call args during light tracing."""
+
+    return func_name == "__setitem__" or func_name.endswith("_") or "out" in kwargs
+
+
 # Names of torch factory functions that accept a ``device`` kwarg.
 # When a ``torch.device`` context manager is active (TorchFunctionMode),
 # normal C dispatch injects the device automatically — but our Python
@@ -378,7 +385,10 @@ def torch_func_decorator(func: Callable, func_name: str):
             return out
 
         # Snapshot args before the call in case in-place ops mutate them.
-        if model_log.save_function_args:
+        lightweight_replay_trace = getattr(model_log, "_lightweight_replay_trace", False)
+        if model_log.save_function_args and (
+            not lightweight_replay_trace or _func_may_mutate_args(func_name, kwargs)
+        ):
             arg_copies = tuple([safe_copy(arg) for arg in args])
             kwarg_copies = {k: safe_copy(v) for k, v in kwargs.items()}
         else:

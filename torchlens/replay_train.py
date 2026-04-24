@@ -8,12 +8,12 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 import torch
 
 from .replay_engine import (
+    ReplaySession,
     _collect_output_indices,
-    _execute_nodes,
     _looks_like_boundary_payload,
     _pack_boundary_payload,
     _prepare_passthrough_seed_map,
-    _prepare_runtime,
+    _resolve_boundary_snapshot,
     _reconstruct_outputs,
     _split_boundary_mode_inputs,
 )
@@ -36,7 +36,8 @@ def train_partitioned(
     return_boundary_grad: bool = False,
     zero_grad: bool = True,
     step_optimizer: bool = True,
-    preserve_rng: bool = True,
+    preserve_rng: bool = False,
+    boundary_snapshot: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Run full-graph or partitioned replay with backward propagation.
 
@@ -60,22 +61,21 @@ def train_partitioned(
         Dict containing at least ``output`` and ``loss``.
     """
 
-    model, runtime_device = _prepare_runtime(plan, inputs, device)
+    session = ReplaySession(plan, device=device, inputs=inputs)
+    model = session.model
+    runtime_device = session.device
     if zero_grad:
         _zero_grad(model, optimizer)
 
     if split is None:
         seed_map = _prepare_differentiable_seed_map(plan, inputs, input_kwargs, runtime_device)
-        computed, _ = _execute_nodes(
-            plan,
+        computed, _ = session.execute(
             node_indices=[node.idx for node in plan.nodes],
             seeded_values=seed_map,
-            device=runtime_device,
             preserve_rng=preserve_rng,
             differentiable=True,
             retain_nodes=set(plan.output_node_indices) | _collect_output_indices(plan.output_specs),
             return_intermediates=False,
-            model=model,
         )
         output = _reconstruct_outputs(plan, computed)
         loss = _compute_loss(output, targets=targets, loss_fn=loss_fn)
@@ -88,26 +88,29 @@ def train_partitioned(
         prefix_seed_map = _prepare_differentiable_seed_map(
             plan, inputs, input_kwargs, runtime_device
         )
-        prefix_computed, _ = _execute_nodes(
-            plan,
+        prefix_computed, _ = session.execute(
             node_indices=split.prefix_node_indices,
             seeded_values=prefix_seed_map,
-            device=runtime_device,
             preserve_rng=preserve_rng,
             differentiable=True,
             retain_nodes=set(split.boundary_indices),
             return_intermediates=False,
-            model=model,
         )
         boundary_tensors = {
             label: prefix_computed[idx]
             for label, idx in zip(split.boundary_labels, split.boundary_indices)
         }
         for tensor in boundary_tensors.values():
-            if isinstance(tensor, torch.Tensor) and tensor.requires_grad:
+            if return_boundary_grad and isinstance(tensor, torch.Tensor) and tensor.requires_grad:
                 tensor.retain_grad()
         boundary_payload = (
-            _pack_boundary_payload(plan, split, boundary_tensors, runtime_device)
+            _pack_boundary_payload(
+                plan,
+                split,
+                boundary_tensors,
+                runtime_device,
+                snapshot=_resolve_boundary_snapshot(plan, split, boundary_snapshot),
+            )
             if return_boundary
             else None
         )
@@ -122,16 +125,13 @@ def train_partitioned(
                 device=runtime_device,
             )
         )
-        suffix_computed, _ = _execute_nodes(
-            plan,
+        suffix_computed, _ = session.execute(
             node_indices=split.suffix_node_indices,
             seeded_values=suffix_seed_map,
-            device=runtime_device,
             preserve_rng=preserve_rng,
             differentiable=True,
             retain_nodes=set(plan.output_node_indices) | _collect_output_indices(plan.output_specs),
             return_intermediates=False,
-            model=model,
         )
         prefix_computed.update(suffix_computed)
         output = _reconstruct_outputs(plan, prefix_computed)
@@ -158,9 +158,16 @@ def train_partitioned(
             split,
             boundary_inputs,
             runtime_device,
+            clone_boundary=_resolve_boundary_snapshot(plan, split, boundary_snapshot),
         )
         boundary_payload = (
-            _pack_boundary_payload(plan, split, boundary_tensors, runtime_device)
+            _pack_boundary_payload(
+                plan,
+                split,
+                boundary_tensors,
+                runtime_device,
+                snapshot=_resolve_boundary_snapshot(plan, split, boundary_snapshot),
+            )
             if return_boundary
             else None
         )
@@ -173,16 +180,13 @@ def train_partitioned(
                 device=runtime_device,
             )
         )
-        suffix_computed, _ = _execute_nodes(
-            plan,
+        suffix_computed, _ = session.execute(
             node_indices=split.suffix_node_indices,
             seeded_values=boundary_seed_map,
-            device=runtime_device,
             preserve_rng=preserve_rng,
             differentiable=True,
             retain_nodes=set(plan.output_node_indices) | _collect_output_indices(plan.output_specs),
             return_intermediates=False,
-            model=model,
         )
         output = _reconstruct_outputs(plan, suffix_computed)
         loss = _compute_loss(output, targets=targets, loss_fn=loss_fn)
@@ -217,26 +221,27 @@ def backward_prefix_from_boundary(
     step_optimizer: bool = True,
     match_boundary: bool = False,
     cached_boundary: Any = None,
+    preserve_rng: bool = False,
+    boundary_snapshot: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Recompute the prefix and backpropagate externally supplied boundary gradients."""
 
-    model, runtime_device = _prepare_runtime(plan, raw_inputs, device)
+    session = ReplaySession(plan, device=device, inputs=raw_inputs)
+    model = session.model
+    runtime_device = session.device
     if zero_grad:
         _zero_grad(model, optimizer)
 
     prefix_seed_map = _prepare_differentiable_seed_map(
         plan, raw_inputs, input_kwargs, runtime_device
     )
-    prefix_computed, _ = _execute_nodes(
-        plan,
+    prefix_computed, _ = session.execute(
         node_indices=split.prefix_node_indices,
         seeded_values=prefix_seed_map,
-        device=runtime_device,
-        preserve_rng=True,
+        preserve_rng=preserve_rng,
         differentiable=True,
         retain_nodes=set(split.boundary_indices),
         return_intermediates=False,
-        model=model,
     )
     boundary_tensors = {
         label: prefix_computed[idx]
@@ -269,7 +274,13 @@ def backward_prefix_from_boundary(
         optimizer.step()
 
     return {
-        "boundary": _pack_boundary_payload(plan, split, boundary_tensors, runtime_device),
+        "boundary": _pack_boundary_payload(
+            plan,
+            split,
+            boundary_tensors,
+            runtime_device,
+            snapshot=_resolve_boundary_snapshot(plan, split, boundary_snapshot),
+        ),
         "boundary_grad": boundary_grad_map,
     }
 
@@ -289,10 +300,13 @@ def _prepare_boundary_seed_map_differentiable(
     split: FrontierSplit,
     boundary_inputs: Any,
     device: torch.device,
+    *,
+    clone_boundary: bool = False,
 ) -> Tuple[Dict[int, Any], Dict[str, Any]]:
     boundary_map = _coerce_boundary_label_map(split, boundary_inputs)
     differentiable_boundary = {
-        label: _detach_tree_for_boundary(value, device) for label, value in boundary_map.items()
+        label: _detach_tree_for_boundary(value, device, clone=clone_boundary)
+        for label, value in boundary_map.items()
     }
     for value in differentiable_boundary.values():
         if isinstance(value, torch.Tensor) and value.is_floating_point():
@@ -328,21 +342,27 @@ def _move_tree_for_grad(tree: Any, device: torch.device) -> Any:
     return tree
 
 
-def _detach_tree_for_boundary(tree: Any, device: torch.device) -> Any:
+def _detach_tree_for_boundary(tree: Any, device: torch.device, *, clone: bool) -> Any:
     if dataclasses.is_dataclass(tree) and not isinstance(tree, type):
         kwargs = {
-            field.name: _detach_tree_for_boundary(getattr(tree, field.name), device)
+            field.name: _detach_tree_for_boundary(getattr(tree, field.name), device, clone=clone)
             for field in dataclasses.fields(tree)
         }
         return type(tree)(**kwargs)
     if isinstance(tree, list):
-        return [_detach_tree_for_boundary(item, device) for item in tree]
+        return [_detach_tree_for_boundary(item, device, clone=clone) for item in tree]
     if isinstance(tree, tuple):
-        return type(tree)(_detach_tree_for_boundary(item, device) for item in tree)
+        return type(tree)(_detach_tree_for_boundary(item, device, clone=clone) for item in tree)
     if isinstance(tree, dict):
-        return {key: _detach_tree_for_boundary(value, device) for key, value in tree.items()}
+        return {
+            key: _detach_tree_for_boundary(value, device, clone=clone)
+            for key, value in tree.items()
+        }
     if isinstance(tree, torch.Tensor):
-        return tree.detach().clone().to(device)
+        detached = tree.detach()
+        if clone:
+            detached = detached.clone()
+        return detached.to(device)
     return tree
 
 

@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .replay_plan import ExecutionPlan, FrontierSplit
-from .replay_utils import canonicalize_batch_agnostic_shape, hash_graph_signature
+from .replay_utils import (
+    aggregate_node_flops,
+    aggregate_node_memory,
+    canonicalize_batch_agnostic_shape,
+    hash_graph_signature,
+)
 
 UNBOUNDED_ALL_FRONTIER_MAX_CANDIDATES = 18
 
@@ -478,6 +483,9 @@ def _build_frontier_split(
     }
     split_id = hash_graph_signature(("frontier", tuple(sorted(boundary))))
 
+    prefix_flops = aggregate_node_flops(plan.nodes, prefix_nodes)
+    suffix_flops = aggregate_node_flops(plan.nodes, suffix_nodes)
+
     return FrontierSplit(
         split_id=split_id,
         boundary_labels=boundary_labels,
@@ -493,6 +501,14 @@ def _build_frontier_split(
             "passthrough_input_labels": [
                 plan.nodes[idx].label for idx in passthrough_input_indices
             ],
+            "prefix_flops_forward": prefix_flops["flops_forward"],
+            "prefix_flops_backward": prefix_flops["flops_backward"],
+            "prefix_flops_total": prefix_flops["flops_total"],
+            "suffix_flops_forward": suffix_flops["flops_forward"],
+            "suffix_flops_backward": suffix_flops["flops_backward"],
+            "suffix_flops_total": suffix_flops["flops_total"],
+            "boundary_tensor_memory": aggregate_node_memory(plan.nodes, boundary),
+            "boundary_node_count": len(boundary),
         },
     )
 

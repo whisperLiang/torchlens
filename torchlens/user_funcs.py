@@ -48,7 +48,7 @@ from .options import (
     merge_visualization_options,
     visualization_to_render_kwargs,
 )
-from .replay_engine import compile_execution_plan, replay_forward, replay_partitioned
+from .replay_engine import ReplaySession, compile_execution_plan, replay_forward, replay_partitioned
 from .replay_train import backward_prefix_from_boundary, train_partitioned
 from .split_engine import enumerate_frontier_splits
 from .utils.arg_handling import normalize_input_args, safe_copy_args, safe_copy_kwargs
@@ -115,6 +115,7 @@ def _run_model_and_save_specified_activations(
     keep_activations_in_memory: bool = True,
     activation_sink: Callable[[str, torch.Tensor], None] | None = None,
     verbose: bool = False,
+    lightweight_replay_trace: bool = False,
 ) -> ModelLog:
     """Run a forward pass with logging enabled, returning a populated ModelLog.
 
@@ -189,6 +190,7 @@ def _run_model_and_save_specified_activations(
     )
     model_log._activation_sink = activation_sink
     model_log._keep_activations_in_memory = keep_activations_in_memory
+    model_log._lightweight_replay_trace = lightweight_replay_trace
     model_log._in_exhaustive_pass = True
     if save_activations_to is not None:
         model_log._activation_writer = BundleStreamWriter(save_activations_to)

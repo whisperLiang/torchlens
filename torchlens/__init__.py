@@ -22,6 +22,7 @@ from .user_funcs import (
     validate_forward_pass,
     validate_saved_activations,
     validate_batch_of_models_and_inputs,
+    ReplaySession,
     compile_execution_plan,
     replay_forward,
     enumerate_frontier_splits,

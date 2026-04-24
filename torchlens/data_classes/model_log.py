@@ -223,6 +223,7 @@ class ModelLog:
         "_keep_activations_in_memory": FieldPolicy.DROP,
         "_activation_sink": FieldPolicy.DROP,
         "_in_exhaustive_pass": FieldPolicy.DROP,
+        "_lightweight_replay_trace": FieldPolicy.DROP,
         "pass_start_time": FieldPolicy.KEEP,
         "pass_end_time": FieldPolicy.KEEP,
         "time_setup": FieldPolicy.KEEP,
@@ -306,6 +307,7 @@ class ModelLog:
         self._keep_activations_in_memory: bool = True
         self._activation_sink: Optional[Callable[[str, torch.Tensor], None]] = None
         self._in_exhaustive_pass: bool = True
+        self._lightweight_replay_trace: bool = False
 
         # Model structure info (computed @properties: is_recurrent,
         # max_recurrent_loops, is_branching, has_conditional_branching)
@@ -510,6 +512,7 @@ class ModelLog:
                 "_keep_activations_in_memory": True,
                 "_activation_sink": None,
                 "_in_exhaustive_pass": False,
+                "_lightweight_replay_trace": False,
                 "_output_structure_template": None,
             },
         )

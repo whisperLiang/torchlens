@@ -65,6 +65,17 @@ def _recursive_safe_copy(val):
     return safe_copy(val)
 
 
+def _recursive_structural_copy(val):
+    """Copy containers while keeping tensor leaves by reference."""
+    if isinstance(val, torch.Tensor):
+        return val
+    elif isinstance(val, (list, tuple)):
+        return type(val)(_recursive_structural_copy(v) for v in val)
+    elif isinstance(val, dict):
+        return {k: _recursive_structural_copy(v) for k, v in val.items()}
+    return copy.copy(val)
+
+
 if TYPE_CHECKING:
     from .._io.lazy import LazyActivationRef
     from .func_call_location import FuncCallLocation
@@ -770,6 +781,24 @@ class LayerPassLog:
             self.args_captured = True
             self.captured_args = [_recursive_safe_copy(arg) for arg in t_args]
             self.captured_kwargs = {k: _recursive_safe_copy(v) for k, v in t_kwargs.items()}
+        else:
+            self.captured_args = None
+            self.captured_kwargs = None
+
+    def save_function_args_data(
+        self,
+        t_args: Union[List, Tuple],
+        t_kwargs: Dict,
+        save_function_args: bool,
+        lightweight: bool = False,
+    ) -> None:
+        """Capture function args/kwargs without saving the activation tensor."""
+
+        if save_function_args:
+            copy_fn = _recursive_structural_copy if lightweight else _recursive_safe_copy
+            self.args_captured = True
+            self.captured_args = [copy_fn(arg) for arg in t_args]
+            self.captured_kwargs = {k: copy_fn(v) for k, v in t_kwargs.items()}
         else:
             self.captured_args = None
             self.captured_kwargs = None

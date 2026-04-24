@@ -24,11 +24,13 @@ from .replay_plan import (
 )
 from .replay_utils import (
     OUTPUT_REF_TAG,
+    aggregate_node_flops,
     apply_value_at_location,
     build_input_seed_map,
     canonicalize_batch_agnostic_shape,
     clone_constant_tensor,
     clone_tree_tensors,
+    combine_optional_flops,
     hash_graph_signature,
     index_nested,
     normalize_positional_inputs,
@@ -39,6 +41,42 @@ from .replay_utils import (
 from .utils.rng import AutocastRestore, log_current_rng_states, set_rng_from_saved_states
 
 _BATCH_DYNAMIC_RESHAPE_FUNCS = {"_reshape_alias", "reshape", "view"}
+_ALIAS_PROPAGATING_FUNC_NAMES = {
+    "__getitem__",
+    "_reshape_alias",
+    "as_strided",
+    "chunk",
+    "contiguous",
+    "diagonal",
+    "dsplit",
+    "expand",
+    "expand_as",
+    "flatten",
+    "hsplit",
+    "movedim",
+    "moveaxis",
+    "narrow",
+    "permute",
+    "real",
+    "reshape",
+    "reshape_as",
+    "select",
+    "split",
+    "squeeze",
+    "swapaxes",
+    "swapdims",
+    "t",
+    "tensor_split",
+    "transpose",
+    "unbind",
+    "unflatten",
+    "unsqueeze",
+    "view",
+    "view_as",
+    "view_as_complex",
+    "view_as_real",
+    "vsplit",
+}
 _BATCH_DYNAMIC_FACTORY_FUNCS = {
     "arange",
     "empty",
@@ -85,6 +123,57 @@ _RNG_SENSITIVE_FUNC_NAMES = {
 _TRAINING_FLAG_CACHE: Dict[Any, Tuple[Optional[str], Optional[int]]] = {}
 _MISSING = object()
 _LIVE_STATE_MAP_CACHE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ExecutionSchedule:
+    """Precomputed execution bookkeeping for a node subset."""
+
+    node_indices: Tuple[int, ...]
+    node_set: frozenset[int]
+    retain_nodes: frozenset[int]
+    remaining_users_template: Tuple[int, ...]
+
+
+def _make_schedule_key(
+    node_indices: Sequence[int],
+    retain_nodes: Set[int],
+) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
+    return tuple(node_indices), tuple(sorted(retain_nodes))
+
+
+def _get_or_build_execution_schedule(
+    plan: ExecutionPlan,
+    node_indices: Sequence[int],
+    retain_nodes: Set[int],
+) -> ExecutionSchedule:
+    cache = plan.meta.setdefault("_execution_schedule_cache", {})
+    key = _make_schedule_key(node_indices, retain_nodes)
+    schedule = cache.get(key)
+    if schedule is None:
+        schedule = _build_execution_schedule(plan, node_indices, retain_nodes)
+        cache[key] = schedule
+    return schedule
+
+
+def _build_execution_schedule(
+    plan: ExecutionPlan,
+    node_indices: Sequence[int],
+    retain_nodes: Set[int],
+) -> ExecutionSchedule:
+    node_indices_tuple = tuple(node_indices)
+    node_set = frozenset(node_indices_tuple)
+    remaining_users = [0] * len(plan.nodes)
+    for idx in node_indices_tuple:
+        for parent_idx in plan.nodes[idx].parents:
+            if parent_idx in node_set:
+                remaining_users[parent_idx] += 1
+    return ExecutionSchedule(
+        node_indices=node_indices_tuple,
+        node_set=node_set,
+        retain_nodes=frozenset(retain_nodes),
+        remaining_users_template=tuple(remaining_users),
+    )
 
 
 class _ComputedStore(Protocol):
@@ -150,13 +239,17 @@ def compile_execution_plan(
     device: Any = "auto",
     trace_on_device: bool = True,
     retrace_if_needed: bool = True,
-    preserve_rng: bool = True,
+    preserve_rng: bool = False,
     store_minimal_metadata: bool = True,
     strict: bool = True,
+    trace_mode: str = "plan",
 ) -> ExecutionPlan:
     """Trace one concrete execution graph and compile a lightweight replay plan."""
 
-    from .user_funcs import log_forward_pass
+    from .user_funcs import _run_model_and_save_specified_activations, log_forward_pass
+
+    if trace_mode not in {"plan", "modellog"}:
+        raise ValueError("trace_mode must be either 'plan' or 'modellog'.")
 
     trace_device = resolve_device(device, model=model, inputs=example_inputs)
     if trace_on_device:
@@ -165,14 +258,40 @@ def compile_execution_plan(
         if input_kwargs is not None:
             input_kwargs = _move_tree_to_device(input_kwargs, trace_device)
 
-    model_log = log_forward_pass(
-        model,
-        example_inputs,
-        input_kwargs=input_kwargs,
-        layers_to_save="all",
-        save_function_args=True,
-        save_rng_states=preserve_rng,
-    )
+    layers_to_save: Optional[str] = "all"
+    trace_kwargs: Dict[str, Any] = {}
+    if trace_mode == "plan":
+        layers_to_save = None
+        trace_kwargs.update(
+            {
+                "detect_loops": False,
+                "save_source_context": False,
+                "mark_input_output_distances": False,
+                "detach_saved_tensors": True,
+            }
+        )
+
+    if trace_mode == "plan":
+        model_log = _run_model_and_save_specified_activations(
+            model=model,
+            input_args=example_inputs,
+            input_kwargs=input_kwargs or {},
+            layers_to_save=layers_to_save,
+            keep_unsaved_layers=True,
+            save_function_args=True,
+            save_rng_states=preserve_rng,
+            lightweight_replay_trace=True,
+            **trace_kwargs,
+        )
+    else:
+        model_log = log_forward_pass(
+            model,
+            example_inputs,
+            input_kwargs=input_kwargs,
+            layers_to_save=layers_to_save,
+            save_function_args=True,
+            save_rng_states=preserve_rng,
+        )
 
     try:
         label_to_idx = {
@@ -187,8 +306,23 @@ def compile_execution_plan(
         for index, layer in enumerate(model_log.layer_list):
             parents = [label_to_idx[parent_label] for parent_label in layer.parent_layers]
             parent_refs, parent_arg_locs = _build_parent_refs(layer, label_to_idx)
-            args_template = _convert_args_to_template(layer.captured_args)
-            kwargs_template = _convert_args_to_template(layer.captured_kwargs or {})
+            param_arg_refs, param_kwarg_refs = _param_refs_by_arg_kind(layer)
+            arg_refs_by_path = _combined_leaf_refs_by_path(
+                _parent_refs_by_path(parent_refs["args"]),
+                param_arg_refs,
+            )
+            kwarg_refs_by_path = _combined_leaf_refs_by_path(
+                _parent_refs_by_path(parent_refs["kwargs"]),
+                param_kwarg_refs,
+            )
+            args_template = _convert_args_to_template(
+                layer.captured_args,
+                tensor_refs_by_path=arg_refs_by_path,
+            )
+            kwargs_template = _convert_args_to_template(
+                layer.captured_kwargs or {},
+                tensor_refs_by_path=kwarg_refs_by_path,
+            )
 
             for location, parent_ref in parent_refs["args"].items():
                 args_template = _apply_placeholder(args_template, location, parent_ref)
@@ -307,8 +441,13 @@ def compile_execution_plan(
                 "preserve_rng": preserve_rng,
                 "retrace_if_needed": retrace_if_needed,
                 "strict": strict,
+                "trace_mode": trace_mode,
                 "pre_forward_rng_states": getattr(model_log, "_pre_forward_rng_states", None),
                 "raw_output_layers": list(model_log.output_layers),
+                **{
+                    f"total_{key}": value
+                    for key, value in aggregate_node_flops(nodes, range(len(nodes))).items()
+                },
             },
             input_node_indices=[spec["idx"] for spec in input_specs],
             output_node_indices=output_node_indices,
@@ -372,6 +511,63 @@ def _build_parent_refs(
             )
 
     return parent_refs, parent_arg_locs
+
+
+def _parent_refs_by_path(parent_refs: Dict[Any, ParentRef]) -> Dict[Tuple[Any, ...], ParentRef]:
+    return {_location_to_path(location): parent_ref for location, parent_ref in parent_refs.items()}
+
+
+def _param_refs_by_arg_kind(
+    layer: LayerPassLog,
+) -> Tuple[Dict[Tuple[Any, ...], ParamRef], Dict[Tuple[Any, ...], ParamRef]]:
+    param_logs = iter(layer.parent_param_logs)
+    arg_refs: Dict[Tuple[Any, ...], ParamRef] = {}
+    kwarg_refs: Dict[Tuple[Any, ...], ParamRef] = {}
+    for refs, value in (
+        (arg_refs, layer.captured_args),
+        (kwarg_refs, layer.captured_kwargs or {}),
+    ):
+        for path, tensor in _iter_tensor_leaf_paths(value):
+            if not isinstance(tensor, nn.Parameter):
+                continue
+            try:
+                param_log = next(param_logs)
+            except StopIteration:
+                return arg_refs, kwarg_refs
+            refs[path] = ParamRef(param_log.address)
+    return arg_refs, kwarg_refs
+
+
+def _combined_leaf_refs_by_path(
+    *ref_maps: Dict[Tuple[Any, ...], Any],
+) -> Dict[Tuple[Any, ...], Any]:
+    combined: Dict[Tuple[Any, ...], Any] = {}
+    for ref_map in ref_maps:
+        for path, ref in ref_map.items():
+            combined.setdefault(path, ref)
+    return combined
+
+
+def _iter_tensor_leaf_paths(
+    value: Any,
+    path: Tuple[Any, ...] = (),
+) -> List[Tuple[Tuple[Any, ...], torch.Tensor]]:
+    matches: List[Tuple[Tuple[Any, ...], torch.Tensor]] = []
+    if isinstance(value, torch.Tensor):
+        matches.append((path, value))
+        return matches
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        for field in dataclasses.fields(value):
+            matches.extend(_iter_tensor_leaf_paths(getattr(value, field.name), path + (field.name,)))
+        return matches
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            matches.extend(_iter_tensor_leaf_paths(item, path + (index,)))
+        return matches
+    if isinstance(value, dict):
+        for key, item in value.items():
+            matches.extend(_iter_tensor_leaf_paths(item, path + (key,)))
+    return matches
 
 
 def _find_tensor_path(container: Any, target: torch.Tensor) -> Optional[Tuple[Any, ...]]:
@@ -444,7 +640,14 @@ def _infer_child_specific_frozen_value(
     return clone_constant_tensor(child_saved_value)
 
 
-def _convert_args_to_template(value: Any) -> Any:
+def _convert_args_to_template(
+    value: Any,
+    *,
+    tensor_refs_by_path: Optional[Dict[Tuple[Any, ...], Any]] = None,
+    path: Tuple[Any, ...] = (),
+) -> Any:
+    if tensor_refs_by_path is not None and path in tensor_refs_by_path:
+        return tensor_refs_by_path[path]
     if value is None:
         return None
 
@@ -457,19 +660,44 @@ def _convert_args_to_template(value: Any) -> Any:
 
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         kwargs = {
-            field.name: _convert_args_to_template(getattr(value, field.name))
+            field.name: _convert_args_to_template(
+                getattr(value, field.name),
+                tensor_refs_by_path=tensor_refs_by_path,
+                path=path + (field.name,),
+            )
             for field in dataclasses.fields(value)
         }
         return type(value)(**kwargs)
 
     if isinstance(value, list):
-        return [_convert_args_to_template(item) for item in value]
+        return [
+            _convert_args_to_template(
+                item,
+                tensor_refs_by_path=tensor_refs_by_path,
+                path=path + (index,),
+            )
+            for index, item in enumerate(value)
+        ]
 
     if isinstance(value, tuple):
-        return type(value)(_convert_args_to_template(item) for item in value)
+        return type(value)(
+            _convert_args_to_template(
+                item,
+                tensor_refs_by_path=tensor_refs_by_path,
+                path=path + (index,),
+            )
+            for index, item in enumerate(value)
+        )
 
     if isinstance(value, dict):
-        return {key: _convert_args_to_template(item) for key, item in value.items()}
+        return {
+            key: _convert_args_to_template(
+                item,
+                tensor_refs_by_path=tensor_refs_by_path,
+                path=path + (key,),
+            )
+            for key, item in value.items()
+        }
 
     return copy.copy(value)
 
@@ -624,6 +852,10 @@ def _build_node_meta(
         "func_name": layer.func_name,
         "tensor_shape": tuple(layer.tensor_shape) if layer.tensor_shape is not None else None,
         "tensor_dtype": str(layer.tensor_dtype) if layer.tensor_dtype is not None else None,
+        "tensor_memory": layer.tensor_memory,
+        "flops_forward": layer.flops_forward,
+        "flops_backward": layer.flops_backward,
+        "flops_total": combine_optional_flops(layer.flops_forward, layer.flops_backward),
         "io_role": layer.io_role,
         "buffer_address": layer.buffer_address,
         "buffer_parent": layer.buffer_parent,
@@ -732,6 +964,63 @@ def _build_graph_signature(plan: ExecutionPlan) -> str:
     return hash_graph_signature(payload)
 
 
+class ReplaySession:
+    """Reusable runtime context for repeated execution-plan replay."""
+
+    def __init__(self, plan: ExecutionPlan, device: Any = "auto", inputs: Any = None) -> None:
+        self.plan = plan
+        self.model, self.device = _prepare_runtime(plan, inputs, device)
+        self.param_map, self.buffer_map = _build_live_state_maps(self.model)
+        self._schedule_cache: Dict[
+            Tuple[Tuple[int, ...], Tuple[int, ...]], ExecutionSchedule
+        ] = {}
+
+    def schedule(
+        self,
+        node_indices: Sequence[int],
+        retain_nodes: Set[int],
+    ) -> ExecutionSchedule:
+        key = _make_schedule_key(node_indices, retain_nodes)
+        schedule = self._schedule_cache.get(key)
+        if schedule is None:
+            schedule = _build_execution_schedule(self.plan, node_indices, retain_nodes)
+            self._schedule_cache[key] = schedule
+        return schedule
+
+    def execute(
+        self,
+        *,
+        node_indices: Sequence[int],
+        seeded_values: Dict[int, Any],
+        preserve_rng: bool,
+        differentiable: bool,
+        retain_nodes: Set[int],
+        return_intermediates: bool = False,
+    ) -> Tuple[Dict[int, Any], Dict[str, Any]]:
+        schedule = self.schedule(node_indices, retain_nodes)
+        return _execute_nodes(
+            self.plan,
+            node_indices=node_indices,
+            seeded_values=seeded_values,
+            device=self.device,
+            preserve_rng=preserve_rng,
+            differentiable=differentiable,
+            retain_nodes=retain_nodes,
+            return_intermediates=return_intermediates,
+            model=self.model,
+            schedule=schedule,
+            param_map=self.param_map,
+            buffer_map=self.buffer_map,
+        )
+
+    def prepare_seed_map(
+        self,
+        inputs: Any,
+        input_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Dict[int, Any]:
+        return _prepare_seed_map(self.plan, inputs, input_kwargs, self.device)
+
+
 def replay_forward(
     plan: ExecutionPlan,
     inputs: Any,
@@ -739,7 +1028,7 @@ def replay_forward(
     input_kwargs: Optional[Dict[str, Any]] = None,
     device: Any = "auto",
     input_mode: str = "raw",
-    preserve_rng: bool = True,
+    preserve_rng: bool = False,
     return_intermediates: bool = False,
     validate: bool = False,
     atol: float = 1e-6,
@@ -750,19 +1039,18 @@ def replay_forward(
     if input_mode != "raw":
         raise ValueError("replay_forward only supports input_mode='raw'.")
 
-    model, runtime_device = _prepare_runtime(plan, inputs, device)
-    seed_map = _prepare_seed_map(plan, inputs, input_kwargs, runtime_device)
+    session = ReplaySession(plan, device=device, inputs=inputs)
+    model = session.model
+    runtime_device = session.device
+    seed_map = session.prepare_seed_map(inputs, input_kwargs)
     retain_nodes = set(plan.output_node_indices) | _collect_output_indices(plan.output_specs)
-    computed, intermediates = _execute_nodes(
-        plan,
+    computed, intermediates = session.execute(
         node_indices=[node.idx for node in plan.nodes],
         seeded_values=seed_map,
-        device=runtime_device,
         preserve_rng=preserve_rng,
         differentiable=False,
         retain_nodes=retain_nodes,
         return_intermediates=return_intermediates,
-        model=model,
     )
     outputs = _reconstruct_outputs(plan, computed)
 
@@ -797,6 +1085,8 @@ def replay_partitioned(
     device: Any = "auto",
     return_boundary: bool = False,
     pack_boundary: bool = True,
+    boundary_snapshot: Optional[bool] = None,
+    preserve_rng: bool = False,
     validate: bool = False,
     atol: float = 1e-6,
     rtol: float = 1e-5,
@@ -810,7 +1100,7 @@ def replay_partitioned(
             input_kwargs=input_kwargs,
             device=device,
             input_mode="raw",
-            preserve_rng=True,
+            preserve_rng=preserve_rng,
             return_intermediates=False,
             validate=validate,
             atol=atol,
@@ -820,27 +1110,35 @@ def replay_partitioned(
     if input_mode == "auto":
         input_mode = "boundary" if _looks_like_boundary_payload(inputs) else "raw"
 
-    model, runtime_device = _prepare_runtime(plan, inputs, device)
+    session = ReplaySession(plan, device=device, inputs=inputs)
+    model = session.model
+    runtime_device = session.device
 
     if input_mode == "raw":
-        prefix_seed_map = _prepare_seed_map(plan, inputs, input_kwargs, runtime_device)
-        prefix_computed, _ = _execute_nodes(
-            plan,
+        prefix_seed_map = session.prepare_seed_map(inputs, input_kwargs)
+        prefix_computed, _ = session.execute(
             node_indices=split.prefix_node_indices,
             seeded_values=prefix_seed_map,
-            device=runtime_device,
-            preserve_rng=True,
+            preserve_rng=preserve_rng,
             differentiable=False,
             retain_nodes=set(split.boundary_indices),
             return_intermediates=False,
-            model=model,
         )
         boundary_tensors = {
             label: prefix_computed[idx]
             for label, idx in zip(split.boundary_labels, split.boundary_indices)
         }
+        should_snapshot_boundary = _resolve_boundary_snapshot(
+            plan, split, boundary_snapshot
+        )
         boundary_payload = (
-            _pack_boundary_payload(plan, split, boundary_tensors, runtime_device)
+            _pack_boundary_payload(
+                plan,
+                split,
+                boundary_tensors,
+                runtime_device,
+                snapshot=should_snapshot_boundary,
+            )
             if pack_boundary
             else boundary_tensors
         )
@@ -858,16 +1156,13 @@ def replay_partitioned(
                 device=runtime_device,
             )
         )
-        suffix_computed, _ = _execute_nodes(
-            plan,
+        suffix_computed, _ = session.execute(
             node_indices=split.suffix_node_indices,
             seeded_values=suffix_seed_map,
-            device=runtime_device,
-            preserve_rng=True,
+            preserve_rng=preserve_rng,
             differentiable=False,
             retain_nodes=set(plan.output_node_indices) | _collect_output_indices(plan.output_specs),
             return_intermediates=False,
-            model=model,
         )
         prefix_computed.update(suffix_computed)
         outputs = _reconstruct_outputs(plan, prefix_computed)
@@ -897,6 +1192,7 @@ def replay_partitioned(
             split,
             boundary_inputs,
             runtime_device,
+            snapshot=_resolve_boundary_snapshot(plan, split, boundary_snapshot),
         )
         boundary_seed_map.update(
             _prepare_passthrough_seed_map(
@@ -907,16 +1203,13 @@ def replay_partitioned(
                 device=runtime_device,
             )
         )
-        suffix_computed, _ = _execute_nodes(
-            plan,
+        suffix_computed, _ = session.execute(
             node_indices=split.suffix_node_indices,
             seeded_values=boundary_seed_map,
-            device=runtime_device,
-            preserve_rng=True,
+            preserve_rng=preserve_rng,
             differentiable=False,
             retain_nodes=set(plan.output_node_indices) | _collect_output_indices(plan.output_specs),
             return_intermediates=False,
-            model=model,
         )
         outputs = _reconstruct_outputs(plan, suffix_computed)
         if return_boundary:
@@ -931,6 +1224,7 @@ def replay_partitioned(
                         for label, idx in zip(split.boundary_labels, split.boundary_indices)
                     },
                     runtime_device,
+                    snapshot=_resolve_boundary_snapshot(plan, split, boundary_snapshot),
                 )
             )
             return {"output": outputs, "boundary": payload}
@@ -1197,26 +1491,33 @@ def _execute_nodes(
     retain_nodes: Set[int],
     return_intermediates: bool,
     model: Optional[nn.Module],
+    schedule: Optional[ExecutionSchedule] = None,
+    param_map: Optional[Dict[str, torch.nn.Parameter]] = None,
+    buffer_map: Optional[Dict[str, torch.Tensor]] = None,
 ) -> Tuple[Dict[int, Any], Dict[str, Any]]:
-    node_set = set(node_indices)
-    remaining_users = _compute_remaining_users(plan, node_indices)
+    if schedule is None:
+        schedule = _get_or_build_execution_schedule(plan, node_indices, retain_nodes)
+    node_set = schedule.node_set
+    retain_nodes = set(schedule.retain_nodes)
+    remaining_users = list(schedule.remaining_users_template)
     computed = _NodeValueStore(len(plan.nodes), seeded_values=seeded_values)
     intermediates: Dict[str, Any] = {}
     saved_values: Dict[int, Any] = {}
-    param_map, buffer_map = _build_live_state_maps(model)
+    if param_map is None or buffer_map is None:
+        param_map, buffer_map = _build_live_state_maps(model)
     needs_rng_restore = preserve_rng and bool(plan.meta.get("has_rng_nodes", True))
     initial_rng_state = log_current_rng_states() if needs_rng_restore else None
 
     try:
         for idx in retain_nodes:
-            if idx in computed and remaining_users.get(idx, 0) > 0:
+            if idx in computed and remaining_users[idx] > 0:
                 saved_values[idx] = clone_tree_tensors(
                     computed[idx],
                     device=device,
                     detach=not differentiable,
                 )
 
-        for idx in node_indices:
+        for idx in schedule.node_indices:
             if idx in computed:
                 if return_intermediates:
                     intermediates[plan.nodes[idx].label] = clone_tree_tensors(
@@ -1232,7 +1533,7 @@ def _execute_nodes(
                 for parent_idx in node.parents
                 if node.is_inplace
                 and (
-                    remaining_users.get(parent_idx, 0) > 1
+                    remaining_users[parent_idx] > 1
                     or (
                         differentiable
                         and parent_idx in computed
@@ -1280,7 +1581,7 @@ def _execute_nodes(
                     f"Replay failed at node {node.idx} ({node.label}, func={node.meta.get('func_name')})."
                 ) from exc
             computed[idx] = output
-            if idx in retain_nodes and remaining_users.get(idx, 0) > 0:
+            if idx in retain_nodes and remaining_users[idx] > 0:
                 saved_values[idx] = clone_tree_tensors(
                     output,
                     device=device,
@@ -1294,7 +1595,7 @@ def _execute_nodes(
                 )
 
             for parent_idx in node.parents:
-                if parent_idx not in remaining_users or parent_idx not in node_set:
+                if parent_idx not in node_set:
                     continue
                 remaining_users[parent_idx] -= 1
                 if (
@@ -1724,10 +2025,16 @@ def _pack_boundary_payload(
     split: FrontierSplit,
     boundary_tensors: Dict[str, Any],
     device: torch.device,
+    *,
+    snapshot: bool = True,
 ) -> BoundaryPayload:
     # Snapshot the boundary immediately so later in-place suffix ops cannot mutate
     # the payload that callers feed back into boundary-mode replay/training.
-    frozen_tensors = clone_tree_tensors(boundary_tensors, device=device, detach=True)
+    frozen_tensors = (
+        clone_tree_tensors(boundary_tensors, device=device, detach=True)
+        if snapshot
+        else _move_tree_to_device(boundary_tensors, device)
+    )
     return {
         "cut_id": split.split_id,
         "labels": list(split.boundary_labels),
@@ -1747,6 +2054,33 @@ def _pack_boundary_payload(
             },
         },
     }
+
+
+def _resolve_boundary_snapshot(
+    plan: ExecutionPlan,
+    split: FrontierSplit,
+    boundary_snapshot: Optional[bool],
+) -> bool:
+    if boundary_snapshot is not None:
+        return boundary_snapshot
+    return _split_suffix_may_mutate_boundary(plan, split)
+
+
+def _split_suffix_may_mutate_boundary(plan: ExecutionPlan, split: FrontierSplit) -> bool:
+    boundary_aliases = set(split.boundary_indices)
+    for idx in split.suffix_node_indices:
+        node = plan.nodes[idx]
+        aliases_boundary = bool(boundary_aliases.intersection(node.parents))
+        if node.is_inplace and aliases_boundary:
+            return True
+        if aliases_boundary and _node_may_alias_parent(node):
+            boundary_aliases.add(idx)
+    return False
+
+
+def _node_may_alias_parent(node: ExecNode) -> bool:
+    func_name = node.meta.get("func_name")
+    return isinstance(func_name, str) and func_name in _ALIAS_PROPAGATING_FUNC_NAMES
 
 
 def _looks_like_boundary_payload(inputs: Any) -> bool:
@@ -1806,6 +2140,8 @@ def _normalize_boundary_inputs(
     split: FrontierSplit,
     boundary_inputs: Any,
     device: torch.device,
+    *,
+    snapshot: bool = False,
 ) -> Dict[int, Any]:
     if _looks_like_boundary_payload(boundary_inputs):
         payload = boundary_inputs
@@ -1835,6 +2171,10 @@ def _normalize_boundary_inputs(
         )
 
     return {
-        node_idx: clone_tree_tensors(boundary_tensors[label], device=device, detach=True)
+        node_idx: (
+            clone_tree_tensors(boundary_tensors[label], device=device, detach=True)
+            if snapshot
+            else _move_tree_to_device(boundary_tensors[label], device)
+        )
         for label, node_idx in zip(split.boundary_labels, split.boundary_indices)
     }

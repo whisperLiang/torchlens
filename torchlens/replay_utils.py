@@ -7,7 +7,7 @@ import copy
 import dataclasses
 import hashlib
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import torch
 from torch import nn
@@ -436,6 +436,50 @@ def hash_graph_signature(payload: Any) -> str:
 
     payload_repr = repr(payload).encode("utf-8")
     return hashlib.sha1(payload_repr).hexdigest()
+
+
+def combine_optional_flops(*values: Optional[int]) -> Optional[int]:
+    """Return the sum of known FLOPs values, or ``None`` if all are unknown."""
+
+    known_values = [value for value in values if value is not None]
+    if not known_values:
+        return None
+    return int(sum(known_values))
+
+
+def aggregate_node_flops(nodes: Sequence[Any], indices: Iterable[int]) -> Dict[str, int]:
+    """Aggregate forward/backward/total FLOPs across execution-plan nodes.
+
+    Unknown per-node FLOPs are skipped so unsupported ops do not block split
+    ranking or replay execution.
+    """
+
+    forward = 0
+    backward = 0
+    for idx in indices:
+        meta = getattr(nodes[idx], "meta", {})
+        flops_forward = meta.get("flops_forward")
+        flops_backward = meta.get("flops_backward")
+        if flops_forward is not None:
+            forward += int(flops_forward)
+        if flops_backward is not None:
+            backward += int(flops_backward)
+    return {
+        "flops_forward": forward,
+        "flops_backward": backward,
+        "flops_total": forward + backward,
+    }
+
+
+def aggregate_node_memory(nodes: Sequence[Any], indices: Iterable[int]) -> int:
+    """Aggregate known tensor-memory bytes across execution-plan nodes."""
+
+    total = 0
+    for idx in indices:
+        tensor_memory = getattr(nodes[idx], "meta", {}).get("tensor_memory")
+        if tensor_memory is not None:
+            total += int(tensor_memory)
+    return total
 
 
 def canonicalize_batch_agnostic_shape(

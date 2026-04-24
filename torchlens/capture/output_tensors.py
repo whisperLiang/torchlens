@@ -896,6 +896,13 @@ def _make_layer_log_entry(
             activation_postfunc,
         )
         self.layers_with_saved_activations.append(new_entry.tensor_label_raw)
+    elif self.save_function_args:
+        new_entry.save_function_args_data(
+            t_args,  # type: ignore[arg-type]
+            t_kwargs,
+            self.save_function_args,
+            lightweight=getattr(self, "_lightweight_replay_trace", False),
+        )
     self._raw_layer_dict[new_entry.tensor_label_raw] = new_entry
     self._raw_layer_labels_list.append(new_entry.tensor_label_raw)
 
