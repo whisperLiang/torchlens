@@ -9,13 +9,15 @@ The top-level package also exports portable bundle helpers: ``save()``,
 ``load()``, ``cleanup_tmp()``, and ``rehydrate_nested()``.
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # ---- Public API: user-facing entry points --------------------------------
 
 from .user_funcs import (
     log_forward_pass,
+    summary,
     show_model_graph,
+    log_model_metadata,
     get_model_metadata,
     validate_forward_pass,
     validate_saved_activations,
@@ -31,6 +33,7 @@ from .user_funcs import (
     validate_gradient_equivalence,
     benchmark_replay,
 )
+from .options import StreamingOptions, VisualizationOptions
 from .validation.invariants import check_metadata_invariants, MetadataInvariantError
 from ._io.bundle import save, load, cleanup_tmp
 from ._io import rehydrate_nested
