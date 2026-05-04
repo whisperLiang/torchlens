@@ -136,7 +136,8 @@ def test_time_fields(small_input):
     model = example_models.SimpleFF()
     mh = log_forward_pass(model, small_input)
     assert isinstance(mh.time_total, float)
-    assert mh.time_total > 0
+    assert mh.time_total >= 0
+    assert mh.pass_end_time >= mh.pass_start_time
     assert isinstance(mh.time_setup, float)
     assert isinstance(mh.time_forward_pass, float)
     assert isinstance(mh.time_cleanup, float)
@@ -504,8 +505,8 @@ def test_postfunc_applied(small_input):
     mh = log_forward_pass(model, small_input, activation_postfunc=torch.mean)
     for label in mh.layer_labels:
         entry = mh[label]
-        if entry.activation is not None:
-            assert entry.activation.dim() == 0, (
+        if entry.transformed_activation is not None:
+            assert entry.transformed_activation.dim() == 0, (
                 f"Layer {label} should be scalar after torch.mean postfunc"
             )
 

@@ -22,16 +22,22 @@ ModuleLog vs ModulePassLog label convention:
 This matches each accessor's natural granularity.
 """
 
-import pandas as pd
 import weakref
+from collections.abc import Iterator
 from os import PathLike
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Union, cast
+
+import torch
 
 from .._io import FieldPolicy, IO_FORMAT_VERSION, default_fill_state, read_io_format_version
 from ..constants import MODULE_PASS_LOG_FIELD_ORDER
 from ..utils.display import human_readable_size
 
 if TYPE_CHECKING:
+    import pandas as pd
+
+    from .buffer_log import BufferAccessor
+    from .model_log import ModelLog
     from .param_log import ParamAccessor
 
 
@@ -86,8 +92,8 @@ class ModulePassLog:
         layers: List[str],
         input_layers: List[str],
         output_layers: List[str],
-        forward_args: Optional[tuple] = None,
-        forward_kwargs: Optional[dict] = None,
+        forward_args: tuple[Any, ...] | None = None,
+        forward_kwargs: dict[str, Any] | None = None,
         call_parent: Optional[str] = None,
         call_children: Optional[List[str]] = None,
         all_module_addresses: Optional[List[str]] = None,
@@ -118,6 +124,18 @@ class ModulePassLog:
         """Whether this module appears at multiple addresses."""
         return len(self.all_module_addresses) > 1
 
+    @property
+    def inputs(self) -> List[str]:
+        """Module-pass input layer labels."""
+
+        return self.input_layers
+
+    @property
+    def outputs(self) -> List[str]:
+        """Module-pass output layer labels."""
+
+        return self.output_layers
+
     def __repr__(self) -> str:
         """Show pass label, layer count, and children."""
         lines = [
@@ -144,6 +162,13 @@ class ModulePassLog:
         pd.DataFrame
             Single-row DataFrame ordered by ``MODULE_PASS_LOG_FIELD_ORDER``.
         """
+        try:
+            import pandas as pd
+        except ImportError as e:
+            raise ImportError(
+                "pandas is required for this feature. Install with `pip install torchlens[tabular]`."
+            ) from e
+
         row = _module_pass_log_to_row(self)
         return pd.DataFrame([row], columns=MODULE_PASS_LOG_FIELD_ORDER)
 
@@ -180,7 +205,9 @@ class ModulePassLog:
             raise ImportError(
                 "to_parquet requires pyarrow. Install with: pip install torchlens[io]"
             ) from exc
-        self.to_pandas().to_parquet(filepath, **kwargs)
+        from ..export import _parquet_safe_dataframe
+
+        _parquet_safe_dataframe(self.to_pandas()).to_parquet(filepath, **kwargs)
 
     def to_json(
         self,
@@ -318,11 +345,11 @@ class ModuleLog:
         is_training: bool = True,
         has_forward_hooks: bool = False,
         has_backward_hooks: bool = False,
-        extra_attributes: Optional[Dict] = None,
+        extra_attributes: Optional[Dict[str, Any]] = None,
         methods: Optional[List[str]] = None,
         # Back-reference
-        _source_model_log=None,
-    ):
+        _source_model_log: "ModelLog | None" = None,
+    ) -> None:
         self.address = address
         self.all_addresses = all_addresses if all_addresses is not None else [address]
         self.name = name
@@ -362,7 +389,7 @@ class ModuleLog:
         self.requires_grad = requires_grad
 
         self.buffer_layers = buffer_layers if buffer_layers is not None else []
-        self._buffer_accessor = None  # populated by _build_module_logs
+        self._buffer_accessor: Any = None  # populated by _build_module_logs
 
         self.is_training = is_training
         self.has_forward_hooks = has_forward_hooks
@@ -387,18 +414,25 @@ class ModuleLog:
 
     @property
     def params_memory_str(self) -> str:
+        """Return parameter tensor size in human-readable units.
+
+        Returns
+        -------
+        str
+            Human-readable parameter memory amount.
+        """
         return human_readable_size(self.params_memory)
 
     @property
-    def _source_model_log(self):
+    def _source_model_log(self) -> "ModelLog | None":
         """Back-reference to the owning ModelLog (stored as weakref)."""
         ref = self.__dict__.get("_source_model_log_ref")
         if ref is None:
             return None
-        return ref()
+        return cast("ModelLog | None", ref())
 
     @_source_model_log.setter
-    def _source_model_log(self, value):
+    def _source_model_log(self, value: "ModelLog | None") -> None:
         self._source_model_log_ref = weakref.ref(value) if value is not None else None
 
     def __getstate__(self) -> Dict[str, Any]:
@@ -421,7 +455,7 @@ class ModuleLog:
     # Mirror the LayerLog delegation pattern: single-pass modules transparently
     # expose per-pass fields; multi-pass modules raise with guidance.
 
-    def _single_pass_or_error(self, field_name: str):
+    def _single_pass_or_error(self, field_name: str) -> Any:
         """Return a field from the single pass, or raise if the module has multiple passes.
 
         For modules invoked once, transparently delegates to passes[1].
@@ -440,38 +474,85 @@ class ModuleLog:
 
     @property
     def layers(self) -> List[str]:
+        """Module layer labels for a single-pass module.
+
+        Returns
+        -------
+        List[str]
+            Layer labels belonging to the only module pass.
+        """
         result = self._single_pass_or_error("layers")
         return result if result is not None else []
 
     @property
     def input_layers(self) -> List[str]:
+        """Module input layer labels for a single-pass module.
+
+        Returns
+        -------
+        List[str]
+            Input layer labels belonging to the only module pass.
+        """
         result = self._single_pass_or_error("input_layers")
         return result if result is not None else []
 
     @property
     def output_layers(self) -> List[str]:
+        """Module output layer labels for a single-pass module.
+
+        Returns
+        -------
+        List[str]
+            Output layer labels belonging to the only module pass.
+        """
         result = self._single_pass_or_error("output_layers")
         return result if result is not None else []
 
     @property
-    def forward_args(self) -> Optional[tuple]:
-        return self._single_pass_or_error("forward_args")
+    def inputs(self) -> List[str]:
+        """Module input layer labels."""
+
+        return self.input_layers
 
     @property
-    def forward_kwargs(self) -> Optional[dict]:
-        return self._single_pass_or_error("forward_kwargs")
+    def outputs(self) -> List[str]:
+        """Module output layer labels."""
+
+        return self.output_layers
 
     @property
-    def buffers(self):
+    def forward_args(self) -> tuple[Any, ...] | None:
+        """Return captured forward positional arguments for one module pass.
+
+        Returns
+        -------
+        tuple[Any, ...] | None
+            Captured positional arguments, or ``None`` when unavailable.
+        """
+        return cast("tuple[Any, ...] | None", self._single_pass_or_error("forward_args"))
+
+    @property
+    def forward_kwargs(self) -> dict[str, Any] | None:
+        """Return captured forward keyword arguments for one module pass.
+
+        Returns
+        -------
+        dict[str, Any] | None
+            Captured keyword arguments, or ``None`` when unavailable.
+        """
+        return cast("dict[str, Any] | None", self._single_pass_or_error("forward_kwargs"))
+
+    @property
+    def buffers(self) -> "BufferAccessor":
         """Scoped BufferAccessor for buffers belonging to this module."""
         if self._buffer_accessor is not None:
-            return self._buffer_accessor
+            return cast("BufferAccessor", self._buffer_accessor)
         # Build on first access from the source ModelLog
         from .buffer_log import BufferAccessor
 
         if self._source_model_log is None or self._source_model_log._buffer_accessor is None:
             self._buffer_accessor = BufferAccessor({})
-            return self._buffer_accessor
+            return cast("BufferAccessor", self._buffer_accessor)
         parent_accessor = self._source_model_log._buffer_accessor
         scoped = {
             addr: bl
@@ -479,7 +560,7 @@ class ModuleLog:
             if bl.module_address == self.address
         }
         self._buffer_accessor = BufferAccessor(scoped, source_model_log=self._source_model_log)
-        return self._buffer_accessor
+        return cast("BufferAccessor", self._buffer_accessor)
 
     def _sum_layer_field(self, field: str) -> int:
         """Sum a numeric field across all layers in this module (skipping None)."""
@@ -523,6 +604,30 @@ class ModuleLog:
         """Total MACs (forward + backward) for this module."""
         return self.flops // 2
 
+    @property
+    def gradient(self) -> torch.Tensor | List[torch.Tensor] | None:
+        """Aggregate saved gradients across layers in this module.
+
+        Returns
+        -------
+        torch.Tensor | List[torch.Tensor] | None
+            A stacked tensor when layer gradient shapes match, a list when
+            shapes differ, or ``None`` when no layer gradients were saved.
+        """
+        if self._source_model_log is None:
+            return None
+        gradients = [
+            self._source_model_log[layer_label].gradient
+            for layer_label in self.all_layers
+            if getattr(self._source_model_log[layer_label], "has_gradient", False)
+        ]
+        if not gradients:
+            return None
+        first_shape = gradients[0].shape
+        if all(gradient.shape == first_shape for gradient in gradients):
+            return torch.stack(gradients)
+        return gradients
+
     def __repr__(self) -> str:
         """Show address, class, depth, param count, layer count, and pass count."""
         lines = [
@@ -542,7 +647,7 @@ class ModuleLog:
         """Return the total number of layers across all passes of this module."""
         return self.num_layers
 
-    def __getitem__(self, ix):
+    def __getitem__(self, ix: int | str) -> Any:
         """Return the LayerPassLog at position ix within this module's layer list.
 
         Supports int indexing and string label lookup (#120).
@@ -565,11 +670,35 @@ class ModuleLog:
             raise KeyError(f"'{ix}' not found in module '{self.address}' layers")
         return self._source_model_log[self.all_layers[ix]]
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Any]:
         """Iterate over LayerPassLog entries for all layers in this module."""
         if self._source_model_log is None:
             return iter(self.all_layers)
         return iter(self._source_model_log[label] for label in self.all_layers)
+
+    def show_graph(self, **kwargs: Any) -> str:
+        """Render this module's focused graph.
+
+        Parameters
+        ----------
+        **kwargs:
+            Keyword arguments forwarded to ``ModelLog.render_graph``.
+
+        Returns
+        -------
+        str
+            Graphviz DOT source string.
+
+        Raises
+        ------
+        RuntimeError
+            If this ModuleLog is not bound to a ModelLog.
+        """
+
+        model_log: ModelLog | None = self._source_model_log
+        if model_log is None:
+            raise RuntimeError("ModuleLog not bound to a ModelLog")
+        return cast(str, model_log.render_graph(module=self, **kwargs))
 
     def to_pandas(self) -> "pd.DataFrame":
         """Export this module's layers as a pandas DataFrame.
@@ -581,6 +710,13 @@ class ModuleLog:
         """
         if self._source_model_log is None:
             raise RuntimeError("No source ModelLog reference; cannot build DataFrame.")
+        try:
+            import pandas as pd
+        except ImportError as e:
+            raise ImportError(
+                "pandas is required for this feature. Install with `pip install torchlens[tabular]`."
+            ) from e
+
         rows = []
         for label in self.all_layers:
             entry = self._source_model_log[label]
@@ -629,7 +765,9 @@ class ModuleLog:
             raise ImportError(
                 "to_parquet requires pyarrow. Install with: pip install torchlens[io]"
             ) from exc
-        self.to_pandas().to_parquet(filepath, **kwargs)
+        from ..export import _parquet_safe_dataframe
+
+        _parquet_safe_dataframe(self.to_pandas()).to_parquet(filepath, **kwargs)
 
     def to_json(
         self,
@@ -677,7 +815,7 @@ class ModuleAccessor:
         module_dict: Dict[str, "ModuleLog"],
         module_list: Optional[List["ModuleLog"]] = None,
         pass_dict: Optional[Dict[str, "ModulePassLog"]] = None,
-    ):
+    ) -> None:
         self._dict = module_dict  # primary address -> ModuleLog
         self._list = module_list if module_list is not None else list(module_dict.values())
         self._pass_dict = pass_dict if pass_dict is not None else {}  # pass label -> ModulePassLog
@@ -705,11 +843,9 @@ class ModuleAccessor:
             return self._alias_dict[key]
         if key in self._pass_dict:
             return self._pass_dict[key]
-        raise KeyError(
-            f"Module '{key}' not found. Valid addresses: {list(self._dict.keys())[:10]}..."
-        )
+        raise KeyError(f"Module '{key}' not found.")
 
-    def __contains__(self, key) -> bool:
+    def __contains__(self, key: object) -> bool:
         """Return True if key is a known module address, alias, or pass label."""
         if key == "":
             key = "self"
@@ -719,7 +855,32 @@ class ModuleAccessor:
         """Return the number of modules in this accessor."""
         return len(self._dict)
 
-    def __iter__(self):
+    def __dir__(self) -> List[str]:
+        """Return Python attributes plus module addresses for tab completion.
+
+        Returns
+        -------
+        List[str]
+            Attribute names and valid module addresses.
+        """
+
+        keys = set(self._dict.keys()) | set(self._alias_dict.keys()) | set(self._pass_dict.keys())
+        return sorted(set(super().__dir__()) | keys)
+
+    def _ipython_key_completions_(self) -> List[str]:
+        """Return module addresses for IPython ``obj[...]`` completion.
+
+        Returns
+        -------
+        List[str]
+            Valid module addresses and pass labels.
+        """
+
+        return (
+            list(self._dict.keys()) + list(self._alias_dict.keys()) + list(self._pass_dict.keys())
+        )
+
+    def __iter__(self) -> Iterator["ModuleLog"]:
         """Iterate over ModuleLog objects in address order."""
         return iter(self._list)
 
@@ -745,6 +906,13 @@ class ModuleAccessor:
         pd.DataFrame
             One row per module in address order.
         """
+        try:
+            import pandas as pd
+        except ImportError as e:
+            raise ImportError(
+                "pandas is required for this feature. Install with `pip install torchlens[tabular]`."
+            ) from e
+
         rows = []
         for ml in self._list:
             rows.append(
@@ -793,7 +961,9 @@ class ModuleAccessor:
             raise ImportError(
                 "to_parquet requires pyarrow. Install with: pip install torchlens[io]"
             ) from exc
-        self.to_pandas().to_parquet(filepath, **kwargs)
+        from ..export import _parquet_safe_dataframe
+
+        _parquet_safe_dataframe(self.to_pandas()).to_parquet(filepath, **kwargs)
 
     def to_json(
         self,
@@ -816,6 +986,13 @@ class ModuleAccessor:
         self.to_pandas().to_json(filepath, orient=orient, **kwargs)
 
     def summary(self) -> str:
+        """Return a compact text table of all modules.
+
+        Returns
+        -------
+        str
+            Summary table with module address, class, depth, params, layers, and passes.
+        """
         if len(self) == 0:
             return "No modules."
         lines = [

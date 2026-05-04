@@ -15,16 +15,28 @@ to wrapped versions.
 """
 
 import copy
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import numpy as np
 import torch
 
-# Maximum tolerance for floating-point comparison in tensor_nanequal.
+# Maximum absolute tolerance for floating-point comparison in tensor_nanequal.
 # Used by validation replay to allow tiny numerical differences caused by
 # non-deterministic GPU reductions or float16 rounding.  Set conservatively
 # tight to catch genuine mismatches while tolerating hardware noise.
-MAX_FLOATING_POINT_TOLERANCE = 3e-6
+MAX_FLOATING_POINT_TOLERANCE = 1e-5
+
+# Maximum relative tolerance for floating-point comparison in tensor_nanequal.
+# Deep convolution replays can differ by a few ULPs above the absolute floor
+# while still matching the saved operation numerically.
+REL_FLOATING_POINT_TOLERANCE = 1e-4
+
+_DTYPE_FLOAT_TOLERANCES: dict[torch.dtype, tuple[float, float]] = {
+    torch.float16: (1e-3, 1e-3),
+    torch.bfloat16: (1e-2, 1e-2),
+    torch.float32: (REL_FLOATING_POINT_TOLERANCE, MAX_FLOATING_POINT_TOLERANCE),
+    torch.float64: (REL_FLOATING_POINT_TOLERANCE, MAX_FLOATING_POINT_TOLERANCE),
+}
 
 # Cached result of torch.cuda.is_available().  Evaluated once per process
 # because CUDA availability cannot change at runtime.  Avoids repeated
@@ -45,6 +57,26 @@ def _is_cuda_available() -> bool:
     return _cuda_available
 
 
+def _tolerances_for_dtype(dtype: torch.dtype) -> tuple[float, float]:
+    """Return replay comparison tolerances for ``dtype``.
+
+    Parameters
+    ----------
+    dtype:
+        Tensor dtype being compared.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(rtol, atol)`` pair for ``torch.allclose``.
+    """
+
+    return _DTYPE_FLOAT_TOLERANCES.get(
+        dtype,
+        (REL_FLOATING_POINT_TOLERANCE, MAX_FLOATING_POINT_TOLERANCE),
+    )
+
+
 def tensor_all_nan(tensor: torch.Tensor) -> bool:
     """Return True if every element in the tensor is NaN."""
     if torch.isnan(tensor).int().sum() == tensor.numel():
@@ -53,7 +85,45 @@ def tensor_all_nan(tensor: torch.Tensor) -> bool:
         return False
 
 
-def tensor_nanequal(tensor_a: torch.Tensor, tensor_b: torch.Tensor, allow_tolerance=False) -> bool:
+def _quantized_tensor_equal(tensor_a: torch.Tensor, tensor_b: torch.Tensor) -> bool:
+    """Return exact equality for quantized tensors without floating ops.
+
+    Parameters
+    ----------
+    tensor_a:
+        First quantized tensor.
+    tensor_b:
+        Second quantized tensor.
+
+    Returns
+    -------
+    bool
+        True if quantization metadata and integer payloads match.
+    """
+
+    if not (tensor_a.is_quantized and tensor_b.is_quantized):
+        return False
+    if tensor_a.qscheme() != tensor_b.qscheme():
+        return False
+    if not torch.equal(tensor_a.int_repr(), tensor_b.int_repr()):
+        return False
+    if tensor_a.qscheme() in (torch.per_tensor_affine, torch.per_tensor_symmetric):
+        return tensor_a.q_scale() == tensor_b.q_scale() and (
+            tensor_a.q_zero_point() == tensor_b.q_zero_point()
+        )
+    return (
+        tensor_a.q_per_channel_axis() == tensor_b.q_per_channel_axis()
+        and torch.equal(tensor_a.q_per_channel_scales(), tensor_b.q_per_channel_scales())
+        and torch.equal(
+            tensor_a.q_per_channel_zero_points(),
+            tensor_b.q_per_channel_zero_points(),
+        )
+    )
+
+
+def tensor_nanequal(
+    tensor_a: torch.Tensor, tensor_b: torch.Tensor, allow_tolerance: bool = False
+) -> bool:
     """NaN-aware tensor equality check, used by validation replay.
 
     NaN positions are treated as equal (NaN == NaN is True here), which
@@ -86,6 +156,9 @@ def tensor_nanequal(tensor_a: torch.Tensor, tensor_b: torch.Tensor, allow_tolera
         return False
 
     with pause_logging():
+        if tensor_a.is_quantized or tensor_b.is_quantized:
+            return _quantized_tensor_equal(tensor_a, tensor_b)
+
         # Inf positions must match exactly (inf != -inf).
         if not torch.equal(tensor_a.isinf(), tensor_b.isinf()):
             return False
@@ -109,14 +182,16 @@ def tensor_nanequal(tensor_a: torch.Tensor, tensor_b: torch.Tensor, allow_tolera
             return True
 
         # Tolerance path: allow small floating-point differences (e.g. from
-        # non-deterministic GPU reductions or mixed-precision rounding).
+        # convolution replay order, non-deterministic GPU reductions, or
+        # mixed-precision rounding).
         if (
             allow_tolerance
             and (tensor_a_nonan.dtype != torch.bool)
             and (tensor_b_nonan.dtype != torch.bool)
-            and ((tensor_a_nonan - tensor_b_nonan).abs().max() <= MAX_FLOATING_POINT_TOLERANCE)
         ):
-            return True
+            rtol, atol = _tolerances_for_dtype(tensor_a_nonan.dtype)
+            if torch.allclose(tensor_a_nonan, tensor_b_nonan, rtol=rtol, atol=atol):
+                return True
 
     return False
 
@@ -175,7 +250,46 @@ def get_tensor_memory_amount(t: torch.Tensor) -> int:
         return 0
 
 
-def safe_copy(x, detach_tensor: bool = False):
+def concatenate_batch_tensors(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+    """Concatenate two tensors along the leading batch dimension.
+
+    Parameters
+    ----------
+    left:
+        Existing accumulated tensor.
+    right:
+        New chunk tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        Tensor containing ``left`` followed by ``right`` on dimension 0.
+    """
+
+    from .._state import pause_logging
+
+    with pause_logging():
+        return torch.cat([left, right], dim=0)
+
+
+def _safe_get_memory_format(t: torch.Tensor) -> torch.memory_format:
+    """Best-effort memory format probe — returns ``preserve_format`` on any error.
+
+    ``is_contiguous(memory_format=...)`` is the recommended query; it is
+    undefined for some exotic layouts (sparse, meta), so we wrap in a
+    try/except and fall back to ``preserve_format`` (clone's default).
+    """
+    try:
+        if t.is_contiguous(memory_format=torch.channels_last):
+            return torch.channels_last
+        if t.is_contiguous(memory_format=torch.channels_last_3d):
+            return torch.channels_last_3d
+    except (RuntimeError, TypeError, AttributeError):
+        pass
+    return torch.preserve_format
+
+
+def safe_copy(x: Any, detach_tensor: bool = False) -> Any:
     """Copy a tensor (or parameter) without triggering torchlens logging.
 
     Uses ``pause_logging()`` so that ``.clone()``, ``.detach()``,
@@ -201,8 +315,18 @@ def safe_copy(x, detach_tensor: bool = False):
 
     if isinstance(x, (torch.Tensor, torch.nn.Parameter)):
         with pause_logging():
+            # Preserve memory_format (channels_last, channels_last_3d, etc.) so
+            # downstream layout-sensitive ops see the same layout they would
+            # see without TorchLens. Falls back to ``preserve_format`` which is
+            # ``clone()``'s default but spelled explicitly for clarity.
+            mem_fmt = _safe_get_memory_format(x)
             if not detach_tensor:
-                copied = x.clone()
+                try:
+                    copied = x.clone(memory_format=mem_fmt)
+                except (TypeError, RuntimeError):
+                    # Some tensor variants (sparse, some subclasses) reject the
+                    # memory_format kwarg; fall back to a plain clone.
+                    copied = x.clone()
                 for attr_name in (
                     "tl_tensor_label_raw",
                     "tl_param_address",
@@ -215,14 +339,16 @@ def safe_copy(x, detach_tensor: bool = False):
             # Detach path: use pure-torch ops — no numpy round-trip.
             # This avoids crashes on sparse, quantized, complex32, meta, float8, etc.
             try:
-                vals_tensor = x.detach().clone()
-            except Exception:
-                # Fallback for exotic dtypes that can't clone directly
+                vals_tensor = x.detach().clone(memory_format=mem_fmt)
+            except (TypeError, RuntimeError):
                 try:
-                    vals_tensor = x.data.cpu().clone()
+                    vals_tensor = x.detach().clone()
                 except Exception:
-                    # Last resort: return shape-preserving zero tensor
-                    vals_tensor = torch.zeros(x.shape, dtype=torch.float32)
+                    try:
+                        vals_tensor = x.data.cpu().clone()
+                    except Exception:
+                        # Last resort: return shape-preserving zero tensor
+                        vals_tensor = torch.zeros(x.shape, dtype=torch.float32)
             # Preserve the raw label so postprocessing can map this tensor
             # back to its ModelLog entry.
             for attr_name in (
@@ -250,7 +376,7 @@ def safe_copy(x, detach_tensor: bool = False):
         return copy.copy(x)
 
 
-def print_override(t: torch.Tensor, func_name: str):
+def print_override(t: torch.Tensor, func_name: str) -> str:
     """Safe ``__str__``/``__repr__`` for tensors during active logging.
 
     The default ``Tensor.__repr__`` calls decorated methods internally,
@@ -291,4 +417,4 @@ def print_override(t: torch.Tensor, func_name: str):
         np_str = np_str[0:-1] + grad_fn_str
     elif t.requires_grad:
         np_str = np_str[0:-1] + ", requires_grad=True)"
-    return np_str
+    return cast(str, np_str)

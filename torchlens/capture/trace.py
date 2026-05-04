@@ -30,7 +30,7 @@ import inspect
 import random
 import time
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple, Union
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from torch import nn
@@ -48,7 +48,9 @@ from ..utils.introspection import get_vars_of_type_from_obj, nested_assign
 from ..utils.rng import set_random_seed, log_current_rng_states, set_rng_from_saved_states
 from ..utils.arg_handling import safe_copy_args, safe_copy_kwargs, normalize_input_args
 from ..replay_utils import OUTPUT_REF_TAG, build_output_structure_template
+from ..utils.tensor_utils import _is_cuda_available
 from .source_tensors import log_source_tensor
+from .output_tensors import _walk_output_tensors_with_paths
 from ..data_classes._lookup_keys import _give_user_feedback_about_lookup_key
 from ..utils.display import _vprint, _vtimed
 
@@ -56,11 +58,13 @@ from ..utils.display import _vprint, _vtimed
 def save_new_activations(
     self: "ModelLog",
     model: nn.Module,
-    input_args: Union[torch.Tensor, List[Any]],
-    input_kwargs: Optional[Dict[Any, Any]] = None,
-    layers_to_save: Union[str, List] = "all",
-    random_seed: Optional[int] = None,
-):
+    input_args: torch.Tensor | list[Any],
+    input_kwargs: dict[Any, Any] | None = None,
+    layers_to_save: str | list[Any] = "all",
+    gradients_to_save: str | list[Any] | None = "all",
+    random_seed: int | None = None,
+    train_mode: bool | None = None,
+) -> None:
     """Re-run the model with new inputs, saving only activations (fast pass).
 
     This is the public API for refreshing activations without rebuilding the
@@ -78,21 +82,62 @@ def save_new_activations(
         input_args: Either a single tensor input to the model, or list of input arguments.
         input_kwargs: Dict of keyword arguments to the model.
         layers_to_save: List of layers to save, using any valid lookup keys.
+        gradients_to_save: List of layers whose gradients should be saved.
         random_seed: Which random seed to use for deterministic reproduction.
+        train_mode: Optional replay override. ``None`` inherits the existing
+            model log settings; explicit values temporarily override saved
+            tensor detachment for the whole replay.
 
     Returns:
         Nothing; mutates ``self`` in place with new activation values.
     """
+    if train_mode is not None:
+        model_detach_saved_tensors = self.detach_saved_tensors
+        model_train_mode = getattr(self, "train_mode", False)
+        layer_detach_saved_tensors = {
+            layer_log_entry: layer_log_entry.detach_saved_tensor for layer_log_entry in self
+        }
+        target_detach_saved_tensors = False if train_mode else self.detach_saved_tensors
+        try:
+            self.detach_saved_tensors = target_detach_saved_tensors
+            self.train_mode = train_mode
+            for layer_log_entry in layer_detach_saved_tensors:
+                layer_log_entry.detach_saved_tensor = target_detach_saved_tensors
+            save_new_activations(
+                self,
+                model=model,
+                input_args=input_args,
+                input_kwargs=input_kwargs,
+                layers_to_save=layers_to_save,
+                gradients_to_save=gradients_to_save,
+                random_seed=random_seed,
+                train_mode=None,
+            )
+        finally:
+            self.detach_saved_tensors = model_detach_saved_tensors
+            self.train_mode = model_train_mode
+            for layer_log_entry, detach_saved_tensor in layer_detach_saved_tensors.items():
+                layer_log_entry.detach_saved_tensor = detach_saved_tensor
+        return
+
     # Switch to fast mode: reuse graph structure, only capture new activations.
     self.logging_mode = "fast"
     self._in_exhaustive_pass = False
 
     # Clear all existing activations from the previous pass.
     for layer_log_entry in self:
-        layer_log_entry.activation = None
+        layer_log_entry._internal_set("activation", None)
+        layer_log_entry._internal_set("transformed_activation", None)
+        layer_log_entry.transformed_activation_shape = None
+        layer_log_entry.transformed_activation_dtype = None
+        layer_log_entry.transformed_activation_memory = None
         layer_log_entry.has_saved_activations = False
         layer_log_entry.has_gradient = False
-        layer_log_entry.gradient = None
+        layer_log_entry._internal_set("gradient", None)
+        layer_log_entry._internal_set("transformed_gradient", None)
+        layer_log_entry.transformed_gradient_shape = None
+        layer_log_entry.transformed_gradient_dtype = None
+        layer_log_entry.transformed_gradient_memory = None
         layer_log_entry.has_child_tensor_variations = False
         # Note: children_tensor_versions is cleared and NOT rebuilt in fast pass.
         # This is a known limitation (#93): validation should not be run after
@@ -138,11 +183,11 @@ def save_new_activations(
     # Now run and log the new inputs.
     _vprint(self, "Running fast pass (saving requested activations)")
     self._run_and_log_inputs_through_model(
-        model, input_args, input_kwargs, layers_to_save, random_seed
+        model, input_args, input_kwargs, layers_to_save, gradients_to_save, random_seed
     )
 
 
-def _get_input_arg_names(model, input_args) -> List[str]:
+def _get_input_arg_names(model: nn.Module, input_args: list[Any]) -> list[str]:
     """Extract parameter names from the model's forward() signature for the given input args.
 
     Inspects the forward method's argspec, strips 'self', and generates synthetic
@@ -161,8 +206,8 @@ def _get_input_arg_names(model, input_args) -> List[str]:
 
 
 def _get_op_nums_from_user_labels(
-    self: "ModelLog", which_layers: Union[str, List[Union[str, int]]]
-) -> Union[List[int], str]:
+    self: "ModelLog", which_layers: str | list[str | int] | None
+) -> list[int] | str:
     """Resolve user-provided layer identifiers to internal creation_order values.
 
     Supports exact key match, substring match across all lookup keys, and the
@@ -174,10 +219,34 @@ def _get_op_nums_from_user_labels(
     elif which_layers in [None, "none", "None", "NONE", []]:
         return []
 
+    from ..intervention.selectors import BaseSelector
+
+    if isinstance(which_layers, BaseSelector):
+        return sorted(
+            {
+                site.creation_order
+                for site in self.resolve_sites(
+                    which_layers,
+                    strict=False,
+                    max_fanout=max(1, len(getattr(self, "layer_list", []))),
+                )
+            }
+        )
+
     if type(which_layers) != list:
         which_layers = [which_layers]  # type: ignore[list-item]
-    raw_layer_nums_to_save = set()
+    raw_layer_nums_to_save: set[int] = set()
     for layer_key in which_layers:
+        if isinstance(layer_key, BaseSelector):
+            raw_layer_nums_to_save.update(
+                site.creation_order
+                for site in self.resolve_sites(
+                    layer_key,
+                    strict=False,
+                    max_fanout=max(1, len(getattr(self, "layer_list", []))),
+                )
+            )
+            continue
         if layer_key in self._lookup_keys_to_layer_num_dict:
             raw_layer_nums_to_save.add(self._lookup_keys_to_layer_num_dict[layer_key])  # type: ignore[index]
             continue
@@ -195,11 +264,11 @@ def _get_op_nums_from_user_labels(
 
 
 def _fetch_label_move_input_tensors(
-    input_args: List[Any],
-    input_arg_names: List[str],
-    input_kwargs: Dict,
+    input_args: list[Any],
+    input_arg_names: list[str],
+    input_kwargs: dict[Any, Any],
     model_device: str,
-) -> Tuple[List[torch.Tensor], List[str]]:
+) -> tuple[list[torch.Tensor], list[str]]:
     """Extract all tensors from input args/kwargs, move to model device, and build addresses.
 
     Handles nested structures (lists, tuples, dicts) up to ``search_depth=5``.
@@ -268,9 +337,9 @@ def _fetch_label_move_input_tensors(
 
 def _setup_inputs_and_device(
     model: nn.Module,
-    input_args: Union[torch.Tensor, List[Any]],
-    input_kwargs: Optional[Dict[Any, Any]],
-) -> Tuple[List[Any], Dict[Any, Any], List[str], str]:
+    input_args: torch.Tensor | list[Any],
+    input_kwargs: dict[Any, Any] | None,
+) -> tuple[list[Any], dict[Any, Any], list[str], str]:
     """Normalize inputs, detect model device, copy args, and extract input arg names.
 
     This is the single place where user-provided inputs are transformed into
@@ -316,7 +385,7 @@ def _setup_inputs_and_device(
 def _extract_and_mark_outputs(
     self: "ModelLog",
     outputs: Any,
-) -> Tuple[List[torch.Tensor], List[str]]:
+) -> tuple[list[torch.Tensor], list[str]]:
     """Extract output tensors from model outputs, deduplicate, and mark in ModelLog.
 
     Called AFTER the forward pass completes (outside ``active_logging``), so
@@ -329,13 +398,28 @@ def _extract_and_mark_outputs(
     Returns:
         (output_tensors, output_tensor_addresses)
     """
-    output_tensors_w_addresses_all = get_vars_of_type_from_obj(
-        outputs,
-        torch.Tensor,
-        search_depth=5,
-        return_addresses=True,
-        allow_repeats=True,
-    )
+    if getattr(self, "intervention_ready", False):
+        output_tensors_w_addresses_all = [
+            (tensor, _output_path_to_address(path), None)
+            for tensor, path, container_spec in _walk_output_tensors_with_paths(outputs)
+        ]
+        output_specs_by_raw_label = {}
+        for tensor, path, container_spec in _walk_output_tensors_with_paths(outputs):
+            tensor_label_raw = getattr(tensor, "tl_tensor_label_raw", None)
+            if tensor_label_raw is not None:
+                output_specs_by_raw_label[tensor_label_raw] = (
+                    path,
+                    container_spec,
+                )
+        setattr(self, "_output_container_specs_by_raw_label", output_specs_by_raw_label)
+    else:
+        output_tensors_w_addresses_all = get_vars_of_type_from_obj(
+            outputs,
+            torch.Tensor,
+            search_depth=5,
+            return_addresses=True,
+            allow_repeats=True,
+        )
     # Remove duplicate addresses (same tensor at multiple output positions).
     addresses_seen = set()
     output_tensors_w_addresses = []
@@ -350,9 +434,10 @@ def _extract_and_mark_outputs(
 
     for t in output_tensors:
         # Only record output_layers during exhaustive pass; fast pass reuses the list.
+        tensor_label_raw = getattr(t, "tl_tensor_label_raw")
         if self.logging_mode == "exhaustive":
-            self.output_layers.append(t.tl_tensor_label_raw)
-        self._raw_layer_dict[t.tl_tensor_label_raw].feeds_output = True
+            self.output_layers.append(tensor_label_raw)
+        self._raw_layer_dict[tensor_label_raw].feeds_output = True
 
     if self.logging_mode == "exhaustive":
         setattr(
@@ -371,13 +456,41 @@ def _extract_and_mark_outputs(
     return output_tensors, output_tensor_addresses
 
 
+def _output_path_to_address(path: tuple[Any, ...]) -> str:
+    """Convert an output path tuple to TorchLens' display address string.
+
+    Parameters
+    ----------
+    path
+        Path components from path-aware output traversal.
+
+    Returns
+    -------
+    str
+        Dot-separated output address suffix.
+    """
+
+    parts: list[str] = []
+    for component in path:
+        if hasattr(component, "index"):
+            parts.append(str(component.index))
+        elif hasattr(component, "key"):
+            parts.append(str(component.key))
+        elif hasattr(component, "name"):
+            parts.append(str(component.name))
+        else:
+            parts.append(str(component))
+    return ".".join(parts)
+
+
 def run_and_log_inputs_through_model(
     self: "ModelLog",
     model: nn.Module,
-    input_args: Union[torch.Tensor, List[Any]],
-    input_kwargs: Optional[Dict[Any, Any]] = None,
-    layers_to_save: Optional[Union[str, List[Union[str, int]]]] = "all",
-    random_seed: Optional[int] = None,
+    input_args: torch.Tensor | list[Any],
+    input_kwargs: dict[Any, Any] | None = None,
+    layers_to_save: str | list[str | int] | None = "all",
+    gradients_to_save: str | list[str | int] | None = "all",
+    random_seed: int | None = None,
 ) -> None:
     """Core orchestration: run a forward pass and log everything into ModelLog.
 
@@ -403,12 +516,14 @@ def run_and_log_inputs_through_model(
     self.random_seed_used = random_seed  # type: ignore[assignment]
     set_random_seed(random_seed)
 
-    self._layer_nums_to_save = _get_op_nums_from_user_labels(self, layers_to_save)  # type: ignore[assignment, arg-type]
+    self._layer_nums_to_save = _get_op_nums_from_user_labels(self, layers_to_save)  # type: ignore[assignment]
+    self._gradient_layer_nums_to_save = _get_op_nums_from_user_labels(self, gradients_to_save)
 
     # In fast mode, output layers' activation are derived from their parents
     # (see postprocess_fast).  If the user requested a subset of layers, we must
     # also include output-layer parents so their activations are available (#46).
-    if self._layer_nums_to_save != "all" and self._pass_finished:
+    layer_nums_to_save = cast(Any, self._layer_nums_to_save)
+    if layer_nums_to_save != "all" and self._pass_finished:
         output_parent_nums = set()
         for output_label in self.output_layers:
             output_entry = self[output_label]
@@ -416,7 +531,7 @@ def run_and_log_inputs_through_model(
                 parent_entry = self[parent_label]
                 output_parent_nums.add(parent_entry.creation_order)
         if output_parent_nums:
-            combined = set(self._layer_nums_to_save) | output_parent_nums
+            combined = set(layer_nums_to_save) | output_parent_nums
             self._layer_nums_to_save = sorted(combined)
 
     input_args, input_kwargs, input_arg_names, model_device = _setup_inputs_and_device(
@@ -426,7 +541,7 @@ def run_and_log_inputs_through_model(
     )
 
     self.pass_start_time = time.time()
-    input_tensors: List[torch.Tensor] = []
+    input_tensors: list[torch.Tensor] = []
 
     try:
         (
@@ -489,6 +604,12 @@ def run_and_log_inputs_through_model(
         # active_logging's __exit__ already turned off the toggle.
         # Clean up model session state and strip tl_ attributes from any
         # partially-constructed tensor entries to avoid stale references (#110).
+        from ..partial import PartialModelLog
+
+        try:
+            e.partial_log = PartialModelLog.from_model_log(self, e)  # type: ignore[attr-defined]
+        except Exception:
+            pass
         _cleanup_model_session(model, input_tensors)
         for label in list(self._raw_layer_dict.keys()):
             entry = self._raw_layer_dict.get(label)
@@ -506,5 +627,9 @@ def run_and_log_inputs_through_model(
 
     finally:
         # Release input tensor references so GC can reclaim CUDA memory.
+        # Gated behind cached cuda.is_available() so CPU-only runs don't pay
+        # the CUDA driver / NVML probe cost (per profiling audit 2026-04-27
+        # finding #4).
         input_tensors = None  # type: ignore[assignment]
-        torch.cuda.empty_cache()
+        if _is_cuda_available():
+            torch.cuda.empty_cache()

@@ -1547,19 +1547,19 @@ def test_ternary_with_bool_cast_model_marks_bool_wrapper_kind() -> None:
     assert linear_layer.conditional_branch_stack == [(event.id, "then")]
 
 
-@pytest.mark.skipif(
-    sys.version_info >= (3, 11),
-    reason="degraded ternary mode is only meaningful before Python 3.11",
-)
-def test_ternary_py310_fail_closed_model_drops_same_line_arm_attribution() -> None:
-    """Pre-3.11 same-line ternaries fail closed when no column offsets are available."""
+def test_ternary_same_line_model_uses_bool_hint_without_attributing_predicate() -> None:
+    """Same-line ternaries use runtime bool hints only after the predicate executes."""
     model_log = _log_model(TernaryPy310FailClosedModel(), torch.ones(1, 2))
 
-    linear_layers = [layer for layer in model_log.layer_list if layer.func_name == "linear"]
+    event = _get_root_event(model_log)
+    predicate_layers = [
+        layer for layer in model_log.layer_list if layer.func_name in {"mean", "gt"}
+    ]
+    linear_layer = _find_only_layer(model_log, "linear", [(event.id, "then")])
 
     assert len(model_log.conditional_events) == 1
-    assert model_log.conditional_arm_edges == {}
-    assert all(layer.conditional_branch_stack == [] for layer in linear_layers)
+    assert linear_layer.conditional_branch_stack == [(event.id, "then")]
+    assert all(layer.conditional_branch_stack == [] for layer in predicate_layers)
 
 
 @pytest.mark.skipif(

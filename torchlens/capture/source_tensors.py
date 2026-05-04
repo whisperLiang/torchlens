@@ -22,16 +22,23 @@ recognized as the same layer).
 """
 
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+import time
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from torch import nn
 
+from .._errors import TorchLensPostfuncError
+from .._training_validation import TrainingModeConfigError
 from ..utils.introspection import _get_func_call_stack, get_attr_values_from_tensor_list
 from ..utils.tensor_utils import get_tensor_memory_amount
 from ..utils.rng import log_current_rng_states
 from ..data_classes.buffer_log import BufferLog
 from ..data_classes.layer_pass_log import LayerPassLog
+from ..fastlog._predicate import _evaluate_keep_op
+from ..fastlog._record_context import _build_record_context
+from ..fastlog._state import get_active_recording_state
+from ..fastlog.types import ActivationRecord
 
 from .tensor_tracking import _add_backward_hook, _update_tensor_containing_modules
 
@@ -39,7 +46,9 @@ if TYPE_CHECKING:
     from ..data_classes.model_log import ModelLog
 
 
-def log_source_tensor(self, t: torch.Tensor, source: str, extra_address: Optional[str] = None):
+def log_source_tensor(
+    self: "ModelLog", t: torch.Tensor, source: str, extra_address: str | None = None
+) -> None:
     """Dispatch source tensor logging to exhaustive or fast mode.
 
     Called explicitly for model inputs (from ``run_and_log_inputs_through_model``)
@@ -55,11 +64,100 @@ def log_source_tensor(self, t: torch.Tensor, source: str, extra_address: Optiona
         log_source_tensor_exhaustive(self, t, source, extra_address)
     elif self.logging_mode == "fast":
         log_source_tensor_fast(self, t, source)
+    elif self.logging_mode == "predicate":
+        log_source_tensor_predicate(self, t, source, extra_address)
+
+
+def log_source_tensor_predicate(
+    self: "ModelLog",
+    t: torch.Tensor,
+    source: str,
+    extra_addr: str | None = None,
+) -> None:
+    """Predicate-mode source tensor logging for inputs and buffers."""
+
+    if source not in {"input", "buffer"}:
+        raise ValueError("source must be either 'input' or 'buffer'")
+    state = get_active_recording_state()
+    self._layer_counter += 1
+    self._raw_layer_type_counter[source] += 1
+    state.event_index += 1
+    creation_order = self._layer_counter
+    layer_type_num = self._raw_layer_type_counter[source]
+    tensor_label = f"{source}_{layer_type_num}_raw"
+    setattr(t, "tl_tensor_label_raw", tensor_label)
+    if source == "input":
+        self.input_layers.append(tensor_label)
+    else:
+        self.buffer_layers.append(tensor_label)
+    module_frame = state.module_stack[-1] if state.module_stack else None
+    ctx = _build_record_context(
+        kind="input" if source == "input" else "buffer",
+        layer_pass_log_or_op_data={
+            "label": tensor_label,
+            "raw_label": tensor_label,
+            "tensor_label_raw": tensor_label,
+            "creation_order": creation_order,
+            "layer_type": source,
+            "layer_type_num": layer_type_num,
+            "func_name": None,
+            "input_output_address": extra_addr,
+            "tensor": t,
+            "module_address": module_frame.module_address if module_frame else None,
+            "module_type": module_frame.module_type if module_frame else None,
+            "module_pass_index": module_frame.pass_index if module_frame else None,
+        },
+        module_stack=state.module_stack,
+        history=tuple(state.history),
+        op_counts=state.op_counts,
+        pass_index=state.pass_index,
+        event_index=state.event_index,
+        op_index=None,
+        time_since_pass_start=time.time() - self.pass_start_time,
+        include_source_events=state.options.include_source_events,
+        sample_id=state.sample_id,
+    )
+    try:
+        if state.options.include_source_events:
+            spec = _evaluate_keep_op(ctx, state.options)
+            if spec.save_activation or spec.save_metadata:
+                ram_payload = None
+                disk_payload = None
+                transformed_ram_payload = None
+                transformed_disk_payload = None
+                if spec.save_activation:
+                    (
+                        ram_payload,
+                        disk_payload,
+                        transformed_ram_payload,
+                        transformed_disk_payload,
+                    ) = state.resolve_storage(t, spec, ctx=ctx)
+                state.add_record(
+                    ActivationRecord(
+                        ctx=ctx,
+                        spec=spec,
+                        ram_payload=ram_payload,
+                        disk_payload=disk_payload,
+                        transformed_ram_payload=transformed_ram_payload,
+                        transformed_disk_payload=transformed_disk_payload,
+                    )
+                )
+    except (TorchLensPostfuncError, TrainingModeConfigError):
+        # Postfunc + train-mode validation errors are storage failures and
+        # must surface directly to the caller, not be aggregated through
+        # the predicate-failure pipeline. The orchestrator's outer
+        # exception handler aborts disk storage before the raise reaches
+        # the caller.
+        raise
+    except Exception as exc:
+        state.handle_predicate_exception(ctx, exc)
+    finally:
+        state.append_context(ctx)
 
 
 def log_source_tensor_exhaustive(
-    self, t: torch.Tensor, source: str, extra_addr: Optional[str] = None
-):
+    self: "ModelLog", t: torch.Tensor, source: str, extra_addr: str | None = None
+) -> None:
     """Takes in an input or buffer tensor, marks it in-place with relevant information, and
     adds it to the log.
 
@@ -120,7 +218,7 @@ def log_source_tensor_exhaustive(
 
     tensor_memory = get_tensor_memory_amount(t)
 
-    fields_dict = {
+    fields_dict: dict[str, Any] = {
         # General info:
         "tensor_label_raw": tensor_label,
         "layer_label_raw": tensor_label,
@@ -128,6 +226,7 @@ def log_source_tensor_exhaustive(
         "operation_num": None,
         "source_model_log": self,
         "_pass_finished": False,
+        "_construction_done": False,
         # Label Info:
         "layer_label": None,
         "layer_label_short": None,
@@ -143,31 +242,50 @@ def log_source_tensor_exhaustive(
         "lookup_keys": [],
         # Saved tensor info:
         "activation": None,
+        "transformed_activation": None,
         "has_saved_activations": False,
         "activation_postfunc": self.activation_postfunc,
+        "extra_data": {},
+        "intervention_log": [],
         "detach_saved_tensor": self.detach_saved_tensors,
         "output_device": self.output_device,
         "args_captured": False,
         "captured_args": None,
         "captured_kwargs": None,
+        "captured_arg_template": None,
+        "captured_kwarg_template": None,
         "tensor_shape": tuple(t.shape),
+        "transformed_activation_shape": None,
         "tensor_dtype": t.dtype,
+        "transformed_activation_dtype": None,
         "tensor_memory": tensor_memory,
+        "transformed_activation_memory": None,
+        "autograd_saved_bytes": None,
+        "autograd_saved_tensor_count": None,
+        "bytes_delta_at_call": 0,
+        "bytes_peak_at_call": 0,
         # Child tensor variation tracking
         "has_child_tensor_variations": False,
         "children_tensor_versions": {},
         # Grad info:
         "gradient": None,
+        "transformed_gradient": None,
         "save_gradients": self.save_gradients,
         "has_gradient": False,
         "grad_shape": None,
+        "transformed_gradient_shape": None,
         "grad_dtype": None,
+        "transformed_gradient_dtype": None,
         "grad_memory": 0,
+        "transformed_gradient_memory": None,
         # Function call info:
         "func_applied": None,
+        "func_call_id": None,
         "func_name": "none",
         "func_call_stack": _get_func_call_stack(
-            self.num_context_lines, source_loading_enabled=self.save_source_context
+            self.num_context_lines,
+            source_loading_enabled=self.save_source_context,
+            disable_col_offset=False,
         ),
         "func_time": 0,
         "flops_forward": 0,
@@ -183,8 +301,13 @@ def log_source_tensor_exhaustive(
         "func_non_tensor_args": [],
         "func_is_inplace": False,
         "grad_fn_name": "none",
+        "grad_fn_id": id(t.grad_fn) if t.grad_fn is not None else None,
+        "grad_fn_object": t.grad_fn,
+        "corresponding_grad_fn": None,
         "is_part_of_iterable_output": False,
         "iterable_output_index": None,
+        "output_path": (),
+        "container_spec": None,
         # Param info:
         "parent_params": [],
         "parent_param_barcodes": [],
@@ -202,6 +325,7 @@ def log_source_tensor_exhaustive(
         # Graph info:
         "parent_layers": [],
         "parent_layer_arg_locs": {"args": {}, "kwargs": {}},
+        "edge_uses": [],
         "root_ancestors": {tensor_label},
         "child_layers": [],
         "has_children": False,
@@ -283,7 +407,7 @@ def log_source_tensor_exhaustive(
         _add_backward_hook(self, t, t.tl_tensor_label_raw)  # type: ignore[attr-defined]
 
 
-def log_source_tensor_fast(self, t: torch.Tensor, source: str):
+def log_source_tensor_fast(self: "ModelLog", t: torch.Tensor, source: str) -> None:
     """Fast-path source tensor logging: save new activation into existing entry.
 
     Mirrors the exhaustive pass's counter increments for alignment, then
@@ -313,9 +437,9 @@ def log_source_tensor_fast(self, t: torch.Tensor, source: str):
     if orig_tensor_label in self.unlogged_layers:
         return
     orig_layer_entry = self.layer_dict_main_keys[orig_tensor_label]
-    if (self._layer_nums_to_save == "all") or (
-        orig_layer_entry.creation_order in self._layer_nums_to_save
-    ):
+    previous_shape = orig_layer_entry.tensor_shape
+    layer_nums_to_save = cast(Any, self._layer_nums_to_save)
+    if (layer_nums_to_save == "all") or (orig_layer_entry.creation_order in layer_nums_to_save):
         self.layers_with_saved_activations.append(orig_layer_entry.layer_label)
         orig_layer_entry.save_tensor_data(
             t, [], {}, self.save_function_args, self.activation_postfunc
@@ -323,12 +447,12 @@ def log_source_tensor_fast(self, t: torch.Tensor, source: str):
 
     # Minimal graph consistency validation (#99)
     new_shape = tuple(t.shape)
-    if orig_layer_entry.tensor_shape is not None and new_shape != orig_layer_entry.tensor_shape:
+    if previous_shape is not None and new_shape != previous_shape:
         import warnings
 
         warnings.warn(
             f"Tensor shape changed for '{orig_tensor_label}': "
-            f"expected {orig_layer_entry.tensor_shape}, got {new_shape}. "
+            f"expected {previous_shape}, got {new_shape}. "
             f"The computational graph may have changed between passes."
         )
     orig_layer_entry.tensor_shape = new_shape
@@ -337,7 +461,7 @@ def log_source_tensor_fast(self, t: torch.Tensor, source: str):
     orig_layer_entry.tensor_memory = memory
 
 
-def _get_input_module_info(self, arg_tensors: List[torch.Tensor]) -> List[str]:
+def _get_input_module_info(self: "ModelLog", arg_tensors: list[torch.Tensor]) -> list[str]:
     """Determine the module nesting context for a new tensor from its parents.
 
     Finds the most deeply nested parent tensor and returns its current

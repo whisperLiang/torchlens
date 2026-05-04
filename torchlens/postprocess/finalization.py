@@ -21,7 +21,7 @@ Step 18 (_set_pass_finished): Marks ModelLog and all LayerPassLogs as finished, 
 import time
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, TYPE_CHECKING, Tuple
+from typing import Any, Dict, List, Literal, NamedTuple, Optional, TYPE_CHECKING, Tuple, cast
 
 import torch
 
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from ..data_classes.model_log import ModelLog
 
 
-def _undecorate_all_saved_tensors(self) -> None:
+def _undecorate_all_saved_tensors(self: "ModelLog") -> None:
     """Step 13: Remove tl_tensor_label_raw from all saved tensors.
 
     During logging, tensors are "decorated" with a tl_tensor_label_raw attribute
@@ -53,6 +53,8 @@ def _undecorate_all_saved_tensors(self) -> None:
         layer_entry = self.layer_dict_main_keys[layer_label]
         if layer_entry.activation is not None:
             tensors_to_undecorate.append(layer_entry.activation)
+        if getattr(layer_entry, "transformed_activation", None) is not None:
+            tensors_to_undecorate.append(layer_entry.transformed_activation)
 
         if layer_entry.captured_args:
             tensors_to_undecorate.extend(
@@ -68,7 +70,7 @@ def _undecorate_all_saved_tensors(self) -> None:
             delattr(t, "tl_tensor_label_raw")
 
 
-def _log_time_elapsed(self) -> None:
+def _log_time_elapsed(self: "ModelLog") -> None:
     """Step 15: Record wall-clock timing for the cleanup phase and overall pass.
 
     Computes cleanup time as the residual after subtracting setup and forward
@@ -123,7 +125,9 @@ def _finalize_param_logs(self: "ModelLog") -> None:
         layer_entry.parent_params = []
 
 
-def _build_root_module_log(self: "ModelLog", pass_dict: dict, mbd: dict) -> "ModuleLog":
+def _build_root_module_log(
+    self: "ModelLog", pass_dict: dict[str, "ModulePassLog"], mbd: dict[str, Any]
+) -> "ModuleLog":
     """Build the root ModuleLog ("self") representing the model itself.
 
     The root module encompasses all layers and params. Its address_children are
@@ -132,7 +136,8 @@ def _build_root_module_log(self: "ModelLog", pass_dict: dict, mbd: dict) -> "Mod
     """
     from ..data_classes.param_log import ParamAccessor
 
-    root_meta = self._module_metadata.get("self", {})
+    module_metadata = cast(dict[str, dict[str, Any]], self._module_metadata)
+    root_meta = module_metadata.get("self", {})
     root_all_layers = list(self.layer_logs.keys())
 
     root_param_dict = {pl.address: pl for pl in self.param_logs}
@@ -200,13 +205,13 @@ def _build_root_module_log(self: "ModelLog", pass_dict: dict, mbd: dict) -> "Mod
     return root_module
 
 
-def _compute_nesting_depths(module_dict: dict, root_module: "ModuleLog") -> None:
+def _compute_nesting_depths(module_dict: dict[str, "ModuleLog"], root_module: "ModuleLog") -> None:
     """Assign nesting_depth to each ModuleLog via BFS from the root.
 
     Root ("self") has depth 0. Each level of call_children nesting adds 1.
     """
     visited = {"self": 0}
-    queue: deque = deque()
+    queue: deque[str] = deque()
     for child_addr in root_module.call_children:
         if child_addr in module_dict:
             module_dict[child_addr].nesting_depth = 1
@@ -388,11 +393,11 @@ def _build_submodule_pass_logs(
     self: "ModelLog",
     address: str,
     num_passes: int,
-    pass_dict: dict,
-    mbd: dict,
-    _child_to_parent_pass: Optional[dict] = None,
-    all_module_addresses: Optional[list] = None,
-) -> tuple:
+    pass_dict: dict[str, "ModulePassLog"],
+    mbd: dict[str, Any],
+    _child_to_parent_pass: dict[str, str] | None = None,
+    all_module_addresses: list[str] | None = None,
+) -> tuple[dict[int, "ModulePassLog"], list[str]]:
     """Build ModulePassLog objects for all passes of a single submodule.
 
     For each pass, derives input/output layers from LayerPassLog fields,
@@ -421,7 +426,10 @@ def _build_submodule_pass_logs(
                     pass_output_layers.append(layer_label)
 
         # Forward args for this pass
-        fwd_args = self._module_forward_args.get((address, pass_num))
+        module_forward_args = cast(
+            dict[tuple[str, int], tuple[Any, Any]], self._module_forward_args
+        )
+        fwd_args = module_forward_args.get((address, pass_num))
         fwd_positional = fwd_args[0] if fwd_args else None
         fwd_kwargs = fwd_args[1] if fwd_args else None
 
@@ -452,7 +460,9 @@ def _build_submodule_pass_logs(
     return passes, pass_labels_list
 
 
-def _resolve_call_hierarchy(passes: dict) -> tuple:
+def _resolve_call_hierarchy(
+    passes: dict[int, "ModulePassLog"],
+) -> tuple[list[str], str | None]:
     """Derive module-level call_children and call_parent from per-pass data.
 
     Unions call_children across all passes (stripping pass suffixes to get
@@ -488,11 +498,14 @@ class ModuleParamInfo(NamedTuple):
     num_trainable: int
     num_frozen: int
     memory: int
-    buffer_layers: list
+    buffer_layers: list[str]
 
 
 def _build_module_param_info(
-    self: "ModelLog", address: str, mbd: dict, _buffer_layers_by_module: Optional[dict] = None
+    self: "ModelLog",
+    address: str,
+    mbd: dict[str, Any],
+    _buffer_layers_by_module: dict[str, list[str]] | None = None,
 ) -> ModuleParamInfo:
     """Gather parameter counts, sizes, and buffer layers for a single module."""
     from ..data_classes.param_log import ParamAccessor
@@ -565,7 +578,7 @@ def _build_module_logs(self: "ModelLog") -> None:
     # under the FIRST address visited by _capture_module_metadata, but
     # tl_module_address may be overwritten to a LATER address by
     # _prepare_model_once. This map ensures all aliases resolve to the same meta.
-    _metadata_by_alias: Dict[str, dict] = {}
+    _metadata_by_alias: dict[str, dict[str, Any]] = {}
     for _primary_addr, _meta in self._module_metadata.items():
         for _alias in _meta.get("all_addresses", [_primary_addr]):
             _metadata_by_alias[_alias] = _meta
@@ -761,17 +774,47 @@ def _build_layer_logs(self: "ModelLog") -> None:
 
         layer_log.passes[pass_log.pass_num] = pass_log
         layer_log.pass_labels.append(pass_log.layer_label)
-        pass_log.parent_layer_log = layer_log  # type: ignore[assignment]
+        pass_log.parent_layer_log = layer_log
         _merge_layer_log_conditional_fields(layer_log, pass_log)
 
+    total_autograd_saved_bytes = 0
+    has_autograd_saved_value = False
     for layer_log in layer_logs.values():
+        for pass_log in layer_log.passes.values():
+            linked_labels = []
+            for param_log in getattr(pass_log, "parent_param_logs", []):
+                for linked_address in getattr(param_log, "linked_params", []):
+                    linked_labels.append(f"{param_log.address} → {linked_address}")
+            if linked_labels:
+                pass_log.extra_data["tied_parameter_notation"] = linked_labels
+        pass_autograd_bytes = [
+            pass_log.autograd_saved_bytes
+            for pass_log in layer_log.passes.values()
+            if pass_log.autograd_saved_bytes is not None
+        ]
+        pass_autograd_tensor_counts = [
+            pass_log.autograd_saved_tensor_count
+            for pass_log in layer_log.passes.values()
+            if pass_log.autograd_saved_tensor_count is not None
+        ]
+        if pass_autograd_bytes:
+            layer_log.autograd_saved_bytes = sum(pass_autograd_bytes)
+            layer_log.autograd_saved_tensor_count = sum(pass_autograd_tensor_counts)
+            total_autograd_saved_bytes += layer_log.autograd_saved_bytes
+            has_autograd_saved_value = True
+        else:
+            layer_log.autograd_saved_bytes = None
+            layer_log.autograd_saved_tensor_count = None
         _rebuild_layer_log_conditional_views(layer_log)
 
+    self.total_autograd_saved_bytes = (
+        total_autograd_saved_bytes if has_autograd_saved_value else None
+    )
     self.layer_logs = layer_logs
     _rebuild_conditional_edge_passes(self)
 
 
-def _set_pass_finished(self) -> None:
+def _set_pass_finished(self: "ModelLog") -> None:
     """Step 18: Mark the ModelLog and all LayerPassLogs as pass-finished.
 
     Sets ``_pass_finished = True`` on the ModelLog and every retained
@@ -790,7 +833,7 @@ def _set_pass_finished(self) -> None:
 
 
 def _finalize_streamed_bundle(self: "ModelLog") -> None:
-    """Step 19: Finalize any in-progress streamed activation bundle.
+    """Step 19: Finalize any in-progress streamed tensor bundle.
 
     Parameters
     ----------
@@ -816,7 +859,7 @@ def _finalize_streamed_bundle(self: "ModelLog") -> None:
         include_captured_args=self.save_function_args,
         include_rng_states=self.save_rng_states,
     )
-    scrubbed_state, blob_specs = _reuse_streamed_activation_blob_ids(
+    scrubbed_state, blob_specs = _reuse_streamed_blob_ids(
         self,
         scrubbed_state=scrubbed_state,
         blob_specs=blob_specs,
@@ -831,10 +874,11 @@ def _finalize_streamed_bundle(self: "ModelLog") -> None:
         "_source_bundle_manifest_sha256",
         sha256_of_file(Path(final_path) / "manifest.json"),
     )
-    _attach_streamed_activation_refs(
+    _attach_streamed_tensor_refs(
         self, scrubbed_state=scrubbed_state, writer=writer, final_path=final_path
     )
     self._activation_writer = None
+    self._defer_streaming_bundle_finalization = False
 
 
 def _evict_streamed_activations(self: "ModelLog") -> None:
@@ -848,17 +892,35 @@ def _evict_streamed_activations(self: "ModelLog") -> None:
 
     for layer_entry in self.layer_list:
         if getattr(layer_entry, "activation_ref", None) is not None:
-            layer_entry.activation = None
+            layer_entry._internal_set("activation", None)
+        if getattr(layer_entry, "_pending_transformed_activation_blob_id", None) is not None:
+            layer_entry._internal_set("transformed_activation", None)
 
 
-def _reuse_streamed_activation_blob_ids(
+def _evict_streamed_gradients(self: "ModelLog") -> None:
+    """Drop in-memory gradients once streaming refs have been attached.
+
+    Parameters
+    ----------
+    self:
+        Model log whose streamed gradients should be evicted.
+    """
+
+    for layer_entry in self.layer_list:
+        if getattr(layer_entry, "gradient_ref", None) is not None:
+            layer_entry._internal_set("gradient", None)
+        if getattr(layer_entry, "_pending_transformed_gradient_blob_id", None) is not None:
+            layer_entry._internal_set("transformed_gradient", None)
+
+
+def _reuse_streamed_blob_ids(
     model_log: "ModelLog",
     *,
-    scrubbed_state: dict,
+    scrubbed_state: dict[str, Any],
     blob_specs: list[tuple[str, torch.Tensor, str, str]],
     writer: BundleStreamWriter,
-) -> tuple[dict, list[tuple[str, torch.Tensor, str, str]]]:
-    """Patch scrubbed activation refs to reuse blob ids written during capture.
+) -> tuple[dict[str, Any], list[tuple[str, torch.Tensor, str, str]]]:
+    """Patch scrubbed tensor refs to reuse blob ids written during capture.
 
     Parameters
     ----------
@@ -885,28 +947,38 @@ def _reuse_streamed_activation_blob_ids(
 
     skipped_blob_ids: set[str] = set()
     for live_layer, scrubbed_layer in zip(model_log.layer_list, scrubbed_layers):
-        activation_blob = getattr(scrubbed_layer, "activation", None)
-        if not isinstance(activation_blob, BlobRef):
-            continue
-        pending_blob_id = getattr(live_layer, "_pending_blob_id", None)
-        if pending_blob_id is None:
-            continue
-        skipped_blob_ids.add(activation_blob.blob_id)
-        scrubbed_layer.activation = BlobRef(blob_id=pending_blob_id, kind=activation_blob.kind)
-        writer.relabel_blob(pending_blob_id, live_layer._streaming_label)
+        for tensor_field, pending_field in (
+            ("activation", "_pending_blob_id"),
+            ("transformed_activation", "_pending_transformed_activation_blob_id"),
+            ("gradient", "_pending_gradient_blob_id"),
+            ("transformed_gradient", "_pending_transformed_gradient_blob_id"),
+        ):
+            tensor_blob = getattr(scrubbed_layer, tensor_field, None)
+            if not isinstance(tensor_blob, BlobRef):
+                continue
+            pending_blob_id = getattr(live_layer, pending_field, None)
+            if pending_blob_id is None:
+                continue
+            skipped_blob_ids.add(tensor_blob.blob_id)
+            setattr(
+                scrubbed_layer,
+                tensor_field,
+                BlobRef(blob_id=pending_blob_id, kind=tensor_blob.kind),
+            )
+            writer.relabel_blob(pending_blob_id, live_layer._streaming_label)
 
     filtered_blob_specs = [spec for spec in blob_specs if spec[0] not in skipped_blob_ids]
     return scrubbed_state, filtered_blob_specs
 
 
-def _attach_streamed_activation_refs(
+def _attach_streamed_tensor_refs(
     model_log: "ModelLog",
     *,
-    scrubbed_state: dict,
+    scrubbed_state: dict[str, Any],
     writer: BundleStreamWriter,
     final_path: str | Path,
 ) -> None:
-    """Attach ``LazyActivationRef`` placeholders for persisted activation blobs.
+    """Attach ``LazyActivationRef`` placeholders for persisted direct tensor blobs.
 
     Parameters
     ----------
@@ -928,20 +1000,28 @@ def _attach_streamed_activation_refs(
         )
 
     for live_layer, scrubbed_layer in zip(model_log.layer_list, scrubbed_layers):
-        activation_blob = getattr(scrubbed_layer, "activation", None)
-        if not isinstance(activation_blob, BlobRef):
-            continue
-        manifest_entry = writer.get_entry(activation_blob.blob_id)
-        live_layer.activation_ref = LazyActivationRef(
-            blob_id=manifest_entry.blob_id,
-            shape=tuple(manifest_entry.shape),
-            dtype=_dtype_from_manifest_string(manifest_entry.dtype),
-            device_at_save=manifest_entry.device_at_save,
-            source_bundle_path=Path(final_path),
-            relative_path=manifest_entry.relative_path,
-            kind="activation",
-            expected_sha256=manifest_entry.sha256,
-        )
+        for tensor_field, ref_field, kind in (
+            ("activation", "activation_ref", "activation"),
+            ("gradient", "gradient_ref", "gradient"),
+        ):
+            tensor_blob = getattr(scrubbed_layer, tensor_field, None)
+            if not isinstance(tensor_blob, BlobRef):
+                continue
+            manifest_entry = writer.get_entry(tensor_blob.blob_id)
+            setattr(
+                live_layer,
+                ref_field,
+                LazyActivationRef(
+                    blob_id=manifest_entry.blob_id,
+                    shape=tuple(manifest_entry.shape),
+                    dtype=_dtype_from_manifest_string(manifest_entry.dtype),
+                    device_at_save=manifest_entry.device_at_save,
+                    source_bundle_path=Path(final_path),
+                    relative_path=manifest_entry.relative_path,
+                    kind=cast(Literal["activation", "gradient"], kind),
+                    expected_sha256=manifest_entry.sha256,
+                ),
+            )
 
 
 def _dtype_from_manifest_string(dtype_name: str) -> torch.dtype:

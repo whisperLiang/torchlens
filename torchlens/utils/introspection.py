@@ -8,8 +8,9 @@ nested attribute traversal and call-stack capture.
 import dis
 import sys
 import warnings
-from types import FrameType
-from typing import Any, Callable, List, Optional, Set, Type
+from collections.abc import Callable, Iterator
+from types import CodeType, FrameType
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -23,15 +24,131 @@ from torch import nn
 # tensors, which are tracked separately.
 _ATTR_SKIP_SET = frozenset({"T", "mT", "real", "imag", "H"})
 
+# Cached instruction-offset -> column-offset maps, keyed by ``id(code_obj)``.
+#
+# CPython code objects are immutable, so once we disassemble a code object
+# the mapping never changes. ``dis.get_instructions`` is one of the most
+# expensive calls on transformer-style hot paths (per profiling audit
+# 2026-04-27, ``dis.*`` self time ~16.5s on GPT-2). Re-using the parsed
+# offset map per code object reduces repeated work to a single dict lookup.
+#
+# Keys are ``id(code_obj)`` so unloaded code objects (e.g. via
+# ``importlib.reload``) get implicitly evicted: the new module's code
+# objects are fresh objects with new ids, and the old entries become
+# unreachable garbage. To keep the cache from growing without bound on
+# pathological workloads, we apply a soft cap and emit a one-shot warning
+# when crossed (the cap is large enough that real-world models never hit it).
+_COL_OFFSET_CACHE: Dict[int, Dict[int, Optional[int]]] = {}
+_COL_OFFSET_CACHE_SIZE_CAP = 100_000
+_col_offset_cache_warned = False
+_AddressPath = list[tuple[str, Any]]
+_SearchEntry = tuple[Any, Any, _AddressPath]
+
+
+def _build_col_offset_map(code: CodeType) -> Dict[int, Optional[int]]:
+    """Return ``instruction_offset -> column_offset`` for every instruction.
+
+    The map covers all bytecode instructions in ``code``. Instructions whose
+    ``positions`` are missing or whose ``col_offset`` is ``None`` are stored
+    with ``None`` so callers can distinguish "not in map" (unknown offset)
+    from "no column information available" (positions absent).
+    """
+    if sys.version_info < (3, 11):
+        return {}
+    offset_map: Dict[int, Optional[int]] = {}
+    try:
+        for instruction in dis.get_instructions(code):
+            positions = instruction.positions
+            if positions is None:
+                offset_map[instruction.offset] = None
+            else:
+                offset_map[instruction.offset] = positions.col_offset
+    except (TypeError, ValueError):
+        return {}
+    return offset_map
+
+
+def _get_or_build_col_offset_map(code: CodeType) -> Dict[int, Optional[int]]:
+    """Return the cached column-offset map for ``code`` (build on miss).
+
+    The cache is keyed by ``id(code)``. Code objects are immutable, so the
+    cached map is valid for the entire lifetime of the code object.
+    """
+    global _col_offset_cache_warned
+    code_id = id(code)
+    cached = _COL_OFFSET_CACHE.get(code_id)
+    if cached is not None:
+        return cached
+    if not _col_offset_cache_warned and len(_COL_OFFSET_CACHE) >= _COL_OFFSET_CACHE_SIZE_CAP:
+        # Emit a single warning so unbounded growth in pathological workloads
+        # is visible without spamming the logs. Real-world models are well
+        # under this cap; crossing it usually points to a code-object leak.
+        warnings.warn(
+            "torchlens column-offset cache exceeded "
+            f"{_COL_OFFSET_CACHE_SIZE_CAP} entries; new entries will still be "
+            "added but this likely indicates a long-running process touching "
+            "very many unique code objects.",
+            stacklevel=2,
+        )
+        _col_offset_cache_warned = True
+    offset_map = _build_col_offset_map(code)
+    _COL_OFFSET_CACHE[code_id] = offset_map
+    return offset_map
+
+
+def _clear_col_offset_cache() -> None:
+    """Drop all cached column-offset maps.
+
+    Intended for tests that need a clean slate between cache-behaviour
+    assertions.
+    """
+    global _col_offset_cache_warned
+    _COL_OFFSET_CACHE.clear()
+    _col_offset_cache_warned = False
+
+
+def _get_code_qualname(frame: FrameType) -> Optional[str]:
+    """Return ``co_qualname`` when available on this Python version.
+
+    Args:
+        frame: Stack frame whose code object should be inspected.
+
+    Returns:
+        Qualified code object name, or None when unavailable.
+    """
+    if sys.version_info < (3, 11):
+        return None
+    return getattr(frame.f_code, "co_qualname", None)
+
+
+def _get_col_offset(frame: FrameType) -> Optional[int]:
+    """Return the current instruction's column offset when available.
+
+    Args:
+        frame: Stack frame whose current bytecode instruction should be inspected.
+
+    Returns:
+        Column offset for the current instruction, or None when unavailable.
+    """
+    if sys.version_info < (3, 11):
+        return None
+    offset_map = _get_or_build_col_offset_map(frame.f_code)
+    if not offset_map:
+        return None
+    # ``offset_map`` may legitimately contain ``None`` for instructions whose
+    # ``positions`` attribute is absent. Use ``get`` so a missing key (e.g.
+    # an instruction we never indexed) also returns ``None``.
+    return offset_map.get(frame.f_lasti)
+
 
 def get_vars_of_type_from_obj(
     obj: Any,
-    which_type: Type,
-    subclass_exceptions: Optional[List] = None,
+    which_type: type[Any],
+    subclass_exceptions: list[type[Any]] | None = None,
     search_depth: int = 3,
-    return_addresses=False,
-    allow_repeats=False,
-) -> List:
+    return_addresses: bool = False,
+    allow_repeats: bool = False,
+) -> list[Any]:
     """Recursively find all instances of ``which_type`` inside a nested object.
 
     Uses breadth-first expansion with a fixed depth limit to avoid
@@ -60,11 +177,11 @@ def get_vars_of_type_from_obj(
     if subclass_exceptions is None:
         subclass_exceptions = []
     # Each stack entry is (item, human_readable_address, programmatic_address).
-    this_stack: List[Any] = [(obj, "", [])]
-    found_items: List[Any] = []
-    found_addresses: List[Any] = []
-    found_addresses_full: List[Any] = []
-    found_ids: Set[Any] = set()
+    this_stack: list[_SearchEntry] = [(obj, "", [])]
+    found_items: list[Any] = []
+    found_addresses: list[Any] = []
+    found_addresses_full: list[_AddressPath] = []
+    found_ids: set[int] = set()
     # BFS: each iteration processes one depth level.
     # Hoist warnings context manager to avoid ~77K per-attribute entries.
     with warnings.catch_warnings():
@@ -88,15 +205,15 @@ def get_vars_of_type_from_obj(
 
 
 def _search_stack_for_vars_of_type(
-    current_stack: List,
-    which_type: Type,
-    found_items: List,
-    found_addresses: List,
-    found_addresses_full: List,
-    found_ids: Set,
-    subclass_exceptions: List,
+    current_stack: list[_SearchEntry],
+    which_type: type[Any],
+    found_items: list[Any],
+    found_addresses: list[Any],
+    found_addresses_full: list[_AddressPath],
+    found_ids: set[int],
+    subclass_exceptions: list[type[Any]],
     allow_repeats: bool,
-):
+) -> list[_SearchEntry]:
     """Process one BFS depth level: classify items, collect matches, build next level.
 
     Items in ``current_stack`` are either:
@@ -120,7 +237,7 @@ def _search_stack_for_vars_of_type(
     Returns:
         ``next_stack`` — items to process in the next depth iteration.
     """
-    next_stack: List[Any] = []
+    next_stack: list[_SearchEntry] = []
     if len(current_stack) == 0:
         return current_stack
     while len(current_stack) > 0:
@@ -146,7 +263,12 @@ def _search_stack_for_vars_of_type(
     return next_stack
 
 
-def _extend_search_stack_from_item(item: Any, address: str, address_full, next_stack: List):
+def _extend_search_stack_from_item(
+    item: Any,
+    address: Any,
+    address_full: _AddressPath,
+    next_stack: list[_SearchEntry],
+) -> None:
     """Expand a single non-leaf item's children onto ``next_stack``.
 
     Handles three kinds of containers:
@@ -292,7 +414,7 @@ def nested_getattr(obj: Any, attr: str) -> Any:
     return obj
 
 
-def nested_assign(obj: Any, addr: List[tuple], val: Any) -> None:
+def nested_assign(obj: Any, addr: list[tuple[Any, Any]], val: Any) -> None:
     """Walk into a nested structure following an address path and assign a value.
 
     The address path is the ``address_full`` format produced by
@@ -325,7 +447,7 @@ def nested_assign(obj: Any, addr: List[tuple], val: Any) -> None:
 
 def iter_accessible_attributes(
     obj: Any, *, short_circuit: Optional[Callable[[Any, str], bool]] = None
-):
+) -> Iterator[tuple[str, Any]]:
     """Yield ``(attr_name, attr_value)`` for every accessible attribute of ``obj``.
 
     Gracefully skips attributes that raise on access (common with C-level
@@ -373,7 +495,11 @@ def remove_attributes_with_prefix(obj: Any, prefix: str) -> None:
             delattr(obj, field)
 
 
-def _get_func_call_stack(num_context_lines: int = 7, source_loading_enabled: bool = True) -> List:
+def _get_func_call_stack(
+    num_context_lines: int = 7,
+    source_loading_enabled: bool = True,
+    disable_col_offset: bool = False,
+) -> list[Any]:
     """Build a list of FuncCallLocation objects for the current call stack.
 
     Filters out torchlens internals and ``_call_impl`` frames, keeping only
@@ -390,13 +516,15 @@ def _get_func_call_stack(num_context_lines: int = 7, source_loading_enabled: boo
             ``2 * num_context_lines + 1``.
         source_loading_enabled: Whether each ``FuncCallLocation`` should
             lazily load source text and function metadata on demand.
+        disable_col_offset: If True, skip bytecode inspection for column
+            offsets and store None for ``col_offset``.
 
     Returns:
         List[FuncCallLocation] ordered shallow-to-deep.
     """
     import os
 
-    from ..data_classes import FuncCallLocation
+    from ..data_classes import FuncCallLocation  # type: ignore[attr-defined]
 
     # Use directory-based check instead of hardcoded suffixes so that
     # refactoring the package layout doesn't break stack filtering.
@@ -405,30 +533,8 @@ def _get_func_call_stack(num_context_lines: int = 7, source_loading_enabled: boo
     def _is_torchlens_internal(filename: str) -> bool:
         return filename.startswith(_TORCHLENS_PKG_DIR)
 
-    def _get_code_qualname(frame: FrameType) -> Optional[str]:
-        """Return ``co_qualname`` when available on this Python version."""
-        if sys.version_info < (3, 11):
-            return None
-        return getattr(frame.f_code, "co_qualname", None)
-
-    def _get_col_offset(frame: FrameType) -> Optional[int]:
-        """Return the current instruction's column offset when available."""
-        if sys.version_info < (3, 11):
-            return None
-        try:
-            for instruction in dis.get_instructions(frame.f_code):
-                if instruction.offset != frame.f_lasti:
-                    continue
-                positions = instruction.positions
-                if positions is None:
-                    return None
-                return positions.col_offset
-        except (TypeError, ValueError):
-            return None
-        return None
-
     # Phase 1: Collect lightweight frame data — only co_filename, co_name, f_lineno.
-    # Do NOT do f_locals/f_globals dict lookups yet (expensive, ~50/call).
+    # Do NOT do f_locals/f_globals dict lookups or bytecode walks yet.
     raw_frames = []
     frame = sys._getframe(0)
     while frame is not None:
@@ -438,8 +544,6 @@ def _get_func_call_stack(num_context_lines: int = 7, source_loading_enabled: boo
                 frame.f_code.co_name,
                 frame.f_lineno,
                 frame.f_code.co_firstlineno,
-                _get_code_qualname(frame),
-                _get_col_offset(frame),
                 frame,  # keep reference for phase 2 func_obj lookup
             )
         )
@@ -454,7 +558,7 @@ def _get_func_call_stack(num_context_lines: int = 7, source_loading_enabled: boo
     filtered_indices = []
 
     for idx in range(len(raw_frames) - 1, -1, -1):
-        filename, func_name, lineno, _, _, _, frame_ref = raw_frames[idx]
+        filename, func_name, lineno, _, frame_ref = raw_frames[idx]
 
         # Skip torchlens internals and PyTorch _call_impl
         if _is_torchlens_internal(filename):
@@ -466,7 +570,7 @@ def _get_func_call_stack(num_context_lines: int = 7, source_loading_enabled: boo
             tracking = True
             # Look for the user-script frame that called log_forward_pass
             for j in range(idx + 1, len(raw_frames)):
-                j_filename, j_func_name, _, _, _, _, _ = raw_frames[j]
+                j_filename, j_func_name, _, _, _ = raw_frames[j]
                 if not _is_torchlens_internal(j_filename) and "_call_impl" not in j_func_name:
                     pre_forward_frame_idx = j
                     break
@@ -479,12 +583,10 @@ def _get_func_call_stack(num_context_lines: int = 7, source_loading_enabled: boo
         filtered_indices.append(pre_forward_frame_idx)
 
     # Phase 2: Build FuncCallLocation objects only for surviving frames (~5-10).
-    # Do the expensive f_locals/f_globals dict lookup only here.
+    # Do expensive f_locals/f_globals lookups and bytecode walks only here.
     result = []
     for idx in filtered_indices:
-        filename, func_name, lineno, code_firstlineno, code_qualname, col_offset, frame_ref = (
-            raw_frames[idx]
-        )
+        filename, func_name, lineno, code_firstlineno, frame_ref = raw_frames[idx]
         loc = FuncCallLocation(
             file=filename,
             line_number=lineno,
@@ -496,8 +598,8 @@ def _get_func_call_stack(num_context_lines: int = 7, source_loading_enabled: boo
                 else None
             ),
             code_firstlineno=code_firstlineno,
-            code_qualname=code_qualname,
-            col_offset=col_offset,
+            code_qualname=_get_code_qualname(frame_ref),
+            col_offset=None if disable_col_offset else _get_col_offset(frame_ref),
             source_loading_enabled=source_loading_enabled,
         )
         result.append(loc)

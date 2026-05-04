@@ -21,7 +21,9 @@ mixed-precision ops can be replayed under the same dtype context.
 """
 
 import random
-from typing import Any, Dict, List
+from collections.abc import Callable
+from types import TracebackType
+from typing import Any, Dict, List, TypeVar, cast
 
 import numpy as np
 import torch
@@ -29,16 +31,19 @@ import torch
 from .tensor_utils import _is_cuda_available
 
 _AUTOCAST_DEVICES = ("cpu", "cuda")
+_T = TypeVar("_T")
 
 
-def set_random_seed(seed: int):
+def set_random_seed(seed: int) -> None:
     """Set the random seed for all RNG engines simultaneously.
 
     Ensures deterministic behavior across Python, NumPy, and PyTorch
     (CPU + all CUDA devices).
 
-    Args:
-        seed: Seed value to set.
+    Parameters
+    ----------
+    seed:
+        Seed value to set.
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -46,37 +51,93 @@ def set_random_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
-def log_current_rng_states(torch_only: bool = False) -> Dict:
+def execute_with_restored_rng_autocast(
+    func: Callable[..., _T],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    rng_states: Dict[str, Any] | None,
+    autocast_state: Dict[str, Any] | None,
+) -> _T:
+    """Execute a callable with saved RNG and autocast state in a tight scope.
+
+    Parameters
+    ----------
+    func:
+        Callable to execute.
+    args:
+        Positional arguments for ``func``.
+    kwargs:
+        Keyword arguments for ``func``.
+    rng_states:
+        RNG states captured before the original operation. ``None`` or an empty
+        dict leaves the current RNG state untouched until final restoration.
+    autocast_state:
+        Autocast state captured before the original operation.
+
+    Returns
+    -------
+    _T
+        Return value from ``func``.
+
+    Raises
+    ------
+    Exception
+        Re-raises any exception from ``func`` after restoring caller RNG state.
+    """
+
+    current_rng_states = log_current_rng_states()
+    if rng_states:
+        set_rng_from_saved_states(rng_states)
+    try:
+        with AutocastRestore(autocast_state or {}):
+            return func(*args, **kwargs)
+    finally:
+        set_rng_from_saved_states(current_rng_states)
+
+
+def log_current_rng_states(torch_only: bool = False) -> Dict[str, Any]:
     """Snapshot the current state of all RNG engines.
 
     The returned dict can be passed to :func:`set_rng_from_saved_states`
     to restore the exact same RNG position later (e.g. during validation
     replay).
 
-    Args:
-        torch_only: If True, only capture PyTorch RNG state (skip Python
-            ``random`` and NumPy). This is faster and sufficient for most
-            torch operations (dropout, randn, etc.).
+    Parameters
+    ----------
+    torch_only:
+        If True, only capture PyTorch RNG state (skip Python ``random`` and
+        NumPy). This is faster and sufficient for most torch operations
+        (dropout, randn, etc.).
 
-    Returns:
+    Returns
+    -------
+    dict[str, Any]
         Dict with keys ``"random"``, ``"np"``, ``"torch"``, and optionally
-        ``"torch_cuda"``, each holding the opaque state object for that engine.
+        ``"torch_cuda_all"``, each holding the opaque state object for that
+        engine. ``"torch_cuda"`` is also populated for backward compatibility
+        with older single-device snapshots.
     """
-    rng_dict: Dict[str, object] = {"torch": torch.random.get_rng_state()}
+    rng_dict: Dict[str, Any] = {"torch": torch.random.get_rng_state()}
     if not torch_only:
         rng_dict["random"] = random.getstate()
         rng_dict["np"] = np.random.get_state()
     if _is_cuda_available():
-        rng_dict["torch_cuda"] = torch.cuda.get_rng_state("cuda")
+        cuda_states = torch.cuda.get_rng_state_all()
+        rng_dict["torch_cuda_all"] = cuda_states
+        if cuda_states:
+            rng_dict["torch_cuda"] = cuda_states[0]
     return rng_dict
 
 
-def set_rng_from_saved_states(rng_states: Dict):
+def set_rng_from_saved_states(rng_states: Dict[str, Any]) -> None:
     """Restore RNG engines to a previously captured state.
 
-    Args:
-        rng_states: Dict produced by :func:`log_current_rng_states`.
-            If empty (RNG capture was disabled), this is a no-op.
+    Parameters
+    ----------
+    rng_states:
+        Dict produced by :func:`log_current_rng_states`. If empty (RNG capture
+        was disabled), this is a no-op.
     """
     if not rng_states:
         return
@@ -85,11 +146,13 @@ def set_rng_from_saved_states(rng_states: Dict):
     if "np" in rng_states:
         np.random.set_state(rng_states["np"])
     torch.random.set_rng_state(rng_states["torch"])
-    if _is_cuda_available() and "torch_cuda" in rng_states:
+    if _is_cuda_available() and "torch_cuda_all" in rng_states:
+        torch.cuda.set_rng_state_all(rng_states["torch_cuda_all"])
+    elif _is_cuda_available() and "torch_cuda" in rng_states:
         torch.cuda.set_rng_state(rng_states["torch_cuda"], "cuda")
 
 
-def log_current_autocast_state() -> Dict:
+def log_current_autocast_state() -> dict[str, dict[str, Any]]:
     """Capture the current ``torch.amp.autocast`` enabled/dtype state.
 
     Checked for each device in :data:`_AUTOCAST_DEVICES`.  If a device
@@ -98,7 +161,7 @@ def log_current_autocast_state() -> Dict:
     Returns:
         Dict mapping device name to ``{"enabled": bool, "dtype": torch.dtype}``.
     """
-    state = {}
+    state: dict[str, dict[str, Any]] = {}
     for device in _AUTOCAST_DEVICES:
         try:
             state[device] = {
@@ -125,19 +188,25 @@ class AutocastRestore:
 
     __slots__ = ("_autocast_state", "_contexts")
 
-    def __init__(self, autocast_state: Dict):
+    def __init__(self, autocast_state: dict[str, dict[str, Any]]) -> None:
         self._autocast_state = autocast_state
         self._contexts: List[Any] = []
 
-    def __enter__(self):
+    def __enter__(self) -> "AutocastRestore":
         for device, state in self._autocast_state.items():
             if state["enabled"]:
-                ctx = torch.amp.autocast(device, dtype=state["dtype"])
+                autocast = cast(Any, getattr(torch.amp, "autocast"))
+                ctx = autocast(device, dtype=state["dtype"])
                 ctx.__enter__()
                 self._contexts.append(ctx)
         return self
 
-    def __exit__(self, *exc_info):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         # Exit in reverse order to mirror the nesting order of __enter__.
         for ctx in reversed(self._contexts):
-            ctx.__exit__(*exc_info)
+            ctx.__exit__(exc_type, exc_value, traceback)

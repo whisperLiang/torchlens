@@ -1,11 +1,17 @@
 # <img src="images/logo.png" width=8% height=8%> TorchLens
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+
 **Quick Links**
 
 - [Paper introducing TorchLens](https://www.nature.com/articles/s41598-023-40807-0)
 - [CoLab tutorial](https://colab.research.google.com/drive/1ORJLGZPifvdsVPFqq1LYT3t5hV560SoW?usp=sharing)
+- [5-minute notebook gallery](examples/5min/README.md)
+- [50-minute workflow notebook gallery](examples/50min/README.md)
 - [\"Menagerie\" of model visualizations](https://drive.google.com/drive/u/0/folders/1BsM6WPf3eB79-CRNgZejMxjg38rN6VCb)
 - [Metadata provided by TorchLens](https://static-content.springer.com/esm/art%3A10.1038%2Fs41598-023-40807-0/MediaObjects/41598_2023_40807_MOESM1_ESM.pdf)
+- License: [Apache 2.0](LICENSE); functional docs: [limitations](LIMITATIONS.md),
+  [roadmap](ROADMAP.md), and [migration tables](docs/migration/).
 
 ## Overview
 
@@ -59,6 +65,70 @@ in its forward pass; you can grab the saved outputs of every last one:
 
 The goal of *TorchLens* is to do this for any PyTorch model whatsoever. You can see a bunch of example model
 visualizations in this [model menagerie](https://drive.google.com/drive/u/0/folders/1BsM6WPf3eB79-CRNgZejMxjg38rN6VCb).
+
+## Compatibility report
+
+Before filing a bug for a model-specific failure, run the runtime compatibility
+report on the exact model wrapper and example input you plan to log:
+
+```python
+import torchlens as tl
+
+compat = tl.compat.report(model, x)
+print(compat.show())
+print(compat.to_markdown())  # useful in issues and README snippets
+```
+
+`tl.compat.report(model, x)` does not execute the model. It inspects the model
+wrapper, modules, parameter sharing, input tensors, CUDA visibility, and common
+framework markers, then reports each row as `pass`, `known_broken`, `scope`, or
+`not_tested`. Known-broken and out-of-scope rows are cross-referenced in
+[`LIMITATIONS.md`](LIMITATIONS.md).
+
+## Interventions (v2.0+)
+
+TorchLens can also capture an intervention-ready log, mutate a fork of that log,
+and propagate the edit with replay or rerun:
+
+```python
+import torch
+from torch import nn
+import torchlens as tl
+
+
+model = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4)).eval()
+x = torch.randn(2, 8)
+
+clean = tl.log_forward_pass(model, x, vis_opt="none", intervention_ready=True)
+site = clean.find_sites(tl.func("relu")).first()
+
+edited = clean.fork("zero_relu")
+edited.attach_hooks(tl.label(site.layer_label), tl.zero_ablate())
+edited.replay()
+
+assert not torch.allclose(clean.layer_list[-1].activation, edited.layer_list[-1].activation)
+```
+
+Key intervention entry points:
+
+- Select sites with `tl.label`, `tl.func`, `tl.module`, `tl.contains`, `tl.where`,
+  and `tl.in_module`; selectors can be composed with `&` and `|` for discovery.
+- Use helpers such as `tl.zero_ablate`, `tl.mean_ablate`, `tl.resample_ablate`,
+  `tl.steer`, `tl.scale`, `tl.clamp`, `tl.noise`, `tl.project_onto`,
+  `tl.project_off`, `tl.swap_with`, and `tl.splice_module`.
+- Use `log.fork()` for branched experiments, then `log.set(...)`,
+  `log.attach_hooks(...)`, `log.do(...)`, or top-level `tl.do(log, ...)`.
+- Use `log.replay()` for graph-stable post-hoc edits and `log.rerun(model, x)`
+  when the model should execute again.
+- Compare related logs with `tl.bundle(...)`.
+- Publish recipes with `log.save_intervention(path, level="portable")`; the
+  saved `.tlspec/` directory contains JSON metadata plus tensor sidecars.
+
+Worked examples live in [`examples/intervention/`](examples/intervention/README.md).
+Additional docs cover [visibility classes](docs/visibility.md),
+[intervention explainers](docs/intervention_explainers.md), the
+[intervention API](docs/intervention_api.md), and cohort migration tables in
+[`docs/migration/`](docs/migration/).
 
 ## Installation
 
@@ -208,6 +278,27 @@ print(model_history.layer_labels)
 '''
 ```
 
+You can also keep raw activations while saving a transformed copy for analysis. For example, this stores each model
+output in `activation` (also available as `tensor`) and stores a channel-averaged copy in `transformed_activation`:
+
+```python
+model_history = tl.log_forward_pass(
+    alexnet,
+    x,
+    layers_to_save="all",
+    activation_postfunc=lambda t: t.mean(dim=(2, 3)) if t.ndim == 4 else t,
+)
+
+layer = model_history["conv2d_3_7"]
+print(layer.activation.shape)                # raw model output
+print(layer.transformed_activation.shape)    # postfunc output
+print(layer.tensor_shape)                    # metadata for the raw output
+print(layer.transformed_activation_shape)    # metadata for the transformed output
+```
+
+By default TorchLens stores both tensors when `activation_postfunc` is set. To keep only the transformed tensor while
+still retaining raw shape/dtype/memory metadata, pass `save_raw_activation=False`.
+
 ### Saving and Loading
 
 ```python
@@ -236,6 +327,61 @@ streamed_log = tl.log_forward_pass(
     keep_activations_in_memory=False,
 )
 ```
+
+## Fast activation recording (`tl.fastlog`)
+
+Use `tl.fastlog` when you already know the events you want and do not need a full
+`ModelLog`. `log_forward_pass()` remains the exhaustive path for graph metadata,
+visualization, validation, and faithful reconstruction of the forward pass. Fastlog is
+the lighter path for predicate-selected activations across one pass or many repeated
+rollouts.
+
+```python
+keep_op = lambda ctx: ctx.kind == "op" and ctx.layer_type == "relu"
+recording = tl.fastlog.record(model, x, keep_op=keep_op)
+print(recording.summary())
+```
+
+Predicates receive `RecordContext` objects with operation/module fields and bounded
+recent history, so they can express rules such as "ReLUs after convolutions" or "outputs
+of every `Linear` module." Captures can stay in RAM, stream synchronously to a fastlog
+directory bundle, or mirror to both. RAM mode is training-compatible via
+`CaptureSpec(keep_grad=True)`.
+
+The tutorial notebook at `notebooks/fastlog_tutorial.ipynb` walks through one-shot
+recording, many-rollout `Recorder` sessions, disk load/recovery, graph previews,
+`dry_run()` predicate iteration, downcasting with `CaptureSpec`, and the v1 support
+boundaries.
+
+## Training from saved activations
+
+Use `train_mode=True` when a saved activation is part of a loss that will feed
+`backward()`. TorchLens keeps saved floating tensors graph-connected in RAM, so you can
+train with auxiliary losses, frozen-backbone probes, multi-tap losses, or
+teacher-student activation distillation.
+
+```python
+model_log = tl.log_forward_pass(
+    model,
+    x,
+    layers_to_save=["block1"],
+    train_mode=True,
+)
+aux_loss = model_log["block1"].activation.square().mean()
+aux_loss.backward()
+```
+
+The same knob is available on `ModelLog.save_new_activations()` for same-graph replay
+and on `tl.fastlog.record()` / `tl.fastlog.Recorder()` for predicate-selected RAM
+captures. Slow/replay training capture rejects disk activation saves because detached
+disk payloads cannot carry autograd. For inspection persistence, capture in RAM first
+and then call `tl.save(model_log, path)` after the training use. Existing code that
+explicitly uses `detach_saved_tensors=False` continues to work, but `train_mode=True`
+adds training guardrails: frozen parameter settings are preserved, disk/inference
+misconfigurations fail early, and fastlog defaults can be promoted to keep-grad capture.
+
+See `notebooks/training_tutorial.ipynb` for executable examples of the supported
+training patterns and gotchas.
 
 ## Security
 
@@ -304,6 +450,18 @@ FuncCallLocation:
           return x
 '''
 ```
+
+## Known limitations / unsupported contexts
+
+TorchLens is not compatible with `torch.compile`'d models, TorchScript, or
+`torch.export` (the forward pass doesn't run as ordinary Python, so our
+wrappers never see the ops). It also has specific behaviors around FSDP,
+sparse tensors, meta tensors, quantization, and `torch.func.vmap`. In
+each case `log_forward_pass` either raises a clear error or emits a
+targeted warning so you never get silent wrong results.
+
+See **[docs/LIMITATIONS.md](docs/LIMITATIONS.md)** for the full matrix:
+what fails, what works, and the recommended workaround for each context.
 
 ## Planned Features
 

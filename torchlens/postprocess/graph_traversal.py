@@ -10,11 +10,10 @@ Step 4 (_mark_input_output_distances): Optional forward/backward BFS recording
 """
 
 from collections import OrderedDict
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, cast
 
 import torch
 
-from .._state import pause_logging
 from ..utils.display import identity
 from ..utils.rng import log_current_rng_states
 from ..utils.tensor_utils import safe_copy, safe_to, tensor_nanequal
@@ -26,7 +25,7 @@ if TYPE_CHECKING:
 
 
 def _add_output_layers(
-    self: "ModelLog", output_tensors: List[torch.Tensor], output_addresses: List[str]
+    self: "ModelLog", output_tensors: list[torch.Tensor], output_addresses: list[str]
 ) -> None:
     """Step 1: Add dedicated output nodes to the graph.
 
@@ -44,7 +43,7 @@ def _add_output_layers(
     new_output_layers = []
     for i, output_layer_label in enumerate(self.output_layers):
         output_node = self[output_layer_label]
-        new_output_node = output_node.copy()
+        new_output_node = cast(LayerPassLog, output_node.copy())
         new_output_node.layer_type = "output"
         new_output_node.is_output_layer = True
         new_output_node.is_input_layer = False
@@ -59,13 +58,21 @@ def _add_output_layers(
         if output_addresses[i] != "":
             output_address += f".{output_addresses[i]}"
         new_output_node.io_role = output_address
+        output_path_meta = getattr(self, "_output_container_specs_by_raw_label", {}).get(
+            output_node.tensor_label_raw
+        )
+        if output_path_meta is not None:
+            new_output_node.output_path = output_path_meta[0]
+            new_output_node.container_spec = output_path_meta[1]
 
         # Fix function information:
 
         new_output_node.func_applied = identity
         new_output_node.func_name = "none"
         new_output_node.func_call_stack = _get_func_call_stack(
-            self.num_context_lines, source_loading_enabled=self.save_source_context
+            self.num_context_lines,
+            source_loading_enabled=self.save_source_context,
+            disable_col_offset=False,
         )
         new_output_node.func_time = 0
         new_output_node.func_rng_states = (
@@ -79,8 +86,12 @@ def _add_output_layers(
         new_output_node.func_kwargs_non_tensor = {}
         new_output_node.func_non_tensor_args = []
         new_output_node.grad_fn_name = None
-        new_output_node.captured_args = [output_tensors[i]]
-        new_output_node.captured_kwargs = {}
+        new_output_node.autograd_saved_bytes = None
+        new_output_node.autograd_saved_tensor_count = None
+        new_output_node.bytes_delta_at_call = 0
+        new_output_node.bytes_peak_at_call = 0
+        new_output_node._internal_set("captured_args", [output_tensors[i]])
+        new_output_node._internal_set("captured_kwargs", {})
 
         # Strip any params:
 
@@ -121,6 +132,7 @@ def _add_output_layers(
             "args": {0: output_node.tensor_label_raw},
             "kwargs": {},
         }
+        new_output_node.edge_uses = []
 
         # Clear func_config on synthetic output nodes:
         new_output_node.func_config = {}
@@ -141,15 +153,30 @@ def _add_output_layers(
             actual_output = safe_copy(output_tensors[i])
             if output_node.output_device not in [str(actual_output.device), "same"]:
                 actual_output = safe_to(actual_output, output_node.output_device)
+            actual_output_raw = actual_output
             if self.activation_postfunc is not None:
-                with pause_logging():
-                    actual_output = self.activation_postfunc(actual_output)
-            if not tensor_nanequal(actual_output, output_node.activation):
+                actual_output = output_node._apply_postfunc(
+                    actual_output,
+                    self.activation_postfunc,
+                    postfunc_kind="activation",
+                    streaming_active=False,
+                )
+            comparison_output = (
+                output_node.activation
+                if output_node.activation is not None
+                else output_node.transformed_activation
+            )
+            if comparison_output is not None and not tensor_nanequal(
+                actual_output, comparison_output
+            ):
                 output_node.children_tensor_versions[new_output_node.tensor_label_raw] = (
                     actual_output
                 )
                 output_node.has_child_tensor_variations = True
-                new_output_node.activation = actual_output
+                if output_node.activation is None:
+                    new_output_node._internal_set("transformed_activation", actual_output)
+                else:
+                    new_output_node._internal_set("activation", actual_output_raw)
 
         # Change original output node:
 
@@ -163,7 +190,7 @@ def _add_output_layers(
     self.output_layers = new_output_layers
 
 
-def _find_output_ancestors(self) -> None:
+def _find_output_ancestors(self: "ModelLog") -> None:
     """Step 2: Mark every node that is an ancestor of an output node.
 
     Uses a LIFO stack (DFS) starting from output nodes. For each node popped,
@@ -195,7 +222,7 @@ def _find_output_ancestors(self) -> None:
                 node_stack.append(parent_node_label)
 
 
-def _remove_orphan_nodes(self) -> None:
+def _remove_orphan_nodes(self: "ModelLog") -> None:
     """Step 3: Remove orphan nodes unreachable from both inputs and outputs.
 
     Floods BIDIRECTIONALLY from input and output nodes simultaneously. A node is
@@ -223,6 +250,7 @@ def _remove_orphan_nodes(self) -> None:
             if next_label not in nodes_seen:
                 node_stack.append(next_label)
 
+    nodes_seen = _expand_seen_nodes_to_complete_func_call_groups(self, nodes_seen)
     orphan_nodes = orig_nodes - nodes_seen
     self.orphan_layers = list(orphan_nodes)
 
@@ -240,7 +268,41 @@ def _remove_orphan_nodes(self) -> None:
     self._raw_layer_dict = new_layer_dict
 
 
-def _mark_input_output_distances(self) -> None:
+def _expand_seen_nodes_to_complete_func_call_groups(
+    self: "ModelLog", nodes_seen: set[str]
+) -> set[str]:
+    """Add raw-label siblings for any surviving ``func_call_id`` group.
+
+    Parameters
+    ----------
+    nodes_seen:
+        Raw labels reachable from the input/output flood.
+
+    Returns
+    -------
+    set[str]
+        Reachable raw labels expanded so multi-output wrapper calls are kept
+        atomically.
+    """
+
+    func_groups: dict[int, set[str]] = {}
+    for raw_label in self._raw_layer_labels_list:
+        func_call_id = getattr(self._raw_layer_dict[raw_label], "func_call_id", None)
+        if func_call_id is not None:
+            func_groups.setdefault(func_call_id, set()).add(raw_label)
+
+    expanded_seen = set(nodes_seen)
+    changed = True
+    while changed:
+        changed = False
+        for raw_labels in func_groups.values():
+            if expanded_seen.intersection(raw_labels) and not raw_labels.issubset(expanded_seen):
+                expanded_seen.update(raw_labels)
+                changed = True
+    return expanded_seen
+
+
+def _mark_input_output_distances(self: "ModelLog") -> None:
     """Step 4: Compute min/max hop distances from inputs and outputs.
 
     Runs two unidirectional floods: forward from inputs (following child_layers)
@@ -256,7 +318,7 @@ def _mark_input_output_distances(self) -> None:
     _flood_graph_from_input_or_output_nodes(self, "output")
 
 
-def _flood_graph_from_input_or_output_nodes(self, mode: str) -> None:
+def _flood_graph_from_input_or_output_nodes(self: "ModelLog", mode: str) -> None:
     """Flood the graph from input or output nodes, tracking min/max distance.
 
     Traverses unidirectionally from starting nodes (input or output), recording
@@ -363,14 +425,14 @@ def _update_node_distance_vals(
 
 
 def _check_whether_to_add_node_to_flood_stack(
-    self,
+    self: "ModelLog",
     candidate_node_label: str,
     orig_node_label: str,
     nodes_since_start: int,
     min_field: str,
     max_field: str,
     layer_logging_field: str,
-    nodes_seen: set,
+    nodes_seen: set[str],
 ) -> bool:
     """Decide whether to push a candidate node onto the flood stack.
 
@@ -401,7 +463,7 @@ def _check_whether_to_add_node_to_flood_stack(
     return False
 
 
-def _log_internally_terminated_tensor(self, tensor_label: str) -> None:
+def _log_internally_terminated_tensor(self: "ModelLog", tensor_label: str) -> None:
     """Mark a tensor as terminated inside the model (no children reaching an output node)."""
     layer_entry = self[tensor_label]
     layer_entry.is_internally_terminated = True

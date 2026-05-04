@@ -181,7 +181,10 @@ class ScopeEntry:
     branch_intervals: List[BranchInterval] = field(default_factory=list)
 
     def query_intervals(
-        self, line: int, col: Optional[int]
+        self,
+        line: int,
+        col: Optional[int],
+        degraded_branch_hints: Optional[Dict[ConditionalKey, str]] = None,
     ) -> List[Tuple[ConditionalKey, str, int]]:
         """Return all branch arms containing a point in this scope.
 
@@ -192,13 +195,18 @@ class ScopeEntry:
         col:
             Source column for the query point. ``None`` activates degraded
             line-only matching.
+        degraded_branch_hints:
+            Optional runtime branch hints used only in degraded line-only mode
+            to resolve same-line ambiguous branch arms for conditionals whose
+            executed branch is already known.
 
         Returns
         -------
         List[Tuple[ConditionalKey, str, int]]
             Matching ``(conditional_key, branch_kind, nesting_depth)`` tuples
             sorted outermost-to-innermost. Ambiguous same-line matches for a
-            single conditional are dropped in degraded mode.
+            single conditional are dropped in degraded mode unless a runtime
+            branch hint safely selects one arm.
         """
 
         matches: List[BranchInterval] = []
@@ -215,9 +223,16 @@ class ScopeEntry:
                 grouped.setdefault(interval.conditional_key, []).append(interval)
 
             filtered: List[BranchInterval] = []
-            for intervals in grouped.values():
+            for conditional_key, intervals in grouped.items():
                 if len(intervals) == 1:
                     filtered.extend(intervals)
+                elif degraded_branch_hints is not None:
+                    hinted_branch_kind = degraded_branch_hints.get(conditional_key)
+                    filtered.extend(
+                        interval
+                        for interval in intervals
+                        if interval.branch_kind == hinted_branch_kind
+                    )
             matches = filtered
 
         matches.sort(key=lambda item: item.nesting_depth)
@@ -406,13 +421,19 @@ def classify_bool(filename: str, line: int, col: Optional[int] = None) -> BoolCl
     return BoolClassification("unknown", None, None, None)
 
 
-def attribute_op(func_call_stack: List[FuncCallLocation]) -> List[Tuple[ConditionalKey, str]]:
+def attribute_op(
+    func_call_stack: List[FuncCallLocation],
+    degraded_branch_hints: Optional[Dict[ConditionalKey, str]] = None,
+) -> List[Tuple[ConditionalKey, str]]:
     """Attribute an operation to enclosing conditional branch arms.
 
     Parameters
     ----------
     func_call_stack:
         Runtime call stack, ordered shallowest-to-deepest.
+    degraded_branch_hints:
+        Optional runtime branch hints used only when column offsets are
+        unavailable and line-only matching sees both arms of one conditional.
 
     Returns
     -------
@@ -436,7 +457,9 @@ def attribute_op(func_call_stack: List[FuncCallLocation]) -> List[Tuple[Conditio
             continue
 
         for conditional_key, branch_kind, _depth in scope.query_intervals(
-            frame.line_number, frame.col_offset
+            frame.line_number,
+            frame.col_offset,
+            degraded_branch_hints,
         ):
             entry = (conditional_key, branch_kind)
             if not branch_stack or branch_stack[-1] != entry:

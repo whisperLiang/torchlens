@@ -31,7 +31,10 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from ..errors._base import ValidationError
 
 if TYPE_CHECKING:
     from ..data_classes.layer_log import LayerLog
@@ -40,16 +43,45 @@ if TYPE_CHECKING:
     from ..data_classes.module_log import ModuleLog
 
 
-class MetadataInvariantError(ValueError):
+class MetadataInvariantError(ValidationError, ValueError):
     """Raised when a metadata invariant check fails.
 
     Embeds the check name (e.g., ``"graph_topology"``) in the message prefix
     and stores it as an attribute for programmatic inspection in tests.
     """
 
-    def __init__(self, check_name: str, message: str):
+    def __init__(self, check_name: str, message: str) -> None:
+        """Initialize a metadata invariant failure.
+
+        Parameters
+        ----------
+        check_name:
+            Invariant check group name.
+        message:
+            Human-readable failure detail.
+        """
+
         super().__init__(f"[{check_name}] {message}")
         self.check_name = check_name
+
+
+@dataclass(frozen=True)
+class InvariantResult:
+    """Structured result for an individual metadata invariant.
+
+    Attributes
+    ----------
+    name:
+        Invariant check name.
+    passed:
+        Whether the invariant passed.
+    message:
+        Optional diagnostic message.
+    """
+
+    name: str
+    passed: bool
+    message: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +128,122 @@ def check_metadata_invariants(model_log: "ModelLog") -> bool:
     _check_graph_connectivity(model_log)  # P
     _check_module_containment_logic(model_log)  # Q
     _check_lookup_key_consistency(model_log)  # R
+    check_func_call_id_invariant(model_log)  # S
     return True
+
+
+def check_func_call_id_invariant(model_log: "ModelLog") -> InvariantResult:
+    """Invariant S: func_call_id consistency.
+
+    For intervention-ready logs, every non-synthetic function output must have a
+    ``func_call_id``. Outputs from the same call must agree on function identity,
+    call stack, captured templates, and container spec; each output in the group
+    must have a unique ``output_path``; and same-call groups must not span
+    incompatible pass labels. Synthetic input, output, and buffer nodes are
+    exempt.
+
+    Parameters
+    ----------
+    model_log:
+        Postprocessed model log to validate.
+
+    Returns
+    -------
+    InvariantResult
+        Passing result when no inconsistency is found.
+    """
+
+    name = "func_call_id_consistency"
+    if not getattr(model_log, "intervention_ready", False):
+        return InvariantResult(name=name, passed=True)
+
+    groups: dict[int, list["LayerPassLog"]] = defaultdict(list)
+    for layer in model_log.layer_list:
+        if _is_func_call_id_exempt(layer):
+            continue
+        if layer.func_call_id is None:
+            raise MetadataInvariantError(
+                name,
+                f"Layer {layer.layer_label} has no func_call_id",
+            )
+        groups[layer.func_call_id].append(layer)
+
+    for func_call_id, group in groups.items():
+        reference = group[0]
+        expected_signature = _func_call_group_signature(reference)
+        output_paths = []
+        pass_nums = set()
+        no_pass_labels = set()
+        for layer in group:
+            if _func_call_group_signature(layer) != expected_signature:
+                raise MetadataInvariantError(
+                    name,
+                    f"func_call_id {func_call_id} has incompatible call metadata",
+                )
+            output_path = tuple(getattr(layer, "output_path", ()) or ())
+            if output_path in output_paths:
+                raise MetadataInvariantError(
+                    name,
+                    f"func_call_id {func_call_id} has duplicate output_path {output_path!r}",
+                )
+            output_paths.append(output_path)
+            pass_nums.add(layer.pass_num)
+            no_pass_labels.add(layer.layer_label_no_pass)
+        if len(pass_nums) > 1 and len(no_pass_labels) > 1:
+            raise MetadataInvariantError(
+                name,
+                f"func_call_id {func_call_id} spans incompatible pass labels",
+            )
+    return InvariantResult(name=name, passed=True)
+
+
+def _is_func_call_id_exempt(layer: "LayerPassLog") -> bool:
+    """Return whether a layer is exempt from Invariant S.
+
+    Parameters
+    ----------
+    layer:
+        Layer pass to classify.
+
+    Returns
+    -------
+    bool
+        Whether the layer is synthetic input/output/buffer metadata.
+    """
+
+    if layer.is_input_layer or layer.is_output_layer or layer.is_buffer_layer:
+        return True
+    func_applied = getattr(layer, "func_applied", None)
+    func_name = str(getattr(layer, "func_name", "")).lower()
+    return func_applied in {"input", "output", "buffer"} or func_name in {
+        "input",
+        "output",
+        "buffer",
+        "none",
+    }
+
+
+def _func_call_group_signature(layer: "LayerPassLog") -> tuple[object, ...]:
+    """Return comparable same-call metadata for Invariant S.
+
+    Parameters
+    ----------
+    layer:
+        Layer pass to summarize.
+
+    Returns
+    -------
+    tuple[object, ...]
+        Stable comparison tuple.
+    """
+
+    return (
+        layer.func_name,
+        tuple(repr(location) for location in (layer.func_call_stack or ())),
+        repr(layer.captured_arg_template),
+        repr(layer.captured_kwarg_template),
+        repr(layer.container_spec),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -399,8 +546,8 @@ def _check_layer_pass_log_fields(ml: "ModelLog") -> None:
             if not lpl.func_name:
                 raise MetadataInvariantError(name, f"Layer {label}: func_name is empty")
 
-        # Operation numbering (input/buffer layers have operation_num=0)
-        if not (lpl.is_input_layer or lpl.is_buffer_layer):
+        # Operation numbering (input/buffer/output bookkeeping layers have operation_num=0)
+        if not (lpl.is_input_layer or lpl.is_buffer_layer or lpl.is_output_layer):
             if lpl.operation_num is not None and lpl.operation_num < 1:
                 raise MetadataInvariantError(
                     name, f"Layer {label}: operation_num={lpl.operation_num} < 1"
@@ -786,49 +933,7 @@ def _check_conditional_invariants(ml: "ModelLog") -> None:
                             f"but conditional_arm_edges[{(conditional_id, branch_kind)}]={model_edges}",
                         )
 
-    # Invariant 2: derived views are exact projections of the primary structures.
-    expected_then_edges = [
-        (parent_label, child_label)
-        for (conditional_id, branch_kind), edge_list in ml.conditional_arm_edges.items()
-        if branch_kind == "then"
-        for parent_label, child_label in edge_list
-    ]
-    if ml.conditional_then_edges != expected_then_edges:
-        _fail_conditional_invariant(
-            name,
-            2,
-            f"ModelLog.conditional_then_edges={ml.conditional_then_edges} != "
-            f"expected projection {expected_then_edges}",
-        )
-
-    expected_elif_edges = [
-        (conditional_id, int(branch_kind.split("_", 1)[1]), parent_label, child_label)
-        for (conditional_id, branch_kind), edge_list in ml.conditional_arm_edges.items()
-        if branch_kind.startswith("elif_")
-        for parent_label, child_label in edge_list
-    ]
-    if ml.conditional_elif_edges != expected_elif_edges:
-        _fail_conditional_invariant(
-            name,
-            2,
-            f"ModelLog.conditional_elif_edges={ml.conditional_elif_edges} != "
-            f"expected projection {expected_elif_edges}",
-        )
-
-    expected_else_edges = [
-        (conditional_id, parent_label, child_label)
-        for (conditional_id, branch_kind), edge_list in ml.conditional_arm_edges.items()
-        if branch_kind == "else"
-        for parent_label, child_label in edge_list
-    ]
-    if ml.conditional_else_edges != expected_else_edges:
-        _fail_conditional_invariant(
-            name,
-            2,
-            f"ModelLog.conditional_else_edges={ml.conditional_else_edges} != "
-            f"expected projection {expected_else_edges}",
-        )
-
+    # Invariant 2: per-layer derived views are exact projections of the primary structures.
     for layer in ml.layer_list:
         expected_then_children, expected_elif_children, expected_else_children = (
             _expected_layer_pass_child_views(layer.cond_branch_children_by_cond)
@@ -941,30 +1046,15 @@ def _check_conditional_invariants(ml: "ModelLog") -> None:
                 f"ModelLog.conditional_branch_edges contains missing child label {child_label!r} "
                 f"for parent {parent_label!r}",
             )
-    for parent_label, child_label in ml.conditional_then_edges:
-        if child_label not in valid_child_labels:
-            _fail_conditional_invariant(
-                name,
-                3,
-                f"ModelLog.conditional_then_edges contains missing child label {child_label!r} "
-                f"for parent {parent_label!r}",
-            )
-    for conditional_id, elif_index, parent_label, child_label in ml.conditional_elif_edges:
-        if child_label not in valid_child_labels:
-            _fail_conditional_invariant(
-                name,
-                3,
-                f"ModelLog.conditional_elif_edges contains missing child label {child_label!r} "
-                f"for edge {(conditional_id, elif_index, parent_label)}",
-            )
-    for conditional_id, parent_label, child_label in ml.conditional_else_edges:
-        if child_label not in valid_child_labels:
-            _fail_conditional_invariant(
-                name,
-                3,
-                f"ModelLog.conditional_else_edges contains missing child label {child_label!r} "
-                f"for edge {(conditional_id, parent_label)}",
-            )
+    for (conditional_id, branch_kind), edge_list in ml.conditional_arm_edges.items():
+        for parent_label, child_label in edge_list:
+            if child_label not in valid_child_labels:
+                _fail_conditional_invariant(
+                    name,
+                    3,
+                    f"ModelLog.conditional_arm_edges contains missing child label "
+                    f"{child_label!r} for edge {(conditional_id, branch_kind, parent_label)}",
+                )
 
     # Invariant 4: bool classification fields are mutually consistent.
     for layer in ml.layer_list:
@@ -1724,7 +1814,7 @@ def _check_loop_detection_invariants(ml: "ModelLog") -> None:
 
     # Build same-layer groups from the authoritative recurrent_group lists
     # Key: frozenset of labels, Value: list of LayerPassLogs in the group
-    groups_seen: dict[frozenset, list] = {}
+    groups_seen: dict[frozenset[str], list[str]] = {}
 
     for lpl in ml.layer_list:
         slo = lpl.recurrent_group
@@ -1825,7 +1915,7 @@ def _check_loop_detection_invariants(ml: "ModelLog") -> None:
     # different passes).  The func_name is included in the grouping key
     # because different operations (e.g., isinf, expand, nantonum) can consume
     # the same parameter tensor without being the same logical layer.
-    param_groups: dict[tuple, list] = defaultdict(list)
+    param_groups: dict[tuple[str, tuple[str, ...]], list[LayerPassLog]] = defaultdict(list)
     for lpl in ml.layer_list:
         if lpl.uses_params and lpl.parent_param_barcodes:
             key = (lpl.func_name, tuple(sorted(lpl.parent_param_barcodes)))
@@ -2057,8 +2147,8 @@ def _check_module_containment_logic(ml: "ModelLog") -> None:
         addr = mod_log.address
 
         # Address tree acyclicity: walk address_parent to root
-        visited = set()
-        current = addr
+        visited: set[str] = set()
+        current: str | None = addr
         while current is not None:
             if current in visited:
                 raise MetadataInvariantError(

@@ -9,7 +9,7 @@ import torch
 
 from .replay_engine import (
     ReplaySession,
-    _collect_output_indices,
+    _get_output_retain_nodes,
     _looks_like_boundary_payload,
     _pack_boundary_payload,
     _prepare_passthrough_seed_map,
@@ -74,7 +74,7 @@ def train_partitioned(
             seeded_values=seed_map,
             preserve_rng=preserve_rng,
             differentiable=True,
-            retain_nodes=set(plan.output_node_indices) | _collect_output_indices(plan.output_specs),
+            retain_nodes=_get_output_retain_nodes(plan),
             return_intermediates=False,
         )
         output = _reconstruct_outputs(plan, computed)
@@ -85,6 +85,7 @@ def train_partitioned(
         return {"output": output, "loss": loss}
 
     if input_mode == "raw":
+        should_snapshot_boundary = _resolve_boundary_snapshot(plan, split, boundary_snapshot)
         prefix_seed_map = _prepare_differentiable_seed_map(
             plan, inputs, input_kwargs, runtime_device
         )
@@ -109,7 +110,7 @@ def train_partitioned(
                 split,
                 boundary_tensors,
                 runtime_device,
-                snapshot=_resolve_boundary_snapshot(plan, split, boundary_snapshot),
+                snapshot=should_snapshot_boundary,
             )
             if return_boundary
             else None
@@ -130,7 +131,7 @@ def train_partitioned(
             seeded_values=suffix_seed_map,
             preserve_rng=preserve_rng,
             differentiable=True,
-            retain_nodes=set(plan.output_node_indices) | _collect_output_indices(plan.output_specs),
+            retain_nodes=_get_output_retain_nodes(plan),
             return_intermediates=False,
         )
         prefix_computed.update(suffix_computed)
@@ -152,13 +153,14 @@ def train_partitioned(
         return result
 
     if input_mode == "boundary":
+        should_snapshot_boundary = _resolve_boundary_snapshot(plan, split, boundary_snapshot)
         boundary_inputs, raw_inputs, boundary_input_kwargs = _split_boundary_mode_inputs(inputs)
         boundary_seed_map, boundary_tensors = _prepare_boundary_seed_map_differentiable(
             plan,
             split,
             boundary_inputs,
             runtime_device,
-            clone_boundary=_resolve_boundary_snapshot(plan, split, boundary_snapshot),
+            clone_boundary=should_snapshot_boundary,
         )
         boundary_payload = (
             _pack_boundary_payload(
@@ -166,7 +168,7 @@ def train_partitioned(
                 split,
                 boundary_tensors,
                 runtime_device,
-                snapshot=_resolve_boundary_snapshot(plan, split, boundary_snapshot),
+                snapshot=should_snapshot_boundary,
             )
             if return_boundary
             else None
@@ -185,7 +187,7 @@ def train_partitioned(
             seeded_values=boundary_seed_map,
             preserve_rng=preserve_rng,
             differentiable=True,
-            retain_nodes=set(plan.output_node_indices) | _collect_output_indices(plan.output_specs),
+            retain_nodes=_get_output_retain_nodes(plan),
             return_intermediates=False,
         )
         output = _reconstruct_outputs(plan, suffix_computed)

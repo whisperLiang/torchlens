@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
-from .replay_plan import ExecutionPlan, FrontierSplit
+from .replay_plan import ExecNode, ExecutionPlan, FrontierSplit
 from .replay_utils import (
     aggregate_node_flops,
     aggregate_node_memory,
@@ -13,6 +13,42 @@ from .replay_utils import (
 )
 
 UNBOUNDED_ALL_FRONTIER_MAX_CANDIDATES = 18
+_ALIAS_PROPAGATING_FUNC_NAMES = {
+    "__getitem__",
+    "_reshape_alias",
+    "as_strided",
+    "chunk",
+    "contiguous",
+    "diagonal",
+    "dsplit",
+    "expand",
+    "expand_as",
+    "flatten",
+    "hsplit",
+    "movedim",
+    "moveaxis",
+    "narrow",
+    "permute",
+    "real",
+    "reshape",
+    "reshape_as",
+    "select",
+    "split",
+    "squeeze",
+    "swapaxes",
+    "swapdims",
+    "t",
+    "tensor_split",
+    "transpose",
+    "unbind",
+    "unflatten",
+    "unsqueeze",
+    "view",
+    "view_as",
+    "view_as_complex",
+    "view_as_real",
+    "vsplit",
+}
 
 
 def enumerate_frontier_splits(
@@ -485,6 +521,11 @@ def _build_frontier_split(
 
     prefix_flops = aggregate_node_flops(plan.nodes, prefix_nodes)
     suffix_flops = aggregate_node_flops(plan.nodes, suffix_nodes)
+    suffix_may_mutate_boundary = _suffix_may_mutate_boundary(
+        plan,
+        boundary,
+        suffix_nodes,
+    )
 
     return FrontierSplit(
         split_id=split_id,
@@ -507,6 +548,7 @@ def _build_frontier_split(
             "suffix_flops_forward": suffix_flops["flops_forward"],
             "suffix_flops_backward": suffix_flops["flops_backward"],
             "suffix_flops_total": suffix_flops["flops_total"],
+            "suffix_may_mutate_boundary": suffix_may_mutate_boundary,
             "boundary_tensor_memory": aggregate_node_memory(plan.nodes, boundary),
             "boundary_node_count": len(boundary),
         },
@@ -598,6 +640,27 @@ def _compute_suffix_execution_nodes(
                 frontier.append(parent_idx)
 
     return sorted(suffix_nodes)
+
+
+def _suffix_may_mutate_boundary(
+    plan: ExecutionPlan,
+    boundary: Sequence[int],
+    suffix_nodes: Sequence[int],
+) -> bool:
+    boundary_aliases = set(boundary)
+    for idx in suffix_nodes:
+        node = plan.nodes[idx]
+        aliases_boundary = bool(boundary_aliases.intersection(node.parents))
+        if node.is_inplace and aliases_boundary:
+            return True
+        if aliases_boundary and _node_may_alias_parent(node):
+            boundary_aliases.add(idx)
+    return False
+
+
+def _node_may_alias_parent(node: ExecNode) -> bool:
+    func_name = node.meta.get("func_name")
+    return isinstance(func_name, str) and func_name in _ALIAS_PROPAGATING_FUNC_NAMES
 
 
 def _forward_reachable(

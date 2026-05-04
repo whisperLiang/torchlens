@@ -13,7 +13,7 @@ from torch import nn
 
 pytest.importorskip("safetensors")
 
-from torchlens import cleanup_tmp, log_forward_pass
+from torchlens import TorchLensPostfuncError, cleanup_tmp, log_forward_pass
 from torchlens._io import TorchLensIOError
 from torchlens._io.manifest import Manifest
 from torchlens.data_classes.model_log import ModelLog
@@ -189,7 +189,7 @@ def test_streaming_mid_pass_exception_marks_partial_tmp_dir(tmp_path: Path) -> N
         raise RuntimeError("boom")
 
     model, inputs = _make_streaming_model()
-    with pytest.raises(TorchLensIOError, match="Streaming activation save failed"):
+    with pytest.raises(TorchLensPostfuncError, match="activation_postfunc raised"):
         log_forward_pass(
             model,
             inputs,
@@ -324,7 +324,10 @@ def test_cleanup_tmp_removes_partial_dirs_and_rejects_symlinks(tmp_path: Path) -
     target_dir = tmp_path / "real_tmp_dir"
     target_dir.mkdir()
     symlink_dir = tmp_path / f"{bundle_path.name}.tmp.symlink"
-    symlink_dir.symlink_to(target_dir, target_is_directory=True)
+    try:
+        symlink_dir.symlink_to(target_dir, target_is_directory=True)
+    except OSError:
+        pytest.skip("current environment cannot create directory symlinks")
 
     with pytest.raises(TorchLensIOError, match="symlink temp directory"):
         cleanup_tmp(bundle_path)

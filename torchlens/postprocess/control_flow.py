@@ -27,6 +27,7 @@ import torch
 
 from ..data_classes.layer_pass_log import LayerPassLog
 from ..utils.display import identity
+from ..utils.tensor_utils import safe_copy
 from . import ast_branches
 
 if TYPE_CHECKING:
@@ -49,10 +50,31 @@ def _mark_conditional_branches(self: "ModelLog") -> None:
     4. Backward-flood IF edges from branch-participating bools only.
     5. Attribute executed ops and forward edges to conditional branch arms.
     6. Rebuild compatibility views derived from the new primary structures.
+
+    Performance fast-path: when no terminal scalar bools were captured, the
+    model has no conditional branches the pipeline can attribute, so we skip
+    the AST file indexing, per-bool classification, and per-op
+    ``attribute_op()`` work. All ModelLog-level conditional collections are
+    already initialized empty in :meth:`ModelLog.__init__`, and per-layer
+    conditional fields are initialized to their empty defaults during
+    capture (see ``capture/output_tensors.py``). The fast-path is verified
+    against the slow-path defaults via ``tests/test_perf_bundle.py``.
     """
+
+    if _can_fast_skip_step5(self):
+        return
 
     file_indexes = _build_file_indexes(self)
     conditional_keys, bool_classifications = _classify_bool_layers(self)
+    # Defensive guard: if no terminal bool produced a structural conditional
+    # key, attribution will produce zero edges, matching the fast-skip output.
+    # This invariant lets future refactors of the bool detector trip an
+    # explicit assertion rather than silently make the fast-path miss work.
+    if not bool_classifications:
+        assert not conditional_keys, (
+            "Internally-terminated bool layers were absent but conditional "
+            "keys were produced; the fast-skip precondition is stale."
+        )
     events_by_key = _materialize_conditional_events(
         self,
         file_indexes,
@@ -62,6 +84,38 @@ def _mark_conditional_branches(self: "ModelLog") -> None:
     _mark_conditional_branches_if_backward_flood(self, bool_classifications)
     _attribute_branches_forward(self, events_by_key)
     _materialize_derived_views(self)
+
+
+def _can_fast_skip_step5(self: "ModelLog") -> bool:
+    """Return True when Step 5 has no work to do.
+
+    The slow path's only branch-attributing inputs are the ModelLog's
+    ``internally_terminated_bool_layers``: if no terminal scalar bool was
+    captured, ``_iter_terminal_scalar_bool_labels`` yields nothing, so
+    every downstream collection (events, edges, per-layer arm children)
+    would resolve to its empty default. Skipping the slow path is then
+    semantically equivalent to running it.
+
+    The function also checks the ModelLog-level conditional collections
+    (``conditional_events``, ``conditional_branch_edges``,
+    ``conditional_arm_edges``, ``conditional_edge_passes``). They are initialized empty in
+    :meth:`ModelLog.__init__`, and the slow path resets them on entry.
+    Any caller that pre-populated these would change the user-visible
+    output if we skipped, so we conservatively run the slow path in that
+    (pathological) case as well.
+    """
+
+    if self.internally_terminated_bool_layers:
+        return False
+    if self.conditional_events:
+        return False
+    if self.conditional_branch_edges:
+        return False
+    if self.conditional_arm_edges:
+        return False
+    if self.conditional_edge_passes:
+        return False
+    return True
 
 
 def _build_file_indexes(
@@ -287,12 +341,20 @@ def _attribute_branches_forward(
 
     conditional_arm_edges: Dict[Tuple[int, str], List[Tuple[str, str]]] = defaultdict(list)
     conditional_edge_passes: Dict[Tuple[str, str, int, str], List[int]] = defaultdict(list)
+    layer_order = {layer_label: index for index, layer_label in enumerate(self._raw_layer_labels_list)}
+    ifexp_branch_hints = _build_executed_ifexp_branch_hints(self, events_by_key, layer_order)
 
     for layer_label in self._raw_layer_labels_list:
         layer = self[layer_label]
+        degraded_branch_hints = {
+            conditional_key: branch_kind
+            for conditional_key, (branch_kind, bool_layer_index) in ifexp_branch_hints.items()
+            if bool_layer_index < layer_order[layer_label]
+        }
         layer.conditional_branch_stack = _translate_conditional_stack(
             layer.func_call_stack,
             events_by_key,
+            degraded_branch_hints,
         )
         layer.conditional_branch_depth = len(layer.conditional_branch_stack)
         layer.cond_branch_children_by_cond = {}
@@ -334,24 +396,6 @@ def _materialize_derived_views(self: "ModelLog") -> None:
         Model log being postprocessed.
     """
 
-    self.conditional_then_edges = [
-        (parent_label, child_label)
-        for (conditional_id, branch_kind), edge_list in self.conditional_arm_edges.items()
-        if branch_kind == "then"
-        for parent_label, child_label in edge_list
-    ]
-    self.conditional_elif_edges = [
-        (conditional_id, int(branch_kind.split("_")[1]), parent_label, child_label)
-        for (conditional_id, branch_kind), edge_list in self.conditional_arm_edges.items()
-        if branch_kind.startswith("elif_")
-        for parent_label, child_label in edge_list
-    ]
-    self.conditional_else_edges = [
-        (conditional_id, parent_label, child_label)
-        for (conditional_id, branch_kind), edge_list in self.conditional_arm_edges.items()
-        if branch_kind == "else"
-        for parent_label, child_label in edge_list
-    ]
     self.conditional_edge_passes = {
         key: sorted(set(pass_nums)) for key, pass_nums in self.conditional_edge_passes.items()
     }
@@ -444,6 +488,7 @@ def _build_conditional_record_lookup(
 def _translate_conditional_stack(
     func_call_stack: List["FuncCallLocation"],
     events_by_key: Dict[ast_branches.ConditionalKey, "ConditionalEvent"],
+    degraded_branch_hints: Optional[Dict[ast_branches.ConditionalKey, str]] = None,
 ) -> List[Tuple[int, str]]:
     """Translate a structural AST branch stack into dense conditional IDs.
 
@@ -453,6 +498,9 @@ def _translate_conditional_stack(
         Captured runtime call stack for one operation.
     events_by_key:
         Structural-to-dense conditional event lookup created in phase 5c.
+    degraded_branch_hints:
+        Optional runtime hints for same-line ternary attribution when the
+        interpreter cannot provide column offsets.
 
     Returns
     -------
@@ -462,15 +510,60 @@ def _translate_conditional_stack(
     """
 
     translated_stack: List[Tuple[int, str]] = []
-    for conditional_key, branch_kind in _attribute_op_with_scope_fallback(func_call_stack):
+    for conditional_key, branch_kind in _attribute_op_with_scope_fallback(
+        func_call_stack,
+        degraded_branch_hints,
+    ):
         if conditional_key not in events_by_key:
             continue
         translated_stack.append((events_by_key[conditional_key].id, branch_kind))
     return translated_stack
 
 
+def _build_executed_ifexp_branch_hints(
+    self: "ModelLog",
+    events_by_key: Dict[ast_branches.ConditionalKey, "ConditionalEvent"],
+    layer_order: Dict[str, int],
+) -> Dict[ast_branches.ConditionalKey, Tuple[str, int]]:
+    """Return runtime branch hints for ternaries whose bool value is known.
+
+    Parameters
+    ----------
+    self:
+        Model log being postprocessed.
+    events_by_key:
+        Structural-to-dense conditional event lookup created in phase 5c.
+    layer_order:
+        Raw layer label to execution-order index.
+
+    Returns
+    -------
+    Dict[ast_branches.ConditionalKey, Tuple[str, int]]
+        Structural conditional key to ``(executed_branch_kind, bool_layer_index)``.
+    """
+
+    branch_hints: Dict[ast_branches.ConditionalKey, Tuple[str, int]] = {}
+    for conditional_key, event in events_by_key.items():
+        if event.kind != "ifexp" or not event.bool_layers:
+            continue
+        bool_layer_label = min(
+            event.bool_layers,
+            key=lambda label: layer_order.get(label, len(layer_order)),
+        )
+        bool_layer_index = layer_order.get(bool_layer_label)
+        if bool_layer_index is None:
+            continue
+        scalar_bool_value = self[bool_layer_label].scalar_bool_value
+        if scalar_bool_value is True:
+            branch_hints[conditional_key] = ("then", bool_layer_index)
+        elif scalar_bool_value is False:
+            branch_hints[conditional_key] = ("else", bool_layer_index)
+    return branch_hints
+
+
 def _attribute_op_with_scope_fallback(
     func_call_stack: List["FuncCallLocation"],
+    degraded_branch_hints: Optional[Dict[ast_branches.ConditionalKey, str]] = None,
 ) -> List[Tuple[ast_branches.ConditionalKey, str]]:
     """Attribute an op, retrying decorated-function scope resolution when needed.
 
@@ -478,6 +571,9 @@ def _attribute_op_with_scope_fallback(
     ----------
     func_call_stack:
         Captured runtime call stack for one operation.
+    degraded_branch_hints:
+        Optional runtime hints for same-line ternary attribution when the
+        interpreter cannot provide column offsets.
 
     Returns
     -------
@@ -486,7 +582,7 @@ def _attribute_op_with_scope_fallback(
         outer-to-inner.
     """
 
-    branch_stack = ast_branches.attribute_op(func_call_stack)
+    branch_stack = ast_branches.attribute_op(func_call_stack, degraded_branch_hints)
     if branch_stack:
         return branch_stack
 
@@ -503,6 +599,7 @@ def _attribute_op_with_scope_fallback(
         for conditional_key, branch_kind, _depth in scope.query_intervals(
             frame.line_number,
             frame.col_offset,
+            degraded_branch_hints,
         ):
             entry = (conditional_key, branch_kind)
             if not fallback_branch_stack or fallback_branch_stack[-1] != entry:
@@ -589,7 +686,7 @@ def _get_gained_branch_entries(
     return child_stack[shared_prefix_len:]
 
 
-def _fix_modules_for_internal_tensors(self) -> None:
+def _fix_modules_for_internal_tensors(self: "ModelLog") -> None:
     """Step 6: Infer module containment for internally-generated tensors.
 
     Internally-initialized tensors (constants, torch.arange results, etc.) are
@@ -704,7 +801,7 @@ def _fix_modules_for_single_internal_tensor(
     nodes_seen.add(node_to_fix_label)
 
 
-def _fix_buffer_layers(self) -> None:
+def _fix_buffer_layers(self: "ModelLog") -> None:
     """Step 7: Connect buffer parents, merge duplicates, and assign pass numbers.
 
     Buffer tensors (nn.Module registered buffers) are logged as source tensors
@@ -739,7 +836,9 @@ def _fix_buffer_layers(self) -> None:
             if (self[layer.buffer_parent].activation is not None) and (
                 layer.captured_args is not None
             ):
-                layer.captured_args.append(self[layer.buffer_parent].activation.detach().clone())
+                layer.captured_args.append(
+                    safe_copy(self[layer.buffer_parent].activation, detach_tensor=True)
+                )
 
         buffer_hash = (
             str(layer.containing_modules) + str(layer.buffer_parent) + layer.buffer_address
@@ -777,7 +876,7 @@ def _fix_buffer_layers(self) -> None:
 
 
 def _merge_buffer_entries(
-    self, source_buffer: LayerPassLog, buffer_to_remove: LayerPassLog
+    self: "ModelLog", source_buffer: LayerPassLog, buffer_to_remove: LayerPassLog
 ) -> None:
     """Merge a duplicate buffer into a source buffer, rewiring all edges.
 

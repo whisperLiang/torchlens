@@ -18,7 +18,7 @@ For integer keys: direct index into ``layer_list`` (supports negative indexing).
 For slice keys: returns a list slice of ``layer_list``.
 """
 
-from typing import TYPE_CHECKING, List, Tuple
+from typing import TYPE_CHECKING, Any, List, Tuple, cast
 
 import numpy as np
 
@@ -27,9 +27,12 @@ if TYPE_CHECKING:
 
 from ._lookup_keys import _give_user_feedback_about_lookup_key
 from .layer_pass_log import LayerPassLog
+from ..intervention.errors import SiteAmbiguityError
+from ..intervention.selectors import BaseSelector
+from ..intervention.types import FrozenTargetSpec, TargetSpec
 
 
-def _getitem_during_pass(self: "ModelLog", ix) -> LayerPassLog:
+def _getitem_during_pass(self: "ModelLog", ix: Any) -> LayerPassLog:
     """Fetches an item when the pass is unfinished, only based on its raw barcode.
 
     Args:
@@ -44,7 +47,7 @@ def _getitem_during_pass(self: "ModelLog", ix) -> LayerPassLog:
         raise ValueError(f"{ix} not found in the ModelLog object.")
 
 
-def _getitem_after_pass(self, ix):
+def _getitem_after_pass(self: "ModelLog", ix: Any) -> Any:
     """Multi-key lookup for ModelLog entries after postprocessing.
 
     Lookup cascade:
@@ -66,6 +69,16 @@ def _getitem_after_pass(self, ix):
         KeyError: No match found.
         ValueError: Ambiguous substring match or invalid index.
     """
+    if isinstance(ix, BaseSelector | TargetSpec | FrozenTargetSpec):
+        from ..intervention.resolver import resolve_sites
+
+        table = resolve_sites(self, ix, max_fanout=1)
+        if len(table) != 1:
+            raise SiteAmbiguityError(
+                f"site {ix!r} matched {len(table)} sites, but ModelLog.__getitem__ requires one."
+            )
+        return table.first()
+
     if isinstance(ix, slice):
         return self.layer_list[ix]  # #78: slice indexing support
 
@@ -101,15 +114,22 @@ def _getitem_after_pass(self, ix):
         keys_with_substr = [
             key for key in self.layer_dict_all_keys if str(ix).lower() in str(key).lower()
         ]
-        if len(keys_with_substr) == 1:
-            return self.layer_dict_all_keys[keys_with_substr[0]]
-        elif len(keys_with_substr) > 1:
-            matches_str = ", ".join(str(k) for k in keys_with_substr[:10])
+        entries_with_substr = {
+            self.layer_dict_all_keys[key].creation_order: self.layer_dict_all_keys[key]
+            for key in keys_with_substr
+        }
+        if len(entries_with_substr) == 1:
+            return next(iter(entries_with_substr.values()))
+        elif len(entries_with_substr) > 1:
+            matches = [entry.layer_label for entry in entries_with_substr.values()]
+            matches_str = ", ".join(str(k) for k in matches[:10])
             suffix = (
-                f" (and {len(keys_with_substr) - 10} more)" if len(keys_with_substr) > 10 else ""
+                f" (and {len(entries_with_substr) - 10} more)"
+                if len(entries_with_substr) > 10
+                else ""
             )
             raise ValueError(
-                f"Ambiguous lookup: '{ix}' matches {len(keys_with_substr)} layers: "
+                f"Ambiguous lookup: '{ix}' matches {len(entries_with_substr)} layers: "
                 f"{matches_str}{suffix}. Please use a more specific key."
             )
 
@@ -118,7 +138,7 @@ def _getitem_after_pass(self, ix):
     raise KeyError(ix)
 
 
-def _str_after_pass(self) -> str:
+def _str_after_pass(self: "ModelLog") -> str:
     """Readable summary of the model history after the pass is finished.
 
     Returns:
@@ -165,6 +185,9 @@ def _str_after_pass(self) -> str:
         f"computed in forward pass."
     )
     s += f"\n\t\t- {self.num_tensors_saved} tensors ({self.saved_activation_memory_str}) with saved activations."
+    nonfinite = self.first_nonfinite()
+    if not nonfinite.startswith("No non-finite"):
+        s += f"\n\t\t- NaN/Inf: {nonfinite}"
 
     # Model parameters:
 
@@ -172,6 +195,7 @@ def _str_after_pass(self) -> str:
         f"\n\tParameters: {self.total_param_layers} parameter operations ({self.total_params} params total; "
         f"{self.total_params_memory_str})"
     )
+    s += "\n\tFLOP convention: MACs are reported as FLOPs // 2."
 
     # Print the module hierarchy.
     s += "\n\tModule Hierarchy:"
@@ -204,7 +228,7 @@ def _str_after_pass(self) -> str:
     return s
 
 
-def _str_during_pass(self) -> str:
+def _str_during_pass(self: "ModelLog") -> str:
     """Readable summary of the model history during the pass, as a debugging aid.
 
     Returns:
@@ -224,7 +248,9 @@ def _str_during_pass(self) -> str:
     return s
 
 
-def _format_list_with_line_breaks(lst, indent_chars: str, line_break_every=5) -> str:
+def _format_list_with_line_breaks(
+    lst: list[Any], indent_chars: str, line_break_every: int = 5
+) -> str:
     """
     Utility function to pretty print a list with line breaks, adding indent_chars every line.
     """
@@ -238,7 +264,7 @@ def _format_list_with_line_breaks(lst, indent_chars: str, line_break_every=5) ->
     return s
 
 
-def _module_hierarchy_str(self) -> str:
+def _module_hierarchy_str(self: "ModelLog") -> str:
     """Build a tree-formatted string of the module call hierarchy.
 
     Starts from the root module ("self") pass 1 and recursively descends
@@ -246,19 +272,20 @@ def _module_hierarchy_str(self) -> str:
     grandchildren) are printed on a single line for compactness.
     """
     s = ""
-    root_pass = self.modules["self"].passes.get(1)
+    root_module = cast(Any, self.modules["self"])
+    root_pass = root_module.passes.get(1)
     if root_pass is None:
         return s
     for module_pass in root_pass.call_children:
         module, pass_num = module_pass.split(":")
         s += f"\n\t\t{module}"
-        if self.modules[module].num_passes > 1:
+        if cast(Any, self.modules[module]).num_passes > 1:
             s += f":{pass_num}"
         s += _module_hierarchy_str_recursive(self, module_pass, 1)
     return s
 
 
-def _module_hierarchy_str_recursive(self, module_pass, level) -> str:
+def _module_hierarchy_str_recursive(self: "ModelLog", module_pass: str, level: int) -> str:
     """Recursively format child modules at the given indentation level.
 
     If any child has grandchildren (deeper nesting), each child gets its
@@ -275,14 +302,14 @@ def _module_hierarchy_str_recursive(self, module_pass, level) -> str:
         for submodule_pass in children:
             submodule, pass_num = submodule_pass.split(":")
             s += f"\n\t\t{'    ' * level}{submodule}"
-            if self.modules[submodule].num_passes > 1:
+            if cast(Any, self.modules[submodule]).num_passes > 1:
                 s += f":{pass_num}"
             s += _module_hierarchy_str_recursive(self, submodule_pass, level + 1)
     else:
         submodule_list = []
         for submodule_pass in children:
             submodule, pass_num = submodule_pass.split(":")
-            if self.modules[submodule].num_passes == 1:
+            if cast(Any, self.modules[submodule]).num_passes == 1:
                 submodule_list.append(submodule)
             else:
                 submodule_list.append(submodule_pass)

@@ -38,7 +38,8 @@ from typing import TYPE_CHECKING, List
 import time
 import torch
 
-from ..utils.tensor_utils import safe_copy
+from ..utils.tensor_utils import _is_cuda_available, safe_copy
+from ..utils.hashing import compute_graph_shape_hash
 
 from .control_flow import (
     _fix_buffer_layers,
@@ -174,7 +175,10 @@ def postprocess(
         _undecorate_all_saved_tensors(self)
 
     # Step 14: Clear the cache after any tensor deletions for garbage collection purposes.
-    torch.cuda.empty_cache()
+    # Gated behind cached cuda.is_available() so CPU-only runs don't pay the
+    # CUDA driver / NVML probe cost (per profiling audit 2026-04-27 finding #4).
+    if _is_cuda_available():
+        torch.cuda.empty_cache()
 
     # Step 15: Log time elapsed.
     with _vtimed(self, "  Step 15: Log timing"):
@@ -192,11 +196,17 @@ def postprocess(
     with _vtimed(self, "  Step 17: Build module logs"):
         _build_module_logs(self)
 
+    # Step 17.5: Compute graph shape hash before _set_pass_finished changes access behavior.
+    with _vtimed(self, "  Step 17.5: Graph shape hash"):
+        self.graph_shape_hash = compute_graph_shape_hash(self)
+
     # Step 18: log the pass as finished, changing the ModelLog behavior to its user-facing version.
     with _vtimed(self, "  Step 18: Mark pass finished"):
         _set_pass_finished(self)
 
-    should_finalize_streaming = self._activation_writer is not None
+    should_finalize_streaming = self._activation_writer is not None and not getattr(
+        self, "_defer_streaming_bundle_finalization", False
+    )
     if should_finalize_streaming:
         with _vtimed(self, "  Step 19: Finalize streamed bundle"):
             _finalize_streamed_bundle(self)
@@ -237,28 +247,53 @@ def postprocess_fast(self: "ModelLog") -> None:
             continue  # Guard for parentless output layers (#152)
         parent_layer = self.layer_dict_main_keys[output_layer.parent_layers[0]]
         parent_contents = parent_layer.activation
-        output_layer.activation = (
-            safe_copy(parent_contents, detach_tensor=True) if parent_contents is not None else None
+        parent_transformed = parent_layer.transformed_activation
+        output_layer._internal_set(
+            "activation",
+            safe_copy(parent_contents, detach_tensor=self.detach_saved_tensors)
+            if parent_contents is not None
+            else None,
+        )
+        output_layer._internal_set(
+            "transformed_activation",
+            safe_copy(parent_transformed, detach_tensor=self.detach_saved_tensors)
+            if isinstance(parent_transformed, torch.Tensor)
+            else parent_transformed,
         )
         output_layer.tensor_memory = parent_layer.tensor_memory
+        output_layer.transformed_activation_shape = parent_layer.transformed_activation_shape
+        output_layer.transformed_activation_dtype = parent_layer.transformed_activation_dtype
+        output_layer.transformed_activation_memory = parent_layer.transformed_activation_memory
         output_layer.has_saved_activations = parent_layer.has_saved_activations
         output_layer.has_gradient = parent_layer.has_gradient
-        output_layer.gradient = parent_layer.gradient
+        output_layer._internal_set("gradient", parent_layer.gradient)
+        output_layer._internal_set("transformed_gradient", parent_layer.transformed_gradient)
+        output_layer.transformed_gradient_shape = parent_layer.transformed_gradient_shape
+        output_layer.transformed_gradient_dtype = parent_layer.transformed_gradient_dtype
+        output_layer.transformed_gradient_memory = parent_layer.transformed_gradient_memory
         if output_layer.has_saved_activations:
             self.layers_with_saved_activations.append(output_layer_label)
     _trim_and_reorder_model_history_fields(self)
     _remove_unwanted_entries_and_log_remaining(self)
     _undecorate_all_saved_tensors(self)
 
-    torch.cuda.empty_cache()
+    # Gated behind cached cuda.is_available() so CPU-only fast-pass runs don't
+    # pay the CUDA driver / NVML probe cost.
+    if _is_cuda_available():
+        torch.cuda.empty_cache()
     _log_time_elapsed(self)
     _build_layer_logs(self)
     # Note: _build_module_logs is NOT called here because module structure
     # doesn't change between passes and _module_build_data isn't repopulated
     # in fast mode (Step 10 is skipped). Existing module logs remain valid. (#108)
+    if self.intervention_ready and not getattr(self, "capture_full_args", False):
+        self.intervention_ready = False
+    self.graph_shape_hash = compute_graph_shape_hash(self)
     _set_pass_finished(self)
 
-    should_finalize_streaming = self._activation_writer is not None
+    should_finalize_streaming = self._activation_writer is not None and not getattr(
+        self, "_defer_streaming_bundle_finalization", False
+    )
     if should_finalize_streaming:
         _finalize_streamed_bundle(self)
     if should_finalize_streaming and not self._keep_activations_in_memory:

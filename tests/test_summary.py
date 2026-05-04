@@ -45,7 +45,8 @@ def tiny_summary_log() -> Generator[tl.ModelLog, None, None]:
 def test_small_model_default_output_golden(tiny_summary_log: tl.ModelLog) -> None:
     """Default overview output should match the expected compact golden text."""
     summary_text = tiny_summary_log.summary()
-    assert summary_text == (
+    assert "TorchLens Discoverability Summary" in summary_text
+    assert summary_text.endswith(
         "Model: TinySummaryModel\n"
         "+-------------------+--------------+--------+-------+\n"
         "| Layer             | Output Shape | Params | Train |\n"
@@ -60,7 +61,9 @@ def test_small_model_default_output_golden(tiny_summary_log: tl.ModelLog) -> Non
         "Params: 1,388 unique; trainable: 1,388\n"
         "Ops: 4 total\n"
         "Saved activations: 0 B\n"
-        "Forward FLOPs: 19.2 K  MACs: 9.6 K"
+        "Forward FLOPs: 19.2 KFLOPs  MACs: 9.6 KFLOPs\n"
+        "FLOP convention: counts use the captured TorchLens convention; "
+        "MACs are reported as FLOPs // 2."
     )
 
 

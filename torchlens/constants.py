@@ -32,6 +32,7 @@ from torch.overrides import get_ignored_functions, get_testing_overrides
 
 MODEL_LOG_FIELD_ORDER = [
     # General info
+    "name",
     "model_name",
     "io_format_version",
     "_pass_finished",
@@ -39,13 +40,36 @@ MODEL_LOG_FIELD_ORDER = [
     "_all_layers_logged",
     "_all_layers_saved",
     "keep_unsaved_layers",
+    "intervention_ready",
+    "capture_full_args",
     "current_function_call_barcode",
     "random_seed_used",
     "detach_saved_tensors",
     "output_device",
+    "train_mode",
+    "module_filter_fn",
+    "emit_nvtx",
+    "raise_on_nan",
+    "capture_kpis",
+    "report_values",
+    "observer_spans",
+    "manual_tensor_connections",
+    "forward_lineno",
+    "capture_cache_hit",
+    "capture_cache_key",
+    "capture_cache_path",
+    "recording_kept",
+    "streaming_pass_logs",
+    "num_streamed_passes",
+    "_activation_hash_cache",
     "save_function_args",
     "num_context_lines",
     "save_gradients",
+    "gradients_to_save",
+    "_gradient_layer_nums_to_save",
+    "gradient_postfunc",
+    "gradient_postfunc_repr",
+    "save_raw_gradient",
     "save_source_context",
     "save_rng_states",
     "detect_loops",
@@ -53,7 +77,32 @@ MODEL_LOG_FIELD_ORDER = [
     "has_gradients",
     "activation_postfunc",
     "activation_postfunc_repr",
+    "save_raw_activation",
+    "input_metadata",
+    "_source_code_blob",
+    "_source_model_ref",
+    "parent_run",
+    "source_model_id",
+    "source_model_class",
+    "weight_fingerprint_at_capture",
+    "weight_fingerprint_full",
+    "input_id_at_capture",
+    "input_shape_hash",
     "mark_input_output_distances",
+    "graph_shape_hash",
+    "_intervention_spec",
+    "operation_history",
+    "last_run_ctx",
+    "_has_direct_writes",
+    "_warned_direct_write",
+    "_warned_mutate_in_place",
+    "_spec_revision",
+    "_activation_recipe_revision",
+    "_append_sequence_id",
+    "_last_hook_handle_ids",
+    "run_state",
+    "is_appended",
+    "relationship_evidence",
     # Model structure info (is_recurrent, max_recurrent_loops,
     # is_branching, has_conditional_branching are computed @properties)
     # Layer tracking logs
@@ -88,9 +137,6 @@ MODEL_LOG_FIELD_ORDER = [
     "internally_terminated_layers",
     "internally_terminated_bool_layers",
     "conditional_branch_edges",
-    "conditional_then_edges",
-    "conditional_elif_edges",
-    "conditional_else_edges",
     "conditional_events",
     "conditional_arm_edges",
     "conditional_edge_passes",
@@ -102,6 +148,7 @@ MODEL_LOG_FIELD_ORDER = [
     "orphan_layers",
     # Tensor info:
     "total_activation_memory",
+    "total_autograd_saved_bytes",
     "num_tensors_saved",
     "saved_activation_memory",
     # Param info
@@ -119,6 +166,14 @@ MODEL_LOG_FIELD_ORDER = [
     "time_forward_pass",
     "time_cleanup",
     "time_function_calls",
+    # Backward pass
+    "has_backward_log",
+    "grad_fn_logs",
+    "grad_fn_order",
+    "backward_root_grad_fn_id",
+    "backward_num_passes",
+    "backward_peak_memory_bytes",
+    "backward_memory_backend",
 ]
 
 LAYER_PASS_LOG_FIELD_ORDER = [
@@ -134,6 +189,7 @@ LAYER_PASS_LOG_FIELD_ORDER = [
     "creation_order",
     "source_model_log",
     "_pass_finished",
+    "_construction_done",
     # Other labeling info
     "layer_label_short",
     "layer_label_w_pass",
@@ -151,25 +207,42 @@ LAYER_PASS_LOG_FIELD_ORDER = [
     "has_saved_activations",
     "output_device",
     "activation_postfunc",
+    "extra_data",
+    "intervention_log",
     "detach_saved_tensor",
     "args_captured",
     "captured_args",
     "captured_kwargs",
+    "captured_arg_template",
+    "captured_kwarg_template",
     "tensor_shape",
+    "transformed_activation_shape",
     "tensor_dtype",
+    "transformed_activation_dtype",
     "tensor_memory",
+    "transformed_activation_memory",
+    "bytes_delta_at_call",
+    "bytes_peak_at_call",
+    "transformed_activation",
+    "autograd_saved_bytes",
+    "autograd_saved_tensor_count",
     # Child tensor variation tracking
     "has_child_tensor_variations",
     "children_tensor_versions",
     # Saved gradient info
     "gradient",
+    "transformed_gradient",
     "save_gradients",
     "has_gradient",
     "grad_shape",
+    "transformed_gradient_shape",
     "grad_dtype",
+    "transformed_gradient_dtype",
     "grad_memory",
+    "transformed_gradient_memory",
     # Function call info
     "func_applied",
+    "func_call_id",
     "func_name",
     "func_call_stack",
     "func_time",
@@ -186,8 +259,13 @@ LAYER_PASS_LOG_FIELD_ORDER = [
     "func_non_tensor_args",
     "func_is_inplace",
     "grad_fn_name",
+    "grad_fn_id",
+    "grad_fn_object",
+    "corresponding_grad_fn",
     "is_part_of_iterable_output",
     "iterable_output_index",
+    "output_path",
+    "container_spec",
     # Param info
     "parent_params",
     "parent_param_barcodes",
@@ -205,6 +283,7 @@ LAYER_PASS_LOG_FIELD_ORDER = [
     # Graph info
     "parent_layers",
     "parent_layer_arg_locs",
+    "edge_uses",
     "root_ancestors",
     "child_layers",
     "has_children",
@@ -248,6 +327,7 @@ LAYER_PASS_LOG_FIELD_ORDER = [
     "cond_branch_children_by_cond",
     # Module info
     "containing_module",
+    "module_address_normalized",
     "containing_modules",
     "modules_entered",
     "module_passes_entered",
@@ -283,6 +363,9 @@ LAYER_LOG_FIELD_ORDER = [
     "func_name",
     "func_is_inplace",
     "grad_fn_name",
+    "grad_fn_id",
+    "grad_fn_object",
+    "corresponding_grad_fn",
     "func_argnames",
     "num_args",
     "num_positional_args",
@@ -291,13 +374,24 @@ LAYER_LOG_FIELD_ORDER = [
     "iterable_output_index",
     # Tensor type (representative from first pass)
     "tensor_shape",
+    "transformed_activation_shape",
     "tensor_dtype",
+    "transformed_activation_dtype",
     "tensor_memory",
+    "transformed_activation_memory",
+    "transformed_activation",
+    "autograd_saved_bytes",
+    "autograd_saved_tensor_count",
     # Config
     "output_device",
     "activation_postfunc",
+    "extra_data",
     "detach_saved_tensor",
     "save_gradients",
+    "transformed_gradient",
+    "transformed_gradient_shape",
+    "transformed_gradient_dtype",
+    "transformed_gradient_memory",
     # FLOPs
     "flops_forward",
     "flops_backward",
@@ -475,6 +569,31 @@ MODULE_LOG_FIELD_ORDER = [
     "methods",
 ]
 
+GRAD_FN_PASS_LOG_FIELD_ORDER = [
+    "pass_num",
+    "grad_inputs",
+    "grad_outputs",
+    "time_started",
+    "time_finished",
+]
+
+GRAD_FN_LOG_FIELD_ORDER = [
+    "grad_fn_id",
+    "name",
+    "label",
+    "grad_fn_type",
+    "grad_fn_type_num",
+    "grad_fn_total_num",
+    "module_path",
+    "is_custom",
+    "is_intervening",
+    "corresponding_layer",
+    "next_grad_fn_ids",
+    "passes",
+    "num_passes",
+    "pass_labels",
+]
+
 # ---------------------------------------------------------------------------
 # Function discovery for decoration
 # ---------------------------------------------------------------------------
@@ -580,7 +699,7 @@ IGNORED_FUNCS = [
 
 
 @functools.lru_cache(None)
-def _get_torch_overridable_functions() -> List:
+def _get_torch_overridable_functions() -> list[tuple[str, str]]:
     """Return a list of (namespace_str, func_name) pairs for all torch functions
     that can be overridden via ``__torch_function__``.
 

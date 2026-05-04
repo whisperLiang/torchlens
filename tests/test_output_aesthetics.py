@@ -30,7 +30,7 @@ from conftest import REPORTS_DIR, TEST_OUTPUTS_DIR, VIS_OUTPUT_DIR
 import torch.nn as nn
 
 import example_models
-from torchlens import log_forward_pass, show_model_graph
+from torchlens import func, log_forward_pass, show_model_graph
 
 # ---------------------------------------------------------------------------
 # Report helpers
@@ -584,11 +584,11 @@ def test_generate_aesthetic_report():
         model = model_cls()
         report.write(_capture_model_outputs(name, model, x, description))
 
-    with open(REPORT_PATH, "w") as f:
+    with open(REPORT_PATH, "w", encoding="utf-8") as f:
         f.write(report.getvalue())
 
     # Verify the file was written and is non-trivial
-    with open(REPORT_PATH) as f:
+    with open(REPORT_PATH, encoding="utf-8") as f:
         content = f.read()
     assert len(content) > 5000, f"Report too short ({len(content)} chars)"
     assert "ModelLog" in content
@@ -1314,7 +1314,7 @@ def test_generate_pdf_report():
     # Build LaTeX source
     tex_content = _build_latex_report()
 
-    with open(TEX_PATH, "w") as f:
+    with open(TEX_PATH, "w", encoding="utf-8") as f:
         f.write(tex_content)
 
     # Compile PDF (run twice for TOC)
@@ -1329,6 +1329,8 @@ def test_generate_pdf_report():
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=120,
         )
 
@@ -1349,7 +1351,14 @@ def test_generate_pdf_report():
 
 
 def _vis(
-    model, x, filename, vis_mode="unrolled", depth=1000, direction="bottomup", buffer_layers=False
+    model,
+    x,
+    filename,
+    vis_mode="unrolled",
+    depth=1000,
+    direction="bottomup",
+    buffer_layers=False,
+    code_panel=False,
 ):
     """Generate a single visualization PDF."""
     show_model_graph(
@@ -1362,6 +1371,7 @@ def _vis(
         vis_fileformat="pdf",
         vis_buffer_layers=buffer_layers,
         vis_direction=direction,
+        code_panel=code_panel,
         random_seed=42,
     )
 
@@ -1410,6 +1420,7 @@ def test_aesthetic_shared_module_visualizations():
     x = torch.rand(1, 8)
 
     _vis(model, x, "shared_unrolled")
+    _vis(model, x, "shared_code_panel", code_panel=True)
     _vis(model, x, "shared_rolled", vis_mode="rolled")
     _vis(model, x, "shared_rolled_depth1", vis_mode="rolled", depth=1)
 
@@ -1521,6 +1532,41 @@ class TestVisualizationBugfixes:
             )
         except ImportError:
             pytest.skip("graphviz not available")
+
+    def test_intervention_visualization_styles(self):
+        """Intervention node-mark and as-node modes emit expected style cues."""
+
+        class ReluAdd(nn.Module):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                """Run a relu followed by an add."""
+
+                return torch.relu(x) + 1
+
+        log = log_forward_pass(
+            ReluAdd(),
+            torch.randn(2, 3),
+            vis_opt="none",
+            intervention_ready=True,
+        )
+        log.set(func("relu"), torch.zeros(2, 3))
+        try:
+            node_mark = log.render_graph(
+                vis_save_only=True,
+                vis_outpath=opj(VIS_DIR, "test_intervention_node_mark"),
+                vis_fileformat="dot",
+                vis_intervention_mode="node_mark",
+            )
+            as_node = log.render_graph(
+                vis_save_only=True,
+                vis_outpath=opj(VIS_DIR, "test_intervention_as_node"),
+                vis_fileformat="dot",
+                vis_intervention_mode="as_node",
+            )
+            assert "#FF00FF" in node_mark
+            assert "#FFB3FF" in node_mark
+            assert "shape=diamond" in as_node
+        finally:
+            log.cleanup()
 
     def test_vis_keep_unsaved_false(self):
         """keep_unsaved_layers=False should not crash visualization."""

@@ -156,6 +156,17 @@ def _get_or_build_execution_schedule(
     return schedule
 
 
+def _get_output_retain_nodes(plan: ExecutionPlan) -> Set[int]:
+    cached = plan.meta.get("_output_retain_nodes")
+    if cached is None:
+        output_indices = set(plan.output_node_indices) | _collect_output_indices(
+            plan.output_specs
+        )
+        cached = tuple(sorted(output_indices))
+        plan.meta["_output_retain_nodes"] = cached
+    return set(cached)
+
+
 def _build_execution_schedule(
     plan: ExecutionPlan,
     node_indices: Sequence[int],
@@ -983,7 +994,7 @@ class ReplaySession:
         key = _make_schedule_key(node_indices, retain_nodes)
         schedule = self._schedule_cache.get(key)
         if schedule is None:
-            schedule = _build_execution_schedule(self.plan, node_indices, retain_nodes)
+            schedule = _get_or_build_execution_schedule(self.plan, node_indices, retain_nodes)
             self._schedule_cache[key] = schedule
         return schedule
 
@@ -1043,7 +1054,7 @@ def replay_forward(
     model = session.model
     runtime_device = session.device
     seed_map = session.prepare_seed_map(inputs, input_kwargs)
-    retain_nodes = set(plan.output_node_indices) | _collect_output_indices(plan.output_specs)
+    retain_nodes = _get_output_retain_nodes(plan)
     computed, intermediates = session.execute(
         node_indices=[node.idx for node in plan.nodes],
         seeded_values=seed_map,
@@ -1128,9 +1139,7 @@ def replay_partitioned(
             label: prefix_computed[idx]
             for label, idx in zip(split.boundary_labels, split.boundary_indices)
         }
-        should_snapshot_boundary = _resolve_boundary_snapshot(
-            plan, split, boundary_snapshot
-        )
+        should_snapshot_boundary = _resolve_boundary_snapshot(plan, split, boundary_snapshot)
         boundary_payload = (
             _pack_boundary_payload(
                 plan,
@@ -1161,7 +1170,7 @@ def replay_partitioned(
             seeded_values=suffix_seed_map,
             preserve_rng=preserve_rng,
             differentiable=False,
-            retain_nodes=set(plan.output_node_indices) | _collect_output_indices(plan.output_specs),
+            retain_nodes=_get_output_retain_nodes(plan),
             return_intermediates=False,
         )
         prefix_computed.update(suffix_computed)
@@ -1208,7 +1217,7 @@ def replay_partitioned(
             seeded_values=boundary_seed_map,
             preserve_rng=preserve_rng,
             differentiable=False,
-            retain_nodes=set(plan.output_node_indices) | _collect_output_indices(plan.output_specs),
+            retain_nodes=_get_output_retain_nodes(plan),
             return_intermediates=False,
         )
         outputs = _reconstruct_outputs(plan, suffix_computed)
@@ -2063,6 +2072,8 @@ def _resolve_boundary_snapshot(
 ) -> bool:
     if boundary_snapshot is not None:
         return boundary_snapshot
+    if "suffix_may_mutate_boundary" in split.meta:
+        return bool(split.meta["suffix_may_mutate_boundary"])
     return _split_suffix_may_mutate_boundary(plan, split)
 
 

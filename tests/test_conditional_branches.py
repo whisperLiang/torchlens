@@ -1738,7 +1738,11 @@ def test_same_line_nested_def_model_fails_closed_when_scope_resolution_is_ambigu
         index = original_get_file_index(filename)
         if index is None or filename != __file__:
             return index
-        helper_scopes = [scope for scope in index.scopes if scope.func_name == "helper"]
+        helper_scopes = [
+            scope
+            for scope in index.scopes
+            if scope.qualname == "SameLineNestedDefModel.forward.<locals>.helper"
+        ]
         if helper_scopes and not any(
             scope.qualname == "shadow.<locals>.helper" for scope in index.scopes
         ):
@@ -2111,18 +2115,18 @@ def test_ternary_with_bool_cast_model_marks_bool_wrapper_kind() -> None:
     assert linear_layer.conditional_branch_stack == [(event.id, "then")]
 
 
-@pytest.mark.skipif(
-    sys.version_info >= (3, 11),
-    reason="degraded ternary mode is only meaningful before Python 3.11",
-)
-def test_ternary_py310_fail_closed_model_drops_same_line_arm_attribution() -> None:
-    """Pre-3.11 same-line ternaries fail closed when no column offsets are available."""
+def test_ternary_same_line_model_uses_bool_hint_without_attributing_predicate() -> None:
+    """Same-line ternaries use runtime bool hints only after the predicate executes."""
     model_log = _log_model(TernaryPy310FailClosedModel(), torch.ones(1, 2))
-    linear_layers = [layer for layer in model_log.layer_list if layer.func_name == "linear"]
+    event = _get_root_event(model_log)
+    predicate_layers = [
+        layer for layer in model_log.layer_list if layer.func_name in {"mean", "gt"}
+    ]
+    linear_layer = _find_only_layer(model_log, "linear", [(event.id, "then")])
 
     assert len(model_log.conditional_events) == 1
-    assert model_log.conditional_arm_edges == {}
-    assert all(layer.conditional_branch_stack == [] for layer in linear_layers)
+    assert linear_layer.conditional_branch_stack == [(event.id, "then")]
+    assert all(layer.conditional_branch_stack == [] for layer in predicate_layers)
 
 
 def test_ternary_multi_op_one_line_model_attributes_each_arm_by_column_offset() -> None:

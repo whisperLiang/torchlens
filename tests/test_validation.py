@@ -23,6 +23,7 @@ from torchlens.validation.core import (
     _copy_validation_args,
     MAX_PERTURB_ATTEMPTS,
 )
+from torchlens.utils.tensor_utils import tensor_nanequal
 
 
 # =============================================================================
@@ -57,6 +58,17 @@ def test_model_log_check_metadata_method_bound():
     """ModelLog.check_metadata_invariants is callable."""
     assert hasattr(ModelLog, "check_metadata_invariants")
     assert callable(ModelLog.check_metadata_invariants)
+
+
+def test_tensor_nanequal_uses_relative_tolerance_for_replay() -> None:
+    """Validation replay should allow tiny relative floating-point drift."""
+    saved = torch.tensor([1.0, 100.0], dtype=torch.float32)
+    replayed = saved + torch.tensor([8e-6, 4e-3], dtype=torch.float32)
+    mismatched = saved + torch.tensor([1e-3, 1e-1], dtype=torch.float32)
+
+    assert not tensor_nanequal(saved, replayed, allow_tolerance=False)
+    assert tensor_nanequal(saved, replayed, allow_tolerance=True)
+    assert not tensor_nanequal(saved, mismatched, allow_tolerance=True)
 
 
 # =============================================================================
@@ -248,6 +260,15 @@ class _MaskedFillModel(nn.Module):
         return x.masked_fill_(mask, 0.0)
 
 
+class _FunctionalMaskedFillModel(nn.Module):
+    """Model that uses masked_fill."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply a boolean mask through the non-in-place masked_fill method."""
+        mask = x > 0.5
+        return x.masked_fill(mask, 0.0)
+
+
 class _ZerosLikeModel(nn.Module):
     """Model that uses zeros_like."""
 
@@ -279,6 +300,13 @@ def test_validation_with_scatter():
 
 def test_validation_with_masked_fill():
     model = _MaskedFillModel()
+    x = torch.randn(4, 4)
+    assert validate_forward_pass(model, x)
+
+
+def test_validation_with_functional_masked_fill() -> None:
+    """Validate non-in-place masked_fill boolean masks as structural args."""
+    model = _FunctionalMaskedFillModel()
     x = torch.randn(4, 4)
     assert validate_forward_pass(model, x)
 

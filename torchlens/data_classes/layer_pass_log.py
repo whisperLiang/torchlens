@@ -34,8 +34,10 @@ Field categories (matching the LAYER_PASS_LOG_FIELD_ORDER in constants.py):
 """
 
 import copy
+import hashlib
 import weakref
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING, Tuple, Union
+import warnings
+from typing import Any, Callable, Dict, List, Literal, Optional, TYPE_CHECKING, Tuple, Union, cast
 
 import torch
 
@@ -46,15 +48,72 @@ from .._io import (
     default_fill_state,
     read_io_format_version,
 )
+from .._errors import TorchLensPostfuncError
+from .._run_state import RunState
+from .._training_validation import _NON_GRAD_DTYPES, TrainingModeConfigError
 from ..constants import LAYER_PASS_LOG_FIELD_ORDER
+from ..intervention.types import LAYER_PASS_LOG_FORK_POLICY
+from ..intervention.errors import DirectActivationWriteWarning
 from .._state import pause_logging
-from ..utils.tensor_utils import get_tensor_memory_amount, print_override, safe_copy, safe_to
+from ..utils.tensor_utils import (
+    concatenate_batch_tensors,
+    get_tensor_memory_amount,
+    print_override,
+    safe_copy,
+    safe_to,
+)
 from ..utils.display import human_readable_size
+from ..utils.display import tensor_stats_summary
 
 _LAYER_PASS_LOG_FIELD_ORDER_SET = frozenset(LAYER_PASS_LOG_FIELD_ORDER)
+_DIRECT_WRITE_GUARDED_FIELDS = frozenset(
+    {
+        "activation",
+        "transformed_activation",
+        "gradient",
+        "transformed_gradient",
+        "intervention_log",
+    }
+)
+_LAYER_PASS_LOG_DEFAULT_FILL: dict[str, Any] = {
+    "_source_model_log_ref": None,
+    "parent_layer_log": None,
+    "activation_ref": None,
+    "gradient_ref": None,
+    "_pending_blob_id": None,
+    "_pending_transformed_activation_blob_id": None,
+    "_pending_gradient_blob_id": None,
+    "_pending_transformed_gradient_blob_id": None,
+    "extra_data": {},
+    "autograd_saved_bytes": None,
+    "autograd_saved_tensor_count": None,
+    "bytes_delta_at_call": None,
+    "bytes_peak_at_call": None,
+    "transformed_activation": None,
+    "transformed_activation_shape": None,
+    "transformed_activation_dtype": None,
+    "transformed_activation_memory": None,
+    "transformed_gradient": None,
+    "transformed_gradient_shape": None,
+    "transformed_gradient_dtype": None,
+    "transformed_gradient_memory": None,
+    "func_call_id": None,
+    "output_path": (),
+    "intervention_log": [],
+    "container_spec": None,
+    "captured_arg_template": None,
+    "captured_kwarg_template": None,
+    "edge_uses": [],
+    "module_address_normalized": None,
+    "_construction_done": True,
+}
+_LAYER_PASS_LOG_DEFAULT_FILL = {
+    **{field_name: None for field_name in LAYER_PASS_LOG_FIELD_ORDER},
+    **_LAYER_PASS_LOG_DEFAULT_FILL,
+}
 
 
-def _recursive_safe_copy(val):
+def _recursive_safe_copy(val: Any) -> Any:
     """Deep-copy nested structures, cloning tensors instead of using copy.deepcopy (#44)."""
     if isinstance(val, torch.Tensor):
         return safe_copy(val)
@@ -65,7 +124,7 @@ def _recursive_safe_copy(val):
     return safe_copy(val)
 
 
-def _recursive_structural_copy(val):
+def _recursive_structural_copy(val: Any) -> Any:
     """Copy containers while keeping tensor leaves by reference."""
     if isinstance(val, torch.Tensor):
         return val
@@ -74,6 +133,49 @@ def _recursive_structural_copy(val):
     elif isinstance(val, dict):
         return {k: _recursive_structural_copy(v) for k, v in val.items()}
     return copy.copy(val)
+
+
+def _tensor_shape_or_none(value: Any) -> tuple[int, ...] | None:
+    """Return a tensor shape tuple, or ``None`` for non-tensor values."""
+
+    return tuple(value.shape) if isinstance(value, torch.Tensor) else None
+
+
+def _tensor_dtype_or_none(value: Any) -> torch.dtype | None:
+    """Return a tensor dtype, or ``None`` for non-tensor values."""
+
+    return value.dtype if isinstance(value, torch.Tensor) else None
+
+
+def _tensor_memory_or_none(value: Any) -> int | None:
+    """Return tensor memory in bytes, or ``None`` for non-tensor values."""
+
+    return get_tensor_memory_amount(value) if isinstance(value, torch.Tensor) else None
+
+
+def _tensor_content_hash(value: torch.Tensor) -> str:
+    """Return a CPU content hash for a tensor.
+
+    Parameters
+    ----------
+    value:
+        Tensor to hash.
+
+    Returns
+    -------
+    str
+        SHA-256 digest.
+    """
+
+    with pause_logging():
+        tensor = safe_copy(value, detach_tensor=True).cpu().contiguous()
+        if tensor.dtype is torch.bfloat16:
+            tensor = tensor.to(torch.float32)
+        payload = tensor.numpy().tobytes()
+    hasher = hashlib.sha256()
+    hasher.update(repr((tuple(tensor.shape), str(tensor.dtype))).encode("utf-8"))
+    hasher.update(payload)
+    return hasher.hexdigest()
 
 
 if TYPE_CHECKING:
@@ -109,8 +211,10 @@ class LayerPassLog:
         "layer_label_raw": FieldPolicy.KEEP,
         "operation_num": FieldPolicy.KEEP,
         "creation_order": FieldPolicy.KEEP,
+        "source_model_log": FieldPolicy.DROP,
         "_source_model_log_ref": FieldPolicy.WEAKREF_STRIP,
         "_pass_finished": FieldPolicy.KEEP,
+        "_construction_done": FieldPolicy.DROP,
         "layer_label": FieldPolicy.KEEP,
         "layer_label_short": FieldPolicy.KEEP,
         "layer_label_w_pass": FieldPolicy.KEEP,
@@ -124,25 +228,42 @@ class LayerPassLog:
         "num_passes": FieldPolicy.KEEP,
         "lookup_keys": FieldPolicy.KEEP,
         "activation": FieldPolicy.BLOB,
+        "transformed_activation": FieldPolicy.BLOB,
         "has_saved_activations": FieldPolicy.KEEP,
         "output_device": FieldPolicy.KEEP,
         "activation_postfunc": FieldPolicy.DROP,
+        "extra_data": FieldPolicy.KEEP,
+        "intervention_log": FieldPolicy.DROP,
         "detach_saved_tensor": FieldPolicy.KEEP,
         "args_captured": FieldPolicy.KEEP,
         "captured_args": FieldPolicy.BLOB_RECURSIVE,
         "captured_kwargs": FieldPolicy.BLOB_RECURSIVE,
+        "captured_arg_template": FieldPolicy.DROP,
+        "captured_kwarg_template": FieldPolicy.DROP,
         "tensor_shape": FieldPolicy.KEEP,
+        "transformed_activation_shape": FieldPolicy.KEEP,
         "tensor_dtype": FieldPolicy.KEEP,
+        "transformed_activation_dtype": FieldPolicy.KEEP,
         "tensor_memory": FieldPolicy.KEEP,
+        "transformed_activation_memory": FieldPolicy.KEEP,
+        "autograd_saved_bytes": FieldPolicy.KEEP,
+        "autograd_saved_tensor_count": FieldPolicy.KEEP,
+        "bytes_delta_at_call": FieldPolicy.KEEP,
+        "bytes_peak_at_call": FieldPolicy.KEEP,
         "has_child_tensor_variations": FieldPolicy.KEEP,
         "children_tensor_versions": FieldPolicy.BLOB_RECURSIVE,
         "gradient": FieldPolicy.BLOB,
+        "transformed_gradient": FieldPolicy.BLOB,
         "save_gradients": FieldPolicy.KEEP,
         "has_gradient": FieldPolicy.KEEP,
         "grad_shape": FieldPolicy.KEEP,
+        "transformed_gradient_shape": FieldPolicy.KEEP,
         "grad_dtype": FieldPolicy.KEEP,
+        "transformed_gradient_dtype": FieldPolicy.KEEP,
         "grad_memory": FieldPolicy.KEEP,
+        "transformed_gradient_memory": FieldPolicy.KEEP,
         "func_applied": FieldPolicy.DROP,
+        "func_call_id": FieldPolicy.KEEP,
         "func_name": FieldPolicy.KEEP,
         "func_call_stack": FieldPolicy.KEEP,
         "func_time": FieldPolicy.KEEP,
@@ -159,8 +280,13 @@ class LayerPassLog:
         "func_non_tensor_args": FieldPolicy.KEEP,
         "func_is_inplace": FieldPolicy.KEEP,
         "grad_fn_name": FieldPolicy.KEEP,
+        "grad_fn_id": FieldPolicy.KEEP,
+        "grad_fn_object": FieldPolicy.DROP,
+        "corresponding_grad_fn": FieldPolicy.DROP,
         "is_part_of_iterable_output": FieldPolicy.KEEP,
         "iterable_output_index": FieldPolicy.KEEP,
+        "output_path": FieldPolicy.KEEP,
+        "container_spec": FieldPolicy.KEEP,
         "parent_params": FieldPolicy.KEEP,
         "parent_param_barcodes": FieldPolicy.KEEP,
         "parent_param_passes": FieldPolicy.KEEP,
@@ -175,6 +301,7 @@ class LayerPassLog:
         "recurrent_group": FieldPolicy.KEEP,
         "parent_layers": FieldPolicy.KEEP,
         "parent_layer_arg_locs": FieldPolicy.KEEP,
+        "edge_uses": FieldPolicy.KEEP,
         "root_ancestors": FieldPolicy.KEEP,
         "child_layers": FieldPolicy.KEEP,
         "has_children": FieldPolicy.KEEP,
@@ -216,6 +343,7 @@ class LayerPassLog:
         "cond_branch_else_children": FieldPolicy.KEEP,
         "cond_branch_children_by_cond": FieldPolicy.KEEP,
         "containing_module": FieldPolicy.KEEP,
+        "module_address_normalized": FieldPolicy.KEEP,
         "containing_modules": FieldPolicy.KEEP,
         "modules_entered": FieldPolicy.KEEP,
         "modules_entered_argnames": FieldPolicy.KEEP,
@@ -231,10 +359,84 @@ class LayerPassLog:
         "activation_ref": FieldPolicy.DROP,
         "gradient_ref": FieldPolicy.DROP,
         "_pending_blob_id": FieldPolicy.DROP,
+        "_pending_transformed_activation_blob_id": FieldPolicy.DROP,
+        "_pending_gradient_blob_id": FieldPolicy.DROP,
+        "_pending_transformed_gradient_blob_id": FieldPolicy.DROP,
         "parent_layer_log": FieldPolicy.DROP,
     }
+    FORK_POLICY = LAYER_PASS_LOG_FORK_POLICY
+    DEFAULT_FILL_STATE = _LAYER_PASS_LOG_DEFAULT_FILL
+    _construction_done: bool = False
 
-    def __init__(self, fields_dict: Dict):
+    def __getattribute__(self, name: str) -> Any:
+        """Materialize lazy gradients when the public ``gradient`` field is accessed."""
+
+        if name == "gradient":
+            state = object.__getattribute__(self, "__dict__")
+            gradient = state.get("gradient")
+            if gradient is None and state.get("gradient_ref") is not None:
+                return object.__getattribute__(self, "materialize_gradient")()
+            return gradient
+        return object.__getattribute__(self, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Mark owning logs dirty when user code directly writes guarded fields.
+
+        Parameters
+        ----------
+        name:
+            Attribute being written.
+        value:
+            New attribute value.
+        """
+
+        construction_done = self.__dict__.get("_construction_done", False)
+        if construction_done and name in _DIRECT_WRITE_GUARDED_FIELDS:
+            owner = self.__dict__.get("_source_model_log_ref")
+            model_log = owner() if owner is not None else None
+            if model_log is not None:
+                object.__setattr__(model_log, "_has_direct_writes", True)
+                object.__setattr__(model_log, "run_state", RunState.DIRECT_WRITE_DIRTY)
+                if not getattr(model_log, "_warned_direct_write", False):
+                    warnings.warn(
+                        "DirectActivationWriteWarning: direct LayerPassLog activation writes "
+                        "are not recipe edits; replay/rerun propagation will overlay them.",
+                        DirectActivationWriteWarning,
+                        stacklevel=2,
+                    )
+                    object.__setattr__(model_log, "_warned_direct_write", True)
+        object.__setattr__(self, name, value)
+
+    def _internal_set(self, attr: str, value: Any) -> None:
+        """Set an attribute without marking the owner dirty.
+
+        Parameters
+        ----------
+        attr:
+            Attribute name to set.
+        value:
+            Value to assign.
+        """
+
+        object.__setattr__(self, attr, value)
+
+    def _append_tensor_from(self, other: "LayerPassLog", field_name: str) -> None:
+        """Append one tensor field from another pass along batch dimension 0.
+
+        Parameters
+        ----------
+        other:
+            New chunk pass with a compatible tensor field.
+        field_name:
+            Tensor attribute name to concatenate.
+        """
+
+        current_value = getattr(self, field_name)
+        other_value = getattr(other, field_name)
+        if isinstance(current_value, torch.Tensor) and isinstance(other_value, torch.Tensor):
+            self._internal_set(field_name, concatenate_batch_tensors(current_value, other_value))
+
+    def __init__(self, fields_dict: Dict[str, Any]) -> None:
         """Initialise from a complete fields dictionary.
 
         Args:
@@ -243,8 +445,11 @@ class LayerPassLog:
                 raise ``ValueError``.
         """
         # Attributes are set explicitly (not via loop) for IDE autocompletion.
+        object.__setattr__(self, "_construction_done", False)
 
         # Validate that fields_dict has exactly the expected keys:
+        if "module_address_normalized" not in fields_dict:
+            fields_dict["module_address_normalized"] = None
         fields_dict_key_set = set(fields_dict.keys())
         if fields_dict_key_set != _LAYER_PASS_LOG_FIELD_ORDER_SET:
             error_str = "Error initializing LayerPassLog:"
@@ -282,16 +487,28 @@ class LayerPassLog:
 
         # Saved tensor info:
         self.activation = fields_dict["activation"]
+        self.transformed_activation = fields_dict["transformed_activation"]
         self.has_saved_activations = fields_dict["has_saved_activations"]
         self.output_device = fields_dict["output_device"]
         self.activation_postfunc = fields_dict["activation_postfunc"]
+        self.extra_data: Dict[str, Any] = fields_dict["extra_data"]
+        self.intervention_log = fields_dict["intervention_log"]
         self.detach_saved_tensor = fields_dict["detach_saved_tensor"]
         self.args_captured = fields_dict["args_captured"]
         self.captured_args = fields_dict["captured_args"]
         self.captured_kwargs = fields_dict["captured_kwargs"]
+        self.captured_arg_template = fields_dict["captured_arg_template"]
+        self.captured_kwarg_template = fields_dict["captured_kwarg_template"]
         self.tensor_shape = fields_dict["tensor_shape"]
+        self.transformed_activation_shape = fields_dict["transformed_activation_shape"]
         self.tensor_dtype = fields_dict["tensor_dtype"]
+        self.transformed_activation_dtype = fields_dict["transformed_activation_dtype"]
         self.tensor_memory = fields_dict["tensor_memory"]
+        self.transformed_activation_memory = fields_dict["transformed_activation_memory"]
+        self.autograd_saved_bytes: Optional[int] = fields_dict["autograd_saved_bytes"]
+        self.autograd_saved_tensor_count: Optional[int] = fields_dict["autograd_saved_tensor_count"]
+        self.bytes_delta_at_call: Optional[int] = fields_dict["bytes_delta_at_call"]
+        self.bytes_peak_at_call: Optional[int] = fields_dict["bytes_peak_at_call"]
 
         # Child tensor variation tracking - stores the raw tensor values that
         # each child operation received as input.  Must store RAW values (not
@@ -302,14 +519,19 @@ class LayerPassLog:
         # Saved gradient info - gradient is stored as a bare clone (not deep-copied)
         # via log_tensor_grad().  gradient is populated by a backward hook.
         self.gradient = fields_dict["gradient"]
+        self.transformed_gradient = fields_dict["transformed_gradient"]
         self.save_gradients = fields_dict["save_gradients"]
         self.has_gradient = fields_dict["has_gradient"]
         self.grad_shape = fields_dict["grad_shape"]
+        self.transformed_gradient_shape = fields_dict["transformed_gradient_shape"]
         self.grad_dtype = fields_dict["grad_dtype"]
+        self.transformed_gradient_dtype = fields_dict["transformed_gradient_dtype"]
         self.grad_memory = fields_dict["grad_memory"]
+        self.transformed_gradient_memory = fields_dict["transformed_gradient_memory"]
 
         # Function call info:
         self.func_applied = fields_dict["func_applied"]
+        self.func_call_id = fields_dict["func_call_id"]
         self.func_name = fields_dict["func_name"]
         self.func_call_stack: List["FuncCallLocation"] = fields_dict["func_call_stack"]
         self.func_time = fields_dict["func_time"]
@@ -326,8 +548,13 @@ class LayerPassLog:
         self.func_non_tensor_args = fields_dict["func_non_tensor_args"]
         self.func_is_inplace = fields_dict["func_is_inplace"]
         self.grad_fn_name = fields_dict["grad_fn_name"]
+        self.grad_fn_id = fields_dict["grad_fn_id"]
+        self.grad_fn_object = fields_dict["grad_fn_object"]
+        self.corresponding_grad_fn = fields_dict["corresponding_grad_fn"]
         self.is_part_of_iterable_output = fields_dict["is_part_of_iterable_output"]
         self.iterable_output_index = fields_dict["iterable_output_index"]
+        self.output_path = fields_dict["output_path"]
+        self.container_spec = fields_dict["container_spec"]
 
         # Param info:
         self.parent_params = fields_dict["parent_params"]
@@ -353,6 +580,7 @@ class LayerPassLog:
         # Graph info:
         self.parent_layers = fields_dict["parent_layers"]
         self.parent_layer_arg_locs = fields_dict["parent_layer_arg_locs"]
+        self.edge_uses = fields_dict["edge_uses"]
         self.root_ancestors = fields_dict["root_ancestors"]
         self.child_layers = fields_dict["child_layers"]
         self.has_children = fields_dict["has_children"]
@@ -400,6 +628,7 @@ class LayerPassLog:
 
         # Module info
         self.containing_module = fields_dict["containing_module"]
+        self.module_address_normalized = fields_dict["module_address_normalized"]
         self.containing_modules = fields_dict["containing_modules"]
         self.modules_entered = fields_dict["modules_entered"]
         self.modules_entered_argnames = fields_dict["modules_entered_argnames"]
@@ -422,7 +651,11 @@ class LayerPassLog:
         self.activation_ref: Optional["LazyActivationRef"] = None
         self.gradient_ref: Optional["LazyActivationRef"] = None
         self._pending_blob_id: Optional[str] = None
+        self._pending_transformed_activation_blob_id: Optional[str] = None
+        self._pending_gradient_blob_id: Optional[str] = None
+        self._pending_transformed_gradient_blob_id: Optional[str] = None
         self.parent_layer_log: Optional["LayerLog"] = None
+        object.__setattr__(self, "_construction_done", True)
 
     @property
     def macs_forward(self) -> Optional[int]:
@@ -440,7 +673,7 @@ class LayerPassLog:
         return len(self.parent_layers) > 0
 
     @property
-    def sibling_layers(self) -> list:
+    def sibling_layers(self) -> list[str]:
         """Layers sharing at least one parent (excluding output layers)."""
         ml = self.source_model_log
         if ml is None:
@@ -464,7 +697,7 @@ class LayerPassLog:
         return len(self.sibling_layers) > 0
 
     @property
-    def co_parent_layers(self) -> list:
+    def co_parent_layers(self) -> list[str]:
         """Layers sharing at least one child (excluding output layers)."""
         ml = self.source_model_log
         if ml is None:
@@ -514,14 +747,53 @@ class LayerPassLog:
 
     @property
     def tensor_memory_str(self) -> str:
+        """Return activation tensor size in human-readable units.
+
+        Returns
+        -------
+        str
+            Human-readable activation memory amount.
+        """
         return human_readable_size(self.tensor_memory)
 
     @property
     def grad_memory_str(self) -> str:
+        """Return gradient tensor size in human-readable units.
+
+        Returns
+        -------
+        str
+            Human-readable gradient memory amount.
+        """
         return human_readable_size(self.grad_memory)
 
     @property
+    def tensor(self) -> Any:
+        """Alias for the raw saved activation."""
+
+        return self.activation
+
+    @property
+    def passes(self) -> tuple["LayerPassLog", ...]:
+        """Tuple containing this pass for aggregate-compatible iteration.
+
+        Returns
+        -------
+        tuple[LayerPassLog, ...]
+            Single-entry tuple containing this pass log.
+        """
+
+        return (self,)
+
+    @property
     def params_memory_str(self) -> str:
+        """Return parameter tensor size in human-readable units.
+
+        Returns
+        -------
+        str
+            Human-readable parameter memory amount.
+        """
         return human_readable_size(self.params_memory)
 
     @property
@@ -551,12 +823,17 @@ class LayerPassLog:
         if ref is None:
             return None  # type: ignore[return-value]
         obj = ref()
-        if obj is None:
-            raise RuntimeError("ModelLog has been garbage-collected.")
-        return obj
+        return cast("ModelLog", obj)
 
     @source_model_log.setter
-    def source_model_log(self, value):
+    def source_model_log(self, value: "ModelLog | None") -> None:
+        """Set the owning ModelLog back-reference.
+
+        Parameters
+        ----------
+        value:
+            Owning model log, or ``None`` to clear the reference.
+        """
         self._source_model_log_ref = weakref.ref(value) if value is not None else None
 
     def materialize_activation(
@@ -594,8 +871,8 @@ class LayerPassLog:
             return self.activation
         if self.activation_ref is None:
             raise TorchLensIOError("no activation_ref to materialize from")
-        self.activation = self.activation_ref.materialize(map_location=map_location)
-        return self.activation
+        self._internal_set("activation", self.activation_ref.materialize(map_location=map_location))
+        return cast(torch.Tensor, self.activation)
 
     def materialize_gradient(
         self,
@@ -628,17 +905,21 @@ class LayerPassLog:
         torch.Size([2, 3])
         """
 
-        if isinstance(self.gradient, torch.Tensor):
-            return self.gradient
+        gradient = self.__dict__.get("gradient")
+        if isinstance(gradient, torch.Tensor):
+            return gradient
         if self.gradient_ref is None:
             raise TorchLensIOError("no gradient_ref to materialize from")
-        self.gradient = self.gradient_ref.materialize(map_location=map_location)
-        return self.gradient
+        self._internal_set("gradient", self.gradient_ref.materialize(map_location=map_location))
+        return cast(torch.Tensor, self.gradient)
 
     def __getstate__(self) -> Dict[str, Any]:
         """Return pickle state with weakrefs stripped."""
         state = self.__dict__.copy()
         state["_source_model_log_ref"] = None
+        state["func_applied"] = None
+        state["grad_fn_object"] = None
+        state["corresponding_grad_fn"] = None
         state["io_format_version"] = IO_FORMAT_VERSION
         return state
 
@@ -647,34 +928,46 @@ class LayerPassLog:
         read_io_format_version(state, cls_name=type(self).__name__)
         default_fill_state(
             state,
-            defaults={
-                "_source_model_log_ref": None,
-                "parent_layer_log": None,
-                "activation_ref": None,
-                "gradient_ref": None,
-                "_pending_blob_id": None,
-            },
+            defaults=self.DEFAULT_FILL_STATE,
         )
+        object.__setattr__(self, "_construction_done", False)
+        state.pop("source_model_log", None)
         self.__dict__.update(state)
+        object.__setattr__(self, "_construction_done", bool(state.get("_construction_done", True)))
+
+    @property
+    def activation_transform(self) -> Optional[Callable[..., Any]]:
+        """Canonical activation transform callable used for this pass.
+
+        Returns
+        -------
+        Optional[Callable]
+            Transform callable, or ``None`` when activations are stored unchanged.
+        """
+
+        return cast("Callable[..., Any] | None", self.activation_postfunc)
+
+    @activation_transform.setter
+    def activation_transform(self, value: Optional[Callable[..., Any]]) -> None:
+        """Set the canonical activation transform callable.
+
+        Parameters
+        ----------
+        value:
+            Transform callable, or ``None``.
+        """
+
+        self._internal_set("activation_postfunc", value)
 
     # ********************************************
     # *********** User-Facing Functions **********
     # ********************************************
 
-    def print_all_fields(self):
-        """Print all data fields in the layer."""
-        fields_to_exclude = ["source_model_log", "func_rng_states"]
-
-        for field in dir(self):
-            attr = getattr(self, field)
-            if not any([field.startswith("_"), field in fields_to_exclude, callable(attr)]):
-                print(f"{field}: {attr}")
-
     # ********************************************
     # ************* Logging Functions ************
     # ********************************************
 
-    def copy(self):
+    def copy(self) -> "LayerPassLog":
         """Return a selective-depth copy of this entry.
 
         Most fields are ``copy.deepcopy``'d so the clone is fully independent.
@@ -696,12 +989,18 @@ class LayerPassLog:
         fields_not_to_deepcopy = [
             "func_applied",
             "grad_fn_name",
+            "grad_fn_object",
+            "corresponding_grad_fn",
             "source_model_log",
             "func_rng_states",
             "captured_args",
             "captured_kwargs",
+            "captured_arg_template",
+            "captured_kwarg_template",
             "parent_params",
             "activation",
+            "transformed_activation",
+            "transformed_gradient",
             "children_tensor_versions",
         ]
         for field in LAYER_PASS_LOG_FIELD_ORDER:
@@ -715,10 +1014,10 @@ class LayerPassLog:
     def save_tensor_data(
         self,
         t: torch.Tensor,
-        t_args: Union[List, Tuple],
-        t_kwargs: Dict,
+        t_args: Union[List[Any], Tuple[Any, ...]],
+        t_kwargs: Dict[str, Any],
         save_function_args: bool,
-        activation_postfunc: Optional[Callable] = None,
+        activation_postfunc: Optional[Callable[..., Any]] = None,
     ) -> None:
         """Save the output tensor (and optionally args) for this operation.
 
@@ -742,18 +1041,68 @@ class LayerPassLog:
         writer = getattr(model_log, "_activation_writer", None) if model_log is not None else None
         try:
             # Clone the tensor, optionally detaching from autograd graph.
-            self.activation = safe_copy(t, self.detach_saved_tensor)
+            raw_activation = safe_copy(t, self.detach_saved_tensor)
             # Move to the user-requested output device if needed.
-            if self.output_device not in [str(self.activation.device), "same"]:
-                self.activation = safe_to(self.activation, self.output_device)
-            # Apply user's postfunc with logging paused so postfunc's own ops
-            # (e.g. .mean(), .float()) don't get logged as model operations.
+            if self.output_device not in [str(raw_activation.device), "same"]:
+                raw_activation = safe_to(raw_activation, self.output_device)
+
+            self.tensor_shape = tuple(raw_activation.shape)
+            self.tensor_dtype = raw_activation.dtype
+            self.tensor_memory = get_tensor_memory_amount(raw_activation)
+
+            save_raw_activation = getattr(model_log, "save_raw_activation", True)
+            store_raw = save_raw_activation or activation_postfunc is None
+            if (
+                model_log is not None
+                and store_raw
+                and not getattr(model_log, "save_function_args", False)
+            ):
+                hash_cache = getattr(model_log, "_activation_hash_cache", None)
+                if hash_cache is None:
+                    hash_cache = {}
+                    setattr(model_log, "_activation_hash_cache", hash_cache)
+                activation_hash = _tensor_content_hash(raw_activation)
+                if activation_hash in hash_cache:
+                    self.extra_data["dedup_activation_hash"] = activation_hash
+                    self.extra_data["dedup_reference_label"] = hash_cache[activation_hash][0]
+                    raw_activation = hash_cache[activation_hash][1]
+                else:
+                    hash_cache[activation_hash] = (self.layer_label_raw, raw_activation)
+            self._internal_set("activation", raw_activation if store_raw else None)
+
+            self._internal_set("transformed_activation", None)
+            self.transformed_activation_shape = None
+            self.transformed_activation_dtype = None
+            self.transformed_activation_memory = None
             if activation_postfunc is not None:
-                with pause_logging():
-                    self.activation = activation_postfunc(self.activation)
+                self._internal_set(
+                    "transformed_activation",
+                    self._apply_postfunc(
+                        raw_activation,
+                        activation_postfunc,
+                        postfunc_kind="activation",
+                        streaming_active=writer is not None,
+                    ),
+                )
+                self._validate_train_mode_postfunc_output(
+                    raw_activation,
+                    self.transformed_activation,
+                    postfunc_kind="activation",
+                )
+                self.transformed_activation_shape = _tensor_shape_or_none(
+                    self.transformed_activation
+                )
+                self.transformed_activation_dtype = _tensor_dtype_or_none(
+                    self.transformed_activation
+                )
+                self.transformed_activation_memory = _tensor_memory_or_none(
+                    self.transformed_activation
+                )
         except Exception as exc:
             if writer is not None:
                 writer.abort(f"Failed while saving activation for {self._streaming_label}: {exc}")
+                if isinstance(exc, TorchLensPostfuncError):
+                    raise
                 raise TorchLensIOError(
                     f"Streaming activation save failed for {self._streaming_label}."
                 ) from exc
@@ -767,23 +1116,30 @@ class LayerPassLog:
                 activation_sink(self._streaming_label, self.activation)
 
             if writer is not None and getattr(model_log, "_in_exhaustive_pass", False):
-                blob_id = writer.next_blob_id()
-                self._pending_blob_id = blob_id
-                writer.write_blob(
-                    blob_id,
-                    self.activation,
+                self._stream_tensor_blob(
+                    writer,
+                    tensor_field="activation",
+                    pending_field="_pending_blob_id",
                     kind="activation",
-                    label=self._streaming_label,
+                )
+                self._stream_tensor_blob(
+                    writer,
+                    tensor_field="transformed_activation",
+                    pending_field="_pending_transformed_activation_blob_id",
+                    kind="transformed_activation",
                 )
 
         # Tensor args and kwargs:
         if save_function_args:
             self.args_captured = True
-            self.captured_args = [_recursive_safe_copy(arg) for arg in t_args]
-            self.captured_kwargs = {k: _recursive_safe_copy(v) for k, v in t_kwargs.items()}
+            self._internal_set("captured_args", [_recursive_safe_copy(arg) for arg in t_args])
+            self._internal_set(
+                "captured_kwargs",
+                {k: _recursive_safe_copy(v) for k, v in t_kwargs.items()},
+            )
         else:
-            self.captured_args = None
-            self.captured_kwargs = None
+            self._internal_set("captured_args", None)
+            self._internal_set("captured_kwargs", None)
 
     def save_function_args_data(
         self,
@@ -803,7 +1159,7 @@ class LayerPassLog:
             self.captured_args = None
             self.captured_kwargs = None
 
-    def log_tensor_grad(self, grad: torch.Tensor):
+    def log_tensor_grad(self, grad: torch.Tensor) -> None:
         """Save the gradient tensor for this layer's output.
 
         Called by the backward hook registered during the forward pass.
@@ -813,24 +1169,213 @@ class LayerPassLog:
         Args:
             grad: The gradient tensor flowing back through this operation.
         """
-        self.gradient = grad.detach().clone()
+        model_log = self.source_model_log
+        raw_grad = grad
+        self.grad_shape = tuple(raw_grad.shape)
+        self.grad_dtype = raw_grad.dtype
+        self.grad_memory = get_tensor_memory_amount(raw_grad)
+        gradient_postfunc = getattr(model_log, "gradient_postfunc", None)
+        self._internal_set("transformed_gradient", None)
+        self.transformed_gradient_shape = None
+        self.transformed_gradient_dtype = None
+        self.transformed_gradient_memory = None
+        writer = getattr(model_log, "_activation_writer", None) if model_log is not None else None
+        if gradient_postfunc is not None:
+            self._internal_set(
+                "transformed_gradient",
+                self._apply_postfunc(
+                    raw_grad,
+                    gradient_postfunc,
+                    postfunc_kind="gradient",
+                    streaming_active=writer is not None,
+                ),
+            )
+            self._validate_train_mode_postfunc_output(
+                raw_grad,
+                self.transformed_gradient,
+                postfunc_kind="gradient",
+            )
+            self.transformed_gradient_shape = _tensor_shape_or_none(self.transformed_gradient)
+            self.transformed_gradient_dtype = _tensor_dtype_or_none(self.transformed_gradient)
+            self.transformed_gradient_memory = _tensor_memory_or_none(self.transformed_gradient)
+
+        save_raw_gradient = getattr(model_log, "save_raw_gradient", True)
+        store_raw = save_raw_gradient or gradient_postfunc is None
+        self._internal_set("gradient", raw_grad.detach().clone() if store_raw else None)
         self.has_gradient = True
-        self.grad_shape = grad.shape
-        self.grad_dtype = grad.dtype
-        self.grad_memory = get_tensor_memory_amount(grad)
+        if writer is not None and getattr(model_log, "_defer_streaming_bundle_finalization", False):
+            self._stream_tensor_blob(
+                writer,
+                tensor_field="gradient",
+                pending_field="_pending_gradient_blob_id",
+                kind="gradient",
+            )
+            self._stream_tensor_blob(
+                writer,
+                tensor_field="transformed_gradient",
+                pending_field="_pending_transformed_gradient_blob_id",
+                kind="transformed_gradient",
+            )
+
+    def _apply_postfunc(
+        self,
+        tensor: torch.Tensor,
+        postfunc: Callable[..., Any],
+        *,
+        postfunc_kind: str,
+        streaming_active: bool,
+    ) -> Any:
+        """Apply a user postfunc with logging paused and rich error context."""
+
+        try:
+            with pause_logging():
+                return postfunc(tensor)
+        except Exception as exc:
+            raise TorchLensPostfuncError(
+                self._postfunc_error_message(
+                    postfunc_kind=postfunc_kind,
+                    tensor=tensor,
+                    streaming_active=streaming_active,
+                )
+            ) from exc
+
+    def _postfunc_error_message(
+        self,
+        *,
+        postfunc_kind: str,
+        tensor: torch.Tensor,
+        streaming_active: bool,
+    ) -> str:
+        """Build context for an activation or gradient postfunc failure."""
+
+        return (
+            f"{postfunc_kind}_postfunc raised for layer {self._streaming_label} "
+            f"(raw={self.layer_label_raw}, func={self.func_name}, "
+            f"shape={tuple(tensor.shape)}, dtype={tensor.dtype}, "
+            f"streaming_active={streaming_active})."
+        )
+
+    def _validate_train_mode_postfunc_output(
+        self,
+        raw_tensor: torch.Tensor,
+        output: Any,
+        *,
+        postfunc_kind: str,
+    ) -> None:
+        """Validate differentiability requirements for train-mode postfunc outputs."""
+
+        model_log = self.source_model_log
+        if not getattr(model_log, "train_mode", False) or not raw_tensor.requires_grad:
+            return
+        if not isinstance(output, torch.Tensor):
+            raise TrainingModeConfigError(
+                f"{postfunc_kind}_postfunc must return a torch.Tensor while train_mode=True "
+                f"for layer {self._streaming_label}."
+            )
+        if output.dtype in _NON_GRAD_DTYPES:
+            raise TrainingModeConfigError(
+                f"train_mode=True with non-grad dtype {output.dtype} on layer "
+                f"{self._streaming_label}. Integer and bool dtypes cannot propagate gradients."
+            )
+        if output.grad_fn is None:
+            raise TrainingModeConfigError(
+                f"{postfunc_kind}_postfunc returned a tensor disconnected from the autograd "
+                "graph (grad_fn is None) while train_mode=True. The transformed activation "
+                "must remain differentiable."
+            )
+
+    def _stream_tensor_blob(
+        self,
+        writer: Any,
+        *,
+        tensor_field: str,
+        pending_field: str,
+        kind: str,
+    ) -> None:
+        """Stream one tensor field when present."""
+
+        tensor = getattr(self, tensor_field)
+        if tensor is None:
+            return
+        if not isinstance(tensor, torch.Tensor):
+            if kind == "transformed_activation":
+                message = (
+                    "Streaming save requires activation_postfunc outputs to be torch.Tensor "
+                    f"instances, but layer {self._streaming_label} produced "
+                    f"{type(tensor).__name__}."
+                )
+            elif kind == "transformed_gradient":
+                message = (
+                    "Streaming save requires gradient_postfunc outputs to be torch.Tensor "
+                    f"instances, but layer {self._streaming_label} produced "
+                    f"{type(tensor).__name__}."
+                )
+            else:
+                message = (
+                    f"{tensor_field} expected a tensor for streaming, got {type(tensor).__name__}."
+                )
+            writer.abort(message)
+            raise TorchLensIOError(message)
+        blob_id = writer.next_blob_id()
+        setattr(self, pending_field, blob_id)
+        writer.write_blob(
+            blob_id,
+            tensor,
+            kind=kind,
+            label=self._streaming_label,
+        )
 
     # ********************************************
     # ************* Fetcher Functions ************
     # ********************************************
 
-    def get_child_layers(self):
+    def get_child_layers(self) -> list["LayerPassLog"]:
+        """Return child LayerPassLog objects for this pass.
+
+        Returns
+        -------
+        list[LayerPassLog]
+            Child passes resolved through the owning model log.
+        """
         return [self.source_model_log[child_label] for child_label in self.child_layers]
 
-    def get_parent_layers(self):
+    def get_parent_layers(self) -> list["LayerPassLog"]:
+        """Return parent LayerPassLog objects for this pass.
+
+        Returns
+        -------
+        list[LayerPassLog]
+            Parent passes resolved through the owning model log.
+        """
         return [self.source_model_log[parent_label] for parent_label in self.parent_layers]
 
+    def show(
+        self,
+        method: Literal["auto", "heatmap", "channels", "rgb", "hist"] = "auto",
+        **kwargs: Any,
+    ) -> Any:
+        """Display this pass's saved activation.
+
+        Parameters
+        ----------
+        method:
+            Display method. ``"auto"`` chooses from tensor shape.
+        **kwargs:
+            Forwarded to the tensor display helper.
+
+        Returns
+        -------
+        Any
+            Matplotlib figure when plotting is available, otherwise a text
+            fallback explaining why no plot was produced.
+        """
+
+        from ..viz._tensor_display import show_tensor
+
+        return show_tensor(self, method=method, **kwargs)
+
     @property
-    def params(self):
+    def params(self) -> Any:
         """Access parameter metadata by address, short name, or index."""
         from .param_log import ParamAccessor
 
@@ -841,7 +1386,7 @@ class LayerPassLog:
     # ************* Built-in Methods *************
     # ********************************************
 
-    def __str__(self):
+    def __str__(self) -> str:
         if self._pass_finished:
             return self._str_after_pass()
         else:
@@ -930,6 +1475,7 @@ class LayerPassLog:
             return ""
         else:
             s = ""
+            s += f"\n\t\t{tensor_stats_summary(self.activation)}"
             tensor_size_shown = 8
             # Use logged shape, not live tensor shape (#45)
             saved_shape = (
@@ -991,7 +1537,7 @@ class LayerPassLog:
 
         return s
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return self.__str__()
 
 
