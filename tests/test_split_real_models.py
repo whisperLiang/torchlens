@@ -30,6 +30,9 @@ from torchlens.split.validation import write_split_sweep_coverage_report
 
 
 YOLO26N_CANDIDATES = (
+    Path(os.environ["TORCHLENS_YOLO26N_PATH"]) if "TORCHLENS_YOLO26N_PATH" in os.environ else None,
+    Path(os.environ["YOLO26N_PATH"]) if "YOLO26N_PATH" in os.environ else None,
+    Path(__file__).resolve().parents[1] / "yolo26n.pt",
     Path("/home/whisperliang/TSBOW-main/yolo26n.pt"),
     Path("/home/whisperliang/TSBOW-main/baselines/yolo26n.pt"),
     Path("/home/whisperliang/Plank-road/model_management/models/yolo26n.pt"),
@@ -39,6 +42,7 @@ TINYNEXT_SOURCE = PLANK_ROAD_ROOT / "model_management" / "tinynext.py"
 RFDETR_PYTHON = PLANK_ROAD_ROOT / ".venv" / "bin" / "python"
 RFDETR_WEIGHTS = Path("/home/whisperliang/TSBOW-main/baselines/rf-detr-nano.pth")
 REAL_MODEL_DYNAMIC_BATCHES = (1, 2, 4, 8, 32)
+REAL_MODEL_CPU_DYNAMIC_BATCHES = (1, 2)
 REAL_MODEL_DYNAMIC_BATCH_RANGE = (1, 32)
 SPLIT_SWEEP_COVERAGE_DIR = Path(__file__).resolve().parent / "artifacts" / "split_sweep_coverage"
 
@@ -49,7 +53,7 @@ def test_yolo26n_detection_head_boundary_is_live_on_cuda() -> None:
     """YOLO26n split after detection head preserves all live boundary tensors."""
 
     ultralytics = pytest.importorskip("ultralytics")
-    weight_path = next((path for path in YOLO26N_CANDIDATES if path.exists()), None)
+    weight_path = next((path for path in YOLO26N_CANDIDATES if path is not None and path.exists()), None)
     if weight_path is None:
         pytest.skip("YOLO26n weights are not available.")
 
@@ -76,27 +80,29 @@ def test_yolo26n_detection_head_boundary_is_live_on_cuda() -> None:
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_yolo26n_all_semantic_split_points_on_cuda() -> None:
-    """Sweep every semantic split point in YOLO26n across CPU and CUDA traces."""
+    """Sweep every semantic split point in YOLO26n on CUDA when available, else CPU."""
 
     ultralytics = pytest.importorskip("ultralytics")
-    weight_path = next((path for path in YOLO26N_CANDIDATES if path.exists()), None)
+    weight_path = next((path for path in YOLO26N_CANDIDATES if path is not None and path.exists()), None)
     if weight_path is None:
         pytest.skip("YOLO26n weights are not available.")
 
+    has_cuda = torch.cuda.is_available()
     cpu_model = ultralytics.YOLO(str(weight_path)).model.eval().cpu()
-    cuda_model = ultralytics.YOLO(str(weight_path)).model.eval().cuda()
-    runtime_cases = _tensor_runtime_cases((3, 640, 640), batch_sizes=REAL_MODEL_DYNAMIC_BATCHES)
+    cuda_model = ultralytics.YOLO(str(weight_path)).model.eval().cuda() if has_cuda else None
+    runtime_cases = _tensor_runtime_cases(
+        (3, 640, 640),
+        batch_sizes=REAL_MODEL_DYNAMIC_BATCHES if has_cuda else REAL_MODEL_CPU_DYNAMIC_BATCHES,
+    )
     trace_cpu = runtime_cases[0]
-    trace_cuda = trace_cpu.cuda()
     cpu_graph = _trace_graph(cpu_model, trace_cpu)
-    cuda_graph = _trace_graph(cuda_model, trace_cuda)
+    cuda_graph = _trace_graph(cuda_model, trace_cpu.cuda()) if cuda_model is not None else None
     targets = _semantic_split_targets(cpu_graph)
 
     report = _run_real_model_semantic_split_sweep(
         model_name="YOLO26n",
-        artifact_name="yolo26n_cuda.json",
+        artifact_name=f"yolo26n_{'cuda' if has_cuda else 'cpu'}.json",
         cpu_model=cpu_model,
         cuda_model=cuda_model,
         cpu_graph=cpu_graph,
@@ -168,32 +174,36 @@ def test_tinynext_cpu_prefix_cuda_suffix_across_split_points() -> None:
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_tinynext_all_semantic_split_points_on_cuda() -> None:
-    """Sweep every semantic split point in TinyNeXt across CPU and CUDA traces."""
+    """Sweep every semantic split point in TinyNeXt on CUDA when available, else CPU."""
 
     if not TINYNEXT_SOURCE.exists():
         pytest.skip("TinyNeXt source file is not available.")
     module = _load_module_from_file("torchlens_split_tinynext_all", TINYNEXT_SOURCE)
+    has_cuda = torch.cuda.is_available()
     cpu_model = module.TinyNeXtBackbone(
         cfg=module.TINYNEXT_VARIANTS["tinynext_s"]["cfg"],
         pretrained_path=None,
     ).eval().cpu()
-    cuda_model = module.TinyNeXtBackbone(
-        cfg=module.TINYNEXT_VARIANTS["tinynext_s"]["cfg"],
-        pretrained_path=None,
-    ).eval().cuda()
-    cuda_model.load_state_dict(cpu_model.state_dict())
-    runtime_cases = _tensor_runtime_cases((3, 320, 320), batch_sizes=REAL_MODEL_DYNAMIC_BATCHES)
+    cuda_model = None
+    if has_cuda:
+        cuda_model = module.TinyNeXtBackbone(
+            cfg=module.TINYNEXT_VARIANTS["tinynext_s"]["cfg"],
+            pretrained_path=None,
+        ).eval().cuda()
+        cuda_model.load_state_dict(cpu_model.state_dict())
+    runtime_cases = _tensor_runtime_cases(
+        (3, 320, 320),
+        batch_sizes=REAL_MODEL_DYNAMIC_BATCHES if has_cuda else REAL_MODEL_CPU_DYNAMIC_BATCHES,
+    )
     trace_cpu = runtime_cases[0]
-    trace_cuda = trace_cpu.cuda()
     cpu_graph = _trace_graph(cpu_model, trace_cpu)
-    cuda_graph = _trace_graph(cuda_model, trace_cuda)
+    cuda_graph = _trace_graph(cuda_model, trace_cpu.cuda()) if cuda_model is not None else None
     targets = _semantic_split_targets(cpu_graph)
 
     report = _run_real_model_semantic_split_sweep(
         model_name="TinyNeXt",
-        artifact_name="tinynext_cuda.json",
+        artifact_name=f"tinynext_{'cuda' if has_cuda else 'cpu'}.json",
         cpu_model=cpu_model,
         cuda_model=cuda_model,
         cpu_graph=cpu_graph,
@@ -554,9 +564,9 @@ def _run_real_model_semantic_split_sweep(
     model_name: str,
     artifact_name: str,
     cpu_model: torch.nn.Module,
-    cuda_model: torch.nn.Module,
+    cuda_model: torch.nn.Module | None,
     cpu_graph: Any,
-    cuda_graph: Any,
+    cuda_graph: Any | None,
     targets: list[str],
     runtime_cases: tuple[torch.Tensor, ...],
     min_support_ratio: float,
@@ -570,25 +580,32 @@ def _run_real_model_semantic_split_sweep(
         try:
             spec = tl.SplitSpec(boundary=boundary, dynamic_batch=REAL_MODEL_DYNAMIC_BATCH_RANGE)
             cpu_runtime = _runtime_from_graph(cpu_model, cpu_graph, spec)
-            cuda_runtime = _runtime_from_graph(cuda_model, cuda_graph, spec)
-            assert_canonical_abi_equivalent(cpu_runtime, cuda_runtime)
+            cuda_runtime = None
+            if cuda_model is not None and cuda_graph is not None:
+                cuda_runtime = _runtime_from_graph(cuda_model, cuda_graph, spec)
+                assert_canonical_abi_equivalent(cpu_runtime, cuda_runtime)
 
             for x_cpu in runtime_cases:
                 batch_size = int(x_cpu.shape[0])
                 tested_batches.append(batch_size)
-                x_cuda = x_cpu.cuda()
                 cpu_boundary = cpu_runtime.run_prefix(x_cpu)
-                cuda_boundary = cuda_runtime.run_prefix(x_cuda)
                 _assert_boundary_devices(cpu_boundary, "cpu")
-                _assert_boundary_devices(cuda_boundary, "cuda")
-                _assert_boundary_shapes(cpu_boundary, cuda_boundary)
 
                 with torch.no_grad():
-                    full_output = cuda_model(x_cuda)
-                    cuda_split_output = cuda_runtime.run_suffix(cuda_boundary)
-                    cross_device_output = cuda_runtime.run_suffix(cpu_boundary)
-                assert _tree_allclose(cuda_split_output, full_output, atol=1e-4, rtol=1e-4)
-                _assert_tree_shape_device_finite(cross_device_output, full_output, "cuda")
+                    if cuda_model is not None and cuda_runtime is not None:
+                        x_cuda = x_cpu.cuda()
+                        cuda_boundary = cuda_runtime.run_prefix(x_cuda)
+                        _assert_boundary_devices(cuda_boundary, "cuda")
+                        _assert_boundary_shapes(cpu_boundary, cuda_boundary)
+                        full_output = cuda_model(x_cuda)
+                        split_output = cuda_runtime.run_suffix(cuda_boundary)
+                        cross_device_output = cuda_runtime.run_suffix(cpu_boundary)
+                        assert _tree_allclose(split_output, full_output, atol=1e-4, rtol=1e-4)
+                        _assert_tree_shape_device_finite(cross_device_output, full_output, "cuda")
+                    else:
+                        full_output = cpu_model(x_cpu)
+                        split_output = cpu_runtime.run_suffix(cpu_boundary)
+                        assert _tree_allclose(split_output, full_output, atol=1e-4, rtol=1e-4)
                 batch_statuses[str(batch_size)] = "supported"
         except SplitUnsupportedError as exc:
             assert_split_unsupported_error_context(exc, boundary)

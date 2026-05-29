@@ -256,6 +256,13 @@ def _dynamic_batch_literal(
     runtime_batch = _runtime_batch_from_env(env, graph)
     if runtime_batch is None:
         raise unsupported(_context(node, graph.batch_symbol, "could not infer runtime batch"))
+    if node.op_type == "repeat" and _repeat_input_already_has_batch_dim(
+        node,
+        graph,
+        env,
+        runtime_batch,
+    ):
+        return None
     return runtime_batch
 
 
@@ -282,6 +289,26 @@ def _runtime_batch_from_env(env: dict[str, Any], graph: TraceGraph) -> int | Non
         if isinstance(value, torch.Tensor) and value.ndim > 0:
             return int(value.shape[0])
     return None
+
+
+def _repeat_input_already_has_batch_dim(
+    node: TraceNode,
+    graph: TraceGraph,
+    env: dict[str, Any],
+    runtime_batch: int,
+) -> bool:
+    if not node.parents or graph.traced_batch_size is None:
+        return False
+    parent_label = _final_label_for_ref(graph, node.parents[0])
+    parent_value = env.get(parent_label)
+    if isinstance(parent_value, torch.Tensor) and parent_value.ndim > 0:
+        if bool(getattr(graph.get(parent_label).layer, "has_input_ancestor", True)):
+            return True
+        return int(parent_value.shape[0]) == runtime_batch
+    parent = graph.get(parent_label)
+    if bool(getattr(parent.layer, "has_input_ancestor", True)):
+        return True
+    return bool(parent.output_shape and parent.output_shape[0] == graph.traced_batch_size)
 
 
 def _next_matching_param(

@@ -71,6 +71,21 @@ class DynamicExpandRepeatNet(nn.Module):
         return torch.cat([base, repeated], dim=1)
 
 
+class DynamicRepeatBatchlessNet(nn.Module):
+    """Toy model covering repeat(batch, ...) on a batchless tensor."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(3))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Repeat a batchless parameter over the runtime batch size."""
+
+        batch = x.shape[0]
+        base = self.weight.view(1, -1).repeat(batch, 1)
+        return base + x.mean(dim=(2, 3))
+
+
 class DynamicStackCatChunkNet(nn.Module):
     """Toy model covering stack, cat, chunk, and tuple getitem."""
 
@@ -125,6 +140,7 @@ class DynamicBatchIndexNet(nn.Module):
         (DynamicReshapeViewNet, (3, 4, 5)),
         (DynamicFactoryNet, (3, 4, 5)),
         (DynamicExpandRepeatNet, (3, 4, 5)),
+        (DynamicRepeatBatchlessNet, (3, 4, 5)),
         (DynamicStackCatChunkNet, (3, 4, 5)),
         (DynamicMeshgridAnchorToy, (3, 4, 5)),
         (DynamicBatchIndexNet, (3, 4, 5)),
@@ -149,11 +165,13 @@ def test_dynamic_shape_codegen_does_not_hardcode_traced_batch_size() -> None:
     reshape_graph = _trace_for(DynamicReshapeViewNet(), (3, 4, 5))
     factory_graph = _trace_for(DynamicFactoryNet(), (3, 4, 5))
     expand_graph = _trace_for(DynamicExpandRepeatNet(), (3, 4, 5))
+    repeat_graph = _trace_for(DynamicRepeatBatchlessNet(), (3, 4, 5))
 
     cases = (
         (reshape_graph, _first_node(reshape_graph, "reshape"), ("args", 1)),
         (reshape_graph, _first_node(reshape_graph, "view"), ("args", 1)),
         (expand_graph, _first_node(expand_graph, "expand"), ("args", 1)),
+        (repeat_graph, _first_node(repeat_graph, "repeat"), ("args", 1)),
         (factory_graph, _first_node(factory_graph, "zeros"), ("args", 0, 0)),
         (factory_graph, _first_node(factory_graph, "ones"), ("args", 0, 0)),
         (factory_graph, replace(_first_node(factory_graph, "zeros"), op_type="empty"), ("args", 0, 0)),
@@ -163,6 +181,10 @@ def test_dynamic_shape_codegen_does_not_hardcode_traced_batch_size() -> None:
     for graph, node, path in cases:
         env = {graph.input_nodes[0]: torch.randn(4, 3, 4, 5)}
         assert _dynamic_batch_literal(TRACE_BATCH, node, graph, env, path) == 4
+
+    repeat_existing_batch_node = _first_node(expand_graph, "repeat")
+    env = {expand_graph.input_nodes[0]: torch.randn(4, 3, 4, 5)}
+    assert _dynamic_batch_literal(1, repeat_existing_batch_node, expand_graph, env, ("args", 1)) is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
