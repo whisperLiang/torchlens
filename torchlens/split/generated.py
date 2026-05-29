@@ -102,6 +102,8 @@ def _execute_node(
     if (
         not getattr(node.layer, "has_input_ancestor", True)
         and isinstance(activation, torch.Tensor)
+        and node.op_type not in _BATCH_SHAPE_OPS
+        and not node.parents
     ):
         env[node.torchlens_label] = activation
         return
@@ -251,7 +253,7 @@ def _dynamic_batch_literal(
         return None
     if not _is_leading_shape_position(node.op_type, path):
         return None
-    runtime_batch = _runtime_batch_from_env(env)
+    runtime_batch = _runtime_batch_from_env(env, graph)
     if runtime_batch is None:
         raise unsupported(_context(node, graph.batch_symbol, "could not infer runtime batch"))
     return runtime_batch
@@ -266,10 +268,16 @@ def _is_leading_shape_position(op_type: str, path: tuple[Any, ...]) -> bool:
         return path in {("args", 1), ("args", 1, 0), ("kwargs", "shape", 0), ("kwargs", "size", 0)}
     if op_type in {"zeros", "ones", "empty"}:
         return path in {("args", 0), ("args", 0, 0), ("kwargs", "size", 0)}
+    if op_type == "arange":
+        return path in {("args", 0), ("kwargs", "end")}
     return False
 
 
-def _runtime_batch_from_env(env: dict[str, Any]) -> int | None:
+def _runtime_batch_from_env(env: dict[str, Any], graph: TraceGraph) -> int | None:
+    for label in graph.input_nodes:
+        value = env.get(label)
+        if isinstance(value, torch.Tensor) and value.ndim > 0:
+            return int(value.shape[0])
     for value in env.values():
         if isinstance(value, torch.Tensor) and value.ndim > 0:
             return int(value.shape[0])
