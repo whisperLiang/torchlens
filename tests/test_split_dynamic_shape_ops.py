@@ -11,6 +11,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.split.generated import _dynamic_batch_literal
+from torchlens.split.generated import _runtime_batch_from_env
 from torchlens.split.trace_graph import TraceGraph, TraceNode
 
 
@@ -185,6 +186,35 @@ def test_dynamic_shape_codegen_does_not_hardcode_traced_batch_size() -> None:
     repeat_existing_batch_node = _first_node(expand_graph, "repeat")
     env = {expand_graph.input_nodes[0]: torch.randn(4, 3, 4, 5)}
     assert _dynamic_batch_literal(1, repeat_existing_batch_node, expand_graph, env, ("args", 1)) is None
+
+
+def test_runtime_batch_inference_prefers_symbolic_batch_tensors() -> None:
+    """Suffix envs may contain non-batch tensors before the true batch tensor."""
+
+    graph = _trace_for(DynamicRepeatBatchlessNet(), (3, 4, 5))
+    batch_node = next(
+        node
+        for node in graph.ordered_nodes()
+        if node.symbolic_output_shape is not None
+        and node.symbolic_output_shape
+        and node.symbolic_output_shape[0] == graph.batch_symbol
+        and not node.is_input
+    )
+    non_batch_node = next(
+        node
+        for node in graph.ordered_nodes()
+        if node.output_shape is not None
+        and node.output_shape
+        and node.symbolic_output_shape is not None
+        and node.symbolic_output_shape[0] != graph.batch_symbol
+    )
+
+    env = {
+        non_batch_node.torchlens_label: torch.randn(2),
+        batch_node.torchlens_label: torch.randn(4, *batch_node.output_shape[1:]),
+    }
+
+    assert _runtime_batch_from_env(env, graph) == 4
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

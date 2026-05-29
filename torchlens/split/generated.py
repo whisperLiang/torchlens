@@ -285,6 +285,16 @@ def _runtime_batch_from_env(env: dict[str, Any], graph: TraceGraph) -> int | Non
         value = env.get(label)
         if isinstance(value, torch.Tensor) and value.ndim > 0:
             return int(value.shape[0])
+    for node in graph.ordered_nodes():
+        value = env.get(node.torchlens_label)
+        if (
+            isinstance(value, torch.Tensor)
+            and value.ndim > 0
+            and node.symbolic_output_shape is not None
+            and node.symbolic_output_shape
+            and node.symbolic_output_shape[0] == graph.batch_symbol
+        ):
+            return int(value.shape[0])
     for value in env.values():
         if isinstance(value, torch.Tensor) and value.ndim > 0:
             return int(value.shape[0])
