@@ -21,6 +21,12 @@ class SplitBoundaryError(ValueError):
 class SplitUnsupportedError(SplitError):
     """Raised when TorchLens cannot lower an observed operation into split runtime."""
 
+    context: SplitErrorContext | None
+
+    def __init__(self, message: str, context: SplitErrorContext | None = None) -> None:
+        super().__init__(message)
+        self.context = context
+
 
 @dataclass(frozen=True)
 class SplitErrorContext:
@@ -91,7 +97,7 @@ def unsupported(context: SplitErrorContext) -> SplitUnsupportedError:
         Error ready to raise.
     """
 
-    return SplitUnsupportedError(f"Unsupported split lowering: {context.format()}")
+    return SplitUnsupportedError(f"Unsupported split lowering: {context.format()}", context)
 
 
 __all__ = [

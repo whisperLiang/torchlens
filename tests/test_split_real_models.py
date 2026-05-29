@@ -18,8 +18,15 @@ from torchlens.split.errors import SplitUnsupportedError
 from torchlens.split.planner import plan_split
 from torchlens.split.runtime import SplitRuntime
 from torchlens.split.trace_graph import trace_graph_from_model_log
+from torchlens.split.validation import SplitSweepCaseResult
+from torchlens.split.validation import assert_split_sweep_coverage
+from torchlens.split.validation import assert_split_unsupported_error_context
 from torchlens.split.validation import assert_canonical_abi_equivalent
 from torchlens.split.validation import boundary_liveness_zero_probe
+from torchlens.split.validation import format_split_sweep_coverage_summary
+from torchlens.split.validation import make_split_sweep_case_result
+from torchlens.split.validation import summarize_split_sweep_coverage
+from torchlens.split.validation import write_split_sweep_coverage_report
 
 
 YOLO26N_CANDIDATES = (
@@ -33,6 +40,7 @@ RFDETR_PYTHON = PLANK_ROAD_ROOT / ".venv" / "bin" / "python"
 RFDETR_WEIGHTS = Path("/home/whisperliang/TSBOW-main/baselines/rf-detr-nano.pth")
 REAL_MODEL_DYNAMIC_BATCHES = (1, 2, 4, 8, 32)
 REAL_MODEL_DYNAMIC_BATCH_RANGE = (1, 32)
+SPLIT_SWEEP_COVERAGE_DIR = Path(__file__).resolve().parent / "artifacts" / "split_sweep_coverage"
 
 
 @pytest.mark.smoke
@@ -86,30 +94,18 @@ def test_yolo26n_all_semantic_split_points_on_cuda() -> None:
     cuda_graph = _trace_graph(cuda_model, trace_cuda)
     targets = _semantic_split_targets(cpu_graph)
 
-    assert len(targets) >= 100
-    for target in targets:
-        spec = tl.SplitSpec(boundary=f"after:{target}", dynamic_batch=REAL_MODEL_DYNAMIC_BATCH_RANGE)
-        cpu_runtime = _runtime_from_graph(cpu_model, cpu_graph, spec)
-        cuda_runtime = _runtime_from_graph(cuda_model, cuda_graph, spec)
-        assert_canonical_abi_equivalent(cpu_runtime, cuda_runtime)
-
-        for x_cpu in runtime_cases:
-            x_cuda = x_cpu.cuda()
-            try:
-                cpu_boundary = cpu_runtime.run_prefix(x_cpu)
-                cuda_boundary = cuda_runtime.run_prefix(x_cuda)
-                _assert_boundary_devices(cpu_boundary, "cpu")
-                _assert_boundary_devices(cuda_boundary, "cuda")
-                _assert_boundary_shapes(cpu_boundary, cuda_boundary)
-
-                with torch.no_grad():
-                    full_output = cuda_model(x_cuda)
-                    cuda_split_output = cuda_runtime.run_suffix(cuda_boundary)
-                    cross_device_output = cuda_runtime.run_suffix(cpu_boundary)
-                assert _tree_allclose(cuda_split_output, full_output, atol=1e-4, rtol=1e-4)
-                _assert_tree_shape_device_finite(cross_device_output, full_output, "cuda")
-            except SplitUnsupportedError as exc:
-                _assert_split_error_context(exc, target)
+    report = _run_real_model_semantic_split_sweep(
+        model_name="YOLO26n",
+        artifact_name="yolo26n_cuda.json",
+        cpu_model=cpu_model,
+        cuda_model=cuda_model,
+        cpu_graph=cpu_graph,
+        cuda_graph=cuda_graph,
+        targets=targets,
+        runtime_cases=runtime_cases,
+        min_support_ratio=0.5,
+    )
+    print(format_split_sweep_coverage_summary(report))
 
 
 @pytest.mark.smoke
@@ -195,30 +191,18 @@ def test_tinynext_all_semantic_split_points_on_cuda() -> None:
     cuda_graph = _trace_graph(cuda_model, trace_cuda)
     targets = _semantic_split_targets(cpu_graph)
 
-    assert len(targets) >= 100
-    for target in targets:
-        spec = tl.SplitSpec(boundary=f"after:{target}", dynamic_batch=REAL_MODEL_DYNAMIC_BATCH_RANGE)
-        cpu_runtime = _runtime_from_graph(cpu_model, cpu_graph, spec)
-        cuda_runtime = _runtime_from_graph(cuda_model, cuda_graph, spec)
-        assert_canonical_abi_equivalent(cpu_runtime, cuda_runtime)
-
-        for x_cpu in runtime_cases:
-            x_cuda = x_cpu.cuda()
-            try:
-                cpu_boundary = cpu_runtime.run_prefix(x_cpu)
-                cuda_boundary = cuda_runtime.run_prefix(x_cuda)
-                _assert_boundary_devices(cpu_boundary, "cpu")
-                _assert_boundary_devices(cuda_boundary, "cuda")
-                _assert_boundary_shapes(cpu_boundary, cuda_boundary)
-
-                with torch.no_grad():
-                    full_output = cuda_model(x_cuda)
-                    cuda_split_output = cuda_runtime.run_suffix(cuda_boundary)
-                    cross_device_output = cuda_runtime.run_suffix(cpu_boundary)
-                assert _tree_allclose(cuda_split_output, full_output, atol=1e-4, rtol=1e-4)
-                _assert_tree_shape_device_finite(cross_device_output, full_output, "cuda")
-            except SplitUnsupportedError as exc:
-                _assert_split_error_context(exc, target)
+    report = _run_real_model_semantic_split_sweep(
+        model_name="TinyNeXt",
+        artifact_name="tinynext_cuda.json",
+        cpu_model=cpu_model,
+        cuda_model=cuda_model,
+        cpu_graph=cpu_graph,
+        cuda_graph=cuda_graph,
+        targets=targets,
+        runtime_cases=runtime_cases,
+        min_support_ratio=0.5,
+    )
+    print(format_split_sweep_coverage_summary(report))
 
 
 @pytest.mark.smoke
@@ -304,6 +288,12 @@ def test_rfdetr_nano_cpu_prefix_cuda_suffix_external_env() -> None:
         from torchlens.split.runtime import SplitRuntime
         from torchlens.split.trace_graph import trace_graph_from_model_log
         from torchlens.split.validation import assert_canonical_abi_equivalent
+        from torchlens.split.validation import assert_split_sweep_coverage
+        from torchlens.split.validation import assert_split_unsupported_error_context
+        from torchlens.split.validation import format_split_sweep_coverage_summary
+        from torchlens.split.validation import make_split_sweep_case_result
+        from torchlens.split.validation import summarize_split_sweep_coverage
+        from torchlens.split.validation import write_split_sweep_coverage_report
         from rfdetr import RFDETRNano
         from rfdetr.utilities.tensors import nested_tensor_from_tensor_list
 
@@ -370,33 +360,30 @@ def test_rfdetr_nano_cpu_prefix_cuda_suffix_external_env() -> None:
                 assert left.tensors[tensor_id].shape == right.tensors[tensor_id].shape
                 assert left.tensors[tensor_id].dtype == right.tensors[tensor_id].dtype
 
-        def assert_split_error_context(exc, target):
-            message = str(exc)
-            assert 'after:' + target in message
-            assert 'split_point=' in message
-            assert 'module_path=' in message
-            assert 'op_type=' in message
-            assert 'layer_label=' in message
-            assert 'reason=' in message
-
         cpu_graph = trace_graph(cpu_model, trace_cpu)
         cuda_graph = trace_graph(cuda_model, trace_cuda)
         targets = semantic_split_targets(cpu_graph)
         assert len(targets) >= 100
 
+        cases = []
         for target in targets:
-            spec = tl.SplitSpec(boundary='after:' + target, dynamic_batch={REAL_MODEL_DYNAMIC_BATCH_RANGE!r})
-            cpu_runtime = runtime_from_graph(cpu_model, cpu_graph, spec)
-            cuda_runtime = runtime_from_graph(cuda_model, cuda_graph, spec)
-            assert_canonical_abi_equivalent(cpu_runtime, cuda_runtime)
-            for tensor in runtime_tensors:
-                nested_cpu = nested_tensor_from_tensor_list(
-                    [tensor[index] for index in range(tensor.shape[0])]
-                )
-                nested_cuda = nested_tensor_from_tensor_list(
-                    [tensor[index].cuda() for index in range(tensor.shape[0])]
-                )
-                try:
+            boundary = 'after:' + target
+            batch_statuses = {{}}
+            tested_batches = []
+            try:
+                spec = tl.SplitSpec(boundary=boundary, dynamic_batch={REAL_MODEL_DYNAMIC_BATCH_RANGE!r})
+                cpu_runtime = runtime_from_graph(cpu_model, cpu_graph, spec)
+                cuda_runtime = runtime_from_graph(cuda_model, cuda_graph, spec)
+                assert_canonical_abi_equivalent(cpu_runtime, cuda_runtime)
+                for tensor in runtime_tensors:
+                    batch_size = int(tensor.shape[0])
+                    tested_batches.append(batch_size)
+                    nested_cpu = nested_tensor_from_tensor_list(
+                        [tensor[index] for index in range(tensor.shape[0])]
+                    )
+                    nested_cuda = nested_tensor_from_tensor_list(
+                        [tensor[index].cuda() for index in range(tensor.shape[0])]
+                    )
                     payload = cpu_runtime.run_prefix(nested_cpu)
                     cuda_payload = cuda_runtime.run_prefix(nested_cuda)
                     assert set(tensor.device.type for tensor in payload.tensors.values()) == set(['cpu'])
@@ -416,8 +403,55 @@ def test_rfdetr_nano_cpu_prefix_cuda_suffix_external_env() -> None:
                         assert cross_device_output[key].device.type == 'cuda'
                         assert cross_device_output[key].shape == full_output[key].shape
                         assert torch.isfinite(cross_device_output[key]).all()
-                except SplitUnsupportedError as exc:
-                    assert_split_error_context(exc, target)
+                    batch_statuses[str(batch_size)] = 'supported'
+            except SplitUnsupportedError as exc:
+                assert_split_unsupported_error_context(exc, boundary)
+                if tested_batches:
+                    batch_statuses[str(tested_batches[-1])] = 'unsupported'
+                cases.append(
+                    make_split_sweep_case_result(
+                        model_name='RF-DETR',
+                        split_target=target,
+                        boundary=boundary,
+                        status='unsupported',
+                        batch_sizes_tested=tuple(tested_batches),
+                        batch_statuses=batch_statuses,
+                        exc=exc,
+                    )
+                )
+            except Exception as exc:
+                if tested_batches:
+                    batch_statuses[str(tested_batches[-1])] = 'failed'
+                cases.append(
+                    make_split_sweep_case_result(
+                        model_name='RF-DETR',
+                        split_target=target,
+                        boundary=boundary,
+                        status='failed',
+                        batch_sizes_tested=tuple(tested_batches),
+                        batch_statuses=batch_statuses,
+                        exc=exc,
+                    )
+                )
+            else:
+                cases.append(
+                    make_split_sweep_case_result(
+                        model_name='RF-DETR',
+                        split_target=target,
+                        boundary=boundary,
+                        status='supported',
+                        batch_sizes_tested=tuple(tested_batches),
+                        batch_statuses=batch_statuses,
+                    )
+                )
+
+        report = summarize_split_sweep_coverage('RF-DETR', cases)
+        write_split_sweep_coverage_report(
+            report,
+            {str(SPLIT_SWEEP_COVERAGE_DIR / "rfdetr_cuda.json")!r},
+        )
+        print(format_split_sweep_coverage_summary(report))
+        assert_split_sweep_coverage(report, 0.3)
         """
     )
     env = dict(os.environ)
@@ -515,6 +549,94 @@ def _runtime_from_graph(
     )
 
 
+def _run_real_model_semantic_split_sweep(
+    *,
+    model_name: str,
+    artifact_name: str,
+    cpu_model: torch.nn.Module,
+    cuda_model: torch.nn.Module,
+    cpu_graph: Any,
+    cuda_graph: Any,
+    targets: list[str],
+    runtime_cases: tuple[torch.Tensor, ...],
+    min_support_ratio: float,
+) -> Any:
+    assert len(targets) >= 100
+    cases: list[SplitSweepCaseResult] = []
+    for target in targets:
+        boundary = f"after:{target}"
+        batch_statuses: dict[str, Any] = {}
+        tested_batches: list[int] = []
+        try:
+            spec = tl.SplitSpec(boundary=boundary, dynamic_batch=REAL_MODEL_DYNAMIC_BATCH_RANGE)
+            cpu_runtime = _runtime_from_graph(cpu_model, cpu_graph, spec)
+            cuda_runtime = _runtime_from_graph(cuda_model, cuda_graph, spec)
+            assert_canonical_abi_equivalent(cpu_runtime, cuda_runtime)
+
+            for x_cpu in runtime_cases:
+                batch_size = int(x_cpu.shape[0])
+                tested_batches.append(batch_size)
+                x_cuda = x_cpu.cuda()
+                cpu_boundary = cpu_runtime.run_prefix(x_cpu)
+                cuda_boundary = cuda_runtime.run_prefix(x_cuda)
+                _assert_boundary_devices(cpu_boundary, "cpu")
+                _assert_boundary_devices(cuda_boundary, "cuda")
+                _assert_boundary_shapes(cpu_boundary, cuda_boundary)
+
+                with torch.no_grad():
+                    full_output = cuda_model(x_cuda)
+                    cuda_split_output = cuda_runtime.run_suffix(cuda_boundary)
+                    cross_device_output = cuda_runtime.run_suffix(cpu_boundary)
+                assert _tree_allclose(cuda_split_output, full_output, atol=1e-4, rtol=1e-4)
+                _assert_tree_shape_device_finite(cross_device_output, full_output, "cuda")
+                batch_statuses[str(batch_size)] = "supported"
+        except SplitUnsupportedError as exc:
+            assert_split_unsupported_error_context(exc, boundary)
+            if tested_batches:
+                batch_statuses[str(tested_batches[-1])] = "unsupported"
+            cases.append(
+                make_split_sweep_case_result(
+                    model_name=model_name,
+                    split_target=target,
+                    boundary=boundary,
+                    status="unsupported",
+                    batch_sizes_tested=tuple(tested_batches),
+                    batch_statuses=batch_statuses,
+                    exc=exc,
+                )
+            )
+        except Exception as exc:
+            if tested_batches:
+                batch_statuses[str(tested_batches[-1])] = "failed"
+            cases.append(
+                make_split_sweep_case_result(
+                    model_name=model_name,
+                    split_target=target,
+                    boundary=boundary,
+                    status="failed",
+                    batch_sizes_tested=tuple(tested_batches),
+                    batch_statuses=batch_statuses,
+                    exc=exc,
+                )
+            )
+        else:
+            cases.append(
+                make_split_sweep_case_result(
+                    model_name=model_name,
+                    split_target=target,
+                    boundary=boundary,
+                    status="supported",
+                    batch_sizes_tested=tuple(tested_batches),
+                    batch_statuses=batch_statuses,
+                )
+            )
+
+    report = summarize_split_sweep_coverage(model_name, cases)
+    write_split_sweep_coverage_report(report, SPLIT_SWEEP_COVERAGE_DIR / artifact_name)
+    assert_split_sweep_coverage(report, min_support_ratio)
+    return report
+
+
 def _semantic_split_targets(graph: Any) -> list[str]:
     targets: list[str] = []
     seen: set[str] = set()
@@ -540,13 +662,3 @@ def _assert_boundary_shapes(left: Any, right: Any) -> None:
     for tensor_id in left.tensors:
         assert left.tensors[tensor_id].shape == right.tensors[tensor_id].shape
         assert left.tensors[tensor_id].dtype == right.tensors[tensor_id].dtype
-
-
-def _assert_split_error_context(exc: Exception, target: str) -> None:
-    message = str(exc)
-    assert f"after:{target}" in message
-    assert "split_point=" in message
-    assert "module_path=" in message
-    assert "op_type=" in message
-    assert "layer_label=" in message
-    assert "reason=" in message

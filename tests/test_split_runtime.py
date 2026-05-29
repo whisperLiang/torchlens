@@ -10,8 +10,13 @@ import torch
 
 import torchlens as tl
 from torchlens.split.cache import load_boundary, save_boundary
+from torchlens.split.errors import SplitUnsupportedError
+from torchlens.split.trace_graph import trace_graph_from_model_log
 from torchlens.split.training import BoundaryCacheDataset, build_feature_cache
+from torchlens.split.validation import assert_split_sweep_coverage
 from torchlens.split.validation import assert_canonical_abi_equivalent, boundary_liveness_zero_probe
+from torchlens.split.validation import make_split_sweep_case_result
+from torchlens.split.validation import summarize_split_sweep_coverage
 
 
 class TinyResidual(torch.nn.Module):
@@ -108,6 +113,99 @@ def test_split_replay_dynamic_batch_sizes() -> None:
     for batch_size in (1, 2, 4, 8):
         x = torch.randn(batch_size, 3, 8, 8)
         assert torch.allclose(runtime.replay(x), model(x), atol=1e-5, rtol=1e-4)
+
+
+@pytest.mark.smoke
+def test_toy_model_semantic_split_sweep_has_full_support() -> None:
+    """Every semantic module split point in the toy CNN replays successfully."""
+
+    torch.manual_seed(0)
+    model = TinyResidual().eval()
+    trace_inputs = torch.randn(2, 3, 8, 8)
+    trace_log = tl.log_forward_pass(
+        model,
+        trace_inputs,
+        vis_opt="none",
+        layers_to_save="all",
+        keep_unsaved_layers=True,
+        detach_saved_tensors=False,
+        save_function_args=True,
+        intervention_ready=True,
+    )
+    trace_graph = trace_graph_from_model_log(
+        trace_log,
+        traced_batch_size=int(trace_inputs.shape[0]),
+        batch_symbol="B",
+        dynamic_batch=(1, 8),
+    )
+    targets: list[str] = []
+    seen: set[str] = set()
+    for node in trace_graph.ordered_nodes():
+        if node.is_input or node.is_output:
+            continue
+        if node.module_path and node.module_path not in seen:
+            seen.add(node.module_path)
+            targets.append(node.module_path)
+
+    assert {"features.0", "features.1", "features.2"} <= set(targets)
+    cases = []
+    for target in targets:
+        boundary = f"after:{target}"
+        batch_statuses = {}
+        tested_batches = []
+        try:
+            runtime = tl.prepare_split(
+                model,
+                trace_inputs,
+                tl.SplitSpec(boundary=boundary, dynamic_batch=(1, 8)),
+            )
+            for batch_size in (1, 2, 4, 8):
+                tested_batches.append(batch_size)
+                x = torch.randn(batch_size, 3, 8, 8)
+                assert torch.allclose(runtime.replay(x), model(x), atol=1e-5, rtol=1e-4)
+                batch_statuses[str(batch_size)] = "supported"
+        except SplitUnsupportedError as exc:
+            if tested_batches:
+                batch_statuses[str(tested_batches[-1])] = "unsupported"
+            cases.append(
+                make_split_sweep_case_result(
+                    model_name="TinyResidual",
+                    split_target=target,
+                    boundary=boundary,
+                    status="unsupported",
+                    batch_sizes_tested=tuple(tested_batches),
+                    batch_statuses=batch_statuses,
+                    exc=exc,
+                )
+            )
+        except Exception as exc:
+            if tested_batches:
+                batch_statuses[str(tested_batches[-1])] = "failed"
+            cases.append(
+                make_split_sweep_case_result(
+                    model_name="TinyResidual",
+                    split_target=target,
+                    boundary=boundary,
+                    status="failed",
+                    batch_sizes_tested=tuple(tested_batches),
+                    batch_statuses=batch_statuses,
+                    exc=exc,
+                )
+            )
+        else:
+            cases.append(
+                make_split_sweep_case_result(
+                    model_name="TinyResidual",
+                    split_target=target,
+                    boundary=boundary,
+                    status="supported",
+                    batch_sizes_tested=tuple(tested_batches),
+                    batch_statuses=batch_statuses,
+                )
+            )
+
+    report = summarize_split_sweep_coverage("TinyResidual", cases)
+    assert_split_sweep_coverage(report, 1.0, allow_unsupported=False)
 
 
 @pytest.mark.smoke
