@@ -116,8 +116,8 @@ def test_split_replay_dynamic_batch_sizes() -> None:
 
 
 @pytest.mark.smoke
-def test_toy_model_semantic_split_sweep_has_full_support() -> None:
-    """Every semantic module split point in the toy CNN replays successfully."""
+def test_toy_model_compute_split_sweep_has_full_support() -> None:
+    """Every TorchLens compute node split point in the toy CNN replays successfully."""
 
     torch.manual_seed(0)
     model = TinyResidual().eval()
@@ -139,15 +139,13 @@ def test_toy_model_semantic_split_sweep_has_full_support() -> None:
         dynamic_batch=(1, 8),
     )
     targets: list[str] = []
-    seen: set[str] = set()
     for node in trace_graph.ordered_nodes():
         if node.is_input or node.is_output:
             continue
-        if node.module_path and node.module_path not in seen:
-            seen.add(node.module_path)
-            targets.append(node.module_path)
+        if node.torchlens_label:
+            targets.append(node.torchlens_label)
 
-    assert {"features.0", "features.1", "features.2"} <= set(targets)
+    assert any(target.startswith("Conv2d") or target.startswith("relu") for target in targets)
     cases = []
     for target in targets:
         boundary = f"after:{target}"

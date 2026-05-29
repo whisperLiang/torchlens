@@ -17,7 +17,7 @@ from .errors import SplitErrorContext, SplitUnsupportedError
 
 @dataclass
 class SplitSweepCaseResult:
-    """Result for one semantic split target in a split sweep."""
+    """Result for one split target in a split sweep."""
 
     model_name: str
     split_target: str
@@ -39,7 +39,7 @@ class SplitSweepCaseResult:
 
 @dataclass
 class SplitSweepCoverageReport:
-    """Coverage summary for a semantic split sweep."""
+    """Coverage summary for a split sweep."""
 
     model_name: str
     total_targets: int

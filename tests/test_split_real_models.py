@@ -80,8 +80,8 @@ def test_yolo26n_detection_head_boundary_is_live_on_cuda() -> None:
 
 
 @pytest.mark.slow
-def test_yolo26n_all_semantic_split_points_on_cuda() -> None:
-    """Sweep every semantic split point in YOLO26n on CUDA when available, else CPU."""
+def test_yolo26n_all_compute_split_points_on_cuda() -> None:
+    """Sweep every TorchLens compute node split point in YOLO26n."""
 
     ultralytics = pytest.importorskip("ultralytics")
     weight_path = next((path for path in YOLO26N_CANDIDATES if path is not None and path.exists()), None)
@@ -98,11 +98,11 @@ def test_yolo26n_all_semantic_split_points_on_cuda() -> None:
     trace_cpu = runtime_cases[0]
     cpu_graph = _trace_graph(cpu_model, trace_cpu)
     cuda_graph = _trace_graph(cuda_model, trace_cpu.cuda()) if cuda_model is not None else None
-    targets = _semantic_split_targets(cpu_graph)
+    targets = _compute_split_targets(cpu_graph)
 
-    report = _run_real_model_semantic_split_sweep(
+    report = _run_real_model_compute_split_sweep(
         model_name="YOLO26n",
-        artifact_name=f"yolo26n_{'cuda' if has_cuda else 'cpu'}.json",
+        artifact_name=f"yolo26n_{'cuda' if has_cuda else 'cpu'}_compute.json",
         cpu_model=cpu_model,
         cuda_model=cuda_model,
         cpu_graph=cpu_graph,
@@ -174,8 +174,8 @@ def test_tinynext_cpu_prefix_cuda_suffix_across_split_points() -> None:
 
 
 @pytest.mark.slow
-def test_tinynext_all_semantic_split_points_on_cuda() -> None:
-    """Sweep every semantic split point in TinyNeXt on CUDA when available, else CPU."""
+def test_tinynext_all_compute_split_points_on_cuda() -> None:
+    """Sweep every TorchLens compute node split point in TinyNeXt."""
 
     if not TINYNEXT_SOURCE.exists():
         pytest.skip("TinyNeXt source file is not available.")
@@ -199,11 +199,11 @@ def test_tinynext_all_semantic_split_points_on_cuda() -> None:
     trace_cpu = runtime_cases[0]
     cpu_graph = _trace_graph(cpu_model, trace_cpu)
     cuda_graph = _trace_graph(cuda_model, trace_cpu.cuda()) if cuda_model is not None else None
-    targets = _semantic_split_targets(cpu_graph)
+    targets = _compute_split_targets(cpu_graph)
 
-    report = _run_real_model_semantic_split_sweep(
+    report = _run_real_model_compute_split_sweep(
         model_name="TinyNeXt",
-        artifact_name=f"tinynext_{'cuda' if has_cuda else 'cpu'}.json",
+        artifact_name=f"tinynext_{'cuda' if has_cuda else 'cpu'}_compute.json",
         cpu_model=cpu_model,
         cuda_model=cuda_model,
         cpu_graph=cpu_graph,
@@ -275,7 +275,7 @@ def test_rfdetr_nano_cpu_prefix_cuda_suffix_external_env() -> None:
 
     RF-DETR's full CPU and CUDA outputs are not numerically close on this
     environment, so this smoke validates ABI equivalence, boundary transfer,
-    CUDA suffix execution, and output structure across every semantic split point.
+    CUDA suffix execution, and output structure across every TorchLens compute node.
     CUDA-only RF-DETR replay equivalence is covered separately above.
     """
 
@@ -353,15 +353,13 @@ def test_rfdetr_nano_cpu_prefix_cuda_suffix_external_env() -> None:
                 segments=segments,
             )
 
-        def semantic_split_targets(graph):
+        def compute_split_targets(graph):
             targets = []
-            seen = set()
             for node in graph.ordered_nodes():
                 if node.is_input or node.is_output:
                     continue
-                if node.module_path and node.module_path not in seen:
-                    seen.add(node.module_path)
-                    targets.append(node.module_path)
+                if node.torchlens_label:
+                    targets.append(node.torchlens_label)
             return targets
 
         def assert_boundary_shapes(left, right):
@@ -372,7 +370,7 @@ def test_rfdetr_nano_cpu_prefix_cuda_suffix_external_env() -> None:
 
         cpu_graph = trace_graph(cpu_model, trace_cpu)
         cuda_graph = trace_graph(cuda_model, trace_cuda)
-        targets = semantic_split_targets(cpu_graph)
+        targets = compute_split_targets(cpu_graph)
         assert len(targets) >= 100
 
         cases = []
@@ -458,7 +456,7 @@ def test_rfdetr_nano_cpu_prefix_cuda_suffix_external_env() -> None:
         report = summarize_split_sweep_coverage('RF-DETR', cases)
         write_split_sweep_coverage_report(
             report,
-            {str(SPLIT_SWEEP_COVERAGE_DIR / "rfdetr_cuda.json")!r},
+            {str(SPLIT_SWEEP_COVERAGE_DIR / "rfdetr_cuda_compute.json")!r},
         )
         print(format_split_sweep_coverage_summary(report))
         assert_split_sweep_coverage(report, 0.3)
@@ -559,7 +557,7 @@ def _runtime_from_graph(
     )
 
 
-def _run_real_model_semantic_split_sweep(
+def _run_real_model_compute_split_sweep(
     *,
     model_name: str,
     artifact_name: str,
@@ -654,15 +652,13 @@ def _run_real_model_semantic_split_sweep(
     return report
 
 
-def _semantic_split_targets(graph: Any) -> list[str]:
+def _compute_split_targets(graph: Any) -> list[str]:
     targets: list[str] = []
-    seen: set[str] = set()
     for node in graph.ordered_nodes():
         if node.is_input or node.is_output:
             continue
-        if node.module_path and node.module_path not in seen:
-            seen.add(node.module_path)
-            targets.append(node.module_path)
+        if node.torchlens_label:
+            targets.append(node.torchlens_label)
     return targets
 
 
