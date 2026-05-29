@@ -30,6 +30,10 @@ class ShapeEnv:
             return shape
         if shape[0] == self.traced_batch_size:
             return (self.batch_symbol, *shape[1:])
+        if shape[0] > 0 and shape[0] % self.traced_batch_size == 0:
+            multiplier = shape[0] // self.traced_batch_size
+            if multiplier > 1:
+                return (f"{self.batch_symbol}*{multiplier}", *shape[1:])
         return shape
 
     def validate_batch(self, batch_size: int) -> None:
@@ -89,12 +93,35 @@ def validate_tensor_against_symbolic_shape(
             actual_batch = actual_dim
             shape_env.validate_batch(actual_dim)
             continue
+        batch_multiplier = _batch_multiplier(expected_dim, shape_env.batch_symbol)
+        if batch_multiplier is not None:
+            if actual_dim % batch_multiplier != 0:
+                raise SplitBoundaryError(
+                    f"{name} shape mismatch at dim {index}: got {actual!r}, "
+                    f"expected symbolic shape {symbolic_shape!r}."
+                )
+            actual_batch = actual_dim // batch_multiplier
+            shape_env.validate_batch(actual_batch)
+            continue
         if actual_dim != expected_dim:
             raise SplitBoundaryError(
                 f"{name} shape mismatch at dim {index}: got {actual!r}, "
                 f"expected symbolic shape {symbolic_shape!r}."
             )
     return actual_batch
+
+
+def _batch_multiplier(expected_dim: Dimension, batch_symbol: str) -> int | None:
+    if not isinstance(expected_dim, str):
+        return None
+    prefix = f"{batch_symbol}*"
+    if not expected_dim.startswith(prefix):
+        return None
+    try:
+        multiplier = int(expected_dim[len(prefix) :])
+    except ValueError:
+        return None
+    return multiplier if multiplier > 1 else None
 
 
 def _walk_values(values: Any) -> Any:

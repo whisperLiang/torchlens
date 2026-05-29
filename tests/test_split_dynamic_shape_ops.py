@@ -37,6 +37,18 @@ class DynamicReshapeViewNet(nn.Module):
         return self.out(y)
 
 
+class DynamicFoldedBatchViewNet(nn.Module):
+    """Toy model covering leading reshape/view dimensions derived from B multiples."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Fold channels into the leading dimension, then restore runtime B."""
+
+        batch = x.shape[0]
+        y = x.reshape(batch, 2, -1)
+        y = y.reshape(batch * 2, -1)
+        return y.reshape(batch, -1)
+
+
 class DynamicFactoryNet(nn.Module):
     """Toy model covering batch-dependent factory tensors."""
 
@@ -152,6 +164,7 @@ class KwargGatherIndexNet(nn.Module):
     ("model_cls", "input_shape_without_batch"),
     (
         (DynamicReshapeViewNet, (3, 4, 5)),
+        (DynamicFoldedBatchViewNet, (2, 3, 5)),
         (DynamicFactoryNet, (3, 4, 5)),
         (DynamicExpandRepeatNet, (3, 4, 5)),
         (DynamicRepeatBatchlessNet, (3, 4, 5)),
@@ -177,25 +190,33 @@ def test_dynamic_shape_codegen_does_not_hardcode_traced_batch_size() -> None:
     """Batch-sensitive shape literals are rewritten to the runtime batch."""
 
     reshape_graph = _trace_for(DynamicReshapeViewNet(), (3, 4, 5))
+    folded_graph = _trace_for(DynamicFoldedBatchViewNet(), (2, 3, 5))
     factory_graph = _trace_for(DynamicFactoryNet(), (3, 4, 5))
     expand_graph = _trace_for(DynamicExpandRepeatNet(), (3, 4, 5))
     repeat_graph = _trace_for(DynamicRepeatBatchlessNet(), (3, 4, 5))
 
     cases = (
-        (reshape_graph, _first_node(reshape_graph, "reshape"), ("args", 1)),
-        (reshape_graph, _first_node(reshape_graph, "view"), ("args", 1)),
-        (expand_graph, _first_node(expand_graph, "expand"), ("args", 1)),
-        (repeat_graph, _first_node(repeat_graph, "repeat"), ("args", 1)),
-        (factory_graph, _first_node(factory_graph, "zeros"), ("args", 0, 0)),
-        (factory_graph, _first_node(factory_graph, "ones"), ("args", 0, 0)),
-        (factory_graph, _first_node(factory_graph, "new_zeros"), ("args", 1, 0)),
-        (factory_graph, _first_node(factory_graph, "new_ones"), ("args", 1, 0)),
-        (factory_graph, _first_node(factory_graph, "arange"), ("args", 0)),
+        (reshape_graph, _first_node(reshape_graph, "reshape"), ("args", 1), TRACE_BATCH, 4),
+        (reshape_graph, _first_node(reshape_graph, "view"), ("args", 1), TRACE_BATCH, 4),
+        (
+            folded_graph,
+            _first_node_with_shape(folded_graph, "reshape", (TRACE_BATCH * 2, 15)),
+            ("args", 1),
+            TRACE_BATCH * 2,
+            8,
+        ),
+        (expand_graph, _first_node(expand_graph, "expand"), ("args", 1), TRACE_BATCH, 4),
+        (repeat_graph, _first_node(repeat_graph, "repeat"), ("args", 1), TRACE_BATCH, 4),
+        (factory_graph, _first_node(factory_graph, "zeros"), ("args", 0, 0), TRACE_BATCH, 4),
+        (factory_graph, _first_node(factory_graph, "ones"), ("args", 0, 0), TRACE_BATCH, 4),
+        (factory_graph, _first_node(factory_graph, "new_zeros"), ("args", 1, 0), TRACE_BATCH, 4),
+        (factory_graph, _first_node(factory_graph, "new_ones"), ("args", 1, 0), TRACE_BATCH, 4),
+        (factory_graph, _first_node(factory_graph, "arange"), ("args", 0), TRACE_BATCH, 4),
     )
 
-    for graph, node, path in cases:
+    for graph, node, path, literal_value, expected_value in cases:
         env = {graph.input_nodes[0]: torch.randn(4, 3, 4, 5)}
-        assert _dynamic_batch_literal(TRACE_BATCH, node, graph, env, path) == 4
+        assert _dynamic_batch_literal(literal_value, node, graph, env, path) == expected_value
 
     repeat_existing_batch_node = _first_node(expand_graph, "repeat")
     env = {expand_graph.input_nodes[0]: torch.randn(4, 3, 4, 5)}
@@ -347,6 +368,19 @@ def _first_node(graph: TraceGraph, op_type: str) -> TraceNode:
         if node.op_type == op_type:
             return node
     raise AssertionError(f"Trace graph did not contain op {op_type!r}.")
+
+
+def _first_node_with_shape(
+    graph: TraceGraph,
+    op_type: str,
+    output_shape: tuple[int, ...],
+) -> TraceNode:
+    """Return the first node with the requested op type and traced output shape."""
+
+    for node in graph.ordered_nodes():
+        if node.op_type == op_type and node.output_shape == output_shape:
+            return node
+    raise AssertionError(f"Trace graph did not contain op {op_type!r} with shape {output_shape!r}.")
 
 
 def assert_tree_allclose(

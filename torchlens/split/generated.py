@@ -250,11 +250,14 @@ def _dynamic_batch_literal(
     """Replace trace-batch literals in leading shape positions with runtime B."""
 
     traced_batch = graph.traced_batch_size
-    if traced_batch is None or value != traced_batch:
+    if traced_batch is None or not isinstance(value, int) or value <= 0:
         return None
     if node.op_type not in _BATCH_SHAPE_OPS:
         return None
     if not _is_leading_shape_position(node.op_type, path):
+        return None
+    batch_multiplier = _batch_literal_multiplier(value, node, graph)
+    if batch_multiplier is None:
         return None
     runtime_batch = _runtime_batch_from_env(env, graph)
     if runtime_batch is None:
@@ -266,7 +269,25 @@ def _dynamic_batch_literal(
         runtime_batch,
     ):
         return None
-    return runtime_batch
+    return runtime_batch * batch_multiplier
+
+
+def _batch_literal_multiplier(value: int, node: TraceNode, graph: TraceGraph) -> int | None:
+    traced_batch = graph.traced_batch_size
+    if traced_batch is None:
+        return None
+    if value == traced_batch:
+        return 1
+    if node.op_type not in {"view", "reshape", "expand"}:
+        return None
+    if value % traced_batch != 0:
+        return None
+    multiplier = value // traced_batch
+    if multiplier <= 1:
+        return None
+    if node.output_shape and node.output_shape[0] == value:
+        return multiplier
+    return None
 
 
 def _is_leading_shape_position(op_type: str, path: tuple[Any, ...]) -> bool:
@@ -297,13 +318,39 @@ def _runtime_batch_from_env(env: dict[str, Any], graph: TraceGraph) -> int | Non
             and value.ndim > 0
             and node.symbolic_output_shape is not None
             and node.symbolic_output_shape
-            and node.symbolic_output_shape[0] == graph.batch_symbol
         ):
-            return int(value.shape[0])
+            runtime_batch = _runtime_batch_from_symbolic_dim(
+                int(value.shape[0]),
+                node.symbolic_output_shape[0],
+                graph.batch_symbol,
+            )
+            if runtime_batch is not None:
+                return runtime_batch
     for value in env.values():
         if isinstance(value, torch.Tensor) and value.ndim > 0:
             return int(value.shape[0])
     return None
+
+
+def _runtime_batch_from_symbolic_dim(
+    actual_dim: int,
+    symbolic_dim: Any,
+    batch_symbol: str,
+) -> int | None:
+    if symbolic_dim == batch_symbol:
+        return actual_dim
+    if not isinstance(symbolic_dim, str):
+        return None
+    prefix = f"{batch_symbol}*"
+    if not symbolic_dim.startswith(prefix):
+        return None
+    try:
+        multiplier = int(symbolic_dim[len(prefix) :])
+    except ValueError:
+        return None
+    if multiplier <= 1 or actual_dim % multiplier != 0:
+        return None
+    return actual_dim // multiplier
 
 
 def _repeat_input_already_has_batch_dim(
