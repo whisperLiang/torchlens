@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -52,8 +51,10 @@ class DynamicFactoryNet(nn.Module):
         idx = torch.arange(batch, device=x.device, dtype=x.dtype).view(batch, 1)
         bias = torch.ones((batch, 1), device=x.device, dtype=x.dtype)
         scratch = torch.zeros((batch, 1), device=x.device, dtype=x.dtype)
+        inherited_bias = x.new_ones((batch, 1))
+        inherited_scratch = x.new_zeros((batch, 1))
         y = x.flatten(1).mean(dim=1, keepdim=True)
-        return y + idx * 0.01 + bias + scratch
+        return y + idx * 0.01 + bias + scratch + inherited_bias + inherited_scratch
 
 
 class DynamicExpandRepeatNet(nn.Module):
@@ -187,7 +188,8 @@ def test_dynamic_shape_codegen_does_not_hardcode_traced_batch_size() -> None:
         (repeat_graph, _first_node(repeat_graph, "repeat"), ("args", 1)),
         (factory_graph, _first_node(factory_graph, "zeros"), ("args", 0, 0)),
         (factory_graph, _first_node(factory_graph, "ones"), ("args", 0, 0)),
-        (factory_graph, replace(_first_node(factory_graph, "zeros"), op_type="empty"), ("args", 0, 0)),
+        (factory_graph, _first_node(factory_graph, "new_zeros"), ("args", 1, 0)),
+        (factory_graph, _first_node(factory_graph, "new_ones"), ("args", 1, 0)),
         (factory_graph, _first_node(factory_graph, "arange"), ("args", 0)),
     )
 

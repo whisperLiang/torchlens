@@ -231,6 +231,9 @@ _BATCH_SHAPE_OPS = frozenset(
         "zeros",
         "ones",
         "empty",
+        "new_zeros",
+        "new_ones",
+        "new_empty",
         "arange",
         "meshgrid",
     }
@@ -275,6 +278,8 @@ def _is_leading_shape_position(op_type: str, path: tuple[Any, ...]) -> bool:
         return path in {("args", 1), ("args", 1, 0), ("kwargs", "shape", 0), ("kwargs", "size", 0)}
     if op_type in {"zeros", "ones", "empty"}:
         return path in {("args", 0), ("args", 0, 0), ("kwargs", "size", 0)}
+    if op_type in {"new_zeros", "new_ones", "new_empty"}:
+        return path in {("args", 1), ("args", 1, 0), ("kwargs", "size", 0)}
     if op_type == "arange":
         return path in {("args", 0), ("kwargs", "end")}
     return False
