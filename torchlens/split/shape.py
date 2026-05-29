@@ -11,6 +11,8 @@ from .errors import SplitBoundaryError
 
 Dimension = int | str
 SymbolicShape = tuple[Dimension, ...]
+MAX_BATCH_MULTIPLIER = 16
+MAX_VALIDATION_BATCH_MULTIPLIER = 512
 
 
 @dataclass(frozen=True)
@@ -32,7 +34,7 @@ class ShapeEnv:
             return (self.batch_symbol, *shape[1:])
         if shape[0] > 0 and shape[0] % self.traced_batch_size == 0:
             multiplier = shape[0] // self.traced_batch_size
-            if multiplier > 1:
+            if 1 < multiplier <= MAX_BATCH_MULTIPLIER:
                 return (f"{self.batch_symbol}*{multiplier}", *shape[1:])
         return shape
 
@@ -93,6 +95,24 @@ def validate_tensor_against_symbolic_shape(
             actual_batch = actual_dim
             shape_env.validate_batch(actual_dim)
             continue
+        if (
+            shape_env.traced_batch_size is not None
+            and expected_dim == shape_env.traced_batch_size
+            and index != len(symbolic_shape) - 1
+        ):
+            actual_batch = actual_dim
+            shape_env.validate_batch(actual_dim)
+            continue
+        folded_multiplier = _concrete_batch_multiplier(expected_dim, shape_env)
+        if folded_multiplier is not None and index != len(symbolic_shape) - 1:
+            if actual_dim % folded_multiplier != 0:
+                raise SplitBoundaryError(
+                    f"{name} shape mismatch at dim {index}: got {actual!r}, "
+                    f"expected symbolic shape {symbolic_shape!r}."
+                )
+            actual_batch = actual_dim // folded_multiplier
+            shape_env.validate_batch(actual_batch)
+            continue
         batch_multiplier = _batch_multiplier(expected_dim, shape_env.batch_symbol)
         if batch_multiplier is not None:
             if actual_dim % batch_multiplier != 0:
@@ -124,6 +144,17 @@ def _batch_multiplier(expected_dim: Dimension, batch_symbol: str) -> int | None:
     return multiplier if multiplier > 1 else None
 
 
+def _concrete_batch_multiplier(expected_dim: Dimension, shape_env: ShapeEnv) -> int | None:
+    if not isinstance(expected_dim, int) or shape_env.traced_batch_size is None:
+        return None
+    if expected_dim <= 0 or expected_dim % shape_env.traced_batch_size != 0:
+        return None
+    multiplier = expected_dim // shape_env.traced_batch_size
+    if multiplier <= 1 or multiplier > MAX_VALIDATION_BATCH_MULTIPLIER:
+        return None
+    return multiplier
+
+
 def _walk_values(values: Any) -> Any:
     if isinstance(values, dict):
         for item in values.values():
@@ -138,6 +169,7 @@ def _walk_values(values: Any) -> Any:
 
 __all__ = [
     "Dimension",
+    "MAX_BATCH_MULTIPLIER",
     "ShapeEnv",
     "SymbolicShape",
     "batch_size_from_value",

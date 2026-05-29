@@ -64,12 +64,52 @@ def _resolve_split_index(graph: TraceGraph, boundary: str) -> tuple[int, str, st
             raise SplitSpecError(f"Split boundary target {target!r} is ambiguous: {labels}.")
     else:
         node = matches[0]
-    index = ordered.index(node)
+    index = _sibling_aware_split_index(ordered, node, mode)
     if mode == "before":
         index -= 1
     if index < 0:
         raise SplitSpecError(f"Split boundary {boundary!r} leaves no prefix nodes.")
     return index, node.torchlens_label, f"{mode}:{target}"
+
+
+def _sibling_aware_split_index(
+    ordered: tuple[TraceNode, ...],
+    node: TraceNode,
+    mode: str,
+) -> int:
+    index = ordered.index(node)
+    layer_label_no_pass = getattr(node.layer, "layer_label_no_pass", node.torchlens_label)
+    sibling_indices = [
+        sibling_index
+        for sibling_index, sibling in enumerate(ordered)
+        if getattr(sibling.layer, "layer_label_no_pass", sibling.torchlens_label)
+        == layer_label_no_pass
+    ]
+    if not sibling_indices:
+        return index
+    if len(sibling_indices) > 1 and node.op_type in {"chunk", "split", "split_with_sizes"}:
+        first_index = _first_related_param_chunk_index(ordered, min(sibling_indices))
+        return first_index if mode == "before" else first_index - 1
+    if mode == "after":
+        return max(sibling_indices)
+    return min(sibling_indices)
+
+
+def _first_related_param_chunk_index(ordered: tuple[TraceNode, ...], first_index: int) -> int:
+    node = ordered[first_index]
+    if node.parents:
+        return first_index
+    index = first_index
+    while index > 0:
+        previous = ordered[index - 1]
+        if (
+            previous.parents
+            or previous.op_type not in {"chunk", "split", "split_with_sizes"}
+            or previous.module_path != node.module_path
+        ):
+            break
+        index -= 1
+    return index
 
 
 def _percent_index(nodes: tuple[TraceNode, ...], percent: float, boundary: str) -> tuple[int, str, str]:

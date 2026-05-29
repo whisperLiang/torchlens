@@ -66,7 +66,9 @@ class DynamicFactoryNet(nn.Module):
         inherited_bias = x.new_ones((batch, 1))
         inherited_scratch = x.new_zeros((batch, 1))
         y = x.flatten(1).mean(dim=1, keepdim=True)
-        return y + idx * 0.01 + bias + scratch + inherited_bias + inherited_scratch
+        like_bias = torch.ones_like(y)
+        like_scratch = torch.zeros_like(y)
+        return y + idx * 0.01 + bias + scratch + inherited_bias + inherited_scratch + like_bias + like_scratch
 
 
 class DynamicExpandRepeatNet(nn.Module):
@@ -215,7 +217,7 @@ def test_dynamic_shape_codegen_does_not_hardcode_traced_batch_size() -> None:
     )
 
     for graph, node, path, literal_value, expected_value in cases:
-        env = {graph.input_nodes[0]: torch.randn(4, 3, 4, 5)}
+        env = _static_codegen_env(graph, node)
         assert _dynamic_batch_literal(literal_value, node, graph, env, path) == expected_value
 
     repeat_existing_batch_node = _first_node(expand_graph, "repeat")
@@ -250,6 +252,25 @@ def test_runtime_batch_inference_prefers_symbolic_batch_tensors() -> None:
     }
 
     assert _runtime_batch_from_env(env, graph) == 4
+
+
+def _static_codegen_env(graph: TraceGraph, node: TraceNode) -> dict[str, torch.Tensor]:
+    """Build enough runtime-shaped env for static dynamic literal checks."""
+
+    env = {graph.input_nodes[0]: torch.randn(4, 3, 4, 5)}
+    for parent_label in node.parents:
+        parent = graph.get(parent_label)
+        if parent.output_shape is None:
+            continue
+        shape = list(parent.output_shape)
+        if (
+            parent.symbolic_output_shape is not None
+            and parent.symbolic_output_shape
+            and parent.symbolic_output_shape[0] == graph.batch_symbol
+        ):
+            shape[0] = 4
+        env[parent.torchlens_label] = torch.randn(*shape)
+    return env
 
 
 def test_frontier_includes_kwarg_parent_refs() -> None:
