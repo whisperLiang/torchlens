@@ -15,26 +15,29 @@ from __future__ import annotations
 
 import functools
 import gc
+import importlib
 import json
 import os
 import re
-import resource
 import subprocess
 import tempfile
 import warnings
 from typing import Any, Optional, cast
 
+_resource = cast(Any, importlib.import_module("resource") if os.name != "nt" else None)
+
 # Set the soft stack limit to match the hard limit once at import time.
 # Child processes (Node.js) inherit this, removing the need for preexec_fn
 # which forces fork+exec and COW-doubles virtual memory of large parent processes.
-try:
-    _soft, _hard = resource.getrlimit(resource.RLIMIT_STACK)
-    if _hard == resource.RLIM_INFINITY:
-        resource.setrlimit(resource.RLIMIT_STACK, (resource.RLIM_INFINITY, _hard))
-    elif _soft < _hard:
-        resource.setrlimit(resource.RLIMIT_STACK, (_hard, _hard))
-except (ValueError, resource.error):
-    pass
+if _resource is not None:
+    try:
+        _soft, _hard = _resource.getrlimit(_resource.RLIMIT_STACK)
+        if _hard == _resource.RLIM_INFINITY:
+            _resource.setrlimit(_resource.RLIMIT_STACK, (_resource.RLIM_INFINITY, _hard))
+        elif _soft < _hard:
+            _resource.setrlimit(_resource.RLIMIT_STACK, (_hard, _hard))
+    except (ValueError, OSError):
+        pass
 
 
 def _available_memory_mb() -> int:
@@ -47,8 +50,11 @@ def _available_memory_mb() -> int:
     except (OSError, ValueError, IndexError):
         pass
     try:
-        pages = os.sysconf("SC_AVPHYS_PAGES")
-        page_size = os.sysconf("SC_PAGE_SIZE")
+        sysconf = getattr(os, "sysconf", None)
+        if sysconf is None:
+            return 0
+        pages = sysconf("SC_AVPHYS_PAGES")
+        page_size = sysconf("SC_PAGE_SIZE")
         if pages > 0 and page_size > 0:
             return (pages * page_size) // (1024 * 1024)
     except (ValueError, OSError):

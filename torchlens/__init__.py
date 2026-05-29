@@ -31,11 +31,13 @@ from . import (
     options,
     partial,
     report,
+    split,
     stats,
     viz,
 )
 from ._io.bundle import load, save
 from .stats import aggregate
+from .split import ReplayBoundary, SplitRuntime, SplitSpec, prepare_split, prepare_split_replay
 from .data_classes.layer_log import LayerLog
 from .data_classes.layer_pass_log import LayerPassLog
 from .data_classes.model_log import ModelLog
@@ -806,4 +808,9 @@ __all__ = [
     "tap",
     "record_span",
     "sites",
+    "SplitSpec",
+    "ReplayBoundary",
+    "SplitRuntime",
+    "prepare_split",
+    "prepare_split_replay",
 ]

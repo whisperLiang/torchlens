@@ -584,11 +584,11 @@ def test_generate_aesthetic_report():
         model = model_cls()
         report.write(_capture_model_outputs(name, model, x, description))
 
-    with open(REPORT_PATH, "w") as f:
+    with open(REPORT_PATH, "w", encoding="utf-8") as f:
         f.write(report.getvalue())
 
     # Verify the file was written and is non-trivial
-    with open(REPORT_PATH) as f:
+    with open(REPORT_PATH, encoding="utf-8") as f:
         content = f.read()
     assert len(content) > 5000, f"Report too short ({len(content)} chars)"
     assert "ModelLog" in content

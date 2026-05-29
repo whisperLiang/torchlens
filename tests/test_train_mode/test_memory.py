@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import gc
-import resource
 
 import pytest
 import torch
@@ -18,6 +17,7 @@ def _rss_bytes() -> int:
     try:
         import psutil
     except ImportError:
+        resource = pytest.importorskip("resource")
         usage_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         return usage_kb * 1024
     process = psutil.Process()

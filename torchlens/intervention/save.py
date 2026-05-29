@@ -1274,6 +1274,8 @@ def _fsync_file(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY)
     try:
         os.fsync(fd)
+    except OSError:
+        return
     finally:
         os.close(fd)
 
@@ -1287,9 +1289,14 @@ def _fsync_directory(path: Path) -> None:
         Directory path.
     """
 
-    fd = os.open(path, os.O_RDONLY)
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
     try:
         os.fsync(fd)
+    except OSError:
+        return
     finally:
         os.close(fd)
 
