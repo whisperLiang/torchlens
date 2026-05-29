@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
+from ..intervention.types import ParentRef
 from .boundary import BoundaryTensorSpec
 from .trace_graph import TraceGraph
 
@@ -40,7 +42,7 @@ def build_frontier(
         if child_label not in suffix_or_output:
             continue
         child = graph.get(child_label)
-        for parent_label in child.parents:
+        for parent_label in _node_dependency_labels(graph, child):
             if parent_label in prefix_set and parent_label not in boundary_nodes:
                 boundary_nodes.append(parent_label)
 
@@ -56,6 +58,34 @@ def build_frontier(
         boundary_nodes=tuple(boundary_nodes),
         boundary_specs=specs,
     )
+
+
+def _node_dependency_labels(graph: TraceGraph, node: Any) -> tuple[str, ...]:
+    labels: list[str] = []
+    for label in node.parents:
+        _append_label(graph, labels, label)
+    _walk_parent_refs(graph, labels, node.args)
+    _walk_parent_refs(graph, labels, node.kwargs)
+    return tuple(labels)
+
+
+def _walk_parent_refs(graph: TraceGraph, labels: list[str], value: Any) -> None:
+    if isinstance(value, ParentRef):
+        _append_label(graph, labels, value.parent_label)
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _walk_parent_refs(graph, labels, item)
+        return
+    if isinstance(value, (tuple, list)):
+        for item in value:
+            _walk_parent_refs(graph, labels, item)
+
+
+def _append_label(graph: TraceGraph, labels: list[str], label: str) -> None:
+    final_label = str(getattr(graph.model_log, "_raw_to_final_layer_labels", {}).get(label, label))
+    if final_label not in labels:
+        labels.append(final_label)
 
 
 def _infer_role(graph: TraceGraph, label: str) -> BoundaryRole:

@@ -135,6 +135,18 @@ class DynamicBatchIndexNet(nn.Module):
         return flat[idx, col].view(batch, 1)
 
 
+class KwargGatherIndexNet(nn.Module):
+    """Toy model whose gather index dependency is passed by keyword."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Gather the highest-scoring row using an index built by repeat."""
+
+        scores = x.mean(dim=2)
+        idx = scores.argmax(dim=1, keepdim=True)
+        index = idx.unsqueeze(-1).repeat(1, 1, x.shape[2])
+        return torch.gather(x, dim=1, index=index).squeeze(1)
+
+
 @pytest.mark.parametrize(
     ("model_cls", "input_shape_without_batch"),
     (
@@ -215,6 +227,30 @@ def test_runtime_batch_inference_prefers_symbolic_batch_tensors() -> None:
     }
 
     assert _runtime_batch_from_env(env, graph) == 4
+
+
+def test_frontier_includes_kwarg_parent_refs() -> None:
+    """Boundary frontier includes ParentRef dependencies stored in kwargs."""
+
+    torch.manual_seed(0)
+    model = KwargGatherIndexNet().eval()
+    trace_x = torch.randn(2, 5, 3)
+    graph = _trace_for(model, (5, 3))
+    repeat_label = _first_node(graph, "repeat").torchlens_label
+
+    runtime = tl.prepare_split(
+        model,
+        trace_x,
+        tl.SplitSpec(boundary=f"after:{repeat_label}", dynamic_batch=(1, 8)),
+    )
+    assert repeat_label in runtime.plan.boundary_nodes
+
+    for batch_size in (1, 2, 4):
+        x = torch.randn(batch_size, 5, 3)
+        with torch.no_grad():
+            split_out = runtime.replay(x)
+            full_out = model(x)
+        assert_tree_allclose(split_out, full_out)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
