@@ -32,7 +32,7 @@ def train_suffix(
     detached_tensors = {}
     for key, tensor in boundary.tensors.items():
         root = tensor.detach()
-        if device is not None:
+        if device is not None and root.device != device:
             root = root.to(device)
         detached_tensors[key] = root.requires_grad_(root.is_floating_point() or root.is_complex())
     detached = ReplayBoundary(
@@ -66,7 +66,7 @@ def backward_prefix(
     grads: list[torch.Tensor] = []
     for key, tensor in boundary.tensors.items():
         grad = boundary_grads.get(key)
-        if grad is not None:
+        if grad is not None and tensor.requires_grad:
             tensors.append(tensor)
             grads.append(grad.to(tensor.device))
     if tensors:

@@ -28,6 +28,41 @@ from .frontier import SplitPlan
 from .shape import MAX_BATCH_MULTIPLIER
 from .trace_graph import TraceGraph, TraceNode
 
+_RNG_SENSITIVE_OP_NAMES = frozenset(
+    {
+        "bernoulli",
+        "bernoulli_",
+        "dropout",
+        "dropout_",
+        "dropout1d",
+        "dropout2d",
+        "dropout3d",
+        "alpha_dropout",
+        "alpha_dropout_",
+        "alphadropout",
+        "feature_alpha_dropout",
+        "feature_alpha_dropout_",
+        "featurealphadropout",
+        "feature_dropout",
+        "feature_dropout_",
+        "gumbel_softmax",
+        "multinomial",
+        "native_dropout",
+        "normal",
+        "normal_",
+        "poisson",
+        "rand",
+        "rand_like",
+        "randint",
+        "randint_like",
+        "randn",
+        "randn_like",
+        "randperm",
+        "rrelu",
+        "rrelu_",
+    }
+)
+
 
 @dataclass
 class GeneratedPrefix(nn.Module):
@@ -116,18 +151,46 @@ def _execute_node(
         return
     args, kwargs = _resolve_call_args(node, graph, env, split_point=split_point)
     try:
-        output = execute_with_restored_rng_autocast(
-            node.target,
-            args,
-            kwargs,
-            rng_states=getattr(node.layer, "func_rng_states", None),
-            autocast_state=getattr(node.layer, "func_autocast_state", None),
-        )
+        output = _call_node_target(node, args, kwargs)
     except Exception as exc:  # pragma: no cover - message is validated through callers.
         raise unsupported(_context(node, split_point, f"operation failed: {exc}")) from exc
     if output is None and getattr(node.layer, "func_is_inplace", False) and args:
         output = args[0]
     env[node.torchlens_label] = _slice_output_by_path(output, tuple(node.layer.output_path or ()))
+
+
+def _call_node_target(node: TraceNode, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    """Execute a traced target with replay context only when it can affect results."""
+
+    autocast_state = getattr(node.layer, "func_autocast_state", None)
+    if _node_needs_replay_context(node, autocast_state):
+        return execute_with_restored_rng_autocast(
+            node.target,
+            args,
+            kwargs,
+            rng_states=getattr(node.layer, "func_rng_states", None),
+            autocast_state=autocast_state,
+        )
+    return node.target(*args, **kwargs)
+
+
+def _node_needs_replay_context(
+    node: TraceNode,
+    autocast_state: dict[str, Any] | None,
+) -> bool:
+    if _autocast_enabled(autocast_state):
+        return True
+    op_name = str(node.op_type)
+    if op_name in _RNG_SENSITIVE_OP_NAMES:
+        return True
+    target_name = getattr(node.target, "__name__", "")
+    return bool(target_name in _RNG_SENSITIVE_OP_NAMES)
+
+
+def _autocast_enabled(autocast_state: dict[str, Any] | None) -> bool:
+    if not autocast_state:
+        return False
+    return any(bool(state.get("enabled", False)) for state in autocast_state.values())
 
 
 def _resolve_call_args(

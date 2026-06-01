@@ -75,7 +75,7 @@ class SplitRuntime:
 
         self.validate_boundary(boundary)
         device = self._runtime_device()
-        if device is not None:
+        if device is not None and _boundary_needs_device_move(boundary, device):
             boundary = boundary.to(device)
         return self.segments.suffix(boundary)
 
@@ -181,6 +181,10 @@ def _tree_allclose(left: Any, right: Any, *, atol: float, rtol: float) -> bool:
     if isinstance(left, dict) and isinstance(right, dict) and set(left) == set(right):
         return all(_tree_allclose(left[key], right[key], atol=atol, rtol=rtol) for key in left)
     return left == right
+
+
+def _boundary_needs_device_move(boundary: ReplayBoundary, device: torch.device) -> bool:
+    return any(tensor.device != device for tensor in boundary.tensors.values())
 
 
 __all__ = ["SplitRuntime"]

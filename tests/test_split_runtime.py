@@ -63,12 +63,35 @@ class TinyTrain(torch.nn.Module):
         return self.head(torch.relu(self.backbone(x)))
 
 
+class TinyBranchTrain(torch.nn.Module):
+    """Branching MLP whose early splits carry input passthrough boundaries."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.left = torch.nn.Linear(6, 6)
+        self.right = torch.nn.Linear(6, 6)
+        self.head = torch.nn.Linear(12, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        left = torch.relu(self.left(x))
+        right = torch.sigmoid(self.right(x))
+        return self.head(torch.cat([left, right], dim=-1))
+
+
 class DynamicReshape(torch.nn.Module):
     """Model whose shape expression depends on runtime batch size."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch = x.shape[0]
         return x.reshape(batch, -1) + 1
+
+
+class RandomSuffix(torch.nn.Module):
+    """Model with a stochastic suffix op."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = x + 1
+        return y + torch.rand_like(y)
 
 
 class MultiOutputDict(torch.nn.Module):
@@ -220,6 +243,23 @@ def test_split_replay_dynamicizes_trace_batch_shape_literal() -> None:
         x = torch.randn(batch_size, 3, 4)
         assert runtime.replay(x).shape == (batch_size, 12)
         assert torch.allclose(runtime.replay(x), model(x), atol=1e-5, rtol=1e-4)
+
+
+@pytest.mark.smoke
+def test_split_replay_restores_rng_for_stochastic_suffix_ops() -> None:
+    """Stochastic suffix ops keep deterministic replay semantics."""
+
+    torch.manual_seed(0)
+    model = RandomSuffix().train()
+    x = torch.randn(2, 4)
+    runtime = tl.prepare_split(
+        model,
+        x,
+        tl.SplitSpec(boundary="after:add_1_1", dynamic_batch=(1, 8)),
+    )
+    first = runtime.replay(x)
+    second = runtime.replay(x)
+    assert torch.allclose(first, second, atol=0.0, rtol=0.0)
 
 
 @pytest.mark.smoke
@@ -387,6 +427,38 @@ def test_full_split_training_with_boundary_gradients_matches_full_step() -> None
     assert torch.allclose(loss, full_loss.detach(), atol=1e-5, rtol=1e-4)
     for p_full, p_split in zip(full_model.parameters(), split_model.parameters(), strict=True):
         assert torch.allclose(p_full, p_split, atol=1e-5, rtol=1e-4)
+
+
+@pytest.mark.smoke
+def test_split_training_skips_nondifferentiable_passthrough_boundaries() -> None:
+    """Early branch splits can carry raw-input boundary grads without input grads."""
+
+    torch.manual_seed(0)
+    x = torch.randn(4, 6)
+    targets = torch.randn(4, 3)
+
+    full_model = TinyBranchTrain().train()
+    split_model = copy.deepcopy(full_model).train()
+
+    full_loss = torch.nn.functional.mse_loss(full_model(x), targets)
+    full_model.zero_grad(set_to_none=True)
+    full_loss.backward()
+
+    runtime = tl.prepare_split(
+        split_model,
+        x,
+        tl.SplitSpec(boundary="after:relu_1_2", dynamic_batch=(1, 8), trainable=True),
+    )
+    boundary = runtime.run_training_prefix(x)
+    assert any(not tensor.requires_grad for tensor in boundary.tensors.values())
+    loss, boundary_grads = runtime.train_suffix(boundary, targets, torch.nn.functional.mse_loss)
+    runtime.backward_prefix(boundary, boundary_grads)
+
+    assert torch.allclose(loss, full_loss.detach(), atol=1e-5, rtol=1e-4)
+    for full_param, split_param in zip(full_model.parameters(), split_model.parameters(), strict=True):
+        assert full_param.grad is not None
+        assert split_param.grad is not None
+        assert torch.allclose(full_param.grad, split_param.grad, atol=1e-5, rtol=1e-4)
 
 
 @pytest.mark.smoke
