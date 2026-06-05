@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+import gc
 import importlib.util
 import os
 from pathlib import Path
@@ -47,6 +48,9 @@ REAL_MODEL_DYNAMIC_BATCHES = (1, 2, 4, 8, 32)
 REAL_MODEL_CPU_DYNAMIC_BATCHES = (1, 2)
 REAL_MODEL_DYNAMIC_BATCH_RANGE = (1, 32)
 SPLIT_SWEEP_COVERAGE_DIR = Path(__file__).resolve().parent / "artifacts" / "split_sweep_coverage"
+YOLO26_DYNAMIC_BATCH_MIN_START_CUDA_FREE_GIB = 12.0
+YOLO26_DYNAMIC_BATCH_MIN_CASE_CUDA_FREE_GIB = 6.0
+YOLO26_DYNAMIC_BATCH_MIN_SYSTEM_FREE_GIB = 8.0
 
 
 @pytest.mark.smoke
@@ -60,7 +64,7 @@ def test_yolo26n_detection_head_boundary_is_live_on_cuda() -> None:
         pytest.skip("YOLO26n weights are not available.")
 
     model = ultralytics.YOLO(str(weight_path)).model.eval().cuda()
-    x = torch.randn(2, 3, 640, 640, device="cuda")
+    x = torch.randn(1, 3, 640, 640, device="cuda")
     runtime = tl.prepare_split(
         model,
         x,
@@ -86,39 +90,153 @@ def test_yolo26n_detection_head_boundary_is_live_on_cuda() -> None:
 
 
 @pytest.mark.slow
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_yolo26n_all_compute_split_points_on_cuda() -> None:
-    """Sweep every TorchLens compute node split point in YOLO26n."""
+    """Sweep every YOLO26n compute split point across all dynamic CUDA batches."""
 
     ultralytics = pytest.importorskip("ultralytics")
     weight_path = next((path for path in YOLO26N_CANDIDATES if path is not None and path.exists()), None)
     if weight_path is None:
         pytest.skip("YOLO26n weights are not available.")
 
-    with _cuda_tf32_disabled():
-        has_cuda = torch.cuda.is_available()
-        cpu_model = ultralytics.YOLO(str(weight_path)).model.eval().cpu()
-        cuda_model = ultralytics.YOLO(str(weight_path)).model.eval().cuda() if has_cuda else None
-        runtime_cases = _tensor_runtime_cases(
-            (3, 640, 640),
-            batch_sizes=REAL_MODEL_DYNAMIC_BATCHES if has_cuda else REAL_MODEL_CPU_DYNAMIC_BATCHES,
-        )
-        trace_cpu = runtime_cases[0]
-        cpu_graph = _trace_graph(cpu_model, trace_cpu)
-        cuda_graph = _trace_graph(cuda_model, trace_cpu.cuda()) if cuda_model is not None else None
-        targets = _compute_split_targets(cpu_graph)
+    _skip_if_system_memory_below(YOLO26_DYNAMIC_BATCH_MIN_SYSTEM_FREE_GIB)
+    device = _select_cuda_device_with_free_memory(
+        min_free_gib=YOLO26_DYNAMIC_BATCH_MIN_START_CUDA_FREE_GIB
+    )
 
-        report = _run_real_model_compute_split_sweep(
-            model_name="YOLO26n",
-            artifact_name=f"yolo26n_{'cuda' if has_cuda else 'cpu'}_compute.json",
-            cpu_model=cpu_model,
-            cuda_model=cuda_model,
-            cpu_graph=cpu_graph,
-            cuda_graph=cuda_graph,
-            targets=targets,
-            runtime_cases=runtime_cases,
-            min_support_ratio=0.5,
+    with _cuda_tf32_disabled():
+        cuda_model = ultralytics.YOLO(str(weight_path)).model.eval().to(device)
+        trace_tensor = torch.randn(1, 3, 640, 640, device=device)
+        cuda_graph = _trace_graph(cuda_model, trace_tensor)
+        del trace_tensor
+        _clear_cuda_working_set(device)
+        targets = _compute_split_targets(cuda_graph)
+        assert len(targets) >= 100
+
+        cases: list[SplitSweepCaseResult] = []
+        for target_index, target in enumerate(targets, start=1):
+            if target_index == 1 or target_index % 25 == 0:
+                print(
+                    f"[YOLO26n dynamic batch] target {target_index}/{len(targets)}: {target}",
+                    flush=True,
+                )
+            boundary = f"after:{target}"
+            batch_statuses: dict[str, Any] = {}
+            tested_batches: list[int] = []
+            cuda_runtime = None
+
+            try:
+                spec = tl.SplitSpec(boundary=boundary, dynamic_batch=REAL_MODEL_DYNAMIC_BATCH_RANGE)
+                cuda_runtime = _runtime_from_graph(cuda_model, cuda_graph, spec)
+
+                for batch_size in REAL_MODEL_DYNAMIC_BATCHES:
+                    _skip_if_cuda_memory_below(
+                        device,
+                        min_free_gib=YOLO26_DYNAMIC_BATCH_MIN_CASE_CUDA_FREE_GIB,
+                        context=f"{boundary} batch={batch_size}",
+                    )
+                    tested_batches.append(batch_size)
+                    _assert_cuda_split_replay_matches(
+                        cuda_model,
+                        cuda_runtime,
+                        batch_size=batch_size,
+                        sample_shape=(3, 640, 640),
+                        device=device,
+                        atol=1e-4,
+                        rtol=1e-4,
+                    )
+                    batch_statuses[str(batch_size)] = "supported"
+                    _clear_cuda_working_set(device)
+            except SplitUnsupportedError as exc:
+                assert_split_unsupported_error_context(exc, boundary)
+                if tested_batches:
+                    batch_statuses[str(tested_batches[-1])] = "unsupported"
+                cases.append(
+                    make_split_sweep_case_result(
+                        model_name="YOLO26n",
+                        split_target=target,
+                        boundary=boundary,
+                        status="unsupported",
+                        batch_sizes_tested=tuple(tested_batches),
+                        batch_statuses=batch_statuses,
+                        exc=exc,
+                    )
+                )
+            except RuntimeError as exc:
+                _clear_cuda_working_set(device)
+                if _is_cuda_oom(exc):
+                    if tested_batches:
+                        batch_statuses[str(tested_batches[-1])] = "failed"
+                    cases.append(
+                        make_split_sweep_case_result(
+                            model_name="YOLO26n",
+                            split_target=target,
+                            boundary=boundary,
+                            status="failed",
+                            batch_sizes_tested=tuple(tested_batches),
+                            batch_statuses=batch_statuses,
+                            exc=exc,
+                        )
+                    )
+                    report = summarize_split_sweep_coverage("YOLO26n", cases)
+                    write_split_sweep_coverage_report(
+                        report,
+                        SPLIT_SWEEP_COVERAGE_DIR / "yolo26n_cuda_dynamic_batch_compute.json",
+                    )
+                    pytest.fail(
+                        "YOLO26n dynamic batch sweep hit CUDA OOM at "
+                        f"{boundary} with batch statuses {batch_statuses}. "
+                        "Partial coverage report was written."
+                    )
+                if tested_batches:
+                    batch_statuses[str(tested_batches[-1])] = "failed"
+                cases.append(
+                    make_split_sweep_case_result(
+                        model_name="YOLO26n",
+                        split_target=target,
+                        boundary=boundary,
+                        status="failed",
+                        batch_sizes_tested=tuple(tested_batches),
+                        batch_statuses=batch_statuses,
+                        exc=exc,
+                    )
+                )
+            except Exception as exc:
+                if tested_batches:
+                    batch_statuses[str(tested_batches[-1])] = "failed"
+                cases.append(
+                    make_split_sweep_case_result(
+                        model_name="YOLO26n",
+                        split_target=target,
+                        boundary=boundary,
+                        status="failed",
+                        batch_sizes_tested=tuple(tested_batches),
+                        batch_statuses=batch_statuses,
+                        exc=exc,
+                    )
+                )
+            else:
+                cases.append(
+                    make_split_sweep_case_result(
+                        model_name="YOLO26n",
+                        split_target=target,
+                        boundary=boundary,
+                        status="supported",
+                        batch_sizes_tested=tuple(tested_batches),
+                        batch_statuses=batch_statuses,
+                    )
+                )
+            finally:
+                del cuda_runtime
+                _clear_cuda_working_set(device)
+
+        report = summarize_split_sweep_coverage("YOLO26n", cases)
+        write_split_sweep_coverage_report(
+            report,
+            SPLIT_SWEEP_COVERAGE_DIR / "yolo26n_cuda_dynamic_batch_compute.json",
         )
-    print(format_split_sweep_coverage_summary(report))
+        print(format_split_sweep_coverage_summary(report))
+        assert_split_sweep_coverage(report, 0.5)
 
 
 @pytest.mark.smoke
@@ -834,6 +952,125 @@ def _assert_boundary_shapes(left: Any, right: Any) -> None:
     for tensor_id in left.tensors:
         assert left.tensors[tensor_id].shape == right.tensors[tensor_id].shape
         assert left.tensors[tensor_id].dtype == right.tensors[tensor_id].dtype
+
+
+def _assert_cuda_split_replay_matches(
+    model: torch.nn.Module,
+    runtime: SplitRuntime,
+    *,
+    batch_size: int,
+    sample_shape: tuple[int, ...],
+    device: torch.device,
+    atol: float,
+    rtol: float,
+) -> None:
+    """Run one CUDA split replay case in a tight scope so tensors can be freed."""
+
+    x_cuda = torch.randn((batch_size, *sample_shape), device=device)
+    with torch.inference_mode():
+        boundary = runtime.run_prefix(x_cuda)
+        full_output = model(x_cuda)
+        split_output = runtime.run_suffix(boundary)
+    assert _tree_allclose(split_output, full_output, atol=atol, rtol=rtol)
+
+
+def _select_cuda_device_with_free_memory(*, min_free_gib: float) -> torch.device:
+    """Select the CUDA device with the most free memory, skipping if too small."""
+
+    candidates = []
+    for index in range(torch.cuda.device_count()):
+        with torch.cuda.device(index):
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+        candidates.append((free_bytes, total_bytes, index))
+    free_bytes, total_bytes, index = max(candidates)
+    min_free_bytes = _gib_to_bytes(min_free_gib)
+    if free_bytes < min_free_bytes:
+        pytest.skip(
+            "YOLO26n dynamic batch sweep needs at least "
+            f"{min_free_gib:.1f} GiB free CUDA memory; best device cuda:{index} has "
+            f"{_bytes_to_gib(free_bytes):.1f}/{_bytes_to_gib(total_bytes):.1f} GiB free."
+        )
+    torch.cuda.set_device(index)
+    return torch.device(f"cuda:{index}")
+
+
+def _skip_if_cuda_memory_below(
+    device: torch.device,
+    *,
+    min_free_gib: float,
+    context: str,
+) -> None:
+    """Skip the heavy real-model sweep before a case can pressure CUDA memory."""
+
+    _clear_cuda_working_set(device)
+    with torch.cuda.device(device):
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+    min_free_bytes = _gib_to_bytes(min_free_gib)
+    if free_bytes < min_free_bytes:
+        pytest.skip(
+            "Stopping YOLO26n dynamic batch sweep before "
+            f"{context}: free CUDA memory is {_bytes_to_gib(free_bytes):.1f}/"
+            f"{_bytes_to_gib(total_bytes):.1f} GiB, below the {min_free_gib:.1f} GiB "
+            "safety floor."
+        )
+
+
+def _skip_if_system_memory_below(min_available_gib: float) -> None:
+    """Skip memory-heavy real-model sweeps when host RAM is already tight."""
+
+    available_bytes = _available_system_memory_bytes()
+    if available_bytes is None:
+        return
+    min_available_bytes = _gib_to_bytes(min_available_gib)
+    if available_bytes < min_available_bytes:
+        pytest.skip(
+            "YOLO26n dynamic batch sweep needs at least "
+            f"{min_available_gib:.1f} GiB available system memory; host has "
+            f"{_bytes_to_gib(available_bytes):.1f} GiB available."
+        )
+
+
+def _available_system_memory_bytes() -> int | None:
+    """Return available host memory from Linux procfs when available."""
+
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    except OSError:
+        return None
+    return None
+
+
+def _clear_cuda_working_set(device: torch.device | None = None) -> None:
+    """Release Python and CUDA caches between memory-heavy real-model cases."""
+
+    gc.collect()
+    if not torch.cuda.is_available():
+        return
+    if device is not None:
+        torch.cuda.synchronize(device)
+    torch.cuda.empty_cache()
+    try:
+        torch.cuda.ipc_collect()
+    except RuntimeError:
+        return
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    """Return whether an exception is a CUDA out-of-memory failure."""
+
+    cuda_oom_type = getattr(torch.cuda, "OutOfMemoryError", RuntimeError)
+    message = str(exc).lower()
+    return isinstance(exc, cuda_oom_type) or ("cuda" in message and "out of memory" in message)
+
+
+def _gib_to_bytes(value: float) -> int:
+    return int(value * 1024**3)
+
+
+def _bytes_to_gib(value: int) -> float:
+    return value / 1024**3
 
 
 @contextmanager

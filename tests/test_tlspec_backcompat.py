@@ -217,7 +217,16 @@ def _assert_modellog_matches(live_log: tl.ModelLog, loaded_log: tl.ModelLog) -> 
             assert isinstance(loaded_layer.activation, torch.Tensor)
             assert loaded_layer.activation.dtype == live_layer.activation.dtype
             assert loaded_layer.activation.shape == live_layer.activation.shape
-            assert torch.equal(loaded_layer.activation, live_layer.activation)
+            _assert_tensor_values_match(loaded_layer.activation, live_layer.activation)
+
+
+def _assert_tensor_values_match(loaded: torch.Tensor, live: torch.Tensor) -> None:
+    """Assert fixture tensor values match, allowing tiny cross-torch float drift."""
+
+    if loaded.is_floating_point() or loaded.is_complex():
+        assert torch.allclose(loaded, live, atol=1e-6, rtol=1e-5)
+        return
+    assert torch.equal(loaded, live)
 
 
 def _assert_intervention_matches(
