@@ -10,8 +10,8 @@ import torch
 
 import torchlens as tl
 from torchlens.split.cache import load_boundary, save_boundary
-from torchlens.split.errors import SplitUnsupportedError
-from torchlens.split.trace_graph import trace_graph_from_model_log
+from torchlens.split.errors import SplitSpecError, SplitUnsupportedError
+from torchlens.split.trace_graph import is_compute_split_node, trace_graph_from_model_log
 from torchlens.split.training import BoundaryCacheDataset, build_feature_cache
 from torchlens.split.validation import assert_split_sweep_coverage
 from torchlens.split.validation import assert_canonical_abi_equivalent, boundary_liveness_zero_probe
@@ -35,6 +35,17 @@ class TinyResidual(torch.nn.Module):
         y = self.features[1](h)
         z = self.features[2](y)
         return z + y.mean(dim=1, keepdim=True)
+
+
+class TinyBatchNorm(torch.nn.Module):
+    """Small CNN that reads eval-time BatchNorm buffers."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bn = torch.nn.BatchNorm2d(3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(self.bn(x))
 
 
 class TinySkip(torch.nn.Module):
@@ -163,7 +174,7 @@ def test_toy_model_compute_split_sweep_has_full_support() -> None:
     )
     targets: list[str] = []
     for node in trace_graph.ordered_nodes():
-        if node.is_input or node.is_output:
+        if not is_compute_split_node(node):
             continue
         if node.torchlens_label:
             targets.append(node.torchlens_label)
@@ -227,6 +238,39 @@ def test_toy_model_compute_split_sweep_has_full_support() -> None:
 
     report = summarize_split_sweep_coverage("TinyResidual", cases)
     assert_split_sweep_coverage(report, 1.0, allow_unsupported=False)
+
+
+@pytest.mark.smoke
+def test_compute_split_boundaries_exclude_buffer_nodes() -> None:
+    """Automatic and explicit split boundaries reject non-compute buffer nodes."""
+
+    model = TinyBatchNorm().eval()
+    x = torch.randn(2, 3, 4, 4)
+    runtime = tl.prepare_split(
+        model,
+        x,
+        tl.SplitSpec(boundary="percent:50", dynamic_batch=(1, 8)),
+    )
+    nodes = runtime.trace_graph.ordered_nodes()
+    buffer_labels = [
+        node.torchlens_label
+        for node in nodes
+        if bool(getattr(node.layer, "is_buffer_layer", False))
+    ]
+    compute_labels = [node.torchlens_label for node in nodes if is_compute_split_node(node)]
+
+    assert buffer_labels
+    assert compute_labels
+    assert not set(buffer_labels) & set(compute_labels)
+    assert runtime.plan.split_label in compute_labels
+
+    for mode in ("after", "before"):
+        with pytest.raises(SplitSpecError, match="non-compute node"):
+            tl.prepare_split(
+                model,
+                x,
+                tl.SplitSpec(boundary=f"{mode}:{buffer_labels[0]}", dynamic_batch=(1, 8)),
+            )
 
 
 @pytest.mark.smoke

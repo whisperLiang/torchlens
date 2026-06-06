@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, fields, is_dataclass
 from typing import Any
 
 import torch
@@ -53,8 +54,8 @@ class ShapeEnv:
 def infer_traced_batch_size(inputs: tuple[Any, ...]) -> int | None:
     """Infer trace batch from the first tensor input."""
 
-    for value in _walk_values(inputs):
-        if isinstance(value, torch.Tensor) and value.ndim > 0:
+    for value in iter_tensor_leaves(inputs):
+        if value.ndim > 0:
             return int(value.shape[0])
     return None
 
@@ -62,8 +63,8 @@ def infer_traced_batch_size(inputs: tuple[Any, ...]) -> int | None:
 def batch_size_from_value(value: Any) -> int | None:
     """Return dim-0 batch size from the first tensor in ``value``."""
 
-    for item in _walk_values((value,)):
-        if isinstance(item, torch.Tensor) and item.ndim > 0:
+    for item in iter_tensor_leaves(value):
+        if item.ndim > 0:
             return int(item.shape[0])
     return None
 
@@ -155,16 +156,48 @@ def _concrete_batch_multiplier(expected_dim: Dimension, shape_env: ShapeEnv) -> 
     return multiplier
 
 
-def _walk_values(values: Any) -> Any:
-    if isinstance(values, dict):
-        for item in values.values():
-            yield from _walk_values(item)
+def iter_tensor_leaves(value: Any) -> Iterator[torch.Tensor]:
+    """Yield tensor leaves from common Python and model input containers."""
+
+    yield from _iter_tensor_leaves(value, seen=set())
+
+
+def _iter_tensor_leaves(value: Any, *, seen: set[int]) -> Iterator[torch.Tensor]:
+    value_id = id(value)
+    if value_id in seen:
         return
-    if isinstance(values, (tuple, list)):
-        for item in values:
-            yield from _walk_values(item)
+    seen.add(value_id)
+    if isinstance(value, torch.Tensor):
+        yield value
         return
-    yield values
+    if isinstance(value, Mapping):
+        for item in value.values():
+            yield from _iter_tensor_leaves(item, seen=seen)
+        return
+    if isinstance(value, (tuple, list)):
+        for item in value:
+            yield from _iter_tensor_leaves(item, seen=seen)
+        return
+    if isinstance(value, torch.nn.Module):
+        return
+    semantic_leaves: list[torch.Tensor] = []
+    for attr_name in ("tensors", "mask"):
+        item = getattr(value, attr_name, None)
+        if item is not None:
+            semantic_leaves.extend(_iter_tensor_leaves(item, seen=seen))
+    if semantic_leaves:
+        yield from semantic_leaves
+    if is_dataclass(value) and not isinstance(value, type):
+        for field in fields(value):
+            yield from _iter_tensor_leaves(getattr(value, field.name), seen=seen)
+        return
+    try:
+        attrs = vars(value)
+    except TypeError:
+        attrs = {}
+    if attrs:
+        for item in attrs.values():
+            yield from _iter_tensor_leaves(item, seen=seen)
 
 
 __all__ = [
@@ -174,5 +207,6 @@ __all__ = [
     "SymbolicShape",
     "batch_size_from_value",
     "infer_traced_batch_size",
+    "iter_tensor_leaves",
     "validate_tensor_against_symbolic_shape",
 ]

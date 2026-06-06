@@ -20,8 +20,9 @@ class SplitSpec:
     Parameters
     ----------
     boundary:
-        Split point, such as ``"after:model.23"``, ``"before:relu_1_2"``,
-        ``"percent:50"``, or ``"50%"``.
+        Split point on a compute node, such as ``"after:model.23"``,
+        ``"before:relu_1_2"``, ``"percent:50"``, or ``"50%"``. Input,
+        output, and buffer nodes are not valid split boundaries.
     batch_symbol:
         Symbol used for dynamic batch dimensions.
     dynamic_batch:

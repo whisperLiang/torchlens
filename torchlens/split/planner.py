@@ -7,7 +7,7 @@ import re
 from .errors import SplitSpecError
 from .frontier import SplitPlan, build_frontier
 from .spec import SplitSpec
-from .trace_graph import TraceGraph, TraceNode
+from .trace_graph import TraceGraph, TraceNode, is_compute_split_node
 
 
 def plan_split(graph: TraceGraph, spec: SplitSpec) -> SplitPlan:
@@ -53,6 +53,14 @@ def _resolve_split_index(graph: TraceGraph, boundary: str) -> tuple[int, str, st
     matches = _matching_nodes(ordered, target)
     if not matches:
         raise SplitSpecError(f"Split boundary target {target!r} did not match any trace node.")
+    compute_matches = [node for node in matches if is_compute_split_node(node)]
+    if not compute_matches:
+        labels = ", ".join(node.torchlens_label for node in matches[:8])
+        raise SplitSpecError(
+            f"Split boundary target {target!r} matched only non-compute nodes "
+            f"({labels}); input, output, and buffer nodes cannot be split boundaries."
+        )
+    matches = compute_matches
     if len(matches) > 1:
         label_matches = [node for node in matches if node.torchlens_label == target]
         module_matches = [node for node in matches if node.module_path == target]
@@ -116,7 +124,7 @@ def _first_related_param_chunk_index(ordered: tuple[TraceNode, ...], first_index
 def _percent_index(nodes: tuple[TraceNode, ...], percent: float, boundary: str) -> tuple[int, str, str]:
     if percent <= 0 or percent >= 100:
         raise SplitSpecError("Percent split must be between 0 and 100.")
-    compute_nodes = [node for node in nodes if not node.is_input and not node.is_output]
+    compute_nodes = [node for node in nodes if is_compute_split_node(node)]
     if not compute_nodes:
         raise SplitSpecError("Percent split requires at least one compute node.")
     compute_index = max(0, min(len(compute_nodes) - 1, int(len(compute_nodes) * percent / 100) - 1))

@@ -214,10 +214,21 @@ def _apply_live_param_replay_policies(
     return updated
 
 
+def is_compute_split_node(node: TraceNode) -> bool:
+    """Return whether ``node`` should be considered an automatic compute split point."""
+
+    return (
+        not node.is_input
+        and not node.is_output
+        and not bool(getattr(node.layer, "is_buffer_layer", False))
+    )
+
+
 __all__ = [
     "BATCH_DYNAMIC_CONSTANT_OPS",
     "ReplaySourcePolicy",
     "TraceGraph",
     "TraceNode",
+    "is_compute_split_node",
     "trace_graph_from_model_log",
 ]

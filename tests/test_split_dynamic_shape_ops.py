@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import pytest
@@ -16,6 +17,55 @@ from torchlens.split.trace_graph import TraceGraph, TraceNode
 
 RUNTIME_BATCHES = (1, 2, 4, 8, 32)
 TRACE_BATCH = 2
+
+
+class NestedTensorLike:
+    """Minimal object exposing RF-DETR-style tensor and mask leaves."""
+
+    def __init__(self, tensors: torch.Tensor, mask: torch.Tensor) -> None:
+        self.tensors = tensors
+        self.mask = mask
+
+
+class NestedTensorPropertyWithCache:
+    """Tensor-like input whose semantic tensor is exposed as a property."""
+
+    def __init__(self, tensors: torch.Tensor, cache: torch.Tensor) -> None:
+        self.cache = cache
+        self._tensors = tensors
+
+    @property
+    def tensors(self) -> torch.Tensor:
+        """Return the tensor leaf consumed by the model."""
+
+        return self._tensors
+
+
+class NestedMaskFirstNet(nn.Module):
+    """Toy nested-input model that reads mask before image tensors."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prefix = nn.Conv2d(3, 4, kernel_size=1)
+        self.head = nn.Linear(4, 2)
+
+    def forward(self, nested: NestedTensorLike) -> torch.Tensor:
+        """Use both nested leaves, with mask access preceding tensor access."""
+
+        mask = nested.mask
+        mask_bias = mask.float()[:, :1, :1].view(mask.shape[0], 1, 1, 1)
+        x = nested.tensors
+        hidden = torch.relu(self.prefix(x + mask_bias))
+        return self.head(hidden.mean(dim=(2, 3)))
+
+
+class NestedTensorPropertyNet(nn.Module):
+    """Toy model consuming a tensor-like property input."""
+
+    def forward(self, nested: NestedTensorPropertyWithCache) -> torch.Tensor:
+        """Use only the semantic ``tensors`` property."""
+
+        return nested.tensors * 2
 
 
 class DynamicReshapeViewNet(nn.Module):
@@ -100,6 +150,20 @@ class DynamicRepeatBatchlessNet(nn.Module):
         batch = x.shape[0]
         base = self.weight.view(1, -1).repeat(batch, 1)
         return base + x.mean(dim=(2, 3))
+
+
+class BatchlessRepeatOnlyNet(nn.Module):
+    """Toy model whose suffix needs B but whose boundary may be batchless."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(3))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Repeat a parameter from ``x.shape[0]`` without tensor-input parents."""
+
+        batch = x.shape[0]
+        return self.weight.view(1, -1).repeat(batch, 1)
 
 
 class LiveParamAndBatchConstantNet(nn.Module):
@@ -244,6 +308,91 @@ def test_dynamic_shape_codegen_does_not_hardcode_traced_batch_size() -> None:
     assert _dynamic_batch_literal(1, repeat_existing_batch_node, expand_graph, env, ("args", 1)) is None
 
 
+def test_nested_tensor_like_inputs_replay_across_runtime_batches() -> None:
+    """Nested ``.tensors``/``.mask`` inputs keep leaf matching dynamic across B."""
+
+    torch.manual_seed(0)
+    model = NestedMaskFirstNet().eval()
+    trace_inputs = _nested_batch(1)
+    runtime = tl.prepare_split(
+        model,
+        trace_inputs,
+        tl.SplitSpec(boundary="after:prefix", dynamic_batch=(1, 4)),
+    )
+
+    for batch_size in (1, 2, 4):
+        inputs = _nested_batch(batch_size)
+        with torch.no_grad():
+            split_out = runtime.replay(inputs)
+            full_out = model(inputs)
+        assert_tree_allclose(split_out, full_out)
+
+
+def test_nested_tensor_like_inputs_split_training_across_runtime_batches() -> None:
+    """Split training accepts nested inputs whose runtime batch differs from trace B."""
+
+    torch.manual_seed(0)
+    base_model = NestedMaskFirstNet().train()
+    full_model = copy.deepcopy(base_model).train()
+    split_model = copy.deepcopy(base_model).train()
+    inputs = _nested_batch(2)
+    targets = torch.randn(2, 2)
+
+    full_optimizer = torch.optim.SGD(full_model.parameters(), lr=0.05)
+    full_optimizer.zero_grad(set_to_none=True)
+    full_loss = torch.nn.functional.mse_loss(full_model(inputs), targets)
+    full_loss.backward()
+    full_optimizer.step()
+
+    runtime = tl.prepare_split(
+        split_model,
+        _nested_batch(1),
+        tl.SplitSpec(boundary="after:prefix", dynamic_batch=(1, 4), trainable=True),
+    )
+    prefix_optimizer = torch.optim.SGD(split_model.prefix.parameters(), lr=0.05)
+    suffix_optimizer = torch.optim.SGD(split_model.head.parameters(), lr=0.05)
+    boundary = runtime.run_training_prefix(inputs)
+    loss, boundary_grads = runtime.train_suffix(
+        boundary,
+        targets,
+        torch.nn.functional.mse_loss,
+        suffix_optimizer,
+    )
+    runtime.backward_prefix(boundary, boundary_grads, prefix_optimizer)
+
+    assert torch.allclose(loss, full_loss.detach(), atol=1e-5, rtol=1e-4)
+    for full_param, split_param in zip(
+        full_model.parameters(),
+        split_model.parameters(),
+        strict=True,
+    ):
+        assert torch.allclose(full_param, split_param, atol=1e-5, rtol=1e-4)
+
+
+def test_nested_tensor_property_precedes_generic_tensor_attrs() -> None:
+    """Semantic ``.tensors`` leaves are matched before unrelated object attrs."""
+
+    model = NestedTensorPropertyNet().eval()
+    trace_inputs = NestedTensorPropertyWithCache(
+        tensors=torch.arange(3, dtype=torch.float32).view(1, 3),
+        cache=torch.full((1, 3), 100.0),
+    )
+    runtime = tl.prepare_split(
+        model,
+        trace_inputs,
+        tl.SplitSpec(boundary="percent:50", dynamic_batch=(1, 4)),
+    )
+
+    inputs = NestedTensorPropertyWithCache(
+        tensors=torch.arange(6, dtype=torch.float32).view(2, 3),
+        cache=torch.full((2, 3), 200.0),
+    )
+    with torch.no_grad():
+        split_out = runtime.replay(inputs)
+        full_out = model(inputs)
+    assert_tree_allclose(split_out, full_out)
+
+
 def test_runtime_batch_inference_prefers_symbolic_batch_tensors() -> None:
     """Suffix envs may contain non-batch tensors before the true batch tensor."""
 
@@ -301,6 +450,57 @@ def test_live_param_policy_does_not_capture_batch_dynamic_constants() -> None:
         split_out = runtime.replay(x)
         full_out = model(x)
     assert_tree_allclose(split_out, full_out)
+
+
+def test_batchless_repeat_dynamicizes_singleton_trace_batch() -> None:
+    """Batchless singleton views still repeat to runtime B after a B=1 trace."""
+
+    assert_dynamic_batch_split_replay(
+        DynamicRepeatBatchlessNet,
+        (3, 4, 5),
+        boundaries=("percent:25", "percent:50", "percent:75"),
+        runtime_batches=(1, 2, 4),
+        trace_batch=1,
+    )
+
+
+def test_boundary_metadata_carries_batch_for_batchless_suffix_shape_ops() -> None:
+    """Suffix shape ops use boundary metadata when boundary tensors are batchless."""
+
+    torch.manual_seed(0)
+    model = BatchlessRepeatOnlyNet().eval()
+    trace_x = torch.randn(1, 3, 4, 5)
+    probe_runtime = tl.prepare_split(
+        model,
+        trace_x,
+        tl.SplitSpec(boundary="percent:50", dynamic_batch=(1, 4)),
+    )
+    view_label = _first_node(probe_runtime.trace_graph, "view").torchlens_label
+    runtime = tl.prepare_split(
+        model,
+        trace_x,
+        tl.SplitSpec(boundary=f"after:{view_label}", dynamic_batch=(1, 4)),
+    )
+
+    for batch_size in (2, 4):
+        x = torch.randn(batch_size, 3, 4, 5)
+        boundary = runtime.run_prefix(x)
+        assert boundary.batch_size == batch_size
+        assert {tuple(tensor.shape) for tensor in boundary.tensors.values()} == {(1, 3)}
+        with torch.no_grad():
+            split_out = runtime.run_suffix(boundary)
+            full_out = model(x)
+        assert_tree_allclose(split_out, full_out)
+
+
+def _nested_batch(batch_size: int) -> NestedTensorLike:
+    """Return a deterministic nested tensor-like input batch."""
+
+    tensors = torch.randn(batch_size, 3, 4, 5)
+    mask = torch.zeros(batch_size, 4, 5, dtype=torch.bool)
+    if batch_size > 1:
+        mask[1::2, 0, 0] = True
+    return NestedTensorLike(tensors=tensors, mask=mask)
 
 
 def _static_codegen_env(graph: TraceGraph, node: TraceNode) -> dict[str, torch.Tensor]:

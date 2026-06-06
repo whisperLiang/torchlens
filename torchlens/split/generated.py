@@ -23,9 +23,10 @@ from ..intervention.types import (
 from ..utils.rng import execute_with_restored_rng_autocast
 
 from .boundary import ReplayBoundary
-from .errors import SplitErrorContext, SplitUnsupportedError, unsupported
+from .errors import SplitBoundaryError, SplitErrorContext, SplitUnsupportedError, unsupported
 from .frontier import SplitPlan
-from .shape import MAX_BATCH_MULTIPLIER
+from .shape import MAX_BATCH_MULTIPLIER, ShapeEnv, iter_tensor_leaves
+from .shape import validate_tensor_against_symbolic_shape
 from .trace_graph import BATCH_DYNAMIC_CONSTANT_OPS, TraceGraph, TraceNode
 
 _RNG_SENSITIVE_OP_NAMES = frozenset(
@@ -64,6 +65,7 @@ _RNG_SENSITIVE_OP_NAMES = frozenset(
 )
 _LIVE_PARAM_SOURCES_ENV_KEY = "__torchlens_live_param_sources__"
 _LIVE_PARAM_SOURCES_METADATA_KEY = "use_live_param_sources"
+_RUNTIME_BATCH_ENV_KEY = "__torchlens_runtime_batch__"
 
 
 @dataclass
@@ -98,7 +100,9 @@ class GeneratedPrefix(nn.Module):
             "split_id": self.plan.split_id,
             "split_label": self.plan.split_label,
             "graph_shape_hash": self.graph.graph_shape_hash,
-            "batch_size": _first_batch_size(tensors.values()) or _first_batch_size(inputs),
+            "batch_size": _runtime_batch_from_env(env, self.graph)
+            or _first_batch_size(inputs)
+            or _first_batch_size(tensors.values()),
             "boundary_order": self.plan.boundary_nodes,
             _LIVE_PARAM_SOURCES_METADATA_KEY: self.plan.use_live_param_sources,
         }
@@ -119,6 +123,8 @@ class GeneratedSuffix(nn.Module):
         """Execute suffix nodes from a boundary and return model output."""
 
         env: dict[str, Any] = dict(boundary.tensors)
+        if boundary.batch_size is not None:
+            env[_RUNTIME_BATCH_ENV_KEY] = boundary.batch_size
         if boundary.metadata.get(
             _LIVE_PARAM_SOURCES_METADATA_KEY,
             self.plan.use_live_param_sources,
@@ -681,11 +687,26 @@ def _is_leading_shape_position(op_type: str, path: tuple[Any, ...]) -> bool:
 
 
 def _runtime_batch_from_env(env: dict[str, Any], graph: TraceGraph) -> int | None:
+    explicit_batch = env.get(_RUNTIME_BATCH_ENV_KEY)
+    if isinstance(explicit_batch, int) and explicit_batch > 0:
+        return explicit_batch
     candidates: list[int] = []
     for label in graph.input_nodes:
+        node = graph.get(label)
         value = env.get(label)
-        if isinstance(value, torch.Tensor) and value.ndim > 0:
-            candidates.append(int(value.shape[0]))
+        if (
+            isinstance(value, torch.Tensor)
+            and value.ndim > 0
+            and node.symbolic_output_shape is not None
+            and node.symbolic_output_shape
+        ):
+            runtime_batch = _runtime_batch_from_symbolic_dim(
+                int(value.shape[0]),
+                node.symbolic_output_shape[0],
+                graph.batch_symbol,
+            )
+            if runtime_batch is not None:
+                candidates.append(runtime_batch)
     for node in graph.ordered_nodes():
         value = env.get(node.torchlens_label)
         if (
@@ -740,19 +761,20 @@ def _repeat_input_already_has_batch_dim(
     parent_label = _final_label_for_ref(graph, node.parents[0])
     parent_value = env.get(parent_label)
     parent = graph.get(parent_label)
+    parent_has_input_ancestor = bool(getattr(parent.layer, "has_input_ancestor", True))
+    if parent_has_input_ancestor:
+        return True
     if isinstance(parent_value, torch.Tensor) and parent_value.ndim > 0:
-        if bool(getattr(graph.get(parent_label).layer, "has_input_ancestor", True)):
-            return True
+        runtime_batch = _runtime_batch_from_env(env, graph)
+        if runtime_batch is not None:
+            return int(parent_value.shape[0]) == runtime_batch
         return _symbolic_dim_contains_batch(
             parent.symbolic_output_shape[0] if parent.symbolic_output_shape else None,
             graph.batch_symbol,
         )
-    if bool(getattr(parent.layer, "has_input_ancestor", True)):
+    if parent.replay_source_policy == "batch_dynamic_constant":
         return True
-    return _symbolic_dim_contains_batch(
-        parent.symbolic_output_shape[0] if parent.symbolic_output_shape else None,
-        graph.batch_symbol,
-    )
+    return False
 
 
 def _symbolic_dim_contains_batch(symbolic_dim: Any, batch_symbol: str) -> bool:
@@ -802,9 +824,13 @@ def _input_env(graph: TraceGraph, inputs: tuple[Any, ...]) -> dict[str, Any]:
     used: set[int] = set()
     for index, label in enumerate(graph.input_nodes):
         node = graph.get(label)
-        match_index = _match_input_leaf(node, leaves, used)
+        match_index = _match_input_leaf(node, leaves, used, graph.shape_env)
         if match_index is None:
-            match_index = index
+            raise SplitUnsupportedError(
+                f"Runtime input tensor matching traced input {label!r} "
+                f"with shape {node.symbolic_output_shape!r} and dtype {node.dtype!r} "
+                "was not found."
+            )
         env[label] = leaves[match_index]
         used.add(match_index)
     for label, node in graph.nodes.items():
@@ -823,39 +849,49 @@ def _match_input_leaf(
     node: TraceNode,
     leaves: list[Any],
     used: set[int],
+    shape_env: ShapeEnv,
 ) -> int | None:
     """Find the runtime input tensor matching a traced input node."""
 
     for index, leaf in enumerate(leaves):
         if index in used or not isinstance(leaf, torch.Tensor):
             continue
-        if node.dtype is not None and leaf.dtype != node.dtype:
-            continue
-        if node.output_shape is not None and tuple(leaf.shape) != tuple(node.output_shape):
+        if not _input_leaf_matches_node(node, leaf, shape_env):
             continue
         return index
     return None
 
 
+def _input_leaf_matches_node(
+    node: TraceNode,
+    leaf: torch.Tensor,
+    shape_env: ShapeEnv,
+) -> bool:
+    """Return whether a runtime input leaf matches one traced input node."""
+
+    if node.dtype is not None and leaf.dtype != node.dtype:
+        return False
+    if node.output_shape is None:
+        return True
+    if tuple(leaf.shape) == tuple(node.output_shape):
+        return True
+    if node.symbolic_output_shape is None:
+        return False
+    try:
+        validate_tensor_against_symbolic_shape(
+            leaf,
+            node.symbolic_output_shape,
+            dtype=node.dtype,
+            shape_env=shape_env,
+            name=node.torchlens_label,
+        )
+    except SplitBoundaryError:
+        return False
+    return True
+
+
 def _walk_input_leaves(value: Any) -> Any:
-    if isinstance(value, torch.Tensor):
-        yield value
-        return
-    nested_tensors = getattr(value, "tensors", None)
-    nested_mask = getattr(value, "mask", None)
-    if isinstance(nested_tensors, torch.Tensor):
-        yield nested_tensors
-        if isinstance(nested_mask, torch.Tensor):
-            yield nested_mask
-        return
-    if isinstance(value, Mapping):
-        for item in value.values():
-            yield from _walk_input_leaves(item)
-        return
-    if isinstance(value, (tuple, list)):
-        for item in value:
-            yield from _walk_input_leaves(item)
-        return
+    yield from iter_tensor_leaves(value)
 
 
 def _slice_output_by_path(output: Any, path: tuple[Any, ...]) -> Any:
@@ -966,13 +1002,9 @@ def _final_label_for_ref(graph: TraceGraph, label: str) -> str:
 
 
 def _first_batch_size(values: Any) -> int | None:
-    for value in values:
-        if isinstance(value, torch.Tensor) and value.ndim > 0:
+    for value in iter_tensor_leaves(values):
+        if value.ndim > 0:
             return int(value.shape[0])
-        if isinstance(value, (tuple, list)):
-            nested = _first_batch_size(value)
-            if nested is not None:
-                return nested
     return None
 
 
