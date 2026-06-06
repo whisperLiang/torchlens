@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import torch
 from torch import nn
 
@@ -114,6 +115,7 @@ def test_bundle_show_accepts_vis_opt_none() -> None:
 def test_dagua_bridge_exposes_intervention_metadata() -> None:
     """Dagua graph objects expose Phase 11 intervention metadata arrays."""
 
+    pytest.importorskip("dagua")
     log = _intervention_log()
     try:
         graph = dagua.model_log_to_dagua_graph(log, vis_mode="unrolled")

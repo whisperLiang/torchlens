@@ -36,6 +36,10 @@ class SplitSpec:
     mode:
         Segment execution mode. ``compiled`` is reserved for a later wrapper over
         generated eager segments.
+    use_live_param_sources:
+        Whether trainable suffix replay should read live parameter/buffer
+        sources instead of reusing trace-time no-input activations. ``None``
+        follows ``trainable``.
     """
 
     boundary: str
@@ -45,6 +49,7 @@ class SplitSpec:
     trace_batch_mode: TraceBatchMode = "batch_gt1"
     device_policy: DevicePolicy = "runtime"
     mode: SplitMode = "generated_eager"
+    use_live_param_sources: bool | None = None
 
     def __post_init__(self) -> None:
         """Validate split spec fields."""
@@ -61,6 +66,14 @@ class SplitSpec:
             raise SplitSpecError("SplitSpec.device_policy must be 'runtime'.")
         if self.mode not in {"generated_eager", "compiled"}:
             raise SplitSpecError("SplitSpec.mode must be 'generated_eager' or 'compiled'.")
+
+    @property
+    def effective_use_live_param_sources(self) -> bool:
+        """Return the replay policy switch after applying trainable defaults."""
+
+        if self.use_live_param_sources is None:
+            return self.trainable
+        return self.use_live_param_sources
 
 
 __all__ = ["DevicePolicy", "SplitMode", "SplitSpec", "TraceBatchMode"]

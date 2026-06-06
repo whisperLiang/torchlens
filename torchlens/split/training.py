@@ -38,7 +38,10 @@ def train_suffix(
     detached = ReplayBoundary(
         tensors=detached_tensors,
         spec=boundary.spec,
-        metadata=dict(boundary.metadata),
+        metadata={
+            **boundary.metadata,
+            "use_live_param_sources": runtime.split_spec.effective_use_live_param_sources,
+        },
     )
     outputs = runtime.run_suffix(detached)
     loss = _default_loss(outputs, targets) if loss_fn is None else loss_fn(outputs, targets)

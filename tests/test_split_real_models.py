@@ -11,6 +11,8 @@ from pathlib import Path
 import subprocess
 import textwrap
 from typing import Any
+import urllib.error
+import urllib.request
 
 import pytest
 import torch
@@ -32,18 +34,24 @@ from torchlens.split.validation import summarize_split_sweep_coverage
 from torchlens.split.validation import write_split_sweep_coverage_report
 
 
-YOLO26N_CANDIDATES = (
-    Path(os.environ["TORCHLENS_YOLO26N_PATH"]) if "TORCHLENS_YOLO26N_PATH" in os.environ else None,
-    Path(os.environ["YOLO26N_PATH"]) if "YOLO26N_PATH" in os.environ else None,
-    Path(__file__).resolve().parents[1] / "yolo26n.pt",
-    Path("/home/whisperliang/TSBOW-main/yolo26n.pt"),
-    Path("/home/whisperliang/TSBOW-main/baselines/yolo26n.pt"),
-    Path("/home/whisperliang/Plank-road/model_management/models/yolo26n.pt"),
+REAL_MODEL_WEIGHT_CACHE_DIR = (
+    Path(os.environ["TORCHLENS_REAL_MODEL_WEIGHT_CACHE"])
+    if "TORCHLENS_REAL_MODEL_WEIGHT_CACHE" in os.environ
+    else Path(__file__).resolve().parent / "artifacts" / "real_model_weights"
 )
+YOLO26N_WEIGHTS_URL = os.environ.get(
+    "TORCHLENS_YOLO26N_URL",
+    "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.pt",
+)
+YOLO26N_WEIGHTS = REAL_MODEL_WEIGHT_CACHE_DIR / "yolo26n.pt"
 PLANK_ROAD_ROOT = Path("/home/whisperliang/Plank-road")
 TINYNEXT_SOURCE = PLANK_ROAD_ROOT / "model_management" / "tinynext.py"
 RFDETR_PYTHON = PLANK_ROAD_ROOT / ".venv" / "bin" / "python"
-RFDETR_WEIGHTS = Path("/home/whisperliang/TSBOW-main/baselines/rf-detr-nano.pth")
+RFDETR_NANO_WEIGHTS_URL = os.environ.get(
+    "TORCHLENS_RFDETR_NANO_URL",
+    "https://storage.googleapis.com/rfdetr/nano_coco/checkpoint_best_regular.pth",
+)
+RFDETR_WEIGHTS = REAL_MODEL_WEIGHT_CACHE_DIR / "rf-detr-nano.pth"
 REAL_MODEL_DYNAMIC_BATCHES = (1, 2, 4, 8, 32)
 REAL_MODEL_CPU_DYNAMIC_BATCHES = (1, 2)
 REAL_MODEL_DYNAMIC_BATCH_RANGE = (1, 32)
@@ -59,9 +67,11 @@ def test_yolo26n_detection_head_boundary_is_live_on_cuda() -> None:
     """YOLO26n split after detection head preserves all live boundary tensors."""
 
     ultralytics = pytest.importorskip("ultralytics")
-    weight_path = next((path for path in YOLO26N_CANDIDATES if path is not None and path.exists()), None)
-    if weight_path is None:
-        pytest.skip("YOLO26n weights are not available.")
+    weight_path = _download_weight_file(
+        url=YOLO26N_WEIGHTS_URL,
+        destination=YOLO26N_WEIGHTS,
+        model_name="YOLO26n",
+    )
 
     model = ultralytics.YOLO(str(weight_path)).model.eval().cuda()
     x = torch.randn(1, 3, 640, 640, device="cuda")
@@ -89,15 +99,267 @@ def test_yolo26n_detection_head_boundary_is_live_on_cuda() -> None:
     assert any(live.values())
 
 
+@pytest.mark.smoke
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_yolo26n_cpu_prefix_cuda_suffix_across_split_points() -> None:
+    """YOLO26n CPU prefix boundaries can drive CUDA suffixes at several split points."""
+
+    ultralytics = pytest.importorskip("ultralytics")
+    weight_path = _download_weight_file(
+        url=YOLO26N_WEIGHTS_URL,
+        destination=YOLO26N_WEIGHTS,
+        model_name="YOLO26n",
+    )
+
+    with _cuda_tf32_disabled():
+        cpu_model = ultralytics.YOLO(str(weight_path)).model.eval().cpu()
+        cuda_model = ultralytics.YOLO(str(weight_path)).model.eval().cuda()
+        cuda_model.load_state_dict(cpu_model.state_dict())
+
+        x_cpu = torch.randn(1, 3, 640, 640)
+        x_cuda = x_cpu.cuda()
+        cpu_graph = _trace_graph(cpu_model, x_cpu)
+        cuda_graph = _trace_graph(cuda_model, x_cuda)
+
+        with torch.no_grad():
+            full_output = cuda_model(x_cuda)
+
+        for boundary in ("percent:25", "percent:50", "percent:75"):
+            spec = tl.SplitSpec(boundary=boundary, dynamic_batch=(1, 4))
+            cpu_runtime = _runtime_from_graph(cpu_model, cpu_graph, spec)
+            cuda_runtime = _runtime_from_graph(cuda_model, cuda_graph, spec)
+            assert_canonical_abi_equivalent(cpu_runtime, cuda_runtime)
+
+            cpu_boundary = cpu_runtime.run_prefix(x_cpu)
+            cuda_boundary = cuda_runtime.run_prefix(x_cuda)
+            _assert_boundary_devices(cpu_boundary, "cpu")
+            _assert_boundary_devices(cuda_boundary, "cuda")
+            _assert_boundary_shapes(cpu_boundary, cuda_boundary)
+
+            with torch.no_grad():
+                cuda_split_output = cuda_runtime.run_suffix(cuda_boundary)
+                cross_device_output = cuda_runtime.run_suffix(cpu_boundary)
+            _assert_cross_device_output_accepted(
+                cuda_split_output,
+                full_output,
+                device="cuda",
+                atol=1e-4,
+                rtol=1e-4,
+            )
+            _assert_cross_device_output_accepted(
+                cross_device_output,
+                full_output,
+                device="cuda",
+                atol=1e-4,
+                rtol=1e-4,
+            )
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_yolo26n_cpu_prefix_cuda_suffix_all_compute_split_points() -> None:
+    """Sweep every YOLO26n compute split point with CPU prefixes and CUDA suffixes."""
+
+    ultralytics = pytest.importorskip("ultralytics")
+    weight_path = _download_weight_file(
+        url=YOLO26N_WEIGHTS_URL,
+        destination=YOLO26N_WEIGHTS,
+        model_name="YOLO26n",
+    )
+
+    _skip_if_system_memory_below(YOLO26_DYNAMIC_BATCH_MIN_SYSTEM_FREE_GIB)
+    device = _select_cuda_device_with_free_memory(
+        min_free_gib=YOLO26_DYNAMIC_BATCH_MIN_START_CUDA_FREE_GIB
+    )
+
+    with _cuda_tf32_disabled():
+        cpu_model = ultralytics.YOLO(str(weight_path)).model.eval().cpu()
+        cuda_model = ultralytics.YOLO(str(weight_path)).model.eval().to(device)
+        cuda_model.load_state_dict(cpu_model.state_dict())
+        trace_cpu = torch.randn(1, 3, 640, 640)
+        trace_cuda = trace_cpu.to(device)
+        cpu_graph = _trace_graph(cpu_model, trace_cpu)
+        cuda_graph = _trace_graph(cuda_model, trace_cuda)
+        del trace_cpu, trace_cuda
+        _clear_cuda_working_set(device)
+        targets = _compute_split_targets(cpu_graph)
+        assert len(targets) >= 100
+
+        cases: list[SplitSweepCaseResult] = []
+        for target_index, target in enumerate(targets, start=1):
+            if target_index == 1 or target_index % 25 == 0:
+                print(
+                    f"[YOLO26n CPU->CUDA dynamic batch] target "
+                    f"{target_index}/{len(targets)}: {target}",
+                    flush=True,
+                )
+            boundary = f"after:{target}"
+            batch_statuses: dict[str, Any] = {}
+            tested_batches: list[int] = []
+            cpu_runtime = None
+            cuda_runtime = None
+            cpu_boundary = None
+            cuda_boundary = None
+            full_output = None
+            cuda_split_output = None
+            cross_device_output = None
+            x_cpu = None
+            x_cuda = None
+
+            try:
+                spec = tl.SplitSpec(boundary=boundary, dynamic_batch=REAL_MODEL_DYNAMIC_BATCH_RANGE)
+                cpu_runtime = _runtime_from_graph(cpu_model, cpu_graph, spec)
+                cuda_runtime = _runtime_from_graph(cuda_model, cuda_graph, spec)
+                assert_canonical_abi_equivalent(cpu_runtime, cuda_runtime)
+
+                for batch_size in REAL_MODEL_CPU_DYNAMIC_BATCHES:
+                    _skip_if_cuda_memory_below(
+                        device,
+                        min_free_gib=YOLO26_DYNAMIC_BATCH_MIN_CASE_CUDA_FREE_GIB,
+                        context=f"{boundary} batch={batch_size}",
+                    )
+                    tested_batches.append(batch_size)
+                    x_cpu = torch.randn(batch_size, 3, 640, 640)
+                    x_cuda = x_cpu.to(device)
+                    cpu_boundary = cpu_runtime.run_prefix(x_cpu)
+                    cuda_boundary = cuda_runtime.run_prefix(x_cuda)
+                    _assert_boundary_devices(cpu_boundary, "cpu")
+                    _assert_boundary_devices(cuda_boundary, "cuda")
+                    _assert_boundary_shapes(cpu_boundary, cuda_boundary)
+                    with torch.no_grad():
+                        full_output = cuda_model(x_cuda)
+                        cuda_split_output = cuda_runtime.run_suffix(cuda_boundary)
+                        cross_device_output = cuda_runtime.run_suffix(cpu_boundary)
+                    _assert_model_output_accepted(
+                        cuda_split_output,
+                        full_output,
+                        device="cuda",
+                        atol=1e-4,
+                        rtol=1e-4,
+                    )
+                    _assert_cross_device_output_accepted(
+                        cross_device_output,
+                        full_output,
+                        device="cuda",
+                        atol=1e-4,
+                        rtol=1e-4,
+                    )
+                    batch_statuses[str(batch_size)] = "supported"
+                    del x_cpu, x_cuda, cpu_boundary, cuda_boundary
+                    del full_output, cuda_split_output, cross_device_output
+                    x_cpu = None
+                    x_cuda = None
+                    cpu_boundary = None
+                    cuda_boundary = None
+                    full_output = None
+                    cuda_split_output = None
+                    cross_device_output = None
+                    _clear_cuda_working_set(device)
+            except SplitUnsupportedError as exc:
+                assert_split_unsupported_error_context(exc, boundary)
+                if tested_batches:
+                    batch_statuses[str(tested_batches[-1])] = "unsupported"
+                cases.append(
+                    make_split_sweep_case_result(
+                        model_name="YOLO26n",
+                        split_target=target,
+                        boundary=boundary,
+                        status="unsupported",
+                        batch_sizes_tested=tuple(tested_batches),
+                        batch_statuses=batch_statuses,
+                        exc=exc,
+                    )
+                )
+            except RuntimeError as exc:
+                _clear_cuda_working_set(device)
+                if _is_cuda_oom(exc):
+                    if tested_batches:
+                        batch_statuses[str(tested_batches[-1])] = "failed"
+                    cases.append(
+                        make_split_sweep_case_result(
+                            model_name="YOLO26n",
+                            split_target=target,
+                            boundary=boundary,
+                            status="failed",
+                            batch_sizes_tested=tuple(tested_batches),
+                            batch_statuses=batch_statuses,
+                            exc=exc,
+                        )
+                    )
+                    report = summarize_split_sweep_coverage("YOLO26n", cases)
+                    write_split_sweep_coverage_report(
+                        report,
+                        SPLIT_SWEEP_COVERAGE_DIR / "yolo26n_cpu_prefix_cuda_suffix_compute.json",
+                    )
+                    pytest.fail(
+                        "YOLO26n CPU-prefix/CUDA-suffix dynamic batch sweep hit CUDA OOM "
+                        f"at {boundary} with batch statuses {batch_statuses}. "
+                        "Partial coverage report was written."
+                    )
+                if tested_batches:
+                    batch_statuses[str(tested_batches[-1])] = "failed"
+                cases.append(
+                    make_split_sweep_case_result(
+                        model_name="YOLO26n",
+                        split_target=target,
+                        boundary=boundary,
+                        status="failed",
+                        batch_sizes_tested=tuple(tested_batches),
+                        batch_statuses=batch_statuses,
+                        exc=exc,
+                    )
+                )
+            except Exception as exc:
+                if tested_batches:
+                    batch_statuses[str(tested_batches[-1])] = "failed"
+                cases.append(
+                    make_split_sweep_case_result(
+                        model_name="YOLO26n",
+                        split_target=target,
+                        boundary=boundary,
+                        status="failed",
+                        batch_sizes_tested=tuple(tested_batches),
+                        batch_statuses=batch_statuses,
+                        exc=exc,
+                    )
+                )
+            else:
+                cases.append(
+                    make_split_sweep_case_result(
+                        model_name="YOLO26n",
+                        split_target=target,
+                        boundary=boundary,
+                        status="supported",
+                        batch_sizes_tested=tuple(tested_batches),
+                        batch_statuses=batch_statuses,
+                    )
+                )
+            finally:
+                del cpu_runtime, cuda_runtime, cpu_boundary, cuda_boundary
+                del full_output, cuda_split_output, cross_device_output
+                del x_cpu, x_cuda
+                _clear_cuda_working_set(device)
+
+        report = summarize_split_sweep_coverage("YOLO26n", cases)
+        write_split_sweep_coverage_report(
+            report,
+            SPLIT_SWEEP_COVERAGE_DIR / "yolo26n_cpu_prefix_cuda_suffix_compute.json",
+        )
+        assert_split_sweep_coverage(report, 0.5)
+        print(format_split_sweep_coverage_summary(report))
+
+
 @pytest.mark.slow
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_yolo26n_all_compute_split_points_on_cuda() -> None:
     """Sweep every YOLO26n compute split point across all dynamic CUDA batches."""
 
     ultralytics = pytest.importorskip("ultralytics")
-    weight_path = next((path for path in YOLO26N_CANDIDATES if path is not None and path.exists()), None)
-    if weight_path is None:
-        pytest.skip("YOLO26n weights are not available.")
+    weight_path = _download_weight_file(
+        url=YOLO26N_WEIGHTS_URL,
+        destination=YOLO26N_WEIGHTS,
+        model_name="YOLO26n",
+    )
 
     _skip_if_system_memory_below(YOLO26_DYNAMIC_BATCH_MIN_SYSTEM_FREE_GIB)
     device = _select_cuda_device_with_free_memory(
@@ -414,8 +676,7 @@ def test_rfdetr_nano_split_replay_on_cuda_external_env() -> None:
         pytest.skip("RF-DETR external CUDA smoke is configured for the remote Linux host.")
     if not RFDETR_PYTHON.exists():
         pytest.skip("RF-DETR external Python environment is not available.")
-    if not RFDETR_WEIGHTS.exists():
-        pytest.skip("RF-DETR Nano weights are not available.")
+    weight_path = _rfdetr_weight_file()
 
     repo_root = Path(__file__).resolve().parents[1]
     script = textwrap.dedent(
@@ -428,7 +689,7 @@ def test_rfdetr_nano_split_replay_on_cuda_external_env() -> None:
         if not torch.cuda.is_available():
             raise SystemExit('CUDA is required for this smoke.')
 
-        wrapper = RFDETRNano(pretrain_weights={str(RFDETR_WEIGHTS)!r}, num_classes=8)
+        wrapper = RFDETRNano(pretrain_weights={str(weight_path)!r}, num_classes=8)
         ctx = wrapper.get_model(wrapper.model_config)
         model = ctx.model.cuda().eval()
         x = torch.rand(1, 3, ctx.resolution, ctx.resolution, device='cuda')
@@ -461,6 +722,234 @@ def test_rfdetr_nano_split_replay_on_cuda_external_env() -> None:
 
 
 @pytest.mark.slow
+def test_rfdetr_nano_cuda_training_trajectory_external_env() -> None:
+    """RF-DETR Nano CUDA training keeps trace and split close to eager."""
+
+    if os.name == "nt":
+        pytest.skip("RF-DETR external CUDA training is configured for the remote Linux host.")
+    if not RFDETR_PYTHON.exists():
+        pytest.skip("RF-DETR external Python environment is not available.")
+    weight_path = _rfdetr_weight_file()
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script = textwrap.dedent(
+        f"""
+        from pathlib import Path
+        import gc
+        import random
+
+        import numpy as np
+        import torch
+        import torchlens as tl
+        from torchlens.options import CaptureOptions, VisualizationOptions
+        from rfdetr import RFDETRNano
+        from rfdetr.utilities.tensors import nested_tensor_from_tensor_list
+
+        if not torch.cuda.is_available():
+            raise SystemExit('CUDA is required for this training smoke.')
+
+        WEIGHTS = Path({str(weight_path)!r})
+        SEED = 20240606
+        STEPS = 2
+        LR = 1e-5
+        BOUNDARY = 'after:permute_69_402'
+        LOSS_RTOL = 5e-3
+        LOSS_ATOL = 1e-4
+        STATE_RTOL = 5e-4
+        STATE_ATOL = 1e-4
+
+
+        def seed_all():
+            random.seed(SEED)
+            np.random.seed(SEED)
+            torch.manual_seed(SEED)
+            torch.cuda.manual_seed_all(SEED)
+
+
+        def make_context_model():
+            wrapper = RFDETRNano(pretrain_weights=str(WEIGHTS), num_classes=8)
+            ctx = wrapper.get_model(wrapper.model_config)
+            model = ctx.model.cuda().eval()
+            return ctx, model
+
+
+        def clone_state_dict_cpu(model):
+            return {{name: value.detach().cpu().clone() for name, value in model.state_dict().items()}}
+
+
+        def load_fresh_model(base_state):
+            ctx, model = make_context_model()
+            missing, unexpected = model.load_state_dict(base_state, strict=True)
+            assert not missing and not unexpected
+            model.cuda().eval()
+            return ctx, model
+
+
+        def make_input(resolution):
+            generator = torch.Generator(device='cpu')
+            generator.manual_seed(SEED + 17)
+            x = torch.rand(1, 3, resolution, resolution, generator=generator).cuda()
+            return nested_tensor_from_tensor_list([x[0]])
+
+
+        def output_loss(out):
+            return out['pred_logits'].float().square().mean() + out['pred_boxes'].float().square().mean()
+
+
+        def trace_loss(model_log):
+            logits = model_log[model_log.output_layers[0]].activation
+            boxes = model_log[model_log.output_layers[1]].activation
+            assert tuple(logits.shape[-2:]) == (300, 9)
+            assert tuple(boxes.shape[-2:]) == (300, 4)
+            return logits.float().square().mean() + boxes.float().square().mean()
+
+
+        def train_eager(base_state, resolution):
+            _, model = load_fresh_model(base_state)
+            nested = make_input(resolution)
+            optimizer = torch.optim.SGD(model.parameters(), lr=LR)
+            losses = []
+            for _step in range(STEPS):
+                optimizer.zero_grad(set_to_none=True)
+                loss = output_loss(model(nested))
+                loss.backward()
+                optimizer.step()
+                losses.append(float(loss.detach().cpu()))
+            state = clone_state_dict_cpu(model)
+            del model, nested, optimizer, loss
+            torch.cuda.empty_cache()
+            gc.collect()
+            return losses, state
+
+
+        def train_trace(base_state, resolution):
+            _, model = load_fresh_model(base_state)
+            nested = make_input(resolution)
+            optimizer = torch.optim.SGD(model.parameters(), lr=LR)
+            losses = []
+            capture = CaptureOptions(train_mode=True)
+            visualization = VisualizationOptions(view='none')
+            for _step in range(STEPS):
+                optimizer.zero_grad(set_to_none=True)
+                model_log = tl.log_forward_pass(
+                    model,
+                    nested,
+                    capture=capture,
+                    visualization=visualization,
+                )
+                loss = trace_loss(model_log)
+                loss.backward()
+                optimizer.step()
+                losses.append(float(loss.detach().cpu()))
+                model_log.cleanup()
+                del model_log, loss
+                torch.cuda.empty_cache()
+            state = clone_state_dict_cpu(model)
+            del model, nested, optimizer
+            torch.cuda.empty_cache()
+            gc.collect()
+            return losses, state
+
+
+        def train_split(base_state, resolution):
+            _, model = load_fresh_model(base_state)
+            nested = make_input(resolution)
+            runtime = tl.prepare_split(
+                model,
+                nested,
+                tl.SplitSpec(boundary=BOUNDARY, dynamic_batch=(1, 1), trainable=True),
+            )
+            prefix_params = [param for name, param in model.named_parameters() if name.startswith('backbone.')]
+            suffix_params = [param for name, param in model.named_parameters() if not name.startswith('backbone.')]
+            prefix_optimizer = torch.optim.SGD(prefix_params, lr=LR)
+            suffix_optimizer = torch.optim.SGD(suffix_params, lr=LR)
+            losses = []
+            for _step in range(STEPS):
+                prefix_optimizer.zero_grad(set_to_none=True)
+                suffix_optimizer.zero_grad(set_to_none=True)
+                boundary = runtime.run_training_prefix(nested)
+                loss, boundary_grads = runtime.train_suffix(
+                    boundary,
+                    targets=None,
+                    loss_fn=lambda out, _targets: output_loss(out),
+                    optimizer=suffix_optimizer,
+                )
+                runtime.backward_prefix(boundary, boundary_grads, prefix_optimizer)
+                losses.append(float(loss.detach().cpu()))
+                del boundary, boundary_grads, loss
+                torch.cuda.empty_cache()
+            state = clone_state_dict_cpu(model)
+            del model, nested, runtime, prefix_optimizer, suffix_optimizer
+            torch.cuda.empty_cache()
+            gc.collect()
+            return losses, state
+
+
+        def assert_loss_allclose(name, actual, expected):
+            actual_tensor = torch.tensor(actual)
+            expected_tensor = torch.tensor(expected)
+            assert torch.allclose(
+                actual_tensor,
+                expected_tensor,
+                rtol=LOSS_RTOL,
+                atol=LOSS_ATOL,
+            ), f"{{name}} losses differ: actual={{actual}} expected={{expected}}"
+
+
+        def assert_state_allclose(name, actual, expected):
+            bad = []
+            for key, expected_value in expected.items():
+                actual_value = actual[key]
+                if torch.is_floating_point(expected_value) or torch.is_complex(expected_value):
+                    close = torch.allclose(
+                        actual_value,
+                        expected_value,
+                        rtol=STATE_RTOL,
+                        atol=STATE_ATOL,
+                    )
+                else:
+                    close = torch.equal(actual_value, expected_value)
+                if not close:
+                    diff = (
+                        float((actual_value - expected_value).abs().max())
+                        if torch.is_tensor(actual_value) and torch.is_floating_point(actual_value)
+                        else float('inf')
+                    )
+                    bad.append((key, diff))
+            assert not bad, f"{{name}} state differs: {{bad[:10]}}"
+
+
+        seed_all()
+        base_ctx, base_model = make_context_model()
+        resolution = int(base_ctx.resolution)
+        base_state = clone_state_dict_cpu(base_model)
+        del base_model
+        torch.cuda.empty_cache()
+
+        eager_losses, eager_state = train_eager(base_state, resolution)
+        trace_losses, trace_state = train_trace(base_state, resolution)
+        split_losses, split_state = train_split(base_state, resolution)
+
+        assert_loss_allclose('trace', trace_losses, eager_losses)
+        assert_loss_allclose('split', split_losses, eager_losses)
+        assert_state_allclose('trace', trace_state, eager_state)
+        assert_state_allclose('split', split_state, eager_state)
+        """
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root)
+    result = subprocess.run(
+        [str(RFDETR_PYTHON), "-c", script],
+        cwd=repo_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=240,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.slow
 def test_rfdetr_nano_cpu_prefix_cuda_suffix_external_env() -> None:
     """RF-DETR Nano CPU prefix boundaries can execute through CUDA suffixes.
 
@@ -474,8 +963,7 @@ def test_rfdetr_nano_cpu_prefix_cuda_suffix_external_env() -> None:
         pytest.skip("RF-DETR external CUDA smoke is configured for the remote Linux host.")
     if not RFDETR_PYTHON.exists():
         pytest.skip("RF-DETR external Python environment is not available.")
-    if not RFDETR_WEIGHTS.exists():
-        pytest.skip("RF-DETR Nano weights are not available.")
+    weight_path = _rfdetr_weight_file()
 
     repo_root = Path(__file__).resolve().parents[1]
     script = textwrap.dedent(
@@ -502,7 +990,7 @@ def test_rfdetr_nano_cpu_prefix_cuda_suffix_external_env() -> None:
         if not torch.cuda.is_available():
             raise SystemExit('CUDA is required for this smoke.')
 
-        wrapper = RFDETRNano(pretrain_weights={str(RFDETR_WEIGHTS)!r}, num_classes=8)
+        wrapper = RFDETRNano(pretrain_weights={str(weight_path)!r}, num_classes=8)
         ctx = wrapper.get_model(wrapper.model_config)
         cpu_model = ctx.model.cpu().eval()
         cuda_model = copy.deepcopy(cpu_model).cuda().eval()
@@ -690,6 +1178,32 @@ def _load_module_from_file(name: str, path: Path) -> Any:
     return module
 
 
+def _download_weight_file(*, url: str, destination: Path, model_name: str) -> Path:
+    """Download real-model weights into the test artifact cache when missing."""
+
+    if destination.exists():
+        return destination
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = destination.with_name(f"{destination.name}.tmp")
+    try:
+        urllib.request.urlretrieve(url, temporary_path)
+    except (OSError, urllib.error.URLError) as exc:
+        temporary_path.unlink(missing_ok=True)
+        pytest.skip(f"{model_name} weights could not be downloaded from {url}: {exc}")
+    temporary_path.replace(destination)
+    return destination
+
+
+def _rfdetr_weight_file() -> Path:
+    """Return the downloaded RF-DETR Nano weight file."""
+
+    return _download_weight_file(
+        url=RFDETR_NANO_WEIGHTS_URL,
+        destination=RFDETR_WEIGHTS,
+        model_name="RF-DETR Nano",
+    )
+
+
 def _tree_allclose(left: Any, right: Any, *, atol: float, rtol: float) -> bool:
     if isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor):
         return bool(torch.allclose(left, right, atol=atol, rtol=rtol))
@@ -713,6 +1227,27 @@ def _assert_cross_device_output_accepted(
     require_numeric: bool = True,
 ) -> None:
     """Validate cross-device replay without overfitting to detection postprocessing order."""
+
+    _assert_model_output_accepted(
+        output,
+        reference,
+        device=device,
+        atol=atol,
+        rtol=rtol,
+        require_numeric=require_numeric,
+    )
+
+
+def _assert_model_output_accepted(
+    output: Any,
+    reference: Any,
+    *,
+    device: str,
+    atol: float,
+    rtol: float,
+    require_numeric: bool = True,
+) -> None:
+    """Validate replay output without overfitting to unstable detector postprocessing."""
 
     _assert_tree_shape_device_finite(output, reference, device)
     output_numeric = _stable_numeric_output(output)
@@ -971,7 +1506,13 @@ def _assert_cuda_split_replay_matches(
         boundary = runtime.run_prefix(x_cuda)
         full_output = model(x_cuda)
         split_output = runtime.run_suffix(boundary)
-    assert _tree_allclose(split_output, full_output, atol=atol, rtol=rtol)
+    _assert_model_output_accepted(
+        split_output,
+        full_output,
+        device=device.type,
+        atol=atol,
+        rtol=rtol,
+    )
 
 
 def _select_cuda_device_with_free_memory(*, min_free_gib: float) -> torch.device:

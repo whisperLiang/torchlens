@@ -48,6 +48,11 @@ TARGET_ALL = [
     "tap",
     "record_span",
     "sites",
+    "SplitSpec",
+    "ReplayBoundary",
+    "SplitRuntime",
+    "prepare_split",
+    "prepare_split_replay",
 ]
 
 CANONICAL_SUBMODULES = [
@@ -77,10 +82,10 @@ CANONICAL_SUBMODULES = [
 ]
 
 
-def test_all_size_exactly_40() -> None:
-    """Top-level ``__all__`` should contain exactly the Phase 1a budget."""
+def test_all_size_matches_target_budget() -> None:
+    """Top-level ``__all__`` should contain exactly the current API budget."""
 
-    assert len(torchlens.__all__) == 40
+    assert len(torchlens.__all__) == len(TARGET_ALL)
     assert torchlens.__all__ == TARGET_ALL
 
 

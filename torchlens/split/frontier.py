@@ -19,6 +19,7 @@ class SplitPlan:
 
     split_id: str
     split_label: str
+    use_live_param_sources: bool
     prefix_nodes: tuple[str, ...]
     suffix_nodes: tuple[str, ...]
     boundary_nodes: tuple[str, ...]
@@ -30,6 +31,7 @@ def build_frontier(
     *,
     split_id: str,
     split_label: str,
+    use_live_param_sources: bool = False,
     prefix_nodes: tuple[str, ...],
     suffix_nodes: tuple[str, ...],
 ) -> SplitPlan:
@@ -53,6 +55,7 @@ def build_frontier(
     return SplitPlan(
         split_id=split_id,
         split_label=split_label,
+        use_live_param_sources=use_live_param_sources,
         prefix_nodes=prefix_nodes,
         suffix_nodes=suffix_nodes,
         boundary_nodes=tuple(boundary_nodes),

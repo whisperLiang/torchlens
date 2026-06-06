@@ -128,6 +128,7 @@ def test_trace_timeline_exports_are_parseable(export_log: Any, tmp_path: Path) -
 def test_xarray_export_has_neuroidassembly_shape(export_log: Any) -> None:
     """xarray export should expose presentation and neuroid dimensions."""
 
+    pytest.importorskip("xarray")
     assembly = tl.export.xarray(export_log)
 
     assert assembly.dims == ("presentation", "neuroid")

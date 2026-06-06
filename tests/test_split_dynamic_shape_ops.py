@@ -102,6 +102,25 @@ class DynamicRepeatBatchlessNet(nn.Module):
         return base + x.mean(dim=(2, 3))
 
 
+class LiveParamAndBatchConstantNet(nn.Module):
+    """Toy model mixing live parameter-derived no-input nodes and B-shaped constants."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prefix = nn.Linear(3 * 4 * 5, 4)
+        self.query = nn.Parameter(torch.randn(4, 6))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Project input with a live parameter view and add a runtime-B constant."""
+
+        batch = x.shape[0]
+        hidden = self.prefix(x.flatten(1))
+        query, _unused = self.query.chunk(2, dim=1)
+        query = query.transpose(0, 1)[:, :4].transpose(0, 1)
+        dynamic_bias = torch.ones((batch, 3), device=x.device, dtype=x.dtype)
+        return hidden @ query + dynamic_bias
+
+
 class DynamicStackCatChunkNet(nn.Module):
     """Toy model covering stack, cat, chunk, and tuple getitem."""
 
@@ -252,6 +271,36 @@ def test_runtime_batch_inference_prefers_symbolic_batch_tensors() -> None:
     }
 
     assert _runtime_batch_from_env(env, graph) == 4
+
+
+def test_live_param_policy_does_not_capture_batch_dynamic_constants() -> None:
+    """Trainable suffix live-param closure leaves unrelated B-shaped constants dynamic."""
+
+    torch.manual_seed(0)
+    model = LiveParamAndBatchConstantNet().eval()
+    trace_x = torch.randn(TRACE_BATCH, 3, 4, 5)
+    runtime = tl.prepare_split(
+        model,
+        trace_x,
+        tl.SplitSpec(boundary="after:prefix", dynamic_batch=(1, 8), trainable=True),
+    )
+
+    policy_by_op = {
+        (node.op_type, node.torchlens_label): node.replay_source_policy
+        for node in runtime.trace_graph.ordered_nodes()
+    }
+    assert any(op_type == "chunk" and policy == "live_param" for (op_type, _), policy in policy_by_op.items())
+    assert any(policy == "live_param_derived" for policy in policy_by_op.values())
+    assert any(
+        op_type == "ones" and policy == "batch_dynamic_constant"
+        for (op_type, _), policy in policy_by_op.items()
+    )
+
+    x = torch.randn(4, 3, 4, 5)
+    with torch.no_grad():
+        split_out = runtime.replay(x)
+        full_out = model(x)
+    assert_tree_allclose(split_out, full_out)
 
 
 def _static_codegen_env(graph: TraceGraph, node: TraceNode) -> dict[str, torch.Tensor]:

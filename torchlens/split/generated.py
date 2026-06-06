@@ -26,7 +26,7 @@ from .boundary import ReplayBoundary
 from .errors import SplitErrorContext, SplitUnsupportedError, unsupported
 from .frontier import SplitPlan
 from .shape import MAX_BATCH_MULTIPLIER
-from .trace_graph import TraceGraph, TraceNode
+from .trace_graph import BATCH_DYNAMIC_CONSTANT_OPS, TraceGraph, TraceNode
 
 _RNG_SENSITIVE_OP_NAMES = frozenset(
     {
@@ -62,6 +62,8 @@ _RNG_SENSITIVE_OP_NAMES = frozenset(
         "rrelu_",
     }
 )
+_LIVE_PARAM_SOURCES_ENV_KEY = "__torchlens_live_param_sources__"
+_LIVE_PARAM_SOURCES_METADATA_KEY = "use_live_param_sources"
 
 
 @dataclass
@@ -98,6 +100,7 @@ class GeneratedPrefix(nn.Module):
             "graph_shape_hash": self.graph.graph_shape_hash,
             "batch_size": _first_batch_size(tensors.values()) or _first_batch_size(inputs),
             "boundary_order": self.plan.boundary_nodes,
+            _LIVE_PARAM_SOURCES_METADATA_KEY: self.plan.use_live_param_sources,
         }
         return ReplayBoundary(tensors=tensors, spec=self.plan.boundary_specs, metadata=metadata)
 
@@ -116,6 +119,11 @@ class GeneratedSuffix(nn.Module):
         """Execute suffix nodes from a boundary and return model output."""
 
         env: dict[str, Any] = dict(boundary.tensors)
+        if boundary.metadata.get(
+            _LIVE_PARAM_SOURCES_METADATA_KEY,
+            self.plan.use_live_param_sources,
+        ):
+            env[_LIVE_PARAM_SOURCES_ENV_KEY] = True
         for label in self.plan.suffix_nodes:
             _execute_node(self.graph.get(label), self.graph, env, split_point=self.plan.split_id)
         for label in self.graph.output_nodes:
@@ -134,14 +142,13 @@ def _execute_node(
         return
     if node.torchlens_label in env and node.target is None and not node.parents:
         return
+    if env.get(_LIVE_PARAM_SOURCES_ENV_KEY, False) and node.replay_source_policy == "live_param":
+        live_source = _live_source_value(node, graph)
+        if live_source is not None:
+            env[node.torchlens_label] = live_source
+            return
     activation = getattr(node.layer, "activation", None)
-    if (
-        not getattr(node.layer, "has_input_ancestor", True)
-        and isinstance(activation, torch.Tensor)
-        and node.op_type not in _BATCH_SHAPE_OPS
-        and not node.parents
-        and not _has_parent_refs((node.args, node.kwargs))
-    ):
+    if _can_reuse_trace_activation(node, activation, env):
         env[node.torchlens_label] = activation
         return
     if node.is_output or node.target is None:
@@ -157,6 +164,83 @@ def _execute_node(
     if output is None and getattr(node.layer, "func_is_inplace", False) and args:
         output = args[0]
     env[node.torchlens_label] = _slice_output_by_path(output, tuple(node.layer.output_path or ()))
+
+
+def _can_reuse_trace_activation(
+    node: TraceNode,
+    activation: Any,
+    env: dict[str, Any],
+) -> bool:
+    """Return whether suffix replay may reuse a trace-time no-input activation."""
+
+    if node.replay_source_policy == "batch_dynamic_constant":
+        return False
+    if env.get(_LIVE_PARAM_SOURCES_ENV_KEY, False) and node.replay_source_policy in {
+        "live_param",
+        "live_param_derived",
+    }:
+        return False
+    return (
+        not getattr(node.layer, "has_input_ancestor", True)
+        and isinstance(activation, torch.Tensor)
+        and node.op_type not in _BATCH_SHAPE_OPS
+        and not node.parents
+        and not _has_parent_refs((node.args, node.kwargs))
+    )
+
+
+def _live_source_value(node: TraceNode, graph: TraceGraph) -> torch.Tensor | None:
+    """Return a live module tensor for source nodes that have no callable target."""
+
+    if bool(getattr(node.layer, "is_buffer_layer", False)):
+        return _live_buffer_value(node, graph)
+    return None
+
+
+def _live_buffer_value(node: TraceNode, graph: TraceGraph) -> torch.Tensor | None:
+    """Resolve a current model buffer/plain tensor by TorchLens buffer address."""
+
+    address = getattr(node.layer, "buffer_address", None)
+    if not isinstance(address, str) or not address:
+        return None
+    model = _source_model(graph)
+    if model is None:
+        return None
+    for buffer_name, buffer in model.named_buffers():
+        if buffer_name == address:
+            return buffer
+    value = _resolve_model_tensor_address(model, address)
+    if isinstance(value, torch.Tensor) and not isinstance(value, torch.nn.Parameter):
+        return value
+    return None
+
+
+def _source_model(graph: TraceGraph) -> nn.Module | None:
+    """Return the live source model captured by the graph, if still available."""
+
+    source_ref = getattr(graph.model_log, "_source_model_ref", None)
+    return source_ref() if source_ref is not None else None
+
+
+def _resolve_model_tensor_address(model: nn.Module, address: str) -> Any:
+    """Best-effort dotted path resolver for non-registered tensor attributes."""
+
+    current: Any = model
+    for part in address.split("."):
+        if isinstance(current, (list, tuple)) and part.isdigit():
+            current = current[int(part)]
+            continue
+        if isinstance(current, nn.ModuleDict) and part in current:
+            current = current[part]
+            continue
+        if hasattr(current, part):
+            current = getattr(current, part)
+            continue
+        if isinstance(current, Mapping) and part in current:
+            current = current[part]
+            continue
+        return None
+    return current
 
 
 def _call_node_target(node: TraceNode, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
@@ -298,23 +382,7 @@ def _has_parent_refs(value: Any) -> bool:
     return False
 
 
-_BATCH_SHAPE_OPS = frozenset(
-    {
-        "view",
-        "reshape",
-        "flatten",
-        "expand",
-        "repeat",
-        "zeros",
-        "ones",
-        "empty",
-        "new_zeros",
-        "new_ones",
-        "new_empty",
-        "arange",
-        "meshgrid",
-    }
-)
+_BATCH_SHAPE_OPS = BATCH_DYNAMIC_CONSTANT_OPS
 _MAX_VIEW_BATCH_MULTIPLIER = 512
 
 
@@ -613,10 +681,11 @@ def _is_leading_shape_position(op_type: str, path: tuple[Any, ...]) -> bool:
 
 
 def _runtime_batch_from_env(env: dict[str, Any], graph: TraceGraph) -> int | None:
+    candidates: list[int] = []
     for label in graph.input_nodes:
         value = env.get(label)
         if isinstance(value, torch.Tensor) and value.ndim > 0:
-            return int(value.shape[0])
+            candidates.append(int(value.shape[0]))
     for node in graph.ordered_nodes():
         value = env.get(node.torchlens_label)
         if (
@@ -631,7 +700,9 @@ def _runtime_batch_from_env(env: dict[str, Any], graph: TraceGraph) -> int | Non
                 graph.batch_symbol,
             )
             if runtime_batch is not None:
-                return runtime_batch
+                candidates.append(runtime_batch)
+    if candidates:
+        return max(candidates)
     for value in env.values():
         if isinstance(value, torch.Tensor) and value.ndim > 0:
             return int(value.shape[0])

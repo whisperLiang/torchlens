@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 
+from ..options import CaptureOptions, VisualizationOptions
 from ..user_funcs import log_forward_pass
 
 from .codegen import build_segments
@@ -31,12 +32,14 @@ def prepare_split(
         model,
         inputs,
         kwargs,
-        vis_opt="none",
-        layers_to_save="all",
-        keep_unsaved_layers=True,
-        detach_saved_tensors=False,
-        save_function_args=True,
-        intervention_ready=True,
+        capture=CaptureOptions(
+            layers_to_save="all",
+            keep_unsaved_layers=True,
+            detach_saved_tensors=False,
+            save_function_args=True,
+            intervention_ready=True,
+        ),
+        visualization=VisualizationOptions(view="none"),
     )
     traced_batch_size = infer_traced_batch_size(inputs)
     graph = trace_graph_from_model_log(
@@ -73,6 +76,7 @@ def prepare_split_replay(
         trace_batch_mode=spec.trace_batch_mode,
         device_policy=spec.device_policy,
         mode=spec.mode,
+        use_live_param_sources=spec.use_live_param_sources,
     )
     return prepare_split(model, example_inputs, replay_spec, example_kwargs=example_kwargs)
 

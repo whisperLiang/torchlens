@@ -30,6 +30,7 @@ def plan_split(graph: TraceGraph, spec: SplitSpec) -> SplitPlan:
         graph,
         split_id=split_id,
         split_label=split_label,
+        use_live_param_sources=spec.effective_use_live_param_sources,
         prefix_nodes=tuple(prefix),
         suffix_nodes=tuple(suffix),
     )
