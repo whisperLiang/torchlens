@@ -56,6 +56,13 @@ REAL_MODEL_DYNAMIC_BATCHES = (1, 2, 4, 8, 32)
 REAL_MODEL_CPU_DYNAMIC_BATCHES = (1, 2)
 REAL_MODEL_DYNAMIC_BATCH_RANGE = (1, 32)
 SPLIT_SWEEP_COVERAGE_DIR = Path(__file__).resolve().parent / "artifacts" / "split_sweep_coverage"
+REAL_MODEL_EXTERNAL_DEFAULT_CPU_THREADS = 2
+REAL_MODEL_EXTERNAL_THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
 YOLO26_DYNAMIC_BATCH_MIN_START_CUDA_FREE_GIB = 12.0
 YOLO26_DYNAMIC_BATCH_MIN_CASE_CUDA_FREE_GIB = 6.0
 YOLO26_DYNAMIC_BATCH_MIN_SYSTEM_FREE_GIB = 8.0
@@ -682,10 +689,17 @@ def test_rfdetr_nano_split_replay_on_cuda_external_env() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     script = textwrap.dedent(
         f"""
+        import os
+
         import torch
         import torchlens as tl
         from rfdetr import RFDETRNano
         from rfdetr.utilities.tensors import nested_tensor_from_tensor_list
+
+        torch.set_num_threads(
+            int(os.environ.get('TORCHLENS_REAL_MODEL_EXTERNAL_CPU_THREADS', '2'))
+        )
+        torch.set_num_interop_threads(1)
 
         if not torch.cuda.is_available():
             raise SystemExit('CUDA is required for this smoke.')
@@ -702,9 +716,9 @@ def test_rfdetr_nano_split_replay_on_cuda_external_env() -> None:
         runtime = tl.prepare_split(
             model,
             trace_nested,
-            tl.SplitSpec(boundary='percent:50', dynamic_batch=(1, 2)),
+            tl.SplitSpec(boundary='percent:50', dynamic_batch={REAL_MODEL_DYNAMIC_BATCH_RANGE!r}),
         )
-        for batch_size in (1, 2):
+        for batch_size in {REAL_MODEL_DYNAMIC_BATCHES!r}:
             nested = make_nested(batch_size)
             boundary = runtime.run_prefix(nested)
             assert len(boundary.tensors) >= 1
@@ -715,8 +729,7 @@ def test_rfdetr_nano_split_replay_on_cuda_external_env() -> None:
                 assert torch.allclose(split_output[key], full_output[key], atol=1e-4, rtol=1e-4)
         """
     )
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(repo_root)
+    env = _real_model_external_env(repo_root)
     result = subprocess.run(
         [str(RFDETR_PYTHON), "-c", script],
         cwd=repo_root,
@@ -743,6 +756,7 @@ def test_rfdetr_nano_cuda_training_trajectory_external_env() -> None:
         f"""
         from pathlib import Path
         import gc
+        import os
         import random
 
         import numpy as np
@@ -751,6 +765,11 @@ def test_rfdetr_nano_cuda_training_trajectory_external_env() -> None:
         from torchlens.options import CaptureOptions, VisualizationOptions
         from rfdetr import RFDETRNano
         from rfdetr.utilities.tensors import nested_tensor_from_tensor_list
+
+        torch.set_num_threads(
+            int(os.environ.get('TORCHLENS_REAL_MODEL_EXTERNAL_CPU_THREADS', '2'))
+        )
+        torch.set_num_interop_threads(1)
 
         if not torch.cuda.is_available():
             raise SystemExit('CUDA is required for this training smoke.')
@@ -946,8 +965,7 @@ def test_rfdetr_nano_cuda_training_trajectory_external_env() -> None:
         assert_state_allclose('split', split_state, eager_state)
         """
     )
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(repo_root)
+    env = _real_model_external_env(repo_root)
     result = subprocess.run(
         [str(RFDETR_PYTHON), "-c", script],
         cwd=repo_root,
@@ -980,6 +998,8 @@ def test_rfdetr_nano_cpu_prefix_cuda_suffix_external_env() -> None:
         f"""
         import gc
         import copy
+        import os
+
         import torch
         import torchlens as tl
         from torchlens.split.codegen import build_segments
@@ -997,6 +1017,11 @@ def test_rfdetr_nano_cpu_prefix_cuda_suffix_external_env() -> None:
         from rfdetr import RFDETRNano
         from rfdetr.utilities.tensors import nested_tensor_from_tensor_list
 
+        torch.set_num_threads(
+            int(os.environ.get('TORCHLENS_REAL_MODEL_EXTERNAL_CPU_THREADS', '2'))
+        )
+        torch.set_num_interop_threads(1)
+
         if not torch.cuda.is_available():
             raise SystemExit('CUDA is required for this smoke.')
 
@@ -1004,7 +1029,10 @@ def test_rfdetr_nano_cpu_prefix_cuda_suffix_external_env() -> None:
         ctx = wrapper.get_model(wrapper.model_config)
         cpu_model = ctx.model.cpu().eval()
         cuda_model = copy.deepcopy(cpu_model).cuda().eval()
-        runtime_tensors = [torch.rand(1, 3, ctx.resolution, ctx.resolution)]
+        runtime_tensors = [
+            torch.rand(batch_size, 3, ctx.resolution, ctx.resolution)
+            for batch_size in {REAL_MODEL_CPU_DYNAMIC_BATCHES!r}
+        ]
         trace_tensor = runtime_tensors[0]
         trace_cpu = nested_tensor_from_tensor_list([trace_tensor[index] for index in range(trace_tensor.shape[0])])
         trace_cuda = nested_tensor_from_tensor_list(
@@ -1165,8 +1193,7 @@ def test_rfdetr_nano_cpu_prefix_cuda_suffix_external_env() -> None:
         assert_split_sweep_coverage(report, 0.3)
         """
     )
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(repo_root)
+    env = _real_model_external_env(repo_root)
     result = subprocess.run(
         [str(RFDETR_PYTHON), "-c", script],
         cwd=repo_root,
@@ -1211,6 +1238,21 @@ def _rfdetr_weight_file() -> Path:
         destination=RFDETR_WEIGHTS,
         model_name="RF-DETR Nano",
     )
+
+
+def _real_model_external_env(repo_root: Path) -> dict[str, str]:
+    """Return a resource-bounded environment for external real-model subprocesses."""
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root)
+    thread_count = env.get(
+        "TORCHLENS_REAL_MODEL_EXTERNAL_CPU_THREADS",
+        str(REAL_MODEL_EXTERNAL_DEFAULT_CPU_THREADS),
+    )
+    env["TORCHLENS_REAL_MODEL_EXTERNAL_CPU_THREADS"] = thread_count
+    for name in REAL_MODEL_EXTERNAL_THREAD_ENV_VARS:
+        env[name] = thread_count
+    return env
 
 
 def _tree_allclose(left: Any, right: Any, *, atol: float, rtol: float) -> bool:

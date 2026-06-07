@@ -317,10 +317,10 @@ def test_nested_tensor_like_inputs_replay_across_runtime_batches() -> None:
     runtime = tl.prepare_split(
         model,
         trace_inputs,
-        tl.SplitSpec(boundary="after:prefix", dynamic_batch=(1, 4)),
+        tl.SplitSpec(boundary="after:prefix", dynamic_batch=(1, max(RUNTIME_BATCHES))),
     )
 
-    for batch_size in (1, 2, 4):
+    for batch_size in RUNTIME_BATCHES:
         inputs = _nested_batch(batch_size)
         with torch.no_grad():
             split_out = runtime.replay(inputs)
@@ -328,15 +328,16 @@ def test_nested_tensor_like_inputs_replay_across_runtime_batches() -> None:
         assert_tree_allclose(split_out, full_out)
 
 
-def test_nested_tensor_like_inputs_split_training_across_runtime_batches() -> None:
-    """Split training accepts nested inputs whose runtime batch differs from trace B."""
+@pytest.mark.parametrize("batch_size", RUNTIME_BATCHES)
+def test_nested_tensor_like_inputs_split_training_across_runtime_batches(batch_size: int) -> None:
+    """Split training accepts nested inputs across dynamic runtime batches."""
 
     torch.manual_seed(0)
     base_model = NestedMaskFirstNet().train()
     full_model = copy.deepcopy(base_model).train()
     split_model = copy.deepcopy(base_model).train()
-    inputs = _nested_batch(2)
-    targets = torch.randn(2, 2)
+    inputs = _nested_batch(batch_size)
+    targets = torch.randn(batch_size, 2)
 
     full_optimizer = torch.optim.SGD(full_model.parameters(), lr=0.05)
     full_optimizer.zero_grad(set_to_none=True)
@@ -347,7 +348,11 @@ def test_nested_tensor_like_inputs_split_training_across_runtime_batches() -> No
     runtime = tl.prepare_split(
         split_model,
         _nested_batch(1),
-        tl.SplitSpec(boundary="after:prefix", dynamic_batch=(1, 4), trainable=True),
+        tl.SplitSpec(
+            boundary="after:prefix",
+            dynamic_batch=(1, max(RUNTIME_BATCHES)),
+            trainable=True,
+        ),
     )
     prefix_optimizer = torch.optim.SGD(split_model.prefix.parameters(), lr=0.05)
     suffix_optimizer = torch.optim.SGD(split_model.head.parameters(), lr=0.05)
