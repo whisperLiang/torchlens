@@ -155,7 +155,8 @@ def _execute_node(
             return
     activation = getattr(node.layer, "activation", None)
     if _can_reuse_trace_activation(node, activation, env):
-        env[node.torchlens_label] = activation
+        live_source = _live_source_value(node, graph)
+        env[node.torchlens_label] = live_source if live_source is not None else activation
         return
     if node.is_output or node.target is None:
         if not node.parents:
@@ -163,6 +164,7 @@ def _execute_node(
         env[node.torchlens_label] = env[node.parents[0]]
         return
     args, kwargs = _resolve_call_args(node, graph, env, split_point=split_point)
+    _sync_batch_norm_counter(node, graph, args, kwargs)
     try:
         output = _call_node_target(node, args, kwargs)
     except Exception as exc:  # pragma: no cover - message is validated through callers.
@@ -814,6 +816,47 @@ def _next_matching_param(
     return param
 
 
+def _module_for_path(graph: TraceGraph, module_path: str) -> nn.Module | None:
+    model = _source_model(graph)
+    if model is None or not module_path:
+        return None
+    try:
+        return model.get_submodule(module_path)
+    except Exception:
+        pass
+    current: Any = model
+    try:
+        for part in module_path.split("."):
+            if isinstance(current, nn.Module) and part in current._modules:
+                current = current._modules[part]
+            else:
+                current = getattr(current, part)
+    except Exception:
+        return None
+    return current if isinstance(current, nn.Module) else None
+
+
+def _sync_batch_norm_counter(
+    node: TraceNode,
+    graph: TraceGraph,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> None:
+    if str(node.op_type) != "batch_norm":
+        return
+    training = kwargs.get("training", args[5] if len(args) > 5 else False)
+    if not bool(training):
+        return
+    module = _module_for_path(graph, node.module_path)
+    if not isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
+        return
+    if not bool(getattr(module, "track_running_stats", False)):
+        return
+    counter = getattr(module, "num_batches_tracked", None)
+    if isinstance(counter, torch.Tensor):
+        counter.add_(1)
+
+
 def _input_env(graph: TraceGraph, inputs: tuple[Any, ...]) -> dict[str, Any]:
     leaves = list(_walk_input_leaves(inputs))
     if len(leaves) < len(graph.input_nodes):
@@ -841,7 +884,8 @@ def _input_env(graph: TraceGraph, inputs: tuple[Any, ...]) -> dict[str, Any]:
             and not node.parents
             and isinstance(activation, torch.Tensor)
         ):
-            env[label] = activation
+            live_source = _live_source_value(node, graph)
+            env[label] = live_source if live_source is not None else activation
     return env
 
 
