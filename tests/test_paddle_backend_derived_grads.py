@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import pytest
-
-paddle = pytest.importorskip("paddle")
 
 import torchlens as tl  # noqa: E402
 from torchlens.backends import BackendUnsupportedError  # noqa: E402
@@ -17,6 +16,27 @@ from torchlens.backends.paddle.backend import (  # noqa: E402
 )
 
 pytestmark = pytest.mark.backend_paddle
+
+paddle: Any
+
+
+def _paddle_runtime_or_skip() -> Any:
+    """Import Paddle unless TensorFlow has made this process unsafe for it."""
+
+    tensorflow_loaded = any(
+        name == "tensorflow" or name.startswith("tensorflow.") for name in sys.modules
+    )
+    if "paddle" not in sys.modules and tensorflow_loaded:
+        pytest.skip("Paddle runtime is unsafe to import after TensorFlow in this process")
+    return pytest.importorskip("paddle")
+
+
+@pytest.fixture(autouse=True)
+def _load_paddle() -> None:
+    """Load Paddle lazily when a Paddle test actually runs."""
+
+    global paddle
+    paddle = _paddle_runtime_or_skip()
 
 
 def _assert_close(actual: Any, expected: Any) -> None:
@@ -50,41 +70,46 @@ def _loss(output: Any) -> Any:
     return output.sum()
 
 
-class LinearRelu(paddle.nn.Layer):
-    """Deterministic linear-relu fixture."""
+def _linear_relu_model() -> Any:
+    """Return a deterministic linear-relu Paddle fixture."""
 
-    def __init__(self) -> None:
-        """Initialize deterministic parameters."""
+    class LinearRelu(paddle.nn.Layer):
+        """Deterministic linear-relu fixture."""
 
-        super().__init__()
-        self.linear = paddle.nn.Linear(3, 2)
-        self.linear.weight.set_value(
-            paddle.to_tensor([[0.2, -0.4], [0.7, 0.3], [-0.5, 0.1]], dtype="float32")
-        )
-        self.linear.bias.set_value(paddle.to_tensor([0.05, -0.1], dtype="float32"))
+        def __init__(self) -> None:
+            """Initialize deterministic parameters."""
 
-    def forward(self, x: Any) -> Any:
-        """Run ``linear -> relu``.
+            super().__init__()
+            self.linear = paddle.nn.Linear(3, 2)
+            self.linear.weight.set_value(
+                paddle.to_tensor([[0.2, -0.4], [0.7, 0.3], [-0.5, 0.1]], dtype="float32")
+            )
+            self.linear.bias.set_value(paddle.to_tensor([0.05, -0.1], dtype="float32"))
 
-        Parameters
-        ----------
-        x
-            Input tensor.
+        def forward(self, x: Any) -> Any:
+            """Run ``linear -> relu``.
 
-        Returns
-        -------
-        Any
-            Model output.
-        """
+            Parameters
+            ----------
+            x
+                Input tensor.
 
-        return paddle.nn.functional.relu(self.linear(x))
+            Returns
+            -------
+            Any
+                Model output.
+            """
+
+            return paddle.nn.functional.relu(self.linear(x))
+
+    return LinearRelu()
 
 
 def test_paddle_leaf_input_and_param_grads_match_direct_reference() -> None:
     """Leaf input and parameter derived grads should match direct ``paddle.grad``."""
 
     paddle.seed(0)
-    model = LinearRelu()
+    model = _linear_relu_model()
     x = paddle.to_tensor([[1.0, -2.0, 0.5], [0.3, 0.1, -0.8]], dtype="float32")
     trace = tl.trace(
         model,
@@ -119,7 +144,7 @@ def test_paddle_derived_grads_do_not_create_backward_logs() -> None:
 
     paddle.seed(0)
     trace = tl.trace(
-        LinearRelu(),
+        _linear_relu_model(),
         paddle.ones([2, 3], dtype="float32"),
         backend="paddle",
         grad_options=GradOptions(loss_fn=_loss),
@@ -274,7 +299,7 @@ def test_paddle_stop_gradient_and_grad_restore_after_success_and_exception() -> 
     """Replay should restore input and parameter gradient state in all exits."""
 
     paddle.seed(0)
-    model = LinearRelu()
+    model = _linear_relu_model()
     x = paddle.ones([2, 3], dtype="float32")
     x_prior_grad = paddle.full([2, 3], 7.0, dtype="float32")
     param_prior_grad = paddle.full(model.linear.weight.shape, 5.0, dtype="float32")

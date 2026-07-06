@@ -18,6 +18,12 @@ TARGET_ALL = [
     "PayloadLoadHints",
     "load",
     "save",
+    "SplitSpec",
+    "BoundaryTensorSpec",
+    "ReplayBoundary",
+    "SplitRuntime",
+    "prepare_split",
+    "prepare_split_replay",
     "do",
     "push",
     "push_from",
@@ -117,6 +123,7 @@ CANONICAL_SUBMODULES = [
     "torchlens.partial",
     "torchlens.report",
     "torchlens.semantic",
+    "torchlens.split",
     "torchlens.stats",
     "torchlens.types",
     "torchlens.utils",
@@ -126,7 +133,7 @@ CANONICAL_SUBMODULES = [
 ]
 
 
-def test_all_size_exactly_89() -> None:
+def test_all_size_exactly_95() -> None:
     """Top-level ``__all__`` should contain exactly the current API budget.
 
     Phase 1a budget was 40; backward-parity sprint added 6 (grad_clip, grad_noise,
@@ -147,17 +154,24 @@ def test_all_size_exactly_89() -> None:
     `span`; removes `sites` = 76. Internal sprint 2 adds `export` and
     `AmbiguousOpLookupError` = 78. Tech-debt sprint adds
     `ReentrantTraceError` and ten paper-era compatibility shims = 89.
+    Backend-neutral split runtime adds six public names = 95.
     """
 
-    assert len(torchlens.__all__) == 89
+    assert len(torchlens.__all__) == 95
     assert torchlens.__all__ == TARGET_ALL
 
 
-def test_phase_b_exports_are_top_level_importable() -> None:
-    """Phase B public names should resolve from the top-level namespace."""
+def test_phase_b_and_split_exports_are_top_level_importable() -> None:
+    """Phase B and split public names should resolve from the top-level namespace."""
 
     assert torchlens.export is importlib.import_module("torchlens.export")
     assert torchlens.AmbiguousOpLookupError.__name__ == "AmbiguousOpLookupError"
+    assert torchlens.SplitSpec.__name__ == "SplitSpec"
+    assert torchlens.BoundaryTensorSpec.__name__ == "BoundaryTensorSpec"
+    assert torchlens.ReplayBoundary.__name__ == "ReplayBoundary"
+    assert torchlens.SplitRuntime.__name__ == "SplitRuntime"
+    assert callable(torchlens.prepare_split)
+    assert callable(torchlens.prepare_split_replay)
 
 
 def test_all_target_names_importable() -> None:
@@ -193,3 +207,4 @@ def test_attribution_submodule_namespace_is_exposed_without_top_level_pollution(
     assert hasattr(torchlens.attribution, "saliency")
     assert "attribution" not in torchlens.__all__
     assert "saliency" not in torchlens.__all__
+    assert "split" not in torchlens.__all__

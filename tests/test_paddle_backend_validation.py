@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import pytest
-
-paddle = pytest.importorskip("paddle")
 
 import torchlens as tl  # noqa: E402
 from torchlens.backends import BackendUnsupportedError  # noqa: E402
@@ -16,6 +15,27 @@ from torchlens.validation.invariants import check_metadata_invariants  # noqa: E
 from torchlens.validation.status import ValidationReplayStatus  # noqa: E402
 
 pytestmark = pytest.mark.backend_paddle
+
+paddle: Any
+
+
+def _paddle_runtime_or_skip() -> Any:
+    """Import Paddle unless TensorFlow has made this process unsafe for it."""
+
+    tensorflow_loaded = any(
+        name == "tensorflow" or name.startswith("tensorflow.") for name in sys.modules
+    )
+    if "paddle" not in sys.modules and tensorflow_loaded:
+        pytest.skip("Paddle runtime is unsafe to import after TensorFlow in this process")
+    return pytest.importorskip("paddle")
+
+
+@pytest.fixture(autouse=True)
+def _load_paddle() -> None:
+    """Load Paddle lazily when a Paddle test actually runs."""
+
+    global paddle
+    paddle = _paddle_runtime_or_skip()
 
 
 def _inputs() -> tuple[Any, Any, Any, Any, Any]:

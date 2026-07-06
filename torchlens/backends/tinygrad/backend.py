@@ -1472,7 +1472,8 @@ class TinygradBackend:
             for op in trace.layer_list
             if op.has_saved_activation
             and not op.is_input
-            and op.annotations.get("tinygrad_observed_tensor_ops")
+            and op.annotations.get("tinygrad_uop") != "CONST"
+            and op.annotations.get("tinygrad_uop_signature")
         )
         trace_signatures = _tinygrad_trace_op_signatures(
             selected_ops,
@@ -2380,7 +2381,7 @@ def _param_refs_for_uop(
             ParamRef(
                 barcode=f"tinygrad:{param_address}",
                 address=param_address,
-                shape=shape,
+                shape=cast("tuple[int, ...] | None", shape),
                 dtype=dtype,
                 trainable=trainable,
                 module_address=owner,
@@ -2596,7 +2597,7 @@ class _observe_tensor_ops:
                 self.observed_tensors.setdefault(id(result.uop), []).append(result)
             return result
 
-        Tensor._apply_uop = wrapped
+        Tensor._apply_uop = wrapped  # type: ignore[method-assign, assignment]
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
@@ -2619,7 +2620,7 @@ class _observe_tensor_ops:
 
         from tinygrad import Tensor
 
-        Tensor._apply_uop = self.original
+        Tensor._apply_uop = self.original  # type: ignore[method-assign]
 
 
 class _reject_mid_capture_execution:

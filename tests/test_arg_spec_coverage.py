@@ -168,13 +168,19 @@ _KNOWN_UNSUPPORTED_ARG_SPEC_REASONS = {
     "dimv": "Python/operator protocol helper with nonstandard callable metadata",
     "dsmm": "demoted fragment: no operator schema available",
     "fanmode": "internal/private helper left on dynamic fallback until independently validated",
+    "flashattentionforwardnodropoutinplace": (
+        "internal/private helper left on dynamic fallback until independently validated"
+    ),
     "functionalassertasync": "internal/private helper left on dynamic fallback until independently validated",
     "functionalassertscalar": "internal/private helper left on dynamic fallback until independently validated",
     "functionalsymconstrainrangeforsize": "internal/private helper left on dynamic fallback until independently validated",
+    "foreachclone": "internal/private helper left on dynamic fallback until independently validated",
+    "foreachpowsum": "internal/private helper left on dynamic fallback until independently validated",
     "getdevice": "metadata/control helper with no validated tensor-input schema",
     "getsoftmaxdim": "metadata/control helper with no validated tensor-input schema",
     "h": "demoted fragment: no operator schema available",
     "handletorchfunction": "internal/private helper left on dynamic fallback until independently validated",
+    "hashtensor": "metadata/control helper with no validated tensor-input schema",
     "hsmm": "demoted fragment: no operator schema available",
     "ipu": "demoted fragment: no operator schema available",
     "issamesize": "metadata/control helper with no validated tensor-input schema",
@@ -207,11 +213,18 @@ _KNOWN_UNSUPPORTED_ARG_SPEC_REASONS = {
     "overload": "Python/operator protocol helper with nonstandard callable metadata",
     "packpaddedsequence": "internal/private helper left on dynamic fallback until independently validated",
     "padpackedsequence": "internal/private helper left on dynamic fallback until independently validated",
+    "philoxkeyfoldin": "metadata/control helper with no validated tensor-input schema",
+    "philoxkeysplit": "metadata/control helper with no validated tensor-input schema",
+    "philoxnormal": "internal/private helper left on dynamic fallback until independently validated",
+    "philoxuniform": "internal/private helper left on dynamic fallback until independently validated",
+    "powsum": "internal/private helper left on dynamic fallback until independently validated",
     "print": "internal/private helper left on dynamic fallback until independently validated",
     "propagatexladata": "demoted fragment: schema mismatch: missing_positions=[], extra_positions=[1], missing_names=[]",
     "removebatchdim": "metadata/control helper with no validated tensor-input schema",
     "reversed": "internal/private helper left on dynamic fallback until independently validated",
     "saddmm": "demoted fragment: no operator schema available",
+    "scaledgroupedmmv2": "internal/private helper left on dynamic fallback until independently validated",
+    "scaledmmv2": "internal/private helper left on dynamic fallback until independently validated",
     "setstate": "metadata/control helper with no validated tensor-input schema",
     "softmaxbackwarddata": "autograd/backward helper left on dynamic fallback pending gradient schema audit",
     "sparselogsoftmaxbackwarddata": "demoted fragment: schema mismatch: missing_positions=[], extra_positions=[1], missing_names=[]",
@@ -229,12 +242,29 @@ _KNOWN_UNSUPPORTED_ARG_SPEC_REASONS = {
     "testparallelmaterialize": "internal/private helper left on dynamic fallback until independently validated",
     "testserializationsubcmul": "internal/private helper left on dynamic fallback until independently validated",
     "unpackdual": "internal/private helper left on dynamic fallback until independently validated",
+    "usemiopenctcloss": "internal/private helper left on dynamic fallback until independently validated",
     "wrappedlinearprepack": "internal/private helper left on dynamic fallback until independently validated",
     "wrappedquantizedlinearprepacked": "demoted fragment: schema mismatch: missing_positions=[], extra_positions=[4, 5], missing_names=[]",
     "xpu": "demoted fragment: no operator schema available",
 }
 
 _KNOWN_UNSUPPORTED_ARG_SPECS = frozenset(_KNOWN_UNSUPPORTED_ARG_SPEC_REASONS)
+_VERSION_GATED_UNSUPPORTED_ARG_SPECS = frozenset(
+    {
+        "flashattentionforwardnodropoutinplace",
+        "foreachclone",
+        "foreachpowsum",
+        "op",
+        "optional",
+        "philoxkeyfoldin",
+        "philoxkeysplit",
+        "philoxnormal",
+        "philoxuniform",
+        "powsum",
+        "usemiopenctcloss",
+    }
+)
+_VERSION_GATED_STATIC_ARG_SPECS = frozenset({"randintlike"})
 
 _EXPECTED_KWARGS = {
     "addr": ("input", "vec1", "vec2"),
@@ -297,7 +327,9 @@ def test_every_decorated_arg_spec_is_static_or_explicitly_unsupported() -> None:
     missing = decorated_names - static_names
 
     assert missing <= _KNOWN_UNSUPPORTED_ARG_SPECS
-    assert _KNOWN_UNSUPPORTED_ARG_SPECS <= decorated_names
+    assert _KNOWN_UNSUPPORTED_ARG_SPECS <= (
+        decorated_names | _VERSION_GATED_UNSUPPORTED_ARG_SPECS
+    )
     assert not (_KNOWN_UNSUPPORTED_ARG_SPECS & static_names)
 
 
@@ -306,7 +338,7 @@ def test_high_confidence_static_fills_remain_covered() -> None:
 
     decorated_names = _decorated_normalized_names()
 
-    assert _HIGH_CONFIDENCE_STATIC_NAMES <= decorated_names
+    assert _HIGH_CONFIDENCE_STATIC_NAMES <= decorated_names | _VERSION_GATED_STATIC_ARG_SPECS
     assert _HIGH_CONFIDENCE_STATIC_NAMES <= set(FUNC_ARG_SPECS)
     assert not (_HIGH_CONFIDENCE_STATIC_NAMES & _KNOWN_UNSUPPORTED_ARG_SPECS)
 

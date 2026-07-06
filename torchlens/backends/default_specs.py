@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 from collections.abc import Iterator, Mapping
 from typing import Any, cast
 
@@ -222,20 +223,17 @@ def _paddle_can_handle(
     Returns
     -------
     bool
-        ``True`` when Paddle is installed, ``model`` is callable, and either the
-        model is a ``paddle.nn.Layer`` or an input leaf is a Paddle tensor.
+        ``True`` when Paddle is installed, ``model`` is callable, and either
+        the model or an input leaf appears to come from Paddle.
     """
 
     if not callable(model) or isinstance(model, nn.Module):
         return False
-    try:
-        import paddle
-    except ImportError:
+    if importlib.util.find_spec("paddle") is None:
         return False
-    return isinstance(model, paddle.nn.Layer) or _contains_paddle_tensor(
-        input_args,
-        input_kwargs,
-        paddle,
+    return _is_paddle_object_hint(model) or any(
+        _is_paddle_object_hint(leaf)
+        for leaf in (*_simple_leaves(input_args), *_simple_leaves(input_kwargs))
     )
 
 
@@ -292,28 +290,25 @@ def _tf_can_handle(
     return callable(model) and _contains_tf_tensor(input_args, input_kwargs, tf)
 
 
-def _contains_paddle_tensor(input_args: object, input_kwargs: object, paddle: object) -> bool:
-    """Return whether public inputs contain at least one Paddle tensor leaf.
+def _is_paddle_object_hint(value: object) -> bool:
+    """Return whether an object appears to be provided by Paddle.
 
     Parameters
     ----------
-    input_args:
-        Positional public inputs.
-    input_kwargs:
-        Keyword public inputs.
-    paddle:
-        Imported ``paddle`` module.
+    value:
+        Candidate object.
 
     Returns
     -------
-    bool
-        True when a Paddle tensor leaf is present.
+    bool:
+        True when either the object or its type reports a Paddle module path.
     """
 
-    tensor_type = getattr(paddle, "Tensor")
-    return any(isinstance(leaf, tensor_type) for leaf in _simple_leaves(input_args)) or any(
-        isinstance(leaf, tensor_type) for leaf in _simple_leaves(input_kwargs)
+    module_names = (
+        getattr(value, "__module__", ""),
+        getattr(type(value), "__module__", ""),
     )
+    return any(module_name == "paddle" or module_name.startswith("paddle.") for module_name in module_names)
 
 
 def _contains_tf_tensor(input_args: object, input_kwargs: object, tf: object) -> bool:

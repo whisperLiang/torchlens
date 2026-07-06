@@ -105,10 +105,14 @@ def test_tf_static_captures_loaded_saved_model_structure_values_and_modules(
         assert relu.parents
         assert relu.out is not None
         assert np.allclose(relu.out, np.array([[5.25, 0.0]], dtype=np.float32))
+        output_labels = set(trace.output_layers)
         assert all(
             op.out is None
             for op in trace.layer_list
-            if not op.is_input and not op.is_output and op.func_name not in {"Relu"}
+            if not op.is_input
+            and not op.is_output
+            and getattr(op, "label_raw", op.label.split(":")[0]) not in output_labels
+            and op.func_name not in {"Relu"}
         )
     else:
         regions = [op for op in trace.layer_list if str(op.func_name).startswith("region:")]

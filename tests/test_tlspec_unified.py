@@ -473,8 +473,7 @@ def test_schema_v2_mlx_materialized_manifest_validates(tmp_path: Path) -> None:
 def test_schema_v2_mlx_materialized_loads_payloads(tmp_path: Path) -> None:
     """MLX schema v2 materialized traces load body entries as MLX arrays."""
 
-    pytest.importorskip("mlx")
-    import mlx.core as mx
+    mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 
     path = tmp_path / "mlx_materialized_load.tlspec"
     _captured_log().save(path)
@@ -528,9 +527,8 @@ def test_schema_v2_mlx_old_audit_only_fixture_loads_metadata_only(tmp_path: Path
 def test_mlx_public_save_writes_materialized_manifest_body(tmp_path: Path) -> None:
     """Public MLX portable saves write codec-backed safetensors body entries."""
 
-    pytest.importorskip("mlx")
-    import mlx.core as mx
-    import mlx.nn as mlx_nn
+    mx = pytest.importorskip("mlx.core", exc_type=ImportError)
+    mlx_nn = pytest.importorskip("mlx.nn", exc_type=ImportError)
 
     class MlxTinyModel(mlx_nn.Module):
         """Small MLX model used for public tlspec save assertions."""

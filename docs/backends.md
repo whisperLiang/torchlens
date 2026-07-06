@@ -108,6 +108,12 @@ TensorFlow interventions, `halt=`, true backward capture, fastlog/`tl.record()`,
 T1/intermediate derived gradients are deferred. These surfaces raise typed backend errors instead of
 silently producing partial traces.
 
+`tl.prepare_split(..., backend="tf")` supports raw-op prefix/suffix replay, trusted local boundary
+caches, conservative leading-dimension `SplitSpec.dynamic_batch`, and split-training boundary
+gradients. Mutable optimizer updates are attempted for live TensorFlow variables that participate
+in the generated suffix/prefix replay; unsupported resource or structural ops fail closed with a
+typed split error rather than fabricating gradients.
+
 ## MLX Preview
 
 MLX is a technical-preview eager-dispatch backend. MLX `mlx.nn.Module` roots default to
@@ -187,6 +193,12 @@ stochastic/training composites. Deterministic eval-mode composites are allowed a
 nodes. Same-object no-ops, such as an operation that returns the exact input tensor object, are
 recorded as alias annotations rather than cloned value-producing ops.
 
+`tl.prepare_split(..., backend="paddle")` supports generated-eager prefix/suffix replay, trusted
+local boundary caches, conservative leading-dimension `SplitSpec.dynamic_batch`, and split training.
+`train_suffix()` returns boundary gradients and steps a supplied Paddle optimizer when the generated
+suffix uses live parameters; `backward_prefix()` propagates gradients from a
+`run_training_prefix()` boundary.
+
 Paddle leaf gradients are a derived-gradient preview, not true backward capture:
 
 ```python
@@ -249,6 +261,12 @@ trace = tl.trace(fn, (params, jnp.ones((4, 3))), backend="jax", grad_options=gra
 trace.derived_grads["params.w"]
 ```
 
+`tl.prepare_split(..., backend="jax")` supports native-IR prefix/suffix replay, trusted local
+boundary caches, conservative leading-dimension `SplitSpec.dynamic_batch`, and split-training
+gradient handoff. JAX split training is functional: `train_suffix()` returns boundary/parameter-leaf
+gradients and rejects `optimizer=`, while `backward_prefix()` returns VJP gradients for the original
+prefix input pytrees so users can apply Optax or custom updates outside TorchLens.
+
 Set `GradOptions(intermediate_grads=True, max_intermediate_grads=...)` to run JAX's separate
 zero-tap AD replay for saved op boundaries. The producer uses one all-tap `jax.grad` pass, then an
 O(k) oracle checks each attached boundary with an independent boundary-replacement VJP and finite
@@ -272,9 +290,9 @@ node and per-output projection nodes; forward `custom_vjp_call` is also represen
 region. These traces report `trace.validation_replay_status.state == "unverified"` after
 replayable ops and region seam checks pass. Pass `jax_control_flow="reject"` to preserve the
 earlier nested-primitive rejection behavior, or `jax_control_flow="region"` to force supported
-scan/while/custom-VJP-forward boundaries to regions. Workarounds are to pass raw functions and explicit params/input leaves to
-`tl.trace(..., backend="jax")`, or use the PyTorch backend for value-dependent predicate capture,
-intervention, sparse fastlog, and true backward graphs.
+scan/while/custom-VJP-forward boundaries to regions. Workarounds are to pass raw functions and
+explicit params/input leaves to `tl.trace(..., backend="jax")`, or use the PyTorch backend for
+value-dependent predicate capture, intervention, sparse fastlog, and true backward graphs.
 
 JAX `.tlspec` support uses `payload_policy="array_payloads"`: default portable saves persist
 forward and derived array payloads and load them back as `jax.Array` values.
@@ -358,6 +376,13 @@ intermediate-gradient pass. It calls `loss.backward()` before realizing any copi
 attaches exact unambiguous records to `trace.intermediate_derived_grads`; each owning `Op` exposes
 the payload through read-only `op.derived_grad`. Ambiguous signature matches are skipped instead of
 attached, and `op.grads` / `trace.saved_grad_ops` remain true-backward-only.
+
+`tl.prepare_split(..., backend="tinygrad")` supports UOp prefix/suffix replay, trusted local
+boundary caches, conservative leading-dimension `SplitSpec.dynamic_batch`, and split-training
+boundary gradients. Ordinary replay continues to realize copied tensors for stable cache/validation
+behavior; `run_training_prefix()` uses a separate live-UOp path so `train_suffix()` can return
+boundary gradients and `backward_prefix()` can hand them through the prefix. Cached or detached
+boundaries remain suffix-only and reject prefix backpropagation.
 
 The tinygrad backend rejects mid-capture `Tensor.realize()`, `Tensor.assign()`,
 `Tensor.replace()`, setitem input mutation, TinyJit execution, value-dependent `save=`

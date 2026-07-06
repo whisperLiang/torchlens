@@ -96,8 +96,7 @@ def test_internal_projection_coerces_deferred_value_to_none() -> None:
 def test_mlx_emit_function_outputs_produces_topology_complete_events() -> None:
     """MLX emits parent-linked ``OpEvent`` objects without Op registration."""
 
-    pytest.importorskip("mlx")
-    import mlx.core as mx
+    mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 
     from torchlens.backends.mlx import MLXBackend
 
@@ -156,9 +155,8 @@ def test_mlx_emit_function_outputs_produces_topology_complete_events() -> None:
 def test_mlx_value_dependent_save_predicate_rejected_clearly() -> None:
     """MLX trace rejects value-dependent save predicates before capture."""
 
-    pytest.importorskip("mlx")
-    import mlx.core as mx
-    import mlx.nn as nn
+    mx = pytest.importorskip("mlx.core", exc_type=ImportError)
+    nn = pytest.importorskip("mlx.nn", exc_type=ImportError)
 
     class Tiny(nn.Module):
         """Tiny MLX module for predicate rejection coverage."""

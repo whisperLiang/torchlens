@@ -49,27 +49,42 @@ def _module_stack_from_layer(op_log: Any) -> tuple[ModuleStackFrame, ...]:
         Synthetic stack frames suitable for preview predicates.
     """
 
+    if bool(getattr(op_log, "is_input", False)):
+        return ()
     frames: list[ModuleStackFrame] = []
-    addresses = tuple(getattr(op_log, "modules", ()) or ())
-    for index, address in enumerate(addresses, start=1):
-        module_type = ""
-        source_trace = getattr(op_log, "source_trace", None)
-        if source_trace is not None:
-            modules = getattr(source_trace, "_module_logs", {})
-            try:
-                module_log = modules[address]
-            except (KeyError, TypeError):
-                module_log = None
-            module_type = str(getattr(module_log, "module_type", ""))
+    source_trace = getattr(op_log, "source_trace", None)
+    module_logs = getattr(source_trace, "_module_logs", {}) if source_trace is not None else {}
+    root_log = _module_log_for_address(module_logs, "self")
+    if root_log is not None:
+        frames.append(
+            ModuleStackFrame(
+                address="",
+                module_type=str(getattr(root_log, "class_name", "") or ""),
+                module_id=0,
+                pass_index=1,
+            )
+        )
+    addresses = tuple(getattr(op_log, "module_call_stack", ()) or ())
+    for address in addresses:
+        module_log = _module_log_for_address(module_logs, str(address))
         frames.append(
             ModuleStackFrame(
                 address=str(address),
-                module_type=module_type,
+                module_type=str(getattr(module_log, "class_name", "") or ""),
                 module_id=0,
-                pass_index=index,
+                pass_index=1,
             )
         )
     return tuple(frames)
+
+
+def _module_log_for_address(module_logs: Any, address: str) -> Any | None:
+    """Return a module log by address when the Trace exposes one."""
+
+    try:
+        return module_logs[address]
+    except (KeyError, TypeError):
+        return None
 
 
 def _kind_from_layer(op_log: Any) -> str:
@@ -80,6 +95,43 @@ def _kind_from_layer(op_log: Any) -> str:
     if bool(getattr(op_log, "is_buffer", False)):
         return "buffer"
     return "op"
+
+
+def _raw_parent_labels_from_layer(op_log: Any) -> tuple[str, ...]:
+    """Return raw parent labels for a layer when they are available."""
+
+    source_trace = getattr(op_log, "source_trace", None)
+    layer_dict = getattr(source_trace, "layer_dict_all_keys", {}) if source_trace else {}
+    raw_labels: list[str] = []
+    for parent in tuple(getattr(op_log, "parents", ()) or ()):
+        parent_log = layer_dict.get(parent)
+        raw_labels.append(str(getattr(parent_log, "_label_raw", parent)))
+    return tuple(raw_labels)
+
+
+def _func_name_from_layer(op_log: Any) -> str | None:
+    """Return the predicate-facing function name for a layer."""
+
+    if bool(getattr(op_log, "is_input", False)):
+        return None
+    return getattr(op_log, "func_name", None)
+
+
+def _output_index_from_layer(op_log: Any) -> int | None:
+    """Return the predicate-facing output index for a layer."""
+
+    if bool(getattr(op_log, "is_input", False)):
+        return None
+    return getattr(op_log, "multi_output_index", None) or 0
+
+
+def _is_bottom_level_from_layer(op_log: Any) -> bool | None:
+    """Return whether a preview op represents a bottom-level function call."""
+
+    if bool(getattr(op_log, "is_input", False)):
+        return None
+    value = getattr(op_log, "is_bottom_level_func", None)
+    return True if value is None else bool(value)
 
 
 def _context_from_layer(
@@ -100,18 +152,18 @@ def _context_from_layer(
     return _build_record_context(
         kind=_kind_from_layer(op_log),  # type: ignore[arg-type]
         op_log_or_op_data={
-            "label": getattr(op_log, "layer_label", raw_label),
+            "label": raw_label or getattr(op_log, "layer_label", raw_label),
             "raw_label": raw_label,
             "_label_raw": raw_label,
             "raw_index": getattr(op_log, "raw_index", None),
             "layer_type": layer_type,
             "type_index": getattr(op_log, "type_index", None),
-            "func_name": getattr(op_log, "func_name", None),
-            "parent_labels": tuple(getattr(op_log, "parents", ()) or ()),
+            "func_name": _func_name_from_layer(op_log),
+            "parent_labels": _raw_parent_labels_from_layer(op_log),
             "shape": getattr(op_log, "shape", None),
             "dtype": getattr(op_log, "dtype", None),
-            "output_index": getattr(op_log, "multi_output_index", None),
-            "is_bottom_level_func": getattr(op_log, "is_bottom_level_func", None),
+            "output_index": _output_index_from_layer(op_log),
+            "is_bottom_level_func": _is_bottom_level_from_layer(op_log),
             "input_output_address": getattr(op_log, "io_role", None),
             "address": module_frame.address if module_frame else None,
             "module_type": module_frame.module_type if module_frame else None,
@@ -172,6 +224,8 @@ def _build_preview_nodes(trace: Any, predicate: Predicate | None) -> dict[str, P
     op_counts: dict[str, int] = {}
     preview_nodes: dict[str, PreviewNode] = {}
     for event_index, op_log in enumerate(trace.layer_list, start=1):
+        if getattr(op_log, "layer_type", None) == "output":
+            continue
         ctx = _context_from_layer(
             op_log,
             history=tuple(history),
@@ -179,7 +233,6 @@ def _build_preview_nodes(trace: Any, predicate: Predicate | None) -> dict[str, P
             op_counts=op_counts,
         )
         preview_node = _evaluate_preview_node(op_log, ctx, predicate)
-        preview_nodes[getattr(op_log, "layer_label", ctx.label)] = preview_node
         preview_nodes[getattr(op_log, "layer_label", ctx.label)] = preview_node
         history.append(ctx)
     return preview_nodes

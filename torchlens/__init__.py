@@ -34,6 +34,7 @@ from . import (
     partial,
     report,
     repgeom,
+    split,
     stats,
     viz,
 )
@@ -41,6 +42,14 @@ from .semantic import facets
 from ._io import JaxPayloadLoadHint, PayloadLoadHints
 from ._io.bundle import load, save
 from .captured_run import ActivationLookup, CapturedRun
+from .split import (
+    BoundaryTensorSpec,
+    ReplayBoundary,
+    SplitRuntime,
+    SplitSpec,
+    prepare_split,
+    prepare_split_replay,
+)
 from .stats import aggregate
 from .data_classes.layer import Layer
 from .data_classes.container import Container
@@ -981,6 +990,12 @@ __all__ = [
     "PayloadLoadHints",
     "load",
     "save",
+    "SplitSpec",
+    "BoundaryTensorSpec",
+    "ReplayBoundary",
+    "SplitRuntime",
+    "prepare_split",
+    "prepare_split_replay",
     "do",
     "push",
     "push_from",

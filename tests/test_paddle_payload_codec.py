@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from typing import Any
 
 import numpy as np
 import pytest
-
-paddle = pytest.importorskip("paddle")
 
 import torchlens as tl  # noqa: E402
 from torchlens._io.payload_codec import get_payload_codec  # noqa: E402
@@ -18,7 +17,27 @@ from torchlens.validation.invariants import check_metadata_invariants  # noqa: E
 
 pytestmark = pytest.mark.backend_paddle
 
-paddle.seed(0)
+paddle: Any
+
+
+def _paddle_runtime_or_skip() -> Any:
+    """Import Paddle unless TensorFlow has made this process unsafe for it."""
+
+    tensorflow_loaded = any(
+        name == "tensorflow" or name.startswith("tensorflow.") for name in sys.modules
+    )
+    if "paddle" not in sys.modules and tensorflow_loaded:
+        pytest.skip("Paddle runtime is unsafe to import after TensorFlow in this process")
+    return pytest.importorskip("paddle")
+
+
+@pytest.fixture(autouse=True)
+def _load_paddle() -> None:
+    """Load Paddle lazily when a Paddle test actually runs."""
+
+    global paddle
+    paddle = _paddle_runtime_or_skip()
+    paddle.seed(0)
 
 
 def _tensor_for_dtype(dtype_name: str) -> Any:

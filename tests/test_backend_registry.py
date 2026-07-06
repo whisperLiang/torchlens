@@ -59,6 +59,18 @@ class _FakeModel:
     """Marker model accepted by fake backend specs."""
 
 
+def _paddle_runtime_or_skip() -> Any:
+    """Import Paddle unless TensorFlow has made this process unsafe for it."""
+
+    tensorflow_loaded = any(
+        module_name == "tensorflow" or module_name.startswith("tensorflow.")
+        for module_name in sys.modules
+    )
+    if "paddle" not in sys.modules and tensorflow_loaded:
+        pytest.skip("Paddle runtime is unsafe to import after TensorFlow in this process")
+    return pytest.importorskip("paddle")
+
+
 def _fake_can_handle(
     model: object,
     input_args: object,
@@ -390,7 +402,7 @@ def test_paddle_detector_returns_false_without_paddle(
 def test_paddle_detector_accepts_layer_and_nested_tensor() -> None:
     """Paddle detector accepts Paddle layers and nested Paddle tensor inputs."""
 
-    paddle = pytest.importorskip("paddle")
+    paddle = _paddle_runtime_or_skip()
 
     class _PaddleLayer(paddle.nn.Layer):
         """Small Paddle layer for backend routing tests."""
@@ -409,7 +421,7 @@ def test_paddle_detector_accepts_layer_and_nested_tensor() -> None:
 def test_explicit_paddle_backend_resolves_to_spec() -> None:
     """Explicit Paddle backend and alias resolve to the Paddle spec."""
 
-    paddle = pytest.importorskip("paddle")
+    paddle = _paddle_runtime_or_skip()
 
     class _PaddleLayer(paddle.nn.Layer):
         """Small Paddle layer for explicit resolution tests."""
@@ -428,7 +440,7 @@ def test_explicit_paddle_backend_resolves_to_spec() -> None:
 def test_paddle_preview_unsupported_options_raise_typed_error() -> None:
     """Paddle preview rejects unsupported options with canonical typed errors."""
 
-    paddle = pytest.importorskip("paddle")
+    paddle = _paddle_runtime_or_skip()
 
     class _PaddleLayer(paddle.nn.Layer):
         """Small Paddle layer for unsupported-option routing tests."""

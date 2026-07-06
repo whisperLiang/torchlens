@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-mlx = pytest.importorskip("mlx")
-import mlx.core as mx  # noqa: E402
-import mlx.nn as nn  # noqa: E402
+mx = pytest.importorskip("mlx.core", exc_type=ImportError)
+nn = pytest.importorskip("mlx.nn", exc_type=ImportError)
 
 import torchlens as tl  # noqa: E402
 

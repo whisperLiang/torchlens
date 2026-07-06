@@ -8655,7 +8655,9 @@ def _layout_dot_plain(
     """Run ``dot -Tplain`` and parse coordinates and real-edge spans."""
 
     real_edges = {(edge.tail_name, edge.head_name) for edge in captured_edges}
-    with tempfile.NamedTemporaryFile("w", suffix=".dot", delete=False) as source_file:
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".dot", delete=False, encoding="utf-8"
+    ) as source_file:
         source_file.write(source)
         source_path = source_file.name
     try:

@@ -69,13 +69,14 @@ def test_report_namespace_is_not_top_level_all() -> None:
     ``without_op``, ``regex``, ``span``; removed ``sites`` (= 76).
     Internal sprint 2 Phase B added ``export`` and ``AmbiguousOpLookupError``
     (= 78). Tech-debt sprint added ``ReentrantTraceError`` and ten paper-era
-    compatibility shims (= 89).
+    compatibility shims (= 89). Backend-neutral split runtime added six public
+    names (= 95).
     """
 
     assert hasattr(tl.report, "explain")
     assert "report" not in tl.__all__
     assert "explain" not in tl.__all__
-    assert len(tl.__all__) == 89
+    assert len(tl.__all__) == 95
 
 
 def test_explain_returns_sensible_string_for_each_audience() -> None:

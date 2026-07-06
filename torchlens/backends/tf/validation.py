@@ -605,16 +605,24 @@ def _replay_raw_op(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
         "Mean": _replay_mean,
         "Mul": lambda item, args: _raw(item).Mul(x=args[0], y=args[1]),
         "Neg": lambda item, args: _raw(item).Neg(x=args[0]),
+        "Pack": _replay_pack,
         "RealDiv": lambda item, args: _raw(item).RealDiv(x=args[0], y=args[1]),
+        "ReadVariableOp": lambda item, args: _raw(item).ReadVariableOp(
+            resource=args[0],
+            dtype=item.attrs["dtype"],
+        ),
         "Relu": lambda item, args: _raw(item).Relu(features=args[0]),
         "Reshape": lambda item, args: _raw(item).Reshape(tensor=args[0], shape=args[1]),
         "Rsqrt": lambda item, args: _raw(item).Rsqrt(x=args[0]),
+        "Shape": _replay_shape,
         "Softmax": lambda item, args: _raw(item).Softmax(logits=args[0]),
         "Sqrt": lambda item, args: _raw(item).Sqrt(x=args[0]),
         "SquaredDifference": lambda item, args: _raw(item).SquaredDifference(
             x=args[0],
             y=args[1],
         ),
+        "Fill": lambda item, args: _raw(item).Fill(dims=args[0], value=args[1]),
+        "StridedSlice": _replay_strided_slice,
         "Sub": lambda item, args: _raw(item).Sub(x=args[0], y=args[1]),
         "Squeeze": lambda item, args: _raw(item).Squeeze(
             input=args[0],
@@ -856,6 +864,43 @@ def _replay_pool(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
         padding=_attr_str(capture.attrs["padding"]),
         explicit_paddings=list(capture.attrs.get("explicit_paddings", [])),
         data_format=_attr_str(capture.attrs.get("data_format", "NHWC")),
+    )
+
+
+def _replay_pack(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
+    """Replay ``Pack``."""
+
+    return _raw(capture).Pack(
+        values=list(inputs),
+        axis=int(capture.attrs.get("axis", 0)),
+    )
+
+
+def _replay_shape(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
+    """Replay ``Shape``."""
+
+    attrs = capture.attrs
+    kwargs = {}
+    if "out_type" in attrs:
+        kwargs["out_type"] = attrs["out_type"]
+    if "out_type_enum" in attrs:
+        kwargs["out_type"] = attrs["out_type_enum"]
+    return _raw(capture).Shape(input=inputs[0], **kwargs)
+
+
+def _replay_strided_slice(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
+    """Replay ``StridedSlice``."""
+
+    return _raw(capture).StridedSlice(
+        input=inputs[0],
+        begin=inputs[1],
+        end=inputs[2],
+        strides=inputs[3],
+        begin_mask=int(capture.attrs.get("begin_mask", 0)),
+        end_mask=int(capture.attrs.get("end_mask", 0)),
+        ellipsis_mask=int(capture.attrs.get("ellipsis_mask", 0)),
+        new_axis_mask=int(capture.attrs.get("new_axis_mask", 0)),
+        shrink_axis_mask=int(capture.attrs.get("shrink_axis_mask", 0)),
     )
 
 

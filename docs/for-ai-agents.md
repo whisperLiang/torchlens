@@ -10,6 +10,13 @@ metadata lives on `Trace.backend`, `Trace.module_identity_mode`, `Trace.param_so
 `Trace.derived_grads`, `Trace.intermediate_derived_grads`, `Trace.payload_load_status`,
 `Trace.validation_replay_status`, `dtype_ref`, `device_ref`, `backend_address`, and
 `resolver_status`.
+Split replay is backend-neutral for torch, JAX, TF, Paddle, and tinygrad, with MLX still gated.
+TF/Paddle/JAX/tinygrad additionally support conservative leading-dimension
+`SplitSpec.dynamic_batch` and split-training boundary gradients. JAX split training is functional
+and rejects `optimizer=`; TF/Paddle may step supplied mutable optimizers when generated replay
+reaches live trainable params. tinygrad uses live UOp autograd for uncached
+`run_training_prefix()` boundaries and may step tinygrad optimizers with `Tensor.training`
+temporarily enabled.
 JAX leaf gradients are requested with `tl.backends.jax.GradOptions`; they are derived by a
 second functional AD run and never populate backward-pass or op-gradient surfaces.
 JAX intermediate derived gradients are requested with

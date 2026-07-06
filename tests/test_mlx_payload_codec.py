@@ -11,8 +11,7 @@ from torchlens._io.payload_codec import get_payload_codec
 from torchlens._io.tensor_policy import FailReason, Ok
 from torchlens.backends import BackendRuntimeCompatibilityError
 
-mlx = pytest.importorskip("mlx")
-import mlx.core as mx  # noqa: E402
+mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 
 
 pytestmark = pytest.mark.optional

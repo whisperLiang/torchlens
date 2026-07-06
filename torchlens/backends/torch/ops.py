@@ -2024,12 +2024,19 @@ def _build_param_fields(
     fields_dict["_param_logs"] = _param_logs
     fields_dict["param_shapes"] = [tuple(param.shape) for param in arg_parameters]
     fields_dict["num_params"] = sum(prod(shape) for shape in fields_dict["param_shapes"])
+    logged_addresses = {pl.address for pl in _param_logs}
+    unlogged_params = []
+    for param in arg_parameters:
+        param_meta = get_param_meta(param)
+        addr = None if param_meta is None else param_meta.param_address
+        if addr not in logged_addresses:
+            unlogged_params.append(param)
     fields_dict["num_params_trainable"] = sum(
         pl.num_params for pl in _param_logs if pl.is_trainable
-    )
+    ) + sum(param.numel() for param in unlogged_params if param.requires_grad)
     fields_dict["num_params_frozen"] = sum(
         pl.num_params for pl in _param_logs if not pl.is_trainable
-    )
+    ) + sum(param.numel() for param in unlogged_params if not param.requires_grad)
     with pause_logging():
         fields_dict["param_memory"] = sum(p.nelement() * p.element_size() for p in arg_parameters)
     return parent_param_ops

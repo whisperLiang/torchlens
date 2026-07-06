@@ -1397,7 +1397,10 @@ def _region_sanitized_params(params: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def replay_equation(
-    capture: JaxEquationCapture, inputs: Sequence[Any] | None = None
+    capture: JaxEquationCapture,
+    inputs: Sequence[Any] | None = None,
+    *,
+    params_override: Mapping[str, Any] | None = None,
 ) -> tuple[Any, ...]:
     """Replay a captured equation on saved inputs.
 
@@ -1407,6 +1410,9 @@ def replay_equation(
         Captured equation.
     inputs
         Optional replacement inputs. When omitted, saved inputs are used.
+    params_override
+        Optional primitive params used for split dynamic-shape replay. Omitted
+        validation calls bind the captured params unchanged.
 
     Returns
     -------
@@ -1421,7 +1427,13 @@ def replay_equation(
         raise NotImplementedError(
             f"JAX replay kind {capture.kind!r} is not registered; expected one of: {expected}."
         ) from exc
-    return handler(capture, inputs)
+    if params_override is not None and capture.kind != "primitive":
+        raise NotImplementedError(
+            f"JAX replay kind {capture.kind!r} does not support params_override."
+        )
+    if params_override is None:
+        return handler(capture, inputs)
+    return _replay_primitive(capture, inputs, params_override=params_override)
 
 
 def reject_attributed_module_strict_control_flow(closed_jaxpr: Any) -> None:
@@ -1734,7 +1746,10 @@ ALL_JAX_EQUATION_KINDS: tuple[JaxEquationKind, ...] = (
 
 
 def _replay_primitive(
-    capture: JaxEquationCapture, inputs: Sequence[Any] | None = None
+    capture: JaxEquationCapture,
+    inputs: Sequence[Any] | None = None,
+    *,
+    params_override: Mapping[str, Any] | None = None,
 ) -> tuple[Any, ...]:
     """Replay a captured JAX primitive bind.
 
@@ -1744,6 +1759,8 @@ def _replay_primitive(
         Captured primitive equation.
     inputs
         Optional replacement inputs. When omitted, saved inputs are used.
+    params_override
+        Optional primitive params replacing captured params.
 
     Returns
     -------
@@ -1752,7 +1769,8 @@ def _replay_primitive(
     """
 
     replay_inputs = tuple(capture.input_values if inputs is None else inputs)
-    result = capture.primitive_obj.bind(*replay_inputs, **capture.params)
+    params = capture.params if params_override is None else params_override
+    result = capture.primitive_obj.bind(*replay_inputs, **params)
     return tuple(result if capture.primitive_obj.multiple_results else (result,))
 
 
@@ -2129,8 +2147,11 @@ def _jax_zero_tap_jvp(primals: tuple[Any, Any], tangents: tuple[Any, Any]) -> tu
 try:
     import jax
 
-    _jax_zero_tap_impl = jax.custom_jvp(lambda value, delta: value)
-    _jax_zero_tap_impl.defjvp(_jax_zero_tap_jvp)
+    _jax_zero_tap_impl: Callable[[Any, Any], Any] = cast(
+        Callable[[Any, Any], Any],
+        jax.custom_jvp(lambda value, delta: value),
+    )
+    _jax_zero_tap_impl.defjvp(_jax_zero_tap_jvp)  # type: ignore[attr-defined]
 except Exception:  # pragma: no cover - import-time fallback for non-JAX environments.
 
     def _jax_zero_tap_impl(value: Any, delta: Any) -> Any:

@@ -2925,7 +2925,9 @@ def _assert_same_treedef(left: Any, right: Any, *, label: str) -> None:
 
     import jax
 
-    if jax.tree.structure(left) != jax.tree.structure(right):
+    left_structure = cast(Any, jax.tree.structure(left))
+    right_structure = cast(Any, jax.tree.structure(right))
+    if left_structure != right_structure:
         raise ValueError(f"{label} must have the same pytree structure as positional arg 0.")
 
 

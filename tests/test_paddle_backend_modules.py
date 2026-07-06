@@ -2,54 +2,88 @@
 
 from __future__ import annotations
 
-import pytest
+import sys
+from typing import Any
 
-paddle = pytest.importorskip("paddle")
+import pytest
 
 import torchlens as tl  # noqa: E402
 
 pytestmark = pytest.mark.backend_paddle
 
-
-class PaddleScale(paddle.nn.Layer):
-    """Parameterless Paddle layer with a keyword argument."""
-
-    def forward(self, x: object, scale: float = 1.0) -> object:
-        """Scale an input tensor.
-
-        Parameters
-        ----------
-        x
-            Input tensor.
-        scale
-            Scalar scale value.
-
-        Returns
-        -------
-        object
-            Scaled tensor.
-        """
-
-        return x * scale
+paddle: Any
 
 
-class PaddleNested(paddle.nn.Layer):
-    """Nested Paddle module with parameterized children."""
+def _paddle_runtime_or_skip() -> Any:
+    """Import Paddle unless TensorFlow has made this process unsafe for it."""
 
-    def __init__(self) -> None:
-        """Initialize child layers."""
+    tensorflow_loaded = any(
+        name == "tensorflow" or name.startswith("tensorflow.") for name in sys.modules
+    )
+    if "paddle" not in sys.modules and tensorflow_loaded:
+        pytest.skip("Paddle runtime is unsafe to import after TensorFlow in this process")
+    return pytest.importorskip("paddle")
 
-        super().__init__()
-        self.seq = paddle.nn.Sequential(paddle.nn.Linear(4, 4), paddle.nn.ReLU())
-        self.scale = PaddleScale()
-        self.head = paddle.nn.Linear(4, 2)
 
-    def forward(self, x: object, scale: float = 1.0) -> object:
-        """Run nested forward."""
+@pytest.fixture(autouse=True)
+def _load_paddle() -> None:
+    """Load Paddle lazily when a Paddle test actually runs."""
 
-        hidden = self.seq(x)
-        hidden = self.scale(hidden, scale=scale)
-        return self.head(hidden)
+    global paddle
+    paddle = _paddle_runtime_or_skip()
+
+
+def _paddle_scale_class() -> type[Any]:
+    """Return the reusable Paddle scale layer type."""
+
+    class PaddleScale(paddle.nn.Layer):
+        """Parameterless Paddle layer with a keyword argument."""
+
+        def forward(self, x: object, scale: float = 1.0) -> object:
+            """Scale an input tensor.
+
+            Parameters
+            ----------
+            x
+                Input tensor.
+            scale
+                Scalar scale value.
+
+            Returns
+            -------
+            object
+                Scaled tensor.
+            """
+
+            return x * scale
+
+    return PaddleScale
+
+
+def _paddle_nested_model() -> Any:
+    """Return a nested Paddle model fixture."""
+
+    scale_cls = _paddle_scale_class()
+
+    class PaddleNested(paddle.nn.Layer):
+        """Nested Paddle module with parameterized children."""
+
+        def __init__(self) -> None:
+            """Initialize child layers."""
+
+            super().__init__()
+            self.seq = paddle.nn.Sequential(paddle.nn.Linear(4, 4), paddle.nn.ReLU())
+            self.scale = scale_cls()
+            self.head = paddle.nn.Linear(4, 2)
+
+        def forward(self, x: object, scale: float = 1.0) -> object:
+            """Run nested forward."""
+
+            hidden = self.seq(x)
+            hidden = self.scale(hidden, scale=scale)
+            return self.head(hidden)
+
+    return PaddleNested()
 
 
 def _input() -> object:
@@ -68,7 +102,7 @@ def _input() -> object:
 def test_paddle_nested_layer_addresses_and_kwargs() -> None:
     """Nested Paddle layers should populate module logs and forward kwargs."""
 
-    trace = tl.trace(PaddleNested(), _input(), {"scale": 2.0}, backend="paddle")
+    trace = tl.trace(_paddle_nested_model(), _input(), {"scale": 2.0}, backend="paddle")
 
     assert trace.module_identity_mode == "object_module"
     addresses = {module.address for module in trace.modules}
@@ -82,7 +116,7 @@ def test_paddle_nested_layer_addresses_and_kwargs() -> None:
 def test_paddle_param_logs_from_named_parameters() -> None:
     """Paddle named parameters should become Trace param logs."""
 
-    trace = tl.trace(PaddleNested(), _input(), backend="paddle")
+    trace = tl.trace(_paddle_nested_model(), _input(), backend="paddle")
 
     addresses = {param.address for param in trace.param_logs}
     assert {"seq.0.weight", "seq.0.bias", "head.weight", "head.bias"} <= addresses
@@ -94,6 +128,8 @@ def test_paddle_param_logs_from_named_parameters() -> None:
 def test_paddle_call_index_counting_for_reused_layer() -> None:
     """Repeated calls to the same Paddle layer should increment call indexes."""
 
+    scale_cls = _paddle_scale_class()
+
     class Reused(paddle.nn.Layer):
         """Layer that calls one child twice."""
 
@@ -101,7 +137,7 @@ def test_paddle_call_index_counting_for_reused_layer() -> None:
             """Initialize shared child."""
 
             super().__init__()
-            self.scale = PaddleScale()
+            self.scale = scale_cls()
 
         def forward(self, x: object) -> object:
             """Run the shared child twice."""
@@ -120,7 +156,7 @@ def test_paddle_call_index_counting_for_reused_layer() -> None:
 def test_paddle_object_module_vs_function_root() -> None:
     """Paddle layers use object-module mode while raw callables use function-root."""
 
-    object_trace = tl.trace(PaddleNested(), _input(), backend="paddle")
+    object_trace = tl.trace(_paddle_nested_model(), _input(), backend="paddle")
     function_trace = tl.trace(lambda x: paddle.nn.functional.relu(x), _input(), backend="paddle")
 
     assert object_trace.module_identity_mode == "object_module"

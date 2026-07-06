@@ -325,6 +325,22 @@ def _fields_from_event(
     param_logs = _param_logs_for_event(trace, params)
     parent_param_ops = {param.barcode: event.pass_index for param in params}
     param_shapes = [param.shape for param in params]
+    logged_param_addresses = {log.address for log in param_logs}
+    unresolved_params = [
+        param
+        for param in params
+        if getattr(param, "address", None) not in logged_param_addresses
+    ]
+    unresolved_trainable_params = sum(
+        prod(param.shape)
+        for param in unresolved_params
+        if param.shape is not None and param.trainable
+    )
+    unresolved_frozen_params = sum(
+        prod(param.shape)
+        for param in unresolved_params
+        if param.shape is not None and not param.trainable
+    )
     parent_params = list(event.parent_params)
     grad_handle = grad_fn_handle if grad_fn_handle is not None else event.grad_fn_handle
     module = event.modules[-1] if event.modules else None
@@ -445,8 +461,12 @@ def _fields_from_event(
             "_param_logs": param_logs,
             "param_shapes": param_shapes,
             "num_params": sum(prod(shape) for shape in param_shapes if shape is not None),
-            "num_params_trainable": sum(log.num_params for log in param_logs if log.is_trainable),
-            "num_params_frozen": sum(log.num_params for log in param_logs if not log.is_trainable),
+            "num_params_trainable": sum(
+                log.num_params for log in param_logs if log.is_trainable
+            )
+            + unresolved_trainable_params,
+            "num_params_frozen": sum(log.num_params for log in param_logs if not log.is_trainable)
+            + unresolved_frozen_params,
             "param_memory": sum(int(log.param_memory) for log in param_logs),
             "equivalence_class": event.equivalence_class,
             "equivalent_ops": equivalent_ops,

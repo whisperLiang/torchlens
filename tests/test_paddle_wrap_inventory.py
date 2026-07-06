@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+import sys
+from typing import Any
 
 import pytest
 
 from torchlens.backends.paddle import wrappers as paddle_wrappers
 from torchlens.backends.paddle.wrappers import PaddleInventory, _PaddleWrapperRegistry
-
-paddle = pytest.importorskip("paddle")
 
 SNAPSHOT_MESSAGE = (
     "Paddle wrapper inventory changed. Classify the new/moved/removed op in "
@@ -18,6 +18,25 @@ SNAPSHOT_MESSAGE = (
     "This static snapshot is the correctness guard for same-object no-op and scalar-escape "
     "coverage gaps that dynamic validation cannot see."
 )
+
+
+def _paddle_runtime_or_skip() -> Any:
+    """Import Paddle unless TensorFlow has made this process unsafe for it."""
+
+    tensorflow_loaded = any(
+        name == "tensorflow" or name.startswith("tensorflow.") for name in sys.modules
+    )
+    if "paddle" not in sys.modules and tensorflow_loaded:
+        pytest.skip("Paddle runtime is unsafe to import after TensorFlow in this process")
+    return pytest.importorskip("paddle")
+
+
+@pytest.fixture(autouse=True)
+def _load_paddle() -> None:
+    """Load Paddle lazily when a Paddle test actually runs."""
+
+    _paddle_runtime_or_skip()
+
 
 EXPECTED_WRAPPED = (
     "abs",
