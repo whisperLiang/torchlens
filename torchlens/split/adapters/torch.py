@@ -21,7 +21,7 @@ from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
 from ..graph import SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
-from ..shape import rewrite_dynamic_batch_value
+from ..shape import infer_runtime_batch_size_from_overlay, rewrite_dynamic_batch_value
 from ..spec import SplitSpec
 from .base import SegmentBundle
 
@@ -181,14 +181,15 @@ class _GeneratedSegmentBase:
         )
 
     def _runtime_batch_size(self, overlay: dict[str, Any]) -> int | None:
-        """Infer runtime batch size from seeded input tensors."""
+        """Infer runtime batch size from available replay tensors."""
 
         torch = _torch()
-        for node_id in self.graph.input_node_ids:
-            value = overlay.get(node_id)
-            if isinstance(value, torch.Tensor) and value.ndim:
-                return int(value.shape[0])
-        return None
+        return infer_runtime_batch_size_from_overlay(
+            overlay,
+            node_by_id=self._node_by_id,
+            traced_batch_size=self.graph.traced_batch_size,
+            is_tensor=lambda value: isinstance(value, torch.Tensor),
+        )
 
     def _param_handles_for_node(self, node: SplitTraceNode) -> list[Any]:
         """Resolve live parameter handles for a replay node."""
@@ -443,6 +444,8 @@ class _GeneratedSegmentBase:
             if node.canonical_id not in self.node_ids:
                 continue
             if node.is_input:
+                continue
+            if node.is_output:
                 continue
             if node.is_buffer or (node.target is None and self._is_replay_source_node(node)):
                 if node.canonical_id not in overlay and not node.is_output:

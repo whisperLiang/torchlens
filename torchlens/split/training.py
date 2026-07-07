@@ -2,13 +2,56 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from .boundary import ReplayBoundary
 from .errors import SplitErrorContext, SplitUnsupportedError
 
 BoundaryGradients = dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TrainingStepResult:
+    """Structured result from a split suffix training step."""
+
+    loss: Any
+    boundary_grads: BoundaryGradients
+    param_grads: dict[str, Any] | None = None
+    optimizer_applied: bool = False
+
+    def as_tuple(self) -> tuple[Any, BoundaryGradients]:
+        """Return the legacy public ``(loss, boundary_grads)`` shape."""
+
+        return self.loss, self.boundary_grads
+
+
+class BackendTrainingEngine(Protocol):
+    """Protocol for backend-owned split training engines."""
+
+    name: str
+
+    def train_suffix(
+        self,
+        runtime: Any,
+        boundary: ReplayBoundary,
+        targets: Any,
+        loss_fn: Callable[[Any, Any], Any] | None = None,
+        optimizer: Any | None = None,
+    ) -> TrainingStepResult:
+        """Differentiate or train a split suffix."""
+        ...
+
+    def backward_prefix(
+        self,
+        runtime: Any,
+        boundary: ReplayBoundary,
+        boundary_grads: BoundaryGradients,
+        optimizer: Any | None = None,
+    ) -> Any:
+        """Propagate suffix gradients through a graph-connected prefix."""
+        ...
 
 
 def _require_torch(runtime: Any) -> Any:
@@ -150,7 +193,7 @@ def _train_suffix_torch(
     targets: Any,
     loss_fn: Callable[[Any, Any], Any] | None = None,
     optimizer: Any | None = None,
-) -> tuple[Any, BoundaryGradients]:
+) -> tuple[Any, BoundaryGradients, bool]:
     """Train a Torch suffix from a boundary and return boundary gradients."""
 
     torch = _require_torch(runtime)
@@ -184,7 +227,7 @@ def _train_suffix_torch(
     }
     if optimizer is not None:
         optimizer.step()
-    return loss, gradients
+    return loss, gradients, optimizer is not None
 
 
 def _is_diff_tf_tensor(tf: Any, value: Any) -> bool:
@@ -194,6 +237,17 @@ def _is_diff_tf_tensor(tf: Any, value: Any) -> bool:
         return False
     dtype = getattr(value, "dtype", None)
     return bool(getattr(dtype, "is_floating", False) or getattr(dtype, "is_complex", False))
+
+
+def _tf_gradient_source(tf: Any, value: Any) -> Any:
+    """Return the TensorFlow variable/tensor watched by ``GradientTape``."""
+
+    if isinstance(value, (tf.Tensor, tf.Variable)):
+        return value
+    keras_value = getattr(value, "value", None)
+    if isinstance(keras_value, (tf.Tensor, tf.Variable)):
+        return keras_value
+    return value
 
 
 def _default_tf_loss(tf: Any, output: Any, targets: Any) -> Any:
@@ -229,7 +283,7 @@ def _train_suffix_tf(
     targets: Any,
     loss_fn: Callable[[Any, Any], Any] | None = None,
     optimizer: Any | None = None,
-) -> tuple[Any, BoundaryGradients]:
+) -> tuple[Any, BoundaryGradients, bool]:
     """Train a TensorFlow suffix and return boundary gradients."""
 
     import tensorflow as tf
@@ -251,11 +305,12 @@ def _train_suffix_tf(
         metadata={**boundary.metadata, "suffix_training_roots": tuple(root_tensors)},
     )
     suffix_vars = _trainable_param_handles(runtime, runtime.plan.suffix_node_ids)
+    suffix_sources = [_tf_gradient_source(tf, var) for var in suffix_vars]
     with tf.GradientTape(persistent=True) as tape:
         for root in root_tensors.values():
             tape.watch(root)
-        for var in suffix_vars:
-            tape.watch(var)
+        for source in suffix_sources:
+            tape.watch(source)
         output = runtime.run_suffix(replay_boundary)
         loss = (
             loss_fn(output, targets)
@@ -269,12 +324,14 @@ def _train_suffix_tf(
         for key, grad in zip(root_tensors, root_grads, strict=False)
         if grad is not None
     }
+    optimizer_applied = False
     if optimizer is not None and suffix_vars:
-        var_grads = tape.gradient(loss, suffix_vars)
+        var_grads = tape.gradient(loss, suffix_sources)
         pairs = [(grad, var) for grad, var in zip(var_grads, suffix_vars) if grad is not None]
         if pairs:
             optimizer.apply_gradients(pairs)
-    return loss, gradients
+            optimizer_applied = True
+    return loss, gradients, optimizer_applied
 
 
 def _is_diff_paddle_tensor(paddle: Any, value: Any) -> bool:
@@ -324,7 +381,7 @@ def _train_suffix_paddle(
     targets: Any,
     loss_fn: Callable[[Any, Any], Any] | None = None,
     optimizer: Any | None = None,
-) -> tuple[Any, BoundaryGradients]:
+) -> tuple[Any, BoundaryGradients, bool]:
     """Train a Paddle suffix and return boundary gradients."""
 
     import paddle
@@ -362,7 +419,7 @@ def _train_suffix_paddle(
             gradients[key] = paddle.clone(grad)
     if optimizer is not None:
         optimizer.step()
-    return loss, gradients
+    return loss, gradients, optimizer is not None
 
 
 def _is_diff_jax_tensor(value: Any) -> bool:
@@ -394,7 +451,7 @@ def _train_suffix_jax(
     targets: Any,
     loss_fn: Callable[[Any, Any], Any] | None = None,
     optimizer: Any | None = None,
-) -> tuple[Any, BoundaryGradients]:
+) -> tuple[Any, BoundaryGradients, bool]:
     """Return JAX suffix boundary gradients without mutating parameters."""
 
     if optimizer is not None:
@@ -424,9 +481,13 @@ def _train_suffix_jax(
 
     if not values:
         loss = suffix_loss()
-        return loss, {}
+        return loss, {}, False
     loss, grads = jax.value_and_grad(suffix_loss, argnums=tuple(range(len(values))))(*values)
-    return loss, {key: grad for key, grad in zip(keys, grads, strict=False) if grad is not None}
+    return (
+        loss,
+        {key: grad for key, grad in zip(keys, grads, strict=False) if grad is not None},
+        False,
+    )
 
 
 def _tinygrad_tensor_type() -> Any:
@@ -505,7 +566,10 @@ def _tinygrad_clone_grad(value: Any) -> Any:
 
     from .adapters.tinygrad import TinygradSplitAdapter
 
-    return TinygradSplitAdapter().clone(value)
+    try:
+        return TinygradSplitAdapter().clone(value)
+    except (RuntimeError, AssertionError):
+        return value
 
 
 def _train_suffix_tinygrad(
@@ -514,7 +578,7 @@ def _train_suffix_tinygrad(
     targets: Any,
     loss_fn: Callable[[Any, Any], Any] | None = None,
     optimizer: Any | None = None,
-) -> tuple[Any, BoundaryGradients]:
+) -> tuple[Any, BoundaryGradients, bool]:
     """Train a tinygrad suffix and return boundary gradients."""
 
     runtime.validate_boundary(boundary)
@@ -548,7 +612,234 @@ def _train_suffix_tinygrad(
         if grad is not None:
             gradients[key] = _tinygrad_clone_grad(grad)
     _tinygrad_optimizer_step(runtime, optimizer, before=False)
-    return loss, gradients
+    return loss, gradients, optimizer is not None
+
+
+class TorchTrainingEngine:
+    """Torch split-training engine."""
+
+    name = "torch"
+
+    def train_suffix(
+        self,
+        runtime: Any,
+        boundary: ReplayBoundary,
+        targets: Any,
+        loss_fn: Callable[[Any, Any], Any] | None = None,
+        optimizer: Any | None = None,
+    ) -> TrainingStepResult:
+        """Train a Torch suffix and return a structured result."""
+
+        loss, grads, optimizer_applied = _train_suffix_torch(
+            runtime,
+            boundary,
+            targets,
+            loss_fn=loss_fn,
+            optimizer=optimizer,
+        )
+        return TrainingStepResult(loss, grads, optimizer_applied=optimizer_applied)
+
+    def backward_prefix(
+        self,
+        runtime: Any,
+        boundary: ReplayBoundary,
+        boundary_grads: BoundaryGradients,
+        optimizer: Any | None = None,
+    ) -> Any:
+        """Backpropagate Torch boundary gradients through the prefix."""
+
+        return _backward_prefix_torch(runtime, boundary, boundary_grads, optimizer=optimizer)
+
+
+class TensorFlowTrainingEngine:
+    """TensorFlow split-training engine."""
+
+    name = "tf"
+
+    def train_suffix(
+        self,
+        runtime: Any,
+        boundary: ReplayBoundary,
+        targets: Any,
+        loss_fn: Callable[[Any, Any], Any] | None = None,
+        optimizer: Any | None = None,
+    ) -> TrainingStepResult:
+        """Train a TensorFlow suffix and return a structured result."""
+
+        loss, grads, optimizer_applied = _train_suffix_tf(
+            runtime,
+            boundary,
+            targets,
+            loss_fn=loss_fn,
+            optimizer=optimizer,
+        )
+        return TrainingStepResult(loss, grads, optimizer_applied=optimizer_applied)
+
+    def backward_prefix(
+        self,
+        runtime: Any,
+        boundary: ReplayBoundary,
+        boundary_grads: BoundaryGradients,
+        optimizer: Any | None = None,
+    ) -> Any:
+        """Backpropagate TensorFlow boundary gradients through the prefix."""
+
+        return _backward_prefix_tf(runtime, boundary, boundary_grads, optimizer=optimizer)
+
+
+class PaddleTrainingEngine:
+    """Paddle split-training engine."""
+
+    name = "paddle"
+
+    def train_suffix(
+        self,
+        runtime: Any,
+        boundary: ReplayBoundary,
+        targets: Any,
+        loss_fn: Callable[[Any, Any], Any] | None = None,
+        optimizer: Any | None = None,
+    ) -> TrainingStepResult:
+        """Train a Paddle suffix and return a structured result."""
+
+        loss, grads, optimizer_applied = _train_suffix_paddle(
+            runtime,
+            boundary,
+            targets,
+            loss_fn=loss_fn,
+            optimizer=optimizer,
+        )
+        return TrainingStepResult(loss, grads, optimizer_applied=optimizer_applied)
+
+    def backward_prefix(
+        self,
+        runtime: Any,
+        boundary: ReplayBoundary,
+        boundary_grads: BoundaryGradients,
+        optimizer: Any | None = None,
+    ) -> Any:
+        """Backpropagate Paddle boundary gradients through the prefix."""
+
+        return _backward_prefix_paddle(runtime, boundary, boundary_grads, optimizer=optimizer)
+
+
+class JaxTrainingEngine:
+    """JAX split-training engine."""
+
+    name = "jax"
+
+    def train_suffix(
+        self,
+        runtime: Any,
+        boundary: ReplayBoundary,
+        targets: Any,
+        loss_fn: Callable[[Any, Any], Any] | None = None,
+        optimizer: Any | None = None,
+    ) -> TrainingStepResult:
+        """Differentiate a JAX suffix and return a structured result."""
+
+        loss, grads, optimizer_applied = _train_suffix_jax(
+            runtime,
+            boundary,
+            targets,
+            loss_fn=loss_fn,
+            optimizer=optimizer,
+        )
+        return TrainingStepResult(loss, grads, optimizer_applied=optimizer_applied)
+
+    def backward_prefix(
+        self,
+        runtime: Any,
+        boundary: ReplayBoundary,
+        boundary_grads: BoundaryGradients,
+        optimizer: Any | None = None,
+    ) -> Any:
+        """Return JAX prefix gradients via VJP recomputation."""
+
+        return _backward_prefix_jax(runtime, boundary, boundary_grads, optimizer=optimizer)
+
+
+class TinygradTrainingEngine:
+    """tinygrad split-training engine."""
+
+    name = "tinygrad"
+
+    def train_suffix(
+        self,
+        runtime: Any,
+        boundary: ReplayBoundary,
+        targets: Any,
+        loss_fn: Callable[[Any, Any], Any] | None = None,
+        optimizer: Any | None = None,
+    ) -> TrainingStepResult:
+        """Train a tinygrad suffix and return a structured result."""
+
+        loss, grads, optimizer_applied = _train_suffix_tinygrad(
+            runtime,
+            boundary,
+            targets,
+            loss_fn=loss_fn,
+            optimizer=optimizer,
+        )
+        return TrainingStepResult(loss, grads, optimizer_applied=optimizer_applied)
+
+    def backward_prefix(
+        self,
+        runtime: Any,
+        boundary: ReplayBoundary,
+        boundary_grads: BoundaryGradients,
+        optimizer: Any | None = None,
+    ) -> Any:
+        """Backpropagate tinygrad boundary gradients through the prefix."""
+
+        return _backward_prefix_tinygrad(runtime, boundary, boundary_grads, optimizer=optimizer)
+
+
+_TRAINING_ENGINES: dict[str, BackendTrainingEngine] = {
+    "torch": TorchTrainingEngine(),
+    "tf": TensorFlowTrainingEngine(),
+    "tensorflow": TensorFlowTrainingEngine(),
+    "paddle": PaddleTrainingEngine(),
+    "jax": JaxTrainingEngine(),
+    "tinygrad": TinygradTrainingEngine(),
+}
+
+
+def training_engine_for(backend: str) -> BackendTrainingEngine:
+    """Return the split training engine for ``backend``."""
+
+    try:
+        return _TRAINING_ENGINES[backend]
+    except KeyError as exc:
+        raise SplitUnsupportedError(
+            f"backend={backend!r} does not support split training.",
+            context=SplitErrorContext(
+                backend=backend,
+                split_point="",
+                module_path=None,
+                op_type=None,
+                layer_label=None,
+                reason="unsupported split training",
+            ),
+        ) from exc
+
+
+def train_suffix_result(
+    runtime: Any,
+    boundary: ReplayBoundary,
+    targets: Any,
+    loss_fn: Callable[[Any, Any], Any] | None = None,
+    optimizer: Any | None = None,
+) -> TrainingStepResult:
+    """Train or differentiate a backend split suffix and return structured metadata."""
+
+    return training_engine_for(runtime.adapter.name).train_suffix(
+        runtime,
+        boundary,
+        targets,
+        loss_fn=loss_fn,
+        optimizer=optimizer,
+    )
 
 
 def train_suffix(
@@ -560,50 +851,13 @@ def train_suffix(
 ) -> tuple[Any, BoundaryGradients]:
     """Train or differentiate a backend split suffix."""
 
-    if runtime.adapter.name == "torch":
-        return _train_suffix_torch(
-            runtime,
-            boundary,
-            targets,
-            loss_fn=loss_fn,
-            optimizer=optimizer,
-        )
-    if runtime.adapter.name == "tf":
-        return _train_suffix_tf(
-            runtime,
-            boundary,
-            targets,
-            loss_fn=loss_fn,
-            optimizer=optimizer,
-        )
-    if runtime.adapter.name == "paddle":
-        return _train_suffix_paddle(
-            runtime,
-            boundary,
-            targets,
-            loss_fn=loss_fn,
-            optimizer=optimizer,
-        )
-    if runtime.adapter.name == "jax":
-        return _train_suffix_jax(
-            runtime,
-            boundary,
-            targets,
-            loss_fn=loss_fn,
-            optimizer=optimizer,
-        )
-    if runtime.adapter.name == "tinygrad":
-        return _train_suffix_tinygrad(
-            runtime,
-            boundary,
-            targets,
-            loss_fn=loss_fn,
-            optimizer=optimizer,
-        )
-    raise SplitUnsupportedError(
-        f"backend={runtime.adapter.name!r} does not support split training.",
-        context=_context(runtime, "unsupported split training"),
-    )
+    return train_suffix_result(
+        runtime,
+        boundary,
+        targets,
+        loss_fn=loss_fn,
+        optimizer=optimizer,
+    ).as_tuple()
 
 
 def _backward_prefix_torch(
@@ -653,6 +907,8 @@ def _backward_prefix_tf(
 ) -> dict[str, Any]:
     """Backpropagate TensorFlow suffix gradients through a prefix tape."""
 
+    import tensorflow as tf
+
     runtime.validate_boundary(boundary)
     if not boundary.metadata.get("supports_prefix_backward"):
         raise SplitUnsupportedError(
@@ -671,14 +927,15 @@ def _backward_prefix_tf(
     if not targets:
         return {}
     sources = _trainable_param_handles(runtime, runtime.plan.prefix_node_ids)
-    if not sources:
+    gradient_sources = [_tf_gradient_source(tf, source) for source in sources]
+    if not gradient_sources:
         return {}
     if tape is None:
         raise SplitUnsupportedError(
             "TensorFlow backward_prefix requires a live GradientTape boundary.",
             context=_context(runtime, "missing tensorflow gradient tape"),
         )
-    grads = tape.gradient(targets, sources, output_gradients=output_grads)
+    grads = tape.gradient(targets, gradient_sources, output_gradients=output_grads)
     result = {
         str(getattr(source, "name", index)): grad
         for index, (source, grad) in enumerate(zip(sources, grads, strict=False))
@@ -795,19 +1052,11 @@ def backward_prefix(
 ) -> Any:
     """Backpropagate suffix boundary gradients through a graph-connected prefix."""
 
-    if runtime.adapter.name == "torch":
-        return _backward_prefix_torch(runtime, boundary, boundary_grads, optimizer=optimizer)
-    if runtime.adapter.name == "tf":
-        return _backward_prefix_tf(runtime, boundary, boundary_grads, optimizer=optimizer)
-    if runtime.adapter.name == "paddle":
-        return _backward_prefix_paddle(runtime, boundary, boundary_grads, optimizer=optimizer)
-    if runtime.adapter.name == "jax":
-        return _backward_prefix_jax(runtime, boundary, boundary_grads, optimizer=optimizer)
-    if runtime.adapter.name == "tinygrad":
-        return _backward_prefix_tinygrad(runtime, boundary, boundary_grads, optimizer=optimizer)
-    raise SplitUnsupportedError(
-        f"backend={runtime.adapter.name!r} does not support split training.",
-        context=_context(runtime, "unsupported split training"),
+    return training_engine_for(runtime.adapter.name).backward_prefix(
+        runtime,
+        boundary,
+        boundary_grads,
+        optimizer=optimizer,
     )
 
 
@@ -870,10 +1119,19 @@ def train_suffix_from_cache(
 
 
 __all__ = [
+    "BackendTrainingEngine",
     "BoundaryCacheDataset",
     "BoundaryGradients",
+    "JaxTrainingEngine",
+    "PaddleTrainingEngine",
+    "TensorFlowTrainingEngine",
+    "TinygradTrainingEngine",
+    "TorchTrainingEngine",
+    "TrainingStepResult",
     "backward_prefix",
     "build_feature_cache",
     "train_suffix",
+    "train_suffix_result",
     "train_suffix_from_cache",
+    "training_engine_for",
 ]

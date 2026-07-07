@@ -41,6 +41,7 @@ _PURE_REPLAY_ALLOWLIST = frozenset(
         "Cast",
         "ConcatV2",
         "Conv2D",
+        "DepthwiseConv2dNative",
         "Einsum",
         "MatMul",
         "MaxPool",
@@ -49,6 +50,7 @@ _PURE_REPLAY_ALLOWLIST = frozenset(
         "Neg",
         "RealDiv",
         "Relu",
+        "Relu6",
         "Reshape",
         "Rsqrt",
         "Softmax",
@@ -599,22 +601,29 @@ def _replay_raw_op(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
         "Cast": _replay_cast,
         "ConcatV2": _replay_concat_v2,
         "Conv2D": _replay_conv2d,
+        "DepthwiseConv2dNative": _replay_depthwise_conv2d_native,
         "Einsum": _replay_einsum,
+        "Identity": lambda item, args: _raw(item).Identity(input=args[0]),
         "MatMul": _replay_matmul,
         "MaxPool": _replay_pool,
         "Mean": _replay_mean,
+        "Maximum": lambda item, args: _raw(item).Maximum(x=args[0], y=args[1]),
+        "Minimum": lambda item, args: _raw(item).Minimum(x=args[0], y=args[1]),
         "Mul": lambda item, args: _raw(item).Mul(x=args[0], y=args[1]),
         "Neg": lambda item, args: _raw(item).Neg(x=args[0]),
         "Pack": _replay_pack,
+        "Pad": lambda item, args: _raw(item).Pad(input=args[0], paddings=args[1]),
         "RealDiv": lambda item, args: _raw(item).RealDiv(x=args[0], y=args[1]),
         "ReadVariableOp": lambda item, args: _raw(item).ReadVariableOp(
             resource=args[0],
             dtype=item.attrs["dtype"],
         ),
         "Relu": lambda item, args: _raw(item).Relu(features=args[0]),
+        "Relu6": lambda item, args: _raw(item).Relu6(features=args[0]),
         "Reshape": lambda item, args: _raw(item).Reshape(tensor=args[0], shape=args[1]),
         "Rsqrt": lambda item, args: _raw(item).Rsqrt(x=args[0]),
         "Shape": _replay_shape,
+        "Sigmoid": lambda item, args: _raw(item).Sigmoid(x=args[0]),
         "Softmax": lambda item, args: _raw(item).Softmax(logits=args[0]),
         "Sqrt": lambda item, args: _raw(item).Sqrt(x=args[0]),
         "SquaredDifference": lambda item, args: _raw(item).SquaredDifference(
@@ -622,6 +631,7 @@ def _replay_raw_op(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
             y=args[1],
         ),
         "Fill": lambda item, args: _raw(item).Fill(dims=args[0], value=args[1]),
+        "StopGradient": lambda item, args: _raw(item).StopGradient(input=args[0]),
         "StridedSlice": _replay_strided_slice,
         "Sub": lambda item, args: _raw(item).Sub(x=args[0], y=args[1]),
         "Squeeze": lambda item, args: _raw(item).Squeeze(
@@ -771,6 +781,20 @@ def _replay_conv2d(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
     )
 
 
+def _replay_depthwise_conv2d_native(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
+    """Replay ``DepthwiseConv2dNative``."""
+
+    return _raw(capture).DepthwiseConv2dNative(
+        input=inputs[0],
+        filter=inputs[1],
+        strides=list(capture.attrs["strides"]),
+        padding=_attr_str(capture.attrs["padding"]),
+        explicit_paddings=list(capture.attrs.get("explicit_paddings", [])),
+        data_format=_attr_str(capture.attrs.get("data_format", "NHWC")),
+        dilations=list(capture.attrs.get("dilations", [1, 1, 1, 1])),
+    )
+
+
 def _replay_einsum(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
     """Replay ``Einsum``.
 
@@ -857,14 +881,18 @@ def _replay_pool(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
     """
 
     raw_op = getattr(_raw(capture), capture.op_type)
-    return raw_op(
-        input=inputs[0],
-        ksize=list(capture.attrs["ksize"]),
-        strides=list(capture.attrs["strides"]),
-        padding=_attr_str(capture.attrs["padding"]),
-        explicit_paddings=list(capture.attrs.get("explicit_paddings", [])),
-        data_format=_attr_str(capture.attrs.get("data_format", "NHWC")),
-    )
+    kwargs = {
+        "ksize": list(capture.attrs["ksize"]),
+        "strides": list(capture.attrs["strides"]),
+        "padding": _attr_str(capture.attrs["padding"]),
+        "data_format": _attr_str(capture.attrs.get("data_format", "NHWC")),
+    }
+    if capture.op_type == "AvgPool":
+        kwargs["value"] = inputs[0]
+    else:
+        kwargs["input"] = inputs[0]
+        kwargs["explicit_paddings"] = list(capture.attrs.get("explicit_paddings", []))
+    return raw_op(**kwargs)
 
 
 def _replay_pack(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:

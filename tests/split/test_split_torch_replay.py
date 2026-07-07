@@ -168,6 +168,20 @@ def test_before_and_after_boundaries_work() -> None:
     _assert_close(before.replay(x), model(x))
 
 
+def test_identity_output_marker_reconstructs_from_graph_parent() -> None:
+    """Suffix replay reconstructs synthetic output markers without executing them."""
+
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(6, 4), nn.Dropout(p=0.0)).eval()
+    x = torch.ones(2, 6)
+
+    runtime = tl.prepare_split(model, x, tl.SplitSpec("after:dropout", dynamic_batch=(1, 3)))
+
+    for batch in (1, 3):
+        replay_x = torch.ones(batch, 6)
+        _assert_close(runtime.replay(replay_x), model(replay_x))
+
+
 def test_residual_frontier_includes_skip_tensor() -> None:
     """Residual suffix needs both primary and skip boundary tensors."""
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from typing import Any
 
 import pytest
@@ -10,16 +9,7 @@ import pytest
 from torchlens.split.adapters import resolve_split_adapter
 from torchlens.split.errors import SplitUnsupportedError
 
-
-def _paddle_runtime_or_skip() -> Any:
-    """Import Paddle unless TensorFlow has made this process unsafe for it."""
-
-    tensorflow_loaded = any(
-        name == "tensorflow" or name.startswith("tensorflow.") for name in sys.modules
-    )
-    if "paddle" not in sys.modules and tensorflow_loaded:
-        pytest.skip("Paddle runtime is unsafe to import after TensorFlow in this process")
-    return pytest.importorskip("paddle")
+from _paddle_subprocess import run_paddle_subprocess
 
 
 def _flatten_numbers(value: Any) -> list[float]:
@@ -92,35 +82,44 @@ def test_mlx_optional_adapter_gate() -> None:
 def test_paddle_optional_adapter_gate() -> None:
     """Installed Paddle supports generated-eager split replay."""
 
-    paddle = _paddle_runtime_or_skip()
-    import torchlens as tl
+    run_paddle_subprocess(
+        """
+        import paddle
+        import torchlens as tl
+        from torchlens.split.adapters import resolve_split_adapter
 
-    def model(x: object) -> object:
-        return paddle.nn.functional.relu(x) * 2
+        def model(x):
+            return paddle.nn.functional.relu(x) * 2
 
-    x = paddle.randn([2, 3], dtype="float32")
-    adapter = resolve_split_adapter("paddle")
+        x = paddle.randn([2, 3], dtype="float32")
+        adapter = resolve_split_adapter("paddle")
 
-    assert adapter.supports_replay is True
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("after:relu", backend="paddle"))
-    replayed = runtime.replay(x)
-    assert bool(paddle.allclose(replayed, model(x)).item())
-    trainable = tl.prepare_split(
-        model,
-        x,
-        tl.SplitSpec("after:relu", backend="paddle", trainable=True),
+        assert adapter.supports_replay is True
+        runtime = tl.prepare_split(model, x, tl.SplitSpec("after:relu", backend="paddle"))
+        replayed = runtime.replay(x)
+        assert bool(paddle.allclose(replayed, model(x)).item())
+        trainable = tl.prepare_split(
+            model,
+            x,
+            tl.SplitSpec("after:relu", backend="paddle", trainable=True),
+        )
+        assert trainable.segments.training_prefix is not None
+        """
     )
-    assert trainable.segments.training_prefix is not None
 
 
 def test_paddle_training_capability_is_advertised() -> None:
     """Paddle split training is exposed by the adapter."""
 
-    _paddle_runtime_or_skip()
+    run_paddle_subprocess(
+        """
+        from torchlens.split.adapters import resolve_split_adapter
 
-    adapter = resolve_split_adapter("paddle")
+        adapter = resolve_split_adapter("paddle")
 
-    assert adapter.supports_training is True
+        assert adapter.supports_training is True
+        """
+    )
 
 
 def test_tf_optional_adapter_gate() -> None:

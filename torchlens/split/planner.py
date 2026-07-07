@@ -133,6 +133,12 @@ def _call_group_ids(graph: SplitTraceGraph, node: SplitTraceNode) -> set[str]:
         candidate.canonical_id
         for candidate in graph.nodes
         if candidate.func_call_id == node.func_call_id
+        and not (
+            candidate.is_input
+            or candidate.is_output
+            or candidate.is_buffer
+            or candidate.is_buffer_only_source
+        )
     }
 
 
@@ -180,6 +186,18 @@ def _frontier_node_ids(
             parent_node = graph.node_for_label(parent)
             if parent_node is not None and parent_node.canonical_id in prefix_node_ids:
                 frontier.add(parent_node.canonical_id)
+    for node_id in graph.input_node_ids:
+        if node_id in suffix_node_ids:
+            frontier.add(node_id)
+    if not frontier and not suffix_node_ids and not graph.output_node_ids:
+        terminal_prefix_nodes = [
+            node
+            for node in graph.nodes
+            if node.canonical_id in prefix_node_ids
+            and not (node.is_input or node.is_buffer or node.is_buffer_only_source)
+        ]
+        if terminal_prefix_nodes:
+            frontier.add(terminal_prefix_nodes[-1].canonical_id)
     return tuple(sorted(frontier, key=lambda node_id: order[node_id]))
 
 

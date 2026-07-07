@@ -232,6 +232,13 @@ def _attach_paddle_capture_templates(
 ) -> list[SplitTraceNode]:
     """Attach Paddle replay templates that live on backend capture records."""
 
+    params_by_module: dict[str, tuple[Any, ...]] = {}
+    for param in getattr(trace, "param_logs", ()) or ():
+        module_address = getattr(param, "module_address", None)
+        if isinstance(module_address, str):
+            params_by_module.setdefault(module_address, ())
+            params_by_module[module_address] = (*params_by_module[module_address], param)
+
     captures = {
         str(getattr(capture, "label_raw")): capture
         for capture in getattr(trace, "_paddle_op_captures", ()) or ()
@@ -251,6 +258,8 @@ def _attach_paddle_capture_templates(
                 target=getattr(capture, "func", node.target),
                 args_template=tuple(getattr(capture, "args_template", ()) or ()),
                 kwargs_template=dict(getattr(capture, "kwargs_template", {}) or {}),
+                param_refs=node.param_refs
+                or params_by_module.get(node.module_path or "", ()),
             )
         )
     return updated

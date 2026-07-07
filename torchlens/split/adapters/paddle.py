@@ -11,7 +11,7 @@ from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
 from ..graph import SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
-from ..shape import maybe_rewrite_dynamic_batch_value
+from ..shape import infer_runtime_batch_size_from_overlay, maybe_rewrite_dynamic_batch_value
 from ..spec import SplitSpec
 from .base import SegmentBundle
 
@@ -71,6 +71,42 @@ def _param_ref_handle(param: Any) -> Any:
     return handle
 
 
+def _numel_from_shape(shape: Any) -> int | None:
+    """Return the product of a concrete shape-like value."""
+
+    try:
+        dims = tuple(int(dim) for dim in shape)
+    except (TypeError, ValueError):
+        return None
+    product = 1
+    for dim in dims:
+        product *= dim
+    return product
+
+
+class _LiveParamCursor:
+    """Resolve unlabeled positional Paddle parameter template leaves in order."""
+
+    def __init__(self, node: SplitTraceNode) -> None:
+        """Create a cursor over live parameter handles for ``node``."""
+
+        self._handles = [
+            handle
+            for param in node.param_refs
+            if (handle := _param_ref_handle(param)) is not None
+        ]
+        self._index = 0
+
+    def next(self) -> Any | None:
+        """Return the next live parameter handle, if any."""
+
+        if self._index >= len(self._handles):
+            return None
+        handle = self._handles[self._index]
+        self._index += 1
+        return handle
+
+
 class _PaddleGeneratedSegmentBase:
     """Shared generated-eager replay helpers for Paddle."""
 
@@ -108,7 +144,8 @@ class _PaddleGeneratedSegmentBase:
     def _param_component_value(self, key: Any, node: SplitTraceNode) -> Any:
         """Resolve an unlabeled Paddle tensor template leaf from ``node.param_refs``."""
 
-        key_text = str(key)
+        keyed_name = self._param_name_for_template_key(key, node)
+        key_text = str(keyed_name if keyed_name is not None else key)
         for param in node.param_refs:
             name = getattr(param, "name", None)
             address = getattr(param, "address", None)
@@ -123,20 +160,66 @@ class _PaddleGeneratedSegmentBase:
             context=self._context(node, "unlabeled tensor template"),
         )
 
+    @staticmethod
+    def _param_name_for_template_key(key: Any, node: SplitTraceNode) -> str | None:
+        """Return the Paddle parameter name implied by a positional op argument."""
+
+        if not isinstance(key, int):
+            return None
+        if node.op_type in {"c_ops.conv2d", "c_ops.depthwise_conv2d"} and key == 1:
+            return "weight"
+        if node.op_type in {"c_ops.depthwise_conv2d_bias"}:
+            return {1: "weight", 2: "bias"}.get(key)
+        if node.op_type == "c_ops.batch_norm":
+            return {1: "_mean", 2: "_variance", 3: "weight", 4: "bias"}.get(key)
+        return None
+
+    def _shape_matched_param_component_value(self, node: SplitTraceNode) -> Any | None:
+        """Resolve an unlabeled parameter by matching this node's output shape."""
+
+        if node.output_shape is None:
+            return None
+        output_numel = _numel_from_shape(node.output_shape)
+        if output_numel is None:
+            return None
+        matches: list[Any] = []
+        for param in node.param_refs:
+            handle = _param_ref_handle(param)
+            if handle is None:
+                continue
+            if _numel_from_shape(getattr(handle, "shape", None)) == output_numel:
+                matches.append(handle)
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
     def _resolve_component(
         self,
         component: Any,
         node: SplitTraceNode,
         overlay: dict[str, Any],
         *,
+        param_cursor: _LiveParamCursor,
         template_key: Any | None = None,
     ) -> Any:
         """Resolve one captured Paddle template component."""
 
         if _is_tensor_marker(component):
             label = component.get("label")
-            if label is None and template_key is not None:
-                return self._param_component_value(template_key, node)
+            if label is None:
+                keyed_name = (
+                    template_key
+                    if isinstance(template_key, str)
+                    else self._param_name_for_template_key(template_key, node)
+                )
+                if keyed_name is not None:
+                    return self._param_component_value(keyed_name, node)
+                value = self._shape_matched_param_component_value(node)
+                if value is not None:
+                    return value
+                value = param_cursor.next()
+                if value is not None:
+                    return value
             if not isinstance(label, str):
                 raise SplitUnsupportedError(
                     f"{node.label!r} has an unlabeled Paddle tensor template leaf.",
@@ -150,32 +233,51 @@ class _PaddleGeneratedSegmentBase:
                 )
             return overlay[node_id]
         if isinstance(component, tuple):
-            return tuple(self._resolve_component(item, node, overlay) for item in component)
+            return tuple(
+                self._resolve_component(
+                    item,
+                    node,
+                    overlay,
+                    param_cursor=param_cursor,
+                    template_key=index,
+                )
+                for index, item in enumerate(component)
+            )
         if isinstance(component, list):
-            return [self._resolve_component(item, node, overlay) for item in component]
+            return [
+                self._resolve_component(
+                    item,
+                    node,
+                    overlay,
+                    param_cursor=param_cursor,
+                    template_key=index,
+                )
+                for index, item in enumerate(component)
+            ]
         if isinstance(component, dict):
             return {
-                key: self._resolve_component(value, node, overlay, template_key=key)
+                key: self._resolve_component(
+                    value,
+                    node,
+                    overlay,
+                    param_cursor=param_cursor,
+                    template_key=key,
+                )
                 for key, value in component.items()
             }
         return component
 
     def _runtime_batch_size(self, overlay: dict[str, Any]) -> int | None:
-        """Infer runtime batch size from symbolized input nodes."""
+        """Infer runtime batch size from available replay tensors."""
 
         if self.spec.dynamic_batch is None or self.graph.traced_batch_size is None:
             return None
-        for node_id in self.graph.input_node_ids:
-            node = self._node_by_id[node_id]
-            if not node.output_shape or node.output_shape[0] != self.graph.traced_batch_size:
-                continue
-            value = overlay.get(node_id)
-            shape = getattr(value, "shape", None)
-            if self._is_paddle_tensor(value) and shape is not None and len(shape) == len(
-                node.output_shape
-            ):
-                return int(shape[0])
-        return None
+        return infer_runtime_batch_size_from_overlay(
+            overlay,
+            node_by_id=self._node_by_id,
+            traced_batch_size=self.graph.traced_batch_size,
+            is_tensor=self._is_paddle_tensor,
+        )
 
     @staticmethod
     def _is_paddle_tensor(value: Any) -> bool:
@@ -225,11 +327,25 @@ class _PaddleGeneratedSegmentBase:
                 f"{node.label!r} has no captured Paddle args_template.",
                 context=self._context(node, "missing args_template"),
             )
+        param_cursor = _LiveParamCursor(node)
         args = tuple(
-            self._resolve_component(component, node, overlay) for component in node.args_template
+            self._resolve_component(
+                component,
+                node,
+                overlay,
+                param_cursor=param_cursor,
+                template_key=index,
+            )
+            for index, component in enumerate(node.args_template)
         )
         kwargs = {
-            str(key): self._resolve_component(component, node, overlay, template_key=key)
+            str(key): self._resolve_component(
+                component,
+                node,
+                overlay,
+                param_cursor=param_cursor,
+                template_key=key,
+            )
             for key, component in (node.kwargs_template or {}).items()
         }
         return self._rewrite_dynamic_args(node, args, kwargs, overlay)

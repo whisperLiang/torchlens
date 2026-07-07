@@ -10,6 +10,11 @@ from .adapters import resolve_split_adapter
 from .errors import SplitErrorContext, SplitUnsupportedError
 from .graph import split_graph_from_trace
 from .planner import plan_split
+from .program import (
+    build_capability_report,
+    ensure_capability_report_supported,
+    lower_replay_program,
+)
 from .runtime import SplitRuntime
 from .spec import SplitSpec
 
@@ -144,6 +149,17 @@ def prepare_split(
         dynamic_batch=spec.dynamic_batch,
     )
     plan = plan_split(graph, spec)
+    prefix_program = lower_replay_program(graph, plan, spec, segment="prefix")
+    suffix_program = lower_replay_program(graph, plan, spec, segment="suffix")
+    capability_report = build_capability_report(
+        adapter,
+        graph,
+        plan,
+        spec,
+        prefix_program=prefix_program,
+        suffix_program=suffix_program,
+    )
+    ensure_capability_report_supported(capability_report, spec)
     segments = adapter.build_segments(graph, plan, spec)
     return SplitRuntime(
         model=model,
@@ -153,6 +169,9 @@ def prepare_split(
         plan=plan,
         adapter=adapter,
         segments=segments,
+        capability_report=capability_report,
+        prefix_program=prefix_program,
+        suffix_program=suffix_program,
     )
 
 

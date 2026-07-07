@@ -85,10 +85,21 @@ _FUNCTIONAL_CORE_OPS = {
     "max_pool1d",
     "max_pool2d",
     "relu",
+    "relu6",
     "sigmoid",
     "silu",
     "softmax",
     "tanh",
+}
+_C_OPS_CORE_OPS = {
+    "add",
+    "batch_norm",
+    "conv2d",
+    "depthwise_conv2d",
+    "depthwise_conv2d_bias",
+    "hardswish",
+    "pool2d",
+    "relu6",
 }
 _TENSOR_CORE_METHODS = {
     "__add__",
@@ -105,6 +116,7 @@ _TENSOR_CORE_METHODS = {
     "__rtruediv__",
     "__sub__",
     "__truediv__",
+    "_use_gpudnn",
     "abs",
     "add",
     "astype",
@@ -189,6 +201,7 @@ _DENY_SUBSTRINGS = (
     "static",
 )
 _ALIAS_ALLOWED_NAMES = {
+    "_use_gpudnn",
     "astype",
     "cast",
     "contiguous",
@@ -459,8 +472,15 @@ def _iter_inventory_candidates(
     for owner, owner_name, curated in (
         (paddle, "paddle", _TOP_LEVEL_CORE_OPS),
         (functional, "paddle.nn.functional", _FUNCTIONAL_CORE_OPS),
+        (
+            getattr(paddle, "_C_ops", None),
+            "paddle._C_ops",
+            _C_OPS_CORE_OPS,
+        ),
         (tensor_cls, "paddle.Tensor", _TENSOR_CORE_METHODS | _SCALAR_ESCAPE_NAMES | _MUTATOR_NAMES),
     ):
+        if owner is None:
+            continue
         for name in sorted(set(dir(owner))):
             original = getattr(owner, name, None)
             if not callable(original):
@@ -548,6 +568,8 @@ def _op_name(owner_name: str, name: str) -> str:
         return f"tensor.{name}"
     if owner_name == "paddle.nn.functional":
         return f"functional.{name}"
+    if owner_name == "paddle._C_ops":
+        return f"c_ops.{name}"
     return name
 
 

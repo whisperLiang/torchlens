@@ -7,7 +7,11 @@ import pytest
 import torchlens as tl
 from torchlens.split import (
     BoundaryTensorSpec,
+    CapabilityStatus,
+    ReplayOp,
     ReplayBoundary,
+    ReplayProgram,
+    SplitCapabilityReport,
     SplitRuntime,
     SplitSpec,
     prepare_split,
@@ -25,6 +29,10 @@ def test_split_exports_are_public() -> None:
     assert tl.SplitRuntime is SplitRuntime
     assert tl.prepare_split is prepare_split
     assert tl.prepare_split_replay is prepare_split_replay
+    assert CapabilityStatus.__name__ == "CapabilityStatus"
+    assert ReplayOp.__name__ == "ReplayOp"
+    assert ReplayProgram.__name__ == "ReplayProgram"
+    assert SplitCapabilityReport.__name__ == "SplitCapabilityReport"
     for name in (
         "SplitSpec",
         "BoundaryTensorSpec",
@@ -34,6 +42,13 @@ def test_split_exports_are_public() -> None:
         "prepare_split_replay",
     ):
         assert name in tl.__all__
+    for name in (
+        "CapabilityStatus",
+        "ReplayOp",
+        "ReplayProgram",
+        "SplitCapabilityReport",
+    ):
+        assert name in tl.split.__all__
 
 
 def test_split_spec_defaults_and_validation() -> None:

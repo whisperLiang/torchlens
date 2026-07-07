@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from numbers import Integral
-from typing import Any
+from typing import Any, Callable
 
 from .errors import SplitBoundaryError, SplitErrorContext, SplitUnsupportedError
 
@@ -83,6 +83,39 @@ def infer_traced_batch_size(trace: Any) -> int | None:
                     return leading_dim
     if input_leading_dims:
         return input_leading_dims[0]
+    return None
+
+
+def infer_runtime_batch_size_from_overlay(
+    overlay: dict[str, Any],
+    *,
+    node_by_id: dict[str, Any],
+    traced_batch_size: int | None,
+    is_tensor: Callable[[Any], bool],
+) -> int | None:
+    """Infer runtime leading batch size from currently available replay values.
+
+    Prefix replay usually has original input nodes in ``overlay``; suffix replay
+    usually has only boundary nodes. Scanning all overlay values keeps dynamic
+    shape literal rewriting available on both sides of the split.
+    """
+
+    if traced_batch_size is None:
+        return None
+    for node_id, value in overlay.items():
+        node = node_by_id.get(node_id)
+        if node is None or not getattr(node, "output_shape", None):
+            continue
+        output_shape = node.output_shape
+        if not output_shape or output_shape[0] != traced_batch_size:
+            continue
+        shape = getattr(value, "shape", None)
+        if not is_tensor(value) or shape is None or len(shape) != len(output_shape):
+            continue
+        try:
+            return int(shape[0])
+        except (TypeError, ValueError):
+            continue
     return None
 
 
@@ -427,6 +460,7 @@ __all__ = [
     "ShapeEnv",
     "SymbolicDim",
     "SymbolicShape",
+    "infer_runtime_batch_size_from_overlay",
     "infer_traced_batch_size",
     "is_dynamic_batch_shape_sensitive_op",
     "maybe_rewrite_dynamic_batch_value",

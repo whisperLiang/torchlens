@@ -12,7 +12,7 @@ from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
 from ..graph import SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
-from ..shape import maybe_rewrite_dynamic_batch_value
+from ..shape import infer_runtime_batch_size_from_overlay, maybe_rewrite_dynamic_batch_value
 from ..spec import SplitSpec
 from .base import SegmentBundle
 
@@ -59,6 +59,18 @@ def _param_ref_handle(param: Any) -> Any:
     if handle is None:
         handle = getattr(param, "handle", None)
     return handle
+
+
+def _tf_gradient_source(value: Any) -> Any:
+    """Return a TensorFlow object suitable for GradientTape watch/gradient."""
+
+    tf = _tf()
+    if isinstance(value, (tf.Tensor, tf.Variable)):
+        return value
+    keras_value = getattr(value, "value", None)
+    if isinstance(keras_value, (tf.Tensor, tf.Variable)):
+        return keras_value
+    return value
 
 
 class _TfGeneratedSegmentBase:
@@ -148,19 +160,17 @@ class _TfGeneratedSegmentBase:
         return overlay[parent_id]
 
     def _runtime_batch_size(self, overlay: dict[str, Any]) -> int | None:
-        """Infer runtime batch size from symbolized input nodes."""
+        """Infer runtime batch size from available replay tensors."""
 
         if self.spec.dynamic_batch is None or self.graph.traced_batch_size is None:
             return None
-        for node_id in self.graph.input_node_ids:
-            node = self._node_by_id[node_id]
-            if not node.output_shape or node.output_shape[0] != self.graph.traced_batch_size:
-                continue
-            value = overlay.get(node_id)
-            shape = getattr(value, "shape", None)
-            if shape is not None and len(shape) == len(node.output_shape):
-                return int(shape[0])
-        return None
+        tf = _tf()
+        return infer_runtime_batch_size_from_overlay(
+            overlay,
+            node_by_id=self._node_by_id,
+            traced_batch_size=self.graph.traced_batch_size,
+            is_tensor=lambda value: isinstance(value, (tf.Tensor, tf.Variable)),
+        )
 
     def _rewrite_tf_literal_tensor(
         self,
@@ -292,7 +302,7 @@ class TfGeneratedPrefix(_TfGeneratedSegmentBase):
                     if _is_diff_tf_tensor(value, tf):
                         tape.watch(value)
                 for value in self._trainable_param_handles(self.plan.prefix_node_ids):
-                    tape.watch(value)
+                    tape.watch(_tf_gradient_source(value))
                 overlay = {
                     node_id: value
                     for node_id, value in zip(self.graph.input_node_ids, input_leaves)

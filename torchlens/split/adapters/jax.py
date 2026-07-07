@@ -11,7 +11,7 @@ from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
 from ..graph import SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
-from ..shape import maybe_rewrite_dynamic_batch_value
+from ..shape import infer_runtime_batch_size_from_overlay, maybe_rewrite_dynamic_batch_value
 from ..spec import SplitSpec
 from .base import SegmentBundle
 
@@ -76,7 +76,50 @@ def _flatten_tensor_leaves(value: Any) -> list[Any]:
         for item in value:
             leaves.extend(_flatten_tensor_leaves(item))
         return leaves
-    return []
+    try:
+        leaves = _jax().tree_util.tree_leaves(value)
+    except Exception:
+        return []
+    if len(leaves) == 1 and leaves[0] is value:
+        return []
+    flattened: list[Any] = []
+    for item in leaves:
+        if _is_jax_tensor(item):
+            flattened.append(item)
+    return flattened
+
+
+_JAX_DYNAMIC_SHAPE_PARAM_KEYS = frozenset(
+    {
+        "shape",
+        "new_sizes",
+        "sizes",
+    }
+)
+
+
+def _jax_dynamic_param_value(
+    *,
+    key: str,
+    value: Any,
+    node: SplitTraceNode,
+    capture: JaxEquationCapture,
+    traced_batch_size: int | None,
+    runtime_batch_size: int | None,
+    dynamic_batch: tuple[int, int] | None,
+) -> Any:
+    """Rewrite only JAX primitive params that are true shape literals."""
+
+    if key not in _JAX_DYNAMIC_SHAPE_PARAM_KEYS:
+        return value
+    return maybe_rewrite_dynamic_batch_value(
+        value,
+        op_type=node.op_type,
+        func_name=capture.primitive,
+        traced_batch_size=traced_batch_size,
+        runtime_batch_size=runtime_batch_size,
+        dynamic_batch=dynamic_batch,
+    )
 
 
 class _JaxGeneratedSegmentBase:
@@ -147,21 +190,16 @@ class _JaxGeneratedSegmentBase:
         return overlay[parent_id]
 
     def _runtime_batch_size(self, overlay: dict[str, Any]) -> int | None:
-        """Infer runtime batch size from symbolized input nodes."""
+        """Infer runtime batch size from available replay tensors."""
 
         if self.spec.dynamic_batch is None or self.graph.traced_batch_size is None:
             return None
-        for node_id in self.graph.input_node_ids:
-            node = self._node_by_id[node_id]
-            if not node.output_shape or node.output_shape[0] != self.graph.traced_batch_size:
-                continue
-            value = overlay.get(node_id)
-            shape = getattr(value, "shape", None)
-            if _is_jax_tensor(value) and shape is not None and len(shape) == len(
-                node.output_shape
-            ):
-                return int(shape[0])
-        return None
+        return infer_runtime_batch_size_from_overlay(
+            overlay,
+            node_by_id=self._node_by_id,
+            traced_batch_size=self.graph.traced_batch_size,
+            is_tensor=_is_jax_tensor,
+        )
 
     def _params_override(
         self,
@@ -173,10 +211,11 @@ class _JaxGeneratedSegmentBase:
 
         runtime_batch_size = self._runtime_batch_size(overlay)
         rewritten = {
-            key: maybe_rewrite_dynamic_batch_value(
-                value,
-                op_type=node.op_type,
-                func_name=capture.primitive,
+            key: _jax_dynamic_param_value(
+                key=str(key),
+                value=value,
+                node=node,
+                capture=capture,
                 traced_batch_size=self.graph.traced_batch_size,
                 runtime_batch_size=runtime_batch_size,
                 dynamic_batch=self.spec.dynamic_batch,

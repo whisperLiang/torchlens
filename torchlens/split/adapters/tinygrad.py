@@ -14,7 +14,7 @@ from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
 from ..graph import SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
-from ..shape import is_dynamic_batch_shape_sensitive_op
+from ..shape import infer_runtime_batch_size_from_overlay, is_dynamic_batch_shape_sensitive_op
 from ..spec import SplitSpec
 from .base import SegmentBundle
 
@@ -67,6 +67,32 @@ def _is_tinygrad_shape_uop(uop: Any) -> bool:
     return getattr(uop, "op", None) in {ops.STACK, ops.CONST} and _is_tinygrad_weakint(
         getattr(uop, "dtype", None)
     )
+
+
+def _is_tinygrad_literal_uop(uop: Any) -> bool:
+    """Return whether ``uop`` is a literal branch that should not be parent-swapped."""
+
+    ops = _tinygrad_ops()
+    return getattr(uop, "op", None) in {ops.CONST, ops.STACK}
+
+
+def _rewrite_tinygrad_uop_device(uop: Any, target_device: str | None) -> Any:
+    """Rewrite captured tinygrad DEVICE leaves to the requested replay device."""
+
+    if target_device is None or not hasattr(uop, "replace"):
+        return uop
+    ops = _tinygrad_ops()
+    if getattr(uop, "op", None) is ops.DEVICE:
+        if getattr(uop, "arg", None) == target_device:
+            return uop
+        return uop.replace(arg=target_device)
+    src = tuple(getattr(uop, "src", ()) or ())
+    if not src:
+        return uop
+    rewritten_src = tuple(_rewrite_tinygrad_uop_device(item, target_device) for item in src)
+    if rewritten_src == src:
+        return uop
+    return uop.replace(src=rewritten_src)
 
 
 def _tinygrad_shape_tuple(uop: Any) -> tuple[int, ...] | None:
@@ -167,19 +193,75 @@ class _TinygradGeneratedSegmentBase:
     def _live_param_value(self, node: SplitTraceNode) -> Any | None:
         """Return a live tinygrad parameter handle for a param source node."""
 
-        if not node.is_param_source:
-            return None
         for param in node.param_refs:
-            handle = getattr(param, "_param_ref", None) or getattr(param, "handle", None)
+            handle = getattr(param, "_param_ref", None)
+            if handle is None:
+                handle = getattr(param, "handle", None)
             if self._backend.is_tensor(handle):
                 return handle
         return None
 
-    def _source_value(self, node: SplitTraceNode, *, preserve_autograd: bool = False) -> Any:
+    def _live_child_param_source_value(self, node: SplitTraceNode) -> Any | None:
+        """Return a unique live parameter handle represented by a source buffer."""
+
+        if node.op_type != "buffer":
+            return None
+        handles: list[Any] = []
+        seen: set[int] = set()
+        for child_label in node.children:
+            child_id = self._label_to_id.get(child_label)
+            child = self._node_by_id.get(child_id) if child_id is not None else None
+            if child is None:
+                continue
+            handle = self._live_param_value(child)
+            if handle is None or id(handle) in seen:
+                continue
+            seen.add(id(handle))
+            handles.append(handle)
+        return handles[0] if len(handles) == 1 else None
+
+    def _tensor_device(self, value: Any) -> str | None:
+        """Return a tinygrad tensor device name, if available."""
+
+        if not self._backend.is_tensor(value):
+            return None
+        device = getattr(value, "device", None)
+        return str(device) if device is not None else None
+
+    def _move_source_to_device(self, value: Any, target_device: str | None) -> Any:
+        """Move a replay source payload to the suffix boundary device."""
+
+        if target_device is None or not self._backend.is_tensor(value):
+            return value
+        if self._tensor_device(value) == target_device or not hasattr(value, "to"):
+            return value
+        moved = value.to(target_device)
+        realize = getattr(moved, "realize", None)
+        return realize() if callable(realize) else moved
+
+    def _overlay_device(self, overlay: dict[str, Any]) -> str | None:
+        """Infer the execution device from boundary or parent tensor values."""
+
+        for value in overlay.values():
+            device = self._tensor_device(value)
+            if device is not None:
+                return device
+        return None
+
+    def _source_value(
+        self,
+        node: SplitTraceNode,
+        *,
+        preserve_autograd: bool = False,
+        target_device: str | None = None,
+    ) -> Any:
         """Return a replay value for source-like nodes."""
 
         if preserve_autograd:
             live_param = self._live_param_value(node)
+            if live_param is not None:
+                return live_param
+            live_param = self._live_child_param_source_value(node)
             if live_param is not None:
                 return live_param
         value = getattr(node.op, "out", None)
@@ -188,7 +270,7 @@ class _TinygradGeneratedSegmentBase:
                 f"{node.label!r} source value is unavailable.",
                 context=self._context(node, "missing source value"),
             )
-        return value
+        return self._move_source_to_device(value, target_device)
 
     def _resolve_parent_value(
         self,
@@ -207,22 +289,16 @@ class _TinygradGeneratedSegmentBase:
         return overlay[parent_id]
 
     def _runtime_batch_size(self, overlay: dict[str, Any]) -> int | None:
-        """Infer runtime batch size from symbolized input nodes."""
+        """Infer runtime batch size from available replay tensors."""
 
         if self.spec.dynamic_batch is None or self.graph.traced_batch_size is None:
             return None
-        candidate_node_ids = (*self.graph.input_node_ids, *self.plan.boundary_node_ids)
-        for node_id in candidate_node_ids:
-            node = self._node_by_id[node_id]
-            if not node.output_shape or node.output_shape[0] != self.graph.traced_batch_size:
-                continue
-            value = overlay.get(node_id)
-            shape = getattr(value, "shape", None)
-            if self._backend.is_tensor(value) and shape is not None and len(shape) == len(
-                node.output_shape
-            ):
-                return int(shape[0])
-        return None
+        return infer_runtime_batch_size_from_overlay(
+            overlay,
+            node_by_id=self._node_by_id,
+            traced_batch_size=self.graph.traced_batch_size,
+            is_tensor=self._backend.is_tensor,
+        )
 
     def _rewrite_shape_descriptor(
         self,
@@ -294,24 +370,34 @@ class _TinygradGeneratedSegmentBase:
         overlay: dict[str, Any],
         *,
         preserve_autograd: bool = False,
+        target_device: str | None = None,
     ) -> Any:
         """Replay one captured tinygrad UOp using runtime parent values."""
 
+        if preserve_autograd and node.op_type == "buffer":
+            live_param = self._live_child_param_source_value(node)
+            if live_param is not None:
+                return live_param
         capture = node.target
         if not isinstance(capture, TinygradUOpCapture):
             raise SplitUnsupportedError(
                 f"{node.label!r} has no tinygrad UOp capture.",
                 context=self._context(node, "missing tinygrad UOp capture"),
             )
-        src = list(getattr(capture.uop, "src", ()) or ())
+        src = [
+            _rewrite_tinygrad_uop_device(item, target_device)
+            for item in (getattr(capture.uop, "src", ()) or ())
+        ]
         if not src and not capture.parent_arg_positions:
-            return capture.payload_snapshot
+            return self._move_source_to_device(capture.payload_snapshot, target_device)
         for position, parent_label in capture.parent_arg_positions:
             if position < 0 or position >= len(src):
                 raise SplitUnsupportedError(
                     f"{node.label!r} has invalid tinygrad parent arg position {position!r}.",
                     context=self._context(node, "invalid parent position"),
                 )
+            if _is_tinygrad_literal_uop(src[position]):
+                continue
             parent_value = self._resolve_parent_value(parent_label, node, overlay)
             if (
                 preserve_autograd
@@ -321,7 +407,10 @@ class _TinygradGeneratedSegmentBase:
                 src[position] = parent_value.uop
         src = self._rewrite_dynamic_uop_src(node, src, overlay)
         try:
-            replay_uop = capture.uop.replace(src=tuple(src))
+            replay_uop = _rewrite_tinygrad_uop_device(
+                capture.uop.replace(src=tuple(src)),
+                target_device,
+            )
             value = self._backend._tensor_from_uop(replay_uop)
             return value if preserve_autograd else self._backend._realized_copy(value)
         except Exception as exc:
@@ -335,9 +424,11 @@ class _TinygradGeneratedSegmentBase:
         overlay: dict[str, Any],
         *,
         preserve_autograd: bool = False,
+        target_device: str | None = None,
     ) -> dict[str, Any]:
         """Execute this segment's node set into ``overlay``."""
 
+        target_device = target_device or self._overlay_device(overlay)
         for node in self.graph.nodes:
             if node.canonical_id not in self.node_ids:
                 continue
@@ -348,6 +439,7 @@ class _TinygradGeneratedSegmentBase:
                     overlay[node.canonical_id] = self._source_value(
                         node,
                         preserve_autograd=preserve_autograd,
+                        target_device=target_device,
                     )
                 continue
             if node.is_output and node.target is None:
@@ -356,6 +448,7 @@ class _TinygradGeneratedSegmentBase:
                 node,
                 overlay,
                 preserve_autograd=preserve_autograd,
+                target_device=target_device,
             )
         return overlay
 
@@ -418,7 +511,11 @@ class TinygradGeneratedSuffix(_TinygradGeneratedSegmentBase):
             if node_id is not None and key in boundary.tensors:
                 overlay[node_id] = boundary.tensors[key]
         preserve_autograd = bool(boundary.metadata.get("suffix_training_roots"))
-        self._execute_nodes(overlay, preserve_autograd=preserve_autograd)
+        self._execute_nodes(
+            overlay,
+            preserve_autograd=preserve_autograd,
+            target_device=self._overlay_device(overlay),
+        )
         return self._reconstruct_output(overlay)
 
     def _output_leaf(self, node: SplitTraceNode, overlay: dict[str, Any]) -> Any:
@@ -502,7 +599,13 @@ class TinygradSplitAdapter:
 
         if not self.is_tensor(value) or device is None:
             return value
-        return value.to(str(device)) if hasattr(value, "to") else value
+        if not hasattr(value, "to"):
+            return value
+        detach = getattr(value, "detach", None)
+        source = detach() if callable(detach) else value
+        moved = source.to(str(device))
+        realize = getattr(moved, "realize", None)
+        return realize() if callable(realize) else moved
 
     def collate(self, values: list[Any]) -> Any:
         """Stack tinygrad tensor values."""

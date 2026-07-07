@@ -11,6 +11,7 @@ from .cache import load_boundary, save_boundary
 from .errors import SplitBoundaryError, SplitErrorContext
 from .graph import SplitTraceGraph
 from .planner import SplitPlan
+from .program import ReplayProgram, SplitCapabilityReport
 from .spec import BoundaryTensorSpec, SplitSpec
 from .validation import nested_allclose
 
@@ -25,6 +26,9 @@ class SplitRuntime:
     plan: SplitPlan
     adapter: SplitBackendAdapter
     segments: SegmentBundle
+    capability_report: SplitCapabilityReport | None
+    prefix_program: ReplayProgram | None
+    suffix_program: ReplayProgram | None
 
     def __init__(
         self,
@@ -36,6 +40,9 @@ class SplitRuntime:
         plan: SplitPlan,
         adapter: SplitBackendAdapter,
         segments: SegmentBundle,
+        capability_report: SplitCapabilityReport | None = None,
+        prefix_program: ReplayProgram | None = None,
+        suffix_program: ReplayProgram | None = None,
     ) -> None:
         """Create a prepared split runtime."""
 
@@ -46,6 +53,9 @@ class SplitRuntime:
         self.plan = plan
         self.adapter = adapter
         self.segments = segments
+        self.capability_report = capability_report
+        self.prefix_program = prefix_program
+        self.suffix_program = suffix_program
 
     @property
     def split_id(self) -> str:
@@ -140,6 +150,19 @@ class SplitRuntime:
         from .training import train_suffix
 
         return train_suffix(self, boundary, targets, loss_fn=loss_fn, optimizer=optimizer)
+
+    def train_suffix_result(
+        self,
+        boundary: ReplayBoundary,
+        targets: Any,
+        loss_fn: Any = None,
+        optimizer: Any = None,
+    ) -> Any:
+        """Train the suffix and return a structured training result."""
+
+        from .training import train_suffix_result
+
+        return train_suffix_result(self, boundary, targets, loss_fn=loss_fn, optimizer=optimizer)
 
     def backward_prefix(
         self,

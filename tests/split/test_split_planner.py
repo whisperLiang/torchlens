@@ -107,6 +107,49 @@ def test_percent_boundary_selects_eligible_compute_node() -> None:
     assert plan.boundary_kind == "after"
 
 
+def test_after_terminal_compute_without_output_node_keeps_boundary() -> None:
+    """Backend traces without explicit output nodes still expose terminal split output."""
+
+    graph = SplitTraceGraph(
+        backend="tf",
+        nodes=(
+            _node("input_1", is_input=True, raw_index=0),
+            _node("dense_1", parents=("input_1",), raw_index=1),
+        ),
+        input_node_ids=("input_1",),
+        output_node_ids=(),
+        graph_shape_hash="abc",
+        traced_batch_size=2,
+    )
+
+    plan = plan_split(graph, SplitSpec("after:dense_1", backend="tf"))
+
+    assert plan.suffix_node_ids == frozenset()
+    assert plan.boundary_node_ids == ("dense_1",)
+
+
+def test_before_first_compute_keeps_input_when_call_group_id_is_shared() -> None:
+    """Input placeholders sharing a backend call ID are not part of the compute group."""
+
+    graph = SplitTraceGraph(
+        backend="paddle",
+        nodes=(
+            _node("input_1", is_input=True, raw_index=1),
+            _node("linear_1", parents=("input_1",), raw_index=1),
+            _node("output_1", parents=("linear_1",), is_output=True, raw_index=2),
+        ),
+        input_node_ids=("input_1",),
+        output_node_ids=("output_1",),
+        graph_shape_hash="abc",
+        traced_batch_size=2,
+    )
+
+    plan = plan_split(graph, SplitSpec("before:linear_1", backend="paddle"))
+
+    assert "input_1" in plan.prefix_node_ids
+    assert plan.boundary_node_ids == ("input_1",)
+
+
 def test_target_errors() -> None:
     """Missing, ambiguous, and source/sink targets raise SplitSpecError."""
 
