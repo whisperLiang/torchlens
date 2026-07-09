@@ -14,6 +14,8 @@ from typing import Annotated, Any, Literal, get_args, get_origin, get_type_hints
 import torch
 from torch import nn
 
+from .. import _state
+from ._torch_compat import get_torch_capability_snapshot
 from .rng import (
     set_random_seed,
     log_current_rng_states,
@@ -86,13 +88,13 @@ class DoctorCheck:
     name:
         Human-readable check name.
     status:
-        ``"PASS"``, ``"FAIL"``, or ``"SKIP"``.
+        ``"PASS"``, ``"FAIL"``, ``"SKIP"``, or ``"WARN"``.
     detail:
         Short diagnostic detail.
     """
 
     name: str
-    status: Literal["PASS", "FAIL", "SKIP"]
+    status: Literal["PASS", "FAIL", "SKIP", "WARN"]
     detail: str
 
 
@@ -254,6 +256,109 @@ def _probe_fingerprint() -> DoctorCheck:
     return DoctorCheck("model fingerprint", status, fingerprint[:16] if fingerprint else "empty")
 
 
+def _probe_torch_capabilities() -> DoctorCheck:
+    """Return the runtime capability snapshot doctor row.
+
+    Returns
+    -------
+    DoctorCheck
+        Snapshot of probed private integration capabilities.
+    """
+
+    snapshot = _runtime_capability_snapshot()
+    missing = [name for name, available in snapshot.items() if not available]
+    detail = _format_capability_snapshot(snapshot)
+    if missing:
+        detail += "; missing=" + ",".join(missing)
+    return DoctorCheck("runtime capabilities", "PASS", detail)
+
+
+def _probe_torch_wrapper_bindings() -> DoctorCheck:
+    """Check torch namespace attributes against the installed wrapper registry.
+
+    Returns
+    -------
+    DoctorCheck
+        Warning-only detector for stale torch module attributes. This cannot
+        inspect arbitrary local aliases such as closure-bound ``from torch
+        import relu`` references, but it catches the cheap process-global case
+        where torch itself is no longer pointing at registered wrappers.
+    """
+
+    if not _state._orig_to_decorated:
+        return DoctorCheck("torch wrapper bindings", "SKIP", "wrappers not installed yet")
+    if not _state._is_decorated:
+        return DoctorCheck("torch wrapper bindings", "SKIP", "torch is currently unwrapped")
+
+    from ..constants import get_orig_torch_funcs
+
+    stale: list[str] = []
+    checked = 0
+    for namespace_name, func_name in get_orig_torch_funcs():
+        namespace_key = namespace_name.replace("torch.", "")
+        try:
+            namespace = nested_getattr(torch, namespace_key)
+        except (AttributeError, TypeError):
+            continue
+        if not hasattr(namespace, func_name):
+            continue
+        current = getattr(namespace, func_name)
+        checked += 1
+        if id(current) in _state._decorated_to_orig:
+            continue
+        if id(current) in _state._orig_to_decorated:
+            stale.append(f"{namespace_name}.{func_name}")
+
+    if stale:
+        examples = ", ".join(stale[:5])
+        return DoctorCheck(
+            "torch wrapper bindings",
+            "WARN",
+            f"{len(stale)}/{checked} torch attrs still point at original callables; "
+            f"examples={examples}",
+        )
+    return DoctorCheck(
+        "torch wrapper bindings",
+        "PASS",
+        f"checked={checked}; no stale torch namespace bindings detected",
+    )
+
+
+def _runtime_capability_snapshot() -> dict[str, bool]:
+    """Return all runtime compatibility capability flags.
+
+    Returns
+    -------
+    dict[str, bool]
+        Mapping from capability flag names to availability.
+    """
+
+    snapshot = get_torch_capability_snapshot()
+    try:
+        from torchlens.backends.tf._tf_compat import get_tf_capability_snapshot
+    except ImportError:
+        return snapshot
+    snapshot.update(get_tf_capability_snapshot())
+    return snapshot
+
+
+def _format_capability_snapshot(snapshot: dict[str, bool]) -> str:
+    """Format capability flags as a stable comma-separated list.
+
+    Parameters
+    ----------
+    snapshot:
+        Capability flags to format.
+
+    Returns
+    -------
+    str
+        Stable ``name=value`` list.
+    """
+
+    return ", ".join(f"{name}={available}" for name, available in sorted(snapshot.items()))
+
+
 def doctor() -> DoctorReport:
     """Run a TorchLens startup health check.
 
@@ -266,6 +371,8 @@ def doctor() -> DoctorReport:
 
     checks: list[DoctorCheck] = [
         DoctorCheck("pytorch", "PASS", torch.__version__),
+        _probe_torch_capabilities(),
+        _probe_torch_wrapper_bindings(),
         DoctorCheck(
             "cuda",
             "PASS" if torch.cuda.is_available() else "SKIP",
@@ -627,7 +734,7 @@ def find_executable_save_set(
     candidates: list[tuple[int, str]] = []
     for layer in layers:
         entry = trace[layer]
-        label = str(getattr(entry, "layer_label", getattr(entry, "layer_label", layer)))
+        label = str(getattr(entry, "layer_label", layer))
         memory = int(
             getattr(entry, "transformed_activation_memory", None)
             or getattr(entry, "activation_memory", None)

@@ -17,10 +17,6 @@ import torchlens
 from torchlens import trace as trace_fn
 from torchlens.data_classes import FuncCallLocation
 from torchlens.capture.flops import (
-    BACKWARD_MULTIPLIERS,
-    ELEMENTWISE_FLOPS,
-    SPECIALTY_HANDLERS,
-    ZERO_FLOPS_OPS,
     compute_backward_flops,
     compute_forward_flops,
 )
@@ -126,6 +122,23 @@ def test_tensor_info_fields(small_input):
     assert mh.total_activation_memory > 0
     assert isinstance(mh.total_activation_memory, torchlens.Bytes)
     assert len(str(mh.total_activation_memory)) > 0
+
+
+def test_forward_peak_memory_is_populated(small_input):
+    """forward_peak_memory reflects a real forward-pass peak, not a hard zero.
+
+    Regression: forward_peak_memory was declared and serialized but never written,
+    so it was always 0 while backward_peak_memory was measured. The forward pass
+    is now bracketed by a CPU/CUDA peak-memory probe (CUDA device peak; CPU host
+    RSS delta combined with the tracemalloc Python-allocation peak so even small
+    models read positive).
+    """
+
+    model = example_models.SimpleFF()
+    mh = trace_fn(model, small_input)
+    assert isinstance(mh.forward_peak_memory, torchlens.Bytes)
+    assert int(mh.forward_peak_memory) > 0
+    assert mh.forward_memory_backend in {"cpu", "cuda", "mps"}
 
 
 def test_param_info_fields(small_input):
@@ -1155,8 +1168,9 @@ def test_corrupt_output_outs(valid_mh_and_ground_truth):
     """Replacing the output layer's out with random data should fail."""
     mh, ground_truth = valid_mh_and_ground_truth
     output_label = mh.output_layers[0]
-    original = mh[output_label].out
-    mh[output_label].out = torch.randn_like(original)
+    output_op = mh.layers[output_label].ops[0]
+    original = output_op.out
+    output_op.out = torch.randn_like(original)
     assert mh.validate_forward_pass(ground_truth) is False
 
 
@@ -1171,8 +1185,9 @@ def test_corrupt_intermediate_outs(valid_mh_and_ground_truth):
     ]
     assert len(intermediate) > 0, "No intermediate layers found"
     target = intermediate[0]
-    original = mh[target].out
-    mh[target].out = torch.randn_like(original)
+    target_op = mh.layers[target].ops[0]
+    original = target_op.out
+    target_op.out = torch.randn_like(original)
     assert mh.validate_forward_pass(ground_truth) is False
 
 
@@ -1182,13 +1197,15 @@ def test_swap_two_layers_outs(valid_mh_and_ground_truth):
     non_output = [label for label in mh.layer_labels if label not in mh.output_layers]
     assert len(non_output) >= 2, "Need at least 2 non-output layers to swap"
     a, b = non_output[0], non_output[1]
-    ta = mh[a].out.clone()
-    tb = mh[b].out.clone()
+    op_a = mh.layers[a].ops[0]
+    op_b = mh.layers[b].ops[0]
+    ta = op_a.out.clone()
+    tb = op_b.out.clone()
     # Only swap if they're different shapes or values — otherwise the swap is a no-op
     if ta.shape == tb.shape and torch.equal(ta, tb):
         pytest.skip("Layers have identical tensors; swap is invisible")
-    mh[a].out = tb
-    mh[b].out = ta
+    op_a.out = tb
+    op_b.out = ta
     assert mh.validate_forward_pass(ground_truth) is False
 
 
@@ -1198,7 +1215,8 @@ def test_zero_out_outs(valid_mh_and_ground_truth):
     non_output = [label for label in mh.layer_labels if label not in mh.output_layers]
     assert len(non_output) > 0
     target = non_output[0]
-    mh[target].out = torch.zeros_like(mh[target].out)
+    target_op = mh.layers[target].ops[0]
+    target_op.out = torch.zeros_like(target_op.out)
     assert mh.validate_forward_pass(ground_truth) is False
 
 
@@ -1208,8 +1226,9 @@ def test_add_noise_to_outs(valid_mh_and_ground_truth):
     non_output = [label for label in mh.layer_labels if label not in mh.output_layers]
     assert len(non_output) > 0
     target = non_output[0]
-    original = mh[target].out
-    mh[target].out = original + torch.randn_like(original) * 0.1
+    target_op = mh.layers[target].ops[0]
+    original = target_op.out
+    target_op.out = original + torch.randn_like(original) * 0.1
     assert mh.validate_forward_pass(ground_truth) is False
 
 
@@ -1219,7 +1238,8 @@ def test_scale_outs(valid_mh_and_ground_truth):
     non_output = [label for label in mh.layer_labels if label not in mh.output_layers]
     assert len(non_output) > 0
     target = non_output[0]
-    mh[target].out = mh[target].out * 100.0
+    target_op = mh.layers[target].ops[0]
+    target_op.out = target_op.out * 100.0
     assert mh.validate_forward_pass(ground_truth) is False
 
 
@@ -1227,7 +1247,7 @@ def test_wrong_shape_outs(valid_mh_and_ground_truth):
     """Replacing out with a wrong-shaped tensor should fail."""
     mh, ground_truth = valid_mh_and_ground_truth
     output_label = mh.output_layers[0]
-    mh[output_label].out = torch.randn(1, 1)
+    mh.layers[output_label].ops[0].out = torch.randn(1, 1)
     assert mh.validate_forward_pass(ground_truth) is False
 
 
@@ -1236,7 +1256,7 @@ def test_corrupt_saved_args(valid_mh_and_ground_truth):
     mh, ground_truth = valid_mh_and_ground_truth
     # Find a non-input layer that has saved_args with tensors
     for label in mh.layer_labels:
-        entry = mh[label]
+        entry = mh.layers[label].ops[0]
         if entry.is_input:
             continue
         if entry.saved_args and any(isinstance(a, torch.Tensor) for a in entry.saved_args):
@@ -1338,7 +1358,7 @@ class TestConditionalBranchDetection:
         mh = self._log(model, self._cond_input())
         for label in mh.layer_labels:
             entry = mh[label]
-            if entry.has_output_descendant and not entry.conditional_entry_children:
+            if not entry.conditional_role_stacks and not entry.conditional_entry_children:
                 assert entry.is_in_conditional_body is False, (
                     f"Output ancestor {label} falsely marked is_in_conditional_body"
                 )
@@ -1351,7 +1371,7 @@ class TestConditionalBranchDetection:
         for label in mh.layer_labels:
             entry = mh[label]
             # Output-ancestor nodes that are NOT branch-starts should not be marked
-            if entry.has_output_descendant and not entry.conditional_entry_children:
+            if not entry.conditional_role_stacks and not entry.conditional_entry_children:
                 assert entry.is_in_conditional_body is False, (
                     f"Node {label} falsely marked is_in_conditional_body (Bug #88)"
                 )
@@ -1535,3 +1555,25 @@ class TestConditionalBranchDetection:
             assert len(mh[label].conditional_then_children) == 0, (
                 f"THEN children should be empty without source context: {label}"
             )
+
+
+def test_transpose_positional_args_expose_salient_dims():
+    """Positional torch.transpose calls expose dim0/dim1 via the arg-name fallback."""
+    import torch
+    from torch import nn
+
+    import torchlens as tl
+
+    class _TransposeModel(nn.Module):
+        def forward(self, x):
+            return torch.transpose(x, 0, 1).contiguous()
+
+    trace = tl.trace(
+        _TransposeModel(),
+        torch.randn(2, 3),
+        layers_to_save="all",
+        save_arg_values=True,
+    )
+    op = next(o for o in trace.layer_list if "transpose" in o.func_name)
+    assert op.func_config.get("dim0") == 0
+    assert op.func_config.get("dim1") == 1

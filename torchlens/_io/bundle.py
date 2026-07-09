@@ -12,7 +12,6 @@ from __future__ import annotations
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 import json
-import os
 import platform
 import pickle
 import shutil
@@ -38,7 +37,7 @@ from .payload_codec import (
 from .paths import resolve_bundle_blob_path
 from .rehydrate import rehydrate_trace
 from .scrub import BlobSpec, scrub_for_save
-from .tensor_policy import FailReason, Ok, SkipReason
+from .tensor_policy import FailReason, Ok
 from .tlspec import _TlSpecWriter, coerce_tlspec_save_level
 from .. import __version__ as TORCHLENS_VERSION
 from ..backends import BackendPayloadUnsupportedError, BackendSpec, get_backend_spec
@@ -46,7 +45,7 @@ from ..data_classes._state_adapter import state_items
 from ..data_classes.trace import Trace
 
 if TYPE_CHECKING:
-    from ..intervention.bundle import Bundle
+    from ..bundle import Bundle
     from ..intervention.types import InterventionSpec
 
 PARTIAL_SENTINEL = "PARTIAL"
@@ -194,7 +193,7 @@ def save(
     >>> import torchlens as tl
     >>> model = nn.Sequential(nn.Linear(4, 3), nn.ReLU())
     >>> x = torch.randn(2, 4)
-    >>> trace = tl.trace(model, x, layers_to_save="all")
+    >>> trace = tl.trace(model, x)
     >>> tl.save(trace, "demo_bundle", overwrite=True)
     >>> loaded = tl.load("demo_bundle")
     >>> loaded["linear_1_1"].out.shape
@@ -347,11 +346,44 @@ def save(
         if backup_path is not None and not bundle_path.exists() and backup_path.exists():
             _restore_backup(backup_path, bundle_path)
         raise
-    except (ImportError, OSError, ValueError, pickle.PickleError) as exc:
+    except (ImportError, OSError, TypeError, ValueError, pickle.PickleError) as exc:
+        # ``TypeError`` is caught alongside the other serialization failure
+        # modes because ``pickle.dump()`` raises a bare ``TypeError`` (not
+        # the ``pickle.PickleError`` subclass) for many live-resource objects
+        # (generators, locks, open file handles, sockets, ...). Without this,
+        # the exception propagated past this handler entirely, skipping both
+        # the ``PARTIAL`` sentinel (leaving the ``.tmp`` dir un-sweepable by
+        # ``cleanup_tmp()``) and the backup restore (permanently losing the
+        # pre-overwrite bundle under an undocumented ``.bak.<uuid>`` name).
         _mark_partial(tmp_path, reason=str(exc))
         if backup_path is not None and not bundle_path.exists() and backup_path.exists():
             _restore_backup(backup_path, bundle_path)
         raise TorchLensIOError(f"Failed to save bundle at {bundle_path}.") from exc
+    except BaseException as exc:
+        # Safety-net catch-all that closes the whole *class* of bug the
+        # branches above were built to fix one exception type at a time
+        # (``ddd9440f`` added ``TypeError``; this is the third recurrence --
+        # most recently a raw ``KeyError`` from ``safetensors.torch.save_file``
+        # for an allow-listed-but-actually-unwritable ``complex128`` tensor,
+        # cert round 8 BLOCKER). A hand-enumerated except tuple can always be
+        # missing the *next* third-party exception shape; this branch instead
+        # guarantees the recovery contract -- mark the ``.tmp`` dir PARTIAL so
+        # ``cleanup_tmp()`` can sweep it, and restore the pre-overwrite backup
+        # onto ``bundle_path`` if the write left it missing -- for literally
+        # any exception, known or not yet discovered, so the live bundle can
+        # never again be stranded under an unrestored ``.bak.<uuid>`` name.
+        #
+        # ``BaseException`` (not ``Exception``) is used deliberately so this
+        # also covers ``KeyboardInterrupt``/``SystemExit``/``GeneratorExit``
+        # unwinding mid-write; those are re-raised unwrapped below so control
+        # flow semantics are preserved, while ordinary exceptions are wrapped
+        # in ``TorchLensIOError`` to match the sibling branch above.
+        _mark_partial(tmp_path, reason=str(exc))
+        if backup_path is not None and not bundle_path.exists() and backup_path.exists():
+            _restore_backup(backup_path, bundle_path)
+        if isinstance(exc, Exception):
+            raise TorchLensIOError(f"Failed to save bundle at {bundle_path}.") from exc
+        raise
 
 
 def _reject_audit_only_materialized_payload_save(
@@ -497,8 +529,8 @@ def load(
     Returns
     -------
     Trace | Bundle | InterventionSpec
-        Rehydrated object selected by ``manifest.kind`` for unified Phase 11
-        files, or by legacy format detection for older files.
+        Rehydrated object selected by ``manifest.kind`` for unified files, or
+        by legacy format detection for older files.
 
     Raises
     ------
@@ -625,7 +657,7 @@ def _load_trace_payload(
         raise TorchLensIOError(
             f"Failed to load bundle metadata from {metadata_path}.{hint}"
         ) from exc
-    except (OSError, AttributeError, EOFError, ImportError, ValueError) as exc:
+    except (OSError, AttributeError, EOFError, ImportError, TypeError, ValueError) as exc:
         raise TorchLensIOError(f"Failed to load bundle at {bundle_path}.") from exc
 
     trace = rehydrate_trace(
@@ -652,7 +684,7 @@ def _load_unified_tlspec(
     materialize_nested: bool,
     payload_hints: PayloadLoadHints | None,
 ) -> "Trace | Bundle | InterventionSpec":
-    """Load a Phase-11 unified ``.tlspec`` bundle by manifest kind.
+    """Load a unified ``.tlspec`` bundle by manifest kind.
 
     Parameters
     ----------
@@ -900,20 +932,21 @@ def _load_unified_bundle(bundle_path: Path) -> "Bundle":
     _reject_symlink_path(legacy_pickle_path, context="bundle metadata")
     try:
         with legacy_pickle_path.open("rb") as handle:
-            bundle = pickle.load(handle)
+            bundle = _RenameAwareUnpickler(handle).load()
     except (
         pickle.UnpicklingError,
         EOFError,
         OSError,
         AttributeError,
         ImportError,
+        TypeError,
         ValueError,
     ) as exc:
         raise TorchLensIOError(
             f"Failed to load bundle metadata from {legacy_pickle_path}."
         ) from exc
 
-    from ..intervention.bundle import Bundle
+    from ..bundle import Bundle
 
     if not isinstance(bundle, Bundle):
         raise TorchLensIOError(f"Unified bundle payload at {legacy_pickle_path} is not a Bundle.")
@@ -966,7 +999,7 @@ def _load_unified_bundle_directory(bundle_path: Path, metadata_path: Path) -> "B
             raise TorchLensIOError(f"Unified bundle member {name!r} did not load as a Trace.")
         members[name] = loaded
 
-    from ..intervention.bundle import Bundle
+    from ..bundle import Bundle
 
     baseline_name = metadata.get("baseline_name")
     if baseline_name is not None and not isinstance(baseline_name, str):
@@ -1004,24 +1037,50 @@ def _read_manifest_object(path: Path) -> dict[str, Any]:
 
 
 def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
-    """Remove leftover sibling temp bundle directories for one target path.
+    """Remove leftover sibling temp/backup bundle directories for one target path.
+
+    Also sweeps orphaned ``.bak.<uuid>`` directories left behind when
+    ``save(overwrite=True)`` fails and the best-effort ``_restore_backup()``
+    step that normally renames the backup back onto ``bundle_path`` itself
+    fails too (e.g. a second, independent I/O failure). If ``bundle_path``
+    is missing, the ``.bak.*`` dir holds the only surviving copy of the
+    pre-overwrite bundle, so it is restored back onto ``bundle_path``
+    (recovering the data) instead of deleted. If ``bundle_path`` already
+    exists and a candidate ``.bak.*`` is byte-for-byte identical to it
+    (e.g. it was just restored there by an earlier candidate in this same
+    sweep, or ``save()``'s post-success backup cleanup failed after a fully
+    successful overwrite), the duplicate is provably redundant and is
+    always removed. Otherwise the candidate's contents are NOT provably
+    redundant -- it may be a genuinely distinct backup from an unrelated
+    incident -- so it is only removed when ``force=True`` is passed
+    (mirroring the ``.tmp.*`` sweep's non-``PARTIAL`` gating below); by
+    default it is left in place with a warning to avoid silent data loss.
 
     Parameters
     ----------
     path:
-        Final bundle path whose ``.tmp.*`` siblings should be inspected.
+        The **target bundle path itself** (e.g. ``"demo_bundle"``, the same
+        path you pass to ``save(path, ...)``/``load(path)``) -- NOT its
+        containing directory. Sibling ``.tmp.*``/``.bak.*`` candidates are
+        found by globbing ``f"{Path(path).name}.tmp.*"`` /
+        ``f"{Path(path).name}.bak.*"`` inside ``Path(path).parent``, so
+        passing the parent directory instead (expecting "clean up everything
+        inside this directory" semantics) silently matches nothing -- no
+        error, no warning, zero directories removed.
     force:
-        Whether temp dirs without a ``PARTIAL`` sentinel should also be removed.
+        Whether temp dirs without a ``PARTIAL`` sentinel, and backup dirs
+        that are not provably redundant, should also be removed.
 
     Returns
     -------
     list[Path]
-        Removed temp directory paths.
+        Removed temp directory paths, plus any restored backup paths (now
+        living at ``bundle_path``).
 
     Raises
     ------
     TorchLensIOError
-        If the requested target path or candidate temp dirs are symlinks.
+        If the requested target path or candidate temp/backup dirs are symlinks.
 
     Examples
     --------
@@ -1037,8 +1096,8 @@ def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
     bundle_path = Path(path)
     _reject_symlink_path(bundle_path, context="cleanup target")
     removed: list[Path] = []
-    pattern = f"{bundle_path.name}.tmp.*"
-    for candidate in bundle_path.parent.glob(pattern):
+    tmp_pattern = f"{bundle_path.name}.tmp.*"
+    for candidate in bundle_path.parent.glob(tmp_pattern):
         if candidate.is_symlink():
             raise TorchLensIOError(f"Refusing to clean symlink temp directory {candidate}.")
         if not candidate.is_dir():
@@ -1052,7 +1111,85 @@ def cleanup_tmp(path: str | Path, *, force: bool = False) -> list[Path]:
             UserWarning,
             stacklevel=2,
         )
+
+    bak_pattern = f"{bundle_path.name}.bak.*"
+    for candidate in bundle_path.parent.glob(bak_pattern):
+        if candidate.is_symlink():
+            raise TorchLensIOError(f"Refusing to clean symlink backup directory {candidate}.")
+        if not candidate.is_dir():
+            continue
+        if not bundle_path.exists():
+            _restore_backup(candidate, bundle_path)
+            if not candidate.exists():
+                removed.append(bundle_path)
+            else:
+                warnings.warn(
+                    f"Leaving orphaned backup directory {candidate} in place; "
+                    "restoring it onto the missing bundle path failed.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            continue
+        if _directories_content_equal(candidate, bundle_path):
+            shutil.rmtree(candidate)
+            removed.append(candidate)
+            continue
+        if force:
+            shutil.rmtree(candidate)
+            removed.append(candidate)
+            warnings.warn(
+                f"Force-removed backup directory {candidate} whose contents differ "
+                f"from the live bundle at {bundle_path}; it was not provably redundant.",
+                UserWarning,
+                stacklevel=2,
+            )
+            continue
+        warnings.warn(
+            f"Leaving backup directory {candidate} in place; its contents differ from "
+            f"the live bundle at {bundle_path} and it is not provably redundant. "
+            "Pass force=True to remove it anyway.",
+            UserWarning,
+            stacklevel=2,
+        )
     return removed
+
+
+def _directories_content_equal(left: Path, right: Path) -> bool:
+    """Return whether two directory trees hold byte-identical file contents.
+
+    Used by :func:`cleanup_tmp` to decide whether an orphaned ``.bak.*``
+    bundle directory is a provable duplicate of the live bundle (safe to
+    delete) versus genuinely distinct data that must not be silently
+    destroyed. Compares the set of relative file paths and, for each,
+    the file's SHA-256 digest via :func:`sha256_of_file`.
+
+    Parameters
+    ----------
+    left:
+        First directory to compare.
+    right:
+        Second directory to compare.
+
+    Returns
+    -------
+    bool
+        ``True`` if both directories contain the same relative file paths
+        with byte-identical contents, ``False`` otherwise (including on
+        any I/O error while comparing, to fail closed toward "not proven
+        redundant").
+    """
+
+    try:
+        left_files = sorted(p.relative_to(left) for p in left.rglob("*") if p.is_file())
+        right_files = sorted(p.relative_to(right) for p in right.rglob("*") if p.is_file())
+    except OSError:
+        return False
+    if left_files != right_files:
+        return False
+    try:
+        return all(sha256_of_file(left / rel) == sha256_of_file(right / rel) for rel in left_files)
+    except OSError:
+        return False
 
 
 def _scrub_trace_for_bundle(

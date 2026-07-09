@@ -14,6 +14,8 @@ TARGET_ALL = [
     "facets",
     "record",
     "Recording",
+    "ActivationLookup",
+    "CapturedRun",
     "JaxPayloadLoadHint",
     "PayloadLoadHints",
     "load",
@@ -38,13 +40,18 @@ TARGET_ALL = [
     "extract_dataset",
     "batched_extract",
     "validate",
+    "decide_recording_of_batch",
+    "record_kpi_in_graph",
+    "register_tensor_connection",
+    "show_bundle_graph",
+    "options",
+    "to_disk",
     "AmbiguousOpLookupError",
     "ReentrantTraceError",
     "Trace",
     "Layer",
     "Container",
     "Op",
-    "ModelHistory",
     "Quantity",
     "Bytes",
     "Duration",
@@ -57,6 +64,9 @@ TARGET_ALL = [
     "func_transform",
     "followed_by",
     "grad_fn",
+    "grad_input",
+    "grad_output",
+    "in_backward_pass",
     "intervening",
     "without_op",
     "regex",
@@ -94,15 +104,6 @@ TARGET_ALL = [
     "grad_zero",
     "tap",
     "record_span",
-    "log_forward_pass",
-    "get_model_activations",
-    "validate_model_activations",
-    "validate_saved_activations",
-    "render_graph",
-    "render_model_graph",
-    "draw_model_graph",
-    "get_model_structure",
-    "show_model_structure",
 ]
 
 CANONICAL_SUBMODULES = [
@@ -116,8 +117,6 @@ CANONICAL_SUBMODULES = [
     "torchlens.experimental.dagua",
     "torchlens.export",
     "torchlens.fastlog",
-    "torchlens.grad",
-    "torchlens.intervene",
     "torchlens.io",
     "torchlens.options",
     "torchlens.partial",
@@ -133,7 +132,7 @@ CANONICAL_SUBMODULES = [
 ]
 
 
-def test_all_size_exactly_95() -> None:
+def test_all_size_exactly_96() -> None:
     """Top-level ``__all__`` should contain exactly the current API budget.
 
     Phase 1a budget was 40; backward-parity sprint added 6 (grad_clip, grad_noise,
@@ -153,11 +152,16 @@ def test_all_size_exactly_95() -> None:
     `push_from`, `run`, `pluck`, `extract_dataset`, `without_op`, `regex`,
     `span`; removes `sites` = 76. Internal sprint 2 adds `export` and
     `AmbiguousOpLookupError` = 78. Tech-debt sprint adds
-    `ReentrantTraceError` and ten paper-era compatibility shims = 89.
-    Backend-neutral split runtime adds six public names = 95.
+    `ReentrantTraceError` = 79. Capture unification and backward/public option
+    follow-ups add `ActivationLookup`, `CapturedRun`, `decide_recording_of_batch`,
+    `record_kpi_in_graph`, `register_tensor_connection`, `show_bundle_graph`,
+    `options`, `to_disk`, `grad_input`, `grad_output`, and `in_backward_pass` = 90.
+    Backend-neutral split runtime adds six public names = 96.
+    Paper-era compatibility shims remain available through ``__getattr__`` but
+    are not advertised in ``__all__``.
     """
 
-    assert len(torchlens.__all__) == 95
+    assert len(torchlens.__all__) == 96
     assert torchlens.__all__ == TARGET_ALL
 
 
@@ -166,6 +170,9 @@ def test_phase_b_and_split_exports_are_top_level_importable() -> None:
 
     assert torchlens.export is importlib.import_module("torchlens.export")
     assert torchlens.AmbiguousOpLookupError.__name__ == "AmbiguousOpLookupError"
+    assert importlib.import_module("torchlens.facets") is importlib.import_module(
+        "torchlens.semantic.facets"
+    )
     assert torchlens.SplitSpec.__name__ == "SplitSpec"
     assert torchlens.BoundaryTensorSpec.__name__ == "BoundaryTensorSpec"
     assert torchlens.ReplayBoundary.__name__ == "ReplayBoundary"

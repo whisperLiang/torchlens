@@ -96,6 +96,48 @@ def test_content_hash_cache_hit_and_miss(tmp_path: Path) -> None:
     assert first.capture_cache_key == second.capture_cache_key
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "saved_type"),
+    [
+        ({"save": tl.func("relu")}, "relu"),
+        ({"layers_to_save": ["relu"]}, "relu"),
+    ],
+)
+def test_selective_capture_cache_preserves_unsaved_payload_contract(
+    tmp_path: Path,
+    kwargs: dict[str, Any],
+    saved_type: str,
+) -> None:
+    """Selective capture cache writes should not read unsaved public payloads."""
+
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.ReLU())
+    x = torch.ones(1, 2)
+
+    first = tl.trace(model, x, cache=True, cache_dir=tmp_path, **kwargs)
+    second = tl.trace(model, x, cache=True, cache_dir=tmp_path, **kwargs)
+
+    assert first.capture_cache_hit is False
+    assert second.capture_cache_hit is True
+    assert first.capture_cache_key == second.capture_cache_key
+    saved = first.find_sites(tl.func(saved_type)).first()
+    assert isinstance(saved.out, torch.Tensor)
+    with pytest.raises(ValueError, match="was not saved"):
+        _ = first["input_1"].out
+
+
+def test_absorbed_layers_to_save_cache_key_is_stable(tmp_path: Path) -> None:
+    """Identical absorbed ``layers_to_save`` requests should hash equally."""
+
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.ReLU())
+    x = torch.ones(1, 2)
+
+    first = tl.trace(model, x, cache=True, cache_dir=tmp_path, layers_to_save=["relu"])
+    second = tl.trace(model, x, cache=True, cache_dir=tmp_path, layers_to_save=["relu"])
+
+    assert first.capture_cache_key == second.capture_cache_key
+    assert second.capture_cache_hit is True
+
+
 def test_config_output_metadata_pickles_into_capture_cache(tmp_path: Path) -> None:
     """HF-style config metadata is captured before cache serialization."""
 
@@ -125,7 +167,7 @@ def test_public_option_spine_changes_capture_cache_key(tmp_path: Path) -> None:
         capture=CaptureOptions(
             cache=True,
             cache_dir=tmp_path,
-            jax_max_control_flow_unroll=8,
+            module_identity_mode="torch_module",
         ),
     )
     second = tl.trace(
@@ -134,7 +176,7 @@ def test_public_option_spine_changes_capture_cache_key(tmp_path: Path) -> None:
         capture=CaptureOptions(
             cache=True,
             cache_dir=tmp_path,
-            jax_max_control_flow_unroll=16,
+            payload_policy="full",
         ),
     )
 
@@ -190,7 +232,12 @@ def test_saved_activation_identity_dedup_rejects_key_collision() -> None:
     old_source = torch.zeros(2, 2)
     new_source = torch.ones(2, 2)
     stale_out = torch.full((2, 2), 9.0)
-    trace._out_identity_cache[id(new_source)] = (old_source, "old", stale_out)
+    trace._out_identity_cache[id(new_source)] = (
+        old_source,
+        "old",
+        stale_out,
+        old_source._version,
+    )
     fields = _minimal_activation_fields("manual_new")
 
     _save_activation_fields(trace, fields, new_source, (), {}, None)
@@ -219,7 +266,8 @@ def test_op_save_activation_identity_dedup_reuses_same_source() -> None:
 def test_trace_reference_save_mode_raises_if_saved_out_mutates() -> None:
     """Reference-mode saved outputs fail loudly after mutation."""
 
-    log = tl.trace(torch.nn.ReLU(), torch.ones(1, 2), save_mode="reference")
+    with pytest.warns(UserWarning, match="save_mode='reference'"):
+        log = tl.trace(torch.nn.ReLU(), torch.ones(1, 2), save_mode="reference")
     op = next(layer for layer in log.layer_list if layer.func_name == "relu")
     saved_out = op._slot("out")
 

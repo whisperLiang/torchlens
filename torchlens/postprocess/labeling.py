@@ -24,6 +24,7 @@ from collections import defaultdict
 from dataclasses import fields, is_dataclass, replace
 from typing import Any, Dict, List, TYPE_CHECKING
 
+from .._errors import AmbiguousOpLookupError
 from ..data_classes.op import Op
 from ..intervention.types import ParentRef
 
@@ -264,16 +265,16 @@ def _build_module_hierarchy_dicts(self: "Trace") -> None:
     """Derive top_level_modules and module_children from their pass-level counterparts."""
     mbd = self._module_build_data
     for module in mbd["top_level_module_ops"]:
-        module_no_pass = module.split(":")[0]
+        module_no_pass = module.rsplit(":", 1)[0]
         if module_no_pass == "self":
             continue
         if module_no_pass not in mbd["top_level_modules"]:
             mbd["top_level_modules"].append(module_no_pass)
 
     for module_parent, module_children in mbd["module_pass_children"].items():
-        module_parent_nopass = module_parent.split(":")[0]
+        module_parent_nopass = module_parent.rsplit(":", 1)[0]
         for module_child in module_children:
-            module_child_nopass = module_child.split(":")[0]
+            module_child_nopass = module_child.rsplit(":", 1)[0]
             if module_child_nopass == module_parent_nopass:
                 continue
             if module_child_nopass not in mbd["module_children"][module_parent_nopass]:
@@ -475,6 +476,8 @@ def _rename_label_dataclass(value: Any, mapping: Dict[str, str]) -> Any:
         "site_label",
         "layer_label",
     }
+    if callable(value):
+        return value
     if isinstance(value, tuple):
         return tuple(_rename_label_dataclass(item, mapping) for item in value)
     if isinstance(value, list):
@@ -714,6 +717,11 @@ def _add_lookup_keys_for_layer_entry(
         layer_entry.label,
         layer_entry.label_short,
     }
+    exact_op_keys = {
+        layer_entry._label_raw,
+        layer_entry.raw_label,
+        layer_entry.label,
+    }
 
     # Relabel the module ops if this pass built module metadata:
     if self.capture_mode in {"exhaustive", "predicate"}:
@@ -733,14 +741,14 @@ def _add_lookup_keys_for_layer_entry(
 
     # Allow indexing by modules exited as well:
     for module_pass in layer_entry.output_of_module_calls:
-        module_name, _ = module_pass.split(":")
+        module_name, _ = module_pass.rsplit(":", 1)
         lookup_keys_for_tensor.append(f"{module_pass}")
         if self._module_build_data["module_num_calls"][module_name] == 1:
             lookup_keys_for_tensor.append(f"{module_name}")
 
     # Allow using buffer/input/output address as key, too:
     if layer_entry.is_buffer:
-        if self.buffer_num_calls[layer_entry.address] == 1:
+        if self.buffer_num_calls.get(layer_entry.address, 1) == 1:
             lookup_keys_for_tensor.append(layer_entry.address)
         lookup_keys_for_tensor.append(f"{layer_entry.address}:{layer_entry.buffer_pass}")
     elif layer_entry.is_input or layer_entry.is_output:
@@ -757,9 +765,22 @@ def _add_lookup_keys_for_layer_entry(
         if lookup_key not in self._lookup_keys_to_layer_num_dict:
             self._lookup_keys_to_layer_num_dict[lookup_key] = layer_entry.raw_index
             self.layer_dict_all_keys[lookup_key] = layer_entry
-        elif lookup_key in primary_label_keys:
-            self._lookup_keys_to_layer_num_dict[lookup_key] = layer_entry.raw_index
-            self.layer_dict_all_keys[lookup_key] = layer_entry
+        elif self._lookup_keys_to_layer_num_dict[lookup_key] != layer_entry.raw_index:
+            if lookup_key in exact_op_keys:
+                existing = self.layer_dict_all_keys[lookup_key]
+                raise AmbiguousOpLookupError(
+                    f"Exact Op lookup key {lookup_key!r} collides between "
+                    f"{existing.label!r} and {layer_entry.label!r}."
+                )
+            raw_indices = self._ambiguous_lookup_keys.setdefault(
+                lookup_key,
+                [self._lookup_keys_to_layer_num_dict[lookup_key]],
+            )
+            if layer_entry.raw_index not in raw_indices:
+                raw_indices.append(layer_entry.raw_index)
+            if lookup_key in primary_label_keys:
+                self._lookup_keys_to_layer_num_dict[lookup_key] = layer_entry.raw_index
+                self.layer_dict_all_keys[lookup_key] = layer_entry
         self._layer_num_to_lookup_keys_dict[layer_entry.raw_index].append(lookup_key)
 
 
@@ -801,6 +822,25 @@ def _rename_model_history_layer_names(self: "Trace") -> None:
             [self._raw_layer_dict[tensor_label].layer_label for tensor_label in tensor_labels],
         )
 
+    # Remap halt provenance from raw to final labels, exactly as the special
+    # layer lists above. `halt_reason`/`halt_frontier` are set to a raw op label
+    # by BOTH the exhaustive `tl.trace(halt=...)` finalizer
+    # (capture/trace.py `_finalize_halted_trace`) and the cooked
+    # `Recording.to_trace()` path (fastlog/types.py); leaving them raw meant the
+    # two capture modes reported DIFFERENT halt labels for the same semantic op
+    # whenever a buffer-write op (e.g. BatchNorm running-stat write-back, counted
+    # only in exhaustive mode) preceded the halt point and shifted the raw index.
+    # Final labels are stable across that raw-index asymmetry, so remapping here
+    # -- in the shared postprocess step both paths run -- makes halt provenance
+    # match exactly. Only remap when the value is a real captured raw layer label
+    # (present in `_raw_layer_dict`); synthetic halt reasons that are NOT op
+    # labels ("linear:exit:1" module-exit reasons, "" empty, custom fastlog
+    # strings) are left untouched.
+    for halt_field in ("halt_reason", "halt_frontier"):
+        raw_halt_label = getattr(self, halt_field, None)
+        if raw_halt_label is not None and raw_halt_label in self._raw_layer_dict:
+            setattr(self, halt_field, self._raw_layer_dict[raw_halt_label].layer_label)
+
     op_list_fields_to_rename = [
         "internal_source_ops",
         "internal_sink_ops",
@@ -829,12 +869,6 @@ def _rename_model_history_layer_names(self: "Trace") -> None:
         and not getattr(layer_entry, "is_orphan", False)
     ]
     self.num_saved_layers = len({layer_entry.layer_label for layer_entry in saved_layers})
-    saved_labels = {layer_entry.layer_label for layer_entry in saved_layers}
-    self.num_saved_module_calls = sum(
-        1
-        for module_call in getattr(self, "module_calls", [])
-        if any(label in saved_labels for label in getattr(module_call, "layers", []))
-    )
 
     new_equiv_operations_tensors: dict[Any, set[str]] = {}
     for key, equiv_values in self.op_equivalence_classes.items():

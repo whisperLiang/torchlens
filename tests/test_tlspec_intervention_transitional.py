@@ -11,6 +11,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens._io import TLSPEC_VERSION
 from torchlens.intervention.save import load_intervention_spec as legacy_load_intervention_spec
 from torchlens.intervention.types import InterventionSpec
 from torchlens.options import CaptureOptions
@@ -113,9 +114,9 @@ def test_intervention_writer_adds_unified_marker_without_removing_legacy_fields(
     _interventions().save_intervention(path, level="portable")
 
     manifest = _read_json(path / "manifest.json")
-    assert manifest["tlspec_version"] == 1
+    assert manifest["tlspec_version"] == TLSPEC_VERSION
     assert manifest["kind"] == "intervention"
-    assert manifest["format_version"] == "1"
+    assert manifest["format_version"] == "2"
     assert manifest["tensor_entries"] == []
     assert tl.io.detect_tlspec_format(path) == "v2.0_unified"
 

@@ -42,7 +42,26 @@ if TYPE_CHECKING:
 else:
     Site: TypeAlias = Any
 DIRECTION_AGNOSTIC_KINDS = frozenset(
-    {"label", "in_module", "module", "contains", "regex", "predicate", "func_transform"}
+    {
+        "label",
+        "func",
+        "in_module",
+        "module",
+        "contains",
+        "regex",
+        "predicate",
+        "func_transform",
+        # These three describe a forward op's output/input container position and
+        # carry no direction of their own; the selector layer
+        # (``_classify_selector_direction``) already treats them as agnostic, so
+        # they must be listed here too. Otherwise a backward (GradFn) site never
+        # bridges to its paired forward op for these kinds and a validly-composed
+        # selector like ``output_at(0) & grad_input()`` silently resolves to 0
+        # sites instead of intersecting meaningfully.
+        "output",
+        "output_at",
+        "input_at",
+    }
 )
 
 
@@ -515,7 +534,15 @@ def _resolve_unchecked(
         return tuple(site for site in sites if _resolve_site_kind(site, kind, value))
     if kind == "predicate":
         return tuple(site for site in sites if _resolve_site_kind(site, kind, value))
-    if kind in {"grad_fn", "grad_fn_handle", "intervening", "without_op", "label"}:
+    if kind in {
+        "grad_fn",
+        "grad_fn_handle",
+        "intervening",
+        "without_op",
+        "label",
+        "grad_kind",
+        "backward_pass",
+    }:
         return tuple(site for site in sites if _resolve_site_kind(site, kind, value))
 
     raise SiteResolutionError(f"Unsupported selector kind {kind!r}.")
@@ -720,7 +747,73 @@ def _resolve_grad_fn_kind(site: "GradFn", kind: str, value: Any) -> bool:
         if is_custom is not None and bool(site.is_custom) is not bool(is_custom):
             return False
         return True
+    if kind == "grad_kind":
+        return _grad_fn_has_saved_grad_kind(site, str(value))
+    if kind == "backward_pass":
+        return _grad_fn_has_backward_pass(site, int(value))
     return False
+
+
+def _grad_fn_has_saved_grad_kind(site: "GradFn", grad_kind: str) -> bool:
+    """Return whether a grad_fn has calls with the requested saved grad tuple.
+
+    Parameters
+    ----------
+    site:
+        Candidate grad_fn_handle log.
+    grad_kind:
+        ``"grad_input"`` or ``"grad_output"``.
+
+    Returns
+    -------
+    bool
+        Whether at least one call has the requested tuple saved.
+    """
+
+    field_name = "grad_inputs" if grad_kind == "grad_input" else "grad_outputs"
+    return any(getattr(call, field_name, None) is not None for call in _grad_fn_call_values(site))
+
+
+def _grad_fn_has_backward_pass(site: "GradFn", pass_index: int) -> bool:
+    """Return whether a grad_fn participates in a backward pass.
+
+    Parameters
+    ----------
+    site:
+        Candidate grad_fn_handle log.
+    pass_index:
+        One-based global backward pass number.
+
+    Returns
+    -------
+    bool
+        Whether the grad_fn has a call in the requested pass.
+    """
+
+    return any(
+        getattr(call, "backward_pass_index", None) == pass_index
+        for call in _grad_fn_call_values(site)
+    )
+
+
+def _grad_fn_call_values(site: "GradFn") -> tuple[Any, ...]:
+    """Return GradFnCall values from dict or accessor-backed call storage.
+
+    Parameters
+    ----------
+    site:
+        Candidate grad_fn_handle log.
+
+    Returns
+    -------
+    tuple[Any, ...]
+        Recorded GradFnCall values.
+    """
+
+    calls = site.calls
+    if isinstance(calls, dict):
+        return tuple(calls.values())
+    return tuple(calls._list)
 
 
 def _output_matches(site: Site, value: Any) -> bool:
@@ -921,11 +1014,16 @@ def _selector_from_spec(kind: str, value: Any, metadata: dict[str, Any]) -> Base
         func,
         func_transform,
         grad_fn,
+        grad_input,
+        grad_output,
         head,
-        intervening,
+        in_backward_pass,
+        input_at,
         label,
         module,
         output,
+        output_at,
+        regex,
         where,
         without_op,
     )
@@ -942,8 +1040,16 @@ def _selector_from_spec(kind: str, value: Any, metadata: dict[str, Any]) -> Base
         return module(str(value))
     if kind == "output":
         return output(value)
+    if kind == "output_at":
+        return output_at(value)
+    if kind == "input_at":
+        if isinstance(value, Sequence) and not isinstance(value, str):
+            return input_at(*value)
+        return input_at(value)
     if kind == "contains":
         return contains(str(value))
+    if kind == "regex":
+        return regex(str(value))
     if kind == "in_module":
         from .selectors import in_module as make_in_module
 
@@ -975,6 +1081,20 @@ def _selector_from_spec(kind: str, value: Any, metadata: dict[str, Any]) -> Base
     if kind == "not":
         nested = _normalize_query(value)
         return ~nested
+    if kind in {"and", "or"}:
+        if not isinstance(value, Sequence) or len(value) != 2:
+            raise SiteResolutionError(f"{kind!r} target specs require two nested selectors.")
+        left, right = value
+        return CompositeSelector(
+            cast("Literal['and', 'or']", kind),
+            (_normalize_query(left), _normalize_query(right)),
+        )
+    if kind == "grad_kind":
+        return grad_input() if value == "grad_input" else grad_output()
+    if kind == "backward_pass":
+        if not isinstance(value, int):
+            raise SiteResolutionError("backward_pass target specs require an integer pass index.")
+        return in_backward_pass(value)
     raise SiteResolutionError(f"Unsupported target spec selector kind {kind!r}.")
 
 

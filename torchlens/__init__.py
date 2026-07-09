@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import functools as _functools
 import importlib as _importlib
+import sys as _sys
 from collections.abc import Callable as _Callable, Iterable as _Iterable, Mapping as _Mapping
 from pathlib import Path as _Path
 import warnings as _warnings
@@ -19,42 +20,15 @@ from typing import Any
 import torch as _torch
 from torch import nn as _nn
 
-__version__ = "2.28.0"
+__version__ = "2.29.1"
 
-from . import (
-    attribution,
-    bridge,
-    compat,
-    debug,
-    examples,
-    experimental,
-    export,
-    fastlog,
-    options,
-    partial,
-    report,
-    repgeom,
-    split,
-    stats,
-    viz,
-)
-from .semantic import facets
-from ._io import JaxPayloadLoadHint, PayloadLoadHints
-from ._io.bundle import load, save
+from . import fastlog
 from .captured_run import ActivationLookup, CapturedRun
-from .split import (
-    BoundaryTensorSpec,
-    ReplayBoundary,
-    SplitRuntime,
-    SplitSpec,
-    prepare_split,
-    prepare_split_replay,
-)
-from .stats import aggregate
 from .data_classes.layer import Layer
 from .data_classes.container import Container
 from .data_classes.op import Op
-from ._errors import AmbiguousOpLookupError, ReentrantTraceError
+from ._errors import AmbiguousOpLookupError
+from ._state import ReentrantTraceError
 from .data_classes.trace import Trace
 from .fastlog import Recording, record
 from .intervention import (  # type: ignore[no-redef]
@@ -120,22 +94,51 @@ from .user_funcs import (
     show_bundle_graph,
     show_model_graph as _moved_show_model_graph,
     summary as _moved_summary,
-)
-from .backends import BackendName
-from .validation import (
     validate_backward_pass as _moved_validate_backward_pass,
     validate_forward_pass as _moved_validate_forward_pass,
     validate_saved_outs as _moved_validate_saved_outs,
 )
-from .io import load_intervention_spec as _moved_load_intervention_spec
+from .backends import BackendName
 from .observers import record_span, span, tap
+from . import options
 from .options import CaptureOptions as _CaptureOptions
 from .options import to_disk
-from .intervention.sites import sites as _sites_private
+from .intervention import load_intervention_spec as _moved_load_intervention_spec
 from .quantities import Bytes, Duration, Flops, Macs, Quantity
-from .validation.consolidated import validate
 
-_REMOVED_IN = "v2.NN"
+_sys.modules.setdefault(__name__ + ".facets", _importlib.import_module("torchlens.semantic.facets"))
+
+_REMOVED_IN = "a future 2.x release"
+
+_LAZY_ATTRS = {
+    "JaxPayloadLoadHint": ("torchlens._io", "JaxPayloadLoadHint"),
+    "PayloadLoadHints": ("torchlens._io", "PayloadLoadHints"),
+    "aggregate": ("torchlens.stats", "aggregate"),
+    "attribution": ("torchlens.attribution", None),
+    "compat": ("torchlens.compat", None),
+    "debug": ("torchlens.debug", None),
+    "examples": ("torchlens.examples", None),
+    "experimental": ("torchlens.experimental", None),
+    "export": ("torchlens.export", None),
+    "facets": ("torchlens.semantic", "facets"),
+    "io": ("torchlens.io", None),
+    "load": ("torchlens._io.bundle", "load"),
+    "partial": ("torchlens.partial", None),
+    "report": ("torchlens.report", None),
+    "repgeom": ("torchlens.repgeom", None),
+    "save": ("torchlens._io.bundle", "save"),
+    "split": ("torchlens.split", None),
+    "BoundaryTensorSpec": ("torchlens.split", "BoundaryTensorSpec"),
+    "ReplayBoundary": ("torchlens.split", "ReplayBoundary"),
+    "SplitRuntime": ("torchlens.split", "SplitRuntime"),
+    "SplitSpec": ("torchlens.split", "SplitSpec"),
+    "prepare_split": ("torchlens.split", "prepare_split"),
+    "prepare_split_replay": ("torchlens.split", "prepare_split_replay"),
+    "stats": ("torchlens.stats", None),
+    "validate": ("torchlens.validation.consolidated", "validate"),
+    "validation": ("torchlens.validation", None),
+    "viz": ("torchlens.viz", None),
+}
 
 _MOVED_OBJECTS = {
     "ActivationPostfunc": ("torchlens.types", "ActivationPostfunc"),
@@ -207,6 +210,57 @@ _LEGACY_API_SHIMS = {
 }
 
 
+def _resolve_top_level(name: str) -> Any:
+    """Resolve a top-level TorchLens attribute, honoring existing globals.
+
+    Parameters
+    ----------
+    name:
+        Top-level attribute name.
+
+    Returns
+    -------
+    Any
+        Existing global value or lazily resolved attribute.
+    """
+
+    if name in globals():
+        return globals()[name]
+    return __getattr__(name)
+
+
+def _sync_validation_wrapper_metadata(validation_module: Any) -> None:
+    """Copy canonical validation signatures onto deprecated top-level wrappers.
+
+    Parameters
+    ----------
+    validation_module:
+        Lazily imported ``torchlens.validation`` module.
+    """
+
+    for wrapper_name in (
+        "validate_forward_pass",
+        "validate_backward_pass",
+        "validate_saved_outs",
+    ):
+        _functools.update_wrapper(globals()[wrapper_name], getattr(validation_module, wrapper_name))
+
+
+def _sync_io_wrapper_metadata(io_module: Any) -> None:
+    """Copy canonical I/O signatures onto deprecated top-level wrappers.
+
+    Parameters
+    ----------
+    io_module:
+        Lazily imported ``torchlens.io`` module.
+    """
+
+    _functools.update_wrapper(
+        globals()["load_intervention_spec"],
+        getattr(io_module, "load_intervention_spec"),
+    )
+
+
 def _warn_moved_name(name: str, new_module_path: str, new_attr: str) -> None:
     """Emit the standard top-level API move deprecation warning.
 
@@ -269,10 +323,10 @@ def _legacy_trace_alias(name: str, replacement: str) -> _Callable[..., Any]:
         _warn_legacy_api_name(name, replacement)
         if name == "validate_model_activations":
             kwargs.setdefault("scope", "forward")
-            return validate(*args, **kwargs)
+            return _resolve_top_level("validate")(*args, **kwargs)
         if name == "validate_saved_activations":
             kwargs.setdefault("scope", "saved")
-            return validate(*args, **kwargs)
+            return _resolve_top_level("validate")(*args, **kwargs)
         if name in {"render_graph", "render_model_graph", "draw_model_graph"}:
             if args and isinstance(args[0], Trace):
                 return args[0].draw(*args[1:], **kwargs)
@@ -292,7 +346,7 @@ def _legacy_trace_alias(name: str, replacement: str) -> _Callable[..., Any]:
 
 
 def __getattr__(name: str) -> Any:
-    """Return deprecated moved top-level names on demand.
+    """Return lazy package attributes or deprecated moved names on demand.
 
     Parameters
     ----------
@@ -302,18 +356,24 @@ def __getattr__(name: str) -> Any:
     Returns
     -------
     Any
-        The canonical moved object.
+        The requested lazy object or canonical moved object.
 
     Raises
     ------
     AttributeError
-        If ``name`` is not part of the deprecation state_history.
+        If ``name`` is not part of the lazy facade or deprecation state_history.
     """
 
-    if name == "autoroute":
-        module_obj = _importlib.import_module("torchlens.autoroute")
-        globals()[name] = module_obj
-        return module_obj
+    if name in _LAZY_ATTRS:
+        module_path, attr_name = _LAZY_ATTRS[name]
+        module_obj = _importlib.import_module(module_path)
+        if name == "validation":
+            _sync_validation_wrapper_metadata(module_obj)
+        if name == "io":
+            _sync_io_wrapper_metadata(module_obj)
+        value = module_obj if attr_name is None else getattr(module_obj, attr_name)
+        globals()[name] = value
+        return value
     if name in _LEGACY_API_SHIMS:
         replacement, shim_kind = _LEGACY_API_SHIMS[name]
         _warn_legacy_api_name(name, replacement)
@@ -328,23 +388,16 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module 'torchlens' has no attribute {name!r}")
 
 
-def _phase_stub(name: str, phase: str) -> Any:
-    """Raise a deferred-implementation error for a reserved public API slot.
+def __dir__() -> list[str]:
+    """Return visible top-level TorchLens attributes.
 
-    Parameters
-    ----------
-    name:
-        Reserved TorchLens API name.
-    phase:
-        Feature-overhaul phase that will implement the API.
-
-    Raises
-    ------
-    NotImplementedError
-        Always raised until the target phase lands.
+    Returns
+    -------
+    list[str]
+        Sorted eager globals plus lazy facade, moved-name, and legacy shim names.
     """
 
-    raise NotImplementedError(f"torchlens.{name} ships in {phase}; see IMPLEMENTATION_PLAN.md")
+    return sorted({*globals(), *_LAZY_ATTRS, *_MOVED_OBJECTS, *_LEGACY_API_SHIMS})
 
 
 def _did_you_mean_message(name: str, suggestions: list[str]) -> str:
@@ -455,7 +508,7 @@ def _matching_saved_layer_labels(trace: Trace, pattern: str) -> list[str]:
         resolved = trace[pattern]
     except (KeyError, ValueError):
         return []
-    label = getattr(resolved, "layer_label", getattr(resolved, "layer_label", pattern))
+    label = getattr(resolved, "layer_label", pattern)
     return [str(label)]
 
 
@@ -805,15 +858,19 @@ def validate_forward_pass(
     """
 
     _warn_moved_name("validate_forward_pass", "torchlens.validation", "validate_forward_pass")
-    return validate(
-        model,
-        input_args,
-        input_kwargs,
-        scope="forward",
-        random_seed=random_seed,
-        verbose=verbose,
-        validate_metadata=validate_metadata,
-        backend=backend,
+    from .validation.consolidated import validate
+
+    return bool(
+        validate(
+            model,
+            input_args,
+            input_kwargs,
+            scope="forward",
+            random_seed=random_seed,
+            verbose=verbose,
+            validate_metadata=validate_metadata,
+            backend=backend,
+        )
     )
 
 
@@ -843,20 +900,24 @@ def validate_backward_pass(
     """
 
     _warn_moved_name("validate_backward_pass", "torchlens.validation", "validate_backward_pass")
-    return validate(
-        model,
-        input_args,
-        input_kwargs,
-        scope="backward",
-        random_seed=random_seed,
-        validate_metadata=validate_metadata,
-        loss_fn=loss_fn,
-        perturb_saved_grads=perturb_saved_grads,
-        atol=atol,
-        rtol=rtol,
-        validate_layer_grads=validate_layer_grads,
-        layer_grad_atol=layer_grad_atol,
-        layer_grad_rtol=layer_grad_rtol,
+    from .validation.consolidated import validate
+
+    return bool(
+        validate(
+            model,
+            input_args,
+            input_kwargs,
+            scope="backward",
+            random_seed=random_seed,
+            validate_metadata=validate_metadata,
+            loss_fn=loss_fn,
+            perturb_saved_grads=perturb_saved_grads,
+            atol=atol,
+            rtol=rtol,
+            validate_layer_grads=validate_layer_grads,
+            layer_grad_atol=layer_grad_atol,
+            layer_grad_rtol=layer_grad_rtol,
+        )
     )
 
 
@@ -878,14 +939,18 @@ def validate_saved_outs(
     """
 
     _warn_moved_name("validate_saved_outs", "torchlens.validation", "validate_saved_outs")
-    return validate(
-        model,
-        input_args,
-        input_kwargs,
-        scope="saved",
-        random_seed=random_seed,
-        verbose=verbose,
-        validate_metadata=validate_metadata,
+    from .validation.consolidated import validate
+
+    return bool(
+        validate(
+            model,
+            input_args,
+            input_kwargs,
+            scope="saved",
+            random_seed=random_seed,
+            verbose=verbose,
+            validate_metadata=validate_metadata,
+        )
     )
 
 
@@ -986,6 +1051,8 @@ __all__ = [
     "facets",
     "record",
     "Recording",
+    "ActivationLookup",
+    "CapturedRun",
     "JaxPayloadLoadHint",
     "PayloadLoadHints",
     "load",
@@ -1010,13 +1077,18 @@ __all__ = [
     "extract_dataset",
     "batched_extract",
     "validate",
+    "decide_recording_of_batch",
+    "record_kpi_in_graph",
+    "register_tensor_connection",
+    "show_bundle_graph",
+    "options",
+    "to_disk",
     "AmbiguousOpLookupError",
     "ReentrantTraceError",
     "Trace",
     "Layer",
     "Container",
     "Op",
-    "ModelHistory",
     "Quantity",
     "Bytes",
     "Duration",
@@ -1029,6 +1101,9 @@ __all__ = [
     "func_transform",
     "followed_by",
     "grad_fn",
+    "grad_input",
+    "grad_output",
+    "in_backward_pass",
     "intervening",
     "without_op",
     "regex",
@@ -1066,13 +1141,4 @@ __all__ = [
     "grad_zero",
     "tap",
     "record_span",
-    "log_forward_pass",
-    "get_model_activations",
-    "validate_model_activations",
-    "validate_saved_activations",
-    "render_graph",
-    "render_model_graph",
-    "draw_model_graph",
-    "get_model_structure",
-    "show_model_structure",
 ]

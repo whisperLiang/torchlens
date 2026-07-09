@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any, Iterator, List, TypeVar, cast
 
 import torch
 
+from ..quantities import Bytes, Flops
+
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
 
@@ -121,15 +123,11 @@ def human_readable_size(size: float, decimal_places: int = 1) -> str:
     Returns:
         String with human-readable size and unit suffix.
     """
-    for unit in ["B", "KB", "MB", "GB", "TB", "PB"]:
-        if size < 1024.0 or unit == "PB":
-            break
-        size /= 1024.0
-    if unit == "B":
-        size = int(size)  # No fractional bytes.
-    else:
-        size = round(size, decimal_places)
-    return f"{size} {unit}"
+    if size < 0:
+        raise ValueError("size must be non-negative.")
+    if decimal_places == 1:
+        return str(Bytes(size))
+    return format(Bytes(size), f".{decimal_places}f")
 
 
 def format_size(size: float, decimal_places: int = 1) -> str:
@@ -148,8 +146,6 @@ def format_size(size: float, decimal_places: int = 1) -> str:
         Human-readable byte string such as ``"1.2 MB"``.
     """
 
-    if size < 0:
-        raise ValueError("size must be non-negative.")
     return human_readable_size(size, decimal_places=decimal_places)
 
 
@@ -181,16 +177,9 @@ def format_flops(
     del count_fma_as_two
     if flops < 0:
         raise ValueError("flops must be non-negative.")
-    value = float(flops)
-    units = ["FLOPs", "KFLOPs", "MFLOPs", "GFLOPs", "TFLOPs", "PFLOPs"]
-    unit = units[-1]
-    for unit in units:
-        if value < 1000.0 or unit == units[-1]:
-            break
-        value /= 1000.0
-    if unit == "FLOPs":
-        return f"{int(value)} {unit}"
-    return f"{round(value, decimal_places)} {unit}"
+    if decimal_places == 1:
+        return str(Flops(flops))
+    return format(Flops(flops), f".{decimal_places}f")
 
 
 def _format_number(value: float | None) -> str:
@@ -235,20 +224,65 @@ def _format_percent(value: float) -> str:
     return f"{value:.3g}%"
 
 
-def tensor_stats_summary(tensor: torch.Tensor) -> str:
+def _non_torch_array_summary(array: Any) -> str:
+    """Return a backend-generic one-line summary for a non-``torch.Tensor`` array.
+
+    Used for saved activations captured under a preview (non-torch) backend
+    -- e.g. MLX, tinygrad, TensorFlow, JAX, Paddle -- whose array types do not
+    share ``torch.Tensor``'s ``.device``/``grad_fn``/dtype-cast surface. Only
+    duck-typed, near-universal attributes (``.shape``, ``.dtype``) are read;
+    no torch-only numeric stats (mean/std/min/max/nan/inf/zero counts) are
+    attempted, since those rely on torch-specific reductions that do not
+    exist -- or behave differently -- across array libraries.
+
+    Parameters
+    ----------
+    array:
+        Non-torch array-like object to summarize.
+
+    Returns
+    -------
+    str
+        One-line summary with whatever shape/dtype information the object
+        exposes. Never raises.
+    """
+
+    shape = getattr(array, "shape", None)
+    if shape is not None:
+        try:
+            shape_text = "Tensor[" + ", ".join(str(dim) for dim in tuple(shape)) + "]"
+        except TypeError:
+            shape_text = f"Tensor[{shape}]"
+    else:
+        shape_text = "Tensor[?]"
+    dtype = getattr(array, "dtype", None)
+    dtype_text = str(dtype) if dtype is not None else "unknown dtype"
+    return f"{shape_text} {dtype_text}"
+
+
+def tensor_stats_summary(tensor: Any) -> str:
     """Return a lovely-style one-line tensor statistics summary.
 
     Parameters
     ----------
     tensor:
-        Tensor to summarize.
+        Tensor to summarize. Non-``torch.Tensor`` arrays (saved activations
+        from a preview backend such as MLX/tinygrad/TF/JAX/Paddle) are
+        handled defensively via :func:`_non_torch_array_summary`: shape and
+        dtype are reported when available and torch-only numeric stats are
+        omitted, rather than raising ``AttributeError``. The ``torch.Tensor``
+        path below is unchanged.
 
     Returns
     -------
     str
         One-line summary with shape, dtype, device, scalar stats, and
-        NaN/Inf warning flags when present.
+        NaN/Inf warning flags when present (torch tensors), or a reduced
+        shape/dtype-only summary (non-torch arrays).
     """
+
+    if not isinstance(tensor, torch.Tensor):
+        return _non_torch_array_summary(tensor)
 
     shape = ", ".join(str(dim) for dim in tuple(tensor.shape))
     shape_text = f"Tensor[{shape}]" if shape else "Tensor[]"

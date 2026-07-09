@@ -12,7 +12,13 @@ from torch import nn
 from ... import _state
 from ...ir import BufferWriteEvent
 from ...utils.tensor_utils import safe_copy
-from ._tl import get_buffer_address, get_module_meta, get_tensor_label, set_buffer_address
+from ._tl import (
+    clear_tensor_label,
+    get_buffer_address,
+    get_module_meta,
+    get_tensor_label,
+    set_buffer_address,
+)
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace
@@ -73,6 +79,9 @@ class BufferWriteTracker:
         self.address_to_object_id: dict[str, int] = {}
         self.address_to_storage_key: dict[str, tuple[Any, ...] | None] = {}
         self.address_to_version: dict[str, int | None] = {}
+        self.storage_key_to_addresses: dict[tuple[Any, ...], dict[str, None]] = {}
+        self._storage_key_cache: dict[tuple[int, int | None], tuple[Any, ...] | None] = {}
+        self._storage_range_cache: dict[tuple[int, int | None], tuple[int, int]] = {}
         self._installed_classes: set[type[nn.Module]] = set()
 
     def install(self) -> None:
@@ -128,11 +137,7 @@ class BufferWriteTracker:
                 address = f"{module_address}.{name}" if module_address else name
                 set_buffer_address(tensor, address)
                 self.trace._buffer_initial_values.setdefault(address, _copy_tensor_value(tensor))
-                self.address_to_tensor[address] = tensor
-                self.address_to_snapshot[address] = _copy_tensor_value(tensor)
-                self.address_to_object_id[address] = id(tensor)
-                self.address_to_storage_key[address] = storage_key(tensor)
-                self.address_to_version[address] = _tensor_version(tensor)
+                self._register_address(address, tensor, _copy_tensor_value(tensor))
 
     def record_reassignment(self, module: nn.Module, name: str, value: Any) -> None:
         """Record a registered-buffer reassignment performed via ``__setattr__``.
@@ -183,7 +188,7 @@ class BufferWriteTracker:
             current = self.address_to_tensor.get(snapshot.address)
             if current is None or id(current) != snapshot.object_id:
                 continue
-            if storage_key(current) != snapshot.storage_key:
+            if self.storage_key(current) != snapshot.storage_key:
                 continue
             current_value = _copy_tensor_value(current)
             value_changed = not _tensor_equal(snapshot.value, current_value)
@@ -248,6 +253,7 @@ class BufferWriteTracker:
     def snapshot_buffer_args(self, tensors: list[torch.Tensor]) -> list[BufferSnapshot]:
         """Return pre-call snapshots for tensor args backed by registered buffers."""
 
+        self.clear_storage_metadata_cache()
         snapshots: list[BufferSnapshot] = []
         for tensor in tensors:
             if isinstance(tensor, nn.Parameter):
@@ -261,7 +267,7 @@ class BufferWriteTracker:
                     address=address,
                     tensor=registered,
                     object_id=id(registered),
-                    storage_key=storage_key(registered),
+                    storage_key=self.storage_key(registered),
                     version=_tensor_version(registered),
                     value=_copy_tensor_value(registered),
                 )
@@ -279,6 +285,7 @@ class BufferWriteTracker:
     ) -> None:
         """Append one write event and advance the expected final snapshot."""
 
+        self.clear_storage_metadata_cache()
         copied_value = _copy_tensor_value(value)
         version_label = self._log_buffer_version_node(
             address,
@@ -296,16 +303,12 @@ class BufferWriteTracker:
             value=copied_value,
             value_changed=value_changed,
             object_id=id(value),
-            storage_key=storage_key(value),
+            storage_key=self.storage_key(value),
             buffer_version=_tensor_version(value),
             source_func_name=source_func_name,
         )
         self.trace._buffer_write_events.append(event)
-        self.address_to_tensor[address] = value
-        self.address_to_snapshot[address] = copied_value
-        self.address_to_object_id[address] = id(value)
-        self.address_to_storage_key[address] = storage_key(value)
-        self.address_to_version[address] = _tensor_version(value)
+        self._register_address(address, value, copied_value)
         set_buffer_address(value, address)
         self._refresh_overlapping_alias_snapshots(address)
 
@@ -336,15 +339,116 @@ class BufferWriteTracker:
         written_tensor = self.address_to_tensor.get(written_address)
         if written_tensor is None:
             return
-        written_key = storage_key(written_tensor)
-        written_range = _storage_range(written_tensor)
-        for address, tensor in self.address_to_tensor.items():
-            if address == written_address or storage_key(tensor) != written_key:
+        written_key = self.storage_key(written_tensor)
+        if written_key is None:
+            return
+        written_range = self.storage_range(written_tensor)
+        for address, tensor in tuple(self.address_to_tensor.items()):
+            if address == written_address:
                 continue
-            if not _ranges_overlap(written_range, _storage_range(tensor)):
+            if tensor is None:
                 continue
+            if self.storage_key(tensor) != written_key:
+                continue
+            if not _ranges_overlap(written_range, self.storage_range(tensor)):
+                continue
+            clear_tensor_label(tensor)
             self.address_to_snapshot[address] = _copy_tensor_value(tensor)
             self.address_to_version[address] = _tensor_version(tensor)
+
+    def storage_key(self, tensor: torch.Tensor) -> tuple[Any, ...] | None:
+        """Return a cached storage identity key for ``tensor``.
+
+        Parameters
+        ----------
+        tensor:
+            Tensor whose backing storage should be identified.
+
+        Returns
+        -------
+        tuple[Any, ...] | None
+            Storage identity key, or ``None`` when storage access fails.
+        """
+
+        cache_key = (id(tensor), _tensor_version(tensor))
+        if cache_key not in self._storage_key_cache:
+            self._storage_key_cache[cache_key] = storage_key(tensor)
+        return self._storage_key_cache[cache_key]
+
+    def storage_range(self, tensor: torch.Tensor) -> tuple[int, int]:
+        """Return a cached byte range for ``tensor`` within its storage.
+
+        Parameters
+        ----------
+        tensor:
+            Tensor whose storage span should be identified.
+
+        Returns
+        -------
+        tuple[int, int]
+            Half-open byte range occupied by the tensor.
+        """
+
+        cache_key = (id(tensor), _tensor_version(tensor))
+        if cache_key not in self._storage_range_cache:
+            self._storage_range_cache[cache_key] = _storage_range(tensor)
+        return self._storage_range_cache[cache_key]
+
+    def clear_storage_metadata_cache(self) -> None:
+        """Clear cached tensor storage metadata for the current operation boundary."""
+
+        self._storage_key_cache.clear()
+        self._storage_range_cache.clear()
+
+    def addresses_for_storage_key(self, key: tuple[Any, ...]) -> tuple[str, ...]:
+        """Return registered buffer addresses backed by ``key``.
+
+        Parameters
+        ----------
+        key:
+            Storage identity key to look up.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Registered addresses sharing the same storage key.
+        """
+
+        return tuple(self.storage_key_to_addresses.get(key, {}))
+
+    def _register_address(
+        self,
+        address: str,
+        tensor: torch.Tensor,
+        snapshot: torch.Tensor,
+    ) -> None:
+        """Register or update one buffer address and its storage index entry.
+
+        Parameters
+        ----------
+        address:
+            Dotted module buffer address.
+        tensor:
+            Live tensor assigned to the address.
+        snapshot:
+            Detached value snapshot for the address.
+        """
+
+        old_key = self.address_to_storage_key.get(address)
+        if old_key is not None:
+            old_addresses = self.storage_key_to_addresses.get(old_key)
+            if old_addresses is not None:
+                old_addresses.pop(address, None)
+                if not old_addresses:
+                    del self.storage_key_to_addresses[old_key]
+        new_key = self.storage_key(tensor)
+        self.address_to_tensor[address] = tensor
+        self.address_to_snapshot[address] = snapshot
+        self.address_to_object_id[address] = id(tensor)
+        self.address_to_storage_key[address] = new_key
+        self.address_to_version[address] = _tensor_version(tensor)
+        if new_key is not None:
+            self.storage_key_to_addresses.setdefault(new_key, {})[address] = None
 
 
 def install_buffer_write_tracker(trace: "Trace", model: nn.Module) -> BufferWriteTracker:
@@ -379,6 +483,7 @@ def snapshot_buffer_args(
     trace: "Trace",
     func_name: str,
     tensors: list[torch.Tensor],
+    kwargs: dict[str, Any],
 ) -> list[BufferSnapshot]:
     """Snapshot buffer-backed arguments for one wrapped torch call."""
 
@@ -387,7 +492,7 @@ def snapshot_buffer_args(
     tracker = getattr(trace, "_buffer_write_tracker", None)
     if not isinstance(tracker, BufferWriteTracker):
         return []
-    if not _is_fused_mutator(func_name) and not _could_mutate(func_name):
+    if not _is_fused_mutator(func_name) and not _could_mutate(func_name, kwargs):
         return []
     return tracker.snapshot_buffer_args(tensors)
 
@@ -405,12 +510,36 @@ def record_op_buffer_writes(
         tracker.record_op_writes(func_name, snapshots, producer_label_raw)
 
 
+def resolve_registered_buffer_address(trace: "Trace", tensor: torch.Tensor) -> str | None:
+    """Resolve an actual tensor argument to a registered-buffer address.
+
+    Parameters
+    ----------
+    trace:
+        Active trace whose buffer-write tracker owns the registered-buffer index.
+    tensor:
+        Tensor argument observed by a wrapped torch call.
+
+    Returns
+    -------
+    str | None
+        Registered-buffer address when the tensor aliases a tracked buffer,
+        otherwise ``None``.
+    """
+
+    tracker = getattr(trace, "_buffer_write_tracker", None)
+    if not isinstance(tracker, BufferWriteTracker):
+        return get_buffer_address(tensor)
+    return _resolve_buffer_address(tracker, tensor)
+
+
 def storage_key(tensor: torch.Tensor) -> tuple[Any, ...] | None:
     """Return a storage identity key guarded by object checks at use sites."""
 
     try:
-        storage = tensor.untyped_storage()
-        return (str(tensor.device), storage.data_ptr(), storage.nbytes())
+        with _state.pause_logging():
+            storage = tensor.untyped_storage()
+            return (str(tensor.device), storage.data_ptr(), storage.nbytes())
     except Exception:
         return None
 
@@ -503,14 +632,17 @@ def _resolve_buffer_address(
     direct = get_buffer_address(tensor)
     if direct in tracker.address_to_tensor:
         return direct
-    key = storage_key(tensor)
+    key = tracker.storage_key(tensor)
     if key is None:
         return None
-    tensor_start, tensor_end = _storage_range(tensor)
-    for address, registered in tracker.address_to_tensor.items():
-        if storage_key(registered) != key:
+    if key not in tracker.storage_key_to_addresses:
+        return None
+    tensor_start, tensor_end = tracker.storage_range(tensor)
+    for address in tracker.addresses_for_storage_key(key):
+        registered = tracker.address_to_tensor.get(address)
+        if registered is None:
             continue
-        reg_start, reg_end = _storage_range(registered)
+        reg_start, reg_end = tracker.storage_range(registered)
         if tensor_start >= reg_start and tensor_end <= reg_end:
             return address
     return None
@@ -519,9 +651,10 @@ def _resolve_buffer_address(
 def _storage_range(tensor: torch.Tensor) -> tuple[int, int]:
     """Return byte range occupied by a tensor inside its storage."""
 
-    element_size = tensor.element_size()
-    start = int(tensor.storage_offset()) * element_size
-    end = start + int(tensor.numel()) * element_size
+    with _state.pause_logging():
+        element_size = tensor.element_size()
+        start = int(tensor.storage_offset()) * element_size
+        end = start + int(tensor.numel()) * element_size
     return start, end
 
 
@@ -531,12 +664,13 @@ def _ranges_overlap(left: tuple[int, int], right: tuple[int, int]) -> bool:
     return left[0] < right[1] and right[0] < left[1]
 
 
-def _could_mutate(func_name: str) -> bool:
+def _could_mutate(func_name: str, kwargs: dict[str, Any] | None = None) -> bool:
     """Return whether a torch wrapper name can mutate tensor storage."""
 
     return (
         func_name.endswith("_")
         or func_name.startswith("__i")
+        or (kwargs is not None and kwargs.get("out") is not None)
         or func_name
         in {
             "__setitem__",

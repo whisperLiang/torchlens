@@ -165,16 +165,19 @@ def format_model_repr(trace: "Trace") -> str:
         Short two-line representation.
     """
     state = getattr(getattr(trace, "state", None), "name", "UNKNOWN")
-    if not trace._tracing_finished:
+    model_class_name = getattr(trace, "model_class_name", None)
+    tracing_finished = getattr(trace, "_tracing_finished", True)
+    if not tracing_finished:
         return (
             f"Trace(name={getattr(trace, 'trace_label', None)!r}, "
-            f"model_class_qualname={trace.model_class_name!r}, layers={_live_op_count(trace)}, "
+            f"model_class_qualname={model_class_name!r}, layers={_live_op_count(trace)}, "
             f"state={state})"
         )
 
+    layer_logs = getattr(trace, "layer_logs", {}) or {}
     return (
         f"Trace(name={getattr(trace, 'trace_label', None)!r}, "
-        f"model_class_qualname={trace.model_class_name!r}, layers={len(trace.layer_logs)}, "
+        f"model_class_qualname={model_class_name!r}, layers={len(layer_logs)}, "
         f"state={state})"
     )
 
@@ -1294,7 +1297,7 @@ def _build_compute_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]
         f"Params: {_int_with_commas(trace.num_params)} unique",
         f"Forward FLOPs: {_human_flops(trace.total_flops_forward)}",
         f"MACs: {_human_flops(trace.total_macs_forward)}",
-        f"Forward time: {trace.forward_duration * 1000:.2f} ms",
+        f"Forward time: {float(trace.forward_duration) * 1000:.2f} ms",
     ]
     return rows, footer_lines
 
@@ -1577,7 +1580,10 @@ def _module_time_ms(trace: "Trace", module: "Module") -> float:
             layer = trace[layer_label]
         except KeyError:
             continue
-        total += float(getattr(layer, "func_duration", 0.0) or 0.0)
+        duration = getattr(layer, "total_func_duration", None)
+        if duration is None:
+            duration = getattr(layer, "func_duration", 0.0)
+        total += float(duration or 0.0)
     return total * 1000.0
 
 
@@ -1639,15 +1645,12 @@ def _entry_name(entry: Any) -> str:
     str
         Display name.
     """
-    base_name = getattr(entry, "layer_label", None) or getattr(entry, "layer_label", None)
+    base_name = getattr(entry, "layer_label", None) or getattr(entry, "layer_label_short", None)
     if base_name is None:
         base_name = getattr(entry, "label", None) or getattr(entry, "layer_label", "?")
-    if (
-        getattr(entry, "num_calls", 1)
-        and getattr(entry, "num_calls", 1) > 1
-        and hasattr(entry, "ops")
-    ):
-        return f"{base_name} x{getattr(entry, 'num_calls', 1)}"
+    num_passes = int(getattr(entry, "num_passes", 1) or 1)
+    if num_passes > 1 and hasattr(entry, "ops"):
+        return f"{base_name} x{num_passes}"
     if getattr(entry, "call_index", 1) > 1:
         return str(getattr(entry, "layer_label", base_name))
     return str(base_name)

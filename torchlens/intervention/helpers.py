@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 import torch
@@ -11,11 +11,12 @@ from torch import nn
 from .errors import (
     AxisAmbiguityError,
     HookValueError,
+    NonExecutableSpecError,
     SpliceModuleDeviceError,
     SpliceModuleDtypeError,
 )
 from .hooks import HookContext, normalize_hook
-from .types import HelperPortability, HelperSpec
+from .types import HelperDirection, HelperPortability, HelperSpec
 
 HELPER_REGISTRY_VERSION = "1"
 
@@ -73,10 +74,10 @@ def mean_ablate(
         Optional tensor source. When omitted or ``over="self"``, the mean is
         computed from the current out at hook fire time.
     over:
-        Source policy label retained for audit. Phase 3 implements ``"self"``
-        and tensor sources only.
+        Source policy label retained for audit. ``"self"`` and tensor sources
+        are supported.
     force_shape_change:
-        Stored escape-hatch metadata for later execution phases.
+        Stored escape-hatch metadata for execution.
 
     Returns
     -------
@@ -529,13 +530,15 @@ def swap_with(
     *,
     force_shape_change: bool = False,
 ) -> HelperSpec:
-    """Create a helper that swaps with another site or tensor.
+    """Create a helper that swaps with another site's tensor.
 
     Parameters
     ----------
     other_label:
-        Label string resolved at fire time by later phases, a Op-like
-        object with ``out``, or a tensor value.
+        A tensor value, or an Op-like object exposing an already-resolved
+        ``out`` tensor (e.g. ``other_log['layer_x']`` from a separate,
+        already-completed capture). A bare string label is **not**
+        supported: see the Raises section.
     force_shape_change:
         Stored escape-hatch metadata for later execution phases.
 
@@ -543,7 +546,28 @@ def swap_with(
     -------
     HelperSpec
         Built-in forward helper spec.
+
+    Raises
+    ------
+    HookValueError
+        Immediately, if ``other_label`` is a plain string. No execution
+        path (live capture, replay, or rerun) populates a fire-time
+        label -> tensor lookup table, so a string label can never resolve
+        to another site's captured activation today. Pass a
+        ``torch.Tensor`` or an Op-like object with a resolved ``out``
+        tensor instead (e.g. ``tl.swap_with(other_log['layer_x'].out)``).
     """
+
+    if isinstance(other_label, str):
+        raise HookValueError(
+            "swap_with(<string label>) is not implemented: no live, replay, "
+            "or rerun execution path populates the fire-time site lookup "
+            "that would resolve a string label to another site's captured "
+            "tensor. Pass a torch.Tensor or an Op-like object with an "
+            "already-resolved `out` tensor instead, e.g. "
+            "tl.swap_with(other_log['layer_x'].out) or "
+            "tl.swap_with(other_log['layer_x'])."
+        )
 
     def factory() -> Callable[..., torch.Tensor]:
         """Return the runtime hook for swapping outs.
@@ -557,10 +581,13 @@ def swap_with(
         def _hook(out: torch.Tensor, *, hook: HookContext) -> torch.Tensor:
             """Return the resolved replacement tensor."""
 
-            replacement = _resolve_swap_value(other_label, hook)
+            del hook
+            replacement = _resolve_swap_value(other_label)
             if not isinstance(replacement, torch.Tensor):
                 raise HookValueError(
-                    "swap_with string labels require Phase 4 fire-time resolution context"
+                    "swap_with requires a torch.Tensor or an Op-like object "
+                    "with a resolved `out` tensor; got "
+                    f"{type(replacement).__name__!r}"
                 )
             return replacement.to(device=out.device, dtype=out.dtype)
 
@@ -579,7 +606,7 @@ def swap_with(
 def splice_module(
     module: nn.Module,
     *,
-    input: str = "out",
+    input: str = "in",
     output: str = "out",
     force_shape_change: bool = False,
 ) -> HelperSpec:
@@ -590,9 +617,10 @@ def splice_module(
     module:
         Module to call under ``pause_logging()`` in the execution helper.
     input:
-        Input routing policy. Phase 3 implements ``"out"``.
+        Input routing policy. ``"in"`` runs ``module`` on the original call
+        inputs; ``"out"`` preserves the legacy output-transform route.
     output:
-        Output routing policy. Phase 3 implements ``"out"``.
+        Output routing policy. Only ``"out"`` is supported.
     force_shape_change:
         Stored escape hatch allowing output metadata changes.
 
@@ -602,8 +630,8 @@ def splice_module(
         Built-in forward helper spec.
     """
 
-    if input != "out" or output != "out":
-        raise HookValueError("splice_module Phase 3 only supports out input/output routing")
+    if input not in {"in", "out"} or output != "out":
+        raise HookValueError("splice_module only supports input in {'in', 'out'} and output='out'")
 
     def factory() -> Callable[..., torch.Tensor]:
         """Return the runtime hook for module splicing.
@@ -617,7 +645,14 @@ def splice_module(
         def _hook(out: torch.Tensor, *, hook: HookContext) -> torch.Tensor:
             """Call the spliced module and validate dtype/device."""
 
-            result = module(out)
+            if input == "in":
+                if not hook.args and not hook.kwargs:
+                    raise HookValueError(
+                        "splice_module input routing requires captured call inputs"
+                    )
+                result = module(*hook.args, **dict(hook.kwargs))
+            else:
+                result = module(out)
             if not isinstance(result, torch.Tensor):
                 raise HookValueError("splice_module must return a torch.Tensor")
             if not force_shape_change and result.dtype != out.dtype:
@@ -637,9 +672,38 @@ def splice_module(
         args=(module,),
         kwargs={"input": input, "output": output, "force_shape_change": force_shape_change},
         factory=factory,
+        metadata={"input": input, "output": output},
         batch_independent=False,
         compatible_with_append=False,
     )
+
+
+def _first_tensor_input(
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+) -> torch.Tensor | None:
+    """Return the first tensor from captured call inputs.
+
+    Parameters
+    ----------
+    args:
+        Captured positional inputs.
+    kwargs:
+        Captured keyword inputs.
+
+    Returns
+    -------
+    torch.Tensor | None
+        First tensor input, or ``None`` when no tensor was captured.
+    """
+
+    for value in args:
+        if isinstance(value, torch.Tensor):
+            return value
+    for value in kwargs.values():
+        if isinstance(value, torch.Tensor):
+            return value
+    return None
 
 
 def bwd_hook(fn: Callable[..., torch.Tensor]) -> HelperSpec:
@@ -676,6 +740,7 @@ def bwd_hook(fn: Callable[..., torch.Tensor]) -> HelperSpec:
         kind="backward",
         factory=factory,
         metadata={"live_rerun_only": True},
+        direction="backward",
         batch_independent=False,
         compatible_with_append=False,
     )
@@ -717,6 +782,7 @@ def grad_zero(*, force_shape_change: bool = False) -> HelperSpec:
         kwargs={"force_shape_change": force_shape_change},
         factory=factory,
         metadata={"live_rerun_only": True},
+        direction="backward",
         batch_independent=False,
         compatible_with_append=False,
     )
@@ -761,6 +827,7 @@ def grad_scale(factor: float, *, force_shape_change: bool = False) -> HelperSpec
         kwargs={"force_shape_change": force_shape_change},
         factory=factory,
         metadata={"live_rerun_only": True},
+        direction="backward",
         batch_independent=False,
         compatible_with_append=False,
     )
@@ -820,6 +887,7 @@ def grad_clip(max_norm: float, norm_type: float = 2.0) -> HelperSpec:
         kind="backward",
         factory=factory,
         metadata={"live_rerun_only": True, "mount_shape": "tuple"},
+        direction="backward",
         batch_independent=False,
         compatible_with_append=False,
     )
@@ -881,6 +949,7 @@ def grad_noise(std: float, *, seed: int | None = None) -> HelperSpec:
         kind="backward",
         factory=factory,
         metadata={"live_rerun_only": True, "mount_shape": "tuple"},
+        direction="backward",
         batch_independent=False,
         compatible_with_append=False,
     )
@@ -931,6 +1000,7 @@ def grad_clamp(min: float | None = None, max: float | None = None) -> HelperSpec
         kind="backward",
         factory=factory,
         metadata={"live_rerun_only": True, "mount_shape": "tuple"},
+        direction="backward",
         batch_independent=False,
         compatible_with_append=False,
     )
@@ -945,6 +1015,7 @@ def _helper_spec(
     portability: HelperPortability = "builtin",
     factory: Callable[[], Callable[..., Any]],
     metadata: dict[str, Any] | None = None,
+    direction: HelperDirection | None = None,
     batch_independent: bool = False,
     compatible_with_append: bool = False,
 ) -> HelperSpec:
@@ -966,6 +1037,8 @@ def _helper_spec(
         Runtime hook factory.
     metadata:
         Extra helper metadata.
+    direction:
+        Optional default signal direction requested by legacy helpers.
     batch_independent:
         Whether this helper can be applied independently to each batch item.
     compatible_with_append:
@@ -985,6 +1058,7 @@ def _helper_spec(
         portability=portability,
         factory=factory,
         metadata=tuple(sorted((metadata or {}).items())),
+        direction=direction,
         batch_independent=batch_independent,
         compatible_with_append=compatible_with_append,
     )
@@ -995,6 +1069,7 @@ def helper_from_serialized(
     *,
     tensor_loader: Callable[[str], torch.Tensor],
     import_resolver: Callable[[str], Callable[..., Any]],
+    value_decoder: Callable[[Any], Any],
 ) -> HelperSpec | Callable[..., Any]:
     """Reconstruct a helper or callable from serialized helper data.
 
@@ -1006,6 +1081,21 @@ def helper_from_serialized(
         Callable mapping tensor reference IDs to loaded tensors.
     import_resolver:
         Callable resolving ``module:qualname`` import references.
+    value_decoder:
+        Full-codec decoder for a builtin helper's ``args``/``kwargs``. REQUIRED,
+        with no narrow-decoder fallback: the maintained ``save.py`` load path
+        passes ``_deserialize_value`` bound to the loaded tensor map, which
+        understands the *entire* wrapper-tag namespace ``_serialize_value`` emits
+        (``__tensor_ref__``, ``__callable__``, ``__helper__``, ``__opaque_audit__``,
+        ``__output_path_component__``, ``__dict_items__``). A narrower decoder that
+        only understands ``__tensor_ref__`` would silently return every other
+        wrapper as a raw dict, corrupting callable/opaque helper arguments until the
+        corrupted helper crashes several frames downstream at fire time -- the exact
+        failure mode this parameter has no default for. See ``_decode_jsonish``
+        (retained only as the fixture pinning that gap for
+        ``test_decode_gap_would_have_returned_raw_dict``; it is never called from
+        production code) for the narrow decoder this parameter must never fall back
+        to.
 
     Returns
     -------
@@ -1015,7 +1105,25 @@ def helper_from_serialized(
 
     portability = data["portability"]
     if portability == "import_ref":
-        return import_resolver(data["import_path"])
+        import_path = str(data["import_path"])
+
+        def factory() -> Callable[..., Any]:
+            """Resolve and call the imported helper factory lazily.
+
+            Returns
+            -------
+            Callable[..., Any]
+                Hook callable produced by the imported helper factory.
+            """
+
+            return import_resolver(import_path)()
+
+        return HelperSpec(
+            helper_name=str(data.get("name", "import_ref")),
+            portability="import_ref",
+            factory=factory,
+            metadata=(("import_path", import_path),),
+        )
     if portability == "opaque_audit":
         return HelperSpec(
             helper_name=data.get("name", "opaque_audit"),
@@ -1026,11 +1134,17 @@ def helper_from_serialized(
         )
 
     name = data["name"]
-    args = tuple(_decode_jsonish(value, tensor_loader) for value in data.get("args", []))
-    kwargs = {
-        str(key): _decode_jsonish(value, tensor_loader)
-        for key, value in data.get("kwargs", {}).items()
-    }
+    args = tuple(value_decoder(value) for value in data.get("args", []))
+    kwargs = {str(key): value_decoder(value) for key, value in data.get("kwargs", {}).items()}
+    # An audit-level save (or any save carrying an opaque argument) decodes those
+    # arguments into non-executable ``opaque_audit`` placeholders. Feeding such a
+    # placeholder into the real builtin constructor would build a helper that only
+    # crashes -- with a misleading, several-frames-removed error -- when it later
+    # fires. Detect it here and return an explicit non-executable placeholder whose
+    # factory raises a clear ``NonExecutableSpecError`` at use time instead.
+    opaque_arg = _first_non_executable_arg(args, kwargs)
+    if opaque_arg is not None:
+        return _non_executable_builtin_placeholder(name, opaque_arg, data)
     constructors: dict[str, Callable[..., HelperSpec]] = {
         "zero_ablate": zero_ablate,
         "mean_ablate": mean_ablate,
@@ -1055,8 +1169,137 @@ def helper_from_serialized(
     return constructors[name](*args, **kwargs)
 
 
+def _is_non_executable_placeholder(value: Any) -> bool:
+    """Whether a decoded argument is a non-executable ``opaque_audit`` placeholder.
+
+    Parameters
+    ----------
+    value:
+        Decoded helper argument.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``value`` is a HelperSpec that was reconstructed as an
+        ``opaque_audit`` (audit-only, factory-less) placeholder.
+    """
+
+    return isinstance(value, HelperSpec) and value.portability == "opaque_audit"
+
+
+def _first_non_executable_arg(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> Any | None:
+    """Return the first non-executable placeholder in ``args``/``kwargs``, if any.
+
+    Recurses into lists, tuples, and dict values so a placeholder nested inside a
+    container argument is still detected.
+
+    Parameters
+    ----------
+    args:
+        Decoded positional helper arguments.
+    kwargs:
+        Decoded keyword helper arguments.
+
+    Returns
+    -------
+    Any | None
+        The offending placeholder, or ``None`` when every argument is executable.
+    """
+
+    def _scan(value: Any) -> Any | None:
+        if _is_non_executable_placeholder(value):
+            return value
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                found = _scan(item)
+                if found is not None:
+                    return found
+        elif isinstance(value, Mapping):
+            for item in value.values():
+                found = _scan(item)
+                if found is not None:
+                    return found
+        return None
+
+    for value in args:
+        found = _scan(value)
+        if found is not None:
+            return found
+    for value in kwargs.values():
+        found = _scan(value)
+        if found is not None:
+            return found
+    return None
+
+
+def _non_executable_builtin_placeholder(
+    name: str, opaque_arg: Any, data: Mapping[str, Any]
+) -> HelperSpec:
+    """Build a non-executable placeholder for a builtin helper with opaque args.
+
+    Parameters
+    ----------
+    name:
+        Builtin helper name.
+    opaque_arg:
+        The decoded ``opaque_audit`` placeholder that made the helper
+        non-executable.
+    data:
+        Original serialized helper payload (used to preserve identity metadata).
+
+    Returns
+    -------
+    HelperSpec
+        An ``opaque_audit`` spec whose factory raises ``NonExecutableSpecError``
+        when fired, so a corrupted argument fails loudly at use time rather than
+        several frames downstream.
+    """
+
+    def factory() -> Callable[..., Any]:
+        """Refuse to build a runtime hook for a non-executable helper.
+
+        Raises
+        ------
+        NonExecutableSpecError
+            Always -- the helper carries an audit-only opaque argument.
+        """
+
+        raise NonExecutableSpecError(
+            f"Builtin helper {name!r} was loaded with a non-executable "
+            f"(audit-only) argument {opaque_arg!r} and cannot be run. Re-save the "
+            "intervention at level='executable_with_callables' (or 'portable') "
+            "with a reconstructible argument to obtain an executable spec."
+        )
+
+    return HelperSpec(
+        helper_name=name,
+        portability="opaque_audit",
+        kind=cast(Any, data.get("kind", "forward")),
+        direction=cast(Any, data.get("direction")),
+        factory=factory,
+        metadata=(
+            ("repr", f"<non-executable {name} helper (audit-only argument)>"),
+            ("executable", False),
+        ),
+        batch_independent=bool(data.get("batch_independent", False)),
+        compatible_with_append=bool(data.get("compatible_with_append", False)),
+    )
+
+
 def _decode_jsonish(value: Any, tensor_loader: Callable[[str], torch.Tensor]) -> Any:
-    """Decode JSON-safe helper argument data.
+    """QUARANTINED -- narrow legacy decoder, dead on every maintained code path.
+
+    This only understands the ``__tensor_ref__`` wrapper tag; every other wrapper
+    ``_serialize_value``/``save.py`` can emit (``__callable__``, ``__helper__``,
+    ``__opaque_audit__``, ``__output_path_component__``, ``__dict_items__``) passes
+    through unchanged as a raw dict -- silently corrupting callable/opaque helper
+    arguments. ``helper_from_serialized`` used to fall back to this decoder when
+    its ``value_decoder`` parameter was omitted; that default was removed (cert9)
+    because it re-triggered the exact BLOCKER-2 corruption class the maintained
+    ``save.py`` load path closed. Nothing in production calls this function anymore
+    -- it is retained ONLY so ``test_decode_gap_would_have_returned_raw_dict`` can
+    keep pinning the failure mode ``value_decoder`` exists to prevent. Do not wire
+    this back in as a fallback for any decoder parameter.
 
     Parameters
     ----------
@@ -1196,15 +1439,15 @@ def _align_direction(
     return direction
 
 
-def _resolve_swap_value(other_label: Any, hook: HookContext) -> Any:
-    """Resolve a swap source for Phase 3 helper execution.
+def _resolve_swap_value(other_label: Any) -> Any:
+    """Resolve a swap source for helper execution.
 
     Parameters
     ----------
     other_label:
-        String label, Op-like object, or tensor.
-    hook:
-        Hook context carrying optional fire-time lookup dictionaries.
+        Tensor or Op-like object with a resolved ``out`` attribute. String
+        labels are rejected earlier, in ``swap_with``, before a ``HelperSpec``
+        is ever built -- there is no fire-time lookup table for them.
 
     Returns
     -------
@@ -1213,11 +1456,6 @@ def _resolve_swap_value(other_label: Any, hook: HookContext) -> Any:
     """
 
     if isinstance(other_label, torch.Tensor):
-        return other_label
-    if isinstance(other_label, str):
-        swap_sources = hook.run_ctx.get("swap_sources", {})
-        if isinstance(swap_sources, dict):
-            return swap_sources.get(other_label, other_label)
         return other_label
     return getattr(other_label, "out", other_label)
 

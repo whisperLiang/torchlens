@@ -15,7 +15,8 @@ from collections import defaultdict, deque
 from typing import Any
 
 from .._label_format import format_memory, format_shape
-from .._render_utils import _open_file_quietly
+from .._render_utils import _open_file_quietly, html_escape
+from ..code_panel import _code_panel_label
 
 SPAN_LOCAL = 12
 # Calibrated 2026-06-11: local 5k-node chains cost about 5k and dot rendered
@@ -356,19 +357,30 @@ def _estimate_node_size(label: str) -> tuple[float, float]:
     return width, height
 
 
+def _dot_escape(value: str) -> str:
+    """Backslash-escape a raw string for embedding inside a quoted DOT string.
+
+    Mirrors ``graphviz.quoting.quote()``'s escaping semantics: escape a
+    literal backslash ``\\`` FIRST, then a literal double-quote ``"``.  Order
+    matters -- escaping the backslash first means the backslash newly
+    introduced to escape a ``"`` is never itself re-escaped by a later pass.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _dot_quote(value: str) -> str:
     """Quote a DOT attribute value, preserving HTML labels."""
     if value.startswith("<") and value.endswith(">"):
         return value
-    return f'"{value}"'
+    return f'"{_dot_escape(value)}"'
 
 
 def _dot_id(name: str) -> str:
     """Format a node name for DOT, quoting if needed."""
     _KW = {"graph", "digraph", "subgraph", "node", "edge", "strict"}
-    if re.match(r"^[a-zA-Z_]\w*$", name) and name not in _KW:
+    if re.match(r"^[a-zA-Z_]\w*$", name) and name.lower() not in _KW:
         return name
-    return f'"{name}"'
+    return f'"{_dot_escape(name)}"'
 
 
 def render_rank_layout(
@@ -376,7 +388,7 @@ def render_rank_layout(
     entries_to_plot: dict[str, Any],
     vis_mode: str,
     vis_call_depth: int,
-    show_buffer_layers: bool,
+    show_buffer_layers: Any,
     overrides: Any,
     node_mode: Any,
     node_spec_fn: Any,
@@ -390,6 +402,7 @@ def render_rank_layout(
     vis_save_only: bool,
     graph_caption: str,
     rankdir: str,
+    code_panel_source: str | None = None,
 ) -> str:
     """Render a graph with the pure-Python rank layout.
 
@@ -416,6 +429,7 @@ def render_rank_layout(
         vis_save_only: If True, don't open viewer.
         graph_caption: HTML label for the graph title.
         rankdir: Graphviz rank direction (BT, TB, LR).
+        code_panel_source: Optional source code to embed as a graph cluster.
 
     Returns:
         The generated DOT source string.
@@ -438,6 +452,8 @@ def render_rank_layout(
         DEFAULT_BG_COLOR,
         COMMUTE_FUNCS,
         _render_node_label,
+        _is_buffer_visible,
+        _is_hidden_buffer_update_node,
     )
     from .._render_utils import compute_module_penwidth
     from ..modes import COLLAPSED_MODE_REGISTRY
@@ -486,9 +502,17 @@ def render_rank_layout(
             root_node_names.append(graph_node_label)
 
     for _barcode, node in entries_to_plot.items():
-        if node.layer_label in skipped_labels:
+        if _render_node_label(node, vis_mode) in skipped_labels:
             continue
-        if node.is_buffer and not show_buffer_layers:
+        if node.is_buffer and not _is_buffer_visible(node, show_buffer_layers):
+            continue
+        if _is_hidden_buffer_update_node(
+            trace,
+            node,
+            entries_to_plot,
+            show_buffer_layers,
+            vis_mode,
+        ):
             continue
 
         collapse_address = _collapse_address_for_node(
@@ -618,7 +642,7 @@ def render_rank_layout(
         for render_edge in (edge_map or {}).get(_render_node_label(node, vis_mode), []):
             child_node = render_edge.target
             metadata_child = render_edge.metadata_child
-            if child_node.is_buffer and not show_buffer_layers:
+            if child_node.is_buffer and not _is_buffer_visible(child_node, show_buffer_layers):
                 continue
 
             # Resolve tail name
@@ -755,7 +779,16 @@ def render_rank_layout(
         """Recursively write a cluster subgraph with its nodes and children."""
         prefix = "  " * indent
         safe = mod_key.replace(":", "_pass").replace(".", "_")
-        lines.append(f"{prefix}subgraph cluster_{safe} {{")
+        # ``safe`` only substitutes ``:``/``.`` -- it still carries through
+        # arbitrary module-address text (e.g. an ``nn.ModuleDict`` key like
+        # ``"a<b>&c"``). Route the subgraph identifier through ``_dot_id()``,
+        # the same quoting helper every other raw-DOT identifier in this file
+        # uses (node names at ``_node_line``, edge tail/head names below), so
+        # characters illegal in an unquoted Graphviz ID don't get spliced
+        # into raw DOT text. Quoting is safe for subgraph names too: neato
+        # still recognizes the "cluster" prefix and applies cluster styling
+        # whether or not the name is quoted.
+        lines.append(f"{prefix}subgraph {_dot_id(f'cluster_{safe}')} {{")
 
         mod_addr = mod_key.split(":")[0] if ":" in mod_key else mod_key
         try:
@@ -775,7 +808,15 @@ def render_rank_layout(
         pw = compute_module_penwidth(depth, max_nest)
         ls = "solid" if module_has_ancestor.get(mod_key) else "dashed"
 
-        cluster_label = f'<<B>@{title}</B><br align="left"/>({mod_type})<br align="left"/>>'
+        # ``title`` is derived from the module address, which can contain
+        # arbitrary user text (e.g. an ``nn.ModuleDict`` key like
+        # ``"score & rank"``) -- escape both it and the class name before
+        # they land in the Graphviz HTML-like label.
+        escaped_title = html_escape(title)
+        escaped_mod_type = html_escape(mod_type)
+        cluster_label = (
+            f'<<B>@{escaped_title}</B><br align="left"/>({escaped_mod_type})<br align="left"/>>'
+        )
 
         # Apply module overrides
         mod_attrs = {
@@ -817,6 +858,22 @@ def render_rank_layout(
         if nn in node_data:
             lines.append(_node_line(nn))
 
+    if code_panel_source is not None:
+        panel_x = 0.0
+        panel_y = max_y + 180.0
+        lines.append("  subgraph cluster_torchlens_code_panel {")
+        lines.append('    label=""')
+        lines.append('    style="filled,rounded"')
+        lines.append('    fillcolor="#FAFAFA"')
+        lines.append('    color="#A8A8A8"')
+        lines.append('    margin="12"')
+        lines.append(
+            "    __tl_code_panel_node "
+            f"[label={_code_panel_label(code_panel_source)} shape=plaintext "
+            f'fontname="Courier" margin="0" pos="{panel_x:.1f},{panel_y:.1f}!"]'
+        )
+        lines.append("  }")
+
     # Module cluster hierarchy
     for mod in top_modules:
         _write_cluster(mod, 0, 1)
@@ -851,6 +908,7 @@ def render_rank_layout(
     # heuristic keys off BOTH size and edge density (see _choose_spline_mode).
     spline_mode = _choose_spline_mode(num_nodes, num_edges)
     render_timeout = max(_NEATO_TIMEOUT, int(num_nodes * 0.01))
+    render_succeeded = False
     try:
         _run_neato_with_fallbacks(
             rendered_path=rendered_path,
@@ -859,10 +917,11 @@ def render_rank_layout(
             spline_mode=spline_mode,
             render_timeout=render_timeout,
         )
+        render_succeeded = True
         if not vis_save_only:
             _open_file_quietly(rendered_path)
     finally:
-        if os.path.exists(source_path):
+        if render_succeeded and os.path.exists(source_path):
             os.remove(source_path)
 
     return dot_source
@@ -1050,5 +1109,5 @@ def _add_arg_label(
                     arg_labels.append(f"{arg_type[:-1]} {arg_loc}")
 
     if arg_labels:
-        label_str = "<br/>".join(arg_labels)
+        label_str = "<br/>".join(html_escape(str(label)) for label in arg_labels)
         edge_dict["label"] = f"<<FONT POINT-SIZE='10'><b>{label_str}</b></FONT>>"

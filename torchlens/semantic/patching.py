@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 from ..intervention.selectors import facet
+from ..options import CaptureOptions
 from ..user_funcs import trace
 from .facets import Facet, MissingGradient
 
@@ -62,58 +63,71 @@ def activation_patch_residual_stream(
     clean_log, corrupted_log = _baseline_traces(
         model, clean_input, corrupted_input, trace_kwargs=trace_kwargs
     )
-    metric_template = _baseline_metric_template(clean_log, corrupted_log, metric)
-    modules = _modules_with_facet(clean_log, facet_name)
-    _ensure_matching_modules(corrupted_log, modules, facet_name=facet_name)
-    if not patch_positions:
-        return _activation_patch_by_module(
-            model,
-            corrupted_input,
-            corrupted_log,
-            clean_log,
-            modules,
-            facet_name=facet_name,
-            metric=metric,
-            metric_template=metric_template,
-        )
-
-    if not modules:
-        raise ValueError(f"No modules expose facet {facet_name!r}.")
-    first_value = _facet_tensor(clean_log.modules[modules[0]].facets[facet_name])
-    normalized_axis = position_axis % first_value.ndim
-    patch_positions_list = (
-        list(range(first_value.shape[normalized_axis])) if positions is None else list(positions)
-    )
-    result = torch.empty(
-        (len(modules), len(patch_positions_list)),
-        dtype=metric_template.dtype,
-        device=metric_template.device,
-    )
-    for layer_index, address in enumerate(modules):
-        clean_value = _facet_tensor(clean_log.modules[address].facets[facet_name]).detach().clone()
-        selector = facet(facet_name).in_module(address)
-        for pos_index, position in enumerate(patch_positions_list):
-
-            def _patch_position(out: torch.Tensor, *, hook: Any) -> torch.Tensor:
-                """Return ``out`` with one position replaced by the clean activation."""
-
-                del hook
-                patched = out.clone(memory_format=torch.preserve_format)
-                target = patched.select(normalized_axis, position)
-                source = clean_value.select(normalized_axis, position)
-                target.copy_(source)
-                return patched
-
-            patched_log = _run_patch(
+    try:
+        metric_template = _baseline_metric_template(clean_log, corrupted_log, metric)
+        modules = _modules_with_facet(clean_log, facet_name)
+        _ensure_matching_modules(corrupted_log, modules, facet_name=facet_name)
+        if not patch_positions:
+            return _activation_patch_by_module(
                 model,
                 corrupted_input,
                 corrupted_log,
-                selector,
-                _patch_position,
-                name=f"patch_{facet_name}_{layer_index}_{position}",
+                clean_log,
+                modules,
+                facet_name=facet_name,
+                metric=metric,
+                metric_template=metric_template,
             )
-            result[layer_index, pos_index] = _metric_scalar(metric(patched_log), like=result)
-    return result
+
+        if not modules:
+            raise ValueError(f"No modules expose facet {facet_name!r}.")
+        first_value = _facet_tensor(clean_log.modules[modules[0]].facets[facet_name])
+        normalized_axis = position_axis % first_value.ndim
+        patch_positions_list = (
+            list(range(first_value.shape[normalized_axis]))
+            if positions is None
+            else list(positions)
+        )
+        result = torch.empty(
+            (len(modules), len(patch_positions_list)),
+            dtype=metric_template.dtype,
+            device=metric_template.device,
+        )
+        for layer_index, address in enumerate(modules):
+            clean_value = (
+                _facet_tensor(clean_log.modules[address].facets[facet_name]).detach().clone()
+            )
+            selector = facet(facet_name).in_module(address)
+            for pos_index, position in enumerate(patch_positions_list):
+
+                def _patch_position(out: torch.Tensor, *, hook: Any) -> torch.Tensor:
+                    """Return ``out`` with one position replaced by the clean activation."""
+
+                    del hook
+                    patched = out.clone(memory_format=torch.preserve_format)
+                    target = patched.select(normalized_axis, position)
+                    source = clean_value.select(normalized_axis, position)
+                    target.copy_(source)
+                    return patched
+
+                patched_log = _run_patch(
+                    model,
+                    corrupted_input,
+                    corrupted_log,
+                    selector,
+                    _patch_position,
+                    name=f"patch_{facet_name}_{layer_index}_{position}",
+                )
+                try:
+                    result[layer_index, pos_index] = _metric_scalar(
+                        metric(patched_log), like=result
+                    )
+                finally:
+                    patched_log.cleanup()
+        return result
+    finally:
+        clean_log.cleanup()
+        corrupted_log.cleanup()
 
 
 def activation_patch_attention_output(
@@ -151,19 +165,23 @@ def activation_patch_attention_output(
     clean_log, corrupted_log = _baseline_traces(
         model, clean_input, corrupted_input, trace_kwargs=trace_kwargs
     )
-    metric_template = _baseline_metric_template(clean_log, corrupted_log, metric)
-    modules = _modules_with_facet(clean_log, facet_name)
-    _ensure_matching_modules(corrupted_log, modules, facet_name=facet_name)
-    return _activation_patch_by_module(
-        model,
-        corrupted_input,
-        corrupted_log,
-        clean_log,
-        modules,
-        facet_name=facet_name,
-        metric=metric,
-        metric_template=metric_template,
-    )
+    try:
+        metric_template = _baseline_metric_template(clean_log, corrupted_log, metric)
+        modules = _modules_with_facet(clean_log, facet_name)
+        _ensure_matching_modules(corrupted_log, modules, facet_name=facet_name)
+        return _activation_patch_by_module(
+            model,
+            corrupted_input,
+            corrupted_log,
+            clean_log,
+            modules,
+            facet_name=facet_name,
+            metric=metric,
+            metric_template=metric_template,
+        )
+    finally:
+        clean_log.cleanup()
+        corrupted_log.cleanup()
 
 
 def activation_patch_attention_heads(
@@ -202,16 +220,20 @@ def activation_patch_attention_heads(
     clean_log, corrupted_log = _baseline_traces(
         model, clean_input, corrupted_input, trace_kwargs=trace_kwargs
     )
-    metric_template = _baseline_metric_template(clean_log, corrupted_log, metric)
-    return _activation_patch_heads(
-        model,
-        corrupted_input,
-        corrupted_log,
-        clean_log,
-        facet_name=facet_name,
-        metric=metric,
-        metric_template=metric_template,
-    )
+    try:
+        metric_template = _baseline_metric_template(clean_log, corrupted_log, metric)
+        return _activation_patch_heads(
+            model,
+            corrupted_input,
+            corrupted_log,
+            clean_log,
+            facet_name=facet_name,
+            metric=metric,
+            metric_template=metric_template,
+        )
+    finally:
+        clean_log.cleanup()
+        corrupted_log.cleanup()
 
 
 def activation_patch_mlp_output(
@@ -249,23 +271,27 @@ def activation_patch_mlp_output(
     clean_log, corrupted_log = _baseline_traces(
         model, clean_input, corrupted_input, trace_kwargs=trace_kwargs
     )
-    metric_template = _baseline_metric_template(clean_log, corrupted_log, metric)
-    modules = [
-        address
-        for address in _modules_with_facet(clean_log, facet_name)
-        if _looks_like_mlp_module(clean_log.modules[address])
-    ]
-    _ensure_matching_modules(corrupted_log, modules, facet_name=facet_name)
-    return _activation_patch_by_module(
-        model,
-        corrupted_input,
-        corrupted_log,
-        clean_log,
-        modules,
-        facet_name=facet_name,
-        metric=metric,
-        metric_template=metric_template,
-    )
+    try:
+        metric_template = _baseline_metric_template(clean_log, corrupted_log, metric)
+        modules = [
+            address
+            for address in _modules_with_facet(clean_log, facet_name)
+            if _looks_like_mlp_module(clean_log.modules[address])
+        ]
+        _ensure_matching_modules(corrupted_log, modules, facet_name=facet_name)
+        return _activation_patch_by_module(
+            model,
+            corrupted_input,
+            corrupted_log,
+            clean_log,
+            modules,
+            facet_name=facet_name,
+            metric=metric,
+            metric_template=metric_template,
+        )
+    finally:
+        clean_log.cleanup()
+        corrupted_log.cleanup()
 
 
 def attribution_patch_attention_heads(
@@ -303,33 +329,35 @@ def attribution_patch_attention_heads(
         Approximate metric effects shaped ``[layer, head]``.
     """
 
-    grad_trace_kwargs = dict(trace_kwargs or {})
-    grad_trace_kwargs.setdefault("save_grads", True)
     clean_log, corrupted_log = _baseline_traces(
-        model, clean_input, corrupted_input, trace_kwargs=grad_trace_kwargs
+        model, clean_input, corrupted_input, trace_kwargs=trace_kwargs, save_grads=True
     )
-    clean_metric = _require_scalar_metric(metric(clean_log))
-    corrupted_metric = _require_scalar_metric(metric(corrupted_log))
-    clean_log.log_backward(clean_metric)
-    corrupted_log.log_backward(corrupted_metric)
-    modules = _modules_with_facet(clean_log, facet_name)
-    _ensure_matching_modules(corrupted_log, modules, facet_name=facet_name)
-    if not modules:
-        raise ValueError(f"No modules expose facet {facet_name!r}.")
-    n_heads = _num_heads(clean_log.modules[modules[0]], facet_name=facet_name)
-    result = torch.empty(
-        (len(modules), n_heads), dtype=corrupted_metric.dtype, device=corrupted_metric.device
-    )
-    for layer_index, address in enumerate(modules):
-        for head_index in range(n_heads):
-            clean_value = _facet_tensor(
-                clean_log.modules[address].facets.head(head_index)[facet_name]
-            )
-            corrupted_facet = corrupted_log.modules[address].facets.head(head_index)[facet_name]
-            corrupted_value = _facet_tensor(corrupted_facet)
-            grad = _facet_grad_tensor(corrupted_facet, address=address, facet_name=facet_name)
-            result[layer_index, head_index] = (grad * (clean_value - corrupted_value)).sum()
-    return result
+    try:
+        clean_metric = _require_scalar_metric(metric(clean_log))
+        corrupted_metric = _require_scalar_metric(metric(corrupted_log))
+        clean_log.log_backward(clean_metric)
+        corrupted_log.log_backward(corrupted_metric)
+        modules = _modules_with_facet(clean_log, facet_name)
+        _ensure_matching_modules(corrupted_log, modules, facet_name=facet_name)
+        if not modules:
+            raise ValueError(f"No modules expose facet {facet_name!r}.")
+        n_heads = _num_heads(clean_log.modules[modules[0]], facet_name=facet_name)
+        result = torch.empty(
+            (len(modules), n_heads), dtype=corrupted_metric.dtype, device=corrupted_metric.device
+        )
+        for layer_index, address in enumerate(modules):
+            for head_index in range(n_heads):
+                clean_value = _facet_tensor(
+                    clean_log.modules[address].facets.head(head_index)[facet_name]
+                )
+                corrupted_facet = corrupted_log.modules[address].facets.head(head_index)[facet_name]
+                corrupted_value = _facet_tensor(corrupted_facet)
+                grad = _facet_grad_tensor(corrupted_facet, address=address, facet_name=facet_name)
+                result[layer_index, head_index] = (grad * (clean_value - corrupted_value)).sum()
+        return result
+    finally:
+        clean_log.cleanup()
+        corrupted_log.cleanup()
 
 
 def _baseline_traces(
@@ -338,21 +366,41 @@ def _baseline_traces(
     corrupted_input: Any,
     *,
     trace_kwargs: Mapping[str, Any] | None,
+    save_grads: bool | None = None,
 ) -> tuple[Any, Any]:
     """Return clean and corrupted traces with all layer activations saved."""
 
-    kwargs = _trace_kwargs(trace_kwargs)
+    kwargs = _trace_kwargs(trace_kwargs, save_grads=save_grads)
     clean_log = trace(model, clean_input, **kwargs)
     corrupted_log = trace(model, corrupted_input, **kwargs)
     return clean_log, corrupted_log
 
 
-def _trace_kwargs(trace_kwargs: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Return trace keyword arguments with P4-safe defaults."""
+def _trace_kwargs(
+    trace_kwargs: Mapping[str, Any] | None,
+    *,
+    save_grads: bool | None = None,
+) -> dict[str, Any]:
+    """Return trace keyword arguments with P4-safe defaults.
+
+    Defaults are supplied through the grouped ``capture=`` kwarg so this
+    helper never triggers torchlens' own flat-kwarg deprecation warnings
+    (``layers_to_save=``/``save_arg_values=``/``save_grads=`` are deprecated
+    aliases for ``capture.*`` fields). If the caller already supplied
+    ``capture=`` or any of the legacy flat names in ``trace_kwargs``, that
+    choice is left untouched -- the caller opted into the deprecated path
+    themselves.
+    """
 
     kwargs = dict(trace_kwargs or {})
-    kwargs.setdefault("layers_to_save", "all")
-    kwargs.setdefault("save_arg_values", True)
+    if "capture" in kwargs:
+        return kwargs
+    if any(name in kwargs for name in ("layers_to_save", "save_arg_values", "save_grads")):
+        return kwargs
+    capture_fields: dict[str, Any] = {"layers_to_save": "all", "save_arg_values": True}
+    if save_grads is not None:
+        capture_fields["save_grads"] = save_grads
+    kwargs["capture"] = CaptureOptions(**capture_fields)
     return kwargs
 
 
@@ -393,7 +441,10 @@ def _activation_patch_by_module(
             _patch_whole,
             name=f"patch_{facet_name}_{layer_index}",
         )
-        result[layer_index] = _metric_scalar(metric(patched_log), like=result)
+        try:
+            result[layer_index] = _metric_scalar(metric(patched_log), like=result)
+        finally:
+            patched_log.cleanup()
     return result
 
 
@@ -439,7 +490,10 @@ def _activation_patch_heads(
                 _patch_head,
                 name=f"patch_{facet_name}_{layer_index}_{head_index}",
             )
-            result[layer_index, head_index] = _metric_scalar(metric(patched_log), like=result)
+            try:
+                result[layer_index, head_index] = _metric_scalar(metric(patched_log), like=result)
+            finally:
+                patched_log.cleanup()
     return result
 
 
@@ -456,7 +510,7 @@ def _run_patch(
 
     patched_log = corrupted_log.fork(name)
     patched_log.attach_hooks(selector, hook)
-    patched_log.rerun(model, corrupted_input)
+    patched_log.run(model, corrupted_input)
     return patched_log
 
 

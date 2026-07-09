@@ -1,8 +1,4 @@
-"""Import surface for the planned TorchLens intervention API.
-
-The subpackage exists in Phase 0 only to reserve ownership boundaries and
-public import paths. Runtime behavior remains unimplemented and fails closed.
-"""
+"""Import surface for TorchLens intervention selectors, hooks, reruns, and bundles."""
 
 from ._metrics import (
     METRIC_REGISTRY,
@@ -90,7 +86,7 @@ from .selectors import (
     where,
     without_op,
 )
-from .sites import SiteCollection, SiteSpec, sites as _sites_private
+from .sites import SiteCollection, SiteSpec, sites
 from .errors import (
     AppendBatchDependenceError,
     AppendMismatchError,
@@ -217,7 +213,9 @@ __all__ = [
     "SaveLevel",
     "ParentRef",
     "SiteAmbiguityError",
+    "SiteCollection",
     "SiteResolutionError",
+    "SiteSpec",
     "SelectorCompositionError",
     "SpecCompat",
     "SpecMutationError",
@@ -295,6 +293,7 @@ __all__ = [
     "save_intervention",
     "scale",
     "splice_module",
+    "sites",
     "steer",
     "swap_with",
     "where",

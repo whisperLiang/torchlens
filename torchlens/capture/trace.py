@@ -1,6 +1,6 @@
 """Forward-pass orchestration: runs the model, manages logging state, and saves outs.
 
-This module implements the two-pass architecture that TorchLens uses to extract
+This module implements the forward-pass architecture that TorchLens uses to extract
 model outs:
 
 1. **Exhaustive pass** (``capture_mode="exhaustive"``): Runs the model once,
@@ -12,7 +12,9 @@ model outs:
    structure from the exhaustive pass, only saving new out values.
    Much faster because it skips all metadata collection.  Used by
    ``save_new_outs()`` to refresh outs for new inputs without
-   rebuilding the entire graph.
+   rebuilding the entire graph. Public selective saves usually use predicate-time
+   filtering in the primary pass and only reach this path when finalized labels or
+   gradient-specific selections require replay.
 
 Key ordering constraint:
     RNG state must be captured/restored BEFORE ``active_logging()`` is entered,
@@ -31,12 +33,9 @@ import random
 import sys
 import time
 from collections import defaultdict
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
-import torch
-from torch import nn
-
-from .. import _state
 from ..backends import (
     BackendName,
     BackendUnsupportedError,
@@ -47,15 +46,151 @@ from ..backends import (
 from ..fastlog._halt import HaltSignal
 from ..ir.container_registry import ModelSite, Phase, Role, walk_container
 from ..quantities import Bytes, Duration
+from .config import InternalCaptureConfig
+from .stop import StopDirective, evaluate_halt_stop
 
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
-from ..utils.rng import set_random_seed, log_current_rng_states, set_rng_from_saved_states
-from ..utils.tensor_utils import _is_cuda_available
 from ..data_classes._lookup_keys import _give_user_feedback_about_lookup_key
 from ..utils.display import _timed_phase, _vprint
 
 _ACTIVE_CAPTURE_BACKEND: CaptureBackend | None = None
+
+
+def _process_rss_bytes() -> int:
+    """Return the current process resident-set size in bytes, or 0 if unavailable.
+
+    Used as a coarse host-memory proxy for the CPU forward-pass peak. psutil is an
+    optional dependency; absence degrades to 0 rather than raising.
+
+    Returns
+    -------
+    int
+        Resident-set size in bytes, or 0 when psutil is unavailable.
+    """
+
+    try:
+        import psutil
+    except ImportError:
+        return 0
+    return int(psutil.Process().memory_info().rss)
+
+
+@contextlib.contextmanager
+def _forward_peak_memory_bracket(trace: "Trace", device: "object | None") -> "Iterator[None]":
+    """Record forward-pass peak memory around the model forward call.
+
+    Stores the peak on ``trace.forward_peak_memory`` and the backend label on
+    ``trace.forward_memory_backend``. CUDA reports the true device-side peak via
+    ``max_memory_allocated`` after ``reset_peak_memory_stats``. CPU/MPS use the
+    larger of (a) a process resident-set-size delta -- which captures torch's
+    C++-allocated tensor buffers for sizeable models -- and (b) the stdlib
+    ``tracemalloc`` Python-allocation peak, measured as a delta against a
+    baseline snapshot taken at bracket entry (after ``reset_peak()`` when
+    tracemalloc was already tracing). This keeps the value scoped to this
+    bracket even when tracemalloc was started earlier by external tooling: the
+    reset discards any unrelated historical high-water mark, and subtracting
+    the entry-time baseline discards memory that is legitimately still live
+    but unrelated to this forward pass (e.g. process-wide Python state already
+    resident when the bracket was entered). tracemalloc stays reliably
+    positive for small models where RSS granularity rounds the delta to zero.
+
+    Only the exhaustive and predicate primary passes record memory; the fast
+    second pass re-runs the model and must not clobber the measured forward peak.
+    Measurement never raises into the capture path.
+
+    Parameters
+    ----------
+    trace:
+        Trace receiving the forward memory metadata.
+    device:
+        Device the forward pass runs on.
+
+    Yields
+    ------
+    None
+        Context body in which the model forward executes.
+    """
+
+    if getattr(trace, "capture_mode", None) == "fast":
+        yield
+        return
+
+    device_type = getattr(device, "type", None)
+    torch_module: Any = None
+    if device_type in {"cuda", "mps"}:
+        try:
+            import torch as torch_module
+        except ImportError:
+            torch_module = None
+
+    if device_type == "cuda" and torch_module is not None and torch_module.cuda.is_available():
+        backend_label = "cuda"
+        cuda_device = device
+        with contextlib.suppress(Exception):
+            torch_module.cuda.reset_peak_memory_stats(cuda_device)
+        try:
+            yield
+        finally:
+            with contextlib.suppress(Exception):
+                trace.forward_peak_memory = Bytes(
+                    max(0, int(torch_module.cuda.max_memory_allocated(cuda_device)))
+                )
+            trace.forward_memory_backend = backend_label
+        return
+
+    if device_type == "mps" and torch_module is not None and hasattr(torch_module, "mps"):
+        backend_label = "mps"
+        before = int(torch_module.mps.current_allocated_memory())
+    else:
+        backend_label = "cpu"
+        before = _process_rss_bytes()
+
+    import tracemalloc
+
+    tracemalloc_started_here = not tracemalloc.is_tracing()
+    if tracemalloc_started_here:
+        with contextlib.suppress(Exception):
+            tracemalloc.start()
+    else:
+        # tracemalloc was already tracing when this bracket was entered (external
+        # tooling, a pytest memory-leak plugin, or a leftover start elsewhere in the
+        # process). Reset its high-water mark before yielding so the peak reported
+        # below is scoped to this forward pass instead of an arbitrary earlier,
+        # unrelated high-water mark from before this bracket ran.
+        with contextlib.suppress(Exception):
+            tracemalloc.reset_peak()
+    # Snapshot the currently-live traced size as a baseline. When tracemalloc was
+    # already running, this "current" size can itself be sizeable (e.g. process-wide
+    # Python-level state that happens to already be resident, such as this same
+    # trace() call's own one-time model-preparation work that ran moments earlier,
+    # just before this bracket). reset_peak() alone only discards *historical* peaks
+    # reached before the bracket; it cannot lower "current". Subtracting this
+    # baseline from the post-yield peak below isolates the delta genuinely
+    # introduced by the forward pass, mirroring the RSS-delta measurement used for
+    # the CPU/MPS path just below.
+    traced_baseline = 0
+    if tracemalloc.is_tracing():
+        with contextlib.suppress(Exception):
+            traced_baseline, _peak_at_entry = tracemalloc.get_traced_memory()
+    try:
+        yield
+    finally:
+        traced_peak = 0
+        if tracemalloc.is_tracing():
+            with contextlib.suppress(Exception):
+                _current, traced_peak = tracemalloc.get_traced_memory()
+                traced_peak = max(0, traced_peak - traced_baseline)
+            if tracemalloc_started_here:
+                with contextlib.suppress(Exception):
+                    tracemalloc.stop()
+        if backend_label == "mps" and torch_module is not None:
+            after = int(torch_module.mps.current_allocated_memory())
+        else:
+            after = _process_rss_bytes()
+        rss_delta = max(0, after - before)
+        trace.forward_memory_backend = backend_label
+        trace.forward_peak_memory = Bytes(max(rss_delta, int(traced_peak)))
 
 
 def _backend_name_for_trace(trace: "Trace") -> BackendName:
@@ -134,10 +269,169 @@ def _clear_saved_activation_dedup_caches(trace: "Trace") -> None:
             registry.clear_live_state()
 
 
+def _run_predicate_forward_with_root_frame(
+    trace: "Trace",
+    backend: CaptureBackend,
+    model: object,
+    input_args: tuple[Any, ...] | list[Any],
+    input_kwargs: dict[Any, Any],
+    model_device: object | None,
+) -> Any:
+    """Run predicate capture through the shared root module-frame boundary.
+
+    Parameters
+    ----------
+    trace
+        Active predicate-mode trace.
+    backend
+        Backend adapter owning module-frame stack operations.
+    model
+        Model being captured.
+    input_args
+        Normalized model positional inputs.
+    input_kwargs
+        Normalized model keyword inputs.
+    model_device
+        Device used for forward peak-memory measurement.
+
+    Returns
+    -------
+    Any
+        Raw model output.
+    """
+
+    from ..capture.predicates import _evaluate_keep_module, _is_halt_only_capture
+    from ..capture.projections import (
+        _build_record_context,
+        append_projected_event,
+        get_active_recording_state,
+    )
+    from ..fastlog.types import CaptureSpec, ModuleStackFrame
+
+    state = get_active_recording_state()
+    root_frame = ModuleStackFrame(
+        address="",
+        module_type=type(model).__name__,
+        module_id=id(model),
+        pass_index=1,
+    )
+    skipped_spec = CaptureSpec(save_out=False, save_metadata=False)
+    backend.push_existing_module_frame(trace, state.module_stack, root_frame)
+    state.event_index += 1
+    enter_ctx = _build_record_context(
+        kind="module_enter",
+        op_log_or_op_data={
+            "label": "root:enter:1",
+            "address": "",
+            "module_type": type(model).__name__,
+            "module_pass_index": root_frame.pass_index,
+        },
+        module_stack=state.module_stack,
+        history=tuple(state.history),
+        op_counts=state.op_counts,
+        pass_index=state.pass_index,
+        event_index=state.event_index,
+        step_index=None,
+        time_since_pass_start=time.time() - trace.capture_start_time,
+        include_source_events=state.options.include_source_events,
+        sample_id=state.sample_id,
+    )
+    halt_only = _is_halt_only_capture(state.options)
+    try:
+        if halt_only:
+            evaluate_halt_stop(trace, enter_ctx, state.options)
+        else:
+            enter_spec = _evaluate_keep_module(enter_ctx, state.options)
+            append_projected_event(
+                trace,
+                enter_ctx,
+                enter_spec,
+                predicate_matched=enter_spec.save_out or enter_spec.save_metadata,
+            )
+            evaluate_halt_stop(trace, enter_ctx, state.options)
+    except HaltSignal:
+        raise
+    except Exception as exc:
+        state.handle_predicate_exception(enter_ctx, exc)
+        if not halt_only:
+            append_projected_event(
+                trace,
+                enter_ctx,
+                skipped_spec,
+                predicate_matched=False,
+            )
+    finally:
+        if not halt_only:
+            state.append_context(enter_ctx)
+    outputs = None
+    try:
+        with _timed_phase(trace, "dispatch:forward_model"):
+            with _forward_peak_memory_bracket(trace, model_device):
+                with backend.inference_context(trace):
+                    outputs = cast(Callable[..., Any], model)(*input_args, **input_kwargs)
+    finally:
+        active_model_exc = sys.exc_info()[1]
+        state.event_index += 1
+        exit_ctx = _build_record_context(
+            kind="module_exit",
+            op_log_or_op_data={
+                "label": "root:exit:1",
+                "address": "",
+                "module_type": type(model).__name__,
+                "module_pass_index": root_frame.pass_index,
+            },
+            module_stack=state.module_stack,
+            history=tuple(state.history),
+            op_counts=state.op_counts,
+            pass_index=state.pass_index,
+            event_index=state.event_index,
+            step_index=None,
+            time_since_pass_start=time.time() - trace.capture_start_time,
+            include_source_events=state.options.include_source_events,
+            sample_id=state.sample_id,
+        )
+        try:
+            if halt_only:
+                evaluate_halt_stop(trace, exit_ctx, state.options, frontier_output=outputs)
+            else:
+                exit_spec = _evaluate_keep_module(exit_ctx, state.options)
+                append_projected_event(
+                    trace,
+                    exit_ctx,
+                    exit_spec,
+                    predicate_matched=exit_spec.save_out or exit_spec.save_metadata,
+                )
+                evaluate_halt_stop(trace, exit_ctx, state.options, frontier_output=outputs)
+        except HaltSignal:
+            if active_model_exc is None:
+                raise
+        except Exception as exc:
+            if active_model_exc is None:
+                state.handle_predicate_exception(exit_ctx, exc)
+            else:
+                state.add_predicate_failure(exit_ctx, exc)
+            if not halt_only:
+                if active_model_exc is None or not any(
+                    event.raw_index == exit_ctx.event_index
+                    for event in trace.capture_events.op_events
+                ):
+                    append_projected_event(
+                        trace,
+                        exit_ctx,
+                        skipped_spec,
+                        predicate_matched=False,
+                    )
+        finally:
+            if not halt_only:
+                state.append_context(exit_ctx)
+            backend.pop_module_frame(trace, state.module_stack, root_frame)
+    return outputs
+
+
 def save_new_outs(
     self: "Trace",
-    model: nn.Module,
-    input_args: torch.Tensor | list[Any],
+    model: object,
+    input_args: Any | list[Any],
     input_kwargs: dict[Any, Any] | None = None,
     layers_to_save: str | list[Any] = "all",
     grad_layers_to_save: str | list[Any] | None = "all",
@@ -156,7 +450,9 @@ def save_new_outs(
     the counter-alignment checks in ``log_function_output_tensors_fast`` will
     detect the mismatch and raise ``ValueError``.
 
-    Args:
+    Parameters
+
+    ----------
         model: Model for which to save outs.
         input_args: Either a single tensor input to the model, or list of input arguments.
         input_kwargs: Dict of keyword arguments to the model.
@@ -167,7 +463,9 @@ def save_new_outs(
             model log settings; explicit values temporarily override saved
             tensor detachment for the whole replay.
 
-    Returns:
+    Returns
+
+    -------
         Nothing; mutates ``self`` in place with new out values.
     """
     if backward_ready is not None:
@@ -201,6 +499,13 @@ def save_new_outs(
 
     # Switch to fast mode: reuse graph structure, only capture new outs.
     self.capture_mode = "fast"
+    backend = _capture_backend_from_registry(
+        _backend_name_for_trace(self),
+        model,
+        input_args,
+        input_kwargs,
+    )
+    backend.set_capture_producer_policy(self, "fast")
     self._in_exhaustive_pass = False
 
     # Clear all existing outs from the previous pass.
@@ -282,7 +587,7 @@ def _get_op_nums_from_user_labels(
             }
         )
 
-    if type(which_layers) != list:
+    if not isinstance(which_layers, list):
         which_layers = [which_layers]  # type: ignore[list-item]
     raw_layer_nums_to_save: set[int] = set()
     for layer_key in which_layers:
@@ -384,10 +689,15 @@ def _register_model_input_container_snapshots(
 
     if not getattr(trace, "_capture_container_structure", False):
         return
+    capability = get_backend_spec(
+        str(_backend_name_for_trace(trace))
+    ).capabilities.input_container_structure
+    if capability == "none":
+        return
     registry = trace._ensure_build_state().container_registry
     first_spec = None
     for index, arg in enumerate(input_args):
-        result = walk_container(arg, role=Role.MODEL_INPUT, capability="full_spec")
+        result = walk_container(arg, role=Role.MODEL_INPUT, capability=capability)
         if result is None:
             continue
         if first_spec is None:
@@ -413,7 +723,7 @@ def _register_model_input_container_snapshots(
             reconstructable=result.reconstructable,
         )
     for key, value in input_kwargs.items():
-        result = walk_container(value, role=Role.MODEL_INPUT, capability="full_spec")
+        result = walk_container(value, role=Role.MODEL_INPUT, capability=capability)
         if result is None:
             continue
         if first_spec is None:
@@ -446,7 +756,7 @@ def _extract_and_mark_outputs(
     self: "Trace",
     outputs: Any,
     backend: CaptureBackend | None = None,
-) -> tuple[list[torch.Tensor], list[str]]:
+) -> tuple[list[Any], list[str]]:
     """Extract output tensors from model outputs through the active backend.
 
     Called AFTER the forward pass completes (outside ``active_logging``). The
@@ -465,7 +775,7 @@ def _extract_and_mark_outputs(
 
     Returns
     -------
-    tuple[list[torch.Tensor], list[str]]
+    tuple[list[Any], list[str]]
         Output tensors and output tensor addresses.
     """
     if backend is None:
@@ -479,15 +789,15 @@ def _extract_and_mark_outputs(
         self,
         outputs,
     )
-    return cast(list[torch.Tensor], output_tensors), output_tensor_addresses
+    return list(output_tensors), output_tensor_addresses
 
 
 def _finalize_halted_trace(
     self: "Trace",
     backend: CaptureBackend,
     halt_exc: HaltSignal,
-    model: nn.Module,
-    input_tensors: list[torch.Tensor],
+    model: object,
+    input_tensors: list[Any],
     postprocess: bool,
 ) -> Any | None:
     """Finalize a predicate trace that stopped at a halt frontier.
@@ -547,8 +857,8 @@ def _finalize_halted_trace(
 
 def run_and_log_inputs_through_model(
     self: "Trace",
-    model: nn.Module,
-    input_args: torch.Tensor | list[Any],
+    model: object,
+    input_args: Any | list[Any],
     input_kwargs: dict[Any, Any] | None = None,
     layers_to_save: str | list[str | int] | None = "all",
     grad_layers_to_save: str | list[str | int] | None = "all",
@@ -568,16 +878,33 @@ def run_and_log_inputs_through_model(
       8. Log source tensors (inputs), then run ``model(*args, **kwargs)``.
       9. Exit logging context, extract/mark outputs, clean up, postprocess.
 
-    RNG ordering constraint: ``set_random_seed`` and ``log_current_rng_states``
-    are called BEFORE ``active_logging()`` because entering the logging context
-    may trigger decorated operations (e.g., module hooks) that consume RNG state.
-    The fast pass restores the same pre-forward RNG state so that stochastic
-    layers (dropout, etc.) produce identical graph structure.
+    RNG ordering constraint: backend seeding and snapshots happen BEFORE
+    ``active_logging()`` because entering the logging context may trigger
+    decorated operations (e.g., module hooks) that consume RNG state. The fast
+    pass restores the same pre-forward RNG state so stochastic layers produce
+    identical graph structure.
     """
     if random_seed is None:
         random_seed = random.randint(1, 4294967294)
     self.random_seed = random_seed  # type: ignore[assignment]
-    set_random_seed(random_seed)
+    backend = _capture_backend_from_registry(
+        _backend_name_for_trace(self),
+        model,
+        input_args,
+        input_kwargs,
+    )
+    backend.set_capture_producer_policy(self, self.capture_mode)
+
+    if getattr(self, "_source_model_ref", None) is None:
+        # Needed so unlabeled output tensors that are direct registered-buffer
+        # reads (e.g. ``forward`` returning ``self.running_mean`` untouched)
+        # can be identified during output extraction. The exhaustive
+        # ``tl.trace()`` entry point (user_funcs.py) sets this before calling
+        # into this function; predicate/fastlog callers (tl.record()) do not,
+        # so set it here once, idempotently, for every capture path.
+        from ..visualization.code_panel import make_weak_model_ref
+
+        self._source_model_ref = make_weak_model_ref(model)  # type: ignore[arg-type]
 
     if self.capture_mode == "predicate":
         self._layer_nums_to_save = []
@@ -593,20 +920,15 @@ def run_and_log_inputs_through_model(
     if layer_nums_to_save != "all" and self._tracing_finished:
         output_parent_nums = set()
         for output_label in self.output_layers:
-            output_entry = self[output_label]
+            output_entry = self.layer_dict_all_keys[output_label]
             for parent_label in output_entry.parents:
-                parent_entry = self[parent_label]
+                parent_entry = self.layer_dict_all_keys[parent_label]
                 output_parent_nums.add(parent_entry.raw_index)
         if output_parent_nums:
             combined = set(layer_nums_to_save) | output_parent_nums
             self._layer_nums_to_save = sorted(combined)
 
-    backend = _capture_backend_from_registry(
-        _backend_name_for_trace(self),
-        model,
-        input_args,
-        input_kwargs,
-    )
+    backend.seed_rng(self, random_seed)
     input_args, input_kwargs, input_arg_names, model_device = backend.setup_inputs_and_device(
         self,
         model,
@@ -615,7 +937,7 @@ def run_and_log_inputs_through_model(
     )
 
     self.capture_start_time = time.time()
-    input_tensors: list[torch.Tensor] = []
+    input_tensors: list[Any] = []
 
     try:
         global _ACTIVE_CAPTURE_BACKEND
@@ -633,21 +955,41 @@ def run_and_log_inputs_through_model(
             )
         finally:
             _ACTIVE_CAPTURE_BACKEND = previous_capture_backend
-        input_tensors = cast(list[torch.Tensor], input_tensors_any)
+        input_tensors = list(input_tensors_any)
         self._input_tensor_addresses = list(input_tensor_addresses)
+        self._output_attribution_input_tensors = input_tensors
 
         # RNG state snapshot/restore for two-pass consistency (#58).
         # Exhaustive pass: snapshot state BEFORE forward so fast pass can replay.
         # Fast pass: restore the snapshot so dropout masks, etc. are identical,
         # ensuring the same computational graph (counter alignment depends on this).
         if self.capture_mode == "exhaustive":
-            self._pre_forward_rng_states = log_current_rng_states()  # type: ignore[attr-defined]
+            self._pre_forward_rng_states = backend.snapshot_rng(self)  # type: ignore[attr-defined]
         elif self.capture_mode == "fast" and hasattr(self, "_pre_forward_rng_states"):
-            set_rng_from_saved_states(self._pre_forward_rng_states)
+            backend.restore_rng(self, self._pre_forward_rng_states)
 
         from ..ir import CaptureEvents
 
         self.capture_events = CaptureEvents()
+        if not isinstance(getattr(self, "_stop_directive", None), StopDirective):
+            self._stop_directive = StopDirective(
+                halt_options=getattr(self, "_predicate_save_options", None),
+                raise_on_nan=bool(getattr(self, "raise_on_nan", False)),
+                forward_error_mode=getattr(
+                    getattr(self, "_predicate_save_options", None),
+                    "on_forward_error",
+                    "raise",
+                ),
+                inference_only=bool(getattr(self, "inference_only", False)),
+            )
+        self._capture_config = InternalCaptureConfig(
+            capture_mode=str(self.capture_mode),
+            layers_to_save=layers_to_save,
+            grad_layers_to_save=grad_layers_to_save,
+            random_seed=random_seed,
+            postprocess=postprocess,
+            stop=self._stop_directive,
+        )
 
         with _timed_phase(self, "ctx_build:model_prepare"):
             # One-time model preparation + incremental sys.modules crawl
@@ -679,148 +1021,19 @@ def run_and_log_inputs_through_model(
             _register_model_input_container_snapshots(self, input_args, input_kwargs)
 
             if self.capture_mode == "predicate":
-                from ..capture.predicates import (
-                    _evaluate_halt,
-                    _evaluate_keep_module,
-                    _is_halt_only_capture,
+                outputs = _run_predicate_forward_with_root_frame(
+                    self,
+                    backend,
+                    model,
+                    input_args,
+                    input_kwargs,
+                    model_device,
                 )
-                from ..capture.projections import (
-                    _build_record_context,
-                    append_projected_event,
-                    get_active_recording_state,
-                )
-                from ..fastlog.types import CaptureSpec, ModuleStackFrame
-
-                state = get_active_recording_state()
-                root_frame = ModuleStackFrame(
-                    address="",
-                    module_type=type(model).__name__,
-                    module_id=id(model),
-                    pass_index=1,
-                )
-                skipped_spec = CaptureSpec(save_out=False, save_metadata=False)
-                backend.push_existing_module_frame(self, state.module_stack, root_frame)
-                state.event_index += 1
-                enter_ctx = _build_record_context(
-                    kind="module_enter",
-                    op_log_or_op_data={
-                        "label": "root:enter:1",
-                        "address": "",
-                        "module_type": type(model).__name__,
-                        "module_pass_index": root_frame.pass_index,
-                    },
-                    module_stack=state.module_stack,
-                    history=tuple(state.history),
-                    op_counts=state.op_counts,
-                    pass_index=state.pass_index,
-                    event_index=state.event_index,
-                    step_index=None,
-                    time_since_pass_start=time.time() - self.capture_start_time,
-                    include_source_events=state.options.include_source_events,
-                    sample_id=state.sample_id,
-                )
-                halt_only = _is_halt_only_capture(state.options)
-                try:
-                    if halt_only:
-                        _evaluate_halt(enter_ctx, state.options)
-                    else:
-                        enter_spec = _evaluate_keep_module(enter_ctx, state.options)
-                        append_projected_event(
-                            self,
-                            enter_ctx,
-                            enter_spec,
-                            predicate_matched=enter_spec.save_out or enter_spec.save_metadata,
-                        )
-                        _evaluate_halt(enter_ctx, state.options)
-                except HaltSignal:
-                    raise
-                except Exception as exc:
-                    state.handle_predicate_exception(enter_ctx, exc)
-                    if not halt_only:
-                        append_projected_event(
-                            self,
-                            enter_ctx,
-                            skipped_spec,
-                            predicate_matched=False,
-                        )
-                finally:
-                    if not halt_only:
-                        state.append_context(enter_ctx)
-                outputs = None
-                inference_context = (
-                    torch.no_grad()
-                    if getattr(self, "inference_only", False)
-                    else contextlib.nullcontext()
-                )
-                try:
-                    with _timed_phase(self, "dispatch:forward_model"):
-                        with inference_context:
-                            outputs = model(*input_args, **input_kwargs)
-                finally:
-                    active_model_exc = sys.exc_info()[1]
-                    state.event_index += 1
-                    exit_ctx = _build_record_context(
-                        kind="module_exit",
-                        op_log_or_op_data={
-                            "label": "root:exit:1",
-                            "address": "",
-                            "module_type": type(model).__name__,
-                            "module_pass_index": root_frame.pass_index,
-                        },
-                        module_stack=state.module_stack,
-                        history=tuple(state.history),
-                        op_counts=state.op_counts,
-                        pass_index=state.pass_index,
-                        event_index=state.event_index,
-                        step_index=None,
-                        time_since_pass_start=time.time() - self.capture_start_time,
-                        include_source_events=state.options.include_source_events,
-                        sample_id=state.sample_id,
-                    )
-                    try:
-                        if halt_only:
-                            _evaluate_halt(exit_ctx, state.options, frontier_output=outputs)
-                        else:
-                            exit_spec = _evaluate_keep_module(exit_ctx, state.options)
-                            append_projected_event(
-                                self,
-                                exit_ctx,
-                                exit_spec,
-                                predicate_matched=exit_spec.save_out or exit_spec.save_metadata,
-                            )
-                            _evaluate_halt(exit_ctx, state.options, frontier_output=outputs)
-                    except HaltSignal:
-                        if active_model_exc is None:
-                            raise
-                    except Exception as exc:
-                        if active_model_exc is None:
-                            state.handle_predicate_exception(exit_ctx, exc)
-                        else:
-                            state.add_predicate_failure(exit_ctx, exc)
-                        if not halt_only:
-                            if active_model_exc is None or not any(
-                                event.raw_index == exit_ctx.event_index
-                                for event in self.capture_events.op_events
-                            ):
-                                append_projected_event(
-                                    self,
-                                    exit_ctx,
-                                    skipped_spec,
-                                    predicate_matched=False,
-                                )
-                    finally:
-                        if not halt_only:
-                            state.append_context(exit_ctx)
-                        backend.pop_module_frame(self, state.module_stack, root_frame)
             else:
-                inference_context = (
-                    torch.no_grad()
-                    if getattr(self, "inference_only", False)
-                    else contextlib.nullcontext()
-                )
                 with _timed_phase(self, "dispatch:forward_model"):
-                    with inference_context:
-                        outputs = model(*input_args, **input_kwargs)
+                    with _forward_peak_memory_bracket(self, model_device):
+                        with backend.inference_context(self):
+                            outputs = cast(Callable[..., Any], model)(*input_args, **input_kwargs)
 
         backend.finalize_forward_session(self)
 
@@ -852,18 +1065,34 @@ def run_and_log_inputs_through_model(
         )
 
         if not postprocess:
-            backend.cleanup_model_session(self, (model, input_tensors))
+            # Extract/mark output tensors BEFORE cleanup, mirroring the
+            # postprocess=True branch below. cleanup_model_session() strips
+            # TorchLens tensor metadata from every model-owned tensor
+            # (buffers included, via _undecorate_model_tensors); extracting
+            # afterward would let output-attribution race against that wipe.
+            # Callers that skip postprocess (fastlog Recorder) read these
+            # scratch results back off the trace and pop them immediately.
+            output_tensors_any, output_tensor_addresses = backend.extract_and_mark_outputs(
+                self, outputs
+            )
+            self._fastlog_output_tensors = list(output_tensors_any)
+            self._fastlog_output_tensor_addresses = output_tensor_addresses
+            self.__dict__.pop("_output_attribution_input_tensors", None)
+            backend.cleanup_model_session(self, (model, input_tensors, (input_args, input_kwargs)))
             self.capture_end_time = time.time()
+            self.__dict__.pop("_capture_producer_policy", None)
             return outputs
 
         output_tensors_any, output_tensor_addresses = backend.extract_and_mark_outputs(
             self, outputs
         )
-        output_tensors = cast(list[torch.Tensor], output_tensors_any)
+        output_tensors = list(output_tensors_any)
+        self.__dict__.pop("_output_attribution_input_tensors", None)
 
-        backend.cleanup_model_session(self, (model, input_tensors))
+        backend.cleanup_model_session(self, (model, input_tensors, (input_args, input_kwargs)))
         _vprint(self, f"Postprocessing {len(self.capture_events.op_events)} operations...")
         self._postprocess(output_tensors, output_tensor_addresses)
+        self.__dict__.pop("_capture_producer_policy", None)
         return outputs
 
     except HaltSignal as halt_exc:
@@ -873,7 +1102,7 @@ def run_and_log_inputs_through_model(
             and getattr(options, "halt", None) is not None
             and getattr(self, "_halt_returns_partial_trace", False)
         ):
-            return _finalize_halted_trace(
+            halted_output = _finalize_halted_trace(
                 self,
                 backend,
                 halt_exc,
@@ -881,19 +1110,23 @@ def run_and_log_inputs_through_model(
                 input_tensors,
                 postprocess,
             )
-        backend.cleanup_halted_forward_session(self, (model, input_tensors))
+            self.__dict__.pop("_capture_producer_policy", None)
+            return halted_output
+        backend.cleanup_halted_forward_session(
+            self, (model, input_tensors, (input_args, input_kwargs))
+        )
+        self.__dict__.pop("_capture_producer_policy", None)
         raise
 
     except Exception as e:
-        backend.cleanup_failed_forward_session(self, (model, input_tensors), e)
+        backend.cleanup_failed_forward_session(
+            self, (model, input_tensors, (input_args, input_kwargs)), e
+        )
+        self.__dict__.pop("_capture_producer_policy", None)
         raise e
 
     finally:
         _clear_saved_activation_dedup_caches(self)
-        # Release input tensor references so GC can reclaim CUDA memory.
-        # Gated behind cached cuda.is_available() so CPU-only runs don't pay
-        # the CUDA driver / NVML probe cost (per profiling audit 2026-04-27
-        # finding #4).
+        # Release input tensor references so GC can reclaim backend memory.
         input_tensors = None  # type: ignore[assignment]
-        if _is_cuda_available():
-            torch.cuda.empty_cache()
+        backend.cleanup_forward_memory(self)

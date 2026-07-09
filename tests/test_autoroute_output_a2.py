@@ -266,6 +266,32 @@ def test_hf_text_decode_uses_attached_tokenizer() -> None:
     ]
 
 
+def test_hf_text_decode_handles_batch_greater_than_one_independently() -> None:
+    """Each batch item must decode its own token sequence, never spliced together.
+
+    Regression for a bug where ``_decode_hf_text`` flattened all batch items'
+    token ids into a single sequence via ``reshape(-1)`` before decoding,
+    silently dropping every batch item past the first and corrupting the
+    first item's text with tokens spliced in from other items.
+    """
+
+    logits = torch.tensor(
+        [
+            [[0.0, 5.0], [6.0, 1.0]],  # batch item 0: argmax -> [1, 0]
+            [[7.0, 2.0], [1.0, 9.0]],  # batch item 1: argmax -> [0, 1]
+        ]
+    )
+    model = _Classifier(logits).eval()
+    model._torchlens_output_tokenizer = _Tokenizer()
+
+    trace = tl.trace(model, torch.ones(2, 2), output_style="hf_text")
+
+    assert trace.decoded_output == [
+        {"batch_item": 0, "rank": 1, "text": "tok1 tok0", "token_ids": [1, 0]},
+        {"batch_item": 1, "rank": 1, "text": "tok0 tok1", "token_ids": [0, 1]},
+    ]
+
+
 def test_decoded_output_roundtrips_tlspec_and_decode_output_is_bounded(tmp_path: Path) -> None:
     """Decoded output rows survive TLSPEC save/load and bounded reads work."""
 
@@ -316,10 +342,8 @@ def test_imagenet_label_bank_package_data_loads() -> None:
 def test_import_torchlens_does_not_import_optional_output_detector_deps() -> None:
     """Importing TorchLens does not import the optional output-detector deps.
 
-    transformers/timm imports live INSIDE the detector functions and must stay
-    lazy. torchvision is intentionally excluded here: TorchLens imports it at
-    import time to register and wrap torchvision custom ops (nms/roi_align/...),
-    which is pre-existing, load-bearing behavior.
+    transformers/timm/torchvision imports live INSIDE detector or wrapping paths
+    and must stay lazy during bare TorchLens import.
     """
 
     code = """

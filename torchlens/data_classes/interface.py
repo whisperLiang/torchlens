@@ -4,9 +4,9 @@
 
 The lookup cascade for string keys after the pass is finished:
 
-1. Exact match in ``layer_dict_all_keys`` (all lookup keys for every
+1. Exact match in ``layer_logs`` (no-pass labels -> Layer aggregate).
+2. Exact match in ``layer_dict_all_keys`` (all lookup keys for every
    Op, including pass-qualified labels like ``"conv2d_1_1:1"``).
-2. Exact match in ``layer_logs`` (no-pass labels -> Layer aggregate).
 3. Exact match in ``_module_logs`` (module address or pass label ->
    Module or ModuleCall).
 4. Case-insensitive exact match against all of the above.
@@ -26,10 +26,57 @@ if TYPE_CHECKING:
 
 from ._lookup_keys import _give_user_feedback_about_lookup_key
 from .op import Op
+from .._errors import AmbiguousOpLookupError
 from ..capture.projections import LiveOpView
 from ..intervention.errors import SiteAmbiguityError
 from ..intervention.selectors import BaseSelector
 from ..intervention.types import FrozenTargetSpec, TargetSpec
+
+
+def _ambiguous_lookup_match_labels(self: "Trace", key: str) -> list[str]:
+    """Return final Op labels that share an ambiguous lookup key.
+
+    Parameters
+    ----------
+    self:
+        Trace containing the ambiguity registry.
+    key:
+        Ambiguous lookup key.
+
+    Returns
+    -------
+    list[str]
+        Final pass-qualified Op labels for matching entries.
+    """
+
+    ambiguous_lookup_keys = getattr(self, "_ambiguous_lookup_keys", {})
+    raw_indices = ambiguous_lookup_keys.get(key, [])
+    matches: list[str] = []
+    for op in self.layer_list:
+        if op.raw_index in raw_indices:
+            matches.append(op.label)
+    return matches
+
+
+def _raise_ambiguous_lookup_key(self: "Trace", requested_key: str, stored_key: str) -> None:
+    """Raise the strict ambiguous lookup error for a colliding alias key.
+
+    Parameters
+    ----------
+    self:
+        Trace containing the ambiguity registry.
+    requested_key:
+        User-supplied lookup key.
+    stored_key:
+        Canonical key stored in the ambiguity registry.
+    """
+
+    matches = _ambiguous_lookup_match_labels(self, stored_key)
+    raise AmbiguousOpLookupError(
+        f"Ambiguous lookup key {requested_key!r} matches {len(matches)} ops: "
+        f"{', '.join(matches[:10])}{'...' if len(matches) > 10 else ''}. "
+        "Use an exact raw/op label or a more specific key."
+    )
 
 
 def _getitem_during_pass(self: "Trace", ix: Any) -> Op | LiveOpView:
@@ -96,9 +143,14 @@ def _getitem_after_pass(self: "Trace", ix: Any) -> Any:
             raise
 
     if isinstance(ix, str):
-        if ix in self.layer_dict_all_keys and not (
-            ix in self.layer_logs and self.layer_num_calls.get(ix, 1) > 1
-        ):
+        if ix in self.layer_logs:
+            return self.layer_logs[ix]
+
+        ambiguous_lookup_keys = getattr(self, "_ambiguous_lookup_keys", {})
+        if ix in ambiguous_lookup_keys:
+            _raise_ambiguous_lookup_key(self, ix, ix)
+
+        if ix in self.layer_dict_all_keys:
             return self.layer_dict_all_keys[ix]
 
         for accessor in (
@@ -116,8 +168,26 @@ def _getitem_after_pass(self: "Trace", ix: Any) -> Any:
                 pass
 
         lower_ix = ix.lower()
+        for accessor in (
+            self.ops,
+            self.module_calls,
+            self.layers,
+            self.modules,
+            self.params,
+            self.buffers,
+            self.grad_fns,
+        ):
+            try:
+                for key in accessor.keys():
+                    if str(key).lower() == lower_ix:
+                        return accessor[key]
+            except (AttributeError, KeyError, ValueError, TypeError):
+                pass
+
         for key in self.layer_dict_all_keys:
             if str(key).lower() == lower_ix:
+                if key in ambiguous_lookup_keys:
+                    _raise_ambiguous_lookup_key(self, ix, key)
                 return self.layer_dict_all_keys[key]
 
         keys_with_substr = [
@@ -137,7 +207,7 @@ def _getitem_after_pass(self: "Trace", ix: Any) -> Any:
                 if len(entries_with_substr) > 10
                 else ""
             )
-            raise ValueError(
+            raise AmbiguousOpLookupError(
                 f"Ambiguous lookup: '{ix}' matches {len(entries_with_substr)} layers: "
                 f"{matches_str}{suffix}. Please use a more specific key."
             )
@@ -288,7 +358,7 @@ def _module_hierarchy_str(self: "Trace") -> str:
     if root_pass is None:
         return s
     for module_pass in root_pass.call_children:
-        module, call_index = module_pass.split(":")
+        module, call_index = module_pass.rsplit(":", 1)
         s += f"\n\t\t{module}"
         if cast(Any, self.modules[module]).num_calls > 1:
             s += f":{call_index}"
@@ -314,7 +384,7 @@ def _module_hierarchy_str_recursive(self: "Trace", module_pass: str, level: int)
     )
     if any_grandchild_modules or len(children) == 0:
         for submodule_pass in children:
-            submodule, call_index = submodule_pass.split(":")
+            submodule, call_index = submodule_pass.rsplit(":", 1)
             s += f"\n\t\t{'    ' * level}{submodule}"
             if cast(Any, self.modules[submodule]).num_calls > 1:
                 s += f":{call_index}"
@@ -322,7 +392,7 @@ def _module_hierarchy_str_recursive(self: "Trace", module_pass: str, level: int)
     else:
         submodule_list = []
         for submodule_pass in children:
-            submodule, call_index = submodule_pass.split(":")
+            submodule, call_index = submodule_pass.rsplit(":", 1)
             if cast(Any, self.modules[submodule]).num_calls == 1:
                 submodule_list.append(submodule)
             else:

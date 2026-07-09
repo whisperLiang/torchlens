@@ -13,6 +13,7 @@ from ._deprecations import MISSING, MissingType, warn_deprecated_alias
 from ._literals import (
     BufferVisibilityLiteral,
     CollapseLiteral,
+    FoldRunsLiteral,
     OutputDeviceLiteral,
     VisDirectionLiteral,
     VisInterventionModeLiteral,
@@ -99,6 +100,7 @@ _VISUALIZATION_FIELDS: Final[tuple[str, ...]] = (
     "collapsed_node_spec_fn",
     "collapse_fn",
     "collapse",
+    "fold_runs",
     "skip_fn",
     "edge_overrides",
     "grad_edge_overrides",
@@ -207,6 +209,7 @@ _VISUALIZATION_FLAT_TO_GROUP: Final[dict[str, str]] = {
     "node_style": "node_style",
     "vis_node_mode": "node_style",
     "collapse": "collapse",
+    "fold_runs": "fold_runs",
     "vis_edge_overrides": "edge_overrides",
     "vis_grad_edge_overrides": "grad_edge_overrides",
     "vis_module_overrides": "module_overrides",
@@ -460,8 +463,30 @@ def _validate_collapse(value: CollapseLiteral) -> None:
         If ``value`` is not a supported collapse mode.
     """
 
+    if isinstance(value, float):
+        if 0.0 <= value <= 1.0:
+            return
+        raise ValueError("collapse float level must be in [0.0, 1.0].")
     if value not in {"none", "auto", "max"}:
-        raise ValueError("collapse must be one of 'none', 'auto', or 'max'.")
+        raise ValueError("collapse must be 'none', 'auto', 'max', or a float in [0.0, 1.0].")
+
+
+def _validate_fold_runs(value: FoldRunsLiteral) -> None:
+    """Validate explicit run-fold rendering policy.
+
+    Parameters
+    ----------
+    value:
+        Candidate run-fold policy.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not ``None``, ``True``, or ``False``.
+    """
+
+    if value not in {None, True, False}:
+        raise ValueError("fold_runs must be None, True, or False.")
 
 
 def _set_frozen_fields(
@@ -566,8 +591,16 @@ def _merge_grouped_options(
         If a field is supplied by both grouped and flat styles.
     """
 
+    default_option = option_factory()
+    option_type = type(default_option)
+    if option is not None and not isinstance(option, option_type):
+        raise TypeError(
+            f"{group_name} must be a {option_type.__name__} instance or None; "
+            f"got {type(option).__name__}."
+        )
+
     if option is None:
-        values = option_factory().as_dict()
+        values = default_option.as_dict()
         specified_fields: frozenset[str] = frozenset()
     else:
         values = option.as_dict()
@@ -1116,7 +1149,11 @@ class VisualizationOptions:
     collapse_fn:
         Optional module collapse predicate.
     collapse:
-        Smart module-collapse mode: ``"none"``, ``"auto"``, or ``"max"``.
+        Smart module-collapse mode: ``"none"``, ``"auto"``, ``"max"``, or a
+        float in ``[0.0, 1.0]`` on the public monotone schedule.
+    fold_runs:
+        Run-fold policy. ``None`` preserves the collapse mode default,
+        ``True`` folds every eligible run, and ``False`` disables run folding.
     skip_fn:
         Optional layer skip predicate.
     edge_overrides:
@@ -1173,6 +1210,7 @@ class VisualizationOptions:
     collapsed_node_spec_fn: Callable[["Module", NodeSpec], NodeSpec | None] | None = None
     collapse_fn: Callable[["Module"], bool] | None = None
     collapse: CollapseLiteral = "none"
+    fold_runs: FoldRunsLiteral = None
     skip_fn: Callable[["Layer"], bool] | None = None
     edge_overrides: dict[str, Any] | None = None
     grad_edge_overrides: dict[str, Any] | None = None
@@ -1211,6 +1249,7 @@ class VisualizationOptions:
         ) = MISSING,
         collapse_fn: Callable[["Module"], bool] | None | MissingType = MISSING,
         collapse: CollapseLiteral | MissingType = MISSING,
+        fold_runs: FoldRunsLiteral | MissingType = MISSING,
         skip_fn: Callable[["Layer"], bool] | None | MissingType = MISSING,
         edge_overrides: dict[str, Any] | None | MissingType = MISSING,
         grad_edge_overrides: dict[str, Any] | None | MissingType = MISSING,
@@ -1290,6 +1329,7 @@ class VisualizationOptions:
                 "collapse_fn", collapse_fn, None, specified_fields
             ),
             "collapse": _resolve_option_value("collapse", collapse, "none", specified_fields),
+            "fold_runs": _resolve_option_value("fold_runs", fold_runs, None, specified_fields),
             "skip_fn": _resolve_option_value("skip_fn", skip_fn, None, specified_fields),
             "edge_overrides": _resolve_option_value(
                 "edge_overrides", edge_overrides, None, specified_fields
@@ -1332,6 +1372,7 @@ class VisualizationOptions:
         _validate_node_style(cast(VisNodeModeLiteral, values["node_style"]))
         _validate_intervention_mode(cast(VisInterventionModeLiteral, values["intervention_mode"]))
         _validate_collapse(cast(CollapseLiteral, values["collapse"]))
+        _validate_fold_runs(cast(FoldRunsLiteral, values["fold_runs"]))
         _set_frozen_fields(self, _VISUALIZATION_FIELDS, values)
         object.__setattr__(self, "_specified_fields", frozenset(specified_fields))
 
@@ -1384,6 +1425,7 @@ class VisualizationOptions:
         _validate_intervention_mode(cast(VisInterventionModeLiteral, values["intervention_mode"]))
         _validate_buffer_visibility(values["show_buffers"])
         _validate_collapse(cast(CollapseLiteral, values["collapse"]))
+        _validate_fold_runs(cast(FoldRunsLiteral, values["fold_runs"]))
         _set_frozen_fields(instance, _VISUALIZATION_FIELDS, values)
         object.__setattr__(instance, "_specified_fields", specified_fields)
         return instance
@@ -1767,6 +1809,7 @@ def merge_visualization_options(
     vis_graph_overrides: dict[str, Any] | None | MissingType = MISSING,
     vis_node_mode: VisNodeModeLiteral | MissingType = MISSING,
     collapse: CollapseLiteral | MissingType = MISSING,
+    fold_runs: FoldRunsLiteral | MissingType = MISSING,
     vis_edge_overrides: dict[str, Any] | None | MissingType = MISSING,
     vis_grad_edge_overrides: dict[str, Any] | None | MissingType = MISSING,
     vis_module_overrides: dict[str, Any] | None | MissingType = MISSING,
@@ -1803,6 +1846,7 @@ def merge_visualization_options(
         "vis_graph_overrides": vis_graph_overrides,
         "vis_node_mode": vis_node_mode,
         "collapse": collapse,
+        "fold_runs": fold_runs,
         "vis_edge_overrides": vis_edge_overrides,
         "vis_grad_edge_overrides": vis_grad_edge_overrides,
         "vis_module_overrides": vis_module_overrides,
@@ -1931,6 +1975,8 @@ def visualization_to_render_kwargs(visualization: VisualizationOptions) -> dict[
         "vis_intervention_mode": visualization.intervention_mode,
         "vis_show_cone": visualization.show_cone,
     }
+    if visualization.fold_runs is not None or visualization.is_field_explicit("fold_runs"):
+        kwargs["fold_runs"] = visualization.fold_runs
     phase7_kwargs = {
         "node_overlay": visualization.node_overlay,
         "node_label_fields": visualization.node_label_fields,

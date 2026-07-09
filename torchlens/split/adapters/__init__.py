@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from ...backends import BackendSpec
 from ..errors import SplitErrorContext, SplitUnsupportedError
 from .base import SegmentBundle, SplitBackendAdapter

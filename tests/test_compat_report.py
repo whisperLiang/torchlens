@@ -9,10 +9,34 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens.backends.tf._tf_compat import get_tf_capability_snapshot
 from torchlens.compat import CompatReport, report
 from torchlens.options import CaptureOptions
+from torchlens.utils._torch_compat import get_torch_capability_snapshot
 from torchlens.utils.rng import log_current_rng_states, set_rng_from_saved_states
 from torchlens.utils.tensor_utils import tensor_nanequal
+
+
+EXPECTED_COMPAT_ROW_KEYS = {
+    "accelerate_cpu_disk_offload",
+    "accelerate_device_map_auto",
+    "bitsandbytes_8bit_4bit",
+    "data_parallel",
+    "deepspeed",
+    "device_context_factory",
+    "distributed_data_parallel",
+    "fsdp",
+    "fx_graph_module",
+    "hf_transformers",
+    "lightning_training_step",
+    "multi_gpu_rng",
+    "quantized_tensor",
+    "single_thread_design",
+    "tied_parameters",
+    "torch_capabilities",
+    "torch_compile",
+    "vmap_functorch",
+}
 
 
 class SmallCnn(nn.Module):
@@ -227,8 +251,9 @@ def test_report_runs_on_five_reference_models(monkeypatch: pytest.MonkeyPatch) -
 
     assert len(reports) == 5
     assert all(isinstance(item, CompatReport) for item in reports)
-    assert all(len(item.rows) == 17 for item in reports)
+    assert all({row.key for row in item.rows} == EXPECTED_COMPAT_ROW_KEYS for item in reports)
     assert reports[1].row("hf_transformers").detected is True
+    assert reports[1].row("torch_capabilities").status in {"pass", "not_tested"}
     assert reports[2].row("quantized_tensor").status == "known_broken"
     assert reports[3].row("multi_gpu_rng").detected is True
     assert reports[4].row("fsdp").status == "scope"
@@ -246,6 +271,18 @@ def test_report_renderers_include_truth_table_rows() -> None:
     assert "Single-thread design" in text_table
     assert "| Row | Status | Severity | Detected | Details | Suggestion |" in markdown_table
     assert "`pass`" in markdown_table
+
+
+def test_report_surfaces_every_runtime_capability() -> None:
+    """Compatibility report capability row stays lockstep with defined flags."""
+
+    compat_report = report(SmallCnn(), torch.randn(2, 1, 4, 4))
+    row = compat_report.row("torch_capabilities")
+    expected = set(get_torch_capability_snapshot()) | set(get_tf_capability_snapshot())
+    rendered = row.details.removeprefix("Runtime capabilities: ")
+    surfaced = {part.split("=", 1)[0] for part in rendered.split(";")[0].split(", ")}
+
+    assert surfaced == expected
 
 
 def test_report_detects_known_scope_and_broken_rows() -> None:
@@ -276,6 +313,20 @@ def test_quantized_tensor_nanequal_no_longer_crashes() -> None:
 
     assert tensor_nanequal(left, right)
     assert not tensor_nanequal(left, mismatch)
+
+
+def test_report_quantized_row_uses_shared_cycle_safe_tensor_walker() -> None:
+    """Quantized input detection survives shared tensors and cyclic containers."""
+
+    tensor = torch.quantize_per_tensor(
+        torch.tensor([1.0, 2.0]), scale=0.1, zero_point=10, dtype=torch.quint8
+    )
+    payload: list[object] = [tensor, {"again": tensor}]
+    payload.append(payload)
+
+    compat_report = report(QuantizedInputModel(), payload)
+
+    assert compat_report.row("quantized_tensor").status == "known_broken"
 
 
 def test_rng_snapshot_uses_all_cuda_devices(monkeypatch: pytest.MonkeyPatch) -> None:

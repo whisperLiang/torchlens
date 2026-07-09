@@ -21,18 +21,19 @@ from .errors import (
 )
 from .selectors import (
     BaseSelector,
+    BackwardPassSelector,
     CompositeSelector,
     FacetSelector,
+    GradKindSelector,
     NotSelector,
-    SelectorLike,
     _classify_selector_direction,
-    in_module,
 )
 from .types import HelperSpec, HookSpec, InterventionSpec, TargetSpec, TargetValueSpec
 
 HookTiming: TypeAlias = Literal["pre", "post"]
 HookDirection: TypeAlias = Literal["forward", "backward"]
-HookCallable: TypeAlias = Callable[..., torch.Tensor]
+HookDirectionRequest: TypeAlias = Literal["forward", "backward", "both"]
+HookCallable: TypeAlias = Callable[..., Any]
 HookInput: TypeAlias = Callable[..., Any] | HelperSpec
 _FINAL_LABEL_PATTERN = re.compile(r"(?:_\d+_\d+(?::\d+)?$|:\d+$)")
 _DEFAULT_HEAD_FACET_NAMES = ("q", "k", "v")
@@ -57,7 +58,7 @@ class HookContext:
     name:
         Display name of the hook.
     timing:
-        Hook timing. Phase 3 stores both pre and post; MVP execution uses post.
+        Hook timing, either ``"pre"`` or ``"post"``.
     direction:
         ``"forward"`` for outs or ``"backward"`` for grads.
     layer_log:
@@ -186,6 +187,7 @@ def normalize_hook_plan(
     *,
     default_site_target: Any | None = None,
     force_shape_change: bool = False,
+    direction: HookDirectionRequest | None = None,
 ) -> list[NormalizedHookEntry]:
     """Normalize all supported attach-hook shapes into hook-plan entries.
 
@@ -197,9 +199,12 @@ def normalize_hook_plan(
         Optional hook for the ``(site, hook)`` shape.
     default_site_target:
         Site target for bare callable/helper input. Without this, bare hooks
-        fail closed because Phase 3 does not resolve model logs.
+        fail closed because they do not imply a model-log site.
     force_shape_change:
-        Escape hatch metadata consumed by the later execution layer.
+        Escape hatch metadata consumed by execution.
+    direction:
+        Optional signal direction override. ``"both"`` expands to one forward
+        and one backward entry.
 
     Returns
     -------
@@ -211,9 +216,17 @@ def normalize_hook_plan(
     entries: list[NormalizedHookEntry] = []
     for order, (site_target, hook_like) in enumerate(pairs):
         helper_spec = hook_like if isinstance(hook_like, HelperSpec) else None
-        for direction in _hook_directions(hook_like, helper_spec):
-            _validate_helper_mount(site_target, helper_spec)
-            normalized_callable = _normalize_directional_hook(hook_like, direction=direction)
+        _validate_live_site_target(site_target)
+        for concrete_direction in _hook_directions(
+            hook_like,
+            helper_spec,
+            requested_direction=direction,
+        ):
+            _validate_helper_mount(site_target, helper_spec, direction=concrete_direction)
+            normalized_callable = _normalize_directional_hook(
+                hook_like,
+                direction=concrete_direction,
+            )
             entries.append(
                 NormalizedHookEntry(
                     site_target=site_target,
@@ -224,7 +237,7 @@ def normalize_hook_plan(
                             "attach_order": order,
                             "composition": "left_to_right",
                             "force_shape_change": force_shape_change,
-                            "direction": direction,
+                            "direction": concrete_direction,
                             "timing": "post",
                         }
                     ),
@@ -233,8 +246,46 @@ def normalize_hook_plan(
     return entries
 
 
+def _validate_live_site_target(site_target: Any) -> None:
+    """Reject selector targets that cannot be live hook application sites.
+
+    Parameters
+    ----------
+    site_target:
+        Selector-like target passed to live hook attachment.
+    """
+
+    selector = _normalize_live_selector(site_target)
+    _reject_input_at_selector(selector)
+
+
+def _reject_input_at_selector(selector: BaseSelector) -> None:
+    """Raise for ``input_at`` selectors nested in a live hook target.
+
+    Parameters
+    ----------
+    selector:
+        Normalized selector to inspect.
+    """
+
+    if selector.selector_kind == "input_at":
+        raise SiteResolutionError(
+            "tl.input_at(...) resolves saved input placeholders, but model inputs are not live "
+            "hook application sites. Use trace(..., intervene=...) on downstream ops or mutate "
+            "the model input before capture."
+        )
+    if isinstance(selector, CompositeSelector):
+        for child in selector.selectors:
+            _reject_input_at_selector(_normalize_live_selector(child))
+    if isinstance(selector, NotSelector):
+        _reject_input_at_selector(_normalize_live_selector(selector.selector))
+
+
 def _hook_directions(
-    hook_like: HookInput, helper_spec: HelperSpec | None
+    hook_like: HookInput,
+    helper_spec: HelperSpec | None,
+    *,
+    requested_direction: HookDirectionRequest | None = None,
 ) -> tuple[HookDirection, ...]:
     """Return hook directions requested by a hook-like object.
 
@@ -244,6 +295,8 @@ def _hook_directions(
         User callable, observer, or helper spec.
     helper_spec:
         Helper spec when ``hook_like`` is a built-in helper.
+    requested_direction:
+        Explicit caller direction override.
 
     Returns
     -------
@@ -251,6 +304,21 @@ def _hook_directions(
         One or two concrete hook directions.
     """
 
+    if helper_spec is not None and requested_direction in {"forward", "backward"}:
+        intrinsic_direction = helper_spec.direction or helper_spec.kind
+        if intrinsic_direction != "both" and intrinsic_direction != requested_direction:
+            raise HelperMountError(
+                f"{helper_spec.name} is intrinsically {intrinsic_direction!r} and cannot be "
+                f"attached with direction={requested_direction!r}."
+            )
+    if requested_direction == "both":
+        return ("forward", "backward")
+    if requested_direction in {"forward", "backward"}:
+        return (cast(HookDirection, requested_direction),)
+    if helper_spec is not None and helper_spec.direction == "both":
+        return ("forward", "backward")
+    if helper_spec is not None and helper_spec.direction in {"forward", "backward"}:
+        return (cast(HookDirection, helper_spec.direction),)
     if helper_spec is not None:
         return (helper_spec.kind,)
     direction = getattr(hook_like, "direction", "forward")
@@ -279,7 +347,106 @@ def _normalize_directional_hook(hook_like: HookInput, *, direction: HookDirectio
 
     if direction == "backward" and hasattr(hook_like, "record_backward"):
         return normalize_hook(getattr(hook_like, "record_backward"), direction=direction)
-    return normalize_hook(hook_like, direction=direction)
+    helper_spec: HelperSpec | None = hook_like if isinstance(hook_like, HelperSpec) else None
+    hook_callable = normalize_hook(hook_like, direction=direction)
+    if direction == "backward" and _needs_tensor_backward_adapter(hook_callable, helper_spec):
+        return _adapt_tensor_backward_hook(hook_callable, helper_spec)
+    return hook_callable
+
+
+def _needs_tensor_backward_adapter(
+    hook_callable: HookCallable,
+    helper_spec: HelperSpec | None,
+) -> bool:
+    """Return whether a backward hook expects one tensor instead of grad tuples.
+
+    Parameters
+    ----------
+    hook_callable:
+        Normalized callable being mounted on the backward signal.
+    helper_spec:
+        Helper spec when the hook came from a built-in helper.
+
+    Returns
+    -------
+    bool
+        Whether the callable should be adapted to a ``GradFn`` tuple callback.
+    """
+
+    if helper_spec is not None and dict(helper_spec.metadata).get("mount_shape") == "tuple":
+        return False
+    try:
+        signature = inspect.signature(hook_callable)
+    except (TypeError, ValueError):
+        return True
+    tuple_callback_params = {"grad_output", "grad_fn_handle", "call_index", "run_ctx"}
+    return not bool(tuple_callback_params & set(signature.parameters))
+
+
+def _adapt_tensor_backward_hook(
+    hook_callable: HookCallable,
+    helper_spec: HelperSpec | None,
+) -> HookCallable:
+    """Wrap a tensor-gradient hook for PyTorch ``GradFn`` tuple callbacks.
+
+    Parameters
+    ----------
+    hook_callable:
+        Callable accepting one gradient tensor and ``hook=HookContext``.
+    helper_spec:
+        Helper spec used for display metadata.
+
+    Returns
+    -------
+    HookCallable
+        Callable accepting ``grad_input`` tuple callback arguments.
+    """
+
+    helper_name = helper_spec.name if helper_spec is not None else "user_backward_hook"
+
+    def _tuple_hook(
+        grad_input: tuple[torch.Tensor | None, ...],
+        *,
+        grad_output: tuple[torch.Tensor | None, ...] | None,
+        grad_fn_handle: Any,
+        call_index: int,
+        run_ctx: dict[str, Any],
+    ) -> tuple[torch.Tensor | None, ...] | None:
+        """Apply a tensor hook independently to each non-None grad_input slot."""
+
+        updated: list[torch.Tensor | None] = []
+        changed = False
+        for index, grad in enumerate(grad_input):
+            if grad is None:
+                updated.append(None)
+                continue
+            context = make_hook_context(
+                name=helper_name,
+                direction="backward",
+                layer_log=getattr(grad_fn_handle, "op", grad_fn_handle),
+                run_ctx=run_ctx,
+                args=(grad,),
+                kwargs={
+                    "grad_output": grad_output,
+                    "grad_fn_handle": grad_fn_handle,
+                    "call_index": call_index,
+                    "tuple_index": index,
+                },
+            )
+            result = hook_callable(grad, hook=context)
+            if result is None:
+                updated.append(grad)
+                continue
+            if not isinstance(result, torch.Tensor):
+                raise HookSignatureError(
+                    f"backward tensor hook {helper_name!r} returned "
+                    f"{type(result).__name__}; expected torch.Tensor or None"
+                )
+            updated.append(result)
+            changed = changed or result is not grad
+        return tuple(updated) if changed else None
+
+    return cast(HookCallable, _tuple_hook)
 
 
 def normalize_hooks_from_spec(spec: InterventionSpec | None) -> list[NormalizedHookEntry]:
@@ -486,7 +653,17 @@ def _normalize_sticky_hook_specs(hook_specs: Sequence[HookSpec]) -> list[Normali
     entries: list[NormalizedHookEntry] = []
     for hook_spec in hook_specs:
         hook_like = hook_spec.helper if hook_spec.helper is not None else hook_spec.hook
-        normalized_entries = normalize_hook_plan(hook_spec.site_target, hook_like)
+        metadata_direction = hook_spec.metadata.get("direction")
+        requested_direction = (
+            cast(HookDirectionRequest, metadata_direction)
+            if metadata_direction in {"forward", "backward", "both"}
+            else None
+        )
+        normalized_entries = normalize_hook_plan(
+            hook_spec.site_target,
+            hook_like,
+            direction=requested_direction,
+        )
         for entry in normalized_entries:
             metadata = {**entry.metadata, **hook_spec.metadata}
             entries.append(
@@ -621,7 +798,21 @@ def _selector_from_target_spec(target: TargetSpec) -> BaseSelector:
         Selector equivalent to the target spec.
     """
 
-    from .selectors import contains, func, grad_fn, intervening, label, module, where, without_op
+    from .selectors import (
+        contains,
+        func,
+        func_transform,
+        grad_fn,
+        grad_input,
+        grad_output,
+        in_backward_pass,
+        label,
+        module,
+        output_at,
+        regex,
+        where,
+        without_op,
+    )
 
     if target.selector_kind == "label":
         return label(str(target.selector_value))
@@ -638,8 +829,20 @@ def _selector_from_target_spec(target: TargetSpec) -> BaseSelector:
         from .selectors import output
 
         return output(cast("int | str", target.selector_value))
+    if target.selector_kind == "output_at":
+        return output_at(target.selector_value)
+    if target.selector_kind == "input_at":
+        raise SiteResolutionError(
+            "tl.input_at(...) resolves saved input placeholders, but model inputs are not live "
+            "hook application sites. Use trace(..., intervene=...) on downstream ops or mutate "
+            "the model input before capture."
+        )
     if target.selector_kind == "contains":
         return contains(str(target.selector_value))
+    if target.selector_kind == "regex":
+        return regex(str(target.selector_value))
+    if target.selector_kind == "func_transform":
+        return func_transform(None if target.selector_value is None else str(target.selector_value))
     if target.selector_kind == "in_module":
         from .selectors import in_module as make_in_module
 
@@ -655,12 +858,27 @@ def _selector_from_target_spec(target: TargetSpec) -> BaseSelector:
             label=payload.get("grad_fn_label_pattern"),
             is_custom=payload.get("is_custom"),
         )
+    if target.selector_kind == "grad_kind":
+        return grad_input() if target.selector_value == "grad_input" else grad_output()
+    if target.selector_kind == "backward_pass":
+        pass_index = target.selector_value
+        if not isinstance(pass_index, int):
+            raise SiteResolutionError("backward_pass target specs require an integer pass index.")
+        return in_backward_pass(pass_index)
     if target.selector_kind in {"intervening", "without_op"}:
         return without_op()
-    if target.selector_kind == "label":
-        return label(str(target.selector_value))
     if target.selector_kind == "not":
         return ~_normalize_live_selector(target.selector_value)
+    if target.selector_kind in {"and", "or"}:
+        if not isinstance(target.selector_value, Sequence) or len(target.selector_value) != 2:
+            raise SiteResolutionError(
+                f"{target.selector_kind!r} target specs require two nested selectors."
+            )
+        left, right = target.selector_value
+        return CompositeSelector(
+            cast("Literal['and', 'or']", target.selector_kind),
+            (_normalize_live_selector(left), _normalize_live_selector(right)),
+        )
     raise SiteResolutionError(f"Unsupported live hook selector kind {target.selector_kind!r}.")
 
 
@@ -668,6 +886,9 @@ def live_backward_selector_matches(
     selector_like: Any,
     grad_fn_handle: Any,
     call_index: int,
+    *,
+    grad_input: tuple[torch.Tensor | None, ...] | None = None,
+    grad_output: tuple[torch.Tensor | None, ...] | None = None,
 ) -> bool:
     """Return whether a selector can match one grad_fn_handle callback site.
 
@@ -679,6 +900,10 @@ def live_backward_selector_matches(
         GradFn receiving a backward hook callback.
     call_index:
         One-based callback index.
+    grad_input:
+        Current grad-input tuple, if available.
+    grad_output:
+        Current grad-output tuple, if available.
 
     Returns
     -------
@@ -686,14 +911,95 @@ def live_backward_selector_matches(
         Whether the selector matches this backward site.
     """
 
-    del call_index
     from .resolver import _resolve_unchecked
 
+    expected_call_index = _selector_call_index(selector_like)
+    if expected_call_index is not None and expected_call_index != call_index:
+        return False
     selector = _normalize_live_selector(selector_like)
+    if not _live_backward_context_matches(
+        selector,
+        grad_fn_handle=grad_fn_handle,
+        grad_input=grad_input,
+        grad_output=grad_output,
+    ):
+        return False
     return bool(_resolve_unchecked((grad_fn_handle,), selector, strict=False))
 
 
-def _validate_helper_mount(site_target: Any, helper_spec: HelperSpec | None) -> None:
+def _selector_call_index(selector_like: Any) -> int | None:
+    """Return an explicit one-based call-index selector, if supplied.
+
+    Parameters
+    ----------
+    selector_like:
+        Selector or target spec.
+
+    Returns
+    -------
+    int | None
+        Expected callback index, or ``None`` when unconstrained.
+    """
+
+    metadata = getattr(selector_like, "metadata", None)
+    if isinstance(metadata, Mapping) and isinstance(metadata.get("call_index"), int):
+        return int(metadata["call_index"])
+    value = getattr(selector_like, "selector_value", None)
+    if isinstance(value, Mapping) and isinstance(value.get("call_index"), int):
+        return int(value["call_index"])
+    return None
+
+
+def _live_backward_context_matches(
+    selector: BaseSelector,
+    *,
+    grad_fn_handle: Any,
+    grad_input: tuple[torch.Tensor | None, ...] | None,
+    grad_output: tuple[torch.Tensor | None, ...] | None,
+) -> bool:
+    """Return whether live-only backward selector facets match this callback."""
+
+    if isinstance(selector, CompositeSelector):
+        left, right = selector.selectors
+        left_matches = _live_backward_context_matches(
+            _normalize_live_selector(left),
+            grad_fn_handle=grad_fn_handle,
+            grad_input=grad_input,
+            grad_output=grad_output,
+        )
+        right_matches = _live_backward_context_matches(
+            _normalize_live_selector(right),
+            grad_fn_handle=grad_fn_handle,
+            grad_input=grad_input,
+            grad_output=grad_output,
+        )
+        return (
+            (left_matches and right_matches)
+            if selector.operator == "and"
+            else (left_matches or right_matches)
+        )
+    if isinstance(selector, NotSelector):
+        return not _live_backward_context_matches(
+            _normalize_live_selector(selector.selector),
+            grad_fn_handle=grad_fn_handle,
+            grad_input=grad_input,
+            grad_output=grad_output,
+        )
+    if isinstance(selector, GradKindSelector):
+        values = grad_input if selector.grad_kind == "grad_input" else grad_output
+        return any(isinstance(value, torch.Tensor) for value in values or ())
+    if isinstance(selector, BackwardPassSelector):
+        trace = getattr(grad_fn_handle, "source_trace", None)
+        return getattr(trace, "_active_backward_pass_index", None) == selector.pass_index
+    return True
+
+
+def _validate_helper_mount(
+    site_target: Any,
+    helper_spec: HelperSpec | None,
+    *,
+    direction: HookDirection,
+) -> None:
     """Validate helper/selector mount compatibility at attach time.
 
     Parameters
@@ -702,6 +1008,8 @@ def _validate_helper_mount(site_target: Any, helper_spec: HelperSpec | None) -> 
         Selector-like site target.
     helper_spec:
         Helper spec, if the hook came from a built-in helper.
+    direction:
+        Concrete signal direction requested for this hook entry.
 
     Returns
     -------
@@ -713,6 +1021,12 @@ def _validate_helper_mount(site_target: Any, helper_spec: HelperSpec | None) -> 
         return
     helper_metadata = dict(helper_spec.metadata)
     mount_shape = helper_metadata.get("mount_shape", "tensor")
+    if direction == "backward":
+        if helper_metadata.get("requires_grad_output") and _targets_accumulate_grad(site_target):
+            raise HelperMountError(
+                f"{helper_spec.name} requires grad_output and cannot mount on AccumulateGrad prehooks."
+            )
+        return
     from .resolver import _selector_resolution_direction
 
     selector_direction = _selector_resolution_direction(site_target)
@@ -728,6 +1042,27 @@ def _validate_helper_mount(site_target: Any, helper_spec: HelperSpec | None) -> 
         raise HelperMountError(
             f"{helper_spec.name} requires grad_output and cannot mount on AccumulateGrad prehooks."
         )
+
+
+def _targets_accumulate_grad(site_target: Any) -> bool:
+    """Return whether a selector target explicitly names ``AccumulateGrad``.
+
+    Parameters
+    ----------
+    site_target:
+        Selector-like target.
+
+    Returns
+    -------
+    bool
+        Whether the target is an AccumulateGrad selector.
+    """
+
+    value = getattr(site_target, "selector_value", None)
+    if isinstance(value, Mapping):
+        type_value = value.get("type")
+        return type_value is not None and "accumulategrad" in str(type_value).lower()
+    return "accumulategrad" in repr(site_target).lower()
 
 
 def _facet_selector_from_target(site_target: Any) -> FacetSelector | None:
@@ -1071,8 +1406,29 @@ def _live_selector_matches_unchecked(selector: BaseSelector, site: Any) -> bool:
         return _live_module_matches(site, str(value))
     if kind == "output":
         return _live_output_matches(site, value)
+    if kind == "output_at":
+        from .resolver import _output_path_matches
+
+        return _output_path_matches(
+            tuple(getattr(site, "container_path", ()) or ()),
+            tuple(value),
+        )
+    if kind == "input_at":
+        from .selectors import _input_path_matches
+
+        return _input_path_matches(site, tuple(value))
     if kind == "contains":
+        if bool(getattr(site, "_tl_module_boundary", False)):
+            return False
         return str(value).lower() in str(getattr(site, "_layer_label_raw", "")).lower()
+    if kind == "regex":
+        return re.search(str(value), str(getattr(site, "_layer_label_raw", ""))) is not None
+    if kind == "func_transform":
+        if value is None:
+            return bool(getattr(site, "is_transform", False))
+        return bool(getattr(site, "is_transform", False)) and str(
+            getattr(site, "transform_kind", "")
+        ) == str(value)
     if kind == "in_module":
         return _live_module_matches(site, str(value))
     if kind == "predicate":
@@ -1172,9 +1528,9 @@ def _module_label_matches(module_pass: str, address: str) -> bool:
     """
 
     if module_pass.startswith("("):
-        return address in module_pass
-    address = module_pass.rsplit(":", 1)[0]
-    return module_pass == address or address == address
+        return f"'{address}'" in module_pass or f'"{address}"' in module_pass
+    module_address = module_pass.rsplit(":", 1)[0]
+    return module_pass == address or module_address == address
 
 
 def _looks_like_finalized_label(label_value: str) -> bool:
@@ -1268,6 +1624,11 @@ def make_live_site_proxy(
         modules=fields.get("modules", []),
         output_of_module_calls=fields.get("output_of_module_calls", []),
         output_of_modules=fields.get("output_of_modules", []),
+        _tl_module_boundary=bool(fields.get("_tl_module_boundary", False)),
+        is_transform=bool(fields.get("is_transform", False)),
+        transform_kind=fields.get("transform_kind"),
+        transform_chain=tuple(fields.get("transform_chain", ())),
+        transform_config=dict(fields.get("transform_config", {})),
         call_index=1,
         lookup_keys=[],
     )

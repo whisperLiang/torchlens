@@ -29,7 +29,7 @@ import linecache
 from typing import Any, Dict, List, Optional, Union
 
 from .._io import FieldPolicy, TLSPEC_VERSION, default_fill_state, read_tlspec_version
-from .._source_links import terminal_file_line_link, vscode_file_line_link
+from .._source_links import vscode_file_line_link
 
 # Sentinel object to distinguish "not yet loaded" from an actual None value.
 # Used as the default for lazy-loading placeholders so we can tell the
@@ -119,6 +119,44 @@ class FuncCallLocation:
         col_offset: Optional[int] = None,
         source_loading_enabled: bool = True,
     ) -> None:
+        """Initialize source-location metadata for a captured function call.
+
+        Parameters
+        ----------
+        file:
+            Source file path for the call.
+        line_number:
+            One-indexed source line for the call.
+        func_name:
+            Display name of the called function.
+        num_context_lines_requested:
+            Number of context lines to load around the call in the capture path.
+        _frame_func_obj:
+            Live function object used for lazy source loading when available.
+        func_signature:
+            Preloaded function signature for direct construction paths.
+        func_docstring:
+            Preloaded function docstring for direct construction paths.
+        call_line:
+            Preloaded source line for direct construction paths.
+        code_context:
+            Preloaded surrounding code lines for direct construction paths.
+        source_context:
+            Preloaded source context block for direct construction paths.
+        code_context_labeled:
+            Preloaded labeled source context for direct construction paths.
+        num_context_lines:
+            Number of context lines present in preloaded source context.
+        code_firstlineno:
+            First source line of the enclosing function.
+        func_qualname:
+            Qualified function name when known.
+        col_offset:
+            Column offset for AST-aware conditional attribution.
+        source_loading_enabled:
+            Whether lazy source loading should be attempted.
+        """
+
         self.file = file
         self.line_number = line_number
         self.func_name = func_name
@@ -401,7 +439,7 @@ class FuncCallLocation:
         """Show file, line number, function name, and source context with arrow."""
         lines = [
             "FuncCallLocation:",
-            f"  file: {terminal_file_line_link(self.file, self.line_number)}",
+            f"  file: {self.file}",
             f"  line: {self.line_number}",
             f"  function: {self.func_name}",
         ]

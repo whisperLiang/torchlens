@@ -74,6 +74,13 @@ class BaseSelector:
             Union selector.
         """
 
+        if _selector_contains_followed_by(self) or _selector_contains_followed_by(other):
+            from .errors import SelectorCompositionError
+
+            raise SelectorCompositionError(
+                "tl.followed_by(...) only supports candidate & tl.followed_by(successor); "
+                "OR-composed followed_by selectors cannot be evaluated safely."
+            )
         _check_composition(self, other)
         return CompositeSelector("or", (self, other))
 
@@ -86,6 +93,13 @@ class BaseSelector:
             Negated selector.
         """
 
+        if _selector_contains_followed_by(self):
+            from .errors import SelectorCompositionError
+
+            raise SelectorCompositionError(
+                "tl.followed_by(...) only supports candidate & tl.followed_by(successor); "
+                "negated followed_by selectors cannot be evaluated safely."
+            )
         return NotSelector(self)
 
     def to_target_spec(self) -> TargetSpec:
@@ -588,6 +602,11 @@ class InterveningSelector(BaseSelector):
         object.__setattr__(self, "selector_value", None)
         object.__setattr__(self, "direction", "backward")
 
+    def __repr__(self) -> str:
+        """Return the canonical non-deprecated selector constructor."""
+
+        return "tl.without_op()"
+
 
 @dataclass(frozen=True, repr=False)
 class FacetSelector(BaseSelector):
@@ -767,7 +786,7 @@ class CompositeSelector(BaseSelector):
 
     def __init__(
         self, operator: Literal["and", "or"], selectors: tuple[SelectorLike, SelectorLike]
-    ):
+    ) -> None:
         """Create a composite selector.
 
         Parameters
@@ -973,7 +992,7 @@ def output(target: int | str) -> OutputSelector:
     return OutputSelector(target)
 
 
-def output_at(path: tuple[Any, ...] | list[Any]) -> OutputPathSelector:
+def output_at(path: Any) -> OutputPathSelector:
     """Create a nested output-path selector.
 
     Parameters
@@ -987,7 +1006,8 @@ def output_at(path: tuple[Any, ...] | list[Any]) -> OutputPathSelector:
         Immutable selector.
     """
 
-    return OutputPathSelector(path)
+    normalized = tuple(path) if isinstance(path, (tuple, list)) else (path,)
+    return OutputPathSelector(normalized)
 
 
 def input_at(*path: Any) -> InputPathSelector:
@@ -1483,7 +1503,12 @@ def _selector_matches_record_context(selector: BaseSelector, ctx: Any) -> bool:
             )
         return any(bool(selector.inner(recent)) for recent in recent_ops)  # type: ignore[operator]
     if kind == "followed_by":
-        return False
+        from .errors import SelectorCompositionError
+
+        raise SelectorCompositionError(
+            "tl.followed_by(...) only supports candidate & tl.followed_by(successor); "
+            "standalone, negated, or OR-composed followed_by selectors are unsupported."
+        )
     if kind == "and" and isinstance(selector, CompositeSelector):
         left, right = selector.selectors
         return bool(left(ctx)) and bool(right(ctx))  # type: ignore[operator]
@@ -1607,7 +1632,7 @@ def _classify_selector_direction(
 
     if isinstance(sel, TargetSpec):
         kind = sel.selector_kind
-        if kind in {"grad_fn", "intervening", "without_op", "label"}:
+        if kind in {"grad_fn", "intervening", "without_op"}:
             return "backward"
         if kind in {"func", "func_transform"}:
             return "forward"
@@ -1665,6 +1690,30 @@ def _classify_selector_direction(
     )
 
 
+def _selector_contains_followed_by(selector: SelectorLike) -> bool:
+    """Return whether ``selector`` contains a ``followed_by`` selector.
+
+    Parameters
+    ----------
+    selector:
+        Selector to inspect.
+
+    Returns
+    -------
+    bool
+        Whether the selector tree contains ``FollowedBySelector``.
+    """
+
+    if isinstance(selector, FollowedBySelector):
+        return True
+    if isinstance(selector, CompositeSelector):
+        left, right = selector.selectors
+        return _selector_contains_followed_by(left) or _selector_contains_followed_by(right)
+    if isinstance(selector, NotSelector):
+        return _selector_contains_followed_by(selector.selector)
+    return False
+
+
 def _check_composition(a: SelectorLike, b: SelectorLike) -> None:
     """Validate that two selectors can be composed.
 
@@ -1690,6 +1739,17 @@ def _check_composition(a: SelectorLike, b: SelectorLike) -> None:
             "Cross-graph composition not supported: a forward selector and a backward "
             "selector cannot be combined. Use separate forward and backward hook sites."
         )
+    if _selector_contains_followed_by(a) or _selector_contains_followed_by(b):
+        if not (
+            isinstance(a, FollowedBySelector)
+            and not _selector_contains_followed_by(b)
+            or isinstance(b, FollowedBySelector)
+            and not _selector_contains_followed_by(a)
+        ):
+            raise SelectorCompositionError(
+                "tl.followed_by(...) only supports candidate & tl.followed_by(successor); "
+                "nested or multi-followed_by compositions are unsupported."
+            )
 
 
 __all__ = [

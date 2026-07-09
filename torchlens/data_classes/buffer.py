@@ -6,15 +6,37 @@ import weakref
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Dict, cast
 
-from .._io import FieldPolicy
+from .._errors import AmbiguousOpLookupError
+from .._io import FieldPolicy, TLSPEC_VERSION, default_fill_state, read_tlspec_version
 from ..constants import BUFFER_LOG_FIELD_ORDER
 from ._accessor_base import Accessor
+from .field_policy import build_record_field_policy_table, portable_state_spec_from_policy
+from ._runtime_handles import runtime_handle_from_trace
+from ._repr import format_summary_lines
 
 if TYPE_CHECKING:
     import pandas as pd
 
     from .op import Op
     from .trace import Trace
+
+
+# Buffer fields deliberately omitted from Buffer.to_pandas() / BufferAccessor
+# .to_pandas() columns. Every field in BUFFER_LOG_FIELD_ORDER must either
+# appear as a dataframe column or be listed here -- tests/test_to_pandas_
+# field_coverage.py enforces this so new Buffer fields (or fields whose
+# FIELD_ORDER entry is later removed) can never silently drop out of the
+# buffer table again (the ``initial_value`` regression this guards against).
+_TO_PANDAS_EXCLUDED_BUFFER_FIELDS: frozenset[str] = frozenset(
+    {
+        # List of live Op child records, not a scalar table cell -- same
+        # "list of child records" exclusion category as BackwardPass
+        # .grad_fn_calls / GradFn.calls / Module.ops. Per-version scalars are
+        # already flattened into sibling columns (buffer_pass, shape, dtype,
+        # etc.) via the most recent version.
+        "versions",
+    }
+)
 
 
 def _buffer_log_to_row(buffer_log: "Buffer") -> Dict[str, Any]:
@@ -28,10 +50,15 @@ def _buffer_log_to_row(buffer_log: "Buffer") -> Dict[str, Any]:
     Returns
     -------
     Dict[str, Any]
-        Mapping from canonical field name to exported value.
+        Mapping from canonical field name to exported value, excluding the
+        fields in ``_TO_PANDAS_EXCLUDED_BUFFER_FIELDS``.
     """
 
-    return {field: getattr(buffer_log, field) for field in BUFFER_LOG_FIELD_ORDER}
+    return {
+        field: getattr(buffer_log, field)
+        for field in BUFFER_LOG_FIELD_ORDER
+        if field not in _TO_PANDAS_EXCLUDED_BUFFER_FIELDS
+    }
 
 
 class Buffer:
@@ -44,6 +71,8 @@ class Buffer:
         "_initial_value": FieldPolicy.KEEP,
         "_source_ref": FieldPolicy.WEAKREF_STRIP,
     }
+    FIELD_POLICY = build_record_field_policy_table(BUFFER_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC)
+    PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     def __init__(
         self,
@@ -70,6 +99,35 @@ class Buffer:
         self._initial_value = initial_value
         self._source_ref = weakref.ref(source_trace) if source_trace is not None else None
 
+    def __getstate__(self) -> Dict[str, Any]:
+        """Return pickle state with the non-picklable weakref stripped.
+
+        ``_source_ref`` is a live ``weakref.ref`` to the owning ``Trace``
+        whenever a ``source_trace`` was supplied (the normal case), and
+        ``weakref`` objects cannot be pickled. Null it here, mirroring every
+        sibling record class (``Op``/``Layer``/``Param``/...), so standalone
+        ``pickle.dumps(buffer)`` does not crash.
+        """
+
+        state = self.__dict__.copy()
+        state["_source_ref"] = None
+        state["tlspec_version"] = TLSPEC_VERSION
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        """Restore pickle state without reviving the source-trace weakref."""
+
+        read_tlspec_version(state, cls_name=type(self).__name__)
+        default_fill_state(
+            state,
+            defaults={
+                "_source_ref": None,
+                "_initial_value": None,
+                "versions": [],
+            },
+        )
+        self.__dict__.update(state)
+
     @property
     def source_trace(self) -> "Trace | None":
         """Return the owning trace if it is still alive."""
@@ -95,17 +153,10 @@ class Buffer:
             this computed runtime handle is unavailable or non-portable.
         """
 
-        trace = self.source_trace
-        source_ref = getattr(trace, "_source_model_ref", None) if trace is not None else None
-        if source_ref is None:
-            return None
-        model = source_ref()
-        if model is None:
-            return None
-        try:
-            return dict(model.named_buffers()).get(self.address)
-        except Exception:
-            return None
+        return runtime_handle_from_trace(
+            self.source_trace,
+            lambda model: dict(model.named_buffers()).get(self.address),
+        )
 
     @property
     def name(self) -> str:
@@ -262,7 +313,11 @@ class Buffer:
         return writes[overwrite_index - 1].out
 
     def to_pandas(self) -> "pd.DataFrame":
-        """Export this Buffer as a one-row pandas DataFrame."""
+        """Export this Buffer as a one-row pandas DataFrame.
+
+        Driven by ``BUFFER_LOG_FIELD_ORDER`` minus the documented, genuinely
+        non-tabular exclusions in ``_TO_PANDAS_EXCLUDED_BUFFER_FIELDS``.
+        """
 
         try:
             import pandas as pd
@@ -271,19 +326,24 @@ class Buffer:
                 "pandas is required for this feature. Install with `pip install torchlens[tabular]`."
             ) from e
 
-        return pd.DataFrame([_buffer_log_to_row(self)], columns=BUFFER_LOG_FIELD_ORDER)
+        columns = [
+            field
+            for field in BUFFER_LOG_FIELD_ORDER
+            if field not in _TO_PANDAS_EXCLUDED_BUFFER_FIELDS
+        ]
+        return pd.DataFrame([_buffer_log_to_row(self)], columns=columns)
 
     def __repr__(self) -> str:
         """Return a concise multi-line buffer summary."""
 
-        lines = [f"Buffer: {self.address}"]
+        lines = []
         if self.shape is not None:
             lines.append(f"  shape: {list(self.shape)}")
         if self.dtype is not None:
             lines.append(f"  dtype: {self.dtype}")
         lines.append(f"  versions: {len(self.versions)}")
         lines.append(f"  num_overwrites: {self.num_overwrites}")
-        return "\n".join(lines)
+        return format_summary_lines(f"Buffer: {self.address}", lines)
 
 
 class BufferAccessor(Accessor["Buffer"]):
@@ -312,7 +372,7 @@ class BufferAccessor(Accessor["Buffer"]):
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
-            raise KeyError(f"Ambiguous short name '{key}' -- use full address")
+            raise AmbiguousOpLookupError(f"Ambiguous short name '{key}' -- use full address")
         return None
 
     def _resolve_pass_qualified(self, key: str) -> "Buffer | None":
@@ -332,7 +392,7 @@ class BufferAccessor(Accessor["Buffer"]):
 
         try:
             self[key]  # type: ignore[index]
-        except (KeyError, TypeError, IndexError):
+        except (KeyError, TypeError, IndexError, ValueError):
             return False
         return True
 
@@ -350,7 +410,12 @@ class BufferAccessor(Accessor["Buffer"]):
         return "{" + inner + "}"
 
     def to_pandas(self) -> "pd.DataFrame":
-        """Export buffer metadata as a pandas DataFrame."""
+        """Export buffer metadata as a pandas DataFrame.
+
+        Driven by ``BUFFER_LOG_FIELD_ORDER`` minus the documented, genuinely
+        non-tabular exclusions in ``_TO_PANDAS_EXCLUDED_BUFFER_FIELDS`` -- see
+        ``Buffer.to_pandas`` for the per-row column derivation.
+        """
 
         try:
             import pandas as pd
@@ -359,5 +424,10 @@ class BufferAccessor(Accessor["Buffer"]):
                 "pandas is required for this feature. Install with `pip install torchlens[tabular]`."
             ) from e
 
+        columns = [
+            field
+            for field in BUFFER_LOG_FIELD_ORDER
+            if field not in _TO_PANDAS_EXCLUDED_BUFFER_FIELDS
+        ]
         rows = [_buffer_log_to_row(buffer_log) for buffer_log in self._list]
-        return pd.DataFrame(rows, columns=BUFFER_LOG_FIELD_ORDER)
+        return pd.DataFrame(rows, columns=columns)

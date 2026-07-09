@@ -453,9 +453,16 @@ def _extend_search_stack_from_item(
         #   - Skip _ATTR_SKIP_SET (.T, .mT, .H, .real, .imag) — trigger
         #     deprecation warnings or create duplicate tensor views
         #   - Skip anything containing "grad" — grad tensors tracked separately
+        try:
+            attrs = dir(item)
+        except Exception:
+            # Some third-party expression/proxy objects intentionally refuse
+            # Python introspection. Treat them as opaque leaves so tensor
+            # discovery can continue for the real tensor arguments.
+            return
         _state._dir_cache[obj_type] = [
             a
-            for a in dir(item)
+            for a in attrs
             if not a.startswith("__") and a not in _ATTR_SKIP_SET and "grad" not in a
         ]
     filtered_attrs = _state._dir_cache[obj_type]
@@ -666,6 +673,19 @@ def _get_code_context(
     _TORCHLENS_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     def _is_torchlens_internal(filename: str) -> bool:
+        """Return whether ``filename`` is inside the TorchLens package.
+
+        Parameters
+        ----------
+        filename:
+            Frame filename to test.
+
+        Returns
+        -------
+        bool
+            Whether the frame should be filtered as TorchLens internals.
+        """
+
         return filename.startswith(_TORCHLENS_PKG_DIR)
 
     # Phase 1: Collect lightweight frame data — only co_filename, co_name, f_lineno.

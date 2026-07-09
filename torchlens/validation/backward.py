@@ -11,6 +11,7 @@ import torch
 from torch import nn
 
 from .._input_coerce import _coerce_input_args
+from ..options import CaptureOptions
 from .._robustness import check_model_and_input_variants
 from ..intervention.errors import AppendStateValidationWarning
 from ..utils.arg_handling import normalize_input_args
@@ -284,8 +285,9 @@ def validate_backward_pass(
         Optional callable that maps model outputs to a scalar loss. Defaults to
         summing all returned tensors.
     perturb_saved_grads:
-        If True, perturb captured saved grads before comparison; the
-        validation should then return False.
+        Deprecated unsupported option. The previous implementation did not
+        compare the perturbed captured grads and therefore had no detection
+        power.
     validate_metadata:
         If True, run metadata invariant checks on the captured backward trace.
     random_seed:
@@ -312,6 +314,18 @@ def validate_backward_pass(
 
     if _is_appended_trace(model):
         return _warn_and_skip_appended_trace_validation(model)
+    if perturb_saved_grads:
+        warnings.warn(
+            "perturb_saved_grads=True is deprecated and unsupported because the previous "
+            "implementation was an inert flag-driven check, not a captured-gradient "
+            "comparison.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        raise ValueError(
+            "perturb_saved_grads=True is unsupported: TorchLens does not currently provide "
+            "a sound saved-gradient perturbation validation check."
+        )
 
     warn_parallel()
     _reject_opaque_wrappers(model)
@@ -351,35 +365,19 @@ def validate_backward_pass(
             model,
             logged_inputs,
             input_kwargs=logged_kwargs,
-            layers_to_save="all",
-            save_grads="all",
-            random_seed=random_seed,
+            capture=CaptureOptions(
+                layers_to_save="all",
+                save_grads="all",
+                random_seed=random_seed,
+            ),
         )
         logged_output = _reconstruct_candidate_output_for_loss(trace)
         logged_loss = loss_fn(logged_output)
         trace.log_backward(logged_loss)
         if validate_metadata:
             check_metadata_invariants(trace)
-        if perturb_saved_grads:
-            for layer in trace.layer_list:
-                if layer.has_grad and isinstance(layer.grad, torch.Tensor):
-                    layer.grad = layer.grad + torch.randn_like(layer.grad)
-                    break
         observed_param_grads = _param_grads(model)
 
-        if expected_param_grads.keys() != observed_param_grads.keys():
-            return False
-        params_passed = (
-            all(
-                torch.allclose(
-                    observed_param_grads[name], expected_param_grads[name], atol=atol, rtol=rtol
-                )
-                for name in expected_param_grads
-            )
-            and not perturb_saved_grads
-        )
-        if not params_passed:
-            return False
         if validate_layer_grads:
             layer_report = _validate_layer_grads(
                 model,
@@ -390,7 +388,34 @@ def validate_backward_pass(
                 rtol=layer_grad_rtol if layer_grad_rtol is not None else rtol,
                 random_seed=random_seed,
             )
-            return bool(layer_report)
+            if not bool(layer_report):
+                return False
+            if not expected_param_grads:
+                warnings.warn(
+                    "validate_backward_pass could not verify parameter gradients because "
+                    "stock autograd produced zero parameter gradients.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return True
+        if not expected_param_grads:
+            warnings.warn(
+                "validate_backward_pass could not verify parameter gradients because "
+                "stock autograd produced zero parameter gradients.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return False
+        if expected_param_grads.keys() != observed_param_grads.keys():
+            return False
+        params_passed = all(
+            torch.allclose(
+                observed_param_grads[name], expected_param_grads[name], atol=atol, rtol=rtol
+            )
+            for name in expected_param_grads
+        )
+        if not params_passed:
+            return False
         return True
     finally:
         model.load_state_dict(state_dict)
@@ -473,9 +498,11 @@ def _validate_layer_grads(
             model,
             candidate_inputs,
             input_kwargs=candidate_kwargs,
-            layers_to_save="all",
-            save_grads="all",
-            random_seed=random_seed,
+            capture=CaptureOptions(
+                layers_to_save="all",
+                save_grads="all",
+                random_seed=random_seed,
+            ),
         )
         candidate_output = _reconstruct_candidate_output_for_loss(candidate_trace)
         candidate_loss = loss_fn(candidate_output)

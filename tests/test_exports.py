@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -59,6 +60,7 @@ class _FakeHubApi:
 
         self.created: list[dict[str, Any]] = []
         self.uploaded: list[dict[str, Any]] = []
+        self.uploaded_bytes: list[bytes] = []
 
     def create_repo(self, **kwargs: Any) -> None:
         """Record repository creation.
@@ -86,6 +88,10 @@ class _FakeHubApi:
         """
 
         self.uploaded.append(kwargs)
+        # Read the file's bytes immediately: the caller's temp directory is
+        # cleaned up as soon as this call returns, so content must be
+        # captured now rather than by re-reading the path later.
+        self.uploaded_bytes.append(Path(kwargs["path_or_fileobj"]).read_bytes())
         return "https://huggingface.co/example/repo/blob/main/torchlens_artifact.pkl"
 
 
@@ -127,6 +133,7 @@ def test_trace_timeline_exports_are_parseable(export_log: Any, tmp_path: Path) -
 
 def test_xarray_export_has_neuroidassembly_shape(export_log: Any) -> None:
     """xarray export should expose presentation and neuroid dimensions."""
+    pytest.importorskip("xarray")
 
     assembly = tl.export.xarray(export_log)
 
@@ -135,6 +142,21 @@ def test_xarray_export_has_neuroidassembly_shape(export_log: Any) -> None:
     assert assembly.attrs["assembly"] == "NeuroidAssembly"
     assert assembly.sizes["presentation"] == 2
     assert assembly.sizes["neuroid"] > 0
+
+
+def test_xarray_export_names_mismatched_presentation_layer() -> None:
+    """Mismatched presentation counts should identify the offending layer."""
+    pytest.importorskip("xarray")
+
+    fake_log = SimpleNamespace(
+        layer_list=[
+            SimpleNamespace(layer_label="first", out=torch.randn(2, 3)),
+            SimpleNamespace(layer_label="bad_layer", out=torch.randn(1, 3)),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="bad_layer.*1.*expected 2"):
+        tl.export.xarray(fake_log)
 
 
 def test_tracker_exports_accept_existing_objects(export_log: Any, tmp_path: Path) -> None:
@@ -164,6 +186,19 @@ def test_tracker_exports_accept_existing_objects(export_log: Any, tmp_path: Path
     pytest.importorskip("wandb")
     wandb_result = tl.export.wandb(export_log)
     assert "table" in wandb_result
+
+
+def test_tracker_exports_reject_paths_with_clear_type_errors(
+    export_log: Any, tmp_path: Path
+) -> None:
+    """Tracker helpers need live tracker objects, not filesystem paths."""
+
+    with pytest.raises(TypeError, match="tensorboard expects an existing tracker object"):
+        tl.export.tensorboard(export_log, str(tmp_path / "tb"))
+    with pytest.raises(TypeError, match="mlflow expects an existing tracker object"):
+        tl.export.mlflow(export_log, client=tmp_path / "mlruns")
+    with pytest.raises(TypeError, match="aim expects an existing tracker object"):
+        tl.export.aim(export_log, run=tmp_path / "aim")
 
 
 def test_emit_nvtx_capture_option_does_not_change_capture() -> None:
@@ -232,6 +267,36 @@ def test_static_graph_adapters_and_hub_dry_run(export_log: Any, tmp_path: Path) 
     assert uploaded["upload_result"].startswith("https://huggingface.co/")
     assert api.created
     assert api.uploaded
+
+
+def test_hub_push_uploads_real_bundle_not_metadata_stub(export_log: Any) -> None:
+    """push_to_hub must upload the real scrubbed artifact, never a JSON stub.
+
+    ``push_to_hub`` previously fell back to a ~240-byte JSON manifest for
+    backward-eligible captures while still reporting ``dry_run: False`` success
+    (the raw Trace was then unpicklable; it is now picklable via GradFn weakref
+    serialization, so the old naive-pickle-fails precondition no longer holds).
+    This asserts the uploaded payload is the real, larger, non-JSON
+    portable-bundle archive.
+    """
+
+    api = _FakeHubApi()
+    uploaded = tl.bridge.huggingface.push_to_hub(export_log, "example/repo", api=api)
+    assert uploaded["dry_run"] is False
+    assert api.uploaded, "expected an upload_file call"
+
+    payload = api.uploaded_bytes[-1]
+
+    # A ~240-byte JSON manifest stub was the old broken fallback. The real
+    # artifact must be large and must not be a bare JSON stub.
+    assert len(payload) > 1000
+    assert uploaded["size_bytes"] > 1000
+    assert not payload.lstrip().startswith(b"{"), "expected a real artifact, not a JSON stub"
+
+    # The Trace is picklable (GradFn weakref serialization), so push_to_hub
+    # uploads the real pickled artifact (pickle protocol opcode 0x80), never a
+    # JSON stub and not the bundle-scrub fallback.
+    assert payload[:1] == b"\x80", "expected a real pickle artifact, not a JSON stub"
 
 
 def test_depyf_bridge_fails_soft_when_extra_missing() -> None:

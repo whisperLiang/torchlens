@@ -1,12 +1,12 @@
 """Steps 5-6: Conditional branches and buffer layer fixes.
 
-Step 5 (_mark_conditional_branches) now runs a six-phase conditional pipeline:
+Step 5 (_mark_conditional_branches) runs a six-phase conditional pipeline:
     5a. Build AST file indexes for files referenced by terminal scalar bools.
     5b. Classify terminal bools into branch/non-branch contexts.
     5c. Materialize dense conditional events from structural AST keys.
     5d. Backward-flood IF edges from branch-participating bools only.
     5e. Attribute executed ops to THEN/ELIF/ELSE arms across every forward edge.
-    5f. Materialize derived compatibility views from the new primary structures.
+    5f. Materialize derived compatibility views from primary structures.
 Step 6 (_fix_buffer_layers): Connects buffer sources, deduplicates identical
     buffers (same module, same value, same parent), and assigns buffer pass numbers.
 """
@@ -36,15 +36,14 @@ _BRANCH_CONTEXT_KINDS = frozenset({"if_test", "elif_test", "ifexp"})
 def _mark_conditional_branches(self: "Trace") -> None:
     """Step 5: Classify bools, materialize events, and attribute conditional edges.
 
-    The public Step 5 entry point is preserved for the postprocess orchestrator,
-    but the implementation now delegates to six internal phases:
+    The public Step 5 entry point delegates to six internal phases:
 
     1. Build AST file indexes for all files touched by terminal scalar bools.
     2. Classify terminal bools and collect observed structural conditional keys.
     3. Materialize dense ``ConditionalEvent`` records from those keys.
     4. Backward-flood IF edges from branch-participating bools only.
     5. Attribute executed ops and forward edges to conditional branch arms.
-    6. Rebuild compatibility views derived from the new primary structures.
+    6. Rebuild compatibility views derived from primary structures.
 
     Performance fast-path: when no terminal scalar bools were captured, the
     model has no conditional branches the pipeline can attribute, so we skip
@@ -63,8 +62,8 @@ def _mark_conditional_branches(self: "Trace") -> None:
     conditional_keys, bool_classifications = _classify_bool_layers(self)
     # Defensive guard: if no terminal bool produced a structural conditional
     # key, attribution will produce zero edges, matching the fast-skip output.
-    # This invariant lets future refactors of the bool detector trip an
-    # explicit assertion rather than silently make the fast-path miss work.
+    # This invariant makes bool-detector drift fail explicitly instead of
+    # silently making the fast-path miss work.
     if not bool_classifications:
         assert not conditional_keys, (
             "Internally-terminated bool layers were absent but conditional "
@@ -646,8 +645,7 @@ def _fix_buffer_layers(self: "Trace") -> None:
        The dedup hash is (modules + buffer_source + address).
     3. Assigns sequential buffer_pass numbers per address.
 
-    Note: Buffer siblings are always empty — the sibling iteration in
-    _merge_buffer_entries is effectively dead code for buffers (#2).
+    Note: Buffer deduplication is scoped by containing module, source, address, and value.
     """
     buffer_counter: Dict[str, int] = defaultdict(lambda: 1)
     buffer_hash_groups: Dict[str, List[str]] = defaultdict(list)
@@ -676,6 +674,12 @@ def _fix_buffer_layers(self: "Trace") -> None:
                     safe_copy(self[layer.buffer_source].out, detach_tensor=True)
                 )
 
+        if layer.address is None:
+            equivalence_class = str(getattr(layer, "equivalence_class", ""))
+            if equivalence_class.startswith("buffer_"):
+                recovered_address = equivalence_class.removeprefix("buffer_")
+                if recovered_address and recovered_address != "None":
+                    layer.address = recovered_address
         if layer.address is None:
             layer.address = f"anonymous_buffer_{layer._label_raw}"
         buffer_hash = str(layer.modules) + str(layer.buffer_source) + layer.address
@@ -771,5 +775,17 @@ def _merge_buffer_entries(self: "Trace", source_buffer: Op, buffer_to_remove: Op
         if buffer_to_remove._label_raw in layer.internal_source_ancestors:
             layer.internal_source_ancestors.remove(buffer_to_remove._label_raw)
             layer.internal_source_ancestors.add(source_buffer._label_raw)
+        # Repoint any op whose scalar ``buffer_source`` still names the removed
+        # buffer to the value-identical survivor. Unlike parents/children, the
+        # ``buffer_source`` field (and its arg-0 mirror in ``parent_arg_positions``)
+        # is NOT rewritten above and is absent from the raw->final rename + scrub
+        # lists, so without this it dangles -- the buffer-merge analogue of the
+        # campaign's "scrub removed buffer graph references" fix (e.g. speechbrain
+        # CRDNN LiGRU per-forward ``drop_mask_te.to(device)`` reassign buffers).
+        if layer.buffer_source == buffer_to_remove._label_raw:
+            layer.buffer_source = source_buffer._label_raw
+            arg_positions = layer.parent_arg_positions.get("args")
+            if arg_positions is not None and arg_positions.get(0) == buffer_to_remove._label_raw:
+                arg_positions[0] = source_buffer._label_raw
 
     self._remove_log_entry(buffer_to_remove, remove_references=True)

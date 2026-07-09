@@ -28,7 +28,12 @@ from torchlens.visualization._rank_layout_internal.layout import (
 
 from example_models import RandomGraphModel
 
-VIS_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "test_outputs", "visualizations", "large")
+VIS_OUTPUT_DIR = os.path.join(
+    os.path.dirname(__file__),
+    "generated_outputs",
+    "visualizations",
+    "large",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -253,10 +258,11 @@ class TestRandomGraphModel:
         model = RandomGraphModel(target_nodes=100000, seed=42)
         assert validate_forward_pass(model, torch.randn(2, 64))
 
-    @pytest.mark.skip(
+    @pytest.mark.skipif(
+        os.environ.get("TORCHLENS_RUN_250K") != "1",
         reason="250k-node validation OOMs / hangs for hours on most machines. "
-        "Run manually with: pytest tests/test_large_graphs.py::"
-        "TestRandomGraphModel::test_validation_250k --no-skip"
+        "Opt in explicitly with: TORCHLENS_RUN_250K=1 pytest tests/test_large_graphs.py::"
+        "TestRandomGraphModel::test_validation_250k -m rare",
     )
     @pytest.mark.slow
     @pytest.mark.rare

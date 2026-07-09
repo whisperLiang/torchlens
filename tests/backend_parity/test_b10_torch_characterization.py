@@ -239,15 +239,20 @@ def test_halt_signal_returns_partial_trace_from_predicate_capture() -> None:
     )
 
     assert trace.halted is True
-    assert trace.halt_reason == "relu_1_3_raw"
-    assert trace.halt_frontier == "relu_1_3_raw"
+    # halt_reason/halt_frontier are now remapped from raw to FINAL labels in
+    # postprocess Step 10 (_rename_model_history_layer_names), consistently for
+    # both the exhaustive tl.trace(halt=...) and cooked Recording.to_trace()
+    # paths, so halt provenance is a stable public label that matches across
+    # capture modes (was raw "relu_1_3_raw", capture-mode-local).
+    assert trace.halt_reason == "relu_1_2"
+    assert trace.halt_frontier == "relu_1_2"
     assert [layer.func_name for layer in trace.layer_list] == ["none", "__add__", "relu", "none"]
     assert torchlens_state._logging_enabled is False
     assert torchlens_state._active_trace is None
 
 
 def test_selective_layers_to_save_uses_fast_pass_save_new_outs() -> None:
-    """Selective layer names run the fast pass and save output-parent payloads."""
+    """Selective layer names save requested and output-parent payloads."""
 
     torch.manual_seed(1703)
     trace = tl.trace(
@@ -258,7 +263,7 @@ def test_selective_layers_to_save_uses_fast_pass_save_new_outs() -> None:
     )
 
     saved = [(layer.func_name, layer.has_saved_activation) for layer in trace.layer_list]
-    assert trace.capture_mode == "fast"
+    assert trace.capture_mode == "exhaustive"
     assert trace.num_saved_ops == 3
     assert saved == [
         ("none", False),
@@ -327,7 +332,7 @@ def test_buffer_mutation_reconciliation_orders_initial_and_written_versions() ->
 
 
 def test_dropout_two_pass_rng_alignment_matches_full_trace() -> None:
-    """Fast-pass selective saving restores the exhaustive-pass dropout RNG state."""
+    """Absorbed selective saving preserves the full-trace dropout RNG stream."""
 
     x = torch.ones(4, 4)
     full = tl.trace(_DropoutTwoPassModel().train(), x, layers_to_save="all", random_seed=1704)
@@ -338,7 +343,7 @@ def test_dropout_two_pass_rng_alignment_matches_full_trace() -> None:
         random_seed=1704,
     )
 
-    assert selective.capture_mode == "fast"
+    assert selective.capture_mode == "exhaustive"
     assert torch.equal(_dropout_out(selective), _dropout_out(full))
 
 

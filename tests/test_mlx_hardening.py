@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
 
-mx = pytest.importorskip("mlx.core", exc_type=ImportError)
-nn = pytest.importorskip("mlx.nn", exc_type=ImportError)
+if sys.platform != "darwin" and os.environ.get("TORCHLENS_RUN_UNSTABLE_MLX_TESTS") != "1":
+    pytest.skip(
+        "MLX exec-level tests are skipped on non-Darwin platforms by default; "
+        "set TORCHLENS_RUN_UNSTABLE_MLX_TESTS=1 to opt in.",
+        allow_module_level=True,
+    )
+
+mlx = pytest.importorskip("mlx")
+import mlx.core as mx  # noqa: E402
+import mlx.nn as nn  # noqa: E402
 
 import torchlens as tl  # noqa: E402
 from torchlens.backends import (  # noqa: E402
@@ -218,6 +228,14 @@ def test_mlx_save_grads_raises() -> None:
 
     with pytest.raises(BackendUnsupportedError, match="backward capture"):
         tl.trace(TinyMLP(), _tiny_mlp_input(), save_grads=True)
+
+
+@pytest.mark.optional
+def test_mlx_layers_to_save_raises_typed_error() -> None:
+    """MLX capture rejects the unsupported legacy ``layers_to_save`` selector."""
+
+    with pytest.raises(BackendUnsupportedError, match="layers_to_save"):
+        tl.trace(TinyMLP(), _tiny_mlp_input(), backend="mlx", layers_to_save=["relu_1_3_raw:1"])
 
 
 @pytest.mark.optional

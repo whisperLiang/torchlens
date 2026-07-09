@@ -60,6 +60,7 @@ from .._io import (
     FieldPolicy,
     TLSPEC_VERSION,
     TorchLensIOError,
+    coerce_container_typed_state,
     default_fill_state,
     read_tlspec_version,
 )
@@ -73,6 +74,13 @@ from ..intervention.errors import DirectActivationWriteWarning
 from ..quantities import Bytes, Flops, Macs, as_bytes, as_duration, as_flops, as_macs
 from .._state import pause_logging
 from ._accessor_base import Accessor
+from .field_policy import (
+    build_record_field_policy_table,
+    default_fill_state_from_policy,
+    fork_policy_from_policy,
+    portable_state_spec_from_policy,
+)
+from ._repr import format_config_items, format_shape_list
 from ._state_adapter import state_items, state_restore
 from ..utils.tensor_utils import (
     SaveMode,
@@ -140,8 +148,64 @@ _LAYER_PASS_LOG_DEFAULT_FILL: dict[str, Any] = {
     "_address_normalized": None,
     "_construction_done": True,
 }
+# Typed container defaults for every non-Optional container field in
+# `LAYER_PASS_LOG_FIELD_ORDER`. Same defect and fix as
+# `trace._MODEL_LOG_CONTAINER_DEFAULTS`: the blanket ``{field: None}`` base
+# below makes an absent (legacy/partial-state) container field restore as
+# ``None`` instead of its declared list/dict/set/tuple, which then crashes real
+# consumer code (membership/iteration in ``finalization.py``,
+# ``loop_detection.py``, ``invariants.py``). Plain builtin types are used so
+# ``coerce_container_typed_state`` (called from ``Op.__setstate__``) also
+# repairs a present-but-wrong-typed legacy value (e.g. a ``set`` where a
+# ``list`` is now declared).
+_LAYER_PASS_LOG_CONTAINER_DEFAULTS: dict[str, Any] = {
+    "lookup_keys": [],
+    "annotations": {},
+    "shape": (),
+    "out_versions_by_child": {},
+    "code_context": [],
+    "func_rng_states": {},
+    "func_autocast_state": {},
+    "arg_names": (),
+    "non_tensor_pos_args": [],
+    "non_tensor_kwargs": {},
+    "func_non_tensor_args": [],
+    "transform_chain": (),
+    "transform_config": {},
+    "unattributed_tensor_args": (),
+    "parent_params": [],
+    "_param_barcodes": [],
+    "parent_param_ops": {},
+    "_param_logs": [],
+    "param_shapes": [],
+    "equivalent_ops": set(),
+    "recurrent_ops": [],
+    "parents": [],
+    "parent_arg_positions": {},
+    "root_ancestors": set(),
+    "children": [],
+    "input_ancestors": set(),
+    "output_descendants": set(),
+    "internal_source_parents": [],
+    "internal_source_ancestors": set(),
+    "in_conditionals": [],
+    "conditional_branch_stack": [],
+    "conditional_entry_children": [],
+    "conditional_then_children": [],
+    "conditional_elif_children": {},
+    "conditional_else_children": [],
+    "conditional_arm_children": {},
+    "modules": [],
+    "module_call_stack": [],
+    "input_to_module_calls": [],
+    "module_entry_arg_keys": {},
+    "output_of_modules": [],
+    "output_of_module_calls": [],
+    "func_config": {},
+}
 _LAYER_PASS_LOG_DEFAULT_FILL = {
     **{field_name: None for field_name in LAYER_PASS_LOG_FIELD_ORDER},
+    **_LAYER_PASS_LOG_CONTAINER_DEFAULTS,
     **_LAYER_PASS_LOG_DEFAULT_FILL,
 }
 _OP_PROPERTY_BACKED_FIELD_NAMES = frozenset(
@@ -298,6 +362,30 @@ class GradientRecord:
         memory: int | None,
         timestamp: float,
     ) -> None:
+        """Initialize one backward-gradient payload record for an operation.
+
+        Parameters
+        ----------
+        owner:
+            Object that owns the gradient record.
+        ordinal:
+            Position of this record within the owner.
+        backward_pass_index:
+            Backward pass index that produced the gradient.
+        grad:
+            Raw gradient tensor, if retained.
+        transformed_grad:
+            Post-processed gradient payload, if retained.
+        shape:
+            Gradient shape.
+        dtype:
+            Gradient dtype string.
+        memory:
+            Gradient memory in bytes.
+        timestamp:
+            Capture timestamp.
+        """
+
         self.owner = owner
         self.ordinal = ordinal
         self.backward_pass_index = backward_pass_index
@@ -803,15 +891,17 @@ def _dedup_saved_activation_out(
         setattr(trace, "_out_identity_cache", identity_cache)
 
     source_key = id(source_tensor)
+    source_version = getattr(source_tensor, "_version", None)
     cached = identity_cache.get(source_key)
     if cached is not None:
-        cached_source, cached_label, cached_out = cached
-        if cached_source is source_tensor:
+        cached_source, cached_label, cached_out, cached_version = cached
+        if cached_source is source_tensor and cached_version == source_version:
             annotations["dedup_source_id"] = source_key
+            annotations["dedup_source_version"] = source_version
             annotations["dedup_reference_label"] = cached_label
             return cached_out
 
-    identity_cache[source_key] = (source_tensor, label, raw_out)
+    identity_cache[source_key] = (source_tensor, label, raw_out, source_version)
     return raw_out
 
 
@@ -879,7 +969,7 @@ class Op:
         "output_device": FieldPolicy.KEEP,
         "activation_transform": FieldPolicy.DROP,
         "annotations": FieldPolicy.KEEP,
-        "interventions": FieldPolicy.DROP,
+        "interventions": FieldPolicy.KEEP,
         "intervention_replaced": FieldPolicy.KEEP,
         "detach_saved_activations": FieldPolicy.KEEP,
         "has_saved_args": FieldPolicy.KEEP,
@@ -1045,8 +1135,15 @@ class Op:
         "_pending_grad_blob_id": FieldPolicy.DROP,
         "_pending_transformed_grad_blob_id": FieldPolicy.DROP,
     }
-    FIELD_FORK_POLICY = LAYER_PASS_LOG_FIELD_FORK_POLICY
-    DEFAULT_FILL_STATE = _LAYER_PASS_LOG_DEFAULT_FILL
+    FIELD_POLICY = build_record_field_policy_table(
+        LAYER_PASS_LOG_FIELD_ORDER,
+        PORTABLE_STATE_SPEC,
+        fork_policy=LAYER_PASS_LOG_FIELD_FORK_POLICY,
+        default_fill_state=_LAYER_PASS_LOG_DEFAULT_FILL,
+    )
+    PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
+    FIELD_FORK_POLICY = fork_policy_from_policy(FIELD_POLICY)
+    DEFAULT_FILL_STATE = default_fill_state_from_policy(FIELD_POLICY)
 
     def _slot(self, name: str, default: Any = None) -> Any:
         """Return one physical slot value, or ``default`` when it is unset."""
@@ -2520,7 +2617,6 @@ class Op:
         state.pop("_facets_cache", None)
         state["func"] = None
         state["grad_fn_handle"] = None
-        state["grad_fn_handle"] = None
         state["tlspec_version"] = TLSPEC_VERSION
         return state
 
@@ -2585,6 +2681,11 @@ class Op:
             state,
             defaults=self.DEFAULT_FILL_STATE,
         )
+        # Repair present-but-wrong-typed container fields from legacy states
+        # (e.g. `_param_barcodes` serialized as a `set` where a `list` is now
+        # declared). `default_fill_state` only fills absent keys; this closes
+        # the same gap `Trace.__setstate__` already closes for its own fields.
+        coerce_container_typed_state(state, self.DEFAULT_FILL_STATE)
         _clear_property_backed_state_fields(state)
         if state.get("dtype_ref") is None:
             state["dtype_ref"] = _dtype_ref_or_none(state.get("dtype"))
@@ -2739,13 +2840,16 @@ class Op:
         Most fields are ``copy.deepcopy``'d so the clone is fully independent.
         However, certain fields are shallow-copied (shared by reference) because:
 
-        * ``func``, ``grad_fn_class_name`` - function objects, immutable/shared.
+        * ``func``, ``grad_fn_class_name``, ``grad_fn_handle`` - function or
+          autograd handle objects, immutable/shared.
         * ``source_trace`` - must point to the same Trace instance.
         * ``func_rng_states`` - large state dicts, not mutated after capture.
-        * ``saved_args``, ``saved_kwargs`` - may contain large tensors;
-          deep-copying them is expensive and unnecessary.
+        * ``saved_args``, ``saved_kwargs``, ``args_template``,
+          ``kwargs_template`` - may contain large tensors or structured
+          templates; deep-copying them is expensive and unnecessary.
         * ``parent_params`` - references to nn.Parameters, must stay shared.
-        * ``out``, ``out_versions_by_child`` - large tensors;
+        * ``out``, ``transformed_out``, ``transformed_grad``,
+          ``out_versions_by_child`` - large tensors;
           shared references are safe since they're replaced (not mutated).
         * ``container_spec`` - frozen dataclass shared by sibling output leaves.
 
@@ -2756,7 +2860,6 @@ class Op:
         fields_not_to_deepcopy = [
             "func",
             "grad_fn_class_name",
-            "grad_fn_handle",
             "grad_fn_handle",
             "source_trace",
             "func_rng_states",
@@ -3226,6 +3329,8 @@ class Op:
     # ********************************************
 
     def __str__(self) -> str:
+        """Return a human-readable operation summary."""
+
         if self._tracing_finished:
             return self._str_after_pass()
         else:
@@ -3277,7 +3382,7 @@ class Op:
         s += self._tensor_contents_str_helper()
         s += self._tensor_family_str_helper()
         if len(self.param_shapes) > 0:
-            params_shapes_str = ", ".join(str(param_shape) for param_shape in self.param_shapes)
+            params_shapes_str = format_shape_list(self.param_shapes)
             s += (
                 f"\n\tParams: Computed from params with shape {params_shapes_str}; "
                 f"{self.num_params} params total ({self.param_memory})"
@@ -3291,7 +3396,7 @@ class Op:
         if not self.is_input:
             s += f"\n\tFunction: {self.func_name} (grad_fn_handle: {self.grad_fn_class_name}) {module_str}"
             if self.func_config:
-                config_str = ", ".join(f"{k}={v}" for k, v in self.func_config.items())
+                config_str = format_config_items(self.func_config)
                 s += f"\n\tConfig: {config_str}"
             s += f"\n\tTime elapsed: {self.func_duration: .3E}s"
         if len(self.output_of_modules) > 0:
@@ -3313,6 +3418,14 @@ class Op:
         else:
             s = ""
             s += f"\n\t\t{tensor_stats_summary(self.out)}"
+            if not isinstance(self.out, torch.Tensor):
+                # Preview-backend (non-torch) saved activation, e.g. MLX/tinygrad/
+                # TF/JAX/Paddle. The slice-then-clone preview below relies on
+                # torch-only methods (.detach(), .requires_grad, .clone()); the
+                # stats-summary line above already reports shape/dtype safely, so
+                # skip the raw-content preview rather than duck-typing torch-only
+                # calls across every preview backend's array type.
+                return s
             tensor_size_shown = 8
             # Use logged shape, not live tensor shape (#45)
             saved_shape = self.shape if self.shape is not None else self.out.shape
@@ -3373,6 +3486,8 @@ class Op:
         return s
 
     def __repr__(self) -> str:
+        """Return the developer representation for this operation."""
+
         return self.__str__()
 
 

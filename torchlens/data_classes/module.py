@@ -31,20 +31,29 @@ from typing import (
     ClassVar,
     Dict,
     List,
-    Literal,
     Optional,
     TextIO,
-    Tuple,
     Union,
     cast,
 )
 
 import torch
 
-from .._io import FieldPolicy, TLSPEC_VERSION, default_fill_state, read_tlspec_version
-from ..constants import MODULE_PASS_LOG_FIELD_ORDER
-from ..quantities import Bytes, Duration, Flops, Macs, as_duration
+from .._errors import AmbiguousOpLookupError
+from .._io import (
+    FieldPolicy,
+    TLSPEC_VERSION,
+    coerce_container_typed_state,
+    default_fill_state,
+    read_tlspec_version,
+)
+from ..constants import LAYER_LOG_FIELD_ORDER, MODULE_LOG_FIELD_ORDER, MODULE_PASS_LOG_FIELD_ORDER
+from ..quantities import Bytes, Duration, Flops, Macs
 from ._accessor_base import Accessor
+from .field_policy import build_record_field_policy_table, portable_state_spec_from_policy
+from .layer import _layer_log_to_row
+from ._runtime_handles import runtime_handle_from_trace
+from ._repr import format_summary_lines
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -55,6 +64,84 @@ if TYPE_CHECKING:
     from .param import ParamAccessor
     from .trace import Trace
     from ..ir.container import ContainerSpec
+
+
+# Module fields deliberately omitted from ``ModuleAccessor.to_pandas()`` columns.
+# Every field in ``MODULE_LOG_FIELD_ORDER`` must either appear as a dataframe
+# column or be listed here -- ``tests/test_to_pandas_field_coverage.py``
+# enforces this so new Module fields can never silently fail to reach the
+# module table again (same regression class as TO-PANDAS-NEW-FIELDS).
+_TO_PANDAS_EXCLUDED_MODULE_FIELDS: frozenset[str] = frozenset(
+    {
+        # Non-instantiable / live class object (not a scalar table cell):
+        "cls",
+        # Live rich accessors and object references, not scalar table cells:
+        "ops",  # ModuleCallAccessor -- use trace.module_calls for per-pass rows
+        "layers",  # list[Layer] -- use trace.layers.to_pandas() for per-layer rows
+        "params",  # ParamAccessor -- use trace.params.to_pandas()
+        "recursive_params",  # ParamAccessor -- same as params
+        "call_parent_module",  # Module reference -- call_parent already carries the label
+        "call_children_modules",  # list[Module] -- call_children already carries the labels
+        "output_structure",  # ContainerSpec -- structural, not a flat scalar
+        "forward_args_template",  # arbitrary structural template, not a flat scalar
+        "forward_kwargs_template",  # arbitrary structural template, not a flat scalar
+        # Hook lists (callables/handles, not scalar table cells):
+        "forward_pre_hooks",
+        "forward_hooks",
+        "backward_pre_hooks",
+        "backward_hooks",
+        "full_backward_pre_hooks",
+        "full_backward_hooks",
+        # Arbitrary user-selected payload (parallel to Op.annotations exclusion):
+        "custom_attributes",
+    }
+)
+
+
+# Per-call fields that ``Module`` resolves via ``_single_pass_or_error``: they
+# describe ONE forward pass and deliberately raise ``AttributeError`` on a
+# multi-call Module (directing the user to a specific ``module.ops[i]`` pass).
+# The field-order-driven table cannot let that raise, so it reports them as None
+# for multi-call Modules -- mirroring ``Module.output_structure``, which already
+# returns None for multi-call Modules. The ``total_*`` sibling columns carry the
+# multi-call aggregate, so no information is lost.
+_MULTI_CALL_PER_PASS_MODULE_FIELDS: frozenset[str] = frozenset(
+    {
+        "forward_args_summary",
+        "forward_kwargs_summary",
+        "forward_duration",
+        "func_calls_duration",
+    }
+)
+
+
+def _module_log_to_row(module_log: "Module") -> Dict[str, Any]:
+    """Convert a Module into one DataFrame row.
+
+    Parameters
+    ----------
+    module_log:
+        Module metadata entry to export.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Mapping from canonical field name to exported value, excluding the
+        fields in ``_TO_PANDAS_EXCLUDED_MODULE_FIELDS``. Per-pass fields
+        (``_MULTI_CALL_PER_PASS_MODULE_FIELDS``) are reported as ``None`` for
+        multi-call Modules so the table never drops a column nor raises.
+    """
+
+    multi_call = module_log.num_calls > 1
+    row: Dict[str, Any] = {}
+    for field_name in MODULE_LOG_FIELD_ORDER:
+        if field_name in _TO_PANDAS_EXCLUDED_MODULE_FIELDS:
+            continue
+        if multi_call and field_name in _MULTI_CALL_PER_PASS_MODULE_FIELDS:
+            row[field_name] = None
+            continue
+        row[field_name] = getattr(module_log, field_name)
+    return row
 
 
 class ModuleCallAccessor(Accessor["ModuleCall"]):
@@ -130,7 +217,7 @@ class ModuleCallAccessor(Accessor["ModuleCall"]):
                 return call
         parent_matches = [call for call in self._dict.values() if key == call.address]
         if len(parent_matches) > 1:
-            raise ValueError(
+            raise AmbiguousOpLookupError(
                 f"Module '{key}' has {len(parent_matches)} calls. Use a 0-based integer "
                 f"position or a call-qualified label like '{key}:1'."
             )
@@ -205,8 +292,25 @@ def _is_atomic_module_call(call: "ModuleCall") -> bool:
     if trace is None:
         return False
     return any(
-        getattr(trace.ops[op_label], "is_atomic_module", False) for op_label in call.output_ops
+        getattr(op, "is_atomic_module", False)
+        for op_label in call.output_ops
+        for op in _resolve_call_ops(trace, op_label)
     )
+
+
+def _resolve_call_ops(trace: "Trace", label: str) -> list["Op"]:
+    """Resolve a ModuleCall op-slot label to its Op object(s).
+
+    Submodule calls store pass-qualified Op labels, each resolving to exactly
+    one Op (unchanged behavior). The root ``self:1`` call stores bare Layer
+    labels (per the function-root-module invariant), and a recurrent
+    (multi-pass) Layer label resolves to EVERY one of its pass Ops. Aggregate
+    ModuleCall properties sum/iterate over the resolved Ops so the root
+    aggregate correctly spans all passes without a caller ever hitting the
+    ``AmbiguousOpLookupError`` that plain ``trace.ops[layer_label]`` raises.
+    """
+
+    return trace.ops.resolve_all(label)
 
 
 def _edge_counts_for_scope(trace: "Trace | None", op_labels: List[str]) -> tuple[int, int, int]:
@@ -229,7 +333,7 @@ def _edge_counts_for_scope(trace: "Trace | None", op_labels: List[str]) -> tuple
     if trace is None:
         return 0, 0, 0
 
-    scope = {trace.ops[label].label for label in op_labels}
+    scope = {op.label for label in op_labels for op in _resolve_call_ops(trace, label)}
     internal_edges: set[tuple[str, str]] = set()
     input_edges: set[tuple[str, str]] = set()
     output_edges: set[tuple[str, str]] = set()
@@ -344,6 +448,28 @@ def _module_call_log_to_row(module_call_log: "ModuleCall") -> Dict[str, Any]:
     return row
 
 
+# Typed container defaults for every non-Optional container field ModuleCall
+# stores directly. Same defect class as
+# `Op._LAYER_PASS_LOG_CONTAINER_DEFAULTS`/`Trace._MODEL_LOG_CONTAINER_DEFAULTS`:
+# without this, `coerce_container_typed_state` cannot repair a
+# present-but-wrong-typed legacy value, and an absent field crashes instead of
+# restoring an empty typed container. Plain builtin types are used
+# deliberately.
+_MODULE_CALL_CONTAINER_DEFAULTS: dict[str, Any] = {
+    "all_addresses": [],
+    "ops": [],
+    "input_ops": [],
+    "input_layers": [],
+    "output_ops": [],
+    "output_layers": [],
+    "output_paths": (),
+    "forward_arg_names": [],
+    "code_context": [],
+    "module_call_stack": [],
+    "call_children": [],
+}
+
+
 @dataclass(init=False)
 class ModuleCall:
     """Per-(module, call_index) data for one invocation of a module.
@@ -371,6 +497,7 @@ class ModuleCall:
         "output_ops": FieldPolicy.KEEP,
         "output_layers": FieldPolicy.KEEP,
         "output_structure": FieldPolicy.KEEP,
+        "output_paths": FieldPolicy.KEEP,
         "forward_args": FieldPolicy.BLOB_RECURSIVE,
         "forward_kwargs": FieldPolicy.BLOB_RECURSIVE,
         "forward_arg_names": FieldPolicy.KEEP,
@@ -391,6 +518,8 @@ class ModuleCall:
         "_source_trace_strong": FieldPolicy.DROP,
         "_source_trace_ref": FieldPolicy.WEAKREF_STRIP,
     }
+    FIELD_POLICY = build_record_field_policy_table(MODULE_PASS_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC)
+    PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     address: str
     all_addresses: List[str]
@@ -406,6 +535,7 @@ class ModuleCall:
     output_ops: List[str]
     output_layers: List[str]
     output_structure: "ContainerSpec | None"
+    output_paths: tuple[tuple[Any, ...], ...]
     forward_args: tuple[Any, ...] | None
     forward_kwargs: dict[str, Any] | None
     forward_arg_names: List[str]
@@ -430,6 +560,7 @@ class ModuleCall:
         output_layers: List[str],
         output_ops: List[str] | None = None,
         output_structure: "ContainerSpec | None" = None,
+        output_paths: tuple[tuple[Any, ...], ...] | None = None,
         forward_args: tuple[Any, ...] | None = None,
         forward_kwargs: dict[str, Any] | None = None,
         forward_args_template: Any = None,
@@ -447,6 +578,62 @@ class ModuleCall:
         ordinal_index: int = 0,
         _source_trace: "Trace | None" = None,
     ) -> None:
+        """Initialize metadata for one module forward call.
+
+        Parameters
+        ----------
+        address:
+            Module address in the owning model.
+        call_index:
+            Zero-based invocation index for this module address.
+        call_label:
+            Pass-qualified module call label.
+        ops:
+            Operation labels executed inside this module call.
+        input_layers:
+            Input layer labels for this call.
+        output_layers:
+            Output layer labels for this call.
+        output_ops:
+            Output operation labels for this call.
+        output_structure:
+            Container structure describing module outputs.
+        output_paths:
+            Container paths for tensor outputs.
+        forward_args:
+            Positional arguments observed at module entry.
+        forward_kwargs:
+            Keyword arguments observed at module entry.
+        forward_args_template:
+            Serializable template for positional arguments.
+        forward_kwargs_template:
+            Serializable template for keyword arguments.
+        forward_arg_names:
+            Argument names resolved for the module forward signature.
+        forward_duration:
+            Runtime duration of the module call in seconds.
+        code_context:
+            Source locations associated with the module call.
+        module_call_stack:
+            Module call stack active for this call.
+        call_parent:
+            Parent module call label, if any.
+        call_children:
+            Child module call labels.
+        all_addresses:
+            All model addresses that reference this same module object.
+        cls:
+            Live module class when available.
+        class_name:
+            Module class name.
+        class_qualname:
+            Qualified module class name.
+        ordinal_index:
+            Position of this module call in execution order.
+        _source_trace:
+            Owning trace used for live accessors.
+        """
+
         self.address = address
         self.all_addresses = all_addresses if all_addresses is not None else [address]
         self.cls = cls
@@ -461,6 +648,7 @@ class ModuleCall:
         self.input_ops = list(input_layers)
         self.output_ops = output_ops if output_ops is not None else list(output_layers)
         self.output_structure = output_structure
+        self.output_paths = output_paths if output_paths is not None else ()
         self.forward_args = forward_args
         self.forward_kwargs = forward_kwargs
         self.forward_arg_names = forward_arg_names if forward_arg_names is not None else []
@@ -583,12 +771,16 @@ class ModuleCall:
         if trace is None:
             return Duration(0)
         return Duration(
-            sum(getattr(trace.ops[label], "func_duration", 0.0) or 0.0 for label in self.ops)
+            sum(
+                getattr(op, "func_duration", 0.0) or 0.0
+                for label in self.ops
+                for op in _resolve_call_ops(trace, label)
+            )
         )
 
     @property
     def backward_duration(self) -> Duration | None:
-        """Backward duration placeholder populated in the backward-pass sprint."""
+        """Backward duration for this module call, if backward timing is available."""
 
         return None
 
@@ -623,9 +815,12 @@ class ModuleCall:
         if trace is None:
             return []
         output_labels = set(self.output_ops)
-        return [
-            cast("Op", trace.ops[label]) for label in self.ops if (label in output_labels) is output
-        ]
+        result: list["Op"] = []
+        for label in self.ops:
+            if (label in output_labels) is not output:
+                continue
+            result.extend(_resolve_call_ops(trace, label))
+        return result
 
     def _sum_op_memory(self, field_name: str, *, output: bool) -> Bytes:
         """Sum an Op memory field for output or non-output Ops in this call."""
@@ -669,7 +864,11 @@ class ModuleCall:
         if trace is None:
             return Bytes(0)
         return Bytes(
-            sum(int(getattr(trace.ops[label], "autograd_memory", 0) or 0) for label in self.ops)
+            sum(
+                int(getattr(op, "autograd_memory", 0) or 0)
+                for label in self.ops
+                for op in _resolve_call_ops(trace, label)
+            )
         )
 
     @property
@@ -804,6 +1003,8 @@ class ModuleCall:
 
     @_source_trace.setter
     def _source_trace(self, value: "Trace | None") -> None:
+        """Store the owning Trace for live module-call lookups."""
+
         self.__dict__["_source_trace_strong"] = value
         self._source_trace_ref = weakref.ref(value) if value is not None else None
 
@@ -968,31 +1169,65 @@ class ModuleCall:
             state["_forward_args_template"] = state.pop("forward_args_template")
         if "forward_kwargs_template" in state:
             state["_forward_kwargs_template"] = state.pop("forward_kwargs_template")
-        default_fill_state(
-            state,
-            defaults={
-                "all_addresses": [state["address"]],
-                "cls": None,
-                "class_name": "",
-                "class_qualname": "",
-                "ordinal_index": 0,
-                "forward_arg_names": [],
-                "num_forward_args_total": 0,
-                "num_forward_pos_args": 0,
-                "num_forward_kwargs": 0,
-                "forward_args_summary": "",
-                "forward_kwargs_summary": "",
-                "_forward_args_template": None,
-                "_forward_kwargs_template": None,
-                "forward_duration": 0.0,
-                "code_context": [],
-                "module_call_stack": [],
-                "_source_trace_ref": None,
-                "output_structure": None,
-            },
-        )
+        module_call_setstate_defaults: dict[str, Any] = {
+            **_MODULE_CALL_CONTAINER_DEFAULTS,
+            "all_addresses": [state["address"]],
+            "cls": None,
+            "class_name": "",
+            "class_qualname": "",
+            "ordinal_index": 0,
+            "forward_arg_names": [],
+            "num_forward_args_total": 0,
+            "num_forward_pos_args": 0,
+            "num_forward_kwargs": 0,
+            "forward_args_summary": "",
+            "forward_kwargs_summary": "",
+            "_forward_args_template": None,
+            "_forward_kwargs_template": None,
+            "forward_duration": 0.0,
+            "code_context": [],
+            "module_call_stack": [],
+            "_source_trace_ref": None,
+            "output_structure": None,
+            "output_paths": (),
+        }
+        default_fill_state(state, defaults=module_call_setstate_defaults)
+        # Repair present-but-wrong-typed container fields from legacy states.
+        # `default_fill_state` only fills absent keys; this closes the same
+        # gap `Trace`/`Op` already close for their own fields.
+        coerce_container_typed_state(state, module_call_setstate_defaults)
         state["forward_duration"] = Duration(state.get("forward_duration") or 0.0)
         self.__dict__.update(state)
+
+
+# Typed container defaults for every non-Optional container field Module
+# stores directly. Same defect class as
+# `Op._LAYER_PASS_LOG_CONTAINER_DEFAULTS`/`Trace._MODEL_LOG_CONTAINER_DEFAULTS`:
+# without this, `coerce_container_typed_state` cannot repair a
+# present-but-wrong-typed legacy value, and an absent field crashes instead of
+# restoring an empty typed container. Plain builtin types are used
+# deliberately. `ops`/`params`/`recursive_params` are custom accessor classes
+# (not plain containers) and are handled separately, below.
+_MODULE_CONTAINER_DEFAULTS: dict[str, Any] = {
+    "all_addresses": [],
+    "address_children": [],
+    "call_children": [],
+    "call_labels": [],
+    "layer_labels": [],
+    "input_ops": [],
+    "input_layers": [],
+    "output_ops": [],
+    "output_layers": [],
+    "buffer_layers": [],
+    "forward_pre_hooks": [],
+    "forward_hooks": [],
+    "backward_pre_hooks": [],
+    "backward_hooks": [],
+    "full_backward_pre_hooks": [],
+    "full_backward_hooks": [],
+    "custom_attributes": {},
+    "custom_methods": [],
+}
 
 
 @dataclass(init=False)
@@ -1063,6 +1298,8 @@ class Module:
         "custom_methods": FieldPolicy.KEEP,
         "_source_trace_ref": FieldPolicy.WEAKREF_STRIP,
     }
+    FIELD_POLICY = build_record_field_policy_table(MODULE_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC)
+    PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     address: str
     all_addresses: List[str]
@@ -1165,6 +1402,98 @@ class Module:
         # Back-reference
         _source_trace: "Trace | None" = None,
     ) -> None:
+        """Initialize persistent metadata for a model module address.
+
+        Parameters
+        ----------
+        address:
+            Canonical module address.
+        all_addresses:
+            All model addresses that reference the same module object.
+        name:
+            Local module name.
+        cls:
+            Live module class when available.
+        class_name:
+            Module class name.
+        class_qualname:
+            Qualified module class name.
+        class_source_file:
+            Source file containing the module class.
+        class_source_line:
+            Source line for the module class.
+        init_source_file:
+            Source file containing ``__init__``.
+        init_source_line:
+            Source line for ``__init__``.
+        forward_source_file:
+            Source file containing ``forward``.
+        forward_source_line:
+            Source line for ``forward``.
+        class_docstring:
+            Module class docstring.
+        init_signature:
+            Signature for ``__init__`` when available.
+        init_docstring:
+            Docstring for ``__init__`` when available.
+        forward_signature:
+            Signature for ``forward`` when available.
+        forward_docstring:
+            Docstring for ``forward`` when available.
+        address_parent:
+            Static parent module address.
+        address_children:
+            Static child module addresses.
+        address_depth:
+            Static nesting depth in the module tree.
+        call_parent:
+            Dynamic parent module-call label.
+        call_children:
+            Dynamic child module-call labels.
+        call_depth:
+            Dynamic call-stack depth.
+        num_calls:
+            Number of observed forward calls.
+        ops:
+            Per-call module call logs.
+        call_labels:
+            Pass-qualified module call labels.
+        layer_labels:
+            Aggregate layer labels owned by this module.
+        params:
+            Parameters owned by this module.
+        num_params:
+            Total parameter count.
+        num_params_trainable:
+            Trainable parameter count.
+        num_params_frozen:
+            Frozen parameter count.
+        param_memory:
+            Parameter memory in bytes.
+        buffer_layers:
+            Buffer layer labels owned by this module.
+        training:
+            Training/eval mode captured from the live module.
+        forward_pre_hooks:
+            Registered forward pre-hooks.
+        forward_hooks:
+            Registered forward hooks.
+        backward_pre_hooks:
+            Registered backward pre-hooks.
+        backward_hooks:
+            Registered backward hooks.
+        full_backward_pre_hooks:
+            Registered full backward pre-hooks.
+        full_backward_hooks:
+            Registered full backward hooks.
+        custom_attributes:
+            User attributes selected for module metadata.
+        custom_methods:
+            User method names selected for module metadata.
+        _source_trace:
+            Owning trace used for live accessors.
+        """
+
         self.address = address
         self.all_addresses = all_addresses if all_addresses is not None else [address]
         self.cls = cls
@@ -1520,6 +1849,8 @@ class Module:
 
     @_source_trace.setter
     def _source_trace(self, value: "Trace | None") -> None:
+        """Store the owning Trace weak reference for live module lookups."""
+
         self._source_trace_ref = weakref.ref(value) if value is not None else None
 
     @property
@@ -1539,19 +1870,25 @@ class Module:
             unavailable. This computed runtime handle is not portable.
         """
 
-        trace = self._source_trace
-        source_ref = getattr(trace, "_source_model_ref", None) if trace is not None else None
-        if source_ref is None:
-            return None
-        model = source_ref()
-        if model is None:
-            return None
-        if self.address in {"", "self"}:
-            return model
-        try:
+        def resolve_module(model: torch.nn.Module) -> torch.nn.Module | None:
+            """Resolve this module address against a live model.
+
+            Parameters
+            ----------
+            model:
+                Live source model.
+
+            Returns
+            -------
+            torch.nn.Module | None
+                Resolved module object.
+            """
+
+            if self.address in {"", "self"}:
+                return model
             return model.get_submodule(self.address)
-        except (AttributeError, KeyError):
-            return None
+
+        return runtime_handle_from_trace(self._source_trace, resolve_module)
 
     def __getstate__(self) -> Dict[str, Any]:
         """Return pickle state with weakrefs stripped."""
@@ -1565,30 +1902,26 @@ class Module:
     def __setstate__(self, state: Dict[str, Any]) -> None:
         """Restore pickle state without touching disk."""
         read_tlspec_version(state, cls_name=type(self).__name__)
-        default_fill_state(
-            state,
-            defaults={
-                "_buffer_accessor": None,
-                "_source_trace_ref": None,
-                "class_source_file": None,
-                "class_source_line": None,
-                "init_source_file": None,
-                "init_source_line": None,
-                "forward_source_file": None,
-                "forward_source_line": None,
-                "input_ops": [],
-                "input_layers": [],
-                "output_ops": [],
-                "output_layers": [],
-                "training": True,
-                "forward_pre_hooks": [],
-                "forward_hooks": [],
-                "backward_pre_hooks": [],
-                "backward_hooks": [],
-                "full_backward_pre_hooks": [],
-                "full_backward_hooks": [],
-            },
-        )
+        module_setstate_defaults: dict[str, Any] = {
+            **_MODULE_CONTAINER_DEFAULTS,
+            "_buffer_accessor": None,
+            "_source_trace_ref": None,
+            "class_source_file": None,
+            "class_source_line": None,
+            "init_source_file": None,
+            "init_source_line": None,
+            "forward_source_file": None,
+            "forward_source_line": None,
+            "training": True,
+        }
+        default_fill_state(state, defaults=module_setstate_defaults)
+        # Repair present-but-wrong-typed container fields from legacy states.
+        # `default_fill_state` only fills absent keys; this closes the same
+        # gap `Trace`/`Op` already close for their own fields. `ops`/`params`/
+        # `recursive_params` are accessor classes handled separately below,
+        # not plain containers, so they are intentionally absent from
+        # `_MODULE_CONTAINER_DEFAULTS`.
+        coerce_container_typed_state(state, module_setstate_defaults)
         self.__dict__.update(state)
         if not isinstance(self.ops, ModuleCallAccessor):
             self.ops = ModuleCallAccessor(self.ops)
@@ -1715,13 +2048,13 @@ class Module:
 
     @property
     def backward_duration(self) -> Duration | None:
-        """Backward duration placeholder populated in the backward-pass sprint."""
+        """Backward duration for this module, if backward timing is available."""
 
         return None
 
     @property
     def total_backward_duration(self) -> Duration | None:
-        """Cross-call backward duration placeholder for the backward-pass sprint."""
+        """Total backward duration across calls, if backward timing is available."""
 
         return None
 
@@ -2019,7 +2352,6 @@ class Module:
     def __repr__(self) -> str:
         """Show address, class, depth, param count, layer count, and pass count."""
         lines = [
-            f"Module: {self.address} ({self.class_name})",
             f"  call_depth: {self.call_depth}, address_depth: {self.address_depth}",
             f"  num_params: {self.num_params}",
             f"  num_layers: {self.num_layers}",
@@ -2029,7 +2361,7 @@ class Module:
             lines.append(f"  aliases: {self.all_addresses}")
         if self.address_children:
             lines.append(f"  children: {self.address_children}")
-        return "\n".join(lines)
+        return format_summary_lines(f"Module: {self.address} ({self.class_name})", lines)
 
     def __len__(self) -> int:
         """Return the total number of layers across all ops of this module."""
@@ -2091,10 +2423,20 @@ class Module:
     def to_pandas(self) -> "pd.DataFrame":
         """Export this module's layers as a pandas DataFrame.
 
+        Builds each row the same way as ``Layer.to_pandas()``
+        (``LAYER_LOG_FIELD_ORDER``) so every populated Layer field is
+        exported -- this used to hand-roll a 6-field subset that silently
+        dropped the rest. ``num_ops`` is kept as a trailing convenience
+        column (a derived ``len(layer.ops)`` count, not a stored field, so
+        it isn't part of ``LAYER_LOG_FIELD_ORDER`` itself). Per-pass fields
+        (e.g. ``transformed_out``/``transformed_grad``) are reported as
+        ``None`` for multi-pass (recurrent) layers instead of raising.
+
         Returns
         -------
         pd.DataFrame
-            One row per layer belonging to this module.
+            One row per layer belonging to this module, ordered by
+            ``LAYER_LOG_FIELD_ORDER`` plus a trailing ``num_ops`` column.
         """
         if self._source_trace is None:
             raise RuntimeError("No source Trace reference; cannot build DataFrame.")
@@ -2105,20 +2447,16 @@ class Module:
                 "pandas is required for this feature. Install with `pip install torchlens[tabular]`."
             ) from e
 
+        columns = [*LAYER_LOG_FIELD_ORDER, "num_ops"]
+        if not self.layer_labels:
+            return pd.DataFrame(columns=columns)
         rows = []
         for label in self.layer_labels:
             entry = self._source_trace[label]
-            rows.append(
-                {
-                    "layer_label": entry.layer_label,
-                    "layer_type": entry.layer_type,
-                    "shape": entry.shape,
-                    "dtype": entry.dtype,
-                    "num_ops": getattr(entry, "num_ops", 1),
-                    "func_name": entry.func_name,
-                }
-            )
-        return pd.DataFrame(rows)
+            row = _layer_log_to_row(entry)
+            row["num_ops"] = getattr(entry, "num_ops", 1)
+            rows.append(row)
+        return pd.DataFrame(rows, columns=columns)
 
 
 class ModuleAccessor(Accessor["Module"]):
@@ -2147,6 +2485,18 @@ class ModuleAccessor(Accessor["Module"]):
         module_list: Optional[List["Module"]] = None,
         pass_dict: Optional[Dict[str, "ModuleCall"]] = None,
     ) -> None:
+        """Initialize a module accessor with address, alias, and pass indexes.
+
+        Parameters
+        ----------
+        module_dict:
+            Mapping from canonical module addresses to ``Module`` logs.
+        module_list:
+            Ordered module logs; defaults to the mapping values.
+        pass_dict:
+            Mapping from pass-qualified call labels to ``ModuleCall`` logs.
+        """
+
         super().__init__(module_dict, item_list=module_list)
         self._pass_dict = pass_dict if pass_dict is not None else {}  # pass label -> ModuleCall
         # Alias map: for shared modules (same nn.Module at multiple addresses),
@@ -2217,6 +2567,11 @@ class ModuleAccessor(Accessor["Module"]):
     def to_pandas(self) -> "pd.DataFrame":
         """Export module metadata as a pandas DataFrame.
 
+        Driven by ``MODULE_LOG_FIELD_ORDER`` minus the documented, genuinely
+        non-tabular exclusions in ``_TO_PANDAS_EXCLUDED_MODULE_FIELDS`` --
+        this used to hand-roll a 7-field subset that silently dropped the
+        rest of ``MODULE_LOG_FIELD_ORDER``.
+
         Returns
         -------
         pd.DataFrame
@@ -2229,20 +2584,13 @@ class ModuleAccessor(Accessor["Module"]):
                 "pandas is required for this feature. Install with `pip install torchlens[tabular]`."
             ) from e
 
-        rows = []
-        for ml in self._list:
-            rows.append(
-                {
-                    "address": ml.address,
-                    "class_name": ml.class_name,
-                    "call_depth": ml.call_depth,
-                    "address_depth": ml.address_depth,
-                    "num_params": ml.num_params,
-                    "num_layers": ml.num_layers,
-                    "num_calls": ml.num_calls,
-                }
-            )
-        return pd.DataFrame(rows)
+        columns = [
+            field_name
+            for field_name in MODULE_LOG_FIELD_ORDER
+            if field_name not in _TO_PANDAS_EXCLUDED_MODULE_FIELDS
+        ]
+        rows = [_module_log_to_row(ml) for ml in self._list]
+        return pd.DataFrame(rows, columns=columns)
 
     def summary(self) -> str:
         """Return a compact text table of all modules.

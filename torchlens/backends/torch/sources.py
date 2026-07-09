@@ -1,24 +1,7 @@
-"""Functions for logging source tensors (inputs and buffers) during model tracing.
+"""Log torch capture source tensors.
 
-Source tensors are the starting points of the computational graph: model inputs
-and module buffers.  This module handles creating Op entries for these
-tensors in both exhaustive and fast logging modes.
-
-Source tensors differ from function-output tensors in several ways:
-  - They have no parent layers (``parents=[]``).
-  - Inputs are roots with ``has_input_ancestor=True``; buffers are internally
-    initialized with ``has_internal_source_ancestor=True``.
-  - Their ``func`` is None and ``func_name`` is ``"none"``.
-  - Buffer labels follow ``"buffer_{N}_raw"``; input labels follow ``"input_{N}_raw"``.
-  - Buffers may carry ``_tl.buffer_source`` metadata (set during model prep)
-    identifying the module that owns them.
-  - Buffer entries are instantiated as ``Buffer`` (a Op subclass
-    that adds ``name`` and ``address`` fields).
-
-The ``equivalence_class`` for inputs encodes shape+dtype (so inputs
-with different shapes are distinct equivalence classes).  For buffers, it
-encodes the buffer's module address (so the same buffer across ops is
-recognized as the same layer).
+This module creates input and buffer Op entries, updates fast-capture source
+payloads, and preserves source equivalence metadata for postprocessing.
 """
 
 from collections import defaultdict
@@ -26,7 +9,6 @@ import time
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
-from torch import nn
 
 from ..._errors import TorchLensPostfuncError
 from ...fastlog.exceptions import PredicateError
@@ -35,8 +17,6 @@ from ...ir.predicate import RetroactiveCaptureDecision
 from ...quantities import Bytes
 from ._tl import get_tensor_meta, set_tensor_label
 from ..._training_validation import TrainingModeConfigError
-from ...data_classes.buffer import Buffer
-from ...data_classes.op import Op
 from . import module_stack as _mstack
 from ...capture.predicates import _evaluate_halt, _evaluate_keep_op, _is_halt_only_capture
 from ...capture.projections import (
@@ -535,7 +515,7 @@ def log_source_tensor_fast(self: "Trace", t: torch.Tensor, source: str) -> None:
             f"This usually means the computational graph changed between the exhaustive pass "
             f"and this fast pass (e.g., dynamic control flow). Use trace() instead."
         )
-    orig_layer_entry = self[orig_tensor_label]
+    orig_layer_entry = cast(Any, self.layer_dict_all_keys[orig_tensor_label])
     previous_shape = orig_layer_entry.shape
     layer_nums_to_save = cast(Any, self._layer_nums_to_save)
     if (layer_nums_to_save == "all") or (orig_layer_entry.raw_index in layer_nums_to_save):

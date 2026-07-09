@@ -288,9 +288,13 @@ def xarray(log: Any) -> Any:
         if presentation_count is None:
             presentation_count = int(flat.shape[0])
         elif flat.shape[0] != presentation_count:
-            raise ValueError("All exported outs must share the same presentation count.")
+            label = str(getattr(layer, "label", getattr(layer, "layer_label", "<unknown>")))
+            raise ValueError(
+                "All exported outs must share the same presentation count; "
+                f"{label} has {flat.shape[0]}, expected {presentation_count}."
+            )
         arrays.append(flat)
-        layer_name = str(getattr(layer, "layer_label", getattr(layer, "layer_label", "")))
+        layer_name = str(getattr(layer, "layer_label", ""))
         label = str(getattr(layer, "layer_label", layer_name))
         layer_coord.extend([layer_name] * flat.shape[1])
         layer_label_coord.extend([label] * flat.shape[1])
@@ -335,6 +339,7 @@ def tensorboard(log: Any, writer: Any, step: int = 0, prefix: str = "torchlens")
         The writer object passed in.
     """
 
+    _require_tracker_object(writer, method_name="tensorboard", required_method="add_scalar")
     writer.add_scalar(f"{prefix}/num_layers", len(getattr(log, "layer_list", [])), step)
     writer.add_scalar(
         f"{prefix}/total_activation_memory",
@@ -407,6 +412,7 @@ def mlflow(log: Any, client: Any | None = None, prefix: str = "torchlens") -> di
 
     metrics = _summary_metrics(log)
     if client is not None:
+        _require_tracker_object(client, method_name="mlflow", required_method="log_metric")
         for key, value in metrics.items():
             client.log_metric(f"{prefix}.{key}", value)
     return metrics
@@ -432,9 +438,25 @@ def aim(log: Any, run: Any | None = None, prefix: str = "torchlens") -> dict[str
 
     metrics = _summary_metrics(log)
     if run is not None:
+        _require_tracker_object(run, method_name="aim", required_method="track")
         for key, value in metrics.items():
             run.track(value, name=f"{prefix}.{key}")
     return metrics
+
+
+def _require_tracker_object(target: Any, *, method_name: str, required_method: str) -> None:
+    """Validate that a tracker export received a live tracker object."""
+
+    if isinstance(target, str | Path):
+        raise TypeError(
+            f"torchlens.export.{method_name} expects an existing tracker object with "
+            f"{required_method}(...), not a filesystem path."
+        )
+    if not callable(getattr(target, required_method, None)):
+        raise TypeError(
+            f"torchlens.export.{method_name} expects an object with "
+            f"{required_method}(...); got {type(target).__name__}."
+        )
 
 
 def csv(log: Any, path: str | Path, **kwargs: Any) -> Path:
@@ -838,8 +860,12 @@ def _parquet_safe_dataframe(dataframe: Any) -> Any:
     return sanitized
 
 
-def _parquet_cell(value: Any) -> Any:
-    """Return a pyarrow-compatible representation of a table cell.
+def _scalarize_cell(value: Any) -> Any:
+    """Return a scalar-safe representation of a table cell.
+
+    Shared body for :func:`_parquet_cell` and :func:`_tracker_cell`, which apply
+    the identical primitive-or-repr coercion for two distinct call sites
+    (pyarrow/Parquet column safety and strict tracker table types respectively).
 
     Parameters
     ----------
@@ -864,6 +890,23 @@ def _parquet_cell(value: Any) -> Any:
     except Exception:
         pass
     return repr(value)
+
+
+def _parquet_cell(value: Any) -> Any:
+    """Return a pyarrow-compatible representation of a table cell.
+
+    Parameters
+    ----------
+    value:
+        Original dataframe cell.
+
+    Returns
+    -------
+    Any
+        Primitive value or string representation.
+    """
+
+    return _scalarize_cell(value)
 
 
 def _tracker_cell(value: Any) -> Any:
@@ -880,18 +923,7 @@ def _tracker_cell(value: Any) -> Any:
         Primitive value or string representation.
     """
 
-    if value is None or isinstance(value, str | int | float | bool):
-        return value
-    try:
-        import numpy as np
-        import pandas as pd
-
-        missing = pd.isna(value)
-        if isinstance(missing, bool | np.bool_) and bool(missing):
-            return None
-    except Exception:
-        pass
-    return repr(value)
+    return _scalarize_cell(value)
 
 
 def _sanitize_flamegraph_frame(frame: str) -> str:

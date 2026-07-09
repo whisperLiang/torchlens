@@ -1,6 +1,6 @@
-"""Error ownership for the planned TorchLens intervention API."""
+"""Error ownership for TorchLens intervention APIs."""
 
-from typing import Literal, NoReturn
+from typing import Literal
 
 from ..errors._base import (
     CaptureError,
@@ -10,25 +10,6 @@ from ..errors._base import (
     TorchLensWarning,
     ValidationError,
 )
-
-
-def _not_implemented(name: str, phase: str) -> NoReturn:
-    """Raise a deterministic placeholder error for future intervention work.
-
-    Parameters
-    ----------
-    name:
-        Public API name that is not implemented yet.
-    phase:
-        Future implementation phase expected to provide the behavior.
-
-    Raises
-    ------
-    NotImplementedError
-        Always raised with the provided API name and phase.
-    """
-
-    raise NotImplementedError(f"torchlens.{name} is reserved for intervention API {phase}.")
 
 
 Severity = Literal["recoverable", "informational", "fatal"]
@@ -151,6 +132,29 @@ SpecPortabilityError = OpaqueCallableInExecutableSaveError
 
 class DirectWriteInExecutableSaveError(ConfigurationError, ValueError):
     """Raised when executable spec save sees direct out writes."""
+
+
+class NonExecutableSpecError(ConfigurationError, RuntimeError):
+    """Raised when a non-executable (audit-level) loaded helper is run.
+
+    An audit-level save (or any save carrying an opaque argument) records a
+    helper for inspection only -- its arguments cannot be reconstructed into a
+    live callable. Attempting to fire such a helper raises this loud error at
+    use time rather than silently loading a corrupted argument and crashing
+    several frames downstream with a misleading message.
+    """
+
+    severity = "fatal"
+
+
+class UnserializableDictKeyError(ConfigurationError, TypeError):
+    """Raised when a spec dict key cannot be preserved through save/load.
+
+    TorchLens never silently stringifies dict keys during spec persistence
+    (mirroring ``annotate``'s reject-don't-coerce philosophy). A key that is not
+    ``str``/``int``/``float``/``bool``/``None`` or a tuple of such values raises
+    this rather than being lossily coerced to its ``str()`` form.
+    """
 
 
 class GraphShapeMismatchError(ValidationError, ValueError):
@@ -333,7 +337,9 @@ __all__ = [
     "MultiMatchWarning",
     "MutateInPlaceWarning",
     "NoParentError",
+    "NonExecutableSpecError",
     "OpaqueCallableInExecutableSaveError",
+    "UnserializableDictKeyError",
     "RecursiveTracingError",
     "ReplayPreconditionError",
     "Severity",

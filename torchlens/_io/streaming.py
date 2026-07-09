@@ -25,6 +25,7 @@ from . import TLSPEC_VERSION, TorchLensIOError
 from .manifest import Manifest, TensorEntry, sha256_of_file
 from .scrub import BlobSpec
 from .tensor_policy import FailReason, Ok, SkipReason, is_supported_for_save
+from .tlspec import _TlSpecWriter
 from .._state import pause_logging
 from .. import __version__ as TORCHLENS_VERSION
 
@@ -182,6 +183,23 @@ class BundleStreamWriter:
             reason = f"Failed to write streaming blob_id={blob_id} for {label}: {exc}"
             self.abort(reason)
             raise TorchLensIOError(reason) from exc
+        except BaseException as exc:
+            # Safety-net catch-all mirroring bundle.py's ``save()`` handler
+            # (round-8 F3): a hand-enumerated except clause can always miss
+            # the next not-yet-seen failure shape (e.g. a bare ``KeyError``
+            # from ``safetensors.torch.save_file()`` for an allow-listed-but-
+            # actually-unwritable dtype, cert round 8 BLOCKER) or a
+            # KeyboardInterrupt/SystemExit/GeneratorExit unwinding mid-write.
+            # This guarantees the ``.tmp`` dir is always marked PARTIAL --
+            # and thus sweepable by ``cleanup_tmp()`` -- for any failure,
+            # known or not, while re-raising non-``Exception``
+            # ``BaseException``s unwrapped so control-flow semantics are
+            # preserved.
+            reason = f"Failed to write streaming blob_id={blob_id} for {label}: {exc}"
+            self.abort(reason)
+            if isinstance(exc, Exception):
+                raise TorchLensIOError(reason) from exc
+            raise
 
         self._tensor_entries.append(entry)
         self._entries_by_blob_id[blob_id] = entry
@@ -192,6 +210,8 @@ class BundleStreamWriter:
         scrubbed_state: dict[str, Any],
         blob_specs: list[BlobSpec],
         unsupported: list[dict[str, str]],
+        *,
+        trace: Any,
     ) -> Path:
         """Finish the bundle by writing remaining blobs, manifest, and metadata.
 
@@ -203,6 +223,12 @@ class BundleStreamWriter:
             Remaining blob specs that were not already streamed during the pass.
         unsupported:
             Unsupported tensor records for the manifest.
+        trace:
+            Source ``Trace`` being streamed to disk. Used to write the same
+            unified ``.tlspec`` manifest fields (``kind``, ``model_signature``,
+            ``sites``, ``body_index``, ...) that ``Trace.save()``/``tl.save()``
+            write, so streaming bundles are detected as ``"v2.0_unified"`` and
+            go through the same ``validate_tlspec()`` schema validation.
 
         Returns
         -------
@@ -222,16 +248,43 @@ class BundleStreamWriter:
                     continue
                 self.write_blob(blob_id, tensor, kind=kind, label=label)
 
-            manifest = self._build_manifest(scrubbed_state=scrubbed_state, unsupported=unsupported)
-            manifest.write(self.tmp_path / "manifest.json")
+            legacy_manifest = self._build_manifest(
+                scrubbed_state=scrubbed_state, unsupported=unsupported
+            )
+            _TlSpecWriter.write_trace_manifest(
+                path=self.tmp_path / "manifest.json",
+                trace=trace,
+                legacy_manifest=legacy_manifest,
+                save_level="portable",
+            )
             with (self.tmp_path / "metadata.pkl").open("wb") as handle:
                 pickle.dump(scrubbed_state, handle, protocol=pickle.HIGHEST_PROTOCOL)
         except TorchLensIOError:
             raise
-        except (OSError, ValueError, pickle.PickleError) as exc:
+        except (OSError, TypeError, ValueError, pickle.PickleError) as exc:
+            # See torchlens/_io/bundle.py's ``save()`` handler: ``TypeError``
+            # is included alongside ``pickle.PickleError`` because
+            # ``pickle.dump()`` raises a bare ``TypeError`` (not the
+            # ``PickleError`` subclass) for many live-resource objects.
             reason = f"Failed to finalize streaming bundle at {self.tmp_path}: {exc}"
             self.abort(reason)
             raise TorchLensIOError(reason) from exc
+        except BaseException as exc:
+            # Safety-net catch-all closing the same bug class as
+            # bundle.py's ``save()`` (round-8 F3): a hand-enumerated except
+            # tuple can always miss the next not-yet-discovered exception
+            # shape, or a KeyboardInterrupt/SystemExit/GeneratorExit
+            # unwinding mid-finalize (e.g. during ``pickle.dump()``).
+            # Guarantees the ``.tmp`` dir is always marked PARTIAL -- and
+            # thus sweepable by ``cleanup_tmp()`` -- for any failure, while
+            # re-raising non-``Exception`` ``BaseException``s unwrapped so
+            # KeyboardInterrupt/SystemExit/GeneratorExit control flow is
+            # preserved.
+            reason = f"Failed to finalize streaming bundle at {self.tmp_path}: {exc}"
+            self.abort(reason)
+            if isinstance(exc, Exception):
+                raise TorchLensIOError(reason) from exc
+            raise
 
         try:
             self.tmp_path.rename(self.final_path)

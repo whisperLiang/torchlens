@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 import inspect
 import multiprocessing
@@ -11,6 +11,12 @@ from typing import Any, Literal
 
 import torch
 from torch import nn
+
+from torchlens._robustness import _iter_tensors
+from torchlens.utils._torch_compat import (
+    get_fx_graph_module_type,
+    get_torch_capability_snapshot,
+)
 
 Status = Literal["pass", "known_broken", "scope", "not_tested"]
 Severity = Literal["ok", "info", "warning", "error"]
@@ -186,6 +192,7 @@ def report(model: nn.Module, input: Any) -> CompatReport:  # noqa: A002
         _deepspeed_row(model),
         _torch_compile_row(model),
         _fx_row(model),
+        _torch_capabilities_row(),
         _lightning_row(model),
         _functorch_row(model),
         _quantized_row(model, input),
@@ -269,39 +276,6 @@ def _qualified_type_name(value: Any) -> str:
 
     value_type = type(value)
     return f"{value_type.__module__}.{value_type.__qualname__}"
-
-
-def _iter_tensors(value: Any, seen: set[int] | None = None) -> Iterator[torch.Tensor]:
-    """Yield tensors from a nested input tree.
-
-    Parameters
-    ----------
-    value:
-        Object that may contain tensors.
-    seen:
-        Object ids already visited.
-
-    Yields
-    ------
-    torch.Tensor
-        Tensors reachable through builtin containers.
-    """
-
-    if seen is None:
-        seen = set()
-    if id(value) in seen:
-        return
-    seen.add(id(value))
-    if isinstance(value, torch.Tensor):
-        yield value
-        return
-    if isinstance(value, dict):
-        for item in value.values():
-            yield from _iter_tensors(item, seen)
-        return
-    if isinstance(value, (list, tuple, set, frozenset)):
-        for item in value:
-            yield from _iter_tensors(item, seen)
 
 
 def _iter_modules(model: nn.Module) -> Iterable[nn.Module]:
@@ -771,7 +745,7 @@ def _fx_row(model: nn.Module) -> CompatRow:
         Report row.
     """
 
-    graph_module_type = getattr(torch.fx, "GraphModule", None)
+    graph_module_type = get_fx_graph_module_type()
     detected = graph_module_type is not None and isinstance(model, graph_module_type)
     status: Status = "scope" if detected else "pass"
     details = (
@@ -970,6 +944,74 @@ def _device_context_row() -> CompatRow:
         "Factory functions honor active torch.device(...) contexts during active logging.",
         "",
     )
+
+
+def _torch_capabilities_row() -> CompatRow:
+    """Build the runtime capability snapshot row.
+
+    Returns
+    -------
+    CompatRow
+        Report row summarizing private runtime capability probes.
+    """
+
+    snapshot = _runtime_capability_snapshot()
+    missing = [name for name, available in snapshot.items() if not available]
+    status: Status = "not_tested" if missing else "pass"
+    severity: Severity = "warning" if missing else "ok"
+    details = "Runtime capabilities: " + _format_capability_snapshot(snapshot)
+    if missing:
+        details += "; missing=" + ", ".join(missing)
+    suggestion = (
+        "Run torchlens.utils.doctor() for the same snapshot; missing flags indicate graceful "
+        "degradation of private runtime integration points."
+        if missing
+        else ""
+    )
+    return CompatRow(
+        "torch_capabilities",
+        "Runtime capability snapshot",
+        status,
+        severity,
+        bool(missing),
+        details,
+        suggestion,
+    )
+
+
+def _runtime_capability_snapshot() -> dict[str, bool]:
+    """Return all runtime compatibility capability flags.
+
+    Returns
+    -------
+    dict[str, bool]
+        Mapping from capability flag names to availability.
+    """
+
+    snapshot = get_torch_capability_snapshot()
+    try:
+        from torchlens.backends.tf._tf_compat import get_tf_capability_snapshot
+    except ImportError:
+        return snapshot
+    snapshot.update(get_tf_capability_snapshot())
+    return snapshot
+
+
+def _format_capability_snapshot(snapshot: dict[str, bool]) -> str:
+    """Format capability flags as a stable comma-separated list.
+
+    Parameters
+    ----------
+    snapshot:
+        Capability flags to format.
+
+    Returns
+    -------
+    str
+        Stable ``name=value`` list.
+    """
+
+    return ", ".join(f"{name}={available}" for name, available in sorted(snapshot.items()))
 
 
 def _single_thread_row() -> CompatRow:

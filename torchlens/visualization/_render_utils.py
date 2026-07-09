@@ -107,7 +107,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only
 # Recognised file extensions that callers may include on ``vis_outpath``.
 # Mirrors the legacy list in ``rendering.draw`` (kept as a tuple
 # so it stays cheap and immutable).
-_KNOWN_EXTS = ("pdf", "png", "jpg", "svg", "jpeg", "bmp", "pic", "tif", "tiff")
+_KNOWN_EXTS = ("pdf", "png", "jpg", "svg", "jpeg", "bmp", "pic", "tif", "tiff", "dot")
 
 # Default subprocess timeout for Graphviz render calls. Mirrors the
 # legacy literal that lived inside ``rendering.draw``.
@@ -373,6 +373,7 @@ def render_dot_to_file(
         os.makedirs(parent, exist_ok=True)
 
     source_path = dot.save(outpath)
+    render_succeeded = False
     try:
         rendered_path = f"{outpath}.{file_format}"
         cmd = [dot.engine, f"-T{file_format}", "-o", rendered_path, source_path]
@@ -382,6 +383,7 @@ def render_dot_to_file(
             check=True,
             capture_output=True,
         )
+        render_succeeded = True
         if not save_only:
             _open_file_quietly(rendered_path)
     except subprocess.TimeoutExpired:
@@ -395,6 +397,6 @@ def render_dot_to_file(
     except subprocess.CalledProcessError as exc:
         warnings.warn(f"Graphviz render failed: {exc.stderr.decode()}")
     finally:
-        if os.path.exists(source_path):
+        if render_succeeded and os.path.exists(source_path):
             os.remove(source_path)
     return cast(str, dot.source)

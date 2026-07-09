@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,12 +24,16 @@ class ExtraKwargPolicy:
         Message template used for non-runtime extras. It receives ``names``.
     always_runtime:
         Whether every rejected extra should use ``runtime_message``.
+    inert_values:
+        Backend-specific explicit values that remain equivalent to an omitted
+        public option.
     """
 
     runtime_option_names: frozenset[str]
     runtime_message: str
     fallback_message: str
     always_runtime: bool = False
+    inert_values: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -127,8 +132,99 @@ PADDLE_EXTRA_KWARG_POLICY = ExtraKwargPolicy(
     ),
     fallback_message="",
     always_runtime=True,
+    inert_values={
+        "lookback": 0,
+        "lookback_payload_policy": "metadata_only",
+        "capture": None,
+        "intervene": None,
+        "halt": None,
+        "storage": None,
+        "streaming": None,
+        "inference_only": False,
+        "cache": False,
+        "stop_after": None,
+        "raise_on_nan": False,
+        "profile": False,
+        "recipes": None,
+        "payload_policy": None,
+        "save_preview": None,
+        "chunk_size": None,
+        "chunk_paths": None,
+    },
 )
 """Extra public-kwarg rejection policy for the Paddle preview backend."""
+
+
+MLX_EXTRA_KWARG_POLICY = ExtraKwargPolicy(
+    runtime_option_names=frozenset(),
+    runtime_message=(
+        "MLX backend preview does not support runtime-mutation or stop-early "
+        "options: {names}. Static-label save= selectors are supported as "
+        "post-finalization payload filters, but trace(intervene=...) and "
+        "trace(halt=...) need predicate-time concrete values and mutation/partial "
+        "replay semantics that MLX lazy evaluation does not expose through a stable "
+        "TorchLens surface. Use an unfiltered tl.trace(..., backend='mlx') call, "
+        "static-label save= selectors, or the PyTorch backend for intervention, "
+        "halt, streaming, and value-dependent predicates."
+    ),
+    fallback_message="",
+    always_runtime=True,
+    inert_values={
+        "lookback": 0,
+        "lookback_payload_policy": "metadata_only",
+        "capture": None,
+        "intervene": None,
+        "halt": None,
+        "storage": None,
+        "streaming": None,
+        "inference_only": False,
+        "cache": False,
+        "stop_after": None,
+        "raise_on_nan": False,
+        "profile": False,
+        "recipes": None,
+        "payload_policy": None,
+        "save_preview": None,
+        "chunk_size": None,
+        "chunk_paths": None,
+        "save_outs_to": None,
+        "keep_outs_in_memory": True,
+        "out_sink": None,
+        "cache_dir": None,
+        "save_mode": "copy",
+        "capture_tensor_grad_hooks": True,
+        "save_raw_gradients": True,
+        "mark_layer_depths": False,
+        "source_context_lines": 7,
+        "compute_input_output_distances": False,
+        "unwrap_when_done": False,
+        "reconstruction_ready": False,
+    },
+)
+"""Extra public-kwarg rejection policy for the MLX preview backend."""
+
+
+TF_EXTRA_KWARG_POLICY = ExtraKwargPolicy(
+    runtime_option_names=frozenset(
+        {
+            "halt",
+            "intervene",
+            "recipes",
+            "stop_after",
+            "storage",
+            "streaming",
+        }
+    ),
+    runtime_message=(
+        "tf backend preview does not support runtime-mutation or stop-early options: {names}."
+    ),
+    fallback_message="tf backend preview does not support: {names}.",
+    inert_values={
+        "lookback": 0,
+        "lookback_payload_policy": "metadata_only",
+    },
+)
+"""Extra public-kwarg rejection policy for the TensorFlow preview backend."""
 
 
 JAX_PREVIEW_TRACE_OPTION_POLICY = PreviewTraceOptionPolicy(
@@ -255,13 +351,53 @@ PADDLE_PREVIEW_TRACE_OPTION_POLICY = PreviewTraceOptionPolicy(
 
 MLX_PREVIEW_TRACE_OPTION_POLICY = PreviewTraceOptionPolicy(
     backend_name="MLX",
+    full_save_message="MLX backend preview does not support layers_to_save; use static save= selectors.",
     rejected_truthy_messages={
-        "save_grads": "backward capture is not supported on the mlx backend",
+        "save_grads": "MLX backend preview does not support save_grads; backward capture is unavailable.",
+    }
+    | {
+        name: f"MLX backend preview does not support {name}; forward capture only."
+        for name in (
+            "activation_transform",
+            "detach_saved_activations",
+            "save_arg_values",
+            "save_code_context",
+            "save_rng_states",
+            "backward_ready",
+            "module_filter",
+            "transform",
+            "layer_visualizers",
+            "save_visualizations",
+        )
     },
     output_device_message="MLX backend only supports output_device='same' in technical preview.",
-    output_device_error=ValueError,
 )
 """Unsupported public trace-option policy for the MLX backend object entry."""
+
+
+TF_PREVIEW_TRACE_OPTION_POLICY = PreviewTraceOptionPolicy(
+    backend_name="tf",
+    full_save_message="tf backend preview is full-save only.",
+    rejected_truthy_messages={
+        name: f"tf backend preview does not support {name}; full-save forward capture only."
+        for name in (
+            "activation_transform",
+            "detach_saved_activations",
+            "save_grads",
+            "save_arg_values",
+            "save_code_context",
+            "save_rng_states",
+            "backward_ready",
+            "module_filter",
+            "transform",
+            "layer_visualizers",
+            "save_visualizations",
+        )
+    },
+    output_device_message="tf backend preview only supports output_device='same'.",
+    save_raw_activations_false_message="tf backend preview is full-save only.",
+)
+"""Unsupported public trace-option policy for the TensorFlow preview backend."""
 
 
 def is_missing(value: object) -> bool:
@@ -316,9 +452,14 @@ def reject_extra_trace_kwargs(kwargs: dict[str, Any], policy: ExtraKwargPolicy) 
         Returns when no non-default extras are present.
     """
 
-    rejected = {
-        key: value for key, value in kwargs.items() if value is not None and not is_missing(value)
-    }
+    inert_values = policy.inert_values or {}
+    rejected = {}
+    for key, value in kwargs.items():
+        if is_missing(value) or value is None:
+            continue
+        if key in inert_values and inert_values[key] == value:
+            continue
+        rejected[key] = value
     if not rejected:
         return
     names = ", ".join(sorted(rejected))

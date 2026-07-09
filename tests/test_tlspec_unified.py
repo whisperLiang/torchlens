@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Any, Callable
 
@@ -11,8 +12,9 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens._io import TLSPEC_VERSION, TorchLensIOError
 from torchlens.backends import BackendPayloadUnsupportedError
-from torchlens.intervention.types import InterventionSpec
+from torchlens.intervention.types import FireRecord, HelperSpec, InterventionSpec
 from torchlens.options import CaptureOptions
 from torchlens.validation import validate_tlspec
 
@@ -286,7 +288,7 @@ def test_unified_modellog_round_trips_per_save_level(tmp_path: Path, level: str)
 
     assert isinstance(loaded, tl.Trace)
     assert manifest["kind"] == "trace"
-    assert manifest["tlspec_version"] == 1
+    assert manifest["tlspec_version"] == TLSPEC_VERSION
     assert manifest["save_level"] == level
     assert [layer.layer_label for layer in loaded.layer_list] == [
         layer.layer_label for layer in log.layer_list
@@ -294,11 +296,119 @@ def test_unified_modellog_round_trips_per_save_level(tmp_path: Path, level: str)
 
 
 @pytest.mark.smoke
+def test_fresh_unified_save_reports_current_version_with_no_deprecation_warning(
+    tmp_path: Path,
+) -> None:
+    """A same-runtime save/load round trip must not report a false "older" version.
+
+    Regression test for a bug where ``torchlens._io.tlspec.TLSPEC_VERSION`` (a
+    second, independently-defined constant pinned at 1) collided with the
+    unrelated ``torchlens._io.TLSPEC_VERSION`` (the real portable-format
+    version) under the same ``"tlspec_version"`` manifest key. A ``dict.update``
+    merge in ``_TlSpecWriter.write_trace_manifest`` let the stale constant win,
+    so every freshly-saved bundle reported ``tlspec_version=1`` on disk and
+    every same-runtime load raised a false "Bundle tlspec_version=1 is older
+    than runtime tlspec_version=5" ``DeprecationWarning``.
+    """
+
+    log = _captured_log()
+    path = tmp_path / "fresh_version.tlspec"
+
+    log.save(path)
+    manifest = _read_manifest(path)
+    assert manifest["tlspec_version"] == TLSPEC_VERSION
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        loaded = tl.load(path)
+    assert isinstance(loaded, tl.Trace)
+
+
+@pytest.mark.smoke
+def test_unified_manifest_forward_compat_hard_fail_for_newer_bundle(tmp_path: Path) -> None:
+    """A genuinely newer on-disk ``tlspec_version`` must still hard-fail at load."""
+
+    log = _captured_log()
+    path = tmp_path / "newer_version.tlspec"
+    log.save(path)
+
+    manifest = _read_manifest(path)
+    manifest["tlspec_version"] = TLSPEC_VERSION + 1
+    _write_manifest(path, manifest)
+
+    with pytest.raises(TorchLensIOError, match=str(TLSPEC_VERSION + 1)):
+        tl.load(path)
+
+
+@pytest.mark.smoke
+def test_unified_trace_save_load_preserves_forward_intervention_records(tmp_path: Path) -> None:
+    """Trace.save preserves per-op intervention fire records."""
+
+    log = tl.trace(
+        UnifiedTinyModel().eval(),
+        torch.randn(2, 3),
+        capture=CaptureOptions(
+            intervention_ready=True,
+            hooks={tl.func("relu"): tl.zero_ablate()},
+        ),
+    )
+    path = tmp_path / "trace_forward_intervention.tlspec"
+
+    log.save(path)
+    loaded = tl.load(path)
+
+    assert isinstance(loaded, tl.Trace)
+    records = [
+        record
+        for layer in loaded.layer_list
+        for record in getattr(layer, "interventions", []) or []
+    ]
+    assert records
+    assert all(isinstance(record, FireRecord) for record in records)
+    assert records[0].direction == "forward"
+
+
+@pytest.mark.smoke
+def test_unified_trace_save_load_preserves_backward_intervention_records(tmp_path: Path) -> None:
+    """Trace.save preserves backward GradFnCall intervention fire refs."""
+
+    x = torch.randn(2, 3, requires_grad=True)
+    log = tl.trace(
+        UnifiedTinyModel().eval(),
+        x,
+        capture=CaptureOptions(save_grads="all", backward_ready=True),
+    )
+    log.attach_hooks(tl.grad_fn(type="relu"), tl.grad_clamp(0, 0), confirm_mutation=True)
+    log.log_backward(log[log.output_layers[0]].out.sum(), retain_graph=True)
+    path = tmp_path / "trace_backward_intervention.tlspec"
+
+    log.save(path)
+    loaded = tl.load(path)
+
+    assert isinstance(loaded, tl.Trace)
+    refs = [
+        call.intervention_fire_ref
+        for grad_fn in loaded.grad_fn_logs.values()
+        for call in grad_fn.calls._list
+        if call.intervention_fire_ref is not None
+    ]
+    assert refs
+    assert isinstance(refs[0], FireRecord)
+    assert refs[0].direction == "backward"
+    assert isinstance(refs[0].helper, HelperSpec)
+
+
+@pytest.mark.smoke
 def test_unified_portable_round_trips_orphan_records(tmp_path: Path) -> None:
     """Portable saves preserve orphan record payload tensors."""
 
     x = torch.ones(2, 2)
-    log = tl.trace(UnifiedSavedOrphanModel(), x, save=tl.func("randn"), random_seed=1)
+    log = tl.trace(
+        UnifiedSavedOrphanModel(),
+        x,
+        save=tl.func("randn"),
+        capture=CaptureOptions(random_seed=1),
+    )
     path = tmp_path / "orphan_records.tlspec"
     expected_payload = log.orphan_records[0]["payload_ref"].detach().clone()
 
@@ -373,8 +483,8 @@ def test_unified_intervention_round_trips_per_save_level(tmp_path: Path, level: 
 
     assert isinstance(loaded, InterventionSpec)
     assert manifest["kind"] == "intervention"
-    assert manifest["tlspec_version"] == 1
-    assert manifest["format_version"] == "1"
+    assert manifest["tlspec_version"] == TLSPEC_VERSION
+    assert manifest["format_version"] == "2"
     assert manifest["save_level"] == level
     assert loaded.metadata["save_level"] == level
 
@@ -414,7 +524,7 @@ def test_unified_manifest_records_backward_summary(tmp_path: Path) -> None:
     torch.manual_seed(2101)
     model = UnifiedTinyModel().eval()
     x = torch.randn(2, 3, requires_grad=True)
-    log = tl.trace(model, x, save_grads=True)
+    log = tl.trace(model, x, capture=CaptureOptions(save_grads=True))
     log.log_backward(log[log.output_layers[0]].out.sum())
     path = tmp_path / "backward.tlspec"
 
@@ -445,7 +555,7 @@ def test_validate_tlspec_rejects_bad_backward_blob_kind(tmp_path: Path) -> None:
     torch.manual_seed(2102)
     model = UnifiedTinyModel().eval()
     x = torch.randn(2, 3, requires_grad=True)
-    log = tl.trace(model, x, save_grads=True)
+    log = tl.trace(model, x, capture=CaptureOptions(save_grads=True))
     log.log_backward(log[log.output_layers[0]].out.sum())
     path = tmp_path / "bad_backward_kind.tlspec"
     log.save(path)
@@ -454,6 +564,58 @@ def test_validate_tlspec_rejects_bad_backward_blob_kind(tmp_path: Path) -> None:
     (path / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="gradient_blob_kinds"):
+        validate_tlspec(path)
+
+
+@pytest.mark.smoke
+def test_validate_tlspec_enforces_shipped_schema_properties_pattern(tmp_path: Path) -> None:
+    """The shipped JSON schema's ``properties`` block must be load-bearing, not decorative.
+
+    Regression test for a MAJOR finding: ``_validate_manifest_against_schema``
+    used to read only ``schema["required"]`` from the shipped
+    ``schemas/tlspec_manifest_v1.json`` file; ``schema["properties"]``
+    (types, enums, minimums, patterns) was never consulted, so editing only
+    the JSON schema could silently no-op. ``python_version`` is a clean
+    probe for this: the hand-written Python validator only checks it is a
+    non-empty string (``_require_str``), while the shipped schema also
+    declares ``"pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+.*$"``. Before the fix,
+    a non-empty string that violates that pattern passed validation
+    entirely; after the fix, the schema's own ``properties`` entry is what
+    catches it.
+    """
+
+    path = tmp_path / "bad_python_version.tlspec"
+    _captured_log().save(path)
+    manifest = _read_manifest(path)
+    manifest["python_version"] = "not-a-version"
+    _write_manifest(path, manifest)
+
+    with pytest.raises(ValueError, match="python_version"):
+        validate_tlspec(path)
+
+
+@pytest.mark.smoke
+def test_validate_tlspec_enforces_schema_v2_python_version_pattern(tmp_path: Path) -> None:
+    """Schema v2 (every non-torch backend) must reject malformed ``python_version`` too.
+
+    Regression test for a MAJOR finding: the round that made
+    ``schemas/tlspec_manifest_v1.json``'s ``properties`` block load-bearing
+    (see ``test_validate_tlspec_enforces_shipped_schema_properties_pattern``)
+    only exercised schema v1 (the torch-backend default). Schema v2 --
+    written for every non-torch backend (mlx/tf/paddle/tinygrad/jax/...) --
+    declared ``python_version`` in its ``required`` list but never in its
+    ``properties`` block, so the pattern constraint was decorative there: a
+    malformed ``python_version`` silently passed ``validate_tlspec()`` for
+    any schema-v2 bundle.
+    """
+
+    path = tmp_path / "bad_python_version_v2.tlspec"
+    _captured_log().save(path)
+    manifest = _mlx_schema_v2_manifest(path)
+    manifest["python_version"] = "not-a-version"
+    _write_manifest(path, manifest)
+
+    with pytest.raises(ValueError, match="python_version"):
         validate_tlspec(path)
 
 

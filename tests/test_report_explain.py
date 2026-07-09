@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
 from torch import nn
 
@@ -53,30 +55,15 @@ def _captured_log() -> tl.Trace:
 def test_report_namespace_is_not_top_level_all() -> None:
     """``tl.report.explain`` should be reachable without expanding ``tl.__all__``.
 
-    Phase 1a budget was 40; backward-parity added 6 top-level names, and
-    post-backward P1 added ``output`` for multi-output module selector
-    disambiguation, facets added the top-level ``facets`` namespace, and
-    v7 quantity types added five top-level names, and facets P2 added
-    ``facet`` / ``head`` selectors. Capture-unification P4 added the
-    ``followed_by`` / ``preceded_by`` predicate-window selectors.
-    Capture-unification P5 added ``when``, ``add``, and ``replace_with``.
-    torch.func transform capture added ``func_transform``.
-    Backend-completion sharded payload hints added two public dataclasses.
-    The Container value-core added ``Container`` / ``output_at`` /
-    ``register_container`` (= 65); container-completion added ``input_at`` (= 66).
-    Glossary-conform-v11 DO-NOW renames added ``record``, ``Recording``,
-    ``push``, ``push_from``, ``run``, ``pluck``, ``extract_dataset``,
-    ``without_op``, ``regex``, ``span``; removed ``sites`` (= 76).
-    Internal sprint 2 Phase B added ``export`` and ``AmbiguousOpLookupError``
-    (= 78). Tech-debt sprint added ``ReentrantTraceError`` and ten paper-era
-    compatibility shims (= 89). Backend-neutral split runtime added six public
-    names (= 95).
+    The namespace size is checked against the namespace itself so this test
+    guards the report names without hard-coding unrelated top-level API churn.
     """
 
     assert hasattr(tl.report, "explain")
+    public_names = set(tl.__all__)
+    assert len(tl.__all__) == len(public_names)
     assert "report" not in tl.__all__
     assert "explain" not in tl.__all__
-    assert len(tl.__all__) == 95
 
 
 def test_explain_returns_sensible_string_for_each_audience() -> None:
@@ -95,6 +82,39 @@ def test_explain_returns_sensible_string_for_each_audience() -> None:
         assert "Notable patterns" in text
         assert "TinyReportModel" in text
         assert "No backward passes are recorded" in text
+
+
+def test_operational_status_line_reports_real_streamed_ops_not_a_fake_constant(
+    tmp_path: Path,
+) -> None:
+    """``streamed_ops`` must reflect real streaming state, not a hardcoded ``1``.
+
+    Regression for a bug where ``_operational_status_line`` always printed
+    ``streamed_ops=1`` regardless of whether the trace used streaming at all.
+    """
+
+    from torchlens.report._explain import _operational_status_line
+
+    plain_log = _captured_log()
+    plain_line = _operational_status_line(plain_log)
+    assert "streamed_ops=0" in plain_line
+
+    plain_text = tl.report.explain(plain_log, audience="practitioner")
+    assert "streamed_ops=0" in plain_text
+
+    bundle_path = tmp_path / "streamed.tlspec"
+    streamed_log = tl.trace(
+        TinyReportModel(),
+        torch.tensor([[2.0, 3.0]]),
+        storage=tl.to_disk(bundle_path, retain_in_memory=False),
+    )
+    streamed_line = _operational_status_line(streamed_log)
+    assert "streamed_ops=0" not in streamed_line
+    num_layers = len(streamed_log.layer_list)
+    assert f"streamed_ops={num_layers}" in streamed_line
+
+    streamed_text = tl.report.explain(streamed_log, audience="practitioner")
+    assert f"streamed_ops={num_layers}" in streamed_text
 
 
 def test_explain_reports_backward_capture() -> None:
@@ -123,8 +143,8 @@ def test_explain_reports_nonfinite_out() -> None:
     assert "vscode://file/" in log.first_nonfinite(link_format="html")
 
 
-def test_source_locations_render_clickable_terminal_and_html_links() -> None:
-    """Source locations should expose OSC 8 terminal links and VS Code HTML links."""
+def test_source_locations_keep_repr_plain_and_expose_html_links() -> None:
+    """Source locations should keep repr plain and expose VS Code HTML links."""
 
     location = FuncCallLocation(
         file="/tmp/demo.py",
@@ -132,5 +152,5 @@ def test_source_locations_render_clickable_terminal_and_html_links() -> None:
         func_name="forward",
         source_loading_enabled=False,
     )
-    assert "\033]8;;file://" in repr(location)
+    assert "\033]8;;file://" not in repr(location)
     assert "vscode://file/" in location.to_html_link()

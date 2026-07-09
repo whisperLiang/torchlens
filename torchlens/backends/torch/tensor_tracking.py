@@ -1,35 +1,9 @@
-"""Functions for tracking tensor lineage, family relationships, and operation equivalence.
+"""Track torch tensor provenance, family links, and equivalence classes.
 
-Handles backward hooks for grad capture, parent-child-sibling-spouse linkage,
-parameter pass tracking, and structural fingerprinting of operations for loop detection.
-
-Key concepts:
-
-**Family links** (parent/child/sibling/spouse):
-    When a new tensor is created by a function, its input tensors become parents,
-    co-parents become spouses, and children of the same parent become siblings.
-    All links are bidirectional and updated immediately at creation time.
-
-**Operation equivalence type** (``_get_equivalence_class``):
-    A structural fingerprint string that identifies operations as "the same layer"
-    across loop iterations.  Used by loop detection to group operations into
-    equivalence classes.  For parameterized ops, the fingerprint is based on the
-    parameter barcodes + op type (e.g. ``"conv2d_abc123_def456"``).  For
-    non-parameterized ops, it hashes non-tensor args, output index, and
-    containing module.
-
-**Backward hooks** (``_add_tensor_backward_hook``):
-    Uses ``weakref.ref(Trace)`` to avoid preventing garbage collection of the
-    Trace after the user is done with it.  The hook closure captures the weakref
-    and the raw tensor label (a string, not the tensor itself).
-
-**Parent arg position tracking** (``_locate_parent_tensors_in_args``):
-    Records where each parent tensor appeared in the function's args/kwargs,
-    supporting up to 2 levels of nesting (e.g., ``args[0]`` or ``args[1][2]``).
-    Deeper nesting is not tracked.
+This module owns tensor backward hooks, parent argument positions, parameter pass
+tracking, and structural fingerprints used by loop detection.
 """
 
-import itertools as it
 import time
 import warnings
 import weakref
@@ -78,6 +52,7 @@ def _add_tensor_backward_hook(trace: "Trace", t: torch.Tensor, tensor_label: str
     trace_ref = weakref.ref(trace)
 
     def log_grad_to_model_history(grad: torch.Tensor) -> None:
+        """Emit and optionally retain one gradient observed by a tensor hook."""
         active_trace = trace_ref()
         if active_trace is not None:
             _emit_tensor_grad_event(active_trace, grad, tensor_label)
@@ -256,7 +231,7 @@ def _build_grad_payloads(
         return None, None
     if layer_label not in getattr(trace, "layer_dict_all_keys", {}):
         return _build_fastlog_grad_payloads(trace, grad)
-    op = trace[layer_label]
+    op = trace.layer_dict_all_keys[layer_label]
     grad_transform = getattr(trace, "grad_transform", None)
     save_raw_gradients = getattr(trace, "save_raw_gradients", True)
     save_mode = _trace_grad_save_mode(trace)
@@ -305,7 +280,7 @@ def _should_save_grad_payload(trace: "Trace", layer_label: str) -> bool:
             )
             return _grad_payload_decision_saves_out(decision)
         return False
-    op = trace[layer_label]
+    op = trace.layer_dict_all_keys[layer_label]
     if isinstance(policy, BaseSelector):
         decision = policy(_GradPayloadContext(op=op, pass_index=_current_backward_pass(trace)))
         return _grad_payload_decision_saves_out(decision)
@@ -478,16 +453,16 @@ def _log_tensor_grad(self: "Trace", grad: torch.Tensor, _label_raw: str) -> None
     if _label_raw not in self._raw_to_final_layer_labels:
         return
     tensor_label = self._raw_to_final_layer_labels[_label_raw]
-    layer_log_entry = self[tensor_label]
+    layer_log_entry = self.layer_dict_all_keys[tensor_label]
     layers_to_update = [tensor_label]
     # Output layers are identity wrappers; propagate grad to them too.
     if layer_log_entry.is_output_parent:
         for child_layer in layer_log_entry.children:
-            if self[child_layer].is_output:
+            if self.layer_dict_all_keys[child_layer].is_output:
                 layers_to_update.append(child_layer)
 
     for layer_label in layers_to_update:
-        layer = self[layer_label]
+        layer = self.layer_dict_all_keys[layer_label]
         selection = getattr(self, "_grad_op_nums_to_save", "all")
         if selection != "all":
             if selection in [None, "none", []] or layer.raw_index not in selection:
@@ -798,6 +773,13 @@ def _append_arg_hash(arg: Any, prefix: str, args_to_hash: list[Any], _depth: int
         # custom_methods (item, __format__) which re-enter logging and cause
         # infinite recursion.
         args_to_hash.append(f"{prefix}_tensor{arg.shape}")
+    elif isinstance(arg, (torch.TypedStorage, torch.UntypedStorage)):
+        # Same hazard as torch.Tensor above: str()/repr() on a Storage walks
+        # every element via wrapped __getitem__ (and even constructs a fresh
+        # wrapped tensor per element on some torch builds), re-entering
+        # logging and causing infinite/runaway recursion. Use size/dtype only.
+        dtype = getattr(arg, "dtype", None)
+        args_to_hash.append(f"{prefix}_storage{arg.size()}_{dtype}")
     elif isinstance(arg, dict):
         for k, v in arg.items():
             _append_arg_hash(v, f"{prefix}_dk{k}", args_to_hash, _depth + 1)

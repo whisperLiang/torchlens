@@ -293,6 +293,31 @@ def test_grad_transform_applied() -> None:
 
 
 @pytest.mark.smoke
+def test_flat_transform_kwargs_populate_transformed_payloads() -> None:
+    """Flat activation_transform and grad_transform kwargs are applied."""
+
+    model = _TinyBackwardModel()
+    x = torch.randn(2, 3, requires_grad=True)
+    with pytest.warns(DeprecationWarning):
+        trace = tl.trace(
+            model,
+            x,
+            activation_transform=lambda out: out.half(),
+            grad_transform=lambda grad: grad.half(),
+            save_grads=True,
+            backward_ready=True,
+        )
+    relu_op = next(op for op in trace.ops if op.func_name == "relu")
+
+    trace.log_backward(_output_loss(trace), retain_graph=True)
+
+    assert relu_op.transformed_out is not None
+    assert relu_op.transformed_out.dtype == torch.float16
+    assert relu_op.transformed_grad is not None
+    assert relu_op.transformed_grad.dtype == torch.float16
+
+
+@pytest.mark.smoke
 def test_module_log_grad_aggregation() -> None:
     """Module exposes aggregated grads for contained layers."""
     _model, _x, trace = _logged_model()
@@ -525,10 +550,12 @@ def test_accumulategrad_labels_deterministic_across_captures() -> None:
 @pytest.mark.filterwarnings("ignore:`random_seed` is deprecated:DeprecationWarning")
 @pytest.mark.filterwarnings("ignore:`save_grads` is deprecated:DeprecationWarning")
 def test_validate_backward_pass_perturbed() -> None:
-    """validate_backward_pass returns False after perturbation sanity check."""
+    """The inert saved-grad perturbation option is loudly unsupported."""
     model = _TinyBackwardModel()
     x = torch.randn(2, 3, requires_grad=True)
-    assert not tl_validation.validate_backward_pass(model, x, perturb_saved_grads=True)
+    with pytest.warns(DeprecationWarning, match="perturb_saved_grads"):
+        with pytest.raises(ValueError, match="unsupported"):
+            tl_validation.validate_backward_pass(model, x, perturb_saved_grads=True)
 
 
 @pytest.mark.smoke

@@ -21,6 +21,7 @@ import torch.nn as nn
 
 import torchlens as tl
 from torchlens import trace as trace_fn
+from torchlens.options import CaptureOptions
 from torchlens.validation.invariants import check_metadata_invariants
 
 
@@ -163,12 +164,39 @@ class ForeignTensorBetweenOutputsModel(nn.Module):
         return y1, self.foreign_tensor, y2
 
 
+class ForeignTensorOnlyOutputModel(nn.Module):
+    """Model returning an untracked foreign tensor as its sole output."""
+
+    def __init__(self, foreign_tensor: torch.Tensor) -> None:
+        """Store a tensor created outside the traced model call."""
+
+        super().__init__()
+        self.foreign_tensor = foreign_tensor
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the foreign tensor directly.
+
+        Parameters
+        ----------
+        x:
+            Model input tensor, intentionally unused.
+
+        Returns
+        -------
+        torch.Tensor
+            Foreign tensor with no TorchLens producer or input-source proof.
+        """
+
+        del x
+        return self.foreign_tensor
+
+
 @pytest.mark.smoke
 def test_buffer_sole_output_traces_with_output_layer() -> None:
     """A buffer-only return must produce ``output_1`` bound to the buffer value."""
 
     model = BufferOnlyOutputModel()
-    log = trace_fn(model, torch.rand(3), layers_to_save="all")
+    log = trace_fn(model, torch.rand(3), capture=CaptureOptions(layers_to_save="all"))
     try:
         assert log.output_layers == ["output_1"]
         output_layer = log["output_1"]
@@ -194,14 +222,18 @@ def test_buffer_sole_output_does_not_leak_labels_onto_model_state() -> None:
     from torchlens.backends.torch._tl import get_tensor_label
 
     model = BufferOnlyOutputModel()
-    log = trace_fn(model, torch.rand(3), layers_to_save="all")
+    log = trace_fn(model, torch.rand(3), capture=CaptureOptions(layers_to_save="all"))
     try:
         assert get_tensor_label(model.buf) is None
     finally:
         log.cleanup()
 
     # A second trace of the same instance must behave identically.
-    second_log = trace_fn(model, torch.rand(3), layers_to_save="all")
+    second_log = trace_fn(
+        model,
+        torch.rand(3),
+        capture=CaptureOptions(layers_to_save="all"),
+    )
     try:
         assert second_log.output_layers == ["output_1"]
         assert torch.equal(second_log["output_1"].out, model.buf)
@@ -220,7 +252,7 @@ def test_buffer_in_compute_model_unchanged() -> None:
 
     model = BufferInComputeModel()
     x = torch.rand(3)
-    log = trace_fn(model, x, layers_to_save="all")
+    log = trace_fn(model, x, capture=CaptureOptions(layers_to_save="all"))
     try:
         assert log.output_layers == ["output_1"]
         assert torch.equal(log["output_1"].out, x + model.buf)
@@ -235,7 +267,7 @@ def test_buffer_alongside_computed_outputs_pairs_values_correctly() -> None:
 
     model = BufferAlongsideComputeModel()
     x = torch.rand(3)
-    log = trace_fn(model, x, layers_to_save="all")
+    log = trace_fn(model, x, capture=CaptureOptions(layers_to_save="all"))
     try:
         assert log.output_layers == ["output_1", "output_2"]
 
@@ -260,7 +292,7 @@ def test_duplicate_direct_buffer_outputs_share_one_buffer_parent() -> None:
     """Repeated direct-buffer outputs must not late-log the buffer twice."""
 
     model = DuplicateBufferOutputModel()
-    log = trace_fn(model, torch.rand(3), layers_to_save="all")
+    log = trace_fn(model, torch.rand(3), capture=CaptureOptions(layers_to_save="all"))
     try:
         assert log.output_layers == ["output_1", "output_2"]
         output_1 = log["output_1"]
@@ -279,32 +311,26 @@ def test_duplicate_direct_buffer_outputs_share_one_buffer_parent() -> None:
     assert tl.validate(DuplicateBufferOutputModel(), torch.rand(3), scope="forward") is True
 
 
-def test_foreign_tensor_between_attributed_outputs_does_not_shift_alignment() -> None:
-    """Unattributed middle outputs must not shift later output bindings."""
+def test_foreign_tensor_between_attributed_outputs_fails_loudly() -> None:
+    """Unattributed final outputs must fail instead of being silently skipped."""
 
     foreign_tensor = torch.full((3,), 7.0)
     model = ForeignTensorBetweenOutputsModel(foreign_tensor)
     x = torch.rand(3)
-    log = trace_fn(model, x, layers_to_save="all")
-    try:
-        assert log.output_layers == ["output_1", "output_2"]
 
-        first_output = log["output_1"]
-        assert first_output.io_role == "output.0"
-        assert torch.equal(first_output.out, x + 1)
-        assert torch.equal(log[first_output.parents[0]].out, x + 1)
+    with pytest.raises(RuntimeError, match="could not attribute a model output tensor"):
+        trace_fn(model, x, capture=CaptureOptions(layers_to_save="all"))
 
-        second_output = log["output_2"]
-        assert second_output.io_role == "output.2"
-        assert torch.equal(second_output.out, x * 2)
-        assert torch.equal(log[second_output.parents[0]].out, x * 2)
 
-        assert not any(
-            torch.equal(log[output_label].out, foreign_tensor) for output_label in log.output_layers
-        )
-        assert check_metadata_invariants(log) is True
-    finally:
-        log.cleanup()
+def test_foreign_tensor_only_output_fails_loudly() -> None:
+    """A foreign passthrough output must not be mistaken for a model input."""
+
+    foreign_tensor = torch.full((3,), 7.0)
+    model = ForeignTensorOnlyOutputModel(foreign_tensor)
+    x = torch.rand(3)
+
+    with pytest.raises(RuntimeError, match="could not attribute a model output tensor"):
+        trace_fn(model, x, capture=CaptureOptions(layers_to_save="all"))
 
 
 class UnloggedPlusReassignedBufferModel(nn.Module):
@@ -347,7 +373,7 @@ def test_unlogged_buffer_before_reassigned_buffer_output() -> None:
 
     model = UnloggedPlusReassignedBufferModel()
     x = torch.rand(3)
-    log = trace_fn(model, x, layers_to_save="all")
+    log = trace_fn(model, x, capture=CaptureOptions(layers_to_save="all"))
     try:
         assert log.output_layers == ["output_1", "output_2"]
 

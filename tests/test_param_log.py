@@ -1,6 +1,5 @@
 """Tests for Param, ParamAccessor, and param-related visualization."""
 
-import os
 from os.path import join as opj
 
 import pytest
@@ -9,10 +8,10 @@ import torch.nn as nn
 
 import example_models
 from conftest import VIS_OUTPUT_DIR
+from torchlens._errors import AmbiguousOpLookupError
 from torchlens import trace as trace_fn
 from torchlens.types import Param
 from torchlens.visualization import show_model_graph
-from torchlens.data_classes import ParamAccessor
 
 
 # ---------------------------------------------------------------------------
@@ -27,6 +26,51 @@ class _SimpleLinear(nn.Module):
 
     def forward(self, x):
         return self.fc(x)
+
+
+class _TiedParameterModel(nn.Module):
+    """Model with one parameter registered at two addresses."""
+
+    def __init__(self) -> None:
+        """Initialize tied parameter aliases."""
+
+        super().__init__()
+        self.left = nn.Linear(3, 3, bias=False)
+        self.right = nn.Linear(3, 3, bias=False)
+        self.right.weight = self.left.weight
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Use both tied parameter addresses."""
+
+        return self.left(x) + self.right(x)
+
+
+class _TiedEmbeddingHead(nn.Module):
+    """Small model with a decoder head tied to the embedding table."""
+
+    def __init__(self) -> None:
+        """Initialize tied embedding and projection modules."""
+
+        super().__init__()
+        self.embed = nn.Embedding(7, 3)
+        self.head = nn.Linear(3, 7, bias=False)
+        self.head.weight = self.embed.weight
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Project embedded token IDs with the tied output head.
+
+        Parameters
+        ----------
+        x:
+            Token IDs.
+
+        Returns
+        -------
+        torch.Tensor
+            Per-token logits summed across the sequence.
+        """
+
+        return self.head(self.embed(x)).sum(dim=1)
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +184,7 @@ class TestParamAccessorMH:
 
     def test_short_name_ambiguous_raises(self):
         mh = trace_fn(_make_simple_model(), _simple_input())
-        with pytest.raises(KeyError, match="Ambiguous"):
+        with pytest.raises(AmbiguousOpLookupError, match="Ambiguous"):
             mh.params["weight"]  # Both 0.weight and 2.weight
 
     def test_repr_dict_like(self):
@@ -300,6 +344,17 @@ class TestLinkedParams:
         b = mh.params["0.bias"]
         assert b.address in w.co_parent_params
         assert w.address in b.co_parent_params
+        assert not w.has_multiple_addresses
+        assert not b.has_multiple_addresses
+
+    def test_tied_parameter_reports_multiple_addresses(self) -> None:
+        """Actual tied parameter aliases still report multiple addresses."""
+
+        mh = trace_fn(_TiedParameterModel(), torch.randn(1, 3))
+        param = mh.params["left.weight"]
+
+        assert param.has_multiple_addresses
+        assert param.all_addresses == ["left.weight", "right.weight"]
 
     def test_linked_symmetric(self):
         mh = trace_fn(_make_simple_model(), _simple_input())
@@ -307,6 +362,17 @@ class TestLinkedParams:
             for other_addr in pl.co_parent_params:
                 other = mh.params[other_addr]
                 assert pl.address in other.co_parent_params
+
+    def test_tied_weight_alias_resolves(self) -> None:
+        """Tied parameter addresses are aliases, not unresolved co-parents."""
+
+        mh = trace_fn(_TiedEmbeddingHead(), torch.tensor([[1, 2, 3]]))
+        tied = mh.params["embed.weight"]
+        assert mh.params["head.weight"] is tied
+        assert tied.all_addresses == ["embed.weight", "head.weight"]
+        assert "head" in tied.all_module_addresses
+        assert "head.weight" not in tied.co_parent_params
+        assert mh.check_metadata_invariants() is True
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +395,10 @@ class TestTensorLogEntries:
                 assert any(p.address == pl.address for p in entry._param_logs)
             for label in pl.used_by_layers:
                 entry = mh[label]
-                assert any(any(p.address == pl.address for p in op._param_logs) for op in entry.ops)
+                assert any(
+                    any(p.address == pl.address for p in op._param_logs)
+                    for op in entry.ops.values()
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -708,6 +777,62 @@ class TestParamRefCleared:
     def test_param_ref_cleared_after_cleanup(self):
         model = _SimpleLinear()
         mh = trace_fn(model, torch.randn(2, 10))
-        for pl in mh.param_logs:
+        # Capture the ParamLog objects BEFORE cleanup: iterating ``mh.param_logs``
+        # rehydrates ``_param_ref`` on access, so we must assert against the same
+        # captured objects, not a fresh re-iteration (which would repopulate it).
+        param_logs = list(mh.param_logs)
+        for pl in param_logs:
             assert pl._param_ref is not None
         mh.cleanup()
+        # GC-1 (discriminating): cleanup must actually release the cached param refs.
+        # Without this post-cleanup assertion the test passes even if cleanup() is a no-op.
+        for pl in param_logs:
+            assert pl._param_ref is None
+
+
+class TestDerivedGradRecordPathFieldOrder:
+    """cert9 MAJOR: ``_derived_grad_record_path`` must survive ``to_pandas()``.
+
+    ``Param._derived_grad_record_path`` is a real, populated ``FieldPolicy.KEEP``
+    field written unconditionally (no ``getattr``/``setdefault`` guard) by the
+    mlx, paddle, jax, and tinygrad backends on every derived-gradient capture
+    (``backends/mlx/backend.py``, ``backends/paddle/backend.py``,
+    ``backends/jax/backend.py``, ``backends/tinygrad/backend.py``), but it was
+    silently absent from ``PARAM_LOG_FIELD_ORDER`` -- the exact FIELD_ORDER /
+    ``to_pandas()`` desync class this bucket exists to close, just on a
+    surface (``Param``) not yet wired into the shared parametrized
+    ``test_field_order_has_no_keep_field_desync`` (that test is scoped away
+    from ``Param`` pending a dedicated alias-exclusion design for
+    ``_grad_memory``/``_derived_grad_payload``; this field is not one of
+    those documented aliases, so it needs its own litmus here rather than
+    waiting on that broader design).
+    """
+
+    def test_derived_grad_record_path_in_field_order(self) -> None:
+        """The field must be a real member of PARAM_LOG_FIELD_ORDER."""
+
+        from torchlens.constants import PARAM_LOG_FIELD_ORDER
+
+        assert "_derived_grad_record_path" in PARAM_LOG_FIELD_ORDER
+
+    def test_derived_grad_record_path_survives_to_pandas(self) -> None:
+        """A populated ``_derived_grad_record_path`` must appear as a column."""
+
+        param_log = Param(
+            module_address="self",
+            name="weight",
+            shape=(2, 2),
+            dtype=torch.float32,
+            num_params=4,
+            param_memory=16,
+            trainable=True,
+            address="weight",
+            barcode="b1",
+        )
+        param_log._derived_grad_payload = torch.zeros(2, 2)
+        param_log._derived_grad_record_path = "grad_records[3].payload"
+
+        df = param_log.to_pandas()
+
+        assert "_derived_grad_record_path" in df.columns
+        assert df["_derived_grad_record_path"].iloc[0] == "grad_records[3].payload"

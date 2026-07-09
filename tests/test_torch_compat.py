@@ -12,6 +12,7 @@ when we cannot install an actual torch-2.1 environment.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 import warnings
 
 import pytest
@@ -19,6 +20,15 @@ import torch
 
 from torchlens.utils import _torch_compat as tc
 from torchlens.utils.rng import log_current_autocast_state
+
+# The functorch transform-level API (torch._C._functorch.maybe_current_level) is a
+# torch-2.4+ addition, genuinely absent on the supported 2.1-2.3 range. Probe torch
+# directly (independent of torchlens' own capability flag) so the capability expectations
+# below stay correct across the whole supported torch matrix.
+_HAS_FUNCTORCH_LEVEL_API = (
+    getattr(getattr(getattr(torch, "_C", None), "_functorch", None), "maybe_current_level", None)
+    is not None
+)
 
 pytestmark = pytest.mark.smoke
 
@@ -84,3 +94,212 @@ def test_log_current_autocast_state_unaffected() -> None:
         assert set(dev_state) == {"enabled", "dtype"}
         assert isinstance(dev_state["enabled"], bool)
         assert isinstance(dev_state["dtype"], torch.dtype)
+
+
+def _reset_capability(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Reset a capability flag and warning state for one degraded-path test.
+
+    Parameters
+    ----------
+    monkeypatch:
+        Pytest monkeypatch fixture.
+    name:
+        Capability flag to reset.
+
+    Returns
+    -------
+    None
+        Module state is reset for the current test.
+    """
+
+    monkeypatch.setattr(tc, name, True)
+    if name == "HAS_DYNAMO_OPTIMIZED_MODULE":
+        monkeypatch.setattr(tc, "_DYNAMO_OPTIMIZED_MODULE_TYPE", None)
+        monkeypatch.setattr(tc, "_DYNAMO_OPTIMIZED_MODULE_PROBED", False)
+    tc._warned_missing_capabilities.discard(name)
+
+
+def test_capability_attrs_cover_all_has_flags() -> None:
+    """Doctor capability inventory must cover every torch ``HAS_*`` flag."""
+
+    has_flags = {name for name in vars(tc) if name.startswith("HAS_")}
+    assert set(tc._CAPABILITY_ATTRS) == has_flags  # noqa: SLF001
+
+
+def test_variable_functions_absence_falls_back_to_torch_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing ``torch._C._VariableFunctions`` falls back to public exports."""
+
+    _reset_capability(monkeypatch, "HAS_VARIABLE_FUNCTIONS")
+    monkeypatch.setattr(tc, "_nested_getattr_or_none", lambda _root, _path: None)
+    with pytest.warns(UserWarning, match="HAS_VARIABLE_FUNCTIONS"):
+        names = tc.get_variable_function_names()
+    assert names == list(getattr(torch, "__all__", ()))
+    assert tc.HAS_VARIABLE_FUNCTIONS is False
+
+
+def test_torch_vf_absence_skips_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing ``torch._VF`` returns ``None`` and marks decoration degraded."""
+
+    _reset_capability(monkeypatch, "HAS_TORCH_VF")
+    monkeypatch.delattr(torch, "_VF", raising=False)
+    with pytest.warns(UserWarning, match="HAS_TORCH_VF"):
+        assert tc.get_torch_vf_namespace() is None
+    assert tc.HAS_TORCH_VF is False
+
+
+@pytest.mark.parametrize(
+    ("namespace_name", "flag_name"),
+    [
+        ("torch.func", "HAS_TORCH_FUNC"),
+        ("torch._functorch.apis", "HAS_FUNCTORCH_APIS"),
+    ],
+)
+def test_optional_torch_namespace_absence_marks_capability(
+    monkeypatch: pytest.MonkeyPatch,
+    namespace_name: str,
+    flag_name: str,
+) -> None:
+    """Missing optional torch namespaces are skipped without raising."""
+
+    _reset_capability(monkeypatch, flag_name)
+    monkeypatch.setattr(tc, "_nested_getattr_or_none", lambda _root, _path: None)
+    with pytest.warns(UserWarning, match=flag_name):
+        assert tc.get_optional_torch_namespace(namespace_name) is None
+    assert getattr(tc, flag_name) is False
+
+
+def test_accumulate_grad_absence_uses_name_matching(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing private AccumulateGrad class returns an empty isinstance target."""
+
+    _reset_capability(monkeypatch, "HAS_ACCUMULATE_GRAD_CLASS")
+    monkeypatch.setattr(tc, "_nested_getattr_or_none", lambda _root, _path: None)
+    with pytest.warns(UserWarning, match="HAS_ACCUMULATE_GRAD_CLASS"):
+        assert tc.get_accumulate_grad_class() == ()
+    assert tc.HAS_ACCUMULATE_GRAD_CLASS is False
+
+
+@pytest.mark.parametrize(
+    ("helper_name", "flag_name", "expected"),
+    [
+        ("get_functorch_maybe_current_level", "HAS_FUNCTORCH_LEVEL_API", None),
+        ("get_functorch_wrapped_tensor_checker", "HAS_FUNCTORCH_WRAPPED_TENSOR_API", None),
+        ("get_fx_graph_module_type", "HAS_FX_GRAPH_MODULE", None),
+    ],
+)
+def test_nested_private_helper_absence_marks_capability(
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+    flag_name: str,
+    expected: object,
+) -> None:
+    """Nested private torch helpers degrade to their documented fallbacks."""
+
+    _reset_capability(monkeypatch, flag_name)
+    monkeypatch.setattr(tc, "_nested_getattr_or_none", lambda _root, _path: None)
+    with pytest.warns(UserWarning, match=flag_name):
+        assert getattr(tc, helper_name)() is expected
+    assert getattr(tc, flag_name) is False
+
+
+@pytest.mark.parametrize(
+    ("helper_name", "flag_name", "expected"),
+    [
+        ("get_jit_builtin_table", "HAS_JIT_BUILTIN_TABLE", None),
+        ("get_device_context_type", "HAS_DEVICE_CONTEXT_DISPATCH", None),
+        ("get_current_function_mode_stack", "HAS_DEVICE_CONTEXT_DISPATCH", None),
+        ("get_torch_function_mode_stack_length", "HAS_DEVICE_CONTEXT_DISPATCH", None),
+        ("get_device_constructors", "HAS_DEVICE_CONSTRUCTORS", None),
+        ("get_dynamo_optimized_module_type", "HAS_DYNAMO_OPTIMIZED_MODULE", None),
+    ],
+)
+def test_imported_private_helper_absence_marks_capability(
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+    flag_name: str,
+    expected: object,
+) -> None:
+    """Import-based private torch helpers degrade to their documented fallbacks."""
+
+    _reset_capability(monkeypatch, flag_name)
+    monkeypatch.setattr(tc, "_import_module_attr_or_none", lambda _module, _attr: None)
+    with pytest.warns(UserWarning, match=flag_name):
+        assert getattr(tc, helper_name)() is expected
+    assert getattr(tc, flag_name) is False
+
+
+def test_tensor_sequence_slot_fix_absence_is_nonfatal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-CPython runtimes skip the tensor sequence-slot fix cleanly."""
+
+    _reset_capability(monkeypatch, "HAS_TENSOR_SEQUENCE_SLOT_FIX")
+    monkeypatch.setattr(tc.sys, "implementation", SimpleNamespace(name="pypy"))
+    with pytest.warns(UserWarning, match="HAS_TENSOR_SEQUENCE_SLOT_FIX"):
+        assert tc.fix_tensor_sequence_slot() is False
+    assert tc.HAS_TENSOR_SEQUENCE_SLOT_FIX is False
+
+
+def test_private_torch_capability_flags_present_on_supported_range() -> None:
+    """Private torch integration flags should be present on the supported range."""
+    snapshot = tc.get_torch_capability_snapshot()
+    required_present = {
+        "HAS_VARIABLE_FUNCTIONS",
+        "HAS_TORCH_VF",
+        "HAS_TORCH_FUNC",
+        "HAS_FUNCTORCH_APIS",
+        "HAS_FUNCTORCH_LEVEL_API",
+        "HAS_FUNCTORCH_WRAPPED_TENSOR_API",
+        "HAS_JIT_BUILTIN_TABLE",
+        "HAS_DEVICE_CONTEXT_DISPATCH",
+        "HAS_DEVICE_CONSTRUCTORS",
+        "HAS_ACCUMULATE_GRAD_CLASS",
+        "HAS_FX_GRAPH_MODULE",
+        "HAS_DYNAMO_OPTIMIZED_MODULE",
+        "HAS_TENSOR_SEQUENCE_SLOT_FIX",
+    }
+
+    assert required_present <= set(snapshot)
+    # HAS_FUNCTORCH_LEVEL_API is torch-2.4+ only; do not require its value on 2.1-2.3.
+    version_gated = set() if _HAS_FUNCTORCH_LEVEL_API else {"HAS_FUNCTORCH_LEVEL_API"}
+    missing = sorted(name for name in required_present - version_gated if not snapshot[name])
+    assert missing == []
+
+
+def test_vf_and_functorch_guards_return_working_namespaces() -> None:
+    """The guarded private namespaces should resolve to usable objects."""
+    variable_names = tc.get_variable_function_names()
+    torch_vf = tc.get_torch_vf_namespace()
+    functorch_apis = tc.get_optional_torch_namespace("torch._functorch.apis")
+
+    assert "add" in variable_names
+    assert torch_vf is not None
+    assert hasattr(torch_vf, "add")
+    assert functorch_apis is not None
+    assert hasattr(functorch_apis, "vmap")
+    assert hasattr(functorch_apis, "grad")
+
+
+def test_torch_capability_snapshot_contract() -> None:
+    """Capability snapshot keys and values provide a named torch-private API signal."""
+    snapshot = tc.get_torch_capability_snapshot()
+    expected = {
+        "HAS_AUTOCAST_DEVICE_TYPE_ARG": tc.AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED,
+        "HAS_VARIABLE_FUNCTIONS": True,
+        "HAS_TORCH_VF": True,
+        "HAS_TORCH_FUNC": True,
+        "HAS_FUNCTORCH_APIS": True,
+        "HAS_FUNCTORCH_LEVEL_API": _HAS_FUNCTORCH_LEVEL_API,
+        "HAS_FUNCTORCH_WRAPPED_TENSOR_API": True,
+        "HAS_JIT_BUILTIN_TABLE": True,
+        "HAS_DEVICE_CONTEXT_DISPATCH": True,
+        "HAS_DEVICE_CONSTRUCTORS": True,
+        "HAS_ACCUMULATE_GRAD_CLASS": True,
+        "HAS_FX_GRAPH_MODULE": True,
+        "HAS_DYNAMO_OPTIMIZED_MODULE": True,
+        "HAS_TENSOR_SEQUENCE_SLOT_FIX": True,
+        "AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED": tc.AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED,
+    }
+
+    assert snapshot == expected

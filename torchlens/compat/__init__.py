@@ -1,4 +1,4 @@
-"""Compatibility adapter namespace reserved for TorchLens 2.0."""
+"""Compatibility adapters and runtime support reports for TorchLens 2.x."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 from ._report import CompatReport, CompatRow, report
 from .torchextractor import Extractor
 
-_COMPAT_MODULES = {"lovely", "torchshow", "torchextractor"}
+_COMPAT_MODULES = {"lovely", "torchshow"}
 
 
 def __getattr__(name: str) -> ModuleType:

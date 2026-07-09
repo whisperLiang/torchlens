@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import importlib.util
 from collections.abc import Iterator, Mapping
 from typing import Any, cast
 
+from packaging.version import InvalidVersion, Version
 import torch
 from torch import nn
 
@@ -76,6 +76,8 @@ def _mlx_can_handle(
     """
 
     if not callable(model):
+        return False
+    if _contains_other_backend_tensor("mlx", input_args, input_kwargs):
         return False
     try:
         import mlx.core as mx
@@ -160,8 +162,9 @@ def _jax_can_handle(
         leaf is a JAX array.
     """
 
-    del input_kwargs
     if not callable(model):
+        return False
+    if _contains_other_backend_tensor("jax", input_args, input_kwargs):
         return False
     try:
         import jax
@@ -194,8 +197,9 @@ def _tinygrad_can_handle(
         input leaf is a tinygrad tensor.
     """
 
-    del input_kwargs
     if not callable(model):
+        return False
+    if _contains_other_backend_tensor("tinygrad", input_args, input_kwargs):
         return False
     try:
         from tinygrad import Tensor
@@ -229,7 +233,11 @@ def _paddle_can_handle(
 
     if not callable(model) or isinstance(model, nn.Module):
         return False
-    if importlib.util.find_spec("paddle") is None:
+    if _contains_other_backend_tensor("paddle", input_args, input_kwargs):
+        return False
+    try:
+        import paddle  # noqa: F401
+    except ImportError:
         return False
     return _is_paddle_object_hint(model) or any(
         _is_paddle_object_hint(leaf)
@@ -263,31 +271,52 @@ def _tf_can_handle(
 
     if isinstance(model, nn.Module):
         return False
+    if _contains_other_backend_tensor("tf", input_args, input_kwargs):
+        return False
     try:
         import keras
         import tensorflow as tf
-    except ImportError:
-        return False
 
-    active_keras_backend = str(keras.backend.backend())
-    if active_keras_backend != "tensorflow":
-        if _is_keras_object(model):
-            raise BackendMismatchError(
-                "backend='tf' requires keras.backend.backend() == 'tensorflow'; "
-                f"active keras backend is {active_keras_backend!r}."
-            )
+        if not _tf_runtime_supported(tf, keras):
+            return False
+
+        active_keras_backend = str(keras.backend.backend())
+        if active_keras_backend != "tensorflow":
+            if _is_keras_object(model):
+                raise BackendMismatchError(
+                    "backend='tf' requires keras.backend.backend() == 'tensorflow'; "
+                    f"active keras backend is {active_keras_backend!r}."
+                )
+            return False
+        if isinstance(model, tf.Module):
+            return True
+        if _is_tf_concrete_function(model, tf):
+            return True
+        if hasattr(model, "get_concrete_function"):
+            return True
+        if _has_saved_model_signatures(model):
+            return True
+        return callable(model) and _contains_tf_tensor(input_args, input_kwargs, tf)
+    except BackendMismatchError:
+        # A genuinely mismatched Keras backend setting (e.g. Keras configured
+        # for torch/jax while ``backend='tf'`` was explicitly requested) is
+        # real, actionable signal for the caller -- never swallow it.
+        raise
+    except ImportError:
+        # TensorFlow/Keras are simply not installed.
         return False
-    if _contains_foreign_tensor(input_args) or _contains_foreign_tensor(input_kwargs):
+    except Exception:
+        # A broken-but-technically-importable TF/Keras install (numpy/
+        # protobuf ABI mismatch, partial C-extension init, etc.) can raise
+        # almost anything OTHER than ImportError from the import statements
+        # above, or from any keras/tf attribute access used to determine
+        # handleability. This function is only a "can this backend handle
+        # the input" PROBE used by autorouting -- it must never crash the
+        # whole autorouter and take down capture attempts for every OTHER
+        # backend (torch, mlx, ...) just because TF happens to be
+        # installed-but-broken in the environment. Treat any such failure
+        # as "cannot handle" rather than letting it propagate.
         return False
-    if isinstance(model, tf.Module):
-        return True
-    if _is_tf_concrete_function(model, tf):
-        return True
-    if hasattr(model, "get_concrete_function"):
-        return True
-    if _has_saved_model_signatures(model):
-        return True
-    return callable(model) and _contains_tf_tensor(input_args, input_kwargs, tf)
 
 
 def _is_paddle_object_hint(value: object) -> bool:
@@ -337,25 +366,39 @@ def _contains_tf_tensor(input_args: object, input_kwargs: object, tf: object) ->
     )
 
 
-def _contains_foreign_tensor(value: object) -> bool:
-    """Return whether nested public inputs contain non-TF tensor leaves.
+def _contains_other_backend_tensor(
+    backend_name: str,
+    input_args: object,
+    input_kwargs: object,
+) -> bool:
+    """Return whether public inputs mix in another backend's tensor family.
 
     Parameters
     ----------
-    value:
-        Candidate public input tree.
+    backend_name:
+        Candidate backend family.
+    input_args:
+        Positional public inputs.
+    input_kwargs:
+        Keyword public inputs.
 
     Returns
     -------
     bool
-        True for torch, JAX, or Paddle tensor leaves.
+        True when any tensor leaf belongs to a different backend family.
     """
 
-    return any(_is_foreign_tensor_leaf(leaf) for leaf in _simple_leaves(value))
+    return any(
+        family is not None and family != backend_name
+        for family in (
+            _tensor_backend_family(leaf)
+            for leaf in (*_simple_leaves(input_args), *_simple_leaves(input_kwargs))
+        )
+    )
 
 
-def _is_foreign_tensor_leaf(leaf: object) -> bool:
-    """Return whether a leaf belongs to a non-TensorFlow tensor runtime.
+def _tensor_backend_family(leaf: object) -> str | None:
+    """Return the backend family for a known tensor leaf.
 
     Parameters
     ----------
@@ -364,15 +407,45 @@ def _is_foreign_tensor_leaf(leaf: object) -> bool:
 
     Returns
     -------
-    bool
-        True for torch, JAX, or Paddle tensor leaves.
+    str | None
+        Backend family name when the leaf is from a recognized tensor runtime,
+        otherwise ``None``.
     """
 
     if isinstance(leaf, torch.Tensor):
-        return True
-    leaf_type = type(leaf)
-    module_name = leaf_type.__module__.split(".", maxsplit=1)[0]
-    return module_name in {"jax", "jaxlib", "paddle"}
+        return "torch"
+    module_name = type(leaf).__module__.split(".", maxsplit=1)[0]
+    if module_name in {"jax", "jaxlib"}:
+        return "jax"
+    if module_name == "tensorflow":
+        return "tf"
+    if module_name in {"mlx", "paddle", "tinygrad"}:
+        return module_name
+    return None
+
+
+def _tf_runtime_supported(tf: object, keras: object) -> bool:
+    """Return whether installed TensorFlow/Keras versions are supported.
+
+    Parameters
+    ----------
+    tf:
+        Imported TensorFlow module.
+    keras:
+        Imported Keras module.
+
+    Returns
+    -------
+    bool
+        True for Keras 3 on TensorFlow >= 2.16.
+    """
+
+    try:
+        tf_version = Version(str(getattr(tf, "__version__", "0")))
+        keras_version = Version(str(getattr(keras, "__version__", "0")))
+    except InvalidVersion:
+        return False
+    return tf_version >= Version("2.16") and keras_version >= Version("3")
 
 
 def _is_keras_object(value: object) -> bool:
@@ -543,7 +616,7 @@ def _tinygrad_capture_trace(*args: Any, **kwargs: Any) -> Any:
 
 
 def _paddle_capture_trace(*args: Any, **kwargs: Any) -> Any:
-    """Dispatch to the Paddle backend preview shell.
+    """Dispatch to the Paddle backend preview.
 
     Parameters
     ----------
@@ -553,7 +626,7 @@ def _paddle_capture_trace(*args: Any, **kwargs: Any) -> Any:
     Returns
     -------
     Any
-        Captured trace once the Paddle capture phase lands.
+        Captured trace.
     """
 
     from .paddle import PaddleBackend
@@ -562,7 +635,7 @@ def _paddle_capture_trace(*args: Any, **kwargs: Any) -> Any:
 
 
 def _tf_capture_trace(*args: Any, **kwargs: Any) -> Any:
-    """Dispatch to the TensorFlow backend preview shell.
+    """Dispatch to the TensorFlow backend preview.
 
     Parameters
     ----------
@@ -572,7 +645,7 @@ def _tf_capture_trace(*args: Any, **kwargs: Any) -> Any:
     Returns
     -------
     Any
-        Captured trace once the TensorFlow capture phase lands.
+        Captured trace.
     """
 
     from .tf import TFBackend
@@ -666,7 +739,7 @@ def _paddle_validate_entry(*args: Any, **kwargs: Any) -> bool:
     Returns
     -------
     bool
-        Validation result once the Paddle validation phase lands.
+        Validation result.
     """
 
     from .paddle import PaddleBackend
@@ -685,7 +758,7 @@ def _tf_validate_entry(*args: Any, **kwargs: Any) -> bool:
     Returns
     -------
     bool
-        Validation result once the TensorFlow validation phase lands.
+        Validation result.
     """
 
     from .tf import TFBackend
@@ -693,7 +766,7 @@ def _tf_validate_entry(*args: Any, **kwargs: Any) -> bool:
     return TFBackend().validate_entry(*args, **kwargs)
 
 
-def _torch_validate_trace(*args: Any, **kwargs: Any) -> bool:
+def _torch_validate_trace(*args: Any, **kwargs: Any) -> Any:
     """Dispatch to the current torch trace validation implementation.
 
     Parameters
@@ -703,8 +776,8 @@ def _torch_validate_trace(*args: Any, **kwargs: Any) -> bool:
 
     Returns
     -------
-    bool
-        Validation result.
+    Any
+        Validation result or replay status.
     """
 
     from ..validation.core import validate_saved_outs
@@ -779,7 +852,7 @@ def _paddle_validate_trace(*args: Any, **kwargs: Any) -> Any:
     Returns
     -------
     Any
-        Validation result once the Paddle validation phase lands.
+        Validation result.
     """
 
     from .paddle import PaddleBackend
@@ -798,7 +871,7 @@ def _tf_validate_trace(*args: Any, **kwargs: Any) -> Any:
     Returns
     -------
     Any
-        Validation result once the TensorFlow validation phase lands.
+        Validation result.
     """
 
     from .tf import TFBackend
@@ -806,22 +879,8 @@ def _tf_validate_trace(*args: Any, **kwargs: Any) -> Any:
     return TFBackend().validate_trace(*args, **kwargs)
 
 
-def _paddle_capture_backend() -> CaptureBackend:
-    """Return the Paddle Protocol adapter shell.
-
-    Returns
-    -------
-    CaptureBackend
-        Paddle capture backend once the Protocol adapter phase lands.
-    """
-
-    from .paddle import PaddleBackend
-
-    return cast(CaptureBackend, PaddleBackend())
-
-
 def register_default_backend_specs() -> None:
-    """Register built-in torch and MLX backend specs.
+    """Register built-in backend specs.
 
     Returns
     -------
@@ -976,7 +1035,6 @@ def register_default_backend_specs() -> None:
                 module_identity_modes=("function_root", "object_module"),
                 trace_options=PADDLE_TRACE_OPTIONS,
             ),
-            capture_backend=_paddle_capture_backend,
             serialization_policy=SerializationPolicy(
                 payload_policy="array_payloads",
                 body_format="safetensors",

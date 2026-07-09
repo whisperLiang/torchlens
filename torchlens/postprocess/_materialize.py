@@ -145,12 +145,13 @@ def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
         events.module_enter_events,
         events.module_exit_events,
     )
-    op_event_labels = {event.label_raw for event in events.op_events}
-    children_by_parent = _children_by_parent(trace, events.op_events, op_event_labels)
-    buffer_addresses_by_label = _buffer_addresses_by_label(trace, events.op_events)
+    op_events = _op_events_in_raw_order(events.op_events)
+    op_event_labels = {event.label_raw for event in op_events}
+    children_by_parent = _children_by_parent(trace, op_events, op_event_labels)
+    buffer_addresses_by_label = _buffer_addresses_by_label(trace, op_events)
     equivalent_ops_by_label = _equivalent_ops_by_label(
         trace,
-        events.op_events,
+        op_events,
         buffer_addresses_by_label,
     )
     buffer_alias_snapshots = _buffer_alias_snapshots_by_address(trace)
@@ -159,14 +160,14 @@ def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
         module_enter_addresses,
         live_module_forward_args,
     )
-    op_events_by_label = {event.label_raw: event for event in events.op_events}
-    input_io_roles = _input_io_roles(trace, events.op_events)
+    op_events_by_label = {event.label_raw: event for event in op_events}
+    input_io_roles = _input_io_roles(trace, op_events)
     # Count ops per innermost module call so a single-op (atomic) leaf module can
     # be told apart from a multi-op one. The innermost module of an op is the last
     # frame of its capture-time module stack.
     innermost_module_op_counts: Counter[tuple[str, int]] = Counter(
         (event.module_stack[-1].address, event.module_stack[-1].call_index)
-        for event in events.op_events
+        for event in op_events
         if event.module_stack
     )
     module_output_fields = _module_output_fields(
@@ -178,7 +179,7 @@ def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
     buffer_write_fields = _buffer_write_fields(trace, op_event_labels)
     output_versions = _output_versions_by_parent(events)
 
-    for event in events.op_events:
+    for event in op_events:
         fields_dict = _fields_from_event(
             trace,
             event,
@@ -209,8 +210,26 @@ def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
     events.output_version_events.clear()
     events.live_by_raw_label.clear()
     events.op_event_by_label_raw.clear()
+    events.op_event_index_by_label_raw.clear()
     events.live_index.clear()
     events.grad_fn_handles_by_label_raw.clear()
+
+
+def _op_events_in_raw_order(op_events: list[OpEvent]) -> list[OpEvent]:
+    """Return operation events sorted by their reserved raw index.
+
+    Parameters
+    ----------
+    op_events
+        Operation events in backend append order.
+
+    Returns
+    -------
+    list[OpEvent]
+        Events in graph raw-index order.
+    """
+
+    return sorted(op_events, key=lambda event: event.raw_index)
 
 
 def _drop_missing_buffer_sources(trace: "Trace") -> None:
@@ -323,14 +342,20 @@ def _fields_from_event(
     templates = event.templates
     params = tuple(event.params)
     param_logs = _param_logs_for_event(trace, params)
-    parent_param_ops = {param.barcode: event.pass_index for param in params}
-    param_shapes = [param.shape for param in params]
-    logged_param_addresses = {log.address for log in param_logs}
-    unresolved_params = [
-        param
-        for param in params
-        if getattr(param, "address", None) not in logged_param_addresses
+    resolved_param_addresses = {log.address for log in param_logs}
+    resolved_params = tuple(
+        param for param in params if getattr(param, "address", None) in resolved_param_addresses
+    )
+    unresolved_params = tuple(
+        param for param in params if getattr(param, "address", None) not in resolved_param_addresses
+    )
+    resolved_parent_params = [
+        parent_param
+        for param, parent_param in zip(params, event.parent_params, strict=False)
+        if getattr(param, "address", None) in resolved_param_addresses
     ]
+    parent_param_ops = {param.barcode: event.pass_index for param in resolved_params}
+    param_shapes = [param.shape for param in resolved_params]
     unresolved_trainable_params = sum(
         prod(param.shape)
         for param in unresolved_params
@@ -341,7 +366,7 @@ def _fields_from_event(
         for param in unresolved_params
         if param.shape is not None and not param.trainable
     )
-    parent_params = list(event.parent_params)
+    parent_params = resolved_parent_params
     grad_handle = grad_fn_handle if grad_fn_handle is not None else event.grad_fn_handle
     module = event.modules[-1] if event.modules else None
     resolved_address = buffer_address or _event_address(event)
@@ -456,7 +481,7 @@ def _fields_from_event(
             "transform_fn_source": event.transform_fn_source,
             "unattributed_tensor_args": tuple(event.unattributed_tensor_args),
             "parent_params": parent_params,
-            "_param_barcodes": [param.barcode for param in params],
+            "_param_barcodes": [param.barcode for param in resolved_params],
             "parent_param_ops": parent_param_ops,
             "_param_logs": param_logs,
             "param_shapes": param_shapes,
@@ -919,6 +944,7 @@ def _event_tensor_payload(
         event.kind == "source"
         and event.layer_type == "buffer"
         and resolved_address in buffer_alias_snapshots
+        and payload is None
     ):
         return buffer_alias_snapshots[resolved_address]
     return payload
@@ -1091,6 +1117,46 @@ def _rebuild_module_side_channels(trace: "Trace", events: CaptureEvents) -> None
         _apply_module_enter_event(trace, enter_event, module_enter_addresses[id(enter_event)])
     for exit_event in events.module_exit_events:
         _apply_module_exit_event(trace, exit_event)
+    if not events.module_enter_events:
+        _fill_module_call_stacks_from_op_events(trace, events.op_events)
+
+
+def _fill_module_call_stacks_from_op_events(trace: "Trace", op_events: list[OpEvent]) -> None:
+    """Rebuild ``module_call_stacks`` from op module stacks (predicate path).
+
+    The exhaustive torch capture records each module call's ancestor chain into
+    ``mbd["module_call_stacks"]`` at prep time (``backends/torch/model_prep.py``:
+    ``call_stack = [f"{f.address}:{f.pass_index}" for f in stack[:-1]]``, where the
+    undecorated root ``self`` never appears in the stack). ``_apply_module_enter_event``
+    replays that into the same dict during materialize. The predicate/fastlog
+    capture path emits no typed ``ModuleEnterEvent``s, so that dict stays empty and
+    every reconstructed ``ModuleCall.module_call_stack`` is ``[]`` -- which fails the
+    ``module_hierarchy`` invariant's call-tree-link check (e.g. "ModuleCall
+    'block.0:1' module_call_stack=[] does not start with ['block:1']").
+
+    Each predicate ``OpEvent`` carries its full capture-time ``module_stack``
+    (``tuple[ModuleFrame, ...]`` of ``(address, call_index)`` from root ``self`` down
+    to the innermost module). For a frame at position ``i`` the module call's
+    ancestor stack is ``module_stack[:i]`` with the reserved root ``self`` dropped --
+    reproducing exactly the exhaustive ``stack[:-1]`` value (which also excludes the
+    never-pushed root). Fill only missing entries so this stays a faithful
+    reconstruction, never an override of any authoritative enter-event value.
+    """
+
+    stacks = trace._module_build_data["module_call_stacks"]
+    for event in op_events:
+        module_stack = event.module_stack
+        for index, frame in enumerate(module_stack):
+            if frame.address == "self":
+                continue
+            call_label = f"{frame.address}:{frame.call_index}"
+            if call_label in stacks:
+                continue
+            stacks[call_label] = [
+                f"{ancestor.address}:{ancestor.call_index}"
+                for ancestor in module_stack[:index]
+                if ancestor.address != "self"
+            ]
 
 
 def _apply_module_prep_event(trace: "Trace", event: ModulePrepEvent) -> None:
@@ -1218,6 +1284,8 @@ def _apply_module_exit_event(trace: "Trace", event: ModuleExitEvent) -> None:
     mbd["module_forward_durations"][event.call_label] = event.forward_duration
     if event.output_structure is not None:
         mbd["module_output_structures"][event.call_label] = event.output_structure
+    if event.output_paths:
+        mbd.setdefault("module_output_paths", {})[event.call_label] = tuple(event.output_paths)
 
 
 def _module_enter_addresses(
@@ -1359,8 +1427,17 @@ def _module_output_fields(
         for output_index, label_raw in enumerate(event.output_tensor_labels_raw):
             fields = by_label.setdefault(label_raw, _empty_module_output_fields())
             fields["is_module_output"] = True
-            if event.has_user_forward_hooks:
-                fields["intervention_replaced"] = True
+            # NOTE: do NOT mark ``intervention_replaced`` here from
+            # ``has_user_forward_hooks``. That is a PROXY, not proof: a module can
+            # carry a purely observational forward hook (returns ``None``, never
+            # substitutes) and this overlay runs during plain postprocess with no
+            # evidence a substitution happened. Forcing it True would (a) mislabel
+            # a plain-capture module output as a user intervention (disarming the
+            # tripwire, see project CLAUDE.md "Validation Integrity") and (b) even
+            # for a genuine replacement mark the PRE-replacement tensor. Genuine
+            # replacements are marked with proof on the actual replacement op by
+            # ``_make_user_forward_hook_wrapper`` and flow in via the authoritative
+            # ``event.intervention_replaced`` base field above.
             cast(list[Any], fields["output_of_modules"]).append(event.address)
             cast(list[Any], fields["output_of_module_calls"]).append(call_tuple)
             if output_index < len(event.output_names):
@@ -1495,7 +1572,13 @@ def _module_role_hints_by_address(
     for event in prep_events:
         module_class = _resolve_module_class(event.cls_qualname)
         if module_class is None:
-            module_class = getattr(nn, event.class_name, None)
+            # `torch.nn` also exposes non-class submodules (e.g. `nn.init`,
+            # `nn.functional`, `nn.utils`). A user module class can legitimately
+            # share one of those names (e.g. a class literally named `init`),
+            # so this fallback must reject non-class matches instead of handing
+            # them to `issubclass()` below.
+            candidate = getattr(nn, event.class_name, None)
+            module_class = candidate if isinstance(candidate, type) else None
         hints = role_hints_for_module_class(module_class)
         if hints is not None:
             hints_by_address[event.address] = hints
@@ -1652,6 +1735,10 @@ def _event_address(event: OpEvent) -> str | None:
     buffer_address = get_buffer_address(event.output.tensor.payload)
     if buffer_address is not None:
         return buffer_address
+    record_context = getattr(event, "record_context", None)
+    input_output_address = getattr(record_context, "input_output_address", None)
+    if isinstance(input_output_address, str):
+        return input_output_address
     if event.module_stack:
         return event.module_stack[-1].address
     return None

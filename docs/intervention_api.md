@@ -68,7 +68,7 @@ Forward helpers return `HelperSpec` objects that can be passed to `set`,
 | `tl.noise` | `noise(std, *, seed=None, force_shape_change=False)` | Built-in stochastic helper; seeded runs avoid global RNG consumption. |
 | `tl.project_onto` | `project_onto(direction, *, feature_axis=None, force_shape_change=False)` | Portable when `direction` is tensor data. |
 | `tl.project_off` | `project_off(direction, *, feature_axis=None, force_shape_change=False)` | Portable when `direction` is tensor data. |
-| `tl.swap_with` | `swap_with(other_label, *, force_shape_change=False)` | Tensor and Op-like sources work in memory; label resolution is runtime-dependent. |
+| `tl.swap_with` | `swap_with(other_label, *, force_shape_change=False)` | Tensor and Op-like (`.out`) sources work in memory; **string labels are not supported and raise `HookValueError` immediately** -- no execution path resolves a bare label to another site's tensor today. |
 | `tl.splice_module` | `splice_module(module, *, input="activation", output="activation", force_shape_change=False)` | Executable in the same environment; not portable and not append-compatible. |
 
 ## Backward Helpers
@@ -78,8 +78,8 @@ Backward helpers are Tier-1 live/rerun-only helpers.
 | Helper | Signature | Portability |
 | --- | --- | --- |
 | `tl.bwd_hook` | `bwd_hook(fn)` | Live/rerun-only; not portable. |
-| `tl.gradient_zero` | `gradient_zero(*, force_shape_change=False)` | Live/rerun-only; not portable. |
-| `tl.gradient_scale` | `gradient_scale(factor, *, force_shape_change=False)` | Live/rerun-only; not portable. |
+| `tl.grad_zero` | `grad_zero(*, force_shape_change=False)` | Live/rerun-only; not portable. |
+| `tl.grad_scale` | `grad_scale(factor, *, force_shape_change=False)` | Live/rerun-only; not portable. |
 
 Hook callables receive one positional tensor and a required keyword-only
 `hook` context. For forward hooks the positional tensor is the activation; for
@@ -157,6 +157,12 @@ For full `tl.trace(...)` failures, inspect `exc.partial_log` directly or call
 | `log.replay(hooks=None)` | Propagate over the saved DAG without calling `model.forward`. |
 | `log.rerun(model, x, append=False)` | Re-execute the model under the active spec. |
 | `log.save_intervention(path, level=...)` | Write a `.tlspec/` intervention recipe. |
+
+`Trace.draw(vis_intervention_mode=...)` visualizes the planned intervention
+recipe stored on an intervention-ready trace, such as sites registered with
+`log.set(...)` or `log.do(...)`. Capture-time `intervene=...` calls record
+fire metadata on matched layers, but they are not replay plans and are not
+drawn as planned sites.
 
 ## Bundle
 

@@ -10,12 +10,14 @@ are dropped or stringified before writing ``metadata.pkl``.
 from __future__ import annotations
 
 import logging
+import pickle
 from io import BytesIO
 from collections import OrderedDict, defaultdict
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
 import torch
 
 from . import BlobRef, FieldPolicy, TLSPEC_VERSION, TorchLensIOError
@@ -167,8 +169,24 @@ def _scrub_value(
     memo: dict[int, Any],
     blob_specs: list[BlobSpec],
     blob_counter: list[int],
+    *,
+    stringify_unknown: bool = False,
 ) -> Any:
-    """Recursively scrub a value while preserving shared object identity."""
+    """Recursively scrub a value while preserving shared object identity.
+
+    Parameters
+    ----------
+    stringify_unknown:
+        When ``True``, a value with neither a container type handled here
+        nor a ``PORTABLE_STATE_SPEC`` falls back to
+        :func:`_stringify_value` instead of being returned unchanged. Used
+        by the ``save_raw_input``/``save_raw_output`` ``True`` policy
+        (:func:`_scrub_raw_value_for_save`) so live, un-picklable objects
+        (generators, locks, open file handles, sockets, ...) nested inside
+        a user's raw input/output never reach ``pickle.dump`` unmodified.
+        Default ``False`` preserves the general-purpose scrub pass used for
+        the rest of the ``Trace`` object graph.
+    """
 
     if isinstance(value, _SIMPLE_KEEP_TYPES):
         return value
@@ -177,32 +195,60 @@ def _scrub_value(
     if isinstance(value, BlobRef):
         return value
     if isinstance(value, list):
-        return [_scrub_value(item, options, memo, blob_specs, blob_counter) for item in value]
+        return [
+            _scrub_value(
+                item, options, memo, blob_specs, blob_counter, stringify_unknown=stringify_unknown
+            )
+            for item in value
+        ]
     if isinstance(value, tuple):
-        return tuple(_scrub_value(item, options, memo, blob_specs, blob_counter) for item in value)
+        return tuple(
+            _scrub_value(
+                item, options, memo, blob_specs, blob_counter, stringify_unknown=stringify_unknown
+            )
+            for item in value
+        )
     if isinstance(value, set):
-        return {_scrub_value(item, options, memo, blob_specs, blob_counter) for item in value}
+        return {
+            _scrub_value(
+                item, options, memo, blob_specs, blob_counter, stringify_unknown=stringify_unknown
+            )
+            for item in value
+        }
     if isinstance(value, OrderedDict):
         return OrderedDict(
             (
                 key,
-                _scrub_value(item, options, memo, blob_specs, blob_counter),
+                _scrub_value(
+                    item,
+                    options,
+                    memo,
+                    blob_specs,
+                    blob_counter,
+                    stringify_unknown=stringify_unknown,
+                ),
             )
             for key, item in value.items()
         )
     if isinstance(value, defaultdict):
         return {
-            key: _scrub_value(item, options, memo, blob_specs, blob_counter)
+            key: _scrub_value(
+                item, options, memo, blob_specs, blob_counter, stringify_unknown=stringify_unknown
+            )
             for key, item in value.items()
         }
     if isinstance(value, dict):
         return {
-            key: _scrub_value(item, options, memo, blob_specs, blob_counter)
+            key: _scrub_value(
+                item, options, memo, blob_specs, blob_counter, stringify_unknown=stringify_unknown
+            )
             for key, item in value.items()
         }
 
     spec = getattr(type(value), "PORTABLE_STATE_SPEC", None)
     if spec is None:
+        if stringify_unknown and not _is_safely_picklable(value):
+            return _stringify_value(value)
         return value
     obj_id = id(value)
     if obj_id in memo:
@@ -323,6 +369,11 @@ def _is_runtime_only_trace_field(field_name: str) -> bool:
         "_last_sibling_ordering_decision",
         "_pending_container_collapse_nodes",
         "_defer_streaming_bundle_finalization",
+        "_capture_producer_policy",
+        "_capture_config",
+        "_stop_directive",
+        "_retain_layers_to_save_output_parents",
+        "_fast_raw_index_lookup",
         "_keep_outs_in_memory",
         "_capture_container_structure",
         "_capture_output_structure",
@@ -455,7 +506,15 @@ def _scrub_raw_value_for_save(
     if policy is False:
         return None
     if policy is True:
-        return _scrub_value(value, options, memo, blob_specs, blob_counter)
+        # Scrub with ``stringify_unknown=True`` (not the default
+        # passthrough) so live, un-picklable objects nested inside a raw
+        # input/output (generators, locks, open file handles, sockets, ...)
+        # fall through to ``_stringify_value``'s bounded placeholder instead
+        # of reaching ``pickle.dump`` unmodified. This mirrors the
+        # ``saved_args``/``forward_args``/``custom_attributes`` policy,
+        # which already uses a stringify fallback (via
+        # ``_blobify_recursive_value``) for exactly this class of object.
+        return _scrub_value(value, options, memo, blob_specs, blob_counter, stringify_unknown=True)
     if policy != "small":
         raise TorchLensIOError(f"{policy_name} must be 'small', True, or False.")
     return _small_raw_value(value, field_name=field_name)
@@ -793,6 +852,71 @@ def _stringify_value(value: Any) -> str:
     """Convert a non-portable object into a stable placeholder string."""
 
     return f"<scrubbed:{type(value).__name__}>"
+
+
+_KNOWN_SAFELY_PICKLABLE_TYPES = (torch.Tensor,)
+
+
+def _is_safely_picklable(value: Any) -> bool:
+    """Return whether ``value`` can be pickled without raising.
+
+    Used by :func:`_scrub_value`'s ``stringify_unknown`` path to decide
+    whether an unspecced leaf value (one with no
+    ``PORTABLE_STATE_SPEC``) reached via ``save_raw_input``/
+    ``save_raw_output``'s ``True`` policy should be kept as-is (full
+    retention, per those options' docs) or degraded to a bounded
+    :func:`_stringify_value` placeholder. Probing picklability once, here,
+    at scrub time -- rather than letting the real ``pickle.dump()`` over
+    the full scrubbed state discover the problem later -- is what keeps
+    live-resource objects (generators, locks, open file handles, sockets,
+    ...) from ever reaching that later call, where a failure mid-write can
+    otherwise cost an already-saved bundle (see ``bundle.py``'s ``save()``
+    atomic-write/backup-restore contract).
+
+    ``torch.Tensor`` and ``numpy.ndarray`` values whose dtype holds no
+    object references (numeric, bool, string, and structured dtypes with
+    no object-typed field) are exempted from the probe: they always
+    support the standard pickle protocol via their own ``__reduce_ex__``
+    and hold no live OS resources that could make pickling fail, so
+    probing them would only pay a full extra ``pickle.dumps()`` pass --
+    doubling CPU and transiently doubling peak memory -- for a result
+    that is always ``True``. Any ``numpy.ndarray`` whose dtype reports
+    ``hasobject`` (a plain ``object``-dtype array, or a structured/
+    compound/nested dtype with an object-typed field), however, is NOT
+    exempted: it may hold arbitrary live Python objects (generators,
+    locks, or other unpicklable values) in any of its fields, just like a
+    plain ``list`` or ``dict`` can, so exempting it would reintroduce
+    exactly the hard ``save()`` failure this probe exists to prevent.
+    ``dtype.hasobject`` is used rather than a top-level
+    ``dtype != np.dtype("object")`` identity check because the latter is
+    only true for a bare object dtype -- a structured dtype whose fields
+    include ``object`` is never itself equal to ``np.dtype("object")`` and
+    would wrongly slip through an identity comparison even though it
+    genuinely embeds live object references. Skipping the probe only for
+    provably-safe types keeps the live-resource detection intact for
+    every value it actually protects.
+
+    Parameters
+    ----------
+    value:
+        Candidate value to probe.
+
+    Returns
+    -------
+    bool
+        ``True`` if ``pickle.dumps(value)`` succeeds, ``False`` otherwise.
+    """
+
+    if isinstance(value, _KNOWN_SAFELY_PICKLABLE_TYPES):
+        return True
+    if isinstance(value, np.ndarray) and not value.dtype.hasobject:
+        return True
+
+    try:
+        pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        return False
+    return True
 
 
 def _next_blob_id(blob_counter: list[int]) -> str:

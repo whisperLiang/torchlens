@@ -16,6 +16,18 @@ pip install -e ".[test]"  # local development with test extras
 Graphviz rendering needs Graphviz (`apt install graphviz` on Debian/Ubuntu). Optional
 extras gate appliance and bridge namespaces; see `pyproject.toml` for the current list.
 
+## Torch Version Compatibility
+
+TorchLens supports torch 2.1 -> 2.12+ for eager torch capture. The declared floor stays
+`torch>=2.1`; torch 2.0 may work best-effort through guarded fallbacks, but it is not a
+declared support floor.
+
+Every fragile torch-private-API probe or cross-version torch signature must route through
+`torchlens/utils/_torch_compat.py`. Feature-detect the runtime capability; do not parse
+`torch.__version__` for behavioral branching. Every graceful degradation must flip a named
+`HAS_*` capability flag and be visible through the torch capability snapshot in
+`torchlens.utils.doctor()` / `torchlens.compat.report()`.
+
 ## Model Menagerie (`menagerie/`)
 
 `menagerie/` is a browsable atlas of 10,000+ neural-net architecture families captured with TorchLens:
@@ -23,13 +35,34 @@ a queryable catalog (`python -m menagerie.catalog stats|query|recipe`), ~300+ ha
 "classics" with no prior PyTorch implementation (`menagerie/classics/`, each trace-verified), and a
 disk-safe graph renderer (`python -m menagerie.generate_menagerie`).
 
-**To expand or update the roster** — periodically, after each conference cycle, or **whenever a more
+**To DISCOVER new families** — periodically, after each conference cycle, or **whenever a more
 capable model becomes available** (a smarter auditor finds more) — use the canonical durable prompt at
 **`menagerie/DISCOVER_MODELS.md`**. It is the reusable, adversarial "hunt exhaustively for architecture
 families we missed" sweep: hostile framing, every-axis + non-English + newly-published coverage,
 strict family-not-variant discipline, and exact instructions for folding finds into the catalog or
 `classics/`. Dispatch cross-lab adversarial sub-hunters with it; seed candidates with the starter
 `python -m menagerie.discover_crawler` (recent-arXiv harvester, meant to be extended).
+
+### To ADD / BUILD found models into the roster (LOCKED — READ THE METHODOLOGY, DO NOT REINVENT)
+
+**BEFORE adding ANY model, READ and FOLLOW `menagerie/METHODOLOGY.md` + `menagerie/UPDATE_RECIPE.md` +
+`menagerie/HARVEST_SOURCES.md`.** The catalog's 8,400+ rows were built by ONE established process; do not
+re-derive it. The build-bridge is: harvest the model's **REAL constructor** into a 9-column source row
+(`name, zoo, constructor_call, input_shape, input_dtype, family, domain, era, notes`), run it through
+`python -m menagerie.tools.tsv_to_jsonl` → typed JSONL record in `menagerie/data/master_catalog.jsonl`
+(or `deferred.jsonl`), then `python -m menagerie.catalog build` and `python -m menagerie.validate_menagerie`
+(renders/validates random-init in **grouped/fat envs** — the renderer amortizes dependency installs; use a
+few fat pixi env-islands via `menagerie/envs.py`, NOT one env per model).
+
+**IF SOURCE CODE EXISTS FOR A MODEL, USE THE REAL SOURCE — never write a from-scratch "approximation".**
+That is SLOP and is forbidden (2026-07-01 incident: ~1029 such reimpls deleted, huge token/$ waste). The ladder
+per candidate: (1) real class from an installed base lib IF the arch is unmodified; (2) the real repo code, run
+it in a (fat) env / vendor its actual model file; (3) **faithful PORT** transcribed from the real repo code, only
+if it genuinely can't be made to run; (4) **faithful REIMPLEMENT from a DETAILED description** (paper/thesis/etc.)
+only when NO usable code exists at all — the triage's REIMPLEMENT class, still faithful, not a gist; (5) skip +
+document ONLY if not even a detailed description exists (triage UNAVAILABLE) or it is not a real trainable NN.
+`classics/` is ONLY for no-prior-code models (faithful ports + rung-4 reimpls). The triage's
+SOURCE_AVAILABLE / ENV_SETUP / REIMPLEMENT / UNAVAILABLE / NOT_TRACEABLE class IS the signal for which rung — honor it.
 
 ## Common Patterns
 
@@ -86,7 +119,7 @@ print(tl.compat.report(model, x).to_markdown())
 
 ## Current 2.x Surface
 
-- Top-level `torchlens.__all__` has 89 names: capture, save/load, intervention,
+- Top-level `torchlens.__all__` has 90 names: capture, save/load, intervention,
   selectors, helper transforms, observers, validation, and the three main log classes.
 - `tl.record(..., save=...)` is the sparse predicate recorder; it returns `Recording`.
   `Recording.to_trace()` cooks the event stream into a full-structure `Trace`, with unsaved
@@ -114,10 +147,15 @@ print(tl.compat.report(model, x).to_markdown())
   deferred like sibling preview gaps.
 - `Trace.draw(order_siblings=True)` is the default Graphviz sibling-ordering pass for
   forward unrolled graphs; set it to `False` to render the raw dot layout.
-- `Trace.draw(collapse="none"|"auto"|"max")` controls smart module collapse. The default
-  `"none"` preserves existing rendering; `"auto"` targets a readable node budget; `"max"`
-  aggressively collapses eligible modules. `collapse=` supersedes `vis_call_depth` when used
-  and is orthogonal to `show_containers` (visual review is usually clearest with containers off).
+- `Trace.draw(collapse="none"|"auto"|"max"|t, fold_runs=None|True|False)` controls v2 smart
+  collapse for rolled and unrolled graphs, where float `t` in `[0.0, 1.0]` follows the public
+  monotone schedule (`0.0 == "none"`, `1.0 == "max"`). `auto` is the first schedule point whose
+  visible count enters the readable band, but its implementation remains frozen for compatibility.
+  `None` preserves defaults (`"none"` has no run folding; `"auto"`/`"max"` use band-pressure
+  folding), `True` folds eligible repeated runs even with `collapse="none"`, and `False` disables
+  run folding. `collapse="max"` may emit segment boxes; `(xN)`, ellipsis, and segment labels must
+  stay honest about hidden calls or ranges. `Trace.collapse_plan(mode=...)` returns the diagnostic
+  plan, and `Trace.collapse_schedule()` returns the float schedule metadata.
 - Smart-collapse metadata is computed at access time: `Module.collapse_score`,
   `Trace.module_collapse_order`, and `Trace.collapse_order(weights=..., mode=...)`. These are
   not portable fields and must not be added to `*_FIELD_ORDER` without an explicit schema change.
@@ -127,8 +165,8 @@ print(tl.compat.report(model, x).to_markdown())
   the submodule is imported as `tl.debug` and is deliberately not in `__all__`.
 - `torchlens.bridge` contains optional adapters for Captum, HF, SHAP, SAE Lens, LIT,
   profiler, and related tools.
-- Appliance packages `viewer`, `paper`, `notebook`, `llm`, and `neuro` reserve extras
-  boundaries; most are stubs except import gating in `notebook` and `neuro`.
+- Appliance packages `notebook` and `neuro` reserve extras boundaries and enforce
+  import gating for their optional dependencies.
 
 ## Anti-Patterns
 

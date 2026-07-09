@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
 from ...fastlog.types import CaptureSpec
-from ...ir.buffer import CaptureEvents
+from ...ir.capture_events import CaptureEvents
 from ...ir.events import (
     ArgTemplateRef,
     FunctionCallRef,

@@ -19,12 +19,12 @@ from _paddle_subprocess import run_paddle_subprocess
 
 
 def _run_tinygrad_subprocess(code: str) -> None:
-    """Run a tinygrad training test in an isolated CPU subprocess."""
+    """Run a tinygrad training test in an isolated Python-device subprocess."""
 
     if find_spec("tinygrad") is None:
         pytest.skip("'tinygrad' is not installed.")
     env = os.environ.copy()
-    env["DEV"] = "CPU"
+    env["DEV"] = "PYTHON"
     result = subprocess.run(
         [sys.executable, "-c", textwrap.dedent(code)],
         cwd=Path(__file__).resolve().parents[2],

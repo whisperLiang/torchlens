@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torchlens"
-version = "2.28.0"
+version = "2.29.1"
 description = "A package for extracting activations from PyTorch models and saving portable bundles"
 readme = "README.md"
 license = "Apache-2.0"
@@ -40,19 +40,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-viewer = []
-paper = []
 notebook = ["ipython>=8.0", "jupyter-client>=8.0"]
-llm = []
 neuro = ["rsatoolbox~=0.1.5", "brain-score~=2.2"]
 viz = ["torchshow~=0.5", "lovely-tensors~=0.1.18"]
 tabular = ["pandas>=2.0", "pyarrow>=14"]
 captum = ["captum~=0.7"]
-sae = ["sae-lens~=4.0"]
+sae = ["sae-lens~=6.45; python_version >= '3.10'"]
 profiler = []
 lightning = ["lightning~=2.4"]
 wandb = ["wandb>=0.16"]
 mlx = ["mlx>=0.26,<0.27"]
+jax = ["jax[cpu]", "equinox", "flax"]
 tinygrad = ["tinygrad>=0.13,<0.14"]
 paddle = ["paddlepaddle>=3.3,<3.4"]
 tf = ["tensorflow>=2.16"]
@@ -91,6 +89,7 @@ test = [
     "lightning",
     "pillow",
     "pytest",
+    "pytest-timeout",
     "requests",
     "soxr",
     "timm",
@@ -127,7 +126,7 @@ Repository = "https://github.com/johnmarktaylor91/torchlens"
 include = ["torchlens*"]
 
 [tool.setuptools.package-data]
-torchlens = ["autoroute/data/*.json", "autoroute/data/*.md"]
+torchlens = ["autoroute/data/*.json", "autoroute/data/*.md", "schemas/*.json"]
 
 [tool.pytest.ini_options]
 markers = [
@@ -135,6 +134,7 @@ markers = [
     "real_model: marks tests that exercise optional real-world model split replay",
     "heavy: marks mid-cost tests excluded from the fast per-step gate (select/deselect with '-m heavy' / '-m \"not heavy\"')",
     "smoke: marks tests as smoke tests for quick critical-path validation (select with '-m smoke')",
+    "serial: marks load-sensitive tests that should run away from parallel worker load",
     "rare: marks tests that are always excluded unless explicitly requested (select with '-m rare')",
     "optional: marks tests that require optional dependencies",
     "backend_parity: marks active backend substrate parity gates",
@@ -144,7 +144,22 @@ markers = [
     "tf_backend: marks tests that require the optional TensorFlow backend runtime",
 ]
 addopts = "-m 'not rare'"
+xfail_strict = true
 filterwarnings = [
+    # TorchLens-originated warnings should be deliberate and locally asserted.
+    # NOTE: pytest applies filterwarnings bottom-to-top priority (later entries win),
+    # so the broad error rules go FIRST and the message-specific "default" exceptions
+    # below them take precedence for their exact messages. Public compatibility aliases
+    # (layers_to_save=, etc.) and older-bundle-version loads are intentionally exercised
+    # across legacy tests and stay visible-not-fatal; deprecation-specific tests assert
+    # them locally.
+    "error::DeprecationWarning:torchlens(\\.|$)",
+    "error::UserWarning:torchlens(\\.|$)",
+    # Expected graceful torch-capability degradations (e.g. functorch level API absent on
+    # torch 2.1) flip a HAS_* flag and warn once; visible-not-fatal across the torch matrix.
+    "default:TorchLens torch capability .* is unavailable;.*:UserWarning:torchlens(\\.|$)",
+    "default:`.*` is deprecated; use `.*` instead\\..*:DeprecationWarning",
+    "default:Bundle tlspec_version=.* is older than runtime tlspec_version=.*:DeprecationWarning",
     # External: torchvision model init deprecations
     "ignore:The default weight initialization of.*:FutureWarning",
     # External: torch.meshgrid indexing argument
@@ -168,40 +183,48 @@ show_missing = true
 skip_empty = true
 
 [tool.coverage.html]
-directory = "tests/test_outputs/reports/coverage_html"
+directory = "tests/generated_outputs/reports/coverage_html"
 
 [tool.coverage.lcov]
-output = "tests/test_outputs/coverage.lcov"
+output = "tests/generated_outputs/coverage.lcov"
 
 [tool.mypy]
 python_version = "3.11"
 warn_return_any = false
 warn_unused_configs = true
 ignore_missing_imports = true
-# Lenient for now - tighten as annotations improve
-check_untyped_defs = false
+# Check bodies of unannotated functions so the package ratchet catches local drift.
+check_untyped_defs = true
 disallow_untyped_defs = false
 
 [tool.ruff]
 line-length = 100
 
 [tool.ruff.lint]
-ignore = ["E721", "F401"]
+ignore = []
 
 [tool.ruff.lint.per-file-ignores]
+# Example/tutorial notebooks intentionally keep broad setup imports in shared
+# starter cells even when a given cell path does not consume every symbol.
+"examples/**/*.ipynb" = ["F401"]
+"notebooks/**/*.ipynb" = ["F401"]
+
 # Audit notebooks (notebooks/audit/) use a sys.path shim + matplotlib.use() before
 # importing the model zoo / torchlens, so module-level imports legitimately follow
 # code (E402). This shim is mandated by notebooks/audit/CLAUDE.md.
-"notebooks/audit/*.ipynb" = ["E402"]
+"notebooks/audit/*.ipynb" = ["E402", "F401"]
 
-# menagerie/classics/ holds ~1000 faithful random-init architecture reconstructions
-# (the model atlas). They are compact reimpl *recipes*, not library code: dense one-line
-# block definitions (E702), conventional math/ML single-letter names like l/I/O for
-# layers/identity (E741), and intentional dead scaffolding vars kept for readability of
-# the reconstructed forward (F841). Enforcing these would mean editing generated forwards
-# and perturbing already-rendered architecture graphs. Real-bug lints (F821/F811/etc.)
-# stay enforced.
-"menagerie/classics/*.py" = ["E702", "E741", "F841"]
+# menagerie/classics/ holds faithful random-init architecture reconstructions AND vendored/
+# ported REAL repo code (the model atlas). They are compact recipes / verbatim vendored source,
+# not first-party library code: dense one-line block definitions (E702), conventional math/ML
+# single-letter names like l/I/O for layers/identity (E741), unused imports kept verbatim from
+# the real source (F401), intentional dead scaffolding vars kept for readability of the
+# reconstructed forward (F841), and lambda-assignment factory idioms common in vendored source,
+# e.g. lucidrains repos (E731). Vendored source also keeps its original `type(x) == T`
+# comparisons (E721). Enforcing these would mean editing generated/vendored forwards
+# and perturbing already-rendered architecture graphs or diverging from the real source.
+# Real-bug lints (F821/F811/etc.) stay enforced.
+"menagerie/classics/*.py" = ["E702", "E741", "F401", "F841", "E731", "E712", "E721", "E402", "E711"]
 
 # =============================================================================
 # RELEASE POLICY (locked): TorchLens stays on the 2.x family on PyPI.

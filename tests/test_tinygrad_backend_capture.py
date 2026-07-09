@@ -444,7 +444,6 @@ def test_tinygrad_spec_registered() -> None:
     assert capabilities.supports_payload_materialization is True
     assert capabilities.module_identity_modes == ("function_root", "object_module")
     assert capabilities.payload_policy == "array_payloads"
-    assert capabilities.live_payload_policy == "dev_python_realized_copy"
     assert capabilities.trace_options == ("module_identity_mode", "grad_options")
 
 
@@ -466,6 +465,13 @@ def test_tinygrad_forward_capture_from_uop_snapshots() -> None:
     assert trace.validate_forward_pass([_tiny_block(x)]) is True
     assert getattr(trace, "tinygrad_payload_policy") == "dev_python_realized_copy"
     assert trace.output_layers
+
+
+def test_tinygrad_preview_rejects_random_seed() -> None:
+    """tinygrad preview rejects random_seed instead of storing inert metadata."""
+
+    with pytest.raises(BackendUnsupportedError, match="random_seed"):
+        tl.trace(_tiny_block, Tensor([1.0, -2.0, 3.0]), backend="tinygrad", random_seed=123)
 
 
 def test_tinygrad_multi_output_marks_outputs() -> None:

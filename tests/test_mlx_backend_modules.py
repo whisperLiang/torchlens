@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pytest
@@ -12,6 +11,7 @@ mx = pytest.importorskip("mlx.core", exc_type=ImportError)
 nn = pytest.importorskip("mlx.nn", exc_type=ImportError)
 
 import torchlens as tl  # noqa: E402
+from torchlens.intervention.errors import MultiMatchWarning  # noqa: E402
 from torchlens.validation import MetadataInvariantError  # noqa: E402
 from torchlens.validation import check_metadata_invariants  # noqa: E402
 
@@ -175,8 +175,8 @@ def test_mlx_nested_modules_preserve_object_module_attribution() -> None:
     head_labels = trace.resolve_sites(tl.in_module("head"), max_fanout=16).labels()
     assert encoder_labels
     assert head_labels
-    assert all("encoder:1" in trace[label].modules for label in encoder_labels)
-    assert all("head:1" in trace[label].modules for label in head_labels)
+    assert all(("encoder", 1) in trace.layers[label].modules for label in encoder_labels)
+    assert all(("head", 1) in trace.layers[label].modules for label in head_labels)
     assert trace.modules["head"].params
     assert check_metadata_invariants(trace) is True
 
@@ -193,9 +193,10 @@ def test_mlx_shared_submodule_aliases_use_primary_address() -> None:
     assert shared.all_addresses == ["left", "right"]
     assert shared.num_calls == 2
     assert shared.call_labels == ["left:1", "left:2"]
-    left_labels = trace.resolve_sites(tl.in_module("left"), max_fanout=32).labels()
-    assert any("left:1" in trace[label].modules for label in left_labels)
-    assert any("left:2" in trace[label].modules for label in left_labels)
+    with pytest.warns(MultiMatchWarning, match="matched 2 sites"):
+        left_labels = trace.resolve_sites(tl.in_module("left"), max_fanout=32).labels()
+    assert any(("left", 1) in trace.layers[label].modules for label in left_labels)
+    assert any(("left", 2) in trace.layers[label].modules for label in left_labels)
     assert {tuple(param.all_module_addresses) for param in shared.params} == {("left", "right")}
     assert check_metadata_invariants(trace) is True
 

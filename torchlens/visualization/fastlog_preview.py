@@ -234,6 +234,9 @@ def _build_preview_nodes(trace: Any, predicate: Predicate | None) -> dict[str, P
         )
         preview_node = _evaluate_preview_node(op_log, ctx, predicate)
         preview_nodes[getattr(op_log, "layer_label", ctx.label)] = preview_node
+        short_label = getattr(op_log, "layer_label_short", None)
+        if isinstance(short_label, str):
+            preview_nodes[short_label] = preview_node
         history.append(ctx)
     return preview_nodes
 
@@ -279,7 +282,18 @@ def _make_node_spec_fn(
     def node_spec_fn(layer_log: Any, default_spec: NodeSpec) -> NodeSpec:
         """Paint one node from cached preview state."""
 
-        preview_node = preview_nodes.get(getattr(layer_log, "layer_label", ""))
+        preview_node = next(
+            (
+                preview_nodes[label]
+                for label in (
+                    getattr(layer_log, "layer_label", None),
+                    getattr(layer_log, "layer_label_short", None),
+                    getattr(layer_log, "label", None),
+                )
+                if isinstance(label, str) and label in preview_nodes
+            ),
+            None,
+        )
         lines = list(default_spec.lines)
         if preview_node is None:
             return default_spec

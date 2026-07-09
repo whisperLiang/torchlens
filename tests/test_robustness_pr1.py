@@ -5,7 +5,7 @@ Covers:
       silently corrupt the outer Trace.
     - Instrumented functorch / vmap / grad transforms warn at the boundary, while raw
       uninstrumented transform regions retain the one-shot warning.
-    - pyproject pins ``torch>=2.4`` (matching the autocast API already in use)
+    - pyproject pins the documented ``torch>=2.1`` compatibility floor
       and advertises Python 3.13 support.
 """
 
@@ -19,7 +19,8 @@ from torch import nn
 
 import torchlens as tl
 from torchlens import _state
-from torchlens.backends.torch.wrappers import wrap_torch
+from torchlens.backends.torch.wrappers import torch_func_decorator, wrap_torch
+from torchlens.options import CaptureOptions
 
 
 class _Tiny(nn.Module):
@@ -74,7 +75,7 @@ def test_nested_trace_via_forward_hook_raises() -> None:
     outer.a.register_forward_hook(evil_hook)
 
     with pytest.raises(RuntimeError, match="not re-entrant"):
-        tl.trace(outer, x, layers_to_save="none")
+        tl.trace(outer, x, capture=CaptureOptions(layers_to_save="none"))
 
 
 def test_logging_state_cleared_after_guard_fires() -> None:
@@ -91,7 +92,7 @@ def test_logging_state_cleared_after_guard_fires() -> None:
     assert _state._active_trace is None
 
     # Follow-up forward pass should succeed — the outer `with` cleaned up.
-    log = tl.trace(model, x, layers_to_save="none")
+    log = tl.trace(model, x, capture=CaptureOptions(layers_to_save="none"))
     assert len(log.layer_logs) > 0
 
 
@@ -121,7 +122,7 @@ def test_vmap_emits_userwarning_once_per_session() -> None:
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        tl.trace(model, x, layers_to_save="none")
+        tl.trace(model, x, capture=CaptureOptions(layers_to_save="none"))
 
     vmap_warnings = [
         w
@@ -158,10 +159,10 @@ def test_vmap_warning_flag_resets_between_sessions() -> None:
 
     with warnings.catch_warnings(record=True) as first:
         warnings.simplefilter("always")
-        tl.trace(model, x, layers_to_save="none")
+        tl.trace(model, x, capture=CaptureOptions(layers_to_save="none"))
     with warnings.catch_warnings(record=True) as second:
         warnings.simplefilter("always")
-        tl.trace(model, x, layers_to_save="none")
+        tl.trace(model, x, capture=CaptureOptions(layers_to_save="none"))
 
     first_count = sum(1 for w in first if "functorch" in str(w.message).lower())
     second_count = sum(1 for w in second if "functorch" in str(w.message).lower())
@@ -176,10 +177,59 @@ def test_non_vmap_forward_pass_emits_no_functorch_warning() -> None:
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        tl.trace(model, x, layers_to_save="none")
+        tl.trace(model, x, capture=CaptureOptions(layers_to_save="none"))
 
     functorch_warnings = [w for w in caught if "functorch" in str(w.message).lower()]
     assert functorch_warnings == []
+
+
+def test_opaque_non_iterable_arg_does_not_hide_tensor_capture() -> None:
+    """Opaque non-tensor args must pass through wrappers while tensors still log."""
+
+    class OpaqueExpr:
+        """Synthetic expression object that refuses iteration and introspection."""
+
+        def __iter__(self) -> None:
+            """Raise the same non-iterable error shape as dataframe expressions."""
+
+            raise TypeError("'Expr' object is not iterable")
+
+        def __dir__(self) -> list[str]:
+            """Route introspection through iteration to reproduce opaque proxy failure."""
+
+            iter(self)
+            return []
+
+    def opaque_passthrough(x: torch.Tensor, expr: OpaqueExpr) -> torch.Tensor:
+        """Return a real tensor result while carrying an opaque side argument."""
+
+        del expr
+        return torch.relu(x)
+
+    wrapped_passthrough = torch_func_decorator(opaque_passthrough, "opaque_passthrough")
+
+    class OpaqueArgModel(nn.Module):
+        """Model that passes an opaque object through a decorated call."""
+
+        def __init__(self) -> None:
+            """Initialize the opaque expression payload."""
+
+            super().__init__()
+            self.expr = OpaqueExpr()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Run a decorated call with both tensor and opaque arguments."""
+
+            return wrapped_passthrough(x, self.expr) + 1
+
+    model = OpaqueArgModel()
+    x = torch.randn(2, 4)
+
+    trace = tl.trace(model, x, layers_to_save="all")
+
+    assert tl.validation.validate_forward_pass(model, x)
+    assert any(label.startswith("relu") for label in trace.layer_labels)
+    assert any(label.startswith("add") for label in trace.layer_labels)
 
 
 # ---------------------------------------------------------------------------
@@ -188,10 +238,11 @@ def test_non_vmap_forward_pass_emits_no_functorch_warning() -> None:
 
 
 def test_pyproject_pins_torch_floor() -> None:
-    """The torch dependency must pin >=2.4 — earlier versions lack the autocast
-    API signatures that TorchLens already uses (torch/amp refactor, 2.4).
-    """
+    """The torch dependency must pin exactly the documented >=2.1 floor."""
     from pathlib import Path
+
+    from packaging.requirements import Requirement
+    from packaging.version import Version
 
     try:
         import tomllib
@@ -203,11 +254,12 @@ def test_pyproject_pins_torch_floor() -> None:
         data = tomllib.load(f)
 
     deps = data["project"]["dependencies"]
-    torch_pins = [d for d in deps if d.startswith("torch") and "=" in d]
+    torch_pins = [Requirement(d) for d in deps if Requirement(d).name == "torch"]
     assert torch_pins, f"Expected a pinned torch dependency; got deps={deps}"
-    # The pin should be torch>=2.4 (or higher) — not a bare 'torch'.
-    pin = torch_pins[0]
-    assert ">=2.4" in pin or ">=2.5" in pin or ">=2.6" in pin, f"torch floor too loose: {pin!r}"
+    lower_bounds = [
+        Version(spec.version) for spec in torch_pins[0].specifier if spec.operator in {">=", "=="}
+    ]
+    assert lower_bounds == [Version("2.1")], f"torch floor must be exactly >=2.1: {torch_pins[0]!s}"
 
 
 def test_pyproject_advertises_python_313_classifier() -> None:

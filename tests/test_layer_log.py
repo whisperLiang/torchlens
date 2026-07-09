@@ -8,6 +8,7 @@ import torchlens as tl
 from torchlens.data_classes.layer import Layer
 from torchlens.data_classes.trace import Trace
 from torchlens.data_classes.op import Op
+from torchlens.options import CaptureOptions
 
 
 # ---------------------------------------------------------------------------
@@ -33,16 +34,31 @@ class RecurrentModel(nn.Module):
         return x
 
 
+class ColonNamedModule(nn.Module):
+    """Model with a legal PyTorch submodule name containing a colon."""
+
+    def __init__(self) -> None:
+        """Register a colon-bearing submodule name."""
+
+        super().__init__()
+        self.add_module("a:b", nn.ReLU())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the colon-bearing submodule."""
+
+        return self._modules["a:b"](x)
+
+
 @pytest.fixture
 def simple_log():
     model = SimpleModel()
-    return tl.trace(model, torch.randn(1, 5), layers_to_save="all")
+    return tl.trace(model, torch.randn(1, 5), capture=CaptureOptions(layers_to_save="all"))
 
 
 @pytest.fixture
 def recurrent_log():
     model = RecurrentModel()
-    return tl.trace(model, torch.randn(1, 5), layers_to_save="all")
+    return tl.trace(model, torch.randn(1, 5), capture=CaptureOptions(layers_to_save="all"))
 
 
 def _assert_layer_labels_are_not_doubled(trace: Trace) -> None:
@@ -113,7 +129,7 @@ class TestLayerLogConstruction:
         model = transformers.DistilBertModel(config)
         model.eval()
         input_ids = torch.randint(0, config.vocab_size, (1, 4))
-        trace = tl.trace(model, input_ids, layers_to_save="all")
+        trace = tl.trace(model, input_ids, capture=CaptureOptions(layers_to_save="all"))
 
         _assert_layer_labels_are_not_doubled(trace)
 
@@ -147,6 +163,29 @@ class TestSinglePassDelegation:
             pass_log = layer_log.ops[0]
             # func_autocast_state is per-pass, not an explicit @property
             assert layer_log.func_autocast_state is pass_log.func_autocast_state
+
+    def test_multi_pass_fallback_getattr_raises_guided_value_error(
+        self: "TestSinglePassDelegation",
+        recurrent_log: Trace,
+    ) -> None:
+        """Multi-pass fallback fields raise the documented ValueError guidance."""
+
+        layer_log = next(layer for layer in recurrent_log.layers if layer.num_passes > 1)
+
+        with pytest.raises(ValueError, match=r"ops\[0\]\.var_names"):
+            _ = layer_log.var_names
+
+    def test_multi_pass_slotted_ref_fields_raise_guided_value_error(
+        self: "TestSinglePassDelegation",
+        recurrent_log: Trace,
+    ) -> None:
+        """Slotted per-pass ref fields use the same multi-pass guidance."""
+
+        layer_log = next(layer for layer in recurrent_log.layers if layer.num_passes > 1)
+
+        for field_name in ("out_ref", "grad_ref"):
+            with pytest.raises(ValueError, match=rf"ops\[0\]\.{field_name}"):
+                getattr(layer_log, field_name)
 
     def test_tracing_finished_reads_from_trace(self, simple_log):
         for layer_log in simple_log.layer_logs.values():
@@ -205,7 +244,7 @@ class TestMultiPassLayerLog:
         """__getattr__ fallback raises for multi-pass layers."""
         for layer_log in recurrent_log.layer_logs.values():
             if layer_log.num_passes > 1:
-                with pytest.raises(AttributeError):
+                with pytest.raises(ValueError, match=r"\.ops\[0\]"):
                     _ = layer_log.func_autocast_state
                 break
 
@@ -277,9 +316,23 @@ class TestLayerLogDisplay:
 
 
 class TestConvenienceAliases:
-    def test_layer_label_no_pass_alias(self, simple_log):
-        for layer_log in simple_log.layer_logs.values():
-            assert layer_log.layer_label == layer_log.layer_label
+    def test_layer_label_no_pass_alias(self, recurrent_log):
+        """``Op.layer_label`` is the pass-free alias of the pass-qualified ``Op.label``.
+
+        ``layer_label_no_pass`` (the field this test originally exercised) was
+        retired: ``Op.layer_label`` is itself already the canonical no-pass label
+        (assigned in ``postprocess/labeling.py``). Assert the real relationship
+        that name implies: stripping the ``:<pass_index>`` suffix from the
+        pass-qualified ``label`` always recovers ``layer_label``, and
+        ``layer_label`` itself never carries a pass qualifier -- including across
+        a recurrent layer's multiple passes, where every pass shares one
+        ``layer_label`` but has a distinct pass-qualified ``label``.
+        """
+
+        for layer_log in recurrent_log.layer_logs.values():
+            for op in layer_log.ops.values():
+                assert ":" not in op.layer_label
+                assert op.label == f"{op.layer_label}:{op.pass_index}"
 
     def test_params_accessor(self, recurrent_log):
         for layer_log in recurrent_log.layer_logs.values():
@@ -340,6 +393,14 @@ class TestLayerNumPasses:
             assert isinstance(ops, int), f"Expected int, got {type(ops)} for {label}"
 
 
+def test_colon_named_module_traces_without_postprocess_split_error() -> None:
+    """Module call labels parse from the right when module names contain colons."""
+
+    trace = tl.trace(ColonNamedModule(), torch.randn(1, 5), layers_to_save="all")
+
+    assert "a:b" in trace.modules
+
+
 class TestSliceIndexing:
     """Slice indexing should return list."""
 
@@ -358,7 +419,10 @@ class TestToPandasGuard:
         model = _SimpleLinear()
         log = tl.trace(model, torch.randn(2, 10))
         try:
-            import pandas
+            import importlib.util
+
+            if importlib.util.find_spec("pandas") is None:
+                raise ImportError
 
             df = log.to_pandas()
             assert df is not None

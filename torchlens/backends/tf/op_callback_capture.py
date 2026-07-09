@@ -9,7 +9,7 @@ from typing import Any, Callable
 import numpy as np
 
 from ...fastlog.types import CaptureSpec
-from ...ir.buffer import CaptureEvents
+from ...ir.capture_events import CaptureEvents
 from ...ir.events import (
     ArgTemplateRef,
     FunctionCallRef,
@@ -21,7 +21,7 @@ from ...ir.events import (
 from ...ir.predicate import RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
-from ..registry import BackendUnsupportedError
+from ._tf_compat import get_op_callbacks_module
 from .modules import TFModuleTree, patched_tf_module_stack
 
 _INIT_OP_TYPES = frozenset(
@@ -243,6 +243,8 @@ class TFEagerCaptureSession:
             op_name: str | None = None,
             graph: Any | None = None,
         ) -> None:
+            """Forward one TensorFlow op-callback event to the capture recorder."""
+
             self._callback(
                 op_type=op_type,
                 inputs=inputs,
@@ -922,13 +924,7 @@ class TFEagerCaptureSession:
             TensorFlow private op-callback module.
         """
 
-        try:
-            from tensorflow.python.framework import op_callbacks
-        except ImportError as exc:
-            raise BackendUnsupportedError(
-                "TensorFlow eager capture requires tensorflow.python.framework.op_callbacks."
-            ) from exc
-        return op_callbacks
+        return get_op_callbacks_module()
 
 
 def warm_up_tf_callable(callable_obj: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:

@@ -7,7 +7,8 @@ import builtins
 import inspect
 from pathlib import Path
 import sys
-from typing import Any
+import types
+from typing import Any, Iterator, cast
 
 import pytest
 import torch
@@ -20,17 +21,30 @@ from torchlens.backends import (
     BackendMismatchError,
     BackendSpec,
     BackendUnsupportedError,
+    CaptureBackend,
+    UnknownBackendError,
     SerializationPolicy,
     get_backend_spec,
     register_backend_spec,
+    registered_backend_specs,
     resolve_backend_spec,
     unregister_backend_spec,
 )
+from torchlens.capture.trace import _capture_backend_from_registry
 from torchlens.backends.jax import capabilities as jax_capabilities
 from torchlens.backends.mlx import capabilities as mlx_capabilities
 from torchlens.backends.paddle import capabilities as paddle_capabilities
 from torchlens.backends.tinygrad import capabilities as tinygrad_capabilities
-from torchlens.backends.default_specs import _paddle_can_handle
+from torchlens.backends.default_specs import (
+    _contains_other_backend_tensor,
+    _jax_can_handle,
+    _mlx_can_handle,
+    _paddle_can_handle,
+    _tf_can_handle,
+    _tinygrad_can_handle,
+)
+from torchlens.backends.registry import _CAPTURE_BACKEND_REQUIRED_ATTRIBUTES
+from torchlens.backends.tf import TFBackend
 from torchlens.validation import check_metadata_invariants
 from torchlens.validation.invariants import MetadataInvariantError
 
@@ -230,8 +244,150 @@ def test_explicit_torch_backend_matches_legacy_trace() -> None:
     assert explicit.layer_labels == legacy.layer_labels
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"module_identity_mode": "object_module"},
+        {"payload_policy": "not_a_policy"},
+        {"save_preview": True},
+        {"jax_control_flow": "reject"},
+    ],
+)
+def test_torch_rejects_explicit_inert_trace_option_values(kwargs: dict[str, Any]) -> None:
+    """Torch should reject explicit public options it cannot honor."""
+
+    with pytest.raises(BackendUnsupportedError):
+        tl.trace(_TinyModel(), torch.ones(1), backend="torch", **kwargs)
+
+
+def test_torch_accepts_default_equivalent_trace_option_values() -> None:
+    """Torch accepts supported/default-equivalent public option values."""
+
+    trace = tl.trace(
+        _TinyModel(),
+        torch.ones(1),
+        backend="torch",
+        module_identity_mode="torch_module",
+        payload_policy="full",
+        save_preview=False,
+    )
+
+    assert trace.backend == "torch"
+    assert trace.module_identity_mode == "torch_module"
+
+
+def test_capture_backend_factory_checked_at_registration() -> None:
+    """Registration rejects incomplete shared capture protocol adapters."""
+
+    def bad_capture_backend() -> CaptureBackend:
+        """Return an object missing the shared capture protocol.
+
+        Returns
+        -------
+        CaptureBackend
+            Deliberately invalid adapter for conformance coverage.
+        """
+
+        return cast(CaptureBackend, object())
+
+    with pytest.raises(TypeError, match="capture_backend.*missing"):
+        register_backend_spec(
+            BackendSpec(
+                name="fake_conformance",
+                can_handle=_fake_can_handle,
+                capture_trace=_fake_capture_trace,
+                validate_entry=_fake_validate_entry,
+                validate_trace=_fake_validate_trace,
+                capabilities=BackendCapabilities(
+                    backward_capture=False,
+                    validation_replay=False,
+                    fastlog=False,
+                    interventions=False,
+                    rng_replay=False,
+                    payload_materialization=False,
+                    streaming=False,
+                ),
+                capture_backend=bad_capture_backend,
+            )
+        )
+
+
+def test_capture_backend_factory_import_error_is_not_exempted() -> None:
+    """Registration rejects factories that cannot construct a backend adapter."""
+
+    def bad_capture_backend() -> CaptureBackend:
+        """Raise the formerly exempt circular-import shaped error."""
+
+        raise ImportError("cannot import name X from partially initialized module Y")
+
+    with pytest.raises(ImportError, match="partially initialized module"):
+        register_backend_spec(
+            BackendSpec(
+                name="fake_partial_import",
+                can_handle=_fake_can_handle,
+                capture_trace=_fake_capture_trace,
+                validate_entry=_fake_validate_entry,
+                validate_trace=_fake_validate_trace,
+                capabilities=BackendCapabilities(
+                    backward_capture=False,
+                    validation_replay=False,
+                    fastlog=False,
+                    interventions=False,
+                    rng_replay=False,
+                    payload_materialization=False,
+                    streaming=False,
+                ),
+                capture_backend=bad_capture_backend,
+            )
+        )
+
+
+def test_replace_backend_spec_removes_stale_aliases() -> None:
+    """Replacing a spec removes aliases owned by the old spec."""
+
+    for name in ("fake_alias_probe", "fake_alias_probe_old"):
+        unregister_backend_spec(name)
+    old_spec = BackendSpec(
+        name="fake_alias_probe",
+        aliases=("fake_alias_probe_old",),
+        can_handle=_fake_can_handle,
+        capture_trace=_fake_capture_trace,
+        validate_entry=_fake_validate_entry,
+        validate_trace=_fake_validate_trace,
+        capabilities=BackendCapabilities(
+            backward_capture=False,
+            validation_replay=False,
+            fastlog=False,
+            interventions=False,
+            rng_replay=False,
+            payload_materialization=False,
+            streaming=False,
+        ),
+    )
+    new_spec = BackendSpec(
+        name="fake_alias_probe",
+        can_handle=_fake_can_handle,
+        capture_trace=_fake_capture_trace,
+        validate_entry=_fake_validate_entry,
+        validate_trace=_fake_validate_trace,
+        capabilities=old_spec.capabilities,
+    )
+    try:
+        register_backend_spec(old_spec)
+        assert get_backend_spec("fake_alias_probe_old") is old_spec
+
+        register_backend_spec(new_spec, replace=True)
+
+        assert get_backend_spec("fake_alias_probe") is new_spec
+        with pytest.raises(UnknownBackendError):
+            get_backend_spec("fake_alias_probe_old")
+    finally:
+        unregister_backend_spec("fake_alias_probe")
+        unregister_backend_spec("fake_alias_probe_old")
+
+
 def test_capability_sources_agree_for_preview_backends() -> None:
-    """Default specs and per-backend capability mirrors stay in lockstep."""
+    """Compatibility capability modules read from the registered specs."""
 
     jax_spec = get_backend_spec("jax")
     mlx_spec = get_backend_spec("mlx")
@@ -362,6 +518,7 @@ def test_paddle_backend_registered_with_alias_and_priority() -> None:
 
     spec = get_backend_spec("paddle")
     assert spec.name == "paddle"
+    assert spec.capture_backend is None
     assert get_backend_spec("paddlepaddle") is spec
     assert spec.priority == 40
     assert get_backend_spec("torch").priority == 0
@@ -418,6 +575,269 @@ def test_paddle_detector_accepts_layer_and_nested_tensor() -> None:
     assert not _paddle_can_handle(_TinyModel(), torch.ones(1), None)
 
 
+def test_mlx_detector_rejects_mixed_foreign_tensor_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MLX detector rejects inputs containing another backend tensor family."""
+
+    mlx_module = types.ModuleType("mlx")
+    mlx_core = types.ModuleType("mlx.core")
+    mlx_nn = types.ModuleType("mlx.nn")
+    MlxArray = type("array", (), {"__module__": "mlx.core"})
+    MlxModule = type("Module", (), {"__module__": "mlx.nn", "__call__": lambda self, x: x})
+    TFTensor = type("Tensor", (), {"__module__": "tensorflow.python.framework.ops"})
+    mlx_core.array = MlxArray
+    mlx_nn.Module = MlxModule
+    mlx_module.core = mlx_core
+    mlx_module.nn = mlx_nn
+    monkeypatch.setitem(sys.modules, "mlx", mlx_module)
+    monkeypatch.setitem(sys.modules, "mlx.core", mlx_core)
+    monkeypatch.setitem(sys.modules, "mlx.nn", mlx_nn)
+
+    assert _mlx_can_handle(MlxModule(), MlxArray(), None)
+    assert not _mlx_can_handle(MlxModule(), (MlxArray(), TFTensor()), None)
+    assert resolve_backend_spec(None, MlxModule(), (MlxArray(), TFTensor())).name == "torch"
+    with pytest.raises(ValueError, match="Unsupported model type"):
+        tl.trace(MlxModule(), (MlxArray(), TFTensor()))
+
+
+def test_jax_detector_rejects_mixed_foreign_tensor_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """JAX detector rejects inputs containing another backend tensor family."""
+
+    jax_module = types.ModuleType("jax")
+    JaxArray = type("Array", (), {"__module__": "jax"})
+    PaddleTensor = type("Tensor", (), {"__module__": "paddle.base.framework"})
+
+    def _flatten(value: object) -> tuple[list[object], None]:
+        """Flatten nested fake JAX inputs for detector coverage."""
+
+        return list(_test_leaves(value)), None
+
+    jax_module.Array = JaxArray
+    jax_module.tree = types.SimpleNamespace(flatten=_flatten)
+    monkeypatch.setitem(sys.modules, "jax", jax_module)
+
+    assert _jax_can_handle(lambda x: x, (JaxArray(),), None)
+    assert not _jax_can_handle(lambda x: x, (JaxArray(),), {"other": PaddleTensor()})
+
+
+def test_tinygrad_detector_rejects_mixed_foreign_tensor_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """tinygrad detector rejects inputs containing another backend tensor family."""
+
+    tinygrad_module = types.ModuleType("tinygrad")
+    TinyTensor = type("Tensor", (), {"__module__": "tinygrad.tensor"})
+    JaxArray = type("Array", (), {"__module__": "jaxlib.xla_extension"})
+    tinygrad_module.Tensor = TinyTensor
+    monkeypatch.setitem(sys.modules, "tinygrad", tinygrad_module)
+
+    assert _tinygrad_can_handle(lambda x: x, (TinyTensor(),), None)
+    assert not _tinygrad_can_handle(lambda x: x, (TinyTensor(), JaxArray()), None)
+
+
+def test_paddle_detector_rejects_mixed_foreign_tensor_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Paddle detector rejects inputs containing another backend tensor family."""
+
+    paddle_module = types.ModuleType("paddle")
+    PaddleTensor = type("Tensor", (), {"__module__": "paddle.base.framework"})
+    PaddleLayer = type("Layer", (), {"__module__": "paddle.nn.layer", "__call__": lambda s, x: x})
+    TFTensor = type("Tensor", (), {"__module__": "tensorflow.python.framework.ops"})
+    paddle_module.Tensor = PaddleTensor
+    paddle_module.nn = types.SimpleNamespace(Layer=PaddleLayer)
+    monkeypatch.setitem(sys.modules, "paddle", paddle_module)
+
+    assert _paddle_can_handle(PaddleLayer(), PaddleTensor(), None)
+    assert not _paddle_can_handle(PaddleLayer(), (PaddleTensor(), TFTensor()), None)
+
+
+def _test_leaves(value: object) -> Iterator[object]:
+    """Yield leaves from simple nested test containers."""
+
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from _test_leaves(item)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _test_leaves(item)
+        return
+    yield value
+
+
+def test_tf_foreign_leaf_guard_covers_mlx_and_tinygrad_modules() -> None:
+    """TensorFlow foreign-leaf detection rejects MLX/tinygrad-shaped leaves."""
+
+    MlxArray = type("array", (), {"__module__": "mlx.core"})
+    TinygradTensor = type("Tensor", (), {"__module__": "tinygrad.tensor"})
+
+    assert _contains_other_backend_tensor("tf", MlxArray(), None)
+    assert _contains_other_backend_tensor("tf", TinygradTensor(), None)
+
+
+def test_tf_detector_foreign_leaf_guard_runs_before_tensorflow_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Foreign leaves should make TensorFlow detection fail without importing TF."""
+
+    original_import = builtins.__import__
+    MlxArray = type("array", (), {"__module__": "mlx.core"})
+
+    def _raise_for_tensorflow(
+        name: str,
+        globals: dict[str, Any] | None = None,
+        locals: dict[str, Any] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> Any:
+        """Raise if TensorFlow/Keras imports are attempted."""
+
+        if name in {"tensorflow", "keras"}:
+            raise AssertionError(f"unexpected import: {name}")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _raise_for_tensorflow)
+
+    assert not _tf_can_handle(lambda x: x, MlxArray(), None)
+
+
+def test_tf_detector_declines_unsupported_tensorflow_stack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TensorFlow routing requires Keras 3 on TensorFlow >= 2.16."""
+
+    keras_module = types.ModuleType("keras")
+    keras_module.__version__ = "2.13.1"
+    keras_module.backend = types.SimpleNamespace(backend=lambda: "tensorflow")
+
+    tf_module = types.ModuleType("tensorflow")
+    tf_module.__version__ = "2.14.0"
+    tf_module.Module = type("TFModule", (), {})
+    tf_module.Tensor = type("TFTensor", (), {})
+    tf_module.Variable = type("TFVariable", (), {})
+    tf_module.types = types.SimpleNamespace(
+        experimental=types.SimpleNamespace(ConcreteFunction=type("ConcreteFunction", (), {}))
+    )
+
+    monkeypatch.setitem(sys.modules, "keras", keras_module)
+    monkeypatch.setitem(sys.modules, "tensorflow", tf_module)
+
+    assert not _tf_can_handle(tf_module.Module(), object(), None)
+
+
+def test_tf_detector_swallows_non_import_error_from_broken_tf_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken-but-importable TF/Keras install must not crash the autorouter.
+
+    Regression test: ``_tf_can_handle`` previously wrapped ``import keras`` /
+    ``import tensorflow`` in a ``try/except ImportError`` only. A TF/Keras
+    install that is present but broken (e.g. a numpy/protobuf ABI mismatch)
+    can raise exceptions other than ``ImportError`` -- ``TypeError``,
+    ``AttributeError``, ``RuntimeError``, etc. -- from the import statements
+    themselves or from any keras/tf attribute access used afterward to
+    determine handleability. Those exceptions previously propagated
+    uncaught out of the can-handle PROBE, up through
+    ``resolve_backend_spec``'s ``[... for spec in registered_backend_specs()
+    if spec.can_handle(...)]`` comprehension, crashing the entire
+    autorouter -- and thus ANY capture attempt, regardless of which backend
+    the caller actually wanted -- any time TF happens to be
+    installed-but-broken in the environment. Confirmed by reverting the fix
+    and re-running this exact scenario (see below). Now the probe treats
+    any such failure as "cannot handle" and autorouting continues to work
+    for other backends.
+    """
+
+    original_import = builtins.__import__
+
+    def _raise_non_import_error(
+        name: str,
+        globals: dict[str, Any] | None = None,
+        locals: dict[str, Any] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> Any:
+        """Simulate a broken-but-technically-importable TF/Keras install."""
+
+        if name in {"tensorflow", "keras"}:
+            raise RuntimeError("simulated numpy/protobuf ABI break")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _raise_non_import_error)
+
+    # Must NOT raise -- a broken TF/Keras install is only "cannot handle",
+    # never a crash.
+    assert _tf_can_handle(lambda x: x, object(), None) is False
+
+    # Autorouting must still resolve a plain torch nn.Module to the torch
+    # backend even though the TF probe raised internally -- the crash must
+    # not propagate up through ``resolve_backend_spec``.
+    assert resolve_backend_spec(None, _TinyModel(), torch.ones(1)).name == "torch"
+    trace = tl.trace(_TinyModel(), torch.ones(1))
+    assert trace.backend == "torch"
+
+
+def test_tf_detector_reraises_genuine_backend_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The broadened exception guard must not swallow a real backend mismatch.
+
+    ``_tf_can_handle`` deliberately raises ``BackendMismatchError`` when a
+    Keras object is configured for a non-TensorFlow Keras backend and
+    ``backend='tf'`` is explicitly requested. That is actionable user-facing
+    signal, not an ABI crash, so the broadened ``except Exception`` guard
+    added to swallow broken-install probe failures must not also swallow it.
+    """
+
+    keras_module = types.ModuleType("keras")
+    keras_module.__version__ = "3.0.0"
+    keras_module.backend = types.SimpleNamespace(backend=lambda: "torch")
+
+    tf_module = types.ModuleType("tensorflow")
+    tf_module.__version__ = "2.16.0"
+    tf_module.Module = type("TFModule", (), {})
+    tf_module.Tensor = type("TFTensor", (), {})
+    tf_module.Variable = type("TFVariable", (), {})
+    tf_module.types = types.SimpleNamespace(
+        experimental=types.SimpleNamespace(ConcreteFunction=type("ConcreteFunction", (), {}))
+    )
+
+    monkeypatch.setitem(sys.modules, "keras", keras_module)
+    monkeypatch.setitem(sys.modules, "tensorflow", tf_module)
+
+    keras_model = type("KerasModel", (), {"__module__": "keras.src.models.model"})()
+    with pytest.raises(BackendMismatchError, match="active keras backend is 'torch'"):
+        _tf_can_handle(keras_model, object(), None)
+
+
+def test_tf_backend_rejects_random_seed_without_importing_tensorflow() -> None:
+    """TensorFlow preview random_seed is a typed unsupported option."""
+
+    with pytest.raises(BackendUnsupportedError, match="random_seed"):
+        TFBackend().capture_trace(lambda x: x, object(), random_seed=123)
+
+
+def test_paddle_shared_capture_backend_is_unsupported_typed_error() -> None:
+    """Paddle shared-orchestration lookup raises the canonical unsupported error."""
+
+    paddle = pytest.importorskip("paddle")
+
+    class _PaddleLayer(paddle.nn.Layer):
+        """Small Paddle layer for shared-capture resolution tests."""
+
+        def forward(self, x: Any) -> Any:
+            """Return the input unchanged."""
+
+            return x
+
+    with pytest.raises(BackendUnsupportedError, match="shared capture Protocol adapter"):
+        _capture_backend_from_registry("paddle", _PaddleLayer(), paddle.to_tensor([1.0]), None)
+
+
 def test_explicit_paddle_backend_resolves_to_spec() -> None:
     """Explicit Paddle backend and alias resolve to the Paddle spec."""
 
@@ -452,6 +872,46 @@ def test_paddle_preview_unsupported_options_raise_typed_error() -> None:
 
     with pytest.raises(BackendUnsupportedError):
         tl.trace(_PaddleLayer(), paddle.to_tensor([1.0]), backend="paddle", backward_ready=True)
+
+
+def test_registered_capture_backends_conform_to_protocol() -> None:
+    """Every registered shared-capture adapter exposes the full protocol surface."""
+
+    required_attrs = tuple(CaptureBackend.__annotations__) + tuple(
+        name
+        for name, value in CaptureBackend.__dict__.items()
+        if not name.startswith("_") and callable(value)
+    )
+    dependency_modules = {
+        "jax": "jax",
+        "mlx": "mlx",
+        "paddle": "paddle",
+        "tf": "tensorflow",
+        "tinygrad": "tinygrad",
+    }
+
+    for spec in registered_backend_specs():
+        if spec.capture_backend is None:
+            continue
+        if spec.name in dependency_modules:
+            pytest.importorskip(dependency_modules[str(spec.name)])
+        backend = spec.capture_backend()
+        missing = [attr for attr in required_attrs if not hasattr(backend, attr)]
+        assert missing == [], f"{spec.name} capture backend missing attrs: {missing}"
+
+
+def test_dead_correctness_protocol_methods_are_not_required() -> None:
+    """Dead isolation/autocast hooks stay out of the mandatory backend contract."""
+
+    dead_attrs = {
+        "detect_in_place_isolation_required",
+        "isolate_same_object_returns",
+        "mark_same_object_candidates",
+        "snapshot_autocast",
+    }
+
+    assert dead_attrs.isdisjoint(_CAPTURE_BACKEND_REQUIRED_ATTRIBUTES)
+    assert all(not hasattr(CaptureBackend, attr) for attr in dead_attrs)
 
 
 def test_public_trace_dispatches_through_backend_spec() -> None:

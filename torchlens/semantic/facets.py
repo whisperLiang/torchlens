@@ -567,6 +567,16 @@ class FacetSpec:
             raise TypeError("Facet scatter_update requires a tensor edited slice.")
         updated = home_out.clone(memory_format=torch.preserve_format)
         target = self.apply(updated)
+        if target.untyped_storage().data_ptr() != updated.untyped_storage().data_ptr():
+            # A primitive in the transform chain (typically "reshape"/"heads" on a
+            # non-contiguous tensor) silently fell back to a copy instead of
+            # returning a view. Writing into `target` here would edit a
+            # disconnected tensor and silently no-op the intervention -- refuse
+            # instead, mirroring the identical guard in write_mask().
+            raise RuntimeError(
+                f"Facet {self.recipe_id!r} did not produce a writable view of home "
+                f"{self.home_label or self.home_address or '<unknown>'!r}."
+            )
         _copy_scatter_value(target, edited_slice, mode=mode)
         return updated
 
@@ -1088,6 +1098,14 @@ class FacetView(Mapping[FacetKey, Any]):
     def __getattr__(self, name: str) -> Any:
         """Return a facet value by attribute name."""
 
+        if name.startswith("__") and name.endswith("__"):
+            # Dunder names are never facet keys. Rejecting them immediately
+            # (rather than falling through to the facet-lookup machinery)
+            # keeps a half-initialized FacetView shell (e.g. a blank instance
+            # under construction by copy.deepcopy/pickle) from re-entering
+            # __getattr__ via `self._cache` before __init__ has run, which
+            # would recurse without bound.
+            raise AttributeError(name)
         if not name.isidentifier() or name in _FACET_VIEW_RESERVED_NAMES:
             raise AttributeError(name)
         try:
@@ -1259,7 +1277,9 @@ def register(
     class_name: str | tuple[str, ...] | None = None,
     class_qualname: str | tuple[str, ...] | None = None,
     predicate: PredicateFunc | None = None,
-) -> Callable[[RecipeFunc], RecipeFunc]: ...
+) -> Callable[[RecipeFunc], RecipeFunc]:
+    """Return a decorator that registers a recipe with default scope."""
+    ...
 
 
 @overload
@@ -1270,7 +1290,9 @@ def register(
     predicate: PredicateFunc | None = None,
     target_scope: RecordScope = "any",
     facets: tuple[str, ...] = (),
-) -> Callable[[RecipeFunc], RecipeFunc]: ...
+) -> Callable[[RecipeFunc], RecipeFunc]:
+    """Return a decorator that registers a recipe with explicit metadata."""
+    ...
 
 
 def register(
@@ -1838,3 +1860,31 @@ def _clear_registry_for_tests() -> None:
     """Clear all registered recipes for isolated tests."""
 
     _REGISTRY.clear()
+
+
+__all__ = [
+    "AbsenceReason",
+    "AttentionHeadView",
+    "Facet",
+    "FacetCapabilityFlags",
+    "FacetKey",
+    "FacetMenuItem",
+    "FacetRecipe",
+    "FacetRegistrySnapshot",
+    "FacetSpec",
+    "FacetView",
+    "MissingFacet",
+    "MissingFacetError",
+    "MissingGradient",
+    "RecordScope",
+    "TransformPrimitive",
+    "enable_transformerlens_aliases",
+    "info",
+    "list",
+    "mark_current_registry_as_builtins",
+    "register",
+    "reset",
+    "snapshot",
+    "transformer_lens_aliases_enabled",
+    "using",
+]

@@ -3,22 +3,26 @@
 from __future__ import annotations
 
 import dataclasses
+import contextlib
 import inspect
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, Mapping, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
 from ... import _state
 from ...data_classes.internal_types import FuncExecutionContext
-from ...fastlog.types import ModuleStackFrame
-from ...ir.events import OpEvent, TraceBuildState
+from ..._io import BlobRef as PortableBlobRef
+from ...fastlog.types import CaptureSpec, ModuleStackFrame, StorageIntent
+from ...ir import replace_op_event
+from ...ir.events import OpEvent
 from ...ir.intervention import FireResult, FunctionEventInput
 from ...ir.container import ContainerSpec, OutputPathComponent
 from ...ir.container_registry import ContainerLeafOccurrence, ModelSite, Phase, Role
 from ...ir.predicate import RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
+from ...ir.trace_build_state import TraceBuildState
 from ...utils.arg_handling import (
     INPUT_WAS_PARAMETER_ATTR,
     normalize_input_args,
@@ -26,12 +30,17 @@ from ...utils.arg_handling import (
     safe_copy_kwargs,
 )
 from ...utils.introspection import get_vars_of_type_from_obj, nested_assign
-from ...utils.rng import log_current_autocast_state, log_current_rng_states
-from ...utils.tensor_utils import safe_copy
+from ...utils.rng import log_current_rng_states, set_random_seed
+from ...utils.rng import set_rng_from_saved_states
+from ...utils.tensor_utils import _is_cuda_available, safe_copy
 from . import _tl
 from .aliasing import detect_torch_alias_contract
 from .buffer_writes import reconcile_buffer_writes, uninstall_buffer_write_tracker
-from .model_prep import _cleanup_model_session, _ensure_model_prepared, _prepare_model_session
+from .model_prep import (
+    _cleanup_model_session,
+    _ensure_model_prepared,
+    _prepare_model_session,
+)
 from .module_stack import pop_frame, push_existing_frame
 from .ops import (
     _get_autograd_saved_stats_for_tensor,
@@ -75,6 +84,171 @@ def _get_input_arg_names(model: torch.nn.Module, input_args: list[Any]) -> list[
         for i in range(len(input_arg_names), len(input_args)):
             input_arg_names.append(f"{spec.varargs}_{i}")
     return input_arg_names
+
+
+def _tensor_memory_bytes(tensor: torch.Tensor) -> int:
+    """Return the byte size of a tensor payload.
+
+    Parameters
+    ----------
+    tensor:
+        Tensor whose payload memory should be measured.
+
+    Returns
+    -------
+    int
+        Number of bytes occupied by the tensor storage view.
+    """
+
+    return int(tensor.nelement() * tensor.element_size())
+
+
+def _write_output_parent_blob(
+    trace: "Trace",
+    label_raw: str,
+    payload: torch.Tensor | None,
+    kind: str,
+) -> PortableBlobRef | None:
+    """Write a promoted output-parent payload to the active bundle writer.
+
+    Parameters
+    ----------
+    trace:
+        Trace that may own an output bundle writer.
+    label_raw:
+        Raw label for the output-parent operation.
+    payload:
+        Tensor payload to persist, if any.
+    kind:
+        Bundle payload kind, such as ``"out"`` or ``"transformed_out"``.
+
+    Returns
+    -------
+    PortableBlobRef | None
+        Blob reference for the persisted payload, or ``None`` when no payload
+        was written.
+    """
+
+    writer = getattr(trace, "_out_writer", None)
+    if writer is None or payload is None:
+        return None
+    blob_id = writer.next_blob_id()
+    writer.write_blob(blob_id, payload, kind=kind, label=label_raw)
+    return PortableBlobRef(blob_id=blob_id, kind=kind)
+
+
+def _promote_layers_to_save_output_parent(
+    trace: "Trace",
+    event: OpEvent,
+    tensor: torch.Tensor,
+) -> OpEvent:
+    """Attach a saved payload to an absorbed ``layers_to_save`` output parent.
+
+    Parameters
+    ----------
+    trace:
+        Predicate-mode trace whose selective ``layers_to_save`` request must
+        preserve the output-parent retention rule.
+    event:
+        Existing operation event for the tensor returned by the model.
+    tensor:
+        Live model-output tensor corresponding to ``event``.
+
+    Returns
+    -------
+    OpEvent
+        Event updated with output-parent state and, when required, saved payload
+        references.
+    """
+
+    if (
+        not getattr(trace, "_retain_layers_to_save_output_parents", False)
+        or getattr(trace, "_predicate_save_options", None) is None
+        or event.output.has_saved_activation
+    ):
+        return dataclasses.replace(event, is_output_parent=True)
+
+    from ...capture.projections import _record_context_from_event
+    from ...fastlog._storage_resolver import _resolve_storage
+
+    ctx = dataclasses.replace(_record_context_from_event(event), is_output_parent=True)
+    options = trace._predicate_save_options
+    streaming = options.streaming
+    intent = StorageIntent(
+        in_ram=streaming is None or streaming.bundle_path is None or streaming.retain_in_memory,
+        on_disk=streaming is not None and streaming.bundle_path is not None,
+    )
+    output_device = getattr(trace, "output_device", None)
+    if output_device == "same":
+        output_device = None
+    spec = CaptureSpec(
+        save_out=True,
+        save_metadata=True,
+        keep_grad=False,
+        device=output_device,
+        save_mode=cast(Any, getattr(trace, "save_mode", "copy")),
+    )
+    ram_payload, disk_payload, transformed_ram_payload, transformed_disk_payload = _resolve_storage(
+        tensor,
+        spec,
+        intent,
+        activation_transform=getattr(trace, "activation_transform", None),
+        save_raw_activations=getattr(trace, "save_raw_activations", True),
+        ctx=ctx,
+        kind="activation",
+    )
+    raw_blob_ref = _write_output_parent_blob(trace, event.label_raw, disk_payload, "out")
+    transformed_blob_ref = _write_output_parent_blob(
+        trace,
+        event.label_raw,
+        transformed_disk_payload,
+        "transformed_out",
+    )
+    tensor_ref = dataclasses.replace(
+        event.output.tensor,
+        shape=tuple(tensor.shape),
+        dtype=str(tensor.dtype),
+        device=str(tensor.device),
+        requires_grad=tensor.requires_grad,
+        memory=_tensor_memory_bytes(tensor),
+        payload=ram_payload,
+        blob_ref=cast(Any, raw_blob_ref),
+        backend_handle_id=str(id(tensor)),
+    )
+    transformed_ref = event.output.transformed_tensor
+    if transformed_ram_payload is not None:
+        transformed_ref = TensorRef(
+            label_raw=event.label_raw,
+            shape=tuple(transformed_ram_payload.shape),
+            dtype=str(transformed_ram_payload.dtype),
+            device=str(transformed_ram_payload.device),
+            requires_grad=transformed_ram_payload.requires_grad,
+            memory=_tensor_memory_bytes(transformed_ram_payload),
+            payload=transformed_ram_payload,
+            blob_ref=cast(Any, transformed_blob_ref),
+            backend_handle_id=str(id(transformed_ram_payload)),
+        )
+    elif transformed_disk_payload is not None and transformed_ref is not None:
+        transformed_ref = dataclasses.replace(
+            transformed_ref,
+            blob_ref=cast(Any, transformed_blob_ref),
+        )
+    output_ref = dataclasses.replace(
+        event.output,
+        tensor=tensor_ref,
+        transformed_tensor=transformed_ref,
+        has_saved_activation=True,
+    )
+    policy = dataclasses.replace(event.policy, save_payload=True)
+    return dataclasses.replace(
+        event,
+        output=output_ref,
+        policy=policy,
+        predicate_matched=True,
+        is_output_parent=True,
+        capture_spec=spec,
+        record_context=ctx,
+    )
 
 
 class TorchBackend:
@@ -122,12 +296,16 @@ class TorchBackend:
         """Clean up per-session torch metadata."""
         model: object
         input_tensors: object
-        if isinstance(prepared_model, tuple) and len(prepared_model) == 2:
+        input_objects: object
+        if isinstance(prepared_model, tuple) and len(prepared_model) == 3:
+            model, input_tensors, input_objects = prepared_model
+        elif isinstance(prepared_model, tuple) and len(prepared_model) == 2:
             model, input_tensors = prepared_model
+            input_objects = None
         else:
-            model, input_tensors = prepared_model, None
+            model, input_tensors, input_objects = prepared_model, None, None
         uninstall_buffer_write_tracker(cast("Trace", session))
-        _cleanup_model_session(cast(torch.nn.Module, model), input_tensors)
+        _cleanup_model_session(cast(torch.nn.Module, model), input_tensors, input_objects)
 
     def active_logging(self, session: object) -> AbstractContextManager[None]:
         """Return the existing torch logging context manager."""
@@ -176,7 +354,7 @@ class TorchBackend:
         """
         del session
         torch_model = cast(torch.nn.Module, model)
-        if type(torch_model) == torch.nn.DataParallel:
+        if isinstance(torch_model, torch.nn.DataParallel):
             torch_model = torch_model.module
 
         # Resolve ambiguity: is [tensor_a, tensor_b] two args or one list-arg?
@@ -246,10 +424,19 @@ class TorchBackend:
             get_vars_of_type_from_obj(kwarg, torch.Tensor, search_depth=5, return_addresses=True)
             for kwarg in input_kwargs.values()
         ]
-        # Move each tensor to model device.  Tuples must be temporarily converted
-        # to lists for item assignment, then converted back to preserve type.
+        # Move each tensor to model device.  Plain tuples must be temporarily
+        # converted to lists for item assignment, then converted back to
+        # preserve type.  This roundtrip only applies to *exact* ``tuple``
+        # instances: they are the only ones addressed positionally
+        # (``("ind", i)``) by ``get_vars_of_type_from_obj``, which treats
+        # tuple *subclasses* (e.g. a NamedTuple-based GNN batch container) as
+        # plain attribute-bearing objects instead, addressed via
+        # ``("attr", name)``.  Applying the list roundtrip to a subclass would
+        # silently discard its identity and break downstream named-field
+        # access (``batch.edge_features``); ``_assign_nested_input_value``
+        # already knows how to mutate those in place via ``attr`` addressing.
         for arg_idx, arg in enumerate(input_args):
-            was_tuple = isinstance(arg, tuple)
+            was_tuple = type(arg) is tuple
             if was_tuple:
                 input_args[arg_idx] = list(arg)
             for tensor_idx, (tensor, addr, addr_full) in enumerate(input_arg_tensors[arg_idx]):
@@ -305,9 +492,83 @@ class TorchBackend:
         """Capture the current torch RNG state."""
         return log_current_rng_states(torch_only=True)
 
-    def snapshot_autocast(self, session: object) -> object:
-        """Capture the current torch autocast state."""
-        return log_current_autocast_state()
+    def seed_rng(self, session: object, seed: int) -> None:
+        """Seed torch, Python, NumPy, and CUDA RNG engines.
+
+        Parameters
+        ----------
+        session:
+            Active trace session, unused by torch RNG seeding.
+        seed:
+            Integer seed value.
+
+        Returns
+        -------
+        None
+            Process-local RNG engines are seeded in place.
+        """
+
+        del session
+        set_random_seed(seed)
+
+    def set_capture_producer_policy(self, session: object, capture_mode: object) -> None:
+        """Install torch producer policy metadata on the active trace.
+
+        Parameters
+        ----------
+        session:
+            Active trace session.
+        capture_mode:
+            Capture mode name.
+
+        Returns
+        -------
+        None
+            Torch producer policy metadata is updated in place.
+        """
+
+        from .ops import set_capture_producer_policy
+
+        set_capture_producer_policy(cast("Trace", session), cast(Any, capture_mode))
+
+    def restore_rng(self, session: object, rng_state: object) -> None:
+        """Restore a previously captured torch RNG state.
+
+        Parameters
+        ----------
+        session:
+            Active trace session, unused by torch RNG restoration.
+        rng_state:
+            Opaque RNG snapshot returned by :meth:`snapshot_rng`.
+
+        Returns
+        -------
+        None
+            The process-local torch RNG state is restored in place.
+        """
+
+        del session
+        set_rng_from_saved_states(cast(dict[str, Any], rng_state))
+
+    def inference_context(self, session: object) -> AbstractContextManager[None]:
+        """Return the torch inference-only context for this session.
+
+        Parameters
+        ----------
+        session:
+            Active trace session whose ``inference_only`` flag controls the context.
+
+        Returns
+        -------
+        AbstractContextManager[None]
+            ``torch.no_grad()`` when requested, otherwise a null context.
+        """
+
+        return (
+            torch.no_grad()
+            if getattr(session, "inference_only", False)
+            else contextlib.nullcontext()
+        )
 
     def log_source_tensor(
         self,
@@ -389,13 +650,19 @@ class TorchBackend:
         """
 
         self_trace = cast("Trace", session)
-        if getattr(self_trace, "intervention_ready", False) or getattr(
+        output_entries = list(_walk_output_tensors_with_paths(outputs))
+        # The container_spec is only user-facing metadata when explicitly opted
+        # into via capture_container_structure (or implied by intervention_ready);
+        # with the default OFF it must stay None on output layers. The container
+        # *path*, however, is always preserved so forward-replay validation can
+        # slice multi-output containers back to the right leaf.
+        persist_container_spec = getattr(self_trace, "intervention_ready", False) or getattr(
             self_trace, "_capture_container_structure", False
-        ):
-            output_entries = list(_walk_output_tensors_with_paths(outputs))
+        )
+        if output_entries:
             output_tensors_w_addresses_all = [
                 (tensor, _container_path_to_address(path), None)
-                for tensor, path, container_spec in output_entries
+                for tensor, path, _container_spec in output_entries
             ]
             output_specs_by_raw_label = {}
             for tensor, path, container_spec in output_entries:
@@ -403,11 +670,15 @@ class TorchBackend:
                 if _label_raw is not None:
                     output_specs_by_raw_label[_label_raw] = (
                         path,
-                        container_spec,
+                        container_spec if persist_container_spec else None,
                     )
             setattr(self_trace, "_output_container_specs_by_raw_label", output_specs_by_raw_label)
-            _register_model_output_container_snapshot(self_trace, outputs, output_entries)
         else:
+            output_tensors_w_addresses_all = []
+        if output_entries and persist_container_spec:
+            _register_model_output_container_snapshot(self_trace, outputs, output_entries)
+        # (container_path is stored above for validation replay even when the spec is None)
+        if not output_entries:
             output_tensors_w_addresses_all = get_vars_of_type_from_obj(
                 outputs,
                 torch.Tensor,
@@ -415,7 +686,7 @@ class TorchBackend:
                 return_addresses=True,
                 allow_repeats=True,
             )
-        # Remove duplicate addresses (same tensor at multiple output positions).
+        # Remove duplicate structural output addresses.
         addresses_seen = set()
         output_tensors_w_addresses = []
         for entry in output_tensors_w_addresses_all:
@@ -427,27 +698,52 @@ class TorchBackend:
         output_tensors = [t for t, _, _ in output_tensors_w_addresses]
         output_tensor_addresses = [addr for _, addr, _ in output_tensors_w_addresses]
 
-        for t in output_tensors:
+        attributable_output_tensors: list[torch.Tensor] = []
+        attributable_output_tensor_addresses: list[str] = []
+        for t, output_address in zip(output_tensors, output_tensor_addresses):
             # Only record output_layers during exhaustive pass; fast pass reuses the list.
-            # Defensive: user-injected output tensors (raw register_forward_hook
-            # returning a fresh tensor, intervention API replacements that don't
-            # propagate metadata, etc.) lack _tl labels. Skip them rather than
-            # crashing - they aren't in our graph but the experiment can continue.
             _label_raw = _tl.get_tensor_label(t)
             if _label_raw is None:
-                continue
+                if _is_direct_registered_buffer_output(self_trace, t):
+                    # Late-logged in postprocess so untouched buffer outputs get
+                    # real source nodes without leaking labels onto model state.
+                    attributable_output_tensors.append(t)
+                    attributable_output_tensor_addresses.append(output_address)
+                    continue
+                _label_raw = _model_input_output_label(self_trace, t)
+            if _label_raw is None:
+                if getattr(self_trace, "_raw_transform_escape_detected", False):
+                    continue
+                raise RuntimeError(
+                    "TorchLens could not attribute a model output tensor to any traced op "
+                    f"(output address {output_address!r}, "
+                    f"shape={tuple(t.shape)}, dtype={t.dtype}). This may indicate an opaque "
+                    "execution boundary or a pre-bound torch function that escaped wrapping. "
+                    "Use ordinary torch module attributes during forward, or bind/import torch "
+                    "functions after TorchLens has wrapped torch."
+                )
+            attributable_output_tensors.append(t)
+            attributable_output_tensor_addresses.append(output_address)
             if self_trace.capture_mode in {"exhaustive", "predicate"}:
                 self_trace.output_layers.append(_label_raw)
                 event = self_trace.capture_events.op_event_by_label_raw.get(_label_raw)
                 if event is not None:
-                    updated_event = dataclasses.replace(event, is_output_parent=True)
-                    self_trace.capture_events.op_event_by_label_raw[_label_raw] = updated_event
-                    for index, existing_event in enumerate(self_trace.capture_events.op_events):
-                        if existing_event.label_raw == _label_raw:
-                            self_trace.capture_events.op_events[index] = updated_event
-                            break
+                    updated_event = _promote_layers_to_save_output_parent(
+                        self_trace,
+                        event,
+                        t,
+                    )
+                    replace_op_event(
+                        self_trace,
+                        _label_raw,
+                        is_output_parent=True,
+                        output=updated_event.output,
+                        policy=updated_event.policy,
+                        predicate_matched=updated_event.predicate_matched,
+                        capture_spec=updated_event.capture_spec,
+                    )
 
-        return output_tensors, output_tensor_addresses
+        return attributable_output_tensors, attributable_output_tensor_addresses
 
     def build_record_context(
         self,
@@ -498,15 +794,6 @@ class TorchBackend:
             if tensor is not None and tensor.dtype == torch.bool and tensor.dim() == 0
             else None,
         )
-
-    def detect_in_place_isolation_required(
-        self,
-        session: object,
-        func_event_input: FunctionEventInput,
-        output: object,
-    ) -> bool:
-        """Return whether the output is the first positional input object."""
-        return len(func_event_input.args) > 0 and id(output) == id(func_event_input.args[0])
 
     def detect_backend_semantics(
         self,
@@ -569,32 +856,6 @@ class TorchBackend:
     def is_parameter(self, value: object) -> bool:
         """Return whether ``value`` is a torch parameter."""
         return isinstance(value, torch.nn.Parameter)
-
-    def mark_same_object_candidates(
-        self,
-        session: object,
-        func_event_input: FunctionEventInput,
-    ) -> object:
-        """Mark the first labeled positional input as a same-object candidate."""
-        if not func_event_input.args:
-            return {}
-        first_arg = func_event_input.args[0]
-        if isinstance(first_arg, torch.Tensor) and _tl.get_tensor_label(first_arg) is not None:
-            return {id(first_arg): first_arg}
-        return {}
-
-    def isolate_same_object_returns(
-        self,
-        session: object,
-        func_event_input: FunctionEventInput,
-        raw_output: object,
-        premarked_inputs: object,
-    ) -> object:
-        """Clone a raw output that is the same object as the marked first input."""
-        marked = cast(Mapping[int, object], premarked_inputs)
-        if id(raw_output) in marked and isinstance(raw_output, torch.Tensor):
-            return safe_copy(raw_output)
-        return raw_output
 
     def apply_live_hooks(
         self,
@@ -701,6 +962,24 @@ class TorchBackend:
             "************\nFeature extraction failed; returning model and environment to normal\n*************"
         )
 
+    def cleanup_forward_memory(self, session: object) -> None:
+        """Release torch transient forward-memory caches.
+
+        Parameters
+        ----------
+        session:
+            Active trace session, unused by torch CUDA cache cleanup.
+
+        Returns
+        -------
+        None
+            CUDA allocator cache is cleared when CUDA is available.
+        """
+
+        del session
+        if _is_cuda_available():
+            torch.cuda.empty_cache()
+
 
 def _register_model_output_container_snapshot(
     trace: "Trace",
@@ -758,6 +1037,95 @@ def _register_model_output_container_snapshot(
     )
 
 
+def _is_direct_registered_buffer_output(trace: "Trace", tensor: torch.Tensor) -> bool:
+    """Return whether an unlabeled output is a registered source-model buffer.
+
+    Parameters
+    ----------
+    trace:
+        Active trace that may hold a weak reference to the source model.
+    tensor:
+        Unlabeled output tensor returned by ``forward``.
+
+    Returns
+    -------
+    bool
+        True when ``tensor`` is exactly one of the source model's registered
+        buffers. Such tensors are late-logged during postprocess; other
+        unlabeled outputs fail loud at the output boundary.
+    """
+
+    model_ref = getattr(trace, "_source_model_ref", None)
+    model = model_ref() if model_ref is not None else None
+    if model is None:
+        return False
+    return any(tensor is buffer for _address, buffer in model.named_buffers())
+
+
+def _model_input_output_label(trace: "Trace", tensor: torch.Tensor) -> str | None:
+    """Return the input-source label when an unlabeled output is a model input.
+
+    Parameters
+    ----------
+    trace:
+        Active trace carrying the tensors that were explicitly marked as model
+        inputs for this capture.
+    tensor:
+        Unlabeled model output tensor.
+
+    Returns
+    -------
+    str | None
+        Raw input label for ``tensor`` when structural tensor identity/storage
+        proves it is one of the marked model inputs; otherwise ``None``.
+    """
+
+    input_tensors = getattr(trace, "_output_attribution_input_tensors", ())
+    input_labels = tuple(getattr(trace, "input_layers", ()))
+    for index, input_tensor in enumerate(input_tensors):
+        if not isinstance(input_tensor, torch.Tensor):
+            continue
+        if not _same_tensor_storage_identity(tensor, input_tensor):
+            continue
+        live_label = _tl.get_tensor_label(input_tensor)
+        if live_label is not None:
+            return live_label
+        if index < len(input_labels):
+            return str(input_labels[index])
+    return None
+
+
+def _same_tensor_storage_identity(left: torch.Tensor, right: torch.Tensor) -> bool:
+    """Return whether two tensors are the same object or identical storage view.
+
+    Parameters
+    ----------
+    left:
+        Candidate output tensor.
+    right:
+        Marked input tensor.
+
+    Returns
+    -------
+    bool
+        True when the tensors are the same Python object, or when their storage
+        pointer, offset, shape, stride, dtype, and device all match.
+    """
+
+    if left is right:
+        return True
+    if left.dtype != right.dtype or left.device != right.device:
+        return False
+    if tuple(left.shape) != tuple(right.shape) or tuple(left.stride()) != tuple(right.stride()):
+        return False
+    if left.storage_offset() != right.storage_offset():
+        return False
+    try:
+        return left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr()
+    except RuntimeError:
+        return False
+
+
 def _assign_nested_input_value(
     obj: Any,
     addr: list[tuple[Any, Any]],
@@ -788,7 +1156,10 @@ def _assign_nested_input_value(
         if isinstance(obj, tuple):
             items = list(obj)
             items[entry_val] = _assign_nested_input_value(items[entry_val], rest, value)
-            return tuple(items)
+            obj_type = type(obj)
+            if hasattr(obj_type, "_fields"):
+                return obj_type(*items)
+            return obj_type(items)
         if isinstance(obj, list):
             obj[entry_val] = _assign_nested_input_value(obj[entry_val], rest, value)
             return obj
@@ -797,7 +1168,21 @@ def _assign_nested_input_value(
             return obj
     if entry_type == "attr":
         child = getattr(obj, entry_val)
-        setattr(obj, entry_val, _assign_nested_input_value(child, rest, value))
+        new_child = _assign_nested_input_value(child, rest, value)
+        try:
+            setattr(obj, entry_val, new_child)
+        except AttributeError:
+            # Immutable attribute — e.g. a real (non-property) NamedTuple
+            # field on a NamedTuple subclass such as a GNN batch container.
+            # ``_replace`` returns a new instance with that field swapped in.
+            obj_fields = getattr(type(obj), "_fields", None)
+            if hasattr(obj, "_replace") and obj_fields is not None and entry_val in obj_fields:
+                return obj._replace(**{entry_val: new_child})
+            # Otherwise this is a read-only *derived* property (e.g. a
+            # convenience accessor that returns a value already stored in a
+            # mutable nested container). The tensor's real backing storage is
+            # reached and moved to device through its own container address;
+            # there is nothing else to update at this alias.
         return obj
     nested_assign(obj, addr, value)
     return obj

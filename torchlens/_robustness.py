@@ -29,7 +29,7 @@ instead of partway through an 18-step pipeline.
 from __future__ import annotations
 
 import warnings
-from typing import Any, Iterable, Iterator, List, Tuple
+from typing import Any, Iterator, List, Tuple
 
 import torch
 from torch import nn
@@ -119,18 +119,19 @@ def _model_has_quantized_modules(model: nn.Module) -> bool:
 
 
 def _iter_tensors(obj: Any, _seen: set[int] | None = None) -> Iterator[torch.Tensor]:
-    """Yield every ``torch.Tensor`` reachable via list/tuple/dict traversal.
+    """Yield every ``torch.Tensor`` reachable through builtin containers.
 
     Doesn't descend into ``nn.Module`` instances (those are handled by
-    ``model.parameters()`` / ``model.buffers()``) and dedupes by ``id()`` so
-    shared tensors are only visited once.
+    ``model.parameters()`` / ``model.buffers()``). Dedupe applies to every
+    visited object id, so shared tensors and cyclic containers are visited
+    safely at most once.
     """
     if _seen is None:
         _seen = set()
+    if id(obj) in _seen:
+        return
+    _seen.add(id(obj))
     if isinstance(obj, torch.Tensor):
-        if id(obj) in _seen:
-            return
-        _seen.add(id(obj))
         yield obj
         return
     if isinstance(obj, (list, tuple, set, frozenset)):

@@ -10,8 +10,12 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens._io import TorchLensIOError
+from torchlens._trace_selector_helpers import _make_layers_to_save_predicate
+from torchlens.backends.default_specs import _tf_runtime_supported
+from torchlens.fastlog.exceptions import PredicateError
 from torchlens.fastlog import RecordContext
+from torchlens.intervention.errors import SelectorCompositionError
+from torchlens.validation.invariants import _check_backend_neutral_graph_topology
 
 
 class ViewThenMutate(nn.Module):
@@ -91,8 +95,17 @@ def test_alias_contract_snapshots_unsaved_mutated_parent(
 
     model = model_factory()
     x = torch.ones(2, 4)
-    full = tl.trace(model, x.clone(), layers_to_save="all", save_arg_values=True)
-    selective = tl.trace(model, x.clone(), save=_save_only_mul, save_arg_values=True)
+    full = tl.trace(
+        model,
+        x.clone(),
+        capture=tl.options.CaptureOptions(layers_to_save="all", save_arg_values=True),
+    )
+    selective = tl.trace(
+        model,
+        x.clone(),
+        save=_save_only_mul,
+        capture=tl.options.CaptureOptions(save_arg_values=True),
+    )
     saved_children = [
         op
         for op in selective.layer_list
@@ -114,11 +127,45 @@ def test_alias_contract_snapshots_unsaved_mutated_parent(
         assert "Cannot validate saved layer" in str(exc) or "was not saved" in str(exc)
 
 
-def test_layers_to_save_rejects_disk_streaming_with_save_guidance(tmp_path: Path) -> None:
-    """Selective two-pass disk streaming rejects with predicate save guidance."""
+def test_layers_to_save_supports_disk_streaming(tmp_path: Path) -> None:
+    """Selective layers_to_save streams through predicate-backed capture."""
 
-    with pytest.raises(TorchLensIOError, match="predicate save=.*selective streaming"):
-        tl.trace(TinyLinear(), torch.randn(2, 4), layers_to_save=["linear"], save_outs_to=tmp_path)
+    bundle_path = tmp_path / "bundle"
+    log = tl.trace(
+        TinyLinear(),
+        torch.randn(2, 4),
+        capture=tl.options.CaptureOptions(layers_to_save=["linear"]),
+        streaming=tl.options.StreamingOptions(bundle_path=bundle_path),
+    )
+    saved = [op for op in log.layer_list if op.has_saved_activation and op.layer_type == "linear"]
+    assert saved
+    assert bundle_path.exists()
+
+
+def test_layers_to_save_absorbed_path_honors_substrings() -> None:
+    """Selective ``layers_to_save`` keeps genuine substrings on the absorbed path."""
+
+    log = tl.trace(
+        TinyLinear(),
+        torch.randn(2, 4),
+        capture=tl.options.CaptureOptions(layers_to_save=["lin"]),
+    )
+    saved = [op for op in log.layer_list if op.has_saved_activation and op.layer_type == "linear"]
+    assert saved
+
+
+def test_layers_to_save_absorbed_path_honors_pass_qualified_substrings() -> None:
+    """Pass-qualified substrings save only the matching model-call pass."""
+
+    with tl.fastlog.Recorder(TinyLinear(), save=lambda ctx: ctx.kind == "op") as recorder:
+        recorder.log(torch.randn(2, 4))
+        recorder.log(torch.randn(2, 4))
+    contexts = [
+        record.ctx for record in recorder.recording.records if record.ctx.layer_type == "linear"
+    ]
+    assert contexts
+    predicate = _make_layers_to_save_predicate(["lin:2"])
+    assert [ctx.pass_index for ctx in contexts if predicate(ctx)] == [2]
 
 
 def test_layers_to_save_supports_backward_ready_and_gradients_two_pass() -> None:
@@ -127,30 +174,85 @@ def test_layers_to_save_supports_backward_ready_and_gradients_two_pass() -> None
     log = tl.trace(
         TinyLinear(),
         torch.randn(2, 4),
-        layers_to_save=["linear"],
-        save_grads=["linear"],
-        backward_ready=True,
+        capture=tl.options.CaptureOptions(
+            layers_to_save=["linear"],
+            save_grads=["linear"],
+            backward_ready=True,
+        ),
     )
     saved = [op for op in log.layer_list if op.has_saved_activation and op.layer_type == "linear"]
     assert saved
     assert saved[0].out.requires_grad
 
 
-def test_layers_to_save_rejects_intervention_ready_and_hooks() -> None:
-    """Selective two-pass rejects intervention-ready and hook capture."""
+def test_layers_to_save_supports_intervention_ready_and_hooks() -> None:
+    """Selective layers_to_save composes with intervention-ready and live hooks."""
 
     x = torch.randn(2, 4)
-    with pytest.raises(ValueError, match="intervention_ready=True.*selective two-pass"):
-        tl.trace(TinyLinear(), x, layers_to_save=["linear"], intervention_ready=True)
-    with pytest.raises(ValueError, match="hooks/intervention capture.*selective two-pass"):
-        tl.trace(TinyLinear(), x, layers_to_save=["linear"], hooks=tl.tap(tl.func("relu")))
+    intervention_ready = tl.trace(
+        TinyLinear(),
+        x,
+        capture=tl.options.CaptureOptions(
+            layers_to_save=["linear"],
+            intervention_ready=True,
+        ),
+    )
+    observer = tl.tap(tl.func("relu"))
+    hooked = tl.trace(
+        TinyLinear(),
+        x,
+        capture=tl.options.CaptureOptions(layers_to_save=["linear"], hooks=observer),
+    )
+    assert any(
+        op.has_saved_activation and op.layer_type == "linear"
+        for op in intervention_ready.layer_list
+    )
+    assert any(op.has_saved_activation and op.layer_type == "linear" for op in hooked.layer_list)
+    assert observer.records
+    assert all(record.site_label is not None for record in observer.records)
+
+
+def test_layers_to_save_supports_intervene_halt_and_save_predicate() -> None:
+    """Selective layers_to_save composes with live predicates."""
+
+    x = torch.randn(2, 4)
+    intervened = tl.trace(
+        TinyLinear(),
+        x,
+        capture=tl.options.CaptureOptions(layers_to_save=["linear"]),
+        intervene=tl.when(tl.func("relu"), tl.add(0.0)),
+    )
+    union_saved = tl.trace(
+        TinyLinear(),
+        x,
+        capture=tl.options.CaptureOptions(layers_to_save=["linear"]),
+        save=lambda ctx: ctx.kind == "op" and ctx.layer_type == "relu",
+    )
+    halted = tl.trace(
+        TinyLinear(),
+        x,
+        capture=tl.options.CaptureOptions(layers_to_save=["linear"]),
+        halt=lambda ctx: ctx.kind == "op" and ctx.layer_type == "relu",
+    )
+
+    assert any(
+        op.has_saved_activation and op.layer_type == "linear" for op in intervened.layer_list
+    )
+    saved_types = {op.layer_type for op in union_saved.layer_list if op.has_saved_activation}
+    assert {"linear", "relu"}.issubset(saved_types)
+    assert getattr(halted, "halted", False) is True
 
 
 def test_orphan_records_expose_saved_payload_when_pruned_or_retained() -> None:
     """Saved orphan payloads are exposed regardless of graph pruning mode."""
 
     x = torch.ones(2, 2)
-    pruned = tl.trace(SavedOrphan(), x, save=tl.func("randn"), random_seed=1)
+    pruned = tl.trace(
+        SavedOrphan(),
+        x,
+        save=tl.func("randn"),
+        capture=tl.options.CaptureOptions(random_seed=1),
+    )
     assert pruned.orphan_records
     assert pruned.orphan_records[0]["raw_label"].startswith("randn")
     assert isinstance(pruned.orphan_records[0]["payload_ref"], torch.Tensor)
@@ -160,8 +262,71 @@ def test_orphan_records_expose_saved_payload_when_pruned_or_retained() -> None:
         SavedOrphan(),
         x,
         save=tl.func("randn"),
-        random_seed=1,
-        keep_orphans=True,
+        capture=tl.options.CaptureOptions(random_seed=1, keep_orphans=True),
     )
     assert retained.orphan_records
     assert retained.orphans
+
+
+def test_followed_by_trace_supported_record_rejected_and_bad_shapes_error() -> None:
+    """followed_by is either supported explicitly or rejected loudly."""
+
+    x = torch.ones(2, 4)
+    selector = tl.func("linear") & tl.followed_by(tl.func("relu"))
+    traced = tl.trace(
+        TinyLinear(),
+        x,
+        save=selector,
+        lookback=4,
+        lookback_payload_policy="detached_raw",
+    )
+    assert any(op.layer_type == "linear" and op.has_saved_activation for op in traced.layer_list)
+
+    with pytest.raises(PredicateError, match="record\\(save=.*followed_by"):
+        tl.record(TinyLinear(), x, save=selector)
+    with pytest.raises(SelectorCompositionError):
+        _ = ~tl.followed_by(tl.func("relu"))
+    with pytest.raises(SelectorCompositionError):
+        _ = tl.func("linear") | tl.followed_by(tl.func("relu"))
+
+
+def test_followed_by_intervene_and_halt_fail_at_capture_start() -> None:
+    """followed_by selectors on intervene/halt raise preflight capability errors."""
+
+    x = torch.ones(2, 4)
+    selector = tl.func("linear") & tl.followed_by(tl.func("relu"))
+
+    with pytest.raises(PredicateError, match="trace\\(intervene=.*does not support"):
+        tl.trace(
+            TinyLinear(),
+            x,
+            intervene=tl.when(selector, tl.add(0.0)),
+        )
+    with pytest.raises(PredicateError, match="trace\\(halt=.*does not support"):
+        tl.trace(TinyLinear(), x, halt=selector)
+    with pytest.raises(PredicateError, match="unsupported followed_by predicate shape"):
+        tl.trace(TinyLinear(), x, halt=tl.followed_by(tl.func("relu")))
+
+
+def test_tf_trace_exercises_backend_neutral_topology_invariant() -> None:
+    """A real TensorFlow trace should satisfy backend-neutral topology checks."""
+
+    tf = pytest.importorskip("tensorflow")
+    keras = pytest.importorskip("keras")
+    if keras.backend.backend() != "tensorflow":
+        pytest.skip(f"active keras backend is {keras.backend.backend()!r}")
+    if not _tf_runtime_supported(tf, keras):
+        pytest.skip("TensorFlow backend requires TensorFlow >= 2.16 and Keras >= 3")
+
+    class IdentityModule(tf.Module):
+        """Small TensorFlow module for backend-neutral topology coverage."""
+
+        def __call__(self, x: object) -> object:
+            """Return an identity tensor."""
+
+            return tf.identity(x)
+
+    trace = tl.trace(IdentityModule(), tf.constant([1.0, 2.0]), backend="tf")
+
+    assert trace.backend == "tf"
+    _check_backend_neutral_graph_topology(trace)

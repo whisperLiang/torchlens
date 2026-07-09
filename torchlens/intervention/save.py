@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass
 from enum import Enum
 import importlib
@@ -20,13 +20,16 @@ from safetensors.torch import load_file, save_file
 from .._io.manifest import TensorEntry, sha256_of_file
 from .._io.tensor_policy import Ok, is_supported_for_save
 from .._io.tlspec import _TlSpecWriter
+from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
 from .errors import (
     DirectActivationWriteWarning,
     DirectWriteInExecutableSaveError,
     GraphShapeMismatchError,
+    MultiMatchWarning,
     OpaqueCallableInExecutableSaveError,
     ReplayPreconditionError,
     SiteResolutionError,
+    UnserializableDictKeyError,
 )
 from .helpers import HELPER_REGISTRY_VERSION, helper_from_serialized
 from .resolver import (
@@ -35,6 +38,7 @@ from .resolver import (
     resolve_sites,
 )
 from .types import (
+    FireRecord,
     FrozenTargetSpec,
     FunctionRegistryKey,
     HelperSpec,
@@ -45,7 +49,8 @@ from .types import (
     TensorSliceSpec,
 )
 
-TLSPEC_FORMAT_VERSION = "1"
+TLSPEC_FORMAT_VERSION = "2"
+SUPPORTED_TLSPEC_FORMAT_VERSIONS = {"1", TLSPEC_FORMAT_VERSION}
 _SPEC_FILE = "spec.json"
 _MANIFEST_FILE = "manifest.json"
 _README_FILE = "README.md"
@@ -86,6 +91,42 @@ class _SerializedState:
 
     tensor_entries: list[TensorEntry]
     tensor_refs: dict[str, torch.Tensor]
+
+
+@dataclass(frozen=True)
+class LazyImportRef:
+    """Callable import reference that resolves only at execution time."""
+
+    import_path: str
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Resolve and call the referenced object.
+
+        Parameters
+        ----------
+        *args:
+            Positional arguments forwarded to the imported callable.
+        **kwargs:
+            Keyword arguments forwarded to the imported callable.
+
+        Returns
+        -------
+        Any
+            Return value from the imported callable.
+        """
+
+        return _resolve_import_ref(self.import_path)(*args, **kwargs)
+
+    def __repr__(self) -> str:
+        """Return a stable representation without importing the target.
+
+        Returns
+        -------
+        str
+            Import-reference representation.
+        """
+
+        return f"LazyImportRef({self.import_path!r})"
 
 
 def save_intervention(
@@ -132,9 +173,10 @@ def save_intervention(
         (tmp_path / _TENSOR_DIR).mkdir()
 
         spec = getattr(log, "_intervention_spec", None) or InterventionSpec()
+        _sync_spec_records_from_log(spec, log)
         serialized_spec = _serialize_intervention_spec(spec, save_level, state)
         function_keys = _serialize_function_registry_keys(log)
-        target_manifest = _build_target_manifest(log, spec)
+        target_manifest = _build_target_manifest(log, spec, save_level)
         _write_tensor_sidecars(
             tmp_path,
             state.tensor_refs,
@@ -191,6 +233,7 @@ def load_intervention_spec(path: str | Path) -> InterventionSpec:
     spec_path = Path(path)
     _reject_symlink_path(spec_path, context="intervention spec path")
     data = _read_json_file(spec_path / _SPEC_FILE)
+    _validate_format_version(data.get("format_version"))
     manifest = _read_json_file(spec_path / _MANIFEST_FILE)
     tensor_entries = [TensorEntry.from_dict(entry) for entry in manifest.get("tensor_entries", [])]
     tensors = _load_tensor_refs(spec_path, tensor_entries)
@@ -212,6 +255,28 @@ def load_intervention_spec(path: str | Path) -> InterventionSpec:
     spec.metadata = metadata
     _verify_loaded_function_keys(data.get("function_registry_keys", []))
     return spec
+
+
+def _validate_format_version(format_version: Any) -> None:
+    """Validate an intervention spec format version.
+
+    Parameters
+    ----------
+    format_version:
+        Format version value read from ``spec.json``.
+
+    Returns
+    -------
+    None
+        Raises when the format is unsupported.
+    """
+
+    if str(format_version) not in SUPPORTED_TLSPEC_FORMAT_VERSIONS:
+        supported = ", ".join(sorted(SUPPORTED_TLSPEC_FORMAT_VERSIONS))
+        raise ValueError(
+            f"Unsupported intervention .tlspec format_version={format_version!r}; "
+            f"expected one of {supported}."
+        )
 
 
 def _append_state_for_json(log: Any) -> dict[str, Any]:
@@ -358,7 +423,7 @@ def _enforce_direct_write_policy(
     *,
     allow_direct_writes: bool,
 ) -> None:
-    """Apply Phase 10 direct-write save policy.
+    """Apply the direct-write save policy.
 
     Parameters
     ----------
@@ -409,7 +474,7 @@ def _serialize_intervention_spec(
     """
 
     return {
-        "targets": [_target_spec_to_json(target) for target in spec.targets],
+        "targets": [_target_spec_to_json(target, save_level) for target in spec.targets],
         "helper": _serialize_value(spec.helper, save_level, state),
         "value": _serialize_value(spec.value, save_level, state),
         "hook": _serialize_value(spec.hook, save_level, state),
@@ -420,9 +485,169 @@ def _serialize_intervention_spec(
         "hook_specs": [
             _serialize_hook_spec(hook_spec, save_level, state) for hook_spec in spec.hook_specs
         ],
-        "records": [asdict(record) for record in spec.records],
+        "records": [_serialize_fire_record(record, save_level, state) for record in spec.records],
         "metadata": _jsonish_metadata(spec.metadata),
     }
+
+
+def _sync_spec_records_from_log(spec: InterventionSpec, log: Any) -> None:
+    """Merge trace-local fire records into an intervention spec ledger.
+
+    Parameters
+    ----------
+    spec:
+        Mutable intervention spec about to be saved.
+    log:
+        Trace-like object that may hold per-op or backward-call records.
+
+    Returns
+    -------
+    None
+        Mutates ``spec.records`` with de-duplicated records.
+    """
+
+    merged: list[FireRecord] = []
+    seen: set[tuple[Any, ...]] = set()
+    for record in [*getattr(spec, "records", []), *_trace_fire_records(log)]:
+        key = _fire_record_key(record)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(record)
+    spec.records = merged
+
+
+def _trace_fire_records(log: Any) -> list[FireRecord]:
+    """Return all fire records materialized on a trace.
+
+    Parameters
+    ----------
+    log:
+        Trace-like object.
+
+    Returns
+    -------
+    list[FireRecord]
+        Forward and backward fire records found on the trace.
+    """
+
+    records: list[FireRecord] = []
+    for layer in getattr(log, "layer_list", []) or []:
+        records.extend(
+            record
+            for record in getattr(layer, "interventions", []) or []
+            if isinstance(record, FireRecord)
+        )
+    for grad_fn in getattr(log, "grad_fn_logs", {}).values():
+        for call in getattr(getattr(grad_fn, "calls", None), "_list", []):
+            records.extend(_flatten_fire_ref(getattr(call, "intervention_fire_ref", None)))
+    return records
+
+
+def _flatten_fire_ref(value: Any) -> list[FireRecord]:
+    """Flatten a GradFnCall fire-ref field into records.
+
+    Parameters
+    ----------
+    value:
+        FireRecord, tuple of records, or ``None``.
+
+    Returns
+    -------
+    list[FireRecord]
+        Fire records in the reference.
+    """
+
+    if isinstance(value, FireRecord):
+        return [value]
+    if isinstance(value, tuple):
+        return [item for item in value if isinstance(item, FireRecord)]
+    return []
+
+
+def _fire_record_key(record: FireRecord) -> tuple[Any, ...]:
+    """Return a stable de-duplication key for a fire record.
+
+    Parameters
+    ----------
+    record:
+        Fire record to identify.
+
+    Returns
+    -------
+    tuple[Any, ...]
+        Key covering direction, site, pass/call position, tuple slot, and
+        helper identity.
+    """
+
+    return (
+        record.direction,
+        record.engine,
+        record.target_label,
+        record.call_label,
+        record.site_label,
+        record.helper_name,
+        _helper_identity(record.helper),
+        record.timing,
+        record.backward_pass_index,
+        record.call_index,
+        record.grad_kind,
+        record.tuple_index,
+    )
+
+
+def _helper_identity(helper: HelperSpec | None) -> tuple[Any, ...] | None:
+    """Return a stable structural identity for a helper spec.
+
+    Parameters
+    ----------
+    helper:
+        Helper spec from a fire record.
+
+    Returns
+    -------
+    tuple[Any, ...] | None
+        Hashable helper identity, or ``None`` when no helper is attached.
+    """
+
+    if helper is None:
+        return None
+    return (
+        helper.name,
+        helper.kind,
+        helper.portability,
+        tuple(repr(arg) for arg in helper.args),
+        tuple((key, repr(value)) for key, value in helper.kwargs),
+        tuple(helper.metadata),
+    )
+
+
+def _serialize_fire_record(
+    record: FireRecord,
+    save_level: SaveLevel,
+    state: _SerializedState,
+) -> dict[str, Any]:
+    """Serialize a fire record with callable-safe helper handling.
+
+    Parameters
+    ----------
+    record:
+        Fire record to serialize.
+    save_level:
+        Requested save level.
+    state:
+        Serialization tensor state.
+
+    Returns
+    -------
+    dict[str, Any]
+        JSON-safe fire-record payload.
+    """
+
+    data = asdict(record)
+    data["helper"] = _serialize_value(record.helper, save_level, state)
+    data["container_path"] = _serialize_value(record.container_path, save_level, state)
+    return data
 
 
 def _serialize_target_value_spec(
@@ -448,7 +673,7 @@ def _serialize_target_value_spec(
     """
 
     return {
-        "site_target": _target_spec_to_json(value_spec.site_target),
+        "site_target": _target_spec_to_json(value_spec.site_target, save_level),
         "value": _serialize_value(value_spec.value, save_level, state),
         "metadata": _jsonish_metadata(value_spec.metadata),
     }
@@ -479,12 +704,59 @@ def _serialize_hook_spec(
     helper = hook_spec.helper if hook_spec.helper is not None else None
     hook_value = helper if helper is not None else hook_spec.hook
     return {
-        "site_target": _target_spec_to_json(hook_spec.site_target),
+        "site_target": _target_spec_to_json(hook_spec.site_target, save_level),
         "hook": _serialize_value(hook_value, save_level, state),
         "helper": _serialize_value(helper, save_level, state),
         "handle": hook_spec.handle,
         "metadata": _jsonish_metadata(hook_spec.metadata),
     }
+
+
+# Reserved wrapper-dict keys used by ``_serialize_value`` / ``_deserialize_value`` to
+# tag non-plain payloads. On load, ``_deserialize_value`` decides how to interpret a
+# JSON object purely by testing for the *presence* of one of these keys, so a plain
+# user dict whose key literally equals one of them would be misread (e.g. silently
+# reconstructed as a ``HelperSpec`` for ``__opaque_audit__``). To make that impossible,
+# ANY dict with a key in this reserved namespace is escaped through the fully-general
+# ``__dict_items__`` item-list encoding instead of the plain-object encoding, so a
+# genuine user key can never be mistaken for a wrapper tag. The reserved namespace is
+# every ``__dunder__`` string, which also future-proofs any wrapper tag added later.
+_RESERVED_WRAPPER_KEYS = frozenset(
+    {
+        "__tensor_ref__",
+        "__helper__",
+        "__callable__",
+        "__output_path_component__",
+        "__opaque_audit__",
+        "__dict_items__",
+        "__tuple_key__",
+    }
+)
+
+
+def _is_reserved_wrapper_key(key: Any) -> bool:
+    """Return ``True`` if ``key`` lives in the reserved wrapper-dict namespace.
+
+    Any string that both starts and ends with ``"__"`` (a classic dunder) is reserved
+    so it can never collide with a serializer sentinel. This covers every current
+    wrapper tag (see :data:`_RESERVED_WRAPPER_KEYS`) and any future one.
+
+    Parameters
+    ----------
+    key:
+        Candidate dict key.
+
+    Returns
+    -------
+    bool
+        Whether the key must be escaped rather than emitted as a plain JSON key.
+    """
+
+    if not isinstance(key, str):
+        return False
+    if key in _RESERVED_WRAPPER_KEYS:
+        return True
+    return len(key) >= 4 and key.startswith("__") and key.endswith("__")
 
 
 def _serialize_value(value: Any, save_level: SaveLevel, state: _SerializedState) -> Any:
@@ -513,15 +785,104 @@ def _serialize_value(value: Any, save_level: SaveLevel, state: _SerializedState)
         return {"__tensor_ref__": tensor_id}
     if isinstance(value, HelperSpec):
         return {"__helper__": _serialize_helper(value, save_level, state)}
+    if isinstance(value, TupleIndex | DictKey | HFKey | NamedField | DataclassField):
+        return _serialize_output_path_component(value, save_level, state)
     if isinstance(value, tuple):
         return [_serialize_value(item, save_level, state) for item in value]
     if isinstance(value, list):
         return [_serialize_value(item, save_level, state) for item in value]
     if isinstance(value, dict):
-        return {str(key): _serialize_value(item, save_level, state) for key, item in value.items()}
+        # All-``str`` keys round-trip losslessly as a plain JSON object (the common
+        # case, on-disk format unchanged) -- UNLESS a key collides with a reserved
+        # wrapper tag (``_is_reserved_wrapper_key``), in which case emitting a plain
+        # object would let ``_deserialize_value`` misread the user dict as a wrapper
+        # (silent corruption for ``__opaque_audit__``, loud crashes for the rest).
+        # Any non-``str`` key (int/float/tuple/...) would also be silently corrupted
+        # by ``str(key)`` -- JSON objects only allow string keys. Both cases are
+        # encoded as an explicit item list that preserves each key's type and value
+        # through load. TorchLens never silently stringifies or mis-tags keys
+        # (mirrors ``annotate``'s reject-don't-coerce rule).
+        if all(type(key) is str for key in value) and not any(
+            _is_reserved_wrapper_key(key) for key in value
+        ):
+            return {key: _serialize_value(item, save_level, state) for key, item in value.items()}
+        return {
+            "__dict_items__": [
+                [_serialize_dict_key(key), _serialize_value(item, save_level, state)]
+                for key, item in value.items()
+            ]
+        }
     if callable(value):
         return {"__callable__": _serialize_callable(value, save_level)}
     return _serialize_opaque(value, save_level)
+
+
+def _serialize_dict_key(key: Any) -> Any:
+    """Serialize a dict key preserving its type through a spec round-trip.
+
+    ``str``/``int``/``float``/``bool``/``None`` survive as native JSON scalars;
+    tuples are tagged so they reload as hashable tuples. Any other key type raises
+    rather than being silently stringified.
+
+    Parameters
+    ----------
+    key:
+        Runtime dict key.
+
+    Returns
+    -------
+    Any
+        JSON-safe, type-preserving key encoding.
+    """
+
+    if key is None or type(key) in (str, int, float, bool):
+        return key
+    if isinstance(key, tuple):
+        return {"__tuple_key__": [_serialize_dict_key(item) for item in key]}
+    raise UnserializableDictKeyError(
+        f"dict key {key!r} of type {type(key).__name__!r} cannot be preserved through a "
+        "spec save/load round-trip; TorchLens refuses to silently stringify it. Use "
+        "str/int/float/bool/None keys, or a tuple of those."
+    )
+
+
+def _serialize_output_path_component(
+    value: TupleIndex | DictKey | HFKey | NamedField | DataclassField,
+    save_level: SaveLevel,
+    state: _SerializedState,
+) -> dict[str, Any]:
+    """Serialize a portable output-container path component.
+
+    Parameters
+    ----------
+    value:
+        Output path component.
+    save_level:
+        Requested save level.
+    state:
+        Serialization tensor state.
+
+    Returns
+    -------
+    dict[str, Any]
+        JSON-safe component payload.
+    """
+
+    if isinstance(value, TupleIndex):
+        return {"__output_path_component__": "tuple_index", "index": value.index}
+    if isinstance(value, DictKey):
+        return {
+            "__output_path_component__": "dict_key",
+            "key": _serialize_value(value.key, save_level, state),
+        }
+    if isinstance(value, HFKey):
+        return {
+            "__output_path_component__": "hf_key",
+            "key": _serialize_value(value.key, save_level, state),
+        }
+    if isinstance(value, NamedField):
+        return {"__output_path_component__": "named_field", "name": value.name}
+    return {"__output_path_component__": "dataclass_field", "name": value.name}
 
 
 def _serialize_helper(
@@ -573,6 +934,7 @@ def _serialize_helper(
         "portability": "builtin",
         "name": helper.name,
         "kind": helper.kind,
+        "direction": helper.direction,
         "args": [_serialize_value(arg, save_level, state) for arg in helper.args],
         "kwargs": {key: _serialize_value(value, save_level, state) for key, value in helper.kwargs},
         "metadata": _jsonish_metadata(dict(helper.metadata)),
@@ -677,7 +1039,48 @@ def _deserialize_intervention_spec(
                 metadata=dict(item.get("metadata", {})),
             )
         )
+    spec.records = [_deserialize_fire_record(item, tensors) for item in data.get("records", [])]
     return spec
+
+
+def _deserialize_fire_record(data: dict[str, Any], tensors: dict[str, torch.Tensor]) -> FireRecord:
+    """Deserialize one fire record from JSON-safe data.
+
+    Parameters
+    ----------
+    data:
+        JSON fire-record payload.
+    tensors:
+        Loaded tensor refs.
+
+    Returns
+    -------
+    FireRecord
+        Runtime fire record.
+    """
+
+    helper = _deserialize_value(data.get("helper"), tensors)
+    container_path = _deserialize_value(data.get("container_path", ()), tensors)
+    return FireRecord(
+        target_label=str(data.get("target_label", "")),
+        call_label=data.get("call_label"),
+        func_call_id=data.get("func_call_id"),
+        container_path=tuple(container_path or ()),
+        engine=data.get("engine"),
+        helper=helper if isinstance(helper, HelperSpec) else None,
+        site_label=data.get("site_label"),
+        timing=data.get("timing"),
+        direction=data.get("direction"),
+        helper_name=data.get("helper_name"),
+        seed=data.get("seed"),
+        determinism_note=data.get("determinism_note"),
+        timestamp=data.get("timestamp"),
+        backward_pass_index=data.get("backward_pass_index"),
+        call_index=data.get("call_index"),
+        grad_kind=data.get("grad_kind"),
+        tuple_index=data.get("tuple_index"),
+        replaced=data.get("replaced"),
+    )
 
 
 def _deserialize_value(value: Any, tensors: dict[str, torch.Tensor]) -> Any:
@@ -699,15 +1102,21 @@ def _deserialize_value(value: Any, tensors: dict[str, torch.Tensor]) -> Any:
     if isinstance(value, dict) and "__tensor_ref__" in value:
         return tensors[str(value["__tensor_ref__"])]
     if isinstance(value, dict) and "__helper__" in value:
+        # Decode a builtin helper's args/kwargs through THIS same full codec so the
+        # decoder stays in lockstep with ``_serialize_value``. The narrow
+        # ``_decode_jsonish`` fallback only understood ``__tensor_ref__`` and
+        # silently returned every other wrapper (``__callable__``/``__opaque_audit__``/
+        # ...) as a raw dict, corrupting callable/opaque helper arguments.
         return helper_from_serialized(
             value["__helper__"],
             tensor_loader=lambda tensor_id: tensors[tensor_id],
             import_resolver=_resolve_import_ref,
+            value_decoder=lambda item: _deserialize_value(item, tensors),
         )
     if isinstance(value, dict) and "__callable__" in value:
         callable_payload = value["__callable__"]
         if callable_payload["portability"] == "import_ref":
-            return _resolve_import_ref(callable_payload["import_path"])
+            return LazyImportRef(str(callable_payload["import_path"]))
         return HelperSpec(
             helper_name="opaque_audit",
             portability="opaque_audit",
@@ -720,6 +1129,13 @@ def _deserialize_value(value: Any, tensors: dict[str, torch.Tensor]) -> Any:
             portability="opaque_audit",
             metadata=(("repr", payload.get("repr", "")), ("executable", False)),
         )
+    if isinstance(value, dict) and "__output_path_component__" in value:
+        return _deserialize_output_path_component(value, tensors)
+    if isinstance(value, dict) and "__dict_items__" in value:
+        return {
+            _deserialize_dict_key(key): _deserialize_value(item, tensors)
+            for key, item in value["__dict_items__"]
+        }
     if isinstance(value, list):
         return [_deserialize_value(item, tensors) for item in value]
     if isinstance(value, dict):
@@ -727,13 +1143,69 @@ def _deserialize_value(value: Any, tensors: dict[str, torch.Tensor]) -> Any:
     return value
 
 
-def _target_spec_to_json(target: TargetSpec | FrozenTargetSpec) -> dict[str, Any]:
+def _deserialize_dict_key(key: Any) -> Any:
+    """Reconstruct a dict key encoded by :func:`_serialize_dict_key`.
+
+    Parameters
+    ----------
+    key:
+        JSON-decoded key encoding.
+
+    Returns
+    -------
+    Any
+        Runtime, hashable dict key with its original type restored.
+    """
+
+    if isinstance(key, dict) and "__tuple_key__" in key:
+        return tuple(_deserialize_dict_key(item) for item in key["__tuple_key__"])
+    return key
+
+
+def _deserialize_output_path_component(
+    value: dict[str, Any], tensors: dict[str, torch.Tensor]
+) -> TupleIndex | DictKey | HFKey | NamedField | DataclassField:
+    """Deserialize a portable output-container path component.
+
+    Parameters
+    ----------
+    value:
+        JSON-safe component payload.
+    tensors:
+        Loaded tensor refs.
+
+    Returns
+    -------
+    TupleIndex | DictKey | HFKey | NamedField | DataclassField
+        Runtime path component.
+    """
+
+    kind = str(value.get("__output_path_component__"))
+    if kind == "tuple_index":
+        return TupleIndex(int(value["index"]))
+    if kind == "dict_key":
+        return DictKey(_deserialize_value(value.get("key"), tensors))
+    if kind == "hf_key":
+        return HFKey(_deserialize_value(value.get("key"), tensors))
+    if kind == "named_field":
+        return NamedField(str(value["name"]))
+    if kind == "dataclass_field":
+        return DataclassField(str(value["name"]))
+    raise SiteResolutionError(f"Unsupported output path component kind {kind!r}.")
+
+
+def _target_spec_to_json(
+    target: TargetSpec | FrozenTargetSpec,
+    save_level: SaveLevel,
+) -> dict[str, Any]:
     """Serialize a target spec.
 
     Parameters
     ----------
     target:
         Target spec.
+    save_level:
+        Requested save level.
 
     Returns
     -------
@@ -744,7 +1216,7 @@ def _target_spec_to_json(target: TargetSpec | FrozenTargetSpec) -> dict[str, Any
     metadata = dict(target.metadata) if isinstance(target.metadata, tuple) else target.metadata
     return {
         "selector_kind": target.selector_kind,
-        "selector_value": _selector_value_to_json(target.selector_value),
+        "selector_value": _selector_value_to_json(target.selector_value, save_level),
         "strict": bool(target.strict),
         "slice_spec": asdict(target.slice_spec) if target.slice_spec is not None else None,
         "metadata": _jsonish_metadata(metadata),
@@ -776,13 +1248,15 @@ def _target_spec_from_json(data: dict[str, Any]) -> TargetSpec:
     )
 
 
-def _selector_value_to_json(value: Any) -> Any:
+def _selector_value_to_json(value: Any, save_level: SaveLevel) -> Any:
     """Serialize selector payloads.
 
     Parameters
     ----------
     value:
         Selector payload.
+    save_level:
+        Requested save level.
 
     Returns
     -------
@@ -791,12 +1265,31 @@ def _selector_value_to_json(value: Any) -> Any:
     """
 
     if isinstance(value, TargetSpec | FrozenTargetSpec):
-        return {"__target_spec__": _target_spec_to_json(value)}
+        return {"__target_spec__": _target_spec_to_json(value, save_level)}
+    if isinstance(value, Mapping):
+        return {
+            "__dict__": {
+                str(key): _selector_value_to_json(item, save_level) for key, item in value.items()
+            }
+        }
     if isinstance(value, tuple):
-        return [_selector_value_to_json(item) for item in value]
+        return {"__tuple__": [_selector_value_to_json(item, save_level) for item in value]}
+    if isinstance(value, list):
+        return {"__list__": [_selector_value_to_json(item, save_level) for item in value]}
     if isinstance(value, str | int | float | bool) or value is None:
         return value
-    return {"__repr__": repr(value), "__type__": type(value).__name__}
+    if callable(value):
+        if save_level != SaveLevel.AUDIT:
+            raise OpaqueCallableInExecutableSaveError(
+                f"Callable selector payload {value!r} is non-portable and can only be saved "
+                "at audit level."
+            )
+        return {"__opaque_audit__": {"type": type(value).__name__, "repr": repr(value)}}
+    if save_level != SaveLevel.AUDIT:
+        raise OpaqueCallableInExecutableSaveError(
+            f"Selector payload {value!r} is non-portable and can only be saved at audit level."
+        )
+    return {"__opaque_audit__": {"type": type(value).__name__, "repr": repr(value)}}
 
 
 def _selector_value_from_json(value: Any) -> Any:
@@ -815,6 +1308,17 @@ def _selector_value_from_json(value: Any) -> Any:
 
     if isinstance(value, dict) and "__target_spec__" in value:
         return _target_spec_from_json(value["__target_spec__"])
+    if isinstance(value, dict) and "__opaque_audit__" in value:
+        payload = value["__opaque_audit__"]
+        return str(payload.get("repr", ""))
+    if isinstance(value, dict) and "__dict__" in value:
+        return {
+            str(key): _selector_value_from_json(item) for key, item in value["__dict__"].items()
+        }
+    if isinstance(value, dict) and "__tuple__" in value:
+        return tuple(_selector_value_from_json(item) for item in value["__tuple__"])
+    if isinstance(value, dict) and "__list__" in value:
+        return [_selector_value_from_json(item) for item in value["__list__"]]
     if isinstance(value, list):
         return tuple(_selector_value_from_json(item) for item in value)
     if isinstance(value, dict) and "__repr__" in value:
@@ -822,7 +1326,11 @@ def _selector_value_from_json(value: Any) -> Any:
     return value
 
 
-def _build_target_manifest(log: Any, spec: InterventionSpec) -> list[dict[str, Any]]:
+def _build_target_manifest(
+    log: Any,
+    spec: InterventionSpec,
+    save_level: SaveLevel,
+) -> list[dict[str, Any]]:
     """Build the saved target manifest for all recipe selectors.
 
     Parameters
@@ -831,6 +1339,8 @@ def _build_target_manifest(log: Any, spec: InterventionSpec) -> list[dict[str, A
         Source model log.
     spec:
         Intervention spec.
+    save_level:
+        Requested save level.
 
     Returns
     -------
@@ -842,13 +1352,38 @@ def _build_target_manifest(log: Any, spec: InterventionSpec) -> list[dict[str, A
     targets.extend(spec.targets)
     targets.extend(value_spec.site_target for value_spec in spec.target_value_specs)
     targets.extend(hook_spec.site_target for hook_spec in spec.hook_specs)
-    manifest = []
+    manifest: list[dict[str, Any]] = []
     for target in targets:
-        resolved = resolve_sites(log, target, strict=True)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", MultiMatchWarning)
+                resolved = resolve_sites(log, target, strict=True)
+        except SiteResolutionError as exc:
+            if "Backward selectors require log_backward()" not in str(
+                exc
+            ) and "predicate selectors are non-portable in strict mode" not in str(exc):
+                raise
+            status = (
+                "unresolved_nonportable"
+                if "predicate selectors are non-portable in strict mode" in str(exc)
+                else "unresolved_backward"
+            )
+            manifest.append(
+                {
+                    "selector": _target_spec_to_json(target, save_level),
+                    "resolved_labels": [],
+                    "resolved_status": status,
+                    "resolution_error": str(exc),
+                    "graph_shape_hash": getattr(log, "graph_shape_hash", None),
+                    "_address_normalized": _normalized_address(target),
+                }
+            )
+            continue
         manifest.append(
             {
-                "selector": _target_spec_to_json(target),
+                "selector": _target_spec_to_json(target, save_level),
                 "resolved_labels": list(resolved.labels()),
+                "resolved_status": "resolved",
                 "graph_shape_hash": getattr(log, "graph_shape_hash", None),
                 "_address_normalized": _normalized_address(target),
             }

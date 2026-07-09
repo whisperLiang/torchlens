@@ -27,8 +27,10 @@ from torchlens._robustness import (
     UnsupportedTensorVariantError,
     _is_meta_tensor,
     _is_sparse_tensor,
+    _iter_tensors,
     check_model_and_input_variants,
 )
+from torchlens.options import CaptureOptions
 from torchlens.utils.tensor_utils import safe_copy
 
 
@@ -55,7 +57,7 @@ def test_meta_tensor_input_raises_with_clear_message() -> None:
     meta_x = torch.zeros(2, 4, device="meta")
 
     with pytest.raises(UnsupportedTensorVariantError, match="meta tensor"):
-        tl.trace(model, meta_x, layers_to_save="none")
+        tl.trace(model, meta_x, capture=CaptureOptions(layers_to_save="none"))
 
 
 def test_meta_tensor_parameter_raises() -> None:
@@ -65,7 +67,7 @@ def test_meta_tensor_parameter_raises() -> None:
     x = torch.randn(2, 4)
 
     with pytest.raises(UnsupportedTensorVariantError, match="meta tensor"):
-        tl.trace(meta_model, x, layers_to_save="none")
+        tl.trace(meta_model, x, capture=CaptureOptions(layers_to_save="none"))
 
 
 def test_meta_tensor_detector_helper() -> None:
@@ -87,7 +89,7 @@ def test_sparse_tensor_input_raises() -> None:
     sparse_x = torch.sparse_coo_tensor(indices, values, (4, 4))
 
     with pytest.raises(UnsupportedTensorVariantError, match="sparse"):
-        tl.trace(model, sparse_x, layers_to_save="none")
+        tl.trace(model, sparse_x, capture=CaptureOptions(layers_to_save="none"))
 
 
 def test_sparse_csr_tensor_input_raises() -> None:
@@ -99,7 +101,7 @@ def test_sparse_csr_tensor_input_raises() -> None:
     sparse_csr = torch.sparse_csr_tensor(crow, col, vals, size=(2, 4))
 
     with pytest.raises(UnsupportedTensorVariantError, match="sparse"):
-        tl.trace(model, sparse_csr, layers_to_save="none")
+        tl.trace(model, sparse_csr, capture=CaptureOptions(layers_to_save="none"))
 
 
 def test_sparse_detector_helper() -> None:
@@ -194,7 +196,7 @@ def test_quantized_model_emits_warning_but_still_logs() -> None:
         deterministic = torch.are_deterministic_algorithms_enabled()
         torch.use_deterministic_algorithms(False)
         try:
-            log = tl.trace(model, x, layers_to_save="all")
+            log = tl.trace(model, x, capture=CaptureOptions(layers_to_save="all"))
         finally:
             torch.use_deterministic_algorithms(deterministic)
 
@@ -263,7 +265,7 @@ def test_standard_model_still_logs_cleanly() -> None:
     """Nothing in PR 2 should regress the golden path."""
     model = _Tiny()
     x = torch.randn(2, 4)
-    log = tl.trace(model, x, layers_to_save="all")
+    log = tl.trace(model, x, capture=CaptureOptions(layers_to_save="all"))
     assert len(log.layer_logs) > 0
 
 
@@ -276,6 +278,16 @@ def test_check_model_and_input_variants_clean_model_is_noop() -> None:
         warnings.simplefilter("always")
         check_model_and_input_variants(model, x, {})
     assert caught == []
+
+
+def test_shared_tensor_tree_walker_dedupes_and_handles_cycles() -> None:
+    """The consolidated tensor walker preserves robust traversal semantics."""
+
+    tensor = torch.randn(1)
+    payload: list[object] = [tensor, {"again": tensor}]
+    payload.append(payload)
+
+    assert list(_iter_tensors(payload)) == [tensor]
 
 
 # ---------------------------------------------------------------------------
@@ -298,5 +310,5 @@ def test_cuda_forward_pass_still_logs() -> None:
     """Regression: standard CUDA model logging is unaffected."""
     model = _Tiny().cuda()
     x = torch.randn(2, 4, device="cuda")
-    log = tl.trace(model, x, layers_to_save="all")
+    log = tl.trace(model, x, capture=CaptureOptions(layers_to_save="all"))
     assert len(log.layer_logs) > 0

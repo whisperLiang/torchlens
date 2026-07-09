@@ -21,16 +21,26 @@ The check is one-shot: once ``_has_grad`` is True, no further checks are made.
 
 from collections.abc import Iterator
 import weakref
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import torch
 
-from .._io import FieldPolicy, TLSPEC_VERSION, default_fill_state, read_tlspec_version
+from .._errors import AmbiguousOpLookupError
+from .._io import (
+    FieldPolicy,
+    TLSPEC_VERSION,
+    coerce_container_typed_state,
+    default_fill_state,
+    read_tlspec_version,
+)
 from .._errors import PostTraceParamUnavailable
 from ..constants import PARAM_LOG_FIELD_ORDER
 from ..ir.refs import DeviceRef, DtypeRef
 from ..quantities import Bytes
 from ._accessor_base import Accessor
+from .field_policy import build_record_field_policy_table, portable_state_spec_from_policy
+from ._runtime_handles import source_model_from_trace
+from ._repr import format_summary_lines
 from .op import GradientRecord, GradientRecordAccessor
 
 if TYPE_CHECKING:
@@ -51,6 +61,23 @@ def _param_log_to_row(param_log: "Param") -> Dict[str, Any]:
         Mapping from canonical field name to exported value.
     """
     return {field: getattr(param_log, field) for field in PARAM_LOG_FIELD_ORDER}
+
+
+# Typed container defaults for every non-Optional container field Param
+# stores directly. Same defect class as
+# `Op._LAYER_PASS_LOG_CONTAINER_DEFAULTS`/`Trace._MODEL_LOG_CONTAINER_DEFAULTS`:
+# without this, `coerce_container_typed_state` cannot repair a
+# present-but-wrong-typed legacy value (e.g. `co_parent_params` serialized as
+# a `set` where a `list` is now declared), and an absent field crashes instead
+# of restoring an empty typed container. Plain builtin types are used
+# deliberately.
+_PARAM_CONTAINER_DEFAULTS: dict[str, Any] = {
+    "all_addresses": [],
+    "all_module_addresses": [],
+    "used_by_ops": [],
+    "used_by_layers": [],
+    "co_parent_params": [],
+}
 
 
 class Param:
@@ -93,6 +120,8 @@ class Param:
         "_derived_grad_payload": FieldPolicy.KEEP,
         "_derived_grad_record_path": FieldPolicy.KEEP,
     }
+    FIELD_POLICY = build_record_field_policy_table(PARAM_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC)
+    PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     def __init__(
         self,
@@ -107,6 +136,32 @@ class Param:
         barcode: str,
         has_optimizer: Optional[bool] = None,
     ) -> None:
+        """Initialize persistent metadata for one model parameter.
+
+        Parameters
+        ----------
+        module_address:
+            Address of the module that owns the parameter.
+        name:
+            Parameter name relative to the owning module.
+        shape:
+            Parameter tensor shape.
+        dtype:
+            Parameter tensor dtype.
+        num_params:
+            Number of scalar elements in the parameter.
+        param_memory:
+            Parameter memory in bytes.
+        trainable:
+            Whether the parameter requires gradients.
+        address:
+            Fully-qualified parameter address.
+        barcode:
+            Stable identity token used during graph attribution.
+        has_optimizer:
+            Whether optimizer state was detected for the parameter.
+        """
+
         self.address = address  # e.g. "features.0.weight"
         self.name = name  # short name, e.g. "weight"
         self.shape = shape
@@ -135,7 +190,7 @@ class Param:
         self.num_calls: int = 1  # how many forward ops used this param
         self.used_by_ops: List[str] = []  # op labels that used this param
         self.used_by_layers: List[str] = []  # layer labels that used this param
-        self.co_parent_params: List[str] = []  # other param addresses sharing the same tensor
+        self.co_parent_params: List[str] = []  # other param addresses used by the same op
         self._has_grad: bool = False  # one-shot flag: once True, no further checks
         self._grad_shape: Optional[Tuple[int, ...]] = None
         self._grad_dtype: Optional[torch.dtype] = None
@@ -166,7 +221,7 @@ class Param:
             Whether multiple parameter addresses share this tensor.
         """
 
-        return len(self.all_addresses) > 1 or bool(self.co_parent_params)
+        return len(self.all_addresses) > 1
 
     @property
     def num_uses_by_ops(self) -> int:
@@ -408,11 +463,10 @@ class Param:
             return self._param_ref
 
         trace = self.source_trace
-        source_ref = getattr(trace, "_source_model_ref", None) if trace is not None else None
-        if source_ref is None:
+        if getattr(trace, "_source_model_ref", None) is None:
             return None
 
-        model = source_ref()
+        model = source_model_from_trace(trace)
         if model is None:
             if self._param_ref_released:
                 raise PostTraceParamUnavailable(
@@ -551,7 +605,6 @@ class Param:
         """Multi-line summary showing address, shape, dtype, trainability, and usage."""
         status = "trainable" if self.is_trainable else "frozen"
         lines = [
-            f"Param: {self.address}",
             f"  shape: {self.shape}",
             f"  dtype: {self.dtype}",
             f"  size: {self.param_memory}",
@@ -567,7 +620,7 @@ class Param:
             lines.append(f"  has_optimizer: {self.has_optimizer}")
         if self.num_calls > 1:
             lines.append(f"  num_calls: {self.num_calls}")
-        return "\n".join(lines)
+        return format_summary_lines(f"Param: {self.address}", lines)
 
     def release_param_ref(self) -> None:
         """Cache grad info, then null _param_ref to allow param GC."""
@@ -617,20 +670,24 @@ class Param:
             state["param_memory"] = state.pop("memory")
         if "is_trainable" not in state and "trainable" in state:
             state["is_trainable"] = state.pop("trainable")
-        default_fill_state(
-            state,
-            defaults={
-                "_param_ref": None,
-                "_param_ref_released": False,
-                "_source_trace_ref": None,
-                "dtype_ref": DtypeRef.from_value(state.get("dtype")),
-                "device_ref": None,
-                "backend_address": state.get("address"),
-                "resolver_status": "resolved",
-                "_derived_grad_payload": None,
-                "_derived_grad_record_path": None,
-            },
-        )
+        param_setstate_defaults: dict[str, Any] = {
+            **_PARAM_CONTAINER_DEFAULTS,
+            "_param_ref": None,
+            "_param_ref_released": False,
+            "_source_trace_ref": None,
+            "dtype_ref": DtypeRef.from_value(state.get("dtype")),
+            "device_ref": None,
+            "backend_address": state.get("address"),
+            "resolver_status": "resolved",
+            "_derived_grad_payload": None,
+            "_derived_grad_record_path": None,
+        }
+        default_fill_state(state, defaults=param_setstate_defaults)
+        # Repair present-but-wrong-typed container fields from legacy states
+        # (e.g. `co_parent_params` serialized as a `set` where a `list` is now
+        # declared). `default_fill_state` only fills absent keys; this closes
+        # the same gap `Trace`/`Op` already close for their own fields.
+        coerce_container_typed_state(state, param_setstate_defaults)
         if state.get("dtype_ref") is None:
             state["dtype_ref"] = DtypeRef.from_value(state.get("dtype"))
         if state.get("backend_address") is None:
@@ -660,6 +717,14 @@ class ParamAccessor(Accessor["Param"]):
     }
 
     def __init__(self, param_logs: Dict[str, "Param"]) -> None:
+        """Initialize an accessor over parameter logs.
+
+        Parameters
+        ----------
+        param_logs:
+            Mapping from parameter addresses to ``Param`` logs.
+        """
+
         super().__init__(param_logs)
         self._rehydrate_on_iter = False
 
@@ -676,12 +741,15 @@ class ParamAccessor(Accessor["Param"]):
 
     def _resolve_substring(self, key: str) -> "Param | None":
         """Resolve an unambiguous parameter short name."""
+        for param_log in self._list:
+            if key in param_log.all_addresses:
+                return param_log
         # Fallback: match by short name (e.g. 'weight', 'bias')
         matches = [pl for pl in self._list if pl.name == key]
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
-            raise KeyError(f"Ambiguous short name '{key}' — use full address")
+            raise AmbiguousOpLookupError(f"Ambiguous short name '{key}' -- use full address")
         return None
 
     def _resolve_pass_qualified(self, key: str) -> "Param | None":
@@ -699,9 +767,10 @@ class ParamAccessor(Accessor["Param"]):
     def __contains__(self, key: object) -> bool:
         """Check membership by full address, short name, or integer index (#84)."""
         try:
-            return super().__contains__(key)
-        except KeyError:
-            return True
+            self[key]  # type: ignore[index]
+        except (KeyError, TypeError, IndexError, ValueError):
+            return False
+        return True
 
     def __repr__(self) -> str:
         """Format as a dict-like string of parameter addresses with shapes and status."""
@@ -731,6 +800,3 @@ class ParamAccessor(Accessor["Param"]):
 
         rows = [_param_log_to_row(param_log) for param_log in self._list]
         return pd.DataFrame(rows, columns=PARAM_LOG_FIELD_ORDER)
-
-
-setattr(Param, "co_parent_params", [])

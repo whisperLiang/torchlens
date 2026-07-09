@@ -1,14 +1,14 @@
 """Shared constants: field-order tuples and function discovery for TorchLens.
 
-**FIELD_ORDER lists** define the *canonical* set of fields for each data class
-(Trace, Op, Layer, etc.).  They serve two purposes:
+**FIELD_ORDER lists** define the ordered user-facing/export field surface for
+each data class (Trace, Op, Layer, etc.).  They serve two purposes:
 
 1. **Canonical ordering** — __repr__, iteration, and serialization use these lists
    to present fields in a consistent, human-readable order.
-2. **Completeness contract** — every attribute a data class exposes must appear in
-   its FIELD_ORDER.  When adding a new field to a class, you MUST also add it here
-   (and vice versa).  These lists are NOT used for filtering; they define the full
-   set of fields.
+2. **User-facing completeness contract** — every public/exported attribute a data
+   class exposes must appear in its FIELD_ORDER.  Runtime-only and portable
+   internal state belongs in the class FIELD_POLICY / PORTABLE_STATE_SPEC even
+   when it is intentionally not exported as a user-facing column.
 
 **Function discovery** (bottom of this module) builds ``ORIG_TORCH_FUNCS``, the
 master list of ``(namespace_str, func_name)`` pairs that ``decorate_all_once()``
@@ -18,17 +18,18 @@ uses to permanently wrap every torch function at import time.
 import __future__
 import functools
 import types
-from typing import List
 import warnings
 
 import torch
 from torch.overrides import get_ignored_functions, get_testing_overrides
 
+from .utils._torch_compat import get_torch_vf_namespace, get_variable_function_names
+
 # ---------------------------------------------------------------------------
 # Field-order definitions
 # ---------------------------------------------------------------------------
-# Each list defines the complete, ordered set of fields for its data class.
-# The order here controls display order in __repr__ and similar outputs.
+# Each list defines the ordered user-facing/export fields for its data class.
+# Runtime-only state belongs in per-class FIELD_POLICY / PORTABLE_STATE_SPEC.
 
 RAW_LABEL_SUFFIX = "_raw"
 RAW_LABEL_FIELD = "raw_label"
@@ -106,6 +107,7 @@ MODEL_LOG_FIELD_ORDER = [
     "_out_identity_cache",
     "_out_hash_cache",
     "_code_context_cache",
+    "_replay_arg_version_data_complete",
     "save_arg_values",
     "num_context_lines",
     "save_grads",
@@ -172,6 +174,7 @@ MODEL_LOG_FIELD_ORDER = [
     "_final_to_raw_layer_labels",
     "_lookup_keys_to_layer_num_dict",
     "_layer_num_to_lookup_keys_dict",
+    "_ambiguous_lookup_keys",
     # Special layers
     "input_layers",
     "output_layers",
@@ -215,9 +218,11 @@ MODEL_LOG_FIELD_ORDER = [
     "total_param_memory",
     "total_param_gradient_memory",
     "forward_peak_memory",
+    "forward_memory_backend",
     # Time elapsed
     "capture_start_time",
     "capture_end_time",
+    "_phase_timings",
     "setup_duration",
     "forward_duration",
     "cleanup_duration",
@@ -227,6 +232,7 @@ MODEL_LOG_FIELD_ORDER = [
     "grad_fn_logs",
     "grad_fn_order",
     "backward_pass_logs",
+    "_grad_fn_param_refs",
     "backward_root_grad_fn_object_ids",
     "backward_durations",
     "num_backward_passes",
@@ -487,6 +493,7 @@ LAYER_LOG_FIELD_ORDER = [
     "num_autograd_tensors",
     # Config
     "output_device",
+    "visualizer_path",
     "activation_transform",
     "annotations",
     "intervention_replaced",
@@ -518,6 +525,13 @@ LAYER_LOG_FIELD_ORDER = [
     "is_buffer",
     "address",
     "buffer_source",
+    "buffer_write_kind",
+    "buffer_value_changed",
+    "buffer_replay_validated",
+    "buffer_source_func_name",
+    "has_input_ancestor",
+    "io_role",
+    "buffer_pass",
     "is_internal_source",
     "is_internal_sink",
     "is_terminal_bool",
@@ -525,6 +539,7 @@ LAYER_LOG_FIELD_ORDER = [
     "bool_value",
     "in_conditionals",
     "terminal_bool_for",
+    "is_in_conditional_body",
     "conditional_role_stacks",
     "conditional_branch_stack_ops",
     "conditional_arm_children",
@@ -535,6 +550,9 @@ LAYER_LOG_FIELD_ORDER = [
     # Module (static containment)
     "module",
     "modules",
+    "output_of_modules",
+    "output_of_module_calls",
+    "is_atomic_module",
     # Function config
     "func_config",
     # Pass management
@@ -579,6 +597,9 @@ PARAM_LOG_FIELD_ORDER = [
     "module_address",
     "module_name",
     "module_cls",
+    "all_addresses",
+    "all_module_addresses",
+    "has_multiple_addresses",
     "barcode",
     "num_calls",
     "used_by_ops",
@@ -590,18 +611,22 @@ PARAM_LOG_FIELD_ORDER = [
     "grad_shape",
     "grad_dtype",
     "gradient_memory",
+    "_derived_grad_record_path",
 ]
 
 # Per-buffer metadata exported by BufferAccessor (one row per buffer address).
 BUFFER_LOG_FIELD_ORDER = [
     "address",
+    "module_address",
     "name",
     "buffer_overwrite_index",
     "buffer_pass",
     "layer_label",
     "call_index",
+    "versions",
     "shape",
     "dtype",
+    "initial_value",
     "activation_memory",
     "has_saved_activation",
     "has_grad",
@@ -632,6 +657,7 @@ MODULE_PASS_LOG_FIELD_ORDER = [
     "output_ops",
     "output_layers",
     "output_structure",
+    "output_paths",
     "forward_arg_names",
     "num_forward_args_total",
     "num_forward_pos_args",
@@ -836,6 +862,27 @@ GRAD_FN_LOG_FIELD_ORDER = [
     "total_backward_duration",
 ]
 
+BACKWARD_PASS_FIELD_ORDER = [
+    "pass_index",
+    "trigger",
+    "implicit",
+    "outer_context",
+    "backward_call_context",
+    "root_grad_fn_ids",
+    "root_meta",
+    "root_grad_arguments",
+    "inputs_subset",
+    "order",
+    "origin_backward_pass",
+    "engine_flags",
+    "save_grads_policy",
+    "duration",
+    "peak_memory",
+    "status",
+    "order_attribution_coverage",
+    "grad_fn_calls",
+]
+
 # ---------------------------------------------------------------------------
 # Function discovery for decoration
 # ---------------------------------------------------------------------------
@@ -957,9 +1004,9 @@ def _get_torch_overridable_functions() -> list[tuple[str, str]]:
     # Each entry: (dotted namespace string, namespace object, list of attr names to inspect).
     # torch._VF mirrors torch._C._VariableFunctions — both are crawled so decoration
     # can patch both the public and internal references to the same underlying C++ functions.
+    variable_function_names = get_variable_function_names()
     tested_namespaces = [
-        ("torch", torch, torch.__all__ + dir(torch._C._VariableFunctions)),
-        ("torch._VF", torch._VF, dir(torch._C._VariableFunctions)),
+        ("torch", torch, torch.__all__ + variable_function_names),
         ("torch.functional", torch.functional, torch.functional.__all__),
         ("torch.nn.functional", torch.nn.functional, dir(torch.nn.functional)),
         ("torch.nn.init", torch.nn.init, dir(torch.nn.init)),
@@ -967,6 +1014,9 @@ def _get_torch_overridable_functions() -> list[tuple[str, str]]:
         ("torch.linalg", torch.linalg, dir(torch.linalg)),
         ("torch.fft", torch.fft, dir(torch.fft)),
     ]
+    torch_vf_namespace = get_torch_vf_namespace()
+    if torch_vf_namespace is not None:
+        tested_namespaces.append(("torch._VF", torch_vf_namespace, variable_function_names))
     if hasattr(torch, "special"):
         tested_namespaces.append(("torch.special", torch.special, dir(torch.special)))
     for namespace_str, namespace, ns_funcs in tested_namespaces:
@@ -1042,19 +1092,57 @@ TORCHVISION_FUNCS = [
     ("torch.ops.torchvision.roi_pool", "_op"),
 ]
 
+_TORCHVISION_FUNCS_CACHE: list[tuple[str, str]] | None = None
+
 # Build the master function list at module load time.  Warnings are suppressed
 # because some torch namespaces emit deprecation warnings during introspection.
 # ORIG_TORCH_FUNCS = overridable functions + "ignored" functions (which we still
-# decorate) + optional torchvision ops.  This is the complete list fed to
-# decorate_all_once() in decoration/torch_funcs.py.
+# decorate).  Optional torchvision ops are appended lazily by
+# get_orig_torch_funcs() at first wrap time, not during ``import torchlens``.
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     OVERRIDABLE_FUNCS = _get_torch_overridable_functions()
 ORIG_TORCH_FUNCS = OVERRIDABLE_FUNCS + IGNORED_FUNCS
 
-try:
-    import torchvision
 
-    ORIG_TORCH_FUNCS += TORCHVISION_FUNCS
-except ModuleNotFoundError:
-    pass
+def _get_torchvision_funcs() -> list[tuple[str, str]]:
+    """Return torchvision torch.ops targets if torchvision is installed.
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        Torchvision operation targets for wrapper decoration, or an empty list
+        when torchvision is not installed.
+    """
+
+    global _TORCHVISION_FUNCS_CACHE
+    if _TORCHVISION_FUNCS_CACHE is not None:
+        return _TORCHVISION_FUNCS_CACHE
+    try:
+        import torchvision  # noqa: F401
+    except ModuleNotFoundError:
+        _TORCHVISION_FUNCS_CACHE = []
+    else:
+        _TORCHVISION_FUNCS_CACHE = list(TORCHVISION_FUNCS)
+    return _TORCHVISION_FUNCS_CACHE
+
+
+def get_orig_torch_funcs(*, include_torchvision: bool = True) -> list[tuple[str, str]]:
+    """Return torch function targets for wrapper decoration.
+
+    Parameters
+    ----------
+    include_torchvision:
+        Whether to append torchvision custom op targets when torchvision is
+        installed. The import probe is intentionally deferred to first wrapper
+        use so ``import torchlens`` does not import torchvision.
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        Torch function targets, including torchvision targets on demand.
+    """
+
+    if not include_torchvision:
+        return list(ORIG_TORCH_FUNCS)
+    return [*ORIG_TORCH_FUNCS, *_get_torchvision_funcs()]

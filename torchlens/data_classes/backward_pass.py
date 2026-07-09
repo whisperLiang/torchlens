@@ -6,12 +6,50 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 import weakref
 
-from .._io import FieldPolicy, TLSPEC_VERSION, default_fill_state, read_tlspec_version
+from .._io import (
+    FieldPolicy,
+    TLSPEC_VERSION,
+    coerce_container_typed_state,
+    default_fill_state,
+    read_tlspec_version,
+)
+from ..constants import BACKWARD_PASS_FIELD_ORDER
 from ..quantities import Duration
 from ._accessor_base import Accessor
+from .field_policy import build_record_field_policy_table, portable_state_spec_from_policy
 
 if TYPE_CHECKING:
     import pandas as pd
+
+# Typed container defaults for every non-Optional container field
+# BackwardPass declares. Same defect class as
+# `Op._LAYER_PASS_LOG_CONTAINER_DEFAULTS`/`Trace._MODEL_LOG_CONTAINER_DEFAULTS`:
+# without this, `coerce_container_typed_state` cannot repair a
+# present-but-wrong-typed legacy value, and an absent field crashes instead of
+# restoring an empty typed container. Plain builtin types are used
+# deliberately.
+_BACKWARD_PASS_CONTAINER_DEFAULTS: dict[str, Any] = {
+    "root_grad_fn_ids": [],
+    "root_meta": (),
+    "inputs_subset": (),
+    "grad_fn_calls": [],
+}
+
+
+# BackwardPass fields deliberately omitted from ``BackwardPass.to_pandas()``
+# columns. Every field in ``BACKWARD_PASS_FIELD_ORDER`` must either appear as
+# a dataframe column or be listed here -- ``tests/test_to_pandas_field_coverage.py``
+# enforces this so new BackwardPass fields can never silently fail to reach
+# the table again (same regression class as TO-PANDAS-NEW-FIELDS).
+_TO_PANDAS_EXCLUDED_BACKWARD_PASS_FIELDS: frozenset[str] = frozenset(
+    {
+        # List of live GradFnCall child records, not a scalar table cell --
+        # summarized instead as the derived "num_grad_fn_calls" column (same
+        # "list of child records" exclusion category as Buffer.versions /
+        # GradFn.calls / Module.ops).
+        "grad_fn_calls",
+    }
+)
 
 
 @dataclass
@@ -30,7 +68,7 @@ class BackwardPass:
         Optional outer TorchLens trigger context when this pass was nested.
     """
 
-    PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
+    _PORTABLE_STATE_POLICY: ClassVar[dict[str, FieldPolicy]] = {
         "pass_index": FieldPolicy.KEEP,
         "trigger": FieldPolicy.KEEP,
         "implicit": FieldPolicy.KEEP,
@@ -51,6 +89,13 @@ class BackwardPass:
         "grad_fn_calls": FieldPolicy.KEEP,
         "_source_trace_ref": FieldPolicy.WEAKREF_STRIP,
     }
+    FIELD_POLICY = build_record_field_policy_table(
+        BACKWARD_PASS_FIELD_ORDER,
+        _PORTABLE_STATE_POLICY,
+    )
+    PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = portable_state_spec_from_policy(
+        FIELD_POLICY
+    )
 
     pass_index: int
     trigger: str
@@ -84,27 +129,26 @@ class BackwardPass:
         """Restore pickle state and fill fields added in newer versions."""
 
         read_tlspec_version(state, cls_name=type(self).__name__)
-        default_fill_state(
-            state,
-            defaults={
-                "outer_context": None,
-                "backward_call_context": None,
-                "root_grad_fn_ids": [],
-                "root_meta": (),
-                "root_grad_arguments": None,
-                "inputs_subset": (),
-                "order": None,
-                "origin_backward_pass": None,
-                "engine_flags": None,
-                "save_grads_policy": None,
-                "duration": None,
-                "peak_memory": None,
-                "status": "ok",
-                "order_attribution_coverage": None,
-                "grad_fn_calls": [],
-                "_source_trace_ref": None,
-            },
-        )
+        backward_pass_setstate_defaults: dict[str, Any] = {
+            **_BACKWARD_PASS_CONTAINER_DEFAULTS,
+            "outer_context": None,
+            "backward_call_context": None,
+            "root_grad_arguments": None,
+            "order": None,
+            "origin_backward_pass": None,
+            "engine_flags": None,
+            "save_grads_policy": None,
+            "duration": None,
+            "peak_memory": None,
+            "status": "ok",
+            "order_attribution_coverage": None,
+            "_source_trace_ref": None,
+        }
+        default_fill_state(state, defaults=backward_pass_setstate_defaults)
+        # Repair present-but-wrong-typed container fields from legacy states.
+        # `default_fill_state` only fills absent keys; this closes the same
+        # gap `Trace`/`Op` already close for their own fields.
+        coerce_container_typed_state(state, backward_pass_setstate_defaults)
         state.pop("call_context", None)
         self.__dict__.update(state)
 
@@ -134,7 +178,17 @@ class BackwardPass:
         return self.pass_index - 1
 
     def to_pandas(self) -> "pd.DataFrame":
-        """Export this backward pass as a one-row DataFrame."""
+        """Export this backward pass as a one-row DataFrame.
+
+        Driven by ``BACKWARD_PASS_FIELD_ORDER``: every field is exported
+        except ``grad_fn_calls`` (a list of live ``GradFnCall`` child records,
+        not a scalar table cell -- summarized instead as ``num_grad_fn_calls``,
+        the same "list of child records" exclusion category as
+        ``Buffer.versions``/``GradFn.calls``/``Module.ops``). This used to
+        hand-roll a 12-field subset that silently dropped
+        ``root_grad_fn_ids``/``root_meta``/``root_grad_arguments``/
+        ``inputs_subset``/``engine_flags``/``save_grads_policy``.
+        """
 
         try:
             import pandas as pd
@@ -144,19 +198,11 @@ class BackwardPass:
             ) from e
 
         row = {
-            "pass_index": self.pass_index,
-            "trigger": self.trigger,
-            "implicit": self.implicit,
-            "outer_context": self.outer_context,
-            "backward_call_context": self.backward_call_context,
-            "order": self.order,
-            "origin_backward_pass": self.origin_backward_pass,
-            "duration": self.duration,
-            "peak_memory": self.peak_memory,
-            "status": self.status,
-            "order_attribution_coverage": self.order_attribution_coverage,
-            "num_grad_fn_calls": len(self.grad_fn_calls),
+            field_name: getattr(self, field_name)
+            for field_name in BACKWARD_PASS_FIELD_ORDER
+            if field_name not in _TO_PANDAS_EXCLUDED_BACKWARD_PASS_FIELDS
         }
+        row["num_grad_fn_calls"] = len(self.grad_fn_calls)
         return pd.DataFrame([row], columns=list(row))
 
 

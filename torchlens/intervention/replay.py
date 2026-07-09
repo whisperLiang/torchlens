@@ -70,8 +70,7 @@ def push(
     strict:
         Whether control-flow divergence warnings should be raised as errors.
     hooks:
-        Optional mapping from selector-like targets to hook callables. Phase 6
-        uses this explicit argument instead of Phase 8 spec dispatch.
+        Optional mapping from selector-like targets to hook callables.
 
     Returns
     -------
@@ -85,7 +84,7 @@ def push(
     hook_entries = _normalize_replay_hooks(log, replay_options.hooks)
     origins = _origin_sites_for_hooks(log, hook_entries, strict=replay_options.strict)
     if not origins:
-        raise ReplayPreconditionError("push requires at least one hook target in Phase 6")
+        raise ReplayPreconditionError("push requires at least one hook target")
     if replay_options.differentiable:
         return _run_differentiable_replay(
             log,
@@ -861,7 +860,7 @@ def _commit_replay_updates(
     snapshots: dict[str, dict[str, Any]] = {}
     try:
         for label, tensor in pending_updates.items():
-            site = log[label]
+            site = log.layer_dict_all_keys[label]
             snapshots[label] = {
                 "out": site.out,
                 "transformed_out": site.transformed_out,
@@ -878,7 +877,7 @@ def _commit_replay_updates(
                 site.interventions.extend(pending_records[label])
     except Exception:
         for label, state in snapshots.items():
-            site = log[label]
+            site = log.layer_dict_all_keys[label]
             for field_name, value in state.items():
                 site._internal_set(field_name, value)
         raise

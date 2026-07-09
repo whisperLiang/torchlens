@@ -16,6 +16,7 @@ from torchlens.intervention.errors import (
 )
 from torchlens.intervention.rerun import rerun
 from torchlens.intervention.types import InterventionSpec, Relationship, TargetSpec
+from torchlens.options import CaptureOptions
 
 
 class ReluAdd(torch.nn.Module):
@@ -138,7 +139,7 @@ def _capture(model: torch.nn.Module, x: torch.Tensor) -> tl.Trace:
         Captured log.
     """
 
-    return tl.trace(model, x, intervention_ready=True)
+    return tl.trace(model, x, capture=CaptureOptions(intervention_ready=True))
 
 
 @pytest.mark.smoke
@@ -151,7 +152,7 @@ def test_rerun_baseline_matches_original_graph_hash_and_sets_state() -> None:
     original_raw_hash = log._raw_event_shape_hash  # noqa: SLF001
     original_history_len = len(log.state_history)
 
-    result = log.rerun(ReluAdd(), x)
+    result = log.run(ReluAdd(), x)
 
     assert result is log
     assert log.state is TraceState.RERUN_PROPAGATED
@@ -176,7 +177,7 @@ def test_rerun_with_hook_updates_downstream_out() -> None:
         hook=_zero_hook,
     )
 
-    log.rerun(ReluAdd(), x)
+    log.run(ReluAdd(), x)
 
     relu_site = next(layer for layer in log.layer_list if layer.func_name == "relu")
     assert torch.equal(relu_site.out, torch.zeros_like(relu_site.out))
@@ -193,11 +194,11 @@ def test_rerun_failure_leaves_original_log_unchanged() -> None:
     log = _capture(ReluAdd(), x)
     original_hash = log.graph_shape_hash
     original_labels = tuple(log.layer_labels)
-    log.rerun(ReluAdd(), x)
+    log.run(ReluAdd(), x)
     history_after_success = list(log.state_history)
 
     with pytest.raises(RuntimeError, match="boom"):
-        log.rerun(BadModel(), x)
+        log.run(BadModel(), x)
 
     assert log.state is TraceState.RERUN_PROPAGATED
     assert log.graph_shape_hash == original_hash
@@ -229,7 +230,7 @@ def test_rerun_keyboard_interrupt_during_build_leaves_original_log_unchanged(
     monkeypatch.setattr(rerun_module, "_capture_with_active_spec", interrupt_capture)
 
     with pytest.raises(KeyboardInterrupt, match="simulated interrupt"):
-        log.rerun(ReluAdd(), x)
+        log.run(ReluAdd(), x)
 
     assert log.state is original_run_state
     assert log.graph_shape_hash == original_hash
@@ -248,7 +249,7 @@ def test_rerun_strict_divergence_raises_before_swap() -> None:
     original_raw_hash = log._raw_event_shape_hash  # noqa: SLF001
 
     with pytest.raises(ControlFlowDivergenceError):
-        log.rerun(BranchModel(), negative, strict=True)
+        log.run(BranchModel(), negative, strict=True)
 
     assert log.graph_shape_hash == original_hash
     assert log._raw_event_shape_hash == original_raw_hash  # noqa: SLF001
@@ -265,7 +266,7 @@ def test_rerun_non_strict_divergence_warns_and_swaps() -> None:
     original_raw_hash = log._raw_event_shape_hash  # noqa: SLF001
 
     with pytest.warns(ControlFlowDivergenceWarning):
-        log.rerun(BranchModel(), negative)
+        log.run(BranchModel(), negative)
 
     assert log.graph_shape_hash != original_hash
     assert log._raw_event_shape_hash != original_raw_hash  # noqa: SLF001
@@ -281,7 +282,7 @@ def test_rerun_honors_metadata_only_save_scope() -> None:
 
     assert log.num_saved_ops == 0
 
-    log.rerun(ReluAdd(), x + 1)
+    log.run(ReluAdd(), x + 1)
 
     assert log.num_saved_ops == 0
     assert log.last_run["engine"] == "rerun"
@@ -297,7 +298,7 @@ def test_rerun_matching_graph_refreshes_existing_ops_without_full_swap() -> None
     original_relu_site_id = id(relu_site)
     original_out = relu_site.out.clone()
 
-    log.rerun(ReluAdd(), new_x)
+    log.run(ReluAdd(), new_x)
     refreshed_relu_site = next(layer for layer in log.layer_list if layer.func_name == "relu")
 
     assert id(refreshed_relu_site) == original_relu_site_id
@@ -323,7 +324,7 @@ def test_rerun_fast_refresh_repopulates_child_versions() -> None:
     add_site = log["add_1_1"]
     original_add_site_id = id(add_site)
 
-    log.rerun(InplaceVersionModel(), new_x)
+    log.run(InplaceVersionModel(), new_x)
 
     refreshed_add_site = log["add_1_1"]
     assert id(refreshed_add_site) == original_add_site_id
@@ -396,7 +397,7 @@ def test_rerun_x_none_requires_explicit_input() -> None:
     log = _capture(ReluAdd(), torch.randn(2, 3))
 
     with pytest.raises(ValueError, match="Pass the forward input explicitly"):
-        log.rerun(ReluAdd())
+        log.run(ReluAdd())
 
 
 def test_rerun_rejects_torchscript_model() -> None:
@@ -407,7 +408,7 @@ def test_rerun_rejects_torchscript_model() -> None:
     scripted = torch.jit.trace(ReluAdd(), x)
 
     with pytest.raises(RuntimeError, match="ScriptModule"):
-        log.rerun(scripted, x)
+        log.run(scripted, x)
 
 
 @pytest.mark.skipif(not hasattr(torch, "compile"), reason="torch.compile unavailable")
@@ -419,7 +420,7 @@ def test_rerun_rejects_compiled_model() -> None:
     compiled = torch.compile(ReluAdd(), backend="eager")
 
     with pytest.raises(RuntimeError, match="torch.compile"):
-        log.rerun(compiled, x)
+        log.run(compiled, x)
 
 
 def test_rerun_rejects_fsdp_when_constructible() -> None:
@@ -438,4 +439,4 @@ def test_rerun_rejects_fsdp_when_constructible() -> None:
         pytest.skip(f"FSDP cannot be constructed in this environment: {exc}")
 
     with pytest.raises(RuntimeError, match="FullyShardedDataParallel"):
-        log.rerun(fsdp_model, x)
+        log.run(fsdp_model, x)

@@ -11,7 +11,7 @@ from torchlens.capture.arg_positions import (
     _cache_dynamic_spec,
     _normalize_func_name,
 )
-from torchlens.constants import ORIG_TORCH_FUNCS
+from torchlens.constants import get_orig_torch_funcs
 
 
 _HIGH_CONFIDENCE_STATIC_NAMES = frozenset(
@@ -266,6 +266,12 @@ _VERSION_GATED_UNSUPPORTED_ARG_SPECS = frozenset(
 )
 _VERSION_GATED_STATIC_ARG_SPECS = frozenset({"randintlike"})
 
+# Torch adds/removes internal/private helpers across releases, so a few known-unsupported
+# names are decorated on some torch versions and absent on others (e.g. "op" is absent on
+# torch 2.8). These are torch-version differences, not stale entries; keep them out of the
+# strict "every known entry is decorated on THIS torch" guard below.
+_TORCH_VERSION_VARYING_UNSUPPORTED = frozenset({"op"})
+
 _EXPECTED_KWARGS = {
     "addr": ("input", "vec1", "vec2"),
     "alignas": ("self", "other"),
@@ -313,10 +319,10 @@ def _decorated_normalized_names() -> set[str]:
     Returns
     -------
     set[str]
-        Normalized names derived from ``ORIG_TORCH_FUNCS``.
+        Normalized names derived from the actual first-wrap function target set.
     """
 
-    return {_normalize_func_name(func_name.strip("_")) for _, func_name in ORIG_TORCH_FUNCS}
+    return {_normalize_func_name(func_name.strip("_")) for _, func_name in get_orig_torch_funcs()}
 
 
 def test_every_decorated_arg_spec_is_static_or_explicitly_unsupported() -> None:
@@ -327,8 +333,14 @@ def test_every_decorated_arg_spec_is_static_or_explicitly_unsupported() -> None:
     missing = decorated_names - static_names
 
     assert missing <= _KNOWN_UNSUPPORTED_ARG_SPECS
-    assert _KNOWN_UNSUPPORTED_ARG_SPECS <= (
-        decorated_names | _VERSION_GATED_UNSUPPORTED_ARG_SPECS
+    # Known-unsupported entries not decorated on this torch version are torch-version
+    # differences (see _TORCH_VERSION_VARYING_UNSUPPORTED); anything else undecorated is a
+    # stale/typo entry and must be caught.
+    undecorated_known = _KNOWN_UNSUPPORTED_ARG_SPECS - decorated_names
+    allowed_undecorated = _VERSION_GATED_UNSUPPORTED_ARG_SPECS | _TORCH_VERSION_VARYING_UNSUPPORTED
+    assert undecorated_known <= allowed_undecorated, (
+        "known-unsupported arg-spec entries are undecorated on this torch and not marked "
+        f"version-varying: {sorted(undecorated_known - allowed_undecorated)}"
     )
     assert not (_KNOWN_UNSUPPORTED_ARG_SPECS & static_names)
 

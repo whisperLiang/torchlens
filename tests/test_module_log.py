@@ -36,6 +36,73 @@ def _nested_input():
     return torch.randn(1, 10)
 
 
+class _RepeatedBatchNormLeaf(nn.Module):
+    """Leaf module with a BatchNorm site and registered running buffers."""
+
+    def __init__(self, channels: int) -> None:
+        """Initialize the convolution and BatchNorm layers.
+
+        Parameters
+        ----------
+        channels:
+            Number of feature channels preserved by the leaf block.
+        """
+
+        super().__init__()
+        self.conv = nn.Conv2d(channels, channels, 1, bias=False)
+        self.bn = nn.BatchNorm2d(channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the leaf block.
+
+        Parameters
+        ----------
+        x:
+            Input feature map.
+
+        Returns
+        -------
+        torch.Tensor
+            Activated output feature map.
+        """
+
+        return torch.relu(self.bn(self.conv(x)))
+
+
+class _RepeatedBatchNormStack(nn.Module):
+    """Stack of identical BatchNorm-containing leaf modules."""
+
+    def __init__(self, depth: int = 4, channels: int = 3) -> None:
+        """Initialize the repeated BatchNorm stack.
+
+        Parameters
+        ----------
+        depth:
+            Number of repeated leaf modules.
+        channels:
+            Number of channels preserved by every leaf module.
+        """
+
+        super().__init__()
+        self.blocks = nn.Sequential(*(_RepeatedBatchNormLeaf(channels) for _ in range(depth)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the repeated BatchNorm stack.
+
+        Parameters
+        ----------
+        x:
+            Input feature map.
+
+        Returns
+        -------
+        torch.Tensor
+            Output feature map after every leaf module.
+        """
+
+        return self.blocks(x)
+
+
 # ---------------------------------------------------------------------------
 # TestModuleLogBasic
 # ---------------------------------------------------------------------------
@@ -291,8 +358,50 @@ class TestSinglePassDelegation:
     def test_forward_args_delegates(self):
         log = trace_fn(_make_simple_model(), _simple_input())
         ml = log.modules["0"]
-        # forward_args should be accessible for single-pass
-        _ = ml.forward_args  # should not raise
+        # GC-11 (torchlens/postprocess/finalization.py) unconditionally nulls
+        # ModuleCall.forward_args/forward_kwargs after Trace construction for
+        # the default "torch_module" identity mode -- the only modes GC-11
+        # exempts ("pytree_module"/"object_module") are JAX/TF/MLX/paddle/
+        # tinygrad-specific and the torch backend rejects them outright
+        # (BackendUnsupportedError), so asserting on forward_args itself for
+        # a torch-backend trace always compares None == None and can never
+        # discriminate a delegation regression (cert7 finding). forward_args
+        # and forward_args_summary delegate through the exact same
+        # ``Module._single_pass_or_error(field_name)`` mechanism, but
+        # forward_args_summary is computed *before* GC-11 nulls the raw
+        # payload and is never itself cleared, so it stays a real, non-empty
+        # value -- making this a genuinely discriminating exercise of the
+        # same delegation code path (mirrors test_layers_delegates, which
+        # discriminates via a real stored field for the same reason).
+        assert ml.forward_args is None
+        assert ml.ops[0].forward_args is None
+        assert ml.forward_args_summary == ml.ops[0].forward_args_summary
+        assert ml.forward_args_summary != ""
+
+    def test_forward_args_summary_delegation_is_discriminating(self, monkeypatch):
+        """Litmus for test_forward_args_delegates: prove the comparison it
+        relies on actually catches a field-swap regression in the shared
+        ``_single_pass_or_error`` delegation mechanism, rather than trivially
+        passing regardless of what the property returns.
+        """
+        from torchlens.data_classes.module import Module
+
+        def _swapped_forward_args_summary(self: Module) -> str:
+            """Wrong delegation: returns kwargs summary instead of args summary."""
+
+            return self._single_pass_or_error("forward_kwargs_summary")
+
+        monkeypatch.setattr(
+            Module,
+            "forward_args_summary",
+            property(_swapped_forward_args_summary),
+        )
+        log = trace_fn(_make_simple_model(), _simple_input())
+        ml = log.modules["0"]
+        # ops[0] is a ModuleCall (Op), not a Module -- its own
+        # forward_args_summary attribute is untouched by the monkeypatch, so
+        # a swapped Module-level delegation now visibly disagrees with it.
+        assert ml.forward_args_summary != ml.ops[0].forward_args_summary
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +418,95 @@ class TestModuleAccessorSummary:
         assert "class_name" in df.columns
         assert "call_depth" in df.columns
         assert "num_params" in df.columns
+
+    def test_recurrent_to_pandas_and_root_aggregates(self, input_2d):
+        """Recurrent models must not crash Module.to_pandas.
+
+        Regression: the root ``self:1`` call stores bare Layer labels (per the
+        function-root-module invariant), and a recurrent layer label resolves
+        to MULTIPLE Ops. Aggregate ModuleCall properties that iterate
+        ``trace.ops[label]`` used to raise ``AmbiguousOpLookupError`` on such a
+        label, crashing the field-order-driven module table. The root aggregate
+        must instead sum over every pass, and multi-call submodules must not
+        crash the per-pass columns.
+        """
+
+        from torchlens.validation.invariants import check_metadata_invariants
+
+        model = example_models.RecurrentParamsSimple()
+        # activation_transform=identity forces transformed_out to be populated
+        # (it stays None with no transform), so the single-pass-vs-multi-pass
+        # None-guard assertions below are meaningful rather than trivially true.
+        log = trace_fn(model, input_2d, activation_transform=lambda x: x)
+
+        # The whole table renders without raising.
+        df = log.modules.to_pandas()
+        assert len(df) == len(log.modules)
+
+        # Root aggregates sum over ALL ops (every recurrent pass), with no
+        # double-count and no miss versus a manual sum over log.ops.
+        root = log.root_module
+        all_ops = list(log.ops)
+        manual_func = sum(getattr(op, "func_duration", 0.0) or 0.0 for op in all_ops)
+        manual_autograd = sum(int(getattr(op, "autograd_memory", 0) or 0) for op in all_ops)
+        out_label_set = set(root.calls[0].output_ops)
+        manual_out_act = sum(
+            int(getattr(op, "activation_memory", 0) or 0)
+            for op in all_ops
+            if op.label in out_label_set or op.layer_label in out_label_set
+        )
+        assert manual_out_act > 0  # cross-check actually exercises some ops
+        assert float(root.func_calls_duration) == pytest.approx(manual_func)
+        assert int(root.total_autograd_memory) == manual_autograd
+        assert int(root.total_output_activation_memory) == manual_out_act
+
+        # A multi-call submodule reports per-pass columns as None (mirroring the
+        # output_structure precedent) rather than raising; total_* still carry
+        # the aggregate.
+        fc1 = log.modules["fc1"]
+        assert fc1.num_calls > 1
+        fc1_row = df[df["address"] == "fc1"].iloc[0]
+        assert (
+            fc1_row["func_calls_duration"] is None
+            or fc1_row["func_calls_duration"] != (fc1_row["func_calls_duration"])
+        )  # None or NaN
+        assert float(fc1_row["total_func_calls_duration"]) >= 0.0
+
+        # BLOCKER regression (cert5/cert6): the SAME bug class one layer down --
+        # ``Layer.to_pandas()``, ``LayerAccessor.to_pandas()`` (trace.layers.to_pandas()),
+        # and a single-module ``Module["addr"].to_pandas()`` all delegate to
+        # ``transformed_out``/``transformed_grad``, which raise ValueError via
+        # ``Layer._single_pass_or_error()`` for any multi-pass (recurrent) layer.
+        # None of these three surfaces were covered by the assertions above, which
+        # is exactly why the regression slipped through hotfix2.
+        multi_pass_labels = [label for label in fc1.layer_labels if log[label].num_passes > 1]
+        assert multi_pass_labels, "fixture must contain a multi-pass layer to exercise this gap"
+
+        # 1) Layer.to_pandas() directly.
+        multi_pass_layer = log[multi_pass_labels[0]]
+        layer_df = multi_pass_layer.to_pandas()
+        assert len(layer_df) == 1
+        assert layer_df.iloc[0]["transformed_out"] is None
+        assert layer_df.iloc[0]["transformed_grad"] is None
+
+        # 2) trace.layers.to_pandas() (LayerAccessor).
+        layers_df = log.layers.to_pandas()
+        assert len(layers_df) == len(log.layers)
+        multi_pass_row = layers_df[layers_df["layer_label"] == multi_pass_labels[0]].iloc[0]
+        assert multi_pass_row["transformed_out"] is None
+        assert multi_pass_row["transformed_grad"] is None
+        # Single-pass layers keep their real (non-None) per-pass values.
+        single_pass_row = layers_df[layers_df["num_passes"] == 1].iloc[0]
+        assert single_pass_row["transformed_out"] is not None
+
+        # 3) trace.modules["addr"].to_pandas() -- the per-module layer export.
+        fc1_layers_df = fc1.to_pandas()
+        assert len(fc1_layers_df) == fc1.num_layers
+        fc1_layer_row = fc1_layers_df[fc1_layers_df["layer_label"] == multi_pass_labels[0]].iloc[0]
+        assert fc1_layer_row["transformed_out"] is None
+        assert fc1_layer_row["transformed_grad"] is None
+
+        assert check_metadata_invariants(log) is True
 
     def test_summary(self):
         log = trace_fn(_make_simple_model(), _simple_input())
@@ -386,6 +584,25 @@ class TestModuleLogIntegration:
         # Should have nested hierarchy
         max_depth = max(ml.call_depth for ml in log.modules)
         assert max_depth >= 2  # At least 3 levels of nesting
+
+    def test_first_repeated_batchnorm_module_owns_only_local_layers(self) -> None:
+        """Internal buffer-address probes must not inflate first BatchNorm module layers."""
+
+        model = _RepeatedBatchNormStack(depth=4).eval()
+        log = trace_fn(model, torch.randn(1, 3, 8, 8))
+
+        block_layers = [log.modules[f"blocks.{idx}"].layer_labels for idx in range(4)]
+        block_counts = [log.modules[f"blocks.{idx}"].num_layers for idx in range(4)]
+        batchnorm_counts = [log.modules[f"blocks.{idx}.bn"].num_layers for idx in range(4)]
+
+        assert block_counts == [7, 7, 7, 7]
+        assert [len(labels) for labels in block_layers] == block_counts
+        assert batchnorm_counts == [5, 5, 5, 5]
+        for labels in block_layers:
+            assert [label.split("_", 1)[0] for label in labels].count("buffer") == 4
+            assert [label.split("_", 1)[0] for label in labels].count("batchnorm") == 1
+            assert [label.split("_", 1)[0] for label in labels].count("conv2d") == 1
+            assert [label.split("_", 1)[0] for label in labels].count("relu") == 1
 
 
 # ---------------------------------------------------------------------------

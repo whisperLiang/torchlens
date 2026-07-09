@@ -5,11 +5,12 @@ from __future__ import annotations
 from contextlib import AbstractContextManager
 from typing import Any, Protocol
 
-from ..ir.events import OpEvent, TraceBuildState
+from ..ir.events import OpEvent
 from ..ir.intervention import FireResult, FunctionEventInput
 from ..ir.predicate import RecordContext
 from ..ir.refs import ReservedLabel, TensorRef
 from ..ir.semantics import BackendSemantics, CapturePolicy
+from ..ir.trace_build_state import TraceBuildState
 
 
 class CaptureBackend(Protocol):
@@ -79,12 +80,24 @@ class CaptureBackend(Protocol):
         """Extract input tensors, move them to the model device, and build labels."""
         ...
 
+    def seed_rng(self, session: object, seed: int) -> None:
+        """Seed backend RNG engines for the current capture session."""
+        ...
+
+    def set_capture_producer_policy(self, session: object, capture_mode: object) -> None:
+        """Install backend producer policy metadata for the capture mode."""
+        ...
+
     def snapshot_rng(self, session: object) -> object:
         """Capture backend RNG state for the current session."""
         ...
 
-    def snapshot_autocast(self, session: object) -> object:
-        """Capture backend autocast state for the current session."""
+    def restore_rng(self, session: object, rng_state: object) -> None:
+        """Restore a backend RNG snapshot for the current session."""
+        ...
+
+    def inference_context(self, session: object) -> AbstractContextManager[None]:
+        """Return the backend inference-only context for this session."""
         ...
 
     def log_source_tensor(
@@ -193,15 +206,6 @@ class CaptureBackend(Protocol):
         """Build the selector predicate context for one output."""
         ...
 
-    def detect_in_place_isolation_required(
-        self,
-        session: object,
-        func_event_input: FunctionEventInput,
-        output: object,
-    ) -> bool:
-        """Return whether the output requires in-place isolation."""
-        ...
-
     def detect_backend_semantics(
         self,
         session: object,
@@ -231,24 +235,6 @@ class CaptureBackend(Protocol):
 
     def is_parameter(self, value: object) -> bool:
         """Return whether a value is a backend parameter."""
-        ...
-
-    def mark_same_object_candidates(
-        self,
-        session: object,
-        func_event_input: FunctionEventInput,
-    ) -> object:
-        """Mark input objects that may be returned by identity."""
-        ...
-
-    def isolate_same_object_returns(
-        self,
-        session: object,
-        func_event_input: FunctionEventInput,
-        raw_output: object,
-        premarked_inputs: object,
-    ) -> object:
-        """Clone raw outputs that alias premarked inputs."""
         ...
 
     def apply_live_hooks(
@@ -351,6 +337,10 @@ class CaptureBackend(Protocol):
             Session metadata is cleared in place and exception diagnostics may
             be attached to ``exc``.
         """
+        ...
+
+    def cleanup_forward_memory(self, session: object) -> None:
+        """Release backend-owned transient forward-memory caches."""
         ...
 
 

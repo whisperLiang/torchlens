@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import gc
-import os
 from pathlib import Path
-import pickle
 import time
 from typing import Any, Iterator
 import weakref
@@ -18,10 +16,10 @@ import numpy as np
 
 import torchlens as tl
 from torchlens import errors
+from torchlens._capture_state_helpers import _detach_nested_for_cache
 from torchlens.data_classes._state_adapter import state_items
-from torchlens.user_funcs import _detach_nested_for_cache
 
-from _pickle_compare import _canonical_pickle_diff, _tensor_equal
+from _pickle_compare import _tensor_equal
 from _pickle_compare_allowlist import ALLOWED_PICKLE_DIFF_FIELDS
 
 _GZIP_MAGIC = b"\x1f\x8b"
@@ -406,54 +404,6 @@ def _write_golden_pickle_bytes(path: Path, data: bytes, model_class_name: str) -
     path.write_bytes(payload)
 
 
-@pytest.mark.skip(
-    reason="feature-removed: M5 pre-M6 pickle byte-equality schema was superseded by 2.0 renames"
-)
-def test_pickle_byte_equal_pre_m6(
-    fixture_model_input: tuple[nn.Module, torch.Tensor, str],
-) -> None:
-    """Compare current trace pickle bytes against M5 pre-M6 goldens.
-
-    Parameters
-    ----------
-    fixture_model_input
-        Parametrized model/input/name fixture.
-    """
-
-    model, x, model_class_name = fixture_model_input
-    trace = tl.trace(
-        model,
-        x,
-        random_seed=123,
-        layers_to_save=None,
-        save_rng_states=False,
-        save_code_context=False,
-    )
-    _make_trace_pickleable(trace)
-    golden_path = Path("tests/golden/m5_pre_m6") / f"{model_class_name}.pkl"
-
-    actual = pickle.dumps(trace, protocol=4)
-    if os.environ.get("TL_REGEN_GOLDEN") == "1":
-        golden_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_golden_pickle_bytes(golden_path, actual, model_class_name)
-        pytest.skip(f"regenerated golden at {golden_path}")
-    if not golden_path.exists():
-        pytest.skip(f"golden fixture missing: {golden_path}; regenerate with TL_REGEN_GOLDEN=1")
-
-    expected_trace = pickle.loads(_read_golden_pickle_bytes(golden_path))
-    _drop_capture_scratch(expected_trace)
-    expected = pickle.dumps(expected_trace, protocol=4)
-    if actual != expected:
-        actual_trace = pickle.loads(actual)
-        expected_trace = pickle.loads(expected)
-        diffs = _canonical_pickle_diff(actual_trace, expected_trace)
-        if diffs:
-            diff = _first_state_difference(actual_trace, expected_trace)
-            if diff is not None:
-                diffs.insert(0, diff)
-            pytest.fail(f"Trace pickle differs for {model_class_name}: {diffs[:5]!r}")
-
-
 def test_pickle_compare_allowlist_stable() -> None:
     """Assert the parity allow-list is an explicit committed contract."""
 
@@ -482,7 +432,7 @@ def test_param_refs_release_but_pid_lookup_remains_for_backward() -> None:
 
     model = nn.Linear(3, 2)
     x = torch.randn(1, 3)
-    trace = tl.trace(model, x, random_seed=123)
+    trace = tl.trace(model, x, capture=tl.options.CaptureOptions(random_seed=123))
     param_log = trace.params["weight"]
 
     assert param_log._param_ref is None
@@ -496,7 +446,9 @@ def test_released_param_grad_refetches_after_manual_backward() -> None:
 
     model = nn.Linear(3, 1)
     x = torch.randn(2, 3, requires_grad=True)
-    trace = tl.trace(model, x, random_seed=123, backward_ready=True)
+    trace = tl.trace(
+        model, x, capture=tl.options.CaptureOptions(random_seed=123, backward_ready=True)
+    )
     param_log = trace.params["weight"]
 
     assert param_log._param_ref is None
@@ -530,7 +482,7 @@ def test_walk_detects_accumulategrad_via_type_name() -> None:
 
     model = nn.Linear(3, 1)
     x = torch.randn(2, 3)
-    trace = tl.trace(model, x, random_seed=123, save_grads=True)
+    trace = tl.trace(model, x, capture=tl.options.CaptureOptions(random_seed=123, save_grads=True))
     loss = trace[trace.output_layers[0]].out.sum()
     trace.log_backward(loss)
     assert trace._grad_fn_param_refs

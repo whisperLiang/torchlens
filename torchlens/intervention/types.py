@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Literal, TypeAlias
+from typing import Any, ClassVar, Literal, TypeAlias
 
+from .._io import FieldPolicy
 from ..ir.container import (
     ContainerSpec,
     DataclassField,
@@ -107,12 +108,26 @@ class FrozenTargetSpec:
 
 
 HelperKind: TypeAlias = Literal["forward", "backward"]
+HelperDirection: TypeAlias = Literal["forward", "backward", "both"]
 HelperPortability: TypeAlias = Literal["builtin", "import_ref", "opaque_audit"]
 
 
 @dataclass(frozen=True)
 class HelperSpec:
     """Portable identity and hook factory for helper-built interventions."""
+
+    PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
+        "helper_name": FieldPolicy.KEEP,
+        "args": FieldPolicy.KEEP,
+        "kwargs": FieldPolicy.KEEP,
+        "kind": FieldPolicy.KEEP,
+        "portability": FieldPolicy.KEEP,
+        "factory": FieldPolicy.DROP,
+        "metadata": FieldPolicy.KEEP,
+        "direction": FieldPolicy.KEEP,
+        "batch_independent": FieldPolicy.KEEP,
+        "compatible_with_append": FieldPolicy.KEEP,
+    }
 
     helper_name: str
     args: tuple[Any, ...] = ()
@@ -123,6 +138,7 @@ class HelperSpec:
         default=None, compare=False, repr=False
     )
     metadata: tuple[tuple[str, Any], ...] = ()
+    direction: HelperDirection | None = None
     batch_independent: bool = False
     compatible_with_append: bool = False
 
@@ -180,6 +196,7 @@ class InterventionDecision:
     template_ref: Any | None = None
     keep_grad: bool = False
     isolate: bool = False
+    direction: HelperDirection = "forward"
 
 
 @dataclass(frozen=True)
@@ -245,6 +262,27 @@ class CapturedArgTemplate:
 class FireRecord:
     """Runtime record for one intervention firing."""
 
+    PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
+        "target_label": FieldPolicy.KEEP,
+        "call_label": FieldPolicy.KEEP,
+        "func_call_id": FieldPolicy.KEEP,
+        "container_path": FieldPolicy.KEEP,
+        "engine": FieldPolicy.KEEP,
+        "helper": FieldPolicy.KEEP,
+        "site_label": FieldPolicy.KEEP,
+        "timing": FieldPolicy.KEEP,
+        "direction": FieldPolicy.KEEP,
+        "helper_name": FieldPolicy.KEEP,
+        "seed": FieldPolicy.KEEP,
+        "determinism_note": FieldPolicy.KEEP,
+        "timestamp": FieldPolicy.KEEP,
+        "backward_pass_index": FieldPolicy.KEEP,
+        "call_index": FieldPolicy.KEEP,
+        "grad_kind": FieldPolicy.KEEP,
+        "tuple_index": FieldPolicy.KEEP,
+        "replaced": FieldPolicy.KEEP,
+    }
+
     target_label: str = ""
     call_label: str | None = None
     func_call_id: int | None = None
@@ -258,6 +296,11 @@ class FireRecord:
     seed: int | None = None
     determinism_note: str | None = None
     timestamp: float | None = None
+    backward_pass_index: int | None = None
+    call_index: int | None = None
+    grad_kind: Literal["grad_input", "grad_output"] | None = None
+    tuple_index: int | None = None
+    replaced: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -447,8 +490,8 @@ class InterventionSpec:
             Optional target spec. When provided without a handle, all sticky
             hooks for that target are removed.
         handle:
-            Optional hook handle. Phase 8a does not issue handles, but this
-            path removes a matching stored handle if future code populated one.
+            Optional hook handle. Matching stored handles are removed when
+            present.
 
         Returns
         -------
@@ -465,7 +508,7 @@ class InterventionSpec:
         return original_len - len(self.hook_specs)
 
     def clear(self) -> None:
-        """Clear all Phase 8a sticky hook entries.
+        """Clear all sticky hook entries.
 
         Returns
         -------
@@ -587,7 +630,17 @@ def _fork_policy_table(
     share = share or set()
     reconstruct = reconstruct or set()
     table: dict[str, ForkFieldPolicy] = {}
-    for field_name in field_order:
+    # Seed from the canonical field order plus any share/reconstruct names that
+    # live outside it (e.g. `_optimizer`, which is a real Trace attribute carried
+    # by the fork but is intentionally NOT a tabular display field in
+    # MODEL_LOG_FIELD_ORDER). Iterating field_order alone would silently drop
+    # those entries, letting the fork fall through to the deepcopy default and
+    # sever the shared reference the `share` set explicitly asked for.
+    seen: set[str] = set()
+    for field_name in [*field_order, *sorted(share | reconstruct)]:
+        if field_name in seen:
+            continue
+        seen.add(field_name)
         if field_name in reconstruct:
             table[field_name] = ForkFieldPolicy.FORK_RECONSTRUCT
         elif field_name in share:
@@ -633,7 +686,7 @@ def _build_op_log_fork_policy() -> dict[str, ForkFieldPolicy]:
 
     from ..constants import LAYER_PASS_LOG_FIELD_ORDER
 
-    return _fork_policy_table(
+    table = _fork_policy_table(
         LAYER_PASS_LOG_FIELD_ORDER,
         share={
             "out",
@@ -642,11 +695,19 @@ def _build_op_log_fork_policy() -> dict[str, ForkFieldPolicy]:
             "transformed_grad",
             "func",
             "grad_fn_handle",
-            "grad_fn_handle",
-            "source_trace",
         },
         reconstruct={"source_trace", "_construction_done"},
     )
+    # `_facets_cache` is not part of LAYER_PASS_LOG_FIELD_ORDER (it is a lazily
+    # populated runtime cache, not a portable/user-facing field), so the loop
+    # above never assigns it a policy. Left unset, a forked Op would fall
+    # through to the generic default policy and attempt copy.deepcopy() on the
+    # cached FacetView -- which self-references its owning Op and crashes with
+    # RecursionError. Reconstruct it instead (discarded immediately afterward
+    # by _rebind_fork_owner_refs's `del layer_pass.facets` in any case),
+    # mirroring how Op.__getstate__ already excludes this field for pickling.
+    table["_facets_cache"] = ForkFieldPolicy.FORK_RECONSTRUCT
+    return table
 
 
 MODEL_LOG_FIELD_FORK_POLICY = _build_trace_fork_policy()

@@ -194,7 +194,7 @@ def _intervention_report(
             if forward_ok
             else "forward validation failed",
             "specificity": "no ambiguous intervention selectors supplied",
-            "completeness": "all five Phase 5a axes evaluated",
+            "completeness": "all five intervention validation axes evaluated",
             "consistency": "single-run consistency mirrors invariance",
             "locality": "validation stayed within supplied model/input",
         },
@@ -218,7 +218,7 @@ def validate(
     layer_grad_atol: float | None = None,
     layer_grad_rtol: float | None = None,
     backend: BackendName | None = None,
-) -> bool:
+) -> bool | InterventionValidationReport:
     """Validate a model/input pair for a requested TorchLens scope.
 
     Parameters
@@ -257,8 +257,9 @@ def validate(
 
     Returns
     -------
-    bool
-        Validation pass/fail for forward, backward, and saved scopes.
+    bool | InterventionValidationReport
+        Validation pass/fail for forward, backward, and saved scopes, or an
+        intervention validation report for ``scope="intervention"``.
     """
 
     normalized_scope = scope.lower()
@@ -315,7 +316,7 @@ def validate(
         random_seed=random_seed,
         verbose=verbose,
         validate_metadata=validate_metadata,
-    )  # type: ignore[return-value]
+    )
 
 
 __all__ = ["InterventionValidationReport", "validate"]

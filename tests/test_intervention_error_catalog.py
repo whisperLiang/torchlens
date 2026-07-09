@@ -5,16 +5,19 @@ from __future__ import annotations
 import gc
 import threading
 import weakref
-import warnings
 from collections.abc import Callable, Iterable
+from pathlib import Path
 from typing import Any
 
 import pytest
 import torch
 
 import torchlens as tl
+from torchlens.io import load_intervention_spec
+from torchlens.io import list_logs
 from torchlens.io import TraceState
 from torchlens.intervention import errors as terrors
+from torchlens.validation import check_spec_compat
 
 
 SeverityClass = type[BaseException]
@@ -26,28 +29,25 @@ ERROR_NAMES: tuple[str, ...] = (
     "BundleMemberError",
     "BundleRelationshipError",
     "BaselineUndeterminedError",
-    "NoParentError",
-    "DeadParentError",
     "ReplayPreconditionError",
     "SiteResolutionError",
     "SiteAmbiguityError",
     "HookSignatureError",
     "HookValueError",
     "HookSiteCoverageError",
-    "RecursiveTracingError",
     "AxisAmbiguityError",
     "AppendMismatchError",
     "AppendBatchDependenceError",
     "ControlFlowDivergenceError",
     "SpecPortabilityError",
     "GraphShapeMismatchError",
-    "LiveModeLabelError",
     "InterventionReadyConflictError",
-    "SpliceModuleDtypeError",
+    "LiveModeLabelError",
     "SpliceModuleDeviceError",
+    "SpliceModuleDtypeError",
+    "DirectWriteInExecutableSaveError",
     "SpecMutationError",
     "OpaqueCallableInExecutableSaveError",
-    "DirectWriteInExecutableSaveError",
 )
 """v5.2 intervention errors owned by Phase 14."""
 
@@ -66,31 +66,28 @@ CATALOG_NAMES: tuple[str, ...] = ERROR_NAMES + WARNING_NAMES
 CATALOG_EXERCISE_MANIFEST: dict[str, str] = {
     "EngineDispatchError": "tests/test_intervention_phase8b.py::test_do_ambiguous_dispatch_and_model_mismatch_errors",
     "ModelMismatchError": "tests/test_intervention_phase8b.py::test_do_ambiguous_dispatch_and_model_mismatch_errors",
-    "BundleMemberError": "tests/test_intervention_phase9.py",
+    "BundleMemberError": "tests/test_intervention_error_catalog.py::test_bundle_member_error_raised_for_missing_bundle_site",
     "BundleRelationshipError": "tests/test_intervention_phase9.py",
     "BaselineUndeterminedError": "tests/test_intervention_phase9.py",
-    "NoParentError": "tests/test_intervention_phase9.py",
-    "DeadParentError": "tests/test_intervention_phase9.py",
     "ReplayPreconditionError": "tests/test_intervention_phase6.py::test_replay_rejects_non_intervention_ready_logs",
     "SiteResolutionError": "tests/test_intervention_phase2.py::test_resolution_errors_strict_mode_and_warnings",
     "SiteAmbiguityError": "tests/test_intervention_phase2.py::test_resolution_errors_strict_mode_and_warnings",
     "HookSignatureError": "tests/test_intervention_phase3.py::test_normalizer_rejects_missing_site_and_bad_signature",
     "HookValueError": "tests/test_intervention_phase3.py::test_execute_hook_rejects_none_type_shape_dtype_and_device",
     "HookSiteCoverageError": "tests/test_intervention_phase3.py::test_normalizer_rejects_missing_site_and_bad_signature",
-    "RecursiveTracingError": "tests/test_intervention_error_catalog.py::test_full_catalog_is_exercised",
     "AxisAmbiguityError": "tests/test_intervention_error_catalog.py::test_helper_axis_ambiguity_uses_catalog_error",
     "AppendMismatchError": "tests/test_intervention_phase12.py::test_append_shape_mismatch_raises",
     "AppendBatchDependenceError": "tests/test_intervention_phase12.py::test_append_batch_dependent_helper_rejected_after_clean_rerun",
     "ControlFlowDivergenceError": "tests/test_intervention_phase7.py::test_rerun_strict_divergence_raises_before_swap",
-    "SpecPortabilityError": "tests/test_intervention_error_catalog.py::test_full_catalog_is_exercised",
-    "GraphShapeMismatchError": "tests/test_intervention_phase10.py",
+    "SpecPortabilityError": "tests/test_intervention_error_catalog.py::test_spec_portability_alias_reconciles_executable_save_name",
+    "GraphShapeMismatchError": "tests/test_intervention_error_catalog.py::test_graph_shape_mismatch_error_raised_for_executable_spec",
+    "InterventionReadyConflictError": "tests/test_intervention_error_catalog.py::test_intervention_ready_conflict_error_raised_for_two_pass_grads",
     "LiveModeLabelError": "tests/test_intervention_phase4c.py",
-    "InterventionReadyConflictError": "tests/test_intervention_phase4a.py::test_intervention_ready_rejects_nonempty_layers_to_save_list",
+    "SpliceModuleDeviceError": "tests/test_intervention_error_catalog.py::test_splice_module_device_error_raised_for_device_mismatch",
     "SpliceModuleDtypeError": "tests/test_intervention_phase3.py::test_splice_module_dtype_error_is_specific",
-    "SpliceModuleDeviceError": "tests/test_intervention_error_catalog.py::test_full_catalog_is_exercised",
+    "DirectWriteInExecutableSaveError": "tests/test_intervention_error_catalog.py::test_direct_write_executable_save_error_raised",
     "SpecMutationError": "tests/test_intervention_phase8a.py",
     "OpaqueCallableInExecutableSaveError": "tests/test_intervention_phase10.py::test_portable_save_rejects_opaque_callable",
-    "DirectWriteInExecutableSaveError": "tests/test_intervention_phase10.py",
     "MutateInPlaceWarning": "tests/test_intervention_phase8b.py::test_mutate_warning_fires_once_and_can_be_suppressed",
     "DirectActivationWriteWarning": "tests/test_intervention_phase8b.py::test_direct_out_write_warns_once_and_marks_dirty",
     "MultiMatchWarning": "tests/test_intervention_phase2.py::test_resolution_errors_strict_mode_and_warnings",
@@ -149,6 +146,46 @@ class _LinearRelu(torch.nn.Module):
         return torch.relu(self.linear(x))
 
 
+class _TanhAdd(torch.nn.Module):
+    """Small model with a different graph shape from ``_ReluAdd``."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply Tanh and a downstream add.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Tanh output plus one.
+        """
+
+        return torch.tanh(x) + 1
+
+
+class _MetaReturn(torch.nn.Module):
+    """Module that returns a tensor on the meta device."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return a meta-device tensor with the same shape and dtype as ``x``.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Meta tensor.
+        """
+
+        return torch.empty_like(x, device="meta")
+
+
 def _zero_hook(out: torch.Tensor, *, hook: Any) -> torch.Tensor:
     """Return zeros matching the input out.
 
@@ -189,7 +226,7 @@ def _capture(model: torch.nn.Module | None = None, x: torch.Tensor | None = None
     return tl.trace(
         _ReluAdd() if model is None else model,
         torch.tensor([[-1.0, 2.0, 3.0]]) if x is None else x,
-        intervention_ready=True,
+        capture=tl.options.CaptureOptions(intervention_ready=True),
     )
 
 
@@ -255,18 +292,10 @@ def test_spec_portability_alias_reconciles_executable_save_name() -> None:
     assert terrors.SpecPortabilityError is terrors.OpaqueCallableInExecutableSaveError
 
 
-def test_full_catalog_is_exercised() -> None:
-    """Raise or warn every named catalog entry at least once in the matrix."""
+def test_catalog_manifest_covers_named_entries() -> None:
+    """Catalog entries must have explicit non-synthetic test citations."""
 
     assert set(CATALOG_EXERCISE_MANIFEST) == set(CATALOG_NAMES)
-    for name in ERROR_NAMES:
-        cls = _catalog_class(name)
-        with pytest.raises(cls):
-            raise cls(site="relu_1_2", helper="zero_ablate", remediation="retry")
-    for name in WARNING_NAMES:
-        cls = _catalog_class(name)
-        with pytest.warns(cls):
-            warnings.warn(cls(site="relu_1_2", helper="zero_ablate"), stacklevel=1)
 
 
 @pytest.mark.parametrize("name", CATALOG_NAMES)
@@ -310,12 +339,14 @@ def test_axis_a_public_verbs_success_paths() -> None:
     log = _capture()
     log.set(tl.func("relu"), torch.zeros(1, 3), confirm_mutation=True)
     log.attach_hooks(tl.func("relu"), _zero_hook, confirm_mutation=True)
-    replay_result = log.replay()
+    with pytest.warns(DeprecationWarning, match="Trace.replay"):
+        replay_result = log.replay()
     assert replay_result is log
     assert log.state is TraceState.REPLAY_PROPAGATED
 
     do_log = _capture()
-    do_log.do(tl.func("relu"), torch.ones(1, 3), engine="set_only", confirm_mutation=True)
+    with pytest.warns(DeprecationWarning):
+        do_log.do(tl.func("relu"), torch.ones(1, 3), engine="set_only", confirm_mutation=True)
     assert do_log.state is TraceState.SPEC_STALE
 
     fork = do_log.fork("phase14")
@@ -324,9 +355,10 @@ def test_axis_a_public_verbs_success_paths() -> None:
     model = _LinearRelu()
     x = torch.randn(2, 3)
     rerun_log = _capture(model, x)
-    rerun_log.rerun(model, x)
+    rerun_log.run(model, x)
     assert rerun_log.state is TraceState.RERUN_PROPAGATED
-    rerun_log.rerun(model, torch.randn(1, 3), append=True)
+    with pytest.warns(DeprecationWarning, match="append"):
+        rerun_log.run(model, torch.randn(1, 3), append=True)
     assert rerun_log.state is TraceState.APPENDED
 
 
@@ -345,8 +377,8 @@ def test_axis_a_public_verbs_success_paths() -> None:
             ),
         ),
         ("replay", lambda log: log.replay()),
-        ("rerun", lambda log: log.rerun(_ReluAdd())),
-        ("append", lambda log: log.rerun(_ReluAdd(), torch.ones(1, 4), append=True)),
+        ("rerun", lambda log: log.run(_ReluAdd())),
+        ("append", lambda log: log.run(_ReluAdd(), torch.ones(1, 4), append=True)),
     ),
 )
 def test_axis_a_public_verbs_failure_paths(
@@ -372,7 +404,7 @@ def test_axis_b_replay_and_rerun_match_for_graph_stable_hook() -> None:
     replay_log.attach_hooks(tl.func("relu"), _zero_hook, confirm_mutation=True)
     rerun_log.attach_hooks(tl.func("relu"), _zero_hook, confirm_mutation=True)
     replay_log.replay()
-    rerun_log.rerun(_ReluAdd(), x)
+    rerun_log.run(_ReluAdd(), x)
 
     replay_output = replay_log[replay_log.output_layers[0]].out
     rerun_output = rerun_log[rerun_log.output_layers[0]].out
@@ -398,10 +430,10 @@ def test_axis_i_list_logs_snapshot_survives_concurrent_log_creation() -> None:
 
         try:
             torch.manual_seed(seed)
-            snapshots.append(tl.list_logs())
+            snapshots.append(list_logs())
             with capture_lock:
                 _capture(_ReluAdd(), torch.randn(1, 3))
-            snapshots.append(tl.list_logs())
+            snapshots.append(list_logs())
         except BaseException as exc:  # pragma: no cover - failure path is asserted below.
             errors.append(exc)
 
@@ -438,7 +470,7 @@ def test_axis_i_log_registry_uses_weakref_cleanup() -> None:
     gc.collect()
 
     assert log_ref() is None
-    assert all(id(log) != log_id for log in tl.list_logs())
+    assert all(id(log) != log_id for log in list_logs())
 
 
 def test_helper_axis_ambiguity_uses_catalog_error() -> None:
@@ -450,6 +482,75 @@ def test_helper_axis_ambiguity_uses_catalog_error() -> None:
         hook(torch.ones(2, 3), hook=None)
 
 
+def test_bundle_member_error_raised_for_missing_bundle_site() -> None:
+    """Bundle operations raise ``BundleMemberError`` for unresolved member sites."""
+
+    x = torch.randn(1, 3)
+    first = _capture(_ReluAdd(), x)
+    second = _capture(_ReluAdd(), x)
+    bundle = tl.bundle({"first": first, "second": second})
+
+    with pytest.raises(terrors.BundleMemberError, match="failed to resolve"):
+        bundle.node(tl.func("missing"))
+
+
+def test_graph_shape_mismatch_error_raised_for_executable_spec(
+    tmp_path: Path,
+) -> None:
+    """Executable specs reject application to a different graph shape."""
+
+    x = torch.randn(1, 3)
+    log = _capture(_ReluAdd(), x)
+    log.attach_hooks(tl.func("relu"), tl.zero_ablate(), confirm_mutation=True)
+    path = tmp_path / "graph_shape_mismatch.tlspec"
+    log.save_intervention(path, level="portable")
+    spec = load_intervention_spec(path)
+    other = _capture(_TanhAdd(), x)
+
+    with pytest.raises(terrors.GraphShapeMismatchError, match="graph_shape_hash"):
+        check_spec_compat(spec, other)
+
+
+def test_intervention_ready_conflict_error_raised_for_two_pass_grads() -> None:
+    """Intervention-ready capture rejects selective two-pass gradient saving."""
+
+    with pytest.raises(terrors.InterventionReadyConflictError, match="selective two-pass"):
+        tl.trace(
+            _ReluAdd(),
+            torch.randn(1, 3, requires_grad=True),
+            capture=tl.options.CaptureOptions(
+                intervention_ready=True,
+                save_grads=["relu"],
+            ),
+        )
+
+
+def test_splice_module_device_error_raised_for_device_mismatch() -> None:
+    """``splice_module`` reports device mismatches with its specific catalog error."""
+
+    with pytest.raises(terrors.SpliceModuleDeviceError, match="returned device"):
+        tl.trace(
+            _ReluAdd(),
+            torch.randn(1, 3),
+            capture=tl.options.CaptureOptions(
+                intervention_ready=True,
+                hooks={tl.func("relu"): tl.splice_module(_MetaReturn())},
+            ),
+        )
+
+
+def test_direct_write_executable_save_error_raised(tmp_path: Path) -> None:
+    """Executable intervention saves reject direct activation writes by default."""
+
+    log = _capture()
+    relu = next(layer for layer in log.layer_list if layer.func_name == "relu")
+    with pytest.warns(terrors.DirectActivationWriteWarning, match="direct Op out writes"):
+        relu.out = relu.out
+
+    with pytest.raises(terrors.DirectWriteInExecutableSaveError, match="Direct out writes"):
+        log.save_intervention(tmp_path / "direct_write.tlspec")
+
+
 def test_axis_l_torchscript_degradation_message_names_recovery() -> None:
     """TorchScript rejection names the wrapper and points to the unwrapped model."""
 
@@ -458,16 +559,38 @@ def test_axis_l_torchscript_degradation_message_names_recovery() -> None:
     scripted = torch.jit.trace(_ReluAdd(), x)
 
     with pytest.raises(RuntimeError) as excinfo:
-        log.rerun(scripted, x)
+        log.run(scripted, x)
     message = str(excinfo.value)
     assert "ScriptModule" in message
     assert "original" in message or "un-scripted" in message
 
 
 def test_manifest_paths_are_test_references() -> None:
-    """The exercise manifest points at intervention test references."""
+    """The exercise manifest points at tests that cite the catalog entry."""
 
-    assert all(reference.startswith("tests/test_intervention") for reference in _manifest_values())
+    for name, reference in CATALOG_EXERCISE_MANIFEST.items():
+        assert reference.startswith("tests/test_intervention")
+        path = reference.split("::", 1)[0]
+        source = Path(path).read_text()
+        assert name in source or _manifest_alias(name) in source
+
+
+def _manifest_alias(name: str) -> str:
+    """Return an accepted citation alias for an error catalog entry.
+
+    Parameters
+    ----------
+    name:
+        Catalog entry name.
+
+    Returns
+    -------
+    str
+        Name or alias expected in the cited test source.
+    """
+
+    aliases = {"SpecPortabilityError": "OpaqueCallableInExecutableSaveError"}
+    return aliases.get(name, name)
 
 
 def _manifest_values() -> Iterable[str]:

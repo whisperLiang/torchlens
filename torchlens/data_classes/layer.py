@@ -15,7 +15,7 @@ Why ValueError instead of AttributeError: Python's property protocol treats
 through to ``__getattr__``.  Using ``ValueError`` avoids this trap and gives
 the user a clear error message.
 
-**_build_layer_logs merge rules** (in postprocess/layer_log.py):
+**_build_layer_logs merge rules** (in ``postprocess/finalization.py``):
 When merging multiple ops into one Layer, these aggregate fields are merged:
   - ``has_input_ancestor``: OR across ops
   - ``io_role``: character-level merge of "I", "O", "IO" strings
@@ -32,14 +32,23 @@ All other 78+ fields use the first pass's values only.
 
 import weakref
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, cast
 
 from .._deprecations import MISSING
 from .._errors import AmbiguousOpLookupError
-from .._io import FieldPolicy, TLSPEC_VERSION, default_fill_state, read_tlspec_version
+from .._io import (
+    FieldPolicy,
+    TLSPEC_VERSION,
+    coerce_container_typed_state,
+    default_fill_state,
+    read_tlspec_version,
+)
+from ..constants import LAYER_LOG_FIELD_ORDER, LAYER_PASS_LOG_FIELD_ORDER
 from ..ir.refs import DeviceRef, DtypeRef
 from ..quantities import Bytes, Duration, Flops, Macs, as_bytes, as_flops, as_macs
 from ._accessor_base import Accessor
+from .field_policy import build_record_field_policy_table, portable_state_spec_from_policy
+from ._repr import format_config_items, format_shape_list
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -47,6 +56,80 @@ if TYPE_CHECKING:
     from .op import Op
     from .trace import Trace
     from .param import Param
+
+
+_LAYER_DELEGATED_PASS_FIELDS = frozenset((*LAYER_PASS_LOG_FIELD_ORDER, "out_ref", "grad_ref"))
+
+# Per-pass fields that ``Layer`` resolves via ``_single_pass_or_error``: they
+# describe ONE op/pass and deliberately raise ``ValueError`` on a multi-pass
+# (recurrent) Layer, directing the user to a specific ``layer.ops[i]`` pass.
+# The field-order-driven ``to_pandas`` row builders cannot let that raise, so
+# they report these as None for multi-pass Layers -- mirroring
+# ``_MULTI_CALL_PER_PASS_MODULE_FIELDS`` one level up in module.py. No
+# information is lost: the per-pass value remains reachable via
+# ``layer.ops[i].transformed_out`` / ``.transformed_grad``.
+_MULTI_PASS_PER_CALL_LAYER_FIELDS: frozenset[str] = frozenset(
+    {
+        "transformed_out",
+        "transformed_grad",
+    }
+)
+
+# Typed container defaults for every non-Optional container field Layer
+# stores directly (as opposed to delegating to ``self.ops[i]``). Same defect
+# class as ``Op._LAYER_PASS_LOG_CONTAINER_DEFAULTS`` /
+# ``Trace._MODEL_LOG_CONTAINER_DEFAULTS``: without this,
+# ``coerce_container_typed_state`` cannot repair a present-but-wrong-typed
+# legacy value (e.g. ``equivalent_ops`` serialized as a ``list`` where a
+# ``set`` is now declared), and an absent field crashes instead of restoring
+# an empty typed container. Plain builtin types are used deliberately.
+_LAYER_LOG_CONTAINER_DEFAULTS: dict[str, Any] = {
+    "arg_names": (),
+    "param_shapes": [],
+    "_param_barcodes": [],
+    "_param_logs": [],
+    "equivalent_ops": set(),
+    "in_conditionals": [],
+    "conditional_role_stacks": [],
+    "conditional_branch_stack_ops": {},
+    "conditional_arm_children": {},
+    "modules": [],
+    "output_of_modules": [],
+    "output_of_module_calls": [],
+    "conditional_entry_children": [],
+    "conditional_then_children": [],
+    "conditional_elif_children": {},
+    "conditional_else_children": [],
+    "annotations": {},
+    "call_labels": [],
+}
+
+
+def _layer_log_to_row(layer_log: "Layer") -> Dict[str, Any]:
+    """Convert a Layer into one DataFrame row.
+
+    Parameters
+    ----------
+    layer_log:
+        Layer metadata entry to export.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Mapping from canonical field name to exported value, ordered by
+        ``LAYER_LOG_FIELD_ORDER``. Per-pass fields
+        (``_MULTI_PASS_PER_CALL_LAYER_FIELDS``) are reported as ``None`` for
+        multi-pass Layers so the table never raises.
+    """
+
+    multi_pass = layer_log.num_passes > 1
+    row: Dict[str, Any] = {}
+    for field_name in LAYER_LOG_FIELD_ORDER:
+        if multi_pass and field_name in _MULTI_PASS_PER_CALL_LAYER_FIELDS:
+            row[field_name] = None
+            continue
+        row[field_name] = getattr(layer_log, field_name)
+    return row
 
 
 class OpAccessor(Accessor["Op"]):
@@ -94,7 +177,7 @@ class OpAccessor(Accessor["Op"]):
         if isinstance(key, str):
             try:
                 self[key]
-            except KeyError:
+            except (KeyError, ValueError):
                 return False
             return True
         return False
@@ -122,16 +205,6 @@ class OpAccessor(Accessor["Op"]):
                 only_op.raw_label,
             }:
                 return only_op
-        for op_log in self._dict.values():
-            if key in {
-                op_log.layer_label,
-                op_log.label,
-                op_log.layer_label_short,
-                op_log.label_short,
-                op_log._label_raw,
-                op_log.raw_label,
-            }:
-                return op_log
         parent_matches = [
             op_log
             for op_log in self._dict.values()
@@ -146,6 +219,14 @@ class OpAccessor(Accessor["Op"]):
                 "integer position or a pass-qualified label like "
                 f"'{parent_label}:1'. Available Op labels: {qualified}{suffix}."
             )
+        for op_log in self._dict.values():
+            if key in {
+                op_log.label,
+                op_log.label_short,
+                op_log._label_raw,
+                op_log.raw_label,
+            }:
+                return op_log
         return None
 
 
@@ -206,6 +287,7 @@ class Layer:
         "total_autograd_memory": FieldPolicy.KEEP,
         "num_autograd_tensors": FieldPolicy.KEEP,
         "output_device": FieldPolicy.KEEP,
+        "visualizer_path": FieldPolicy.KEEP,
         "activation_transform": FieldPolicy.DROP,
         "annotations": FieldPolicy.KEEP,
         "intervention_replaced": FieldPolicy.KEEP,
@@ -264,6 +346,8 @@ class Layer:
         "ops": FieldPolicy.KEEP,
         "call_labels": FieldPolicy.KEEP,
     }
+    FIELD_POLICY = build_record_field_policy_table(LAYER_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC)
+    PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     def __init__(self, first_pass: "Op") -> None:
         """Initialize from the first pass of this layer.
@@ -323,6 +407,7 @@ class Layer:
 
         # Config
         self.output_device = first_pass.output_device
+        self.visualizer_path = first_pass.visualizer_path
         self.activation_transform = first_pass.activation_transform
         self.annotations: Dict[str, Any] = {}
         self.intervention_replaced = first_pass.intervention_replaced
@@ -627,9 +712,16 @@ class Layer:
         return self.source_trace
 
     def __getstate__(self) -> Dict[str, Any]:
-        """Return pickle state with weakrefs stripped."""
+        """Return pickle state with weakrefs and raw autograd handles stripped."""
         state = self.__dict__.copy()
         state["_source_trace_ref"] = None
+        # `grad_fn_handle` holds the live torch autograd `Node` (e.g.
+        # `AddmmBackward0`), which is not picklable. `Layer.FIELD_POLICY`
+        # declares it `FieldPolicy.DROP` for exactly this reason; enforce that
+        # here (mirroring `Op.__getstate__`) so plain `pickle.dumps(trace)` of
+        # any model with trainable params does not crash. `grad_fn` (a picklable
+        # `GradFn` record after a backward pass) is intentionally retained.
+        state["grad_fn_handle"] = None
         state["tlspec_version"] = TLSPEC_VERSION
         return state
 
@@ -640,28 +732,32 @@ class Layer:
             state["ops"] = state.pop("passes")
         if "call_labels" not in state and "pass_labels" in state:
             state["call_labels"] = state.pop("pass_labels")
-        default_fill_state(
-            state,
-            defaults={
-                "_source_trace_ref": None,
-                "annotations": {},
-                "autograd_memory": None,
-                "total_autograd_memory": None,
-                "num_autograd_tensors": None,
-                "transformed_out": None,
-                "transformed_out_shape": None,
-                "transformed_out_dtype": None,
-                "dtype_ref": DtypeRef.from_value(state.get("dtype")),
-                "device_ref": None,
-                "backend_address": state.get("address"),
-                "resolver_status": "resolved",
-                "transformed_activation_memory": None,
-                "transformed_grad": None,
-                "transformed_grad_shape": None,
-                "transformed_grad_dtype": None,
-                "transformed_gradient_memory": None,
-            },
-        )
+        layer_setstate_defaults: dict[str, Any] = {
+            **_LAYER_LOG_CONTAINER_DEFAULTS,
+            "_source_trace_ref": None,
+            "annotations": {},
+            "autograd_memory": None,
+            "total_autograd_memory": None,
+            "num_autograd_tensors": None,
+            "transformed_out": None,
+            "transformed_out_shape": None,
+            "transformed_out_dtype": None,
+            "dtype_ref": DtypeRef.from_value(state.get("dtype")),
+            "device_ref": None,
+            "backend_address": state.get("address"),
+            "resolver_status": "resolved",
+            "transformed_activation_memory": None,
+            "transformed_grad": None,
+            "transformed_grad_shape": None,
+            "transformed_grad_dtype": None,
+            "transformed_gradient_memory": None,
+        }
+        default_fill_state(state, defaults=layer_setstate_defaults)
+        # Repair present-but-wrong-typed container fields from legacy states
+        # (e.g. `equivalent_ops` serialized as a `list` where a `set` is now
+        # declared). `default_fill_state` only fills absent keys; this closes
+        # the same gap `Trace`/`Op` already close for their own fields.
+        coerce_container_typed_state(state, layer_setstate_defaults)
         if state.get("dtype_ref") is None:
             state["dtype_ref"] = DtypeRef.from_value(state.get("dtype"))
         if state.get("backend_address") is None:
@@ -982,8 +1078,6 @@ class Layer:
     def is_in_conditional_body(self) -> bool:
         """Whether this layer is in a conditional arm body."""
 
-        if getattr(self, "has_output_descendant", False) and not self.conditional_entry_children:
-            return False
         return bool(self.__dict__.get("_is_in_conditional_body", False)) or any(
             role.role == "body" for role in self.in_conditionals or []
         )
@@ -1008,6 +1102,8 @@ class Layer:
 
     @property
     def _tracing_finished(self) -> bool:
+        """Return whether the owning trace has finished capture/postprocess."""
+
         sml = self.source_trace
         if sml is None:
             return True
@@ -1122,7 +1218,6 @@ class Layer:
         """
         if self.num_passes == 1:
             return cast(dict[str, dict[Any, str]], self.ops[0].parent_arg_positions)
-        from collections import defaultdict
 
         result: dict[str, dict[Any, str]] = {"args": {}, "kwargs": {}}
         for pass_log in self.ops.values():
@@ -1161,6 +1256,8 @@ class Layer:
                 return getattr(ops[0], name)
             except AttributeError:
                 pass
+        if ops and len(ops) > 1 and name in _LAYER_DELEGATED_PASS_FIELDS:
+            return self._single_pass_or_error(name)
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     # ********************************************
@@ -1355,6 +1452,11 @@ class Layer:
     def to_pandas(self) -> "pd.DataFrame":
         """Export this Layer as a one-row pandas DataFrame.
 
+        Per-pass fields (``_MULTI_PASS_PER_CALL_LAYER_FIELDS``, e.g.
+        ``transformed_out``/``transformed_grad``) are reported as ``None``
+        for multi-pass (recurrent) Layers instead of raising -- access them
+        per-pass via ``layer.ops[i].transformed_out`` instead.
+
         Returns
         -------
         pd.DataFrame
@@ -1369,7 +1471,7 @@ class Layer:
             ) from e
         from ..constants import LAYER_LOG_FIELD_ORDER
 
-        row = {field_name: getattr(self, field_name) for field_name in LAYER_LOG_FIELD_ORDER}
+        row = _layer_log_to_row(self)
         return pd.DataFrame([row], columns=LAYER_LOG_FIELD_ORDER)
 
     # ********************************************
@@ -1377,6 +1479,8 @@ class Layer:
     # ********************************************
 
     def __str__(self) -> str:
+        """Return a human-readable layer summary."""
+
         if not self._tracing_finished:
             return f"Layer({self.layer_label}) (pass not finished)"
         s = f"Layer {self.layer_label}:"
@@ -1386,12 +1490,12 @@ class Layer:
         if not self.is_input:
             s += f"\n\tFunction: {self.func_name} (grad_fn_handle: {self.grad_fn_class_name})"
             if self.func_config:
-                config_str = ", ".join(f"{k}={v}" for k, v in self.func_config.items())
+                config_str = format_config_items(self.func_config)
                 s += f"\n\tConfig: {config_str}"
         if self.module is not None:
             s += f"\n\tComputed inside module: {self.module}"
         if len(self.param_shapes) > 0:
-            params_shapes_str = ", ".join(str(ps) for ps in self.param_shapes)
+            params_shapes_str = format_shape_list(self.param_shapes)
             s += (
                 f"\n\tParams: {params_shapes_str}; "
                 f"{self.num_params} total ({self.total_param_memory})"
@@ -1404,9 +1508,13 @@ class Layer:
         return s
 
     def __repr__(self) -> str:
+        """Return the developer representation for this layer."""
+
         return self.__str__()
 
     def __len__(self) -> int:
+        """Return the number of operation passes aggregated into this layer."""
+
         return cast(int, self.num_passes)
 
 
@@ -1433,6 +1541,16 @@ class LayerAccessor(Accessor["Layer"]):
         layer_logs: Dict[str, "Layer"],
         source_trace: Optional["Trace"] = None,
     ) -> None:
+        """Initialize an accessor over aggregate layer logs.
+
+        Parameters
+        ----------
+        layer_logs:
+            Mapping from layer labels to aggregate ``Layer`` objects.
+        source_trace:
+            Trace that owns the layer logs, if still reachable.
+        """
+
         source_ref = weakref.ref(source_trace) if source_trace is not None else None
         super().__init__(layer_logs, source_ref=source_ref)
 
@@ -1457,7 +1575,7 @@ class LayerAccessor(Accessor["Layer"]):
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
-            raise ValueError(
+            raise AmbiguousOpLookupError(
                 f"Layer lookup '{key}' is ambiguous across {len(matches)} Layers. "
                 "Use the full Layer label."
             )
@@ -1568,6 +1686,8 @@ class LayerAccessor(Accessor["Layer"]):
         return len(self)
 
     def __repr__(self) -> str:
+        """Return a compact multi-line accessor summary."""
+
         if len(self) == 0:
             return "LayerAccessor({})"
         items = []
@@ -1581,7 +1701,14 @@ class LayerAccessor(Accessor["Layer"]):
         return f"LayerAccessor({len(self)} layers):\n{inner}"
 
     def to_pandas(self) -> "pd.DataFrame":
-        """One row per unique layer (aggregate view)."""
+        """One row per unique layer (aggregate view), ordered by ``LAYER_LOG_FIELD_ORDER``.
+
+        Builds each row the same way as ``Layer.to_pandas()`` so every field
+        in ``LAYER_LOG_FIELD_ORDER`` is exported -- this used to hand-roll a
+        12-field subset that silently dropped most populated Layer fields.
+        Per-pass fields (``_MULTI_PASS_PER_CALL_LAYER_FIELDS``) are reported
+        as ``None`` for multi-pass (recurrent) layers instead of raising.
+        """
         try:
             import pandas as pd
         except ImportError as e:
@@ -1589,22 +1716,7 @@ class LayerAccessor(Accessor["Layer"]):
                 "pandas is required for this feature. Install with `pip install torchlens[tabular]`."
             ) from e
 
-        rows = []
-        for ll in self._list:
-            rows.append(
-                {
-                    "layer_label": ll.layer_label,
-                    "layer_type": ll.layer_type,
-                    "func_name": ll.func_name,
-                    "shape": ll.shape,
-                    "dtype": ll.dtype,
-                    "activation_memory": ll.activation_memory,
-                    "num_passes": ll.num_passes,
-                    "num_params": ll.num_params,
-                    "module": ll.module,
-                    "is_input": ll.is_input,
-                    "is_output": ll.is_output,
-                    "is_buffer": ll.is_buffer,
-                }
-            )
-        return pd.DataFrame(rows)
+        if not self._list:
+            return pd.DataFrame(columns=LAYER_LOG_FIELD_ORDER)
+        rows = [_layer_log_to_row(ll) for ll in self._list]
+        return pd.DataFrame(rows, columns=LAYER_LOG_FIELD_ORDER)

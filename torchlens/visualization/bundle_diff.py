@@ -14,22 +14,12 @@ from ._render_utils import html_escape, render_dot_to_file, strip_known_extensio
 from .themes import resolve_theme, theme_edge_attrs, theme_graph_attrs, theme_node_attrs
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only
-    from ..data_classes.op import Op
     from ..data_classes.trace import Trace
-    from ..intervention.bundle import Bundle
+    from ..bundle import Bundle
 
 
 DiffLayout = Literal["paired"]
 DiffTensorField = Literal["out", "grad"]
-
-_CAPTION = (
-    "Clean vs zero_ablate(layer1.0.relu) — top: clean, bottom: ablated. "
-    "Color: per-node L2 norm delta."
-)
-_ARIA_LABEL = (
-    "TorchLens bundle diff: clean versus zero ablate layer1.0.relu. "
-    "White means zero delta; red intensity scales with the L2 delta magnitude."
-)
 
 
 def bundle_diff(
@@ -96,6 +86,7 @@ def bundle_diff(
     layer_to_node = _layer_to_supergraph_node(bundle)
     pairs = _select_pairs(
         bundle.aligned_pairs(left_name, right_name),
+        left_name=left_name,
         right_name=right_name,
         delta_map=delta_map,
         layer_to_node=layer_to_node,
@@ -106,6 +97,8 @@ def bundle_diff(
         bundle=bundle,
         left_name=left_name,
         right_name=right_name,
+        metric_name=_metric_display_name(metric),
+        tensor_field=on,
         delta_map=delta_map,
         layer_to_node=layer_to_node,
         theme_name=theme,
@@ -114,7 +107,10 @@ def bundle_diff(
     outpath = strip_known_extension(vis_outpath)
     source = render_dot_to_file(dot, outpath, vis_fileformat, vis_save_only)
     if vis_fileformat == "svg":
-        _add_svg_accessibility(f"{outpath}.{vis_fileformat}")
+        _add_svg_accessibility(
+            f"{outpath}.{vis_fileformat}",
+            _aria_label(left_name, right_name, _metric_display_name(metric), on),
+        )
     return source
 
 
@@ -210,6 +206,8 @@ def _build_dot(
     bundle: "Bundle",
     left_name: str,
     right_name: str,
+    metric_name: str,
+    tensor_field: DiffTensorField,
     delta_map: dict[str, dict[str, float]],
     layer_to_node: dict[str, str],
     theme_name: str,
@@ -227,6 +225,10 @@ def _build_dot(
         Left member name.
     right_name:
         Right member name.
+    metric_name:
+        Human-readable metric name.
+    tensor_field:
+        Tensor field used for comparison.
     delta_map:
         Per-node metric values from ``bundle.delta_map``.
     layer_to_node:
@@ -265,7 +267,7 @@ def _build_dot(
             # box; when the natural graph aspect is taller (e.g. 1.69:1 for
             # the default paired layout) the bottom-positioned caption gets
             # pushed outside the SVG viewBox and clipped.
-            "label": _CAPTION + "\\nLegend: white→red = increasing L2 delta.",
+            "label": _caption(left_name, right_name, metric_name, tensor_field),
             "labelloc": "b",
             "labeljust": "l",
             "fontname": "Helvetica",
@@ -297,8 +299,9 @@ def _build_dot(
     )
     left_layers = [left_layer for left_layer, _right_layer in pairs] + left_unmatched
     right_layers = [right_layer for _left_layer, right_layer in pairs] + right_unmatched
-    values = _right_delta_values(
+    values = _pair_delta_values(
         pairs=pairs,
+        left_name=left_name,
         right_name=right_name,
         delta_map=delta_map,
         layer_to_node=layer_to_node,
@@ -309,7 +312,7 @@ def _build_dot(
         layers=left_layers,
         side="clean",
         member_name=left_name,
-        compared_member_name=right_name,
+        compared_member_name=left_name,
         delta_map=delta_map,
         layer_to_node=layer_to_node,
         max_delta=max_delta,
@@ -333,19 +336,105 @@ def _build_dot(
     return dot
 
 
-def _right_delta_values(
+def _metric_display_name(metric: str | Callable[[torch.Tensor, torch.Tensor], torch.Tensor]) -> str:
+    """Return a stable display name for a bundle-diff metric.
+
+    Parameters
+    ----------
+    metric:
+        Metric name or callable passed to ``bundle_diff``.
+
+    Returns
+    -------
+    str
+        Human-readable metric name.
+    """
+
+    if isinstance(metric, str):
+        return metric
+    return getattr(metric, "__name__", metric.__class__.__name__)
+
+
+def _caption(
+    left_name: str,
+    right_name: str,
+    metric_name: str,
+    tensor_field: DiffTensorField,
+) -> str:
+    """Return the graph caption for a paired bundle diff.
+
+    Parameters
+    ----------
+    left_name:
+        Left bundle member name.
+    right_name:
+        Right bundle member name.
+    metric_name:
+        Human-readable metric name.
+    tensor_field:
+        Tensor field used for comparison.
+
+    Returns
+    -------
+    str
+        Graphviz label text.
+    """
+
+    return (
+        f"{left_name} vs {right_name} - columns: {left_name}, {right_name}. "
+        f"Color: per-node {metric_name} delta on {tensor_field}.\\n"
+        "Legend: white to red = increasing delta."
+    )
+
+
+def _aria_label(
+    left_name: str,
+    right_name: str,
+    metric_name: str,
+    tensor_field: DiffTensorField,
+) -> str:
+    """Return the SVG accessibility label for a paired bundle diff.
+
+    Parameters
+    ----------
+    left_name:
+        Left bundle member name.
+    right_name:
+        Right bundle member name.
+    metric_name:
+        Human-readable metric name.
+    tensor_field:
+        Tensor field used for comparison.
+
+    Returns
+    -------
+    str
+        Accessibility label for the SVG root.
+    """
+
+    return (
+        f"TorchLens bundle diff: {left_name} versus {right_name}; "
+        f"{metric_name} delta on {tensor_field}. "
+        "White means zero delta; red intensity scales with delta magnitude."
+    )
+
+
+def _pair_delta_values(
     *,
     pairs: list[tuple[Any, Any]],
+    left_name: str,
     right_name: str,
     delta_map: dict[str, dict[str, float]],
     layer_to_node: dict[str, str],
 ) -> list[float]:
-    """Return right-side delta values for color normalization.
+    """Return member-specific delta values for color normalization.
 
     Parameters
     ----------
     pairs:
         Aligned layer pairs.
+    left_name:
+        Left member name.
     right_name:
         Right member name.
     delta_map:
@@ -356,7 +445,7 @@ def _right_delta_values(
     Returns
     -------
     list[float]
-        Non-negative finite delta values.
+        Non-negative finite delta values for both rendered members.
     """
 
     values: list[float] = []
@@ -366,15 +455,18 @@ def _right_delta_values(
         graph_node_label = layer_to_node.get(left_label) or layer_to_node.get(right_label)
         if graph_node_label is None:
             continue
-        value = float(delta_map.get(graph_node_label, {}).get(right_name, 0.0))
-        if value >= 0.0:
-            values.append(value)
+        node_values = delta_map.get(graph_node_label, {})
+        for member_name in (left_name, right_name):
+            value = float(node_values.get(member_name, 0.0))
+            if value >= 0.0:
+                values.append(value)
     return values
 
 
 def _select_pairs(
     pairs: list[tuple[Any, Any]],
     *,
+    left_name: str,
     right_name: str,
     delta_map: dict[str, dict[str, float]],
     layer_to_node: dict[str, str],
@@ -386,6 +478,8 @@ def _select_pairs(
     ----------
     pairs:
         Candidate aligned pairs.
+    left_name:
+        Left member name.
     right_name:
         Right member name.
     delta_map:
@@ -410,7 +504,11 @@ def _select_pairs(
         left_label = str(getattr(left_layer, "layer_label", ""))
         right_label = str(getattr(right_layer, "layer_label", ""))
         graph_node_label = layer_to_node.get(left_label) or layer_to_node.get(right_label)
-        value = float(delta_map.get(str(graph_node_label), {}).get(right_name, 0.0))
+        node_values = delta_map.get(str(graph_node_label), {})
+        value = max(
+            float(node_values.get(left_name, 0.0)),
+            float(node_values.get(right_name, 0.0)),
+        )
         scored.append((value, index, (left_layer, right_layer)))
     chosen_indexes = {
         index
@@ -761,13 +859,15 @@ def _hex_to_rgb(value: str) -> tuple[int, int, int]:
     return int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16)
 
 
-def _add_svg_accessibility(path: str) -> None:
+def _add_svg_accessibility(path: str, aria_label: str) -> None:
     """Add figure-level accessibility attributes to a rendered SVG.
 
     Parameters
     ----------
     path:
         Rendered SVG path.
+    aria_label:
+        Root SVG accessibility label.
 
     Returns
     -------
@@ -780,9 +880,10 @@ def _add_svg_accessibility(path: str) -> None:
     with open(path, encoding="utf-8") as handle:
         svg = handle.read()
     if "aria-label=" not in svg:
+        escaped_label = html_escape(aria_label).replace('"', "&quot;")
         svg = re.sub(
             r"<svg\b",
-            f'<svg role="img" aria-label="{html_escape(_ARIA_LABEL)}"',
+            f'<svg role="img" aria-label="{escaped_label}"',
             svg,
             count=1,
         )
