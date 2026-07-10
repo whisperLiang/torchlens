@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torchlens"
-version = "2.29.1"
+version = "2.30.1"
 description = "A package for extracting activations from PyTorch models and saving portable bundles"
 readme = "README.md"
 license = "Apache-2.0"
@@ -158,6 +158,10 @@ filterwarnings = [
     # Expected graceful torch-capability degradations (e.g. functorch level API absent on
     # torch 2.1) flip a HAS_* flag and warn once; visible-not-fatal across the torch matrix.
     "default:TorchLens torch capability .* is unavailable;.*:UserWarning:torchlens(\\.|$)",
+    # Informational opt-in caveat (reference save-mode shares tensors); visible once, not
+    # fatal -- like the capability-degradation warning above. Fires whenever save_mode=
+    # 'reference' is used, so it is not per-test assertable.
+    "default:save_mode='reference' stores source tensors by reference.*:UserWarning:torchlens(\\.|$)",
     "default:`.*` is deprecated; use `.*` instead\\..*:DeprecationWarning",
     "default:Bundle tlspec_version=.* is older than runtime tlspec_version=.*:DeprecationWarning",
     # External: torchvision model init deprecations

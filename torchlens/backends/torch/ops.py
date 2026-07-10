@@ -125,6 +125,7 @@ from ...capture.arg_positions import (
     FUNC_ARG_SPECS,
     extract_tensors_and_params,
     _cache_dynamic_spec,
+    _normalize_func_name,
 )
 
 from .tensor_tracking import (
@@ -1649,7 +1650,7 @@ def _apply_predicate_mode_interventions_to_outputs(
     if options is None:
         return out_orig
     state = get_active_recording_state()
-    layer_type = func_name.lower().replace("_", "")
+    layer_type = _normalize_func_name(func_name)
     arg_tensors, _ = _extract_arg_tensors_and_params(layer_type, args, kwargs)
     parent_labels = tuple(get_label_list(arg_tensors))
     replacements: dict[tuple[OutputPathComponent, ...], torch.Tensor] = {}
@@ -2086,7 +2087,7 @@ def _emit_predicate_operation_events(
 
     del exec_ctx
     state = get_active_recording_state()
-    layer_type = func_name.lower().replace("_", "")
+    layer_type = _normalize_func_name(func_name)
     arg_tensors, _ = _extract_arg_tensors_and_params(layer_type, args, kwargs)
     parent_labels = tuple(get_label_list(arg_tensors))
     out_iter = list(_iter_loggable_live_outputs(out_orig, is_bottom_level_func))
@@ -2223,6 +2224,13 @@ def _emit_predicate_operation_events(
             # the predicate-failure pipeline. The orchestrator's outer
             # exception handler aborts disk storage before the raise reaches
             # the caller.
+            raise
+        except Warning:
+            # A TorchLens warning escalated to an error by the caller's filter
+            # (e.g. warnings-as-errors on the reference-save-mode caveat) is not a
+            # user-predicate failure. Surface it directly with its true type instead
+            # of swallowing it into the predicate-failure pipeline, where it would
+            # resurface as a misleading PredicateError.
             raise
         except Exception as exc:
             state.handle_predicate_exception(ctx, exc)
@@ -2433,7 +2441,7 @@ def _build_shared_fields_dict(
         (fields_dict, parent_layer_entries, arg_tensors, parent_param_ops)
     """
     # Canonical layer_type: lowercase with underscores stripped (e.g. "conv2d").
-    layer_type = func_name.lower().replace("_", "")
+    layer_type = _normalize_func_name(func_name)
 
     # O(1) tensor/param extraction via lookup table (replaces BFS crawl)
     arg_tensors, arg_parameters = _extract_arg_tensors_and_params(layer_type, args, kwargs)
@@ -3047,7 +3055,7 @@ def _emit_fast_operation_events(
     telling the user to re-run ``trace``.
     """
     # Minimal info collection — only what's needed for counter alignment and saving.
-    layer_type = func_name.lower().replace("_", "")
+    layer_type = _normalize_func_name(func_name)
     non_tensor_args = [arg for arg in args if not _check_if_tensor_arg(arg)]
     non_tensor_kwargs = {key: val for key, val in kwargs.items() if not _check_if_tensor_arg(val)}
 
@@ -4240,11 +4248,6 @@ def _append_trace_predicate_context(trace: "Trace", ctx: RecordContext) -> None:
         Mutates trace-owned predicate runtime state.
     """
 
-    all_contexts = getattr(trace, "_predicate_all_contexts", None)
-    if all_contexts is None:
-        all_contexts = []
-        trace._predicate_all_contexts = all_contexts
-    all_contexts.append(ctx)
     history_size = int(getattr(trace, "_predicate_history_size", 8))
     if history_size == 0:
         return

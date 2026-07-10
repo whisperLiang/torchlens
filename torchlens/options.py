@@ -657,8 +657,13 @@ class CaptureOptions:
     save_visualizations:
         Whether rendered visualizer image files should be copied into portable bundles.
     keep_orphans:
-        Whether island ops are retained in raw metadata and exposed via
-        ``trace.orphans``.
+        Whether island ops (computations unreachable from both the model inputs and
+        outputs) are retained in raw metadata and exposed via ``trace.orphans``. Defaults
+        to ``False`` (islands pruned); set ``True`` to surface them. Retained orphans do not
+        enter ``layer_list``/summaries; they live only on the ``trace.orphans`` accessor.
+        NOTE: retaining orphans changes ``num_ops`` and currently trips the trace
+        self-consistency invariant, so the default stays opt-in until the validation
+        invariants account for retained islands.
     output_device:
         Device placement for saved tensors.
     save_arg_values:
@@ -1173,7 +1178,8 @@ class VisualizationOptions:
     show_cone:
         Whether intervention cones are highlighted.
     node_overlay:
-        Built-in overlay name or external score mapping for graph nodes.
+        Built-in overlay name, an external label->value score mapping, or a callable
+        invoked as ``fn(node)`` to compute a per-node overlay value.
     node_label_fields:
         Optional explicit label row fields.
     show_legend:
@@ -1220,7 +1226,7 @@ class VisualizationOptions:
     theme: str = "torchlens"
     intervention_mode: VisInterventionModeLiteral = "node_mark"
     show_cone: bool = True
-    node_overlay: str | Mapping[str, Any] | None = None
+    node_overlay: str | Mapping[str, Any] | Callable[[Any], Any] | None = None
     node_label_fields: list[str] | None = None
     show_legend: bool = False
     font_size: int | None = None
@@ -1259,7 +1265,7 @@ class VisualizationOptions:
         theme: str | MissingType = MISSING,
         intervention_mode: VisInterventionModeLiteral | MissingType = MISSING,
         show_cone: bool | MissingType = MISSING,
-        node_overlay: str | Mapping[str, Any] | None | MissingType = MISSING,
+        node_overlay: str | Mapping[str, Any] | Callable[[Any], Any] | None | MissingType = MISSING,
         node_label_fields: list[str] | None | MissingType = MISSING,
         show_legend: bool | MissingType = MISSING,
         font_size: int | None | MissingType = MISSING,

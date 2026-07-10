@@ -356,7 +356,7 @@ def _add_node_to_graphviz(
     vis_intervention_mode: VisInterventionModeLiteral = "node_mark",
     intervention_site_labels: set[str] | None = None,
     theme: VisualizationTheme | None = None,
-    node_overlay: str | OverlayScores | None = None,
+    node_overlay: str | OverlayScores | Callable[[Any], Any] | None = None,
     node_label_fields: list[str] | None = None,
     captured_forward_edges: list[CapturedForwardEdge] | None = None,
     rankdir: str = "BT",
@@ -484,7 +484,7 @@ def _build_layer_node(
     node_mode: VisNodeModeLiteral,
     node_spec_fn: NodeSpecFn | None = None,
     theme: VisualizationTheme | None = None,
-    node_overlay: str | OverlayScores | None = None,
+    node_overlay: str | OverlayScores | Callable[[Any], Any] | None = None,
     node_label_fields: list[str] | None = None,
     show_containers: ShowContainersLiteral = False,
     collapsed_container_nodes: Mapping[str, str] | None = None,
@@ -1710,7 +1710,7 @@ def compute_default_node_lines(
     vis_mode: str = "unrolled",
     *,
     node_label_fields: list[str] | None = None,
-    node_overlay: str | OverlayScores | None = None,
+    node_overlay: str | OverlayScores | Callable[[Any], Any] | None = None,
 ) -> list[str]:
     """Build default plain-text rows for a layer node.
 
