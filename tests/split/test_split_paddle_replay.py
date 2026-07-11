@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+
 from _paddle_subprocess import run_paddle_subprocess
 
 
@@ -21,10 +22,10 @@ def test_paddle_split_replay_equivalence() -> None:
             return hidden * 2.0 + 1.0
 
         x = paddle.randn([2, 3], dtype="float32")
-        runtime = tl.prepare_split(
+        runtime = tl.split.prepare(
             model,
             x,
-            tl.SplitSpec("after:relu", backend="paddle"),
+            split_request("after:relu", backend="paddle"),
         )
 
         boundary = runtime.run_prefix(x)
@@ -54,10 +55,10 @@ def test_paddle_boundary_cache_roundtrip() -> None:
             return hidden * 2.0 + 1.0
 
         x = paddle.randn([2, 3], dtype="float32")
-        runtime = tl.prepare_split(
+        runtime = tl.split.prepare(
             model,
             x,
-            tl.SplitSpec("after:relu", backend="paddle"),
+            split_request("after:relu", backend="paddle"),
         )
         boundary = runtime.run_prefix(x)
 
@@ -89,10 +90,10 @@ def test_paddle_dynamic_batch_replay_for_reshape() -> None:
             return paddle.nn.functional.relu(flat) * 2.0
 
         x = paddle.randn([2, 3, 2], dtype="float32")
-        runtime = tl.prepare_split(
+        runtime = tl.split.prepare(
             model,
             x,
-            tl.SplitSpec("after:reshape", backend="paddle", dynamic_batch=(1, 4)),
+            split_request("after:reshape", backend="paddle", dynamic_batch=(1, 4)),
         )
 
         for batch in (1, 2, 4):
@@ -118,10 +119,10 @@ def test_paddle_dynamic_batch_preserves_fixed_dim_matching_trace_batch() -> None
             return paddle.nn.functional.relu(flat)
 
         x = paddle.randn([2, 1, 2], dtype="float32")
-        runtime = tl.prepare_split(
+        runtime = tl.split.prepare(
             model,
             x,
-            tl.SplitSpec("after:reshape", backend="paddle", dynamic_batch=(1, 4)),
+            split_request("after:reshape", backend="paddle", dynamic_batch=(1, 4)),
         )
 
         for batch in (1, 2, 4):
@@ -159,10 +160,10 @@ def test_paddle_layer_split_training_optimizer_step_matches_full_step() -> None:
         split_model = copy.deepcopy(model)
         x = paddle.randn([2, 4], dtype="float32")
         y = paddle.randn([2, 3], dtype="float32")
-        runtime = tl.prepare_split(
+        runtime = tl.split.prepare(
             split_model,
             x,
-            tl.SplitSpec("after:relu", backend="paddle", trainable=True, dynamic_batch=(1, 4)),
+            split_request("after:relu", backend="paddle", trainable=True, dynamic_batch=(1, 4)),
         )
         suffix_opt = paddle.optimizer.SGD(
             learning_rate=0.05,

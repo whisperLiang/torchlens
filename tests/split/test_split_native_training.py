@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from v2_helpers import split_request
+
 import os
 import subprocess
 import sys
@@ -25,8 +27,12 @@ def _run_tinygrad_subprocess(code: str) -> None:
         pytest.skip("'tinygrad' is not installed.")
     env = os.environ.copy()
     env["DEV"] = "PYTHON"
+    env["DEBUG"] = "0"
+    helper_path = str(Path(__file__).resolve().parent)
+    env["PYTHONPATH"] = helper_path + os.pathsep + env.get("PYTHONPATH", "")
+    source = "from v2_helpers import split_request\n" + textwrap.dedent(code)
     result = subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(code)],
+        [sys.executable, "-c", source],
         cwd=Path(__file__).resolve().parents[2],
         env=env,
         capture_output=True,
@@ -61,7 +67,7 @@ def test_jax_suffix_and_prefix_gradient_handoff() -> None:
 
     x = jnp.array([[-1.0, 2.0], [3.0, -4.0]])
     targets = jnp.ones_like(x)
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("after:max", backend="jax", trainable=True))
+    runtime = tl.split.prepare(model, x, split_request("after:max", backend="jax", trainable=True))
     boundary = runtime.run_training_prefix(x)
 
     loss, grads = runtime.train_suffix(boundary, targets)
@@ -94,7 +100,7 @@ def test_tf_suffix_boundary_gradients() -> None:
 
     x = tf.constant([[-1.0, 2.0], [3.0, -4.0]], dtype=tf.float32)
     targets = tf.ones_like(x)
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("after:relu", backend="tf", trainable=True))
+    runtime = tl.split.prepare(model, x, split_request("after:relu", backend="tf", trainable=True))
     boundary = runtime.run_training_prefix(x)
 
     loss, grads = runtime.train_suffix(boundary, targets)
@@ -130,10 +136,10 @@ def test_paddle_suffix_boundary_gradients() -> None:
 
         x = paddle.to_tensor([[-1.0, 2.0], [3.0, -4.0]], dtype="float32")
         targets = paddle.ones_like(x)
-        runtime = tl.prepare_split(
+        runtime = tl.split.prepare(
             model,
             x,
-            tl.SplitSpec("after:relu", backend="paddle", trainable=True),
+            split_request("after:relu", backend="paddle", trainable=True),
         )
         boundary = runtime.run_training_prefix(x)
 
@@ -173,10 +179,10 @@ def test_tinygrad_suffix_boundary_gradients() -> None:
 
         x = Tensor([[-1.0, 2.0], [3.0, -4.0]]).realize()
         targets = Tensor.ones(2, 2).realize()
-        runtime = tl.prepare_split(
+        runtime = tl.split.prepare(
             model,
             x,
-            tl.SplitSpec("after:where", backend="tinygrad", trainable=True),
+            split_request("after:where", backend="tinygrad", trainable=True),
         )
         boundary = runtime.run_training_prefix(x)
 
@@ -217,10 +223,10 @@ def test_tinygrad_suffix_and_prefix_gradient_handoff() -> None:
         x = Tensor([[-1.0, 2.0], [3.0, -4.0]]).realize()
         x.requires_grad = True
         targets = Tensor.ones(2, 2).realize()
-        runtime = tl.prepare_split(
+        runtime = tl.split.prepare(
             model,
             x,
-            tl.SplitSpec("after:where", backend="tinygrad", trainable=True),
+            split_request("after:where", backend="tinygrad", trainable=True),
         )
         boundary = runtime.run_training_prefix(x)
         _loss, grads = runtime.train_suffix(boundary, targets)
@@ -257,10 +263,10 @@ def test_tinygrad_suffix_optimizer_step_matches_full_step() -> None:
 
         x = Tensor([[-1.0, 2.0], [3.0, -4.0]]).realize()
         targets = Tensor.ones(2, 2).realize()
-        runtime = tl.prepare_split(
+        runtime = tl.split.prepare(
             split_model,
             x,
-            tl.SplitSpec("after:where", backend="tinygrad", trainable=True),
+            split_request("after:where", backend="tinygrad", trainable=True),
         )
         optimizer = optim.SGD([weight], lr=0.1)
         boundary = runtime.run_training_prefix(x)
@@ -297,7 +303,7 @@ def test_tf_detached_boundary_rejects_prefix_backward() -> None:
         return tf.nn.relu(x) * 2.0
 
     x = tf.ones((2, 2), dtype=tf.float32)
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("after:relu", backend="tf", trainable=True))
+    runtime = tl.split.prepare(model, x, split_request("after:relu", backend="tf", trainable=True))
     boundary = runtime.run_prefix(x)
     _loss, grads = runtime.train_suffix(boundary, tf.ones_like(x))
 
@@ -320,7 +326,7 @@ def test_tinygrad_detached_boundary_rejects_prefix_backward() -> None:
             return x.relu() * 2.0
 
         x = Tensor.ones(2, 2).realize()
-        runtime = tl.prepare_split(model, x, tl.SplitSpec("after:where", backend="tinygrad"))
+        runtime = tl.split.prepare(model, x, split_request("after:where", backend="tinygrad"))
         boundary = runtime.run_prefix(x)
         _loss, grads = runtime.train_suffix(boundary, Tensor.ones(2, 2).realize())
 

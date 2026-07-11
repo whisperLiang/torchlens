@@ -22,7 +22,7 @@ class TrainingStepResult:
     optimizer_applied: bool = False
 
     def as_tuple(self) -> tuple[Any, BoundaryGradients]:
-        """Return the legacy public ``(loss, boundary_grads)`` shape."""
+        """Return the compact ``(loss, boundary_grads)`` result shape."""
 
         return self.loss, self.boundary_grads
 
@@ -62,7 +62,7 @@ def _require_torch(runtime: Any) -> Any:
             f"backend={runtime.adapter.name!r} does not support split training.",
             context=SplitErrorContext(
                 backend=runtime.adapter.name,
-                split_point=runtime.split_spec.boundary,
+                split_point=runtime.request.boundary,
                 module_path=None,
                 op_type=None,
                 layer_label=None,
@@ -79,7 +79,7 @@ def _context(runtime: Any, reason: str) -> SplitErrorContext:
 
     return SplitErrorContext(
         backend=runtime.adapter.name,
-        split_point=runtime.split_spec.boundary,
+        split_point=runtime.request.boundary,
         module_path=None,
         op_type=None,
         layer_label=None,
@@ -869,13 +869,13 @@ def _backward_prefix_torch(
     """Backpropagate suffix boundary gradients through a graph-connected prefix."""
 
     torch = _require_torch(runtime)
-    runtime.validate_boundary(boundary)
+    runtime.validate_boundary(boundary, validate_state=False)
     if not boundary.metadata.get("supports_prefix_backward"):
         raise SplitUnsupportedError(
             "backward_prefix requires a boundary from run_training_prefix().",
             context=SplitErrorContext(
                 backend="torch",
-                split_point=runtime.split_spec.boundary,
+                split_point=runtime.request.boundary,
                 module_path=None,
                 op_type=None,
                 layer_label=None,
@@ -909,7 +909,7 @@ def _backward_prefix_tf(
 
     import tensorflow as tf
 
-    runtime.validate_boundary(boundary)
+    runtime.validate_boundary(boundary, validate_state=False)
     if not boundary.metadata.get("supports_prefix_backward"):
         raise SplitUnsupportedError(
             "backward_prefix requires a boundary from run_training_prefix().",
@@ -958,7 +958,7 @@ def _backward_prefix_paddle(
 
     import paddle
 
-    runtime.validate_boundary(boundary)
+    runtime.validate_boundary(boundary, validate_state=False)
     if not boundary.metadata.get("supports_prefix_backward"):
         raise SplitUnsupportedError(
             "backward_prefix requires a boundary from run_training_prefix().",
@@ -997,7 +997,7 @@ def _backward_prefix_jax(
         )
     import jax
 
-    runtime.validate_boundary(boundary)
+    runtime.validate_boundary(boundary, validate_state=False)
     if not boundary.metadata.get("supports_prefix_backward"):
         raise SplitUnsupportedError(
             "backward_prefix requires a boundary from run_training_prefix().",
@@ -1025,7 +1025,7 @@ def _backward_prefix_tinygrad(
 ) -> dict[str, Any]:
     """Backpropagate tinygrad suffix gradients through a graph-connected prefix."""
 
-    runtime.validate_boundary(boundary)
+    runtime.validate_boundary(boundary, validate_state=False)
     if not boundary.metadata.get("supports_prefix_backward"):
         raise SplitUnsupportedError(
             "backward_prefix requires a boundary from run_training_prefix().",

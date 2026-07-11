@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from v2_helpers import split_request
+
 import copy
 
 import torch
@@ -57,7 +59,7 @@ def test_suffix_only_training_parity() -> None:
     for param in split_model.fc1.parameters():
         param.requires_grad_(False)
 
-    runtime = tl.prepare_split(split_model, x, tl.SplitSpec("after:relu", trainable=True))
+    runtime = tl.split.prepare(split_model, x, split_request("after:relu", trainable=True))
     boundary = runtime.run_prefix(x)
     opt = torch.optim.SGD(split_model.fc2.parameters(), lr=0.05)
     full_opt = torch.optim.SGD(model.fc2.parameters(), lr=0.05)
@@ -82,7 +84,7 @@ def test_full_split_training_gradient_handoff() -> None:
     split_model = copy.deepcopy(model)
     x = torch.randn(4, 4)
     y = torch.randn(4, 3)
-    runtime = tl.prepare_split(split_model, x, tl.SplitSpec("after:relu", trainable=True))
+    runtime = tl.split.prepare(split_model, x, split_request("after:relu", trainable=True))
     boundary = runtime.run_training_prefix(x)
     suffix_opt = torch.optim.SGD(split_model.fc2.parameters(), lr=0.05)
     prefix_opt = torch.optim.SGD(split_model.fc1.parameters(), lr=0.05)
@@ -106,7 +108,7 @@ def test_nondifferentiable_boundary_is_skipped() -> None:
     model = NonDiffPassModel()
     x = torch.randn(4, 4)
     y = torch.randn(4, 3)
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("before:float", trainable=True))
+    runtime = tl.split.prepare(model, x, split_request("before:float", trainable=True))
     boundary = runtime.run_training_prefix(x)
     int_keys = [
         key

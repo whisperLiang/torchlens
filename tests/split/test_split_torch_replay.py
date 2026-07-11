@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from v2_helpers import split_request
+
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,7 +18,7 @@ from torchlens.split.errors import SplitUnsupportedError
 from torchlens.split.graph import SplitTraceGraph, SplitTraceNode
 from torchlens.split.planner import SplitPlan
 from torchlens.split.shape import SymbolicShape
-from torchlens.split.spec import BoundaryTensorSpec, SplitSpec
+from torchlens.split import BoundarySchema
 
 
 def _assert_close(left: Any, right: Any) -> None:
@@ -136,7 +138,7 @@ def test_mlp_replay_equivalence() -> None:
     model = TinyMlp().eval()
     x = torch.randn(2, 4)
 
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("50%"))
+    runtime = tl.split.prepare(model, x, split_request("50%"))
 
     assert runtime.validate_equivalence(model, (x,))
     _assert_close(runtime.replay(x), model(x))
@@ -149,7 +151,7 @@ def test_cnn_replay_equivalence() -> None:
     model = TinyCnn().eval()
     x = torch.randn(2, 3, 8, 8)
 
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("50%"))
+    runtime = tl.split.prepare(model, x, split_request("50%"))
 
     assert runtime.validate_equivalence(model, (x,))
 
@@ -161,8 +163,8 @@ def test_before_and_after_boundaries_work() -> None:
     model = TinyMlp().eval()
     x = torch.randn(2, 4)
 
-    after = tl.prepare_split(model, x, tl.SplitSpec("after:relu"))
-    before = tl.prepare_split(model, x, tl.SplitSpec("before:fc2"))
+    after = tl.split.prepare(model, x, split_request("after:relu"))
+    before = tl.split.prepare(model, x, split_request("before:fc2"))
 
     _assert_close(after.replay(x), model(x))
     _assert_close(before.replay(x), model(x))
@@ -175,7 +177,7 @@ def test_identity_output_marker_reconstructs_from_graph_parent() -> None:
     model = nn.Sequential(nn.Linear(6, 4), nn.Dropout(p=0.0)).eval()
     x = torch.ones(2, 6)
 
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("after:dropout", dynamic_batch=(1, 3)))
+    runtime = tl.split.prepare(model, x, split_request("after:dropout", dynamic_batch=(1, 3)))
 
     for batch in (1, 3):
         replay_x = torch.ones(batch, 6)
@@ -189,7 +191,7 @@ def test_residual_frontier_includes_skip_tensor() -> None:
     model = ResidualMlp().eval()
     x = torch.randn(2, 4)
 
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("after:relu"))
+    runtime = tl.split.prepare(model, x, split_request("after:relu"))
     boundary = runtime.run_prefix(x)
 
     assert len(boundary.tensors) >= 2
@@ -203,7 +205,7 @@ def test_multi_output_dict_reconstruction() -> None:
     model = DictOutput().eval()
     x = torch.randn(2, 5)
 
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("50%"))
+    runtime = tl.split.prepare(model, x, split_request("50%"))
 
     _assert_close(runtime.replay(x), model(x))
 
@@ -218,8 +220,12 @@ def test_targetless_suffix_compute_node_raises() -> None:
     """Target-less compute nodes cannot replay from captured outputs."""
 
     boundary_spec = {
-        "h": BoundaryTensorSpec(
-            canonical_id="h",
+        "h": BoundarySchema(
+            value_id="h",
+            container_path=(),
+            role="primary",
+            alias_group=None,
+            source_kind="boundary",
             label="h",
             backend="torch",
             module_path=None,
@@ -227,7 +233,6 @@ def test_targetless_suffix_compute_node_raises() -> None:
             shape=SymbolicShape((2, 3)),
             dtype="torch.float32",
             requires_grad=False,
-            role="primary",
         )
     }
     graph = SplitTraceGraph(
@@ -254,7 +259,7 @@ def test_targetless_suffix_compute_node_raises() -> None:
     suffix = GeneratedSuffix(
         graph=graph,
         plan=plan,
-        spec=SplitSpec("after:h"),
+        spec=split_request("after:h"),
         node_ids=plan.suffix_node_ids,
         use_live_param_sources=True,
     )

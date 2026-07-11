@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from ..graph import SplitTraceGraph
     from ..planner import SplitPlan
     from ..program import ReplayProgram, ReplaySegment
-    from ..spec import SplitSpec
+    from ..ir import SplitRequest
     from ..training import BoundaryGradients, TrainingStepResult
 
 
@@ -67,6 +67,61 @@ class TensorOps(Protocol):
         ...
 
 
+class SplitPolicyMixin:
+    """Reusable adapter-owned capability and boundary policy hooks."""
+
+    name = ""
+    native_target_types: frozenset[str] = frozenset()
+    allow_callable_target = False
+    native_state_replay = False
+
+    def target_support_reasons(self, node: Any, graph: Any) -> tuple[str, ...]:
+        """Validate a node against this adapter's native capture handles."""
+
+        del graph
+        if (
+            node.is_input
+            or (node.is_output and node.target is None)
+            or (node.is_buffer or (not node.parents and not node.is_output))
+        ):
+            return ()
+        if node.target is None:
+            return ("missing replay target/capture",)
+        target_type = type(node.target).__name__
+        if target_type in self.native_target_types:
+            return ()
+        if self.allow_callable_target and callable(node.target):
+            return ()
+        return (f"unsupported {self.name} target {target_type!r}",)
+
+    def stateful_replay_reasons(self, node: Any, backend: str) -> tuple[str, ...]:
+        """Return conservative state/random replay failures for this adapter."""
+
+        del backend
+        if self.native_state_replay:
+            return ()
+        op_text = node.op_type.lower()
+        target_name = str(
+            getattr(node.target, "op_type", "") or getattr(node.target, "__name__", "")
+        )
+        target_text = target_name.lower()
+        tokens = (op_text, target_text)
+        is_dropout = any("dropout" in token for token in tokens)
+        if is_dropout and (node.kwargs_template or {}).get("training") is False:
+            return ()
+        if is_dropout or any("random" in token or "rand" in token for token in tokens):
+            return ("stateful/random op requires backend-specific replay policy",)
+        if any("assign" in token or "inplace" in token or "write" in token for token in tokens):
+            return ("state mutation requires backend-specific replay policy",)
+        return ()
+
+    def dynamic_shape_reasons(self, node: Any, graph: Any, spec: Any) -> tuple[str, ...]:
+        """Provide an adapter extension point for symbolic shape validation."""
+
+        del node, graph, spec
+        return ()
+
+
 class ReplayLowerer(Protocol):
     """Backend hook for lowering a split graph into replay IR."""
 
@@ -74,7 +129,7 @@ class ReplayLowerer(Protocol):
         self,
         graph: "SplitTraceGraph",
         plan: "SplitPlan",
-        spec: "SplitSpec",
+        spec: "SplitRequest",
         *,
         segment: "ReplaySegment",
     ) -> "ReplayProgram":
@@ -89,7 +144,7 @@ class ReplayExecutor(Protocol):
         self,
         graph: "SplitTraceGraph",
         plan: "SplitPlan",
-        spec: "SplitSpec",
+        spec: "SplitRequest",
     ) -> SegmentBundle:
         """Build backend-specific split replay segments."""
         ...
@@ -131,11 +186,24 @@ class SplitBackendAdapter(TensorOps, ReplayExecutor, Protocol):
     supports_boundary_cache: bool
     supports_dynamic_batch: bool
 
+    def target_support_reasons(self, node: Any, graph: Any) -> tuple[str, ...]:
+        """Validate a captured target against backend replay handles."""
+        ...
+
+    def stateful_replay_reasons(self, node: Any, backend: str) -> tuple[str, ...]:
+        """Report backend-specific stateful replay limitations."""
+        ...
+
+    def dynamic_shape_reasons(self, node: Any, graph: Any, spec: Any) -> tuple[str, ...]:
+        """Report backend-specific symbolic-shape limitations."""
+        ...
+
 
 __all__ = [
     "ReplayExecutor",
     "ReplayLowerer",
     "SegmentBundle",
+    "SplitPolicyMixin",
     "SplitBackendAdapter",
     "TensorOps",
     "TrainingEngine",

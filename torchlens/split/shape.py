@@ -439,7 +439,7 @@ def require_safe_dynamic_shape_rewrite(
     split_point: str,
     label: str,
 ) -> None:
-    """Raise for shape-sensitive ops not covered by v1 rewrite support."""
+    """Raise for shape-sensitive ops without a backend rewrite policy."""
 
     if is_dynamic_batch_shape_sensitive_op(op_type):
         return

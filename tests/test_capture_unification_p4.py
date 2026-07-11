@@ -11,6 +11,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens import _state
 from torchlens.backends.torch._tl import get_tensor_label, set_tensor_label
 from torchlens.backends.torch.ops import _get_parent_output_version_snapshot
 from torchlens.utils.arg_handling import copy_arg_tree
@@ -198,18 +199,29 @@ def _assert_tensor_payload_matches(source: torch.Tensor, copied: torch.Tensor) -
 def _tensor_zoo() -> list[tuple[str, torch.Tensor]]:
     """Return representative tensors for copy policy coverage."""
 
-    sparse = torch.sparse_coo_tensor(
-        torch.tensor([[0, 1], [1, 0]]),
-        torch.tensor([1.0, 2.0]),
-        (2, 2),
-    )
-    return [
-        ("dense", torch.randn(2, 3)),
-        ("sparse", sparse),
-        ("meta", torch.empty(2, 3, device="meta")),
-        ("quantized", torch.quantize_per_tensor(torch.tensor([1.0, 2.0]), 0.1, 10, torch.quint8)),
-        ("complex", torch.tensor([1 + 2j, 3 - 4j])),
-    ]
+    with _state.pause_logging():
+        sparse = torch.sparse_coo_tensor(
+            torch.tensor([[0, 1], [1, 0]]),
+            torch.tensor([1.0, 2.0]),
+            (2, 2),
+            check_invariants=True,
+        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="torch.quantize_per_tensor.*",
+                category=UserWarning,
+            )
+            quantized = torch.quantize_per_tensor(
+                torch.tensor([1.0, 2.0]), 0.1, 10, torch.quint8
+            )
+        return [
+            ("dense", torch.randn(2, 3)),
+            ("sparse", sparse),
+            ("meta", torch.empty(2, 3, device="meta")),
+            ("quantized", quantized),
+            ("complex", torch.tensor([1 + 2j, 3 - 4j])),
+        ]
 
 
 def test_copy_policies_pause_logging_for_internal_tensor_ops() -> None:

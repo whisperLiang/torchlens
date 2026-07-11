@@ -108,8 +108,8 @@ TensorFlow interventions, `halt=`, true backward capture, fastlog/`tl.record()`,
 T1/intermediate derived gradients are deferred. These surfaces raise typed backend errors instead of
 silently producing partial traces.
 
-`tl.prepare_split(..., backend="tf")` supports raw-op prefix/suffix replay, trusted local boundary
-caches, conservative leading-dimension `SplitSpec.dynamic_batch`, and split-training boundary
+`tl.split.prepare(..., SplitRequest(..., backend="tf"))` supports raw-op prefix/suffix replay, trusted local boundary
+caches, conservative leading-dimension `SplitFeatures.dynamic_batch`, and split-training boundary
 gradients. Mutable optimizer updates are attempted for live TensorFlow variables that participate
 in the generated suffix/prefix replay; unsupported resource or structural ops fail closed with a
 typed split error rather than fabricating gradients.
@@ -193,8 +193,8 @@ stochastic/training composites. Deterministic eval-mode composites are allowed a
 nodes. Same-object no-ops, such as an operation that returns the exact input tensor object, are
 recorded as alias annotations rather than cloned value-producing ops.
 
-`tl.prepare_split(..., backend="paddle")` supports generated-eager prefix/suffix replay, trusted
-local boundary caches, conservative leading-dimension `SplitSpec.dynamic_batch`, and split training.
+`tl.split.prepare(..., SplitRequest(..., backend="paddle"))` supports generated-eager prefix/suffix replay, trusted
+local boundary caches, conservative leading-dimension `SplitFeatures.dynamic_batch`, and split training.
 `train_suffix()` returns boundary gradients and steps a supplied Paddle optimizer when the generated
 suffix uses live parameters; `backward_prefix()` propagates gradients from a
 `run_training_prefix()` boundary.
@@ -261,8 +261,8 @@ trace = tl.trace(fn, (params, jnp.ones((4, 3))), backend="jax", grad_options=gra
 trace.derived_grads["params.w"]
 ```
 
-`tl.prepare_split(..., backend="jax")` supports native-IR prefix/suffix replay, trusted local
-boundary caches, conservative leading-dimension `SplitSpec.dynamic_batch`, and split-training
+`tl.split.prepare(..., SplitRequest(..., backend="jax"))` supports native-IR prefix/suffix replay, trusted local
+boundary caches, conservative leading-dimension `SplitFeatures.dynamic_batch`, and split-training
 gradient handoff. JAX split training is functional: `train_suffix()` returns boundary/parameter-leaf
 gradients and rejects `optimizer=`, while `backward_prefix()` returns VJP gradients for the original
 prefix input pytrees so users can apply Optax or custom updates outside TorchLens.
@@ -377,8 +377,8 @@ attaches exact unambiguous records to `trace.intermediate_derived_grads`; each o
 the payload through read-only `op.derived_grad`. Ambiguous signature matches are skipped instead of
 attached, and `op.grads` / `trace.saved_grad_ops` remain true-backward-only.
 
-`tl.prepare_split(..., backend="tinygrad")` supports UOp prefix/suffix replay, trusted local
-boundary caches, conservative leading-dimension `SplitSpec.dynamic_batch`, and split-training
+`tl.split.prepare(..., SplitRequest(..., backend="tinygrad"))` supports UOp prefix/suffix replay, trusted local
+boundary caches, conservative leading-dimension `SplitFeatures.dynamic_batch`, and split-training
 boundary gradients. Ordinary replay continues to realize copied tensors for stable cache/validation
 behavior; `run_training_prefix()` uses a separate live-UOp path so `train_suffix()` can return
 boundary gradients and `backward_prefix()` can hand them through the prefix. Cached or detached

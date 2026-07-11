@@ -29,6 +29,7 @@ from ...validation.status import (
     REGION_REPLAY_PROVENANCE_KEY,
 )
 from ..registry import BackendUnsupportedError
+from ._tf_compat import get_tf_device_name
 from .op_callback_capture import TFCaptureResult, TFInputCapture, TFOpCapture, TFSourceRecord
 
 _CONTROL_FLOW_OP_TYPES = frozenset(
@@ -1425,7 +1426,7 @@ def _record_context_for_symbolic(
         input_output_address=None,
         shape=_shape_tuple(output),
         dtype=DtypeRef(backend="tf", name=str(getattr(output, "dtype", ""))),
-        tensor_device=DeviceRef(backend="tf", name=""),
+        tensor_device=DeviceRef(backend="tf", name=get_tf_device_name(output)),
         tensor_requires_grad=None,
         output_index=output_index,
         is_bottom_level_func=True,

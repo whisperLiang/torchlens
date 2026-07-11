@@ -165,19 +165,24 @@ def test_paddle_object_module_vs_function_root() -> None:
     assert [module.address for module in function_trace.modules] == ["self"]
 
 
-class PaddleSingleLinear(paddle.nn.Layer):
-    """Minimal parameterized Paddle layer for finalization regression tests."""
+def _paddle_single_linear() -> Any:
+    """Create a minimal parameterized Paddle layer after the lazy import."""
 
-    def __init__(self) -> None:
-        """Initialize the single linear child."""
+    class PaddleSingleLinear(paddle.nn.Layer):
+        """Minimal parameterized Paddle layer for finalization regression tests."""
 
-        super().__init__()
-        self.fc = paddle.nn.Linear(4, 4)
+        def __init__(self) -> None:
+            """Initialize the single linear child."""
 
-    def forward(self, x: object) -> object:
-        """Run the linear layer."""
+            super().__init__()
+            self.fc = paddle.nn.Linear(4, 4)
 
-        return self.fc(x)
+        def forward(self, x: object) -> object:
+            """Run the linear layer."""
+
+            return self.fc(x)
+
+    return PaddleSingleLinear()
 
 
 def test_paddle_num_layers_with_params_populated_in_object_module_mode() -> None:
@@ -196,7 +201,7 @@ def test_paddle_num_layers_with_params_populated_in_object_module_mode() -> None
     Paddle must match.
     """
 
-    trace = tl.trace(PaddleSingleLinear(), _input(), backend="paddle")
+    trace = tl.trace(_paddle_single_linear(), _input(), backend="paddle")
 
     assert trace.module_identity_mode == "object_module"
     assert trace.num_layers_with_params == 1

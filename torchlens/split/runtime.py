@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from hashlib import sha256
 from typing import Any
 
 from .adapters.base import SegmentBundle, SplitBackendAdapter
@@ -10,9 +11,9 @@ from .boundary import ReplayBoundary
 from .cache import load_boundary, save_boundary
 from .errors import SplitBoundaryError, SplitErrorContext
 from .graph import SplitTraceGraph
+from .ir import BoundarySchema, SplitGraphIR, SplitModelProfile, SplitRequest
 from .planner import SplitPlan
 from .program import ReplayProgram, SplitCapabilityReport
-from .spec import BoundaryTensorSpec, SplitSpec
 from .validation import nested_allclose
 
 
@@ -22,13 +23,15 @@ class SplitRuntime:
     model: Any
     trace: Any
     trace_graph: SplitTraceGraph
-    split_spec: SplitSpec
+    request: SplitRequest
     plan: SplitPlan
     adapter: SplitBackendAdapter
     segments: SegmentBundle
     capability_report: SplitCapabilityReport | None
     prefix_program: ReplayProgram | None
     suffix_program: ReplayProgram | None
+    graph_ir: SplitGraphIR | None
+    model_profile: SplitModelProfile | None
 
     def __init__(
         self,
@@ -36,26 +39,30 @@ class SplitRuntime:
         model: Any,
         trace: Any,
         trace_graph: SplitTraceGraph,
-        split_spec: SplitSpec,
+        request: SplitRequest,
         plan: SplitPlan,
         adapter: SplitBackendAdapter,
         segments: SegmentBundle,
         capability_report: SplitCapabilityReport | None = None,
         prefix_program: ReplayProgram | None = None,
         suffix_program: ReplayProgram | None = None,
+        graph_ir: SplitGraphIR | None = None,
+        model_profile: SplitModelProfile | None = None,
     ) -> None:
         """Create a prepared split runtime."""
 
         self.model = model
         self.trace = trace
         self.trace_graph = trace_graph
-        self.split_spec = split_spec
+        self.request = request
         self.plan = plan
         self.adapter = adapter
         self.segments = segments
         self.capability_report = capability_report
         self.prefix_program = prefix_program
         self.suffix_program = suffix_program
+        self.graph_ir = graph_ir
+        self.model_profile = model_profile
 
     @property
     def split_id(self) -> str:
@@ -64,15 +71,30 @@ class SplitRuntime:
         return self.plan.split_id
 
     @property
-    def boundary_spec(self) -> dict[str, BoundaryTensorSpec]:
+    def boundary_spec(self) -> dict[str, BoundarySchema]:
         """Boundary ABI spec keyed by boundary tensor ID."""
 
         return self.plan.boundary_spec
 
+    @property
+    def boundary_schema(self) -> tuple[BoundarySchema, ...]:
+        """Return the backend-neutral v2 boundary ABI schema."""
+
+        if self.graph_ir is None:
+            return ()
+        return self.graph_ir.boundary_schema
+
+    def explain_capabilities(self) -> dict[str, Any]:
+        """Return structured capability and verification diagnostics."""
+
+        if self.capability_report is None:
+            return {}
+        return self.capability_report.as_dict()
+
     def run_prefix(self, *inputs: Any) -> ReplayBoundary:
         """Run the detached inference prefix."""
 
-        return self.segments.prefix(*inputs, detach_boundary=True)
+        return self._annotate_boundary(self.segments.prefix(*inputs, detach_boundary=True))
 
     def run_training_prefix(self, *inputs: Any) -> ReplayBoundary:
         """Run the graph-connected training prefix."""
@@ -84,16 +106,35 @@ class SplitRuntime:
                 f"backend={self.adapter.name!r} does not support split training prefixes.",
                 context=SplitErrorContext(
                     backend=self.adapter.name,
-                    split_point=self.split_spec.boundary,
+                    split_point=self.request.boundary,
                     module_path=None,
                     op_type=None,
                     layer_label=None,
                     reason="unsupported training prefix",
                 ),
             )
-        return self.segments.training_prefix(*inputs, detach_boundary=False)
+        return self._annotate_boundary(
+            self.segments.training_prefix(*inputs, detach_boundary=False)
+        )
 
-    def validate_boundary(self, boundary: ReplayBoundary) -> None:
+    def _annotate_boundary(self, boundary: ReplayBoundary) -> ReplayBoundary:
+        """Attach v2 graph/profile/state identity to a backend boundary."""
+
+        metadata = dict(boundary.metadata)
+        if self.graph_ir is not None:
+            metadata["graph_shape_hash"] = self.graph_ir.graph_hash
+            metadata["profile_hash"] = self.graph_ir.profile_hash
+        state_fingerprint = _model_state_fingerprint(self.model)
+        if state_fingerprint is not None:
+            metadata["state_fingerprint"] = state_fingerprint
+        return ReplayBoundary(
+            backend=boundary.backend,
+            tensors=boundary.tensors,
+            spec=boundary.spec,
+            metadata=metadata,
+        )
+
+    def validate_boundary(self, boundary: ReplayBoundary, *, validate_state: bool = True) -> None:
         """Validate ``boundary`` for this runtime."""
 
         if boundary.backend != self.adapter.name:
@@ -101,7 +142,7 @@ class SplitRuntime:
                 "Replay boundary backend differs from runtime backend.",
                 context=SplitErrorContext(
                     backend=boundary.backend,
-                    split_point=self.split_spec.boundary,
+                    split_point=self.request.boundary,
                     module_path=None,
                     op_type=None,
                     layer_label=None,
@@ -111,6 +152,9 @@ class SplitRuntime:
         boundary.validate(
             self.boundary_spec,
             split_id=self.split_id,
+            graph_hash=None if self.graph_ir is None else self.graph_ir.graph_hash,
+            profile_hash=None if self.graph_ir is None else self.graph_ir.profile_hash,
+            state_fingerprint=(_model_state_fingerprint(self.model) if validate_state else None),
             adapter=self.adapter,
         )
 
@@ -188,3 +232,44 @@ class SplitRuntime:
 
 
 __all__ = ["SplitRuntime"]
+
+
+def _model_state_fingerprint(model: Any) -> str | None:
+    """Return a value-sensitive state fingerprint when a model exposes state."""
+
+    state_dict = getattr(model, "state_dict", None)
+    if callable(state_dict):
+        try:
+            values = state_dict()
+        except Exception:
+            return None
+    else:
+        values = getattr(model, "variables", None)
+        if values is None:
+            values = getattr(model, "parameters", None)
+        if callable(values):
+            try:
+                values = tuple(values())
+            except Exception:
+                return None
+        if values is None:
+            return None
+        if not hasattr(values, "items"):
+            values = {str(index): value for index, value in enumerate(values)}
+    digest = sha256()
+    for name in sorted(values):
+        value = values[name]
+        digest.update(str(name).encode("utf-8"))
+        digest.update(repr(getattr(value, "shape", None)).encode("utf-8"))
+        digest.update(str(getattr(value, "dtype", None)).encode("utf-8"))
+        try:
+            detached = value.detach() if hasattr(value, "detach") else value
+            if hasattr(detached, "cpu"):
+                detached = detached.cpu()
+            if hasattr(detached, "numpy"):
+                digest.update(detached.numpy().tobytes())
+            else:
+                digest.update(repr(detached).encode("utf-8"))
+        except Exception:
+            digest.update(repr(value).encode("utf-8"))
+    return digest.hexdigest()

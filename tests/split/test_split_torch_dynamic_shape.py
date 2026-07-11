@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from v2_helpers import split_request
+
 import torch
 from torch import nn
 
@@ -30,10 +32,10 @@ def test_dynamic_batch_replay_for_view_reshape_flatten() -> None:
     torch.manual_seed(0)
     model = DynamicShapeModel().eval()
     example = torch.randn(2, 3, 4)
-    runtime = tl.prepare_split(
+    runtime = tl.split.prepare(
         model,
         example,
-        tl.SplitSpec("50%", dynamic_batch=(1, 8)),
+        split_request("50%", dynamic_batch=(1, 8)),
     )
 
     for batch in (1, 2, 4, 8):

@@ -13,6 +13,7 @@ from typing import Any
 from ...data_classes.param import Param
 from ...ir.events import ModuleFrame
 from ...ir.refs import DeviceRef, DtypeRef
+from ._tf_compat import get_tf_device_name
 
 
 @dataclass(frozen=True)
@@ -180,7 +181,7 @@ def tf_param_logs(tree: TFModuleTree, trace: Any) -> dict[str, Param]:
             has_optimizer=None,
         )
         param.dtype_ref = DtypeRef(backend="tf", name=dtype)
-        param.device_ref = DeviceRef(backend="tf", name=str(getattr(variable, "device", "")))
+        param.device_ref = DeviceRef(backend="tf", name=get_tf_device_name(variable))
         param.backend_address = f"object:{address}"
         param.resolver_status = "resolved"
         param._param_ref = variable

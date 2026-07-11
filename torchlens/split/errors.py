@@ -81,10 +81,10 @@ class SplitError(Exception):
         return f"{base} ({self.context.reason}; backend={self.context.backend!r})"
 
 
-class SplitSpecError(SplitError, ValueError):
-    """Raised when a split specification cannot be resolved."""
+class SplitRequestError(SplitError, ValueError):
+    """Raised when a typed split request cannot be resolved."""
 
-    code = "split_spec_error"
+    code = "split_request_error"
 
 
 class SplitBoundaryError(SplitError, ValueError):
@@ -103,6 +103,6 @@ __all__ = [
     "SplitBoundaryError",
     "SplitError",
     "SplitErrorContext",
-    "SplitSpecError",
+    "SplitRequestError",
     "SplitUnsupportedError",
 ]

@@ -61,7 +61,7 @@ streaming, fastlog, and true backward capture remain PyTorch-only. Loaded non-to
 replay-validate because portable save strips or lacks runtime replay captures; inspect
 `trace.validation_replay_status` for the explicit unavailable status.
 Backend-neutral split replay is broader than true backward capture: TF, Paddle, JAX, and tinygrad
-support `prepare_split()`, trusted local boundary caches, conservative leading-dimension dynamic
+support `tl.split.prepare()` with `SplitRequest`, trusted local boundary caches, conservative leading-dimension dynamic
 batch, and split-training boundary gradients. JAX returns functional gradients for external
 updates; TF/Paddle attempt mutable optimizer updates only when generated replay reaches live
 trainable parameters. tinygrad split training uses live UOp autograd for uncached

@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from ..errors import SplitErrorContext, SplitUnsupportedError
-from .base import SegmentBundle
+from .base import SegmentBundle, SplitPolicyMixin
 
 
-class UnsupportedSplitAdapter:
-    """Capability shell for a backend without v1 generated-eager replay."""
+class UnsupportedSplitAdapter(SplitPolicyMixin):
+    """Capability shell for a backend without a replay implementation."""
 
     supports_replay = False
     supports_training = False
@@ -25,7 +25,7 @@ class UnsupportedSplitAdapter:
         """Build a structured unsupported-capability error."""
 
         return SplitUnsupportedError(
-            f"backend={self.name!r} does not support split {capability} in v1.",
+            f"backend={self.name!r} does not support split {capability}.",
             context=SplitErrorContext(
                 backend=self.name,
                 split_point="",

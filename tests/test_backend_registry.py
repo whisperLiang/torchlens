@@ -824,7 +824,7 @@ def test_tf_backend_rejects_random_seed_without_importing_tensorflow() -> None:
 def test_paddle_shared_capture_backend_is_unsupported_typed_error() -> None:
     """Paddle shared-orchestration lookup raises the canonical unsupported error."""
 
-    paddle = pytest.importorskip("paddle")
+    paddle = _paddle_runtime_or_skip()
 
     class _PaddleLayer(paddle.nn.Layer):
         """Small Paddle layer for shared-capture resolution tests."""
@@ -877,7 +877,7 @@ def test_paddle_preview_unsupported_options_raise_typed_error() -> None:
 def test_paddle_preview_applies_static_label_save_selector() -> None:
     """Paddle accepts advertised static save selectors and filters public payloads."""
 
-    paddle = pytest.importorskip("paddle")
+    paddle = _paddle_runtime_or_skip()
 
     class _PaddleRelu(paddle.nn.Layer):
         """Small Paddle model with a selectively saved operation."""

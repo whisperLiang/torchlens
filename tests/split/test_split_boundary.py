@@ -8,15 +8,19 @@ import torch
 from torchlens.split.boundary import ReplayBoundary
 from torchlens.split.errors import SplitBoundaryError
 from torchlens.split.shape import SymbolicShape
-from torchlens.split.spec import BoundaryTensorSpec
+from torchlens.split import BoundarySchema
 
 
-def _spec(label: str = "relu_1_1") -> dict[str, BoundaryTensorSpec]:
+def _spec(label: str = "relu_1_1") -> dict[str, BoundarySchema]:
     """Return a one-tensor boundary spec."""
 
     return {
-        "h": BoundaryTensorSpec(
-            canonical_id="h",
+        "h": BoundarySchema(
+            value_id="h",
+            container_path=(),
+            role="primary",
+            alias_group=None,
+            source_kind="boundary",
             label=label,
             backend="torch",
             module_path="relu",
@@ -24,7 +28,6 @@ def _spec(label: str = "relu_1_1") -> dict[str, BoundaryTensorSpec]:
             shape=SymbolicShape(("B", 3)),
             dtype="torch.float32",
             requires_grad=False,
-            role="primary",
         )
     }
 
@@ -33,7 +36,7 @@ def _boundary(
     tensor: torch.Tensor | None = None,
     *,
     split_id: str = "s1",
-    spec: dict[str, BoundaryTensorSpec] | None = None,
+    spec: dict[str, BoundarySchema] | None = None,
 ) -> ReplayBoundary:
     """Return a simple replay boundary."""
 

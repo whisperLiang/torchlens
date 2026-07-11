@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from v2_helpers import split_request
+
 from types import SimpleNamespace
 from typing import Any
 
@@ -19,7 +21,6 @@ from torchlens.split.program import (
     ensure_capability_report_supported,
     lower_replay_program,
 )
-from torchlens.split.spec import SplitSpec
 
 
 def _node(
@@ -65,13 +66,13 @@ def _node(
     )
 
 
-def test_prepare_split_attaches_capability_report() -> None:
+def test_prepare_attaches_capability_report() -> None:
     """Prepared runtimes expose the strict split capability report and programs."""
 
     model = nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 2)).eval()
     x = torch.randn(2, 4)
 
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("after:relu"))
+    runtime = tl.split.prepare(model, x, split_request("after:relu"))
 
     assert runtime.capability_report is not None
     assert runtime.capability_report.preflight_ok is True
@@ -99,7 +100,7 @@ def test_replay_program_preflight_rejects_targetless_suffix_compute() -> None:
         graph_shape_hash="abc",
         traced_batch_size=2,
     )
-    spec = SplitSpec("after:h")
+    spec = split_request("after:h")
     plan = plan_split(graph, spec)
     prefix_program = lower_replay_program(graph, plan, spec, segment="prefix")
     suffix_program = lower_replay_program(graph, plan, spec, segment="suffix")

@@ -18,8 +18,11 @@ def run_paddle_subprocess(code: str, *, timeout: int = 180) -> None:
     if find_spec("paddle") is None:
         pytest.skip("'paddle' is not installed.")
     env = os.environ.copy()
+    helper_path = str(Path(__file__).resolve().parent)
+    env["PYTHONPATH"] = helper_path + os.pathsep + env.get("PYTHONPATH", "")
+    source = "from v2_helpers import split_request\n" + textwrap.dedent(code)
     result = subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(code)],
+        [sys.executable, "-c", source],
         cwd=Path(__file__).resolve().parents[2],
         env=env,
         capture_output=True,

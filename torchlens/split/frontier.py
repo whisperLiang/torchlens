@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .spec import BoundaryRole, BoundaryTensorSpec
+from .ir import BoundaryRole, BoundarySchema
 
 
 def boundary_key_for_node(node_id: str, container_path: tuple[Any, ...] = ()) -> str:
@@ -45,27 +45,30 @@ def classify_boundary_role(
     return "skip"
 
 
-def make_boundary_tensor_spec(
+def make_boundary_schema(
     key: str,
     *,
     node: Any,
     role: BoundaryRole,
     device_policy: str,
-) -> BoundaryTensorSpec:
-    """Create a public boundary tensor spec from a split graph node."""
+) -> BoundarySchema:
+    """Create a public boundary schema from a split graph node."""
 
-    return BoundaryTensorSpec(
-        canonical_id=key,
+    return BoundarySchema(
+        value_id=key,
+        container_path=node.output_container_path,
+        role=role,
+        shape=node.symbolic_output_shape,
+        dtype=node.dtype,
+        device=None,
+        requires_grad=node.requires_grad,
+        alias_group=None,
+        source_kind="boundary",
         label=node.label,
         backend=node.backend,
         module_path=node.module_path,
         op_type=node.op_type,
-        shape=node.symbolic_output_shape,
-        dtype=node.dtype,
-        requires_grad=node.requires_grad,
-        role=role,
         output_index=getattr(node.op, "multi_output_index", None),
-        container_path=node.output_container_path,
         device_policy=device_policy,
     )
 
@@ -73,5 +76,5 @@ def make_boundary_tensor_spec(
 __all__ = [
     "boundary_key_for_node",
     "classify_boundary_role",
-    "make_boundary_tensor_spec",
+    "make_boundary_schema",
 ]

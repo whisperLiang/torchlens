@@ -155,14 +155,20 @@ _KNOWN_UNSUPPORTED_ARG_SPEC_REASONS = {
     "asarray": "C-level tensor factory with non-introspectable signature (wrapped for capture coverage)",
     "emptypermuted": "C-level tensor factory with non-introspectable signature (wrapped for capture coverage)",
     "emptystrided": "C-level tensor factory with non-introspectable signature (wrapped for capture coverage)",
+    "enumlistasintlist": "internal/private helper left on dynamic fallback until independently validated",
+    "expandsinglevalue": "internal/private helper left on dynamic fallback until independently validated",
+    "foreachmm": "internal/private helper left on dynamic fallback until independently validated",
     "frombuffer": "C-level tensor factory with non-introspectable signature (wrapped for capture coverage)",
+    "fromblob": "C-level tensor factory with non-introspectable signature (wrapped for capture coverage)",
     "assertasync": "metadata/control helper with no validated tensor-input schema",
     "assertscalar": "metadata/control helper with no validated tensor-input schema",
     "asserttensormetadata": "metadata/control helper with no validated tensor-input schema",
     "backward": "autograd/backward helper left on dynamic fallback pending gradient schema audit",
     "batchnormbackwardelemt": "autograd/backward helper left on dynamic fallback pending gradient schema audit",
     "batchnormbackwardreduce": "autograd/backward helper left on dynamic fallback pending gradient schema audit",
+    "checkunpooloutputsize": "internal/private helper left on dynamic fallback until independently validated",
     "clearnonserializablecacheddata": "metadata/control helper with no validated tensor-input schema",
+    "constdataptr": "C-level tensor factory with non-introspectable signature (wrapped for capture coverage)",
     "cudnnrnn": "demoted fragment: schema mismatch: missing_positions=[5, 15], extra_positions=[14], missing_names=[]",
     "debughasinternaloverlap": "internal/private helper left on dynamic fallback until independently validated",
     "deepcopy": "demoted fragment: no operator schema available",
@@ -187,6 +193,7 @@ _KNOWN_UNSUPPORTED_ARG_SPEC_REASONS = {
     "hashtensor": "metadata/control helper with no validated tensor-input schema",
     "hsmm": "demoted fragment: no operator schema available",
     "ipu": "demoted fragment: no operator schema available",
+    "jitunused": "metadata/control helper with no validated tensor-input schema",
     "issamesize": "metadata/control helper with no validated tensor-input schema",
     "isshared": "metadata/control helper with no validated tensor-input schema",
     "isview": "metadata/control helper with no validated tensor-input schema",
@@ -198,6 +205,8 @@ _KNOWN_UNSUPPORTED_ARG_SPEC_REASONS = {
     "linalgslogdet": "internal/private helper left on dynamic fallback until independently validated",
     "linalgsolveex": "internal/private helper left on dynamic fallback until independently validated",
     "linalgsvd": "internal/private helper left on dynamic fallback until independently validated",
+    "linearcrossentropy": "internal/private helper left on dynamic fallback until independently validated",
+    "listorempty": "internal/private helper left on dynamic fallback until independently validated",
     "logsoftmaxbackwarddata": "autograd/backward helper left on dynamic fallback pending gradient schema audit",
     "luwithinfo": "internal/private helper left on dynamic fallback until independently validated",
     "makedeprecate": "metadata/control helper with no validated tensor-input schema",
@@ -268,7 +277,7 @@ _VERSION_GATED_UNSUPPORTED_ARG_SPECS = frozenset(
         "usemiopenctcloss",
     }
 )
-_VERSION_GATED_STATIC_ARG_SPECS = frozenset({"randintlike"})
+_VERSION_GATED_STATIC_ARG_SPECS = frozenset({"alignas", "randintlike"})
 
 # Torch adds/removes internal/private helpers across releases, so a few known-unsupported
 # names are decorated on some torch versions and absent on others (e.g. "op" is absent on

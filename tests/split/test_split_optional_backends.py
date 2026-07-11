@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from v2_helpers import split_request
+
 from typing import Any
 
 import pytest
@@ -33,13 +35,13 @@ def test_jax_optional_adapter_gate() -> None:
     adapter = resolve_split_adapter("jax")
 
     assert adapter.supports_replay is True
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("after:max", backend="jax"))
+    runtime = tl.split.prepare(model, x, split_request("after:max", backend="jax"))
     replayed = runtime.replay(x)
     assert bool(jnp.allclose(replayed, model(x)))
-    trainable = tl.prepare_split(
+    trainable = tl.split.prepare(
         model,
         x,
-        tl.SplitSpec("after:max", backend="jax", trainable=True),
+        split_request("after:max", backend="jax", trainable=True),
     )
     assert trainable.segments.training_prefix is not None
 
@@ -57,24 +59,26 @@ def test_tinygrad_optional_adapter_gate() -> None:
     adapter = resolve_split_adapter("tinygrad")
 
     assert adapter.supports_replay is True
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("after:where", backend="tinygrad"))
+    runtime = tl.split.prepare(model, x, split_request("after:where", backend="tinygrad"))
     replayed = runtime.replay(x)
     assert _flatten_numbers(replayed.tolist()) == pytest.approx(
         _flatten_numbers(model(x).realize().tolist())
     )
-    trainable = tl.prepare_split(
+    trainable = tl.split.prepare(
         model,
         x,
-        tl.SplitSpec("after:where", backend="tinygrad", trainable=True),
+        split_request("after:where", backend="tinygrad", trainable=True),
     )
     assert trainable.segments.training_prefix is not None
 
 
 def test_mlx_optional_adapter_gate() -> None:
-    """Installed MLX still gates v1 replay explicitly."""
+    """MLX reports deferred replay explicitly, even when MLX is unavailable."""
 
-    pytest.importorskip("mlx")
     adapter = resolve_split_adapter("mlx")
+    assert adapter.supports_replay is False
+    assert adapter.supports_training is False
+    assert adapter.supports_dynamic_batch is False
     with pytest.raises(SplitUnsupportedError):
         adapter.build_segments(None, None, None)  # type: ignore[arg-type]
 
@@ -95,13 +99,13 @@ def test_paddle_optional_adapter_gate() -> None:
         adapter = resolve_split_adapter("paddle")
 
         assert adapter.supports_replay is True
-        runtime = tl.prepare_split(model, x, tl.SplitSpec("after:relu", backend="paddle"))
+        runtime = tl.split.prepare(model, x, split_request("after:relu", backend="paddle"))
         replayed = runtime.replay(x)
         assert bool(paddle.allclose(replayed, model(x)).item())
-        trainable = tl.prepare_split(
+        trainable = tl.split.prepare(
             model,
             x,
-            tl.SplitSpec("after:relu", backend="paddle", trainable=True),
+            split_request("after:relu", backend="paddle", trainable=True),
         )
         assert trainable.segments.training_prefix is not None
         """
@@ -135,12 +139,12 @@ def test_tf_optional_adapter_gate() -> None:
     adapter = resolve_split_adapter("tf")
 
     assert adapter.supports_replay is True
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("after:relu", backend="tf"))
+    runtime = tl.split.prepare(model, x, split_request("after:relu", backend="tf"))
     replayed = runtime.replay(x)
     assert bool(tf.reduce_all(tf.abs(replayed - model(x)) < 1e-5).numpy())
-    trainable = tl.prepare_split(
+    trainable = tl.split.prepare(
         model,
         x,
-        tl.SplitSpec("after:relu", backend="tf", trainable=True),
+        split_request("after:relu", backend="tf", trainable=True),
     )
     assert trainable.segments.training_prefix is not None

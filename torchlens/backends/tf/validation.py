@@ -182,19 +182,65 @@ def validate_tf_trace(trace: Any, *, validate_metadata: bool = True) -> Validati
     source: ValidationReplaySource = (
         "loaded" if getattr(trace, "_loaded_from_bundle", False) else "live"
     )
-    status = ValidationReplayStatus.from_replay_counts(
-        backend="tf",
-        source=source,
-        replayed_node_count=result.counts.replayed_node_count,
-        unverified_node_count=0,
-        pure_unverified_node_count=result.counts.pure_unverified_node_count,
-        effect_region_node_count=result.counts.effect_region_node_count,
-        failed_node_count=result.counts.failed_node_count,
-        payload_load_status=getattr(trace, "payload_load_status", None),
-    )
+    if _annotation_only_validation_passes(result):
+        annotation_count = sum(
+            op_class == "annotation" for op_class in result.classes.values()
+        )
+        status = ValidationReplayStatus.result(
+            passed=True,
+            backend="tf",
+            source=source,
+            replayed_node_count=0,
+            payload_load_status=getattr(trace, "payload_load_status", None),
+            exempted_reason_counts={"annotation_passthrough": annotation_count},
+        )
+    else:
+        status = ValidationReplayStatus.from_replay_counts(
+            backend="tf",
+            source=source,
+            replayed_node_count=result.counts.replayed_node_count,
+            unverified_node_count=0,
+            pure_unverified_node_count=result.counts.pure_unverified_node_count,
+            effect_region_node_count=result.counts.effect_region_node_count,
+            failed_node_count=result.counts.failed_node_count,
+            payload_load_status=getattr(trace, "payload_load_status", None),
+        )
     setattr(trace, "_tf_validation_result", result)
     setattr(trace, "_validation_replay_status", status)
     return status
+
+
+def _annotation_only_validation_passes(result: TFValidationResult) -> bool:
+    """Return whether validation covered only source and passthrough nodes.
+
+    An identity or stop-gradient op is intentionally classified as an
+    annotation rather than a value-producing op.  Its callback lineage and
+    saved output are still checked by ``validate_tf_trace_detailed``; counting
+    it as a raw-op replay would overstate replay coverage.  A trace containing
+    only these annotations therefore passes with an explicit exemption rather
+    than becoming the misleading ``no_nodes_replay_validated`` status.
+
+    Parameters
+    ----------
+    result
+        Detailed validation result.
+
+    Returns
+    -------
+    bool
+        True for a clean source/annotation-only validation result.
+    """
+
+    if result.counts.failed_node_count:
+        return False
+    if result.counts.replayed_node_count:
+        return False
+    if result.counts.pure_unverified_node_count or result.counts.effect_region_node_count:
+        return False
+    classes = tuple(result.classes.values())
+    return bool(classes) and "annotation" in classes and all(
+        op_class in {"source", "annotation"} for op_class in classes
+    )
 
 
 def validate_tf_trace_detailed(trace: Any) -> TFValidationResult:

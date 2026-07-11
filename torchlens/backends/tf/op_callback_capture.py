@@ -21,7 +21,7 @@ from ...ir.events import (
 from ...ir.predicate import RecordContext
 from ...ir.refs import DeviceRef, DtypeRef, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
-from ._tf_compat import get_op_callbacks_module
+from ._tf_compat import get_op_callbacks_module, get_tf_device_name
 from .modules import TFModuleTree, patched_tf_module_stack
 
 _INIT_OP_TYPES = frozenset(
@@ -584,7 +584,7 @@ class TFEagerCaptureSession:
             input_output_address=None,
             shape=_shape_tuple(output),
             dtype=DtypeRef(backend="tf", name=str(getattr(output, "dtype", ""))),
-            tensor_device=DeviceRef(backend="tf", name=str(getattr(output, "device", ""))),
+            tensor_device=DeviceRef(backend="tf", name=get_tf_device_name(output)),
             tensor_requires_grad=None,
             output_index=output_index,
             is_bottom_level_func=True,

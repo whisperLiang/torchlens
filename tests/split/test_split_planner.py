@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from v2_helpers import split_request
+
 import pytest
 
-from torchlens.split.errors import SplitSpecError
+from torchlens.split.errors import SplitRequestError
 from torchlens.split.graph import SplitTraceGraph, SplitTraceNode
 from torchlens.split.planner import plan_split
-from torchlens.split.spec import SplitSpec
 
 
 def _node(
@@ -79,7 +80,7 @@ def _graph(extra: tuple[SplitTraceNode, ...] = ()) -> SplitTraceGraph:
 def test_after_boundary_frontier_includes_skip() -> None:
     """Splitting after ReLU includes both primary and residual skip tensors."""
 
-    plan = plan_split(_graph(), SplitSpec("after:relu"))
+    plan = plan_split(_graph(), split_request("after:relu"))
 
     assert plan.target_node_id == "relu_1_1"
     assert set(plan.boundary_node_ids) == {"relu_1_1", "linear_1_1"}
@@ -91,7 +92,7 @@ def test_after_boundary_frontier_includes_skip() -> None:
 def test_before_boundary_uses_direct_parents_as_primary() -> None:
     """before: targets pass direct parents across the boundary."""
 
-    plan = plan_split(_graph(), SplitSpec("before:add_1_1"))
+    plan = plan_split(_graph(), split_request("before:add_1_1"))
 
     roles = {item.label: item.role for item in plan.boundary_spec.values()}
     assert roles["relu_1_1"] == "primary"
@@ -101,7 +102,7 @@ def test_before_boundary_uses_direct_parents_as_primary() -> None:
 def test_percent_boundary_selects_eligible_compute_node() -> None:
     """Percent split indexes eligible compute nodes only."""
 
-    plan = plan_split(_graph(), SplitSpec("50%"))
+    plan = plan_split(_graph(), split_request("50%"))
 
     assert plan.target_node_id == "relu_1_1"
     assert plan.boundary_kind == "after"
@@ -122,7 +123,7 @@ def test_after_terminal_compute_without_output_node_keeps_boundary() -> None:
         traced_batch_size=2,
     )
 
-    plan = plan_split(graph, SplitSpec("after:dense_1", backend="tf"))
+    plan = plan_split(graph, split_request("after:dense_1", backend="tf"))
 
     assert plan.suffix_node_ids == frozenset()
     assert plan.boundary_node_ids == ("dense_1",)
@@ -144,28 +145,28 @@ def test_before_first_compute_keeps_input_when_call_group_id_is_shared() -> None
         traced_batch_size=2,
     )
 
-    plan = plan_split(graph, SplitSpec("before:linear_1", backend="paddle"))
+    plan = plan_split(graph, split_request("before:linear_1", backend="paddle"))
 
     assert "input_1" in plan.prefix_node_ids
     assert plan.boundary_node_ids == ("input_1",)
 
 
 def test_target_errors() -> None:
-    """Missing, ambiguous, and source/sink targets raise SplitSpecError."""
+    """Missing, ambiguous, and source/sink targets raise SplitRequestError."""
 
     graph = _graph((_node("other_relu", module_path="other.relu", raw_index=5),))
-    with pytest.raises(SplitSpecError, match="No split target"):
-        plan_split(graph, SplitSpec("after:missing"))
-    with pytest.raises(SplitSpecError, match="ambiguous"):
-        plan_split(graph, SplitSpec("after:raw_"))
-    with pytest.raises(SplitSpecError, match="input"):
-        plan_split(_graph(), SplitSpec("after:input_1_1"))
-    with pytest.raises(SplitSpecError, match="output"):
-        plan_split(_graph(), SplitSpec("after:output_1_1"))
-    with pytest.raises(SplitSpecError, match="buffer"):
+    with pytest.raises(SplitRequestError, match="No split target"):
+        plan_split(graph, split_request("after:missing"))
+    with pytest.raises(SplitRequestError, match="ambiguous"):
+        plan_split(graph, split_request("after:raw_"))
+    with pytest.raises(SplitRequestError, match="input"):
+        plan_split(_graph(), split_request("after:input_1_1"))
+    with pytest.raises(SplitRequestError, match="output"):
+        plan_split(_graph(), split_request("after:output_1_1"))
+    with pytest.raises(SplitRequestError, match="buffer"):
         plan_split(
             _graph((_node("buffer_1_1", is_buffer=True, raw_index=5),)),
-            SplitSpec("after:buffer_1_1"),
+            split_request("after:buffer_1_1"),
         )
 
 
@@ -197,10 +198,10 @@ def test_repeated_layer_labels_require_canonical_target() -> None:
         traced_batch_size=2,
     )
 
-    with pytest.raises(SplitSpecError, match="ambiguous"):
-        plan_split(graph, SplitSpec("after:relu_1_1"))
+    with pytest.raises(SplitRequestError, match="ambiguous"):
+        plan_split(graph, split_request("after:relu_1_1"))
 
-    plan = plan_split(graph, SplitSpec("after:relu_1_1:2"))
+    plan = plan_split(graph, split_request("after:relu_1_1:2"))
 
     assert plan.target_node_id == "relu_1_1:2"
     assert plan.boundary_node_ids == ("relu_1_1:2",)

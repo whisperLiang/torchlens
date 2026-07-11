@@ -22,8 +22,8 @@ from ..frontier import boundary_key_for_node
 from ..graph import SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
 from ..shape import infer_runtime_batch_size_from_overlay, rewrite_dynamic_batch_value
-from ..spec import SplitSpec
-from .base import SegmentBundle
+from ..ir import SplitRequest
+from .base import SegmentBundle, SplitPolicyMixin
 
 
 def _torch() -> Any:
@@ -146,7 +146,7 @@ class _GeneratedSegmentBase:
         *,
         graph: SplitTraceGraph,
         plan: SplitPlan,
-        spec: SplitSpec,
+        spec: SplitRequest,
         node_ids: frozenset[str],
         use_live_param_sources: bool,
     ) -> None:
@@ -584,7 +584,7 @@ class GeneratedSuffix(_GeneratedSegmentBase):
         return tuple(leaves)
 
 
-class TorchSplitAdapter:
+class TorchSplitAdapter(SplitPolicyMixin):
     """Torch split backend adapter."""
 
     name = "torch"
@@ -592,6 +592,8 @@ class TorchSplitAdapter:
     supports_training = True
     supports_boundary_cache = True
     supports_dynamic_batch = True
+    allow_callable_target = True
+    native_state_replay = True
 
     def is_tensor(self, value: Any) -> bool:
         """Return whether ``value`` is a torch tensor."""
@@ -656,22 +658,10 @@ class TorchSplitAdapter:
         self,
         graph: SplitTraceGraph,
         plan: SplitPlan,
-        spec: SplitSpec,
+        spec: SplitRequest,
     ) -> SegmentBundle:
         """Build Torch generated-eager prefix/suffix segments."""
 
-        if spec.mode == "compiled":
-            raise SplitUnsupportedError(
-                "Torch compiled split mode is not supported in v1.",
-                context=SplitErrorContext(
-                    backend="torch",
-                    split_point=spec.boundary,
-                    module_path=None,
-                    op_type=None,
-                    layer_label=None,
-                    reason="compiled split mode unsupported",
-                ),
-            )
         use_live = (
             spec.trainable if spec.use_live_param_sources is None else spec.use_live_param_sources
         )
@@ -682,7 +672,10 @@ class TorchSplitAdapter:
             node_ids=plan.prefix_node_ids,
             use_live_param_sources=use_live,
         )
-        training_spec = replace(spec, trainable=True)
+        training_spec = replace(
+            spec,
+            features=replace(spec.features, training=True, live_param_sources=True),
+        )
         training_prefix = GeneratedPrefix(
             graph=graph,
             plan=plan,

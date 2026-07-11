@@ -12,8 +12,8 @@ from ..frontier import boundary_key_for_node
 from ..graph import SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
 from ..shape import infer_runtime_batch_size_from_overlay, maybe_rewrite_dynamic_batch_value
-from ..spec import SplitSpec
-from .base import SegmentBundle
+from ..ir import SplitRequest
+from .base import SegmentBundle, SplitPolicyMixin
 
 
 def _paddle() -> Any:
@@ -91,9 +91,7 @@ class _LiveParamCursor:
         """Create a cursor over live parameter handles for ``node``."""
 
         self._handles = [
-            handle
-            for param in node.param_refs
-            if (handle := _param_ref_handle(param)) is not None
+            handle for param in node.param_refs if (handle := _param_ref_handle(param)) is not None
         ]
         self._index = 0
 
@@ -115,7 +113,7 @@ class _PaddleGeneratedSegmentBase:
         *,
         graph: SplitTraceGraph,
         plan: SplitPlan,
-        spec: SplitSpec,
+        spec: SplitRequest,
         node_ids: frozenset[str],
     ) -> None:
         """Create a generated replay segment."""
@@ -520,7 +518,7 @@ class PaddleGeneratedSuffix(_PaddleGeneratedSegmentBase):
         return tuple(leaves)
 
 
-class PaddleSplitAdapter:
+class PaddleSplitAdapter(SplitPolicyMixin):
     """Paddle split backend adapter."""
 
     name = "paddle"
@@ -528,6 +526,7 @@ class PaddleSplitAdapter:
     supports_training = True
     supports_boundary_cache = True
     supports_dynamic_batch = True
+    allow_callable_target = True
 
     def is_tensor(self, value: Any) -> bool:
         """Return whether ``value`` is a Paddle tensor."""
@@ -601,22 +600,10 @@ class PaddleSplitAdapter:
         self,
         graph: SplitTraceGraph,
         plan: SplitPlan,
-        spec: SplitSpec,
+        spec: SplitRequest,
     ) -> SegmentBundle:
         """Build Paddle generated-eager prefix/suffix segments."""
 
-        if spec.mode == "compiled":
-            raise SplitUnsupportedError(
-                "Paddle compiled split mode is not supported.",
-                context=SplitErrorContext(
-                    backend="paddle",
-                    split_point=spec.boundary,
-                    module_path=None,
-                    op_type=None,
-                    layer_label=None,
-                    reason="compiled split mode unsupported",
-                ),
-            )
         prefix = PaddleGeneratedPrefix(
             graph=graph,
             plan=plan,
@@ -626,7 +613,11 @@ class PaddleSplitAdapter:
         training_prefix = PaddleGeneratedPrefix(
             graph=graph,
             plan=plan,
-            spec=spec if spec.trainable else replace(spec, trainable=True),
+            spec=(
+                spec
+                if spec.trainable
+                else replace(spec, features=replace(spec.features, training=True))
+            ),
             node_ids=plan.prefix_node_ids,
         )
         suffix = PaddleGeneratedSuffix(

@@ -136,6 +136,22 @@ def _reset_deprecation_dedup():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _split_backend_debug_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Keep backend tests independent from host DEBUG settings.
+
+    tinygrad expects ``DEBUG`` to be an integer, while developer shells may set
+    it to a textual value such as ``release``.  The split adapters do not need
+    the host-level debug setting, so use tinygrad's quiet default for every test.
+    """
+
+    if request.node.nodeid.startswith("tests/split/"):
+        monkeypatch.setenv("DEBUG", "0")
+
+
 @pytest.fixture
 def default_input1():
     return torch.rand(6, 3, 224, 224)

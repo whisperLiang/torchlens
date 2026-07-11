@@ -27,6 +27,7 @@ SAFE_JIT_NAMES = frozenset(
 REJECTED_NESTED_PRIMITIVES = frozenset(
     {
         "cond",
+        "custom_jvp_call",
         "custom_vjp_call",
         "remat2",
         "scan",
@@ -519,7 +520,7 @@ def interpret_closed_jaxpr_with_inlining(
                 for var, value in zip(eqn.outvars, outputs):
                     _write_env(env, var, value, core)
                 continue
-            if primitive_name == "custom_vjp_call":
+            if primitive_name in {"custom_jvp_call", "custom_vjp_call"}:
                 if jax_control_flow == "reject":
                     raise ValueError(f"unsupported nested primitive: {primitive_name}")
                 outputs = _interpret_region(
@@ -530,7 +531,7 @@ def interpret_closed_jaxpr_with_inlining(
                     inlined_depth=inlined_depth,
                     captures=captures,
                     jax_max_control_flow_unroll=jax_max_control_flow_unroll,
-                    unverified_reason="custom_vjp_forward_region",
+                    unverified_reason=f"{primitive_name}_forward_region",
                     inherited_module_stack=inherited_module_stack,
                     inherited_module_call_stack=inherited_module_call_stack,
                     rewrite_outputs=rewrite_outputs,
@@ -1148,7 +1149,7 @@ def _execute_region_equation(eqn: Any, inputs: Sequence[Any]) -> tuple[Any, ...]
         Boundary outputs.
     """
 
-    if eqn.primitive.name == "custom_vjp_call":
+    if eqn.primitive.name in {"custom_jvp_call", "custom_vjp_call"}:
         return _evaluate_closed_jaxpr_no_capture(eqn.params["call_jaxpr"], inputs)
     result = eqn.primitive.bind(*tuple(inputs), **eqn.params)
     return tuple(result if eqn.primitive.multiple_results else (result,))
@@ -1196,14 +1197,20 @@ def _can_import_region(eqn: Any, core: Any) -> bool:
     """
 
     primitive_name = eqn.primitive.name
-    if primitive_name not in {"scan", "while", "while_loop", "custom_vjp_call"}:
+    if primitive_name not in {
+        "scan",
+        "while",
+        "while_loop",
+        "custom_jvp_call",
+        "custom_vjp_call",
+    }:
         return False
     if eqn.effects:
         return False
     if primitive_name in EFFECT_PRIMITIVES:
         return False
     nested_jaxprs = _nested_jaxpr_params(eqn, core)
-    if primitive_name == "custom_vjp_call":
+    if primitive_name in {"custom_jvp_call", "custom_vjp_call"}:
         call_jaxpr = eqn.params.get("call_jaxpr")
         if not isinstance(call_jaxpr, core.ClosedJaxpr):
             return False
@@ -1303,11 +1310,13 @@ def _region_metadata(
                 "trip_count_status": "exceeds_unroll_cap",
             }
         )
-    elif primitive_name == "custom_vjp_call":
+    elif primitive_name in {"custom_jvp_call", "custom_vjp_call"}:
         metadata.update(
             {
-                "has_custom_backward": True,
-                "true_backward_status": "rejected",
+                "has_custom_backward": primitive_name == "custom_vjp_call",
+                "has_custom_jvp": primitive_name == "custom_jvp_call",
+                "derivative_jaxpr_status": "metadata_only",
+                "true_backward_status": "region_metadata_only",
                 "trip_count_kind": "call_region",
             }
         )
@@ -1337,7 +1346,7 @@ def _named_region_jaxprs(eqn: Any, nested_jaxprs: Sequence[Any]) -> tuple[tuple[
             ("cond", eqn.params["cond_jaxpr"]),
             ("body", eqn.params["body_jaxpr"]),
         )
-    if eqn.primitive.name == "custom_vjp_call":
+    if eqn.primitive.name in {"custom_jvp_call", "custom_vjp_call"}:
         return (("forward", eqn.params["call_jaxpr"]),)
     return tuple((f"nested_{index}", nested) for index, nested in enumerate(nested_jaxprs))
 
@@ -1960,6 +1969,13 @@ def _evaluate_closed_jaxpr_no_capture(closed_jaxpr: Any, args: Sequence[Any]) ->
         _write_env(env, var, arg, core)
     for eqn in closed_jaxpr.jaxpr.eqns:
         primitive_name = eqn.primitive.name
+        nested = _closed_jaxpr_param(eqn, core)
+        if nested is not None:
+            nested_inputs = tuple(_read_env(env, var, core) for var in eqn.invars)
+            outputs = _evaluate_closed_jaxpr_no_capture(nested, nested_inputs)
+            for var, value in zip(eqn.outvars, outputs):
+                _write_env(env, var, value, core)
+            continue
         if primitive_name in REJECTED_NESTED_PRIMITIVES or _has_nested_jaxpr(eqn, core):
             raise ValueError(f"unsupported nested jaxpr in replay primitive: {primitive_name}")
         if eqn.effects:
@@ -2232,7 +2248,7 @@ def _closed_jaxpr_param(eqn: Any, core: Any) -> Any | None:
 
     if eqn.primitive.name in PURE_JIT_CALL_PRIMITIVES:
         nested = eqn.params.get("jaxpr")
-    elif eqn.primitive.name == "custom_jvp_call":
+    elif eqn.primitive.name in {"custom_jvp_call", "custom_vjp_call"}:
         nested = eqn.params.get("call_jaxpr")
     else:
         return None

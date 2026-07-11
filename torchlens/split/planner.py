@@ -7,14 +7,14 @@ from hashlib import sha256
 from math import floor
 from typing import Literal
 
-from .errors import SplitSpecError
+from .errors import SplitRequestError
 from .frontier import (
     boundary_key_for_node,
     classify_boundary_role,
-    make_boundary_tensor_spec,
+    make_boundary_schema,
 )
 from .graph import SplitTraceGraph, SplitTraceNode
-from .spec import BoundaryTensorSpec, SplitSpec
+from .ir import BoundarySchema, SplitRequest
 
 BoundaryKind = Literal["after", "before"]
 
@@ -29,7 +29,7 @@ class SplitPlan:
     prefix_node_ids: frozenset[str]
     suffix_node_ids: frozenset[str]
     boundary_node_ids: tuple[str, ...]
-    boundary_spec: dict[str, BoundaryTensorSpec]
+    boundary_spec: dict[str, BoundarySchema]
 
 
 def _parse_boundary(boundary: str) -> tuple[BoundaryKind | Literal["percent"], str]:
@@ -43,7 +43,7 @@ def _parse_boundary(boundary: str) -> tuple[BoundaryKind | Literal["percent"], s
         return "percent", boundary.split(":", 1)[1]
     if boundary.endswith("%"):
         return "percent", boundary[:-1]
-    raise SplitSpecError(
+    raise SplitRequestError(
         "Split boundary must be 'after:<target>', 'before:<target>', 'percent:<N>', or '<N>%'."
     )
 
@@ -54,12 +54,12 @@ def _resolve_percent_target(graph: SplitTraceGraph, percent_text: str) -> SplitT
     try:
         percent = float(percent_text)
     except ValueError as exc:
-        raise SplitSpecError(f"Invalid percent split {percent_text!r}.") from exc
+        raise SplitRequestError(f"Invalid percent split {percent_text!r}.") from exc
     if not 0 < percent < 100:
-        raise SplitSpecError("Percent split must be strictly between 0 and 100.")
+        raise SplitRequestError("Percent split must be strictly between 0 and 100.")
     eligible = graph.compute_nodes
     if not eligible:
-        raise SplitSpecError("Cannot resolve percent split: graph has no eligible compute nodes.")
+        raise SplitRequestError("Cannot resolve percent split: graph has no eligible compute nodes.")
     index = floor((percent / 100.0) * (len(eligible) - 1))
     return eligible[index]
 
@@ -68,11 +68,11 @@ def _unique_match(candidates: list[SplitTraceNode], target: str) -> SplitTraceNo
     """Return a unique target match or raise."""
 
     if not candidates:
-        raise SplitSpecError(f"No split target matched {target!r}.")
+        raise SplitRequestError(f"No split target matched {target!r}.")
     deduped = {candidate.canonical_id: candidate for candidate in candidates}
     if len(deduped) > 1:
         labels = ", ".join(sorted(node.label for node in deduped.values()))
-        raise SplitSpecError(f"Split target {target!r} is ambiguous: {labels}.")
+        raise SplitRequestError(f"Split target {target!r} is ambiguous: {labels}.")
     return next(iter(deduped.values()))
 
 
@@ -115,13 +115,13 @@ def _reject_invalid_target(node: SplitTraceNode) -> None:
     """Reject source/sink split targets."""
 
     if node.is_input:
-        raise SplitSpecError(f"Split target {node.label!r} is an input node.")
+        raise SplitRequestError(f"Split target {node.label!r} is an input node.")
     if node.is_output:
-        raise SplitSpecError(f"Split target {node.label!r} is an output node.")
+        raise SplitRequestError(f"Split target {node.label!r} is an output node.")
     if node.is_buffer:
-        raise SplitSpecError(f"Split target {node.label!r} is a buffer node.")
+        raise SplitRequestError(f"Split target {node.label!r} is a buffer node.")
     if node.is_buffer_only_source:
-        raise SplitSpecError(f"Split target {node.label!r} is a buffer-only source node.")
+        raise SplitRequestError(f"Split target {node.label!r} is a buffer-only source node.")
 
 
 def _call_group_ids(graph: SplitTraceGraph, node: SplitTraceNode) -> set[str]:
@@ -204,11 +204,11 @@ def _frontier_node_ids(
 def _boundary_specs(
     graph: SplitTraceGraph,
     *,
-    spec: SplitSpec,
+    spec: SplitRequest,
     target: SplitTraceNode,
     boundary_kind: BoundaryKind,
     boundary_node_ids: tuple[str, ...],
-) -> dict[str, BoundaryTensorSpec]:
+) -> dict[str, BoundarySchema]:
     """Build public boundary specs for crossing node IDs."""
 
     node_by_id = graph.node_by_id
@@ -222,7 +222,7 @@ def _boundary_specs(
         output_shape = node_by_id[node_id].output_shape
         if output_shape is not None and len(output_shape) >= 4:
             spatial_shapes.add(tuple(output_shape[-2:]))
-    specs: dict[str, BoundaryTensorSpec] = {}
+    specs: dict[str, BoundarySchema] = {}
     for node_id in boundary_node_ids:
         node = node_by_id[node_id]
         key = boundary_key_for_node(node.canonical_id, node.output_container_path)
@@ -236,7 +236,7 @@ def _boundary_specs(
             shape=node.output_shape,
             spatial_shapes=spatial_shapes,
         )
-        specs[key] = make_boundary_tensor_spec(
+        specs[key] = make_boundary_schema(
             key,
             node=node,
             role=role,
@@ -245,7 +245,7 @@ def _boundary_specs(
     return specs
 
 
-def _split_id(graph: SplitTraceGraph, spec: SplitSpec, target: SplitTraceNode) -> str:
+def _split_id(graph: SplitTraceGraph, spec: SplitRequest, target: SplitTraceNode) -> str:
     """Compute a stable split identifier."""
 
     payload = repr(
@@ -255,15 +255,16 @@ def _split_id(graph: SplitTraceGraph, spec: SplitSpec, target: SplitTraceNode) -
             spec.boundary,
             spec.batch_symbol,
             spec.dynamic_batch,
-            spec.mode,
+            spec.validation,
+            spec.features.training,
             target.canonical_id,
         )
     ).encode("utf-8")
     return sha256(payload).hexdigest()[:16]
 
 
-def plan_split(graph: SplitTraceGraph, spec: SplitSpec) -> SplitPlan:
-    """Resolve a :class:`SplitSpec` into executable split plan."""
+def plan_split(graph: SplitTraceGraph, spec: SplitRequest) -> SplitPlan:
+    """Resolve a :class:`SplitRequest` into executable split plan."""
 
     parsed_kind, target_text = _parse_boundary(spec.boundary)
     if parsed_kind == "percent":

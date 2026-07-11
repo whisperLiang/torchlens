@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from v2_helpers import split_request
+
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +31,7 @@ def test_jax_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
         return hidden * 2.0 + 1.0
 
     x = jnp.array([[-1.0, 2.0, 3.0], [4.0, -5.0, 6.0]])
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("after:max", backend="jax"))
+    runtime = tl.split.prepare(model, x, split_request("after:max", backend="jax"))
 
     boundary = runtime.run_prefix(x)
     runtime.validate_boundary(boundary)
@@ -51,7 +53,7 @@ def test_tinygrad_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
         return hidden * 2.0 + 1.0
 
     x = tinygrad.Tensor([[-1.0, 2.0, 3.0], [4.0, -5.0, 6.0]]).realize()
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("after:where", backend="tinygrad"))
+    runtime = tl.split.prepare(model, x, split_request("after:where", backend="tinygrad"))
 
     boundary = runtime.run_prefix(x)
     runtime.validate_boundary(boundary)
@@ -77,7 +79,7 @@ def test_tf_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
         return hidden * 2.0 + 1.0
 
     x = tf.constant([[-1.0, 2.0, 3.0], [4.0, -5.0, 6.0]], dtype=tf.float32)
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("after:relu", backend="tf"))
+    runtime = tl.split.prepare(model, x, split_request("after:relu", backend="tf"))
 
     boundary = runtime.run_prefix(x)
     runtime.validate_boundary(boundary)
@@ -100,10 +102,10 @@ def test_jax_dynamic_batch_replay_for_reshape() -> None:
         return jnp.maximum(flat, 0) * 2.0
 
     x = jnp.ones((2, 3, 2))
-    runtime = tl.prepare_split(
+    runtime = tl.split.prepare(
         model,
         x,
-        tl.SplitSpec("after:reshape", backend="jax", dynamic_batch=(1, 4)),
+        split_request("after:reshape", backend="jax", dynamic_batch=(1, 4)),
     )
 
     for batch in (1, 2, 4):
@@ -121,10 +123,10 @@ def test_jax_dynamic_batch_preserves_fixed_dim_matching_trace_batch() -> None:
         return jnp.maximum(flat, 0)
 
     x = jnp.ones((2, 1, 2))
-    runtime = tl.prepare_split(
+    runtime = tl.split.prepare(
         model,
         x,
-        tl.SplitSpec("after:reshape", backend="jax", dynamic_batch=(1, 4)),
+        split_request("after:reshape", backend="jax", dynamic_batch=(1, 4)),
     )
 
     for batch in (1, 2, 4):
@@ -142,10 +144,10 @@ def test_tf_dynamic_batch_replay_for_reshape() -> None:
         return tf.nn.relu(flat) * 2.0
 
     x = tf.ones((2, 3, 2), dtype=tf.float32)
-    runtime = tl.prepare_split(
+    runtime = tl.split.prepare(
         model,
         x,
-        tl.SplitSpec("after:reshape", backend="tf", dynamic_batch=(1, 4)),
+        split_request("after:reshape", backend="tf", dynamic_batch=(1, 4)),
     )
 
     for batch in (1, 2, 4):
@@ -164,10 +166,10 @@ def test_tf_dynamic_batch_preserves_fixed_dim_matching_trace_batch() -> None:
         return tf.nn.relu(flat)
 
     x = tf.ones((2, 1, 2), dtype=tf.float32)
-    runtime = tl.prepare_split(
+    runtime = tl.split.prepare(
         model,
         x,
-        tl.SplitSpec("after:reshape", backend="tf", dynamic_batch=(1, 4)),
+        split_request("after:reshape", backend="tf", dynamic_batch=(1, 4)),
     )
 
     for batch in (1, 2, 4):
@@ -186,10 +188,10 @@ def test_tinygrad_dynamic_batch_replay_for_reshape() -> None:
         return flat.relu() * 2.0
 
     x = tinygrad.Tensor.ones(2, 3, 2).realize()
-    runtime = tl.prepare_split(
+    runtime = tl.split.prepare(
         model,
         x,
-        tl.SplitSpec("after:reshape_3", backend="tinygrad", dynamic_batch=(1, 4)),
+        split_request("after:reshape_3", backend="tinygrad", dynamic_batch=(1, 4)),
     )
 
     for batch in (1, 2, 4):
@@ -209,10 +211,10 @@ def test_tinygrad_dynamic_batch_rejects_out_of_range_batch() -> None:
         return flat.relu() * 2.0
 
     x = tinygrad.Tensor.ones(2, 3, 2).realize()
-    runtime = tl.prepare_split(
+    runtime = tl.split.prepare(
         model,
         x,
-        tl.SplitSpec("after:reshape_3", backend="tinygrad", dynamic_batch=(1, 4)),
+        split_request("after:reshape_3", backend="tinygrad", dynamic_batch=(1, 4)),
     )
 
     with pytest.raises(SplitUnsupportedError, match="outside"):
@@ -229,10 +231,10 @@ def test_tinygrad_dynamic_batch_rejects_non_batch_dim_change() -> None:
         return flat.relu() * 2.0
 
     x = tinygrad.Tensor.ones(2, 3, 2).realize()
-    runtime = tl.prepare_split(
+    runtime = tl.split.prepare(
         model,
         x,
-        tl.SplitSpec("after:reshape_3", backend="tinygrad", dynamic_batch=(1, 4)),
+        split_request("after:reshape_3", backend="tinygrad", dynamic_batch=(1, 4)),
     )
 
     with pytest.raises((SplitUnsupportedError, ValueError, RuntimeError)):

@@ -2,21 +2,81 @@
 
 from __future__ import annotations
 
-from .api import prepare_split, prepare_split_replay
+from .api import prepare
 from .boundary import ReplayBoundary
+from .ir import (
+    BackendHandle,
+    BoundarySchema,
+    ModelProfile,
+    OpIR,
+    RegionIR,
+    ShapeConstraint,
+    SplitFeatures,
+    SplitGraphIR,
+    SplitModelProfile,
+    SplitPoint,
+    SplitRequest,
+    SplitVerificationStatus,
+    StateIR,
+    ValueIR,
+    after,
+    before,
+    percent,
+)
 from .program import CapabilityStatus, ReplayOp, ReplayProgram, SplitCapabilityReport
+from .profiles import (
+    checkpoint_cache_path,
+    get_model_profile,
+    iter_model_profiles,
+    model_cache_dir,
+    profile_cache_dir,
+    register_model_profile,
+    resolve_model_profile,
+)
+from .pipeline import (
+    analyze_split_capabilities,
+    capture_model,
+    execute_split_runtime,
+    lower_split_program,
+    normalize_to_split_ir,
+)
 from .runtime import SplitRuntime
-from .spec import BoundaryTensorSpec, SplitSpec
 
 __all__ = [
-    "BoundaryTensorSpec",
+    "BoundarySchema",
+    "BackendHandle",
     "CapabilityStatus",
+    "ModelProfile",
+    "OpIR",
     "ReplayOp",
     "ReplayProgram",
     "ReplayBoundary",
+    "RegionIR",
+    "ShapeConstraint",
     "SplitCapabilityReport",
+    "SplitFeatures",
+    "SplitGraphIR",
+    "SplitModelProfile",
+    "SplitPoint",
+    "SplitRequest",
     "SplitRuntime",
-    "SplitSpec",
-    "prepare_split",
-    "prepare_split_replay",
+    "SplitVerificationStatus",
+    "StateIR",
+    "ValueIR",
+    "after",
+    "analyze_split_capabilities",
+    "before",
+    "capture_model",
+    "checkpoint_cache_path",
+    "get_model_profile",
+    "iter_model_profiles",
+    "model_cache_dir",
+    "execute_split_runtime",
+    "lower_split_program",
+    "normalize_to_split_ir",
+    "percent",
+    "prepare",
+    "profile_cache_dir",
+    "register_model_profile",
+    "resolve_model_profile",
 ]

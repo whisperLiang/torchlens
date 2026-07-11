@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from v2_helpers import split_request
+
 from typing import Any
 
 import pytest
@@ -53,10 +55,10 @@ def test_tf_module_split_training_optimizer_step_matches_full_step() -> None:
         split_model = clone_from(base)
         x = tf.reshape(tf.linspace(-1.0, 1.0, 8), (2, 4))
         y = tf.reshape(tf.linspace(0.25, -0.25, 6), (2, 3))
-        runtime = tl.prepare_split(
+        runtime = tl.split.prepare(
             split_model,
             x,
-            tl.SplitSpec("after:relu", backend="tf", trainable=True, dynamic_batch=(1, 4)),
+            split_request("after:relu", backend="tf", trainable=True, dynamic_batch=(1, 4)),
         )
         full_opt = tf.keras.optimizers.SGD(learning_rate=0.05)
         suffix_opt = tf.keras.optimizers.SGD(learning_rate=0.05)
@@ -92,7 +94,7 @@ def test_tf_training_boundary_cache_strips_gradient_tape(tmp_path) -> None:
 
     x = tf.ones((2, 2), dtype=tf.float32)
     target = tf.zeros_like(x)
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("after:relu", backend="tf", trainable=True))
+    runtime = tl.split.prepare(model, x, split_request("after:relu", backend="tf", trainable=True))
     boundary = runtime.run_training_prefix(x)
 
     runtime.save_boundary(boundary, tmp_path / "boundary")

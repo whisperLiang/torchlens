@@ -6,7 +6,7 @@ from ._unsupported import UnsupportedSplitAdapter
 
 
 class MlxSplitAdapter(UnsupportedSplitAdapter):
-    """MLX split capabilities for v1."""
+    """MLX split capability shell for the deferred implementation."""
 
     def __init__(self) -> None:
         """Create the MLX adapter shell."""

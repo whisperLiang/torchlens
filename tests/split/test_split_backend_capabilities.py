@@ -9,7 +9,7 @@ from torchlens.split.adapters import resolve_split_adapter
 from torchlens.split.errors import SplitUnsupportedError
 
 
-def test_mlx_adapter_does_not_fallback() -> None:
+def test_mlx_adapter_reports_unsupported() -> None:
     """MLX still gates replay explicitly when its native runtime is unavailable."""
 
     adapter = resolve_split_adapter(get_backend_spec("mlx"))
@@ -57,7 +57,7 @@ def test_tinygrad_adapter_advertises_replay_capabilities() -> None:
     assert adapter.supports_dynamic_batch is True
 
 
-def test_torch_adapter_advertises_v1_capabilities() -> None:
+def test_torch_adapter_advertises_v2_capabilities() -> None:
     """Torch keeps full replay/training/cache/dynamic-batch capabilities."""
 
     adapter = resolve_split_adapter("torch")

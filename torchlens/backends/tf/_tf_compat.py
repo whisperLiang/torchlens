@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
 import warnings
+from typing import Any
 
 from ..registry import BackendUnsupportedError
 
@@ -87,6 +87,33 @@ def get_tf_capability_snapshot() -> TFCapabilitySnapshot:
     return {name: bool(globals()[name]) for name in _CAPABILITY_ATTRS}
 
 
+def get_tf_device_name(value: Any) -> str:
+    """Return a non-empty device name from a TensorFlow tensor or variable.
+
+    Keras 3 variables commonly expose placement on their resource handle
+    instead of ``variable.device``.
+
+    Parameters
+    ----------
+    value
+        TensorFlow tensor-like value.
+
+    Returns
+    -------
+    str
+        Device name, or ``"unknown"`` when TensorFlow exposes no placement.
+    """
+
+    candidates = (
+        getattr(value, "device", None),
+        getattr(getattr(value, "handle", None), "device", None),
+    )
+    for candidate in candidates:
+        if candidate is not None and str(candidate):
+            return str(candidate)
+    return "unknown"
+
+
 def get_op_callbacks_module() -> Any:
     """Return TensorFlow's private eager op-callback module.
 
@@ -120,5 +147,6 @@ __all__ = [
     "TFCapabilitySnapshot",
     "get_op_callbacks_module",
     "get_tf_capability_snapshot",
+    "get_tf_device_name",
     "mark_tf_capability_missing",
 ]

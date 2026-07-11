@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from v2_helpers import split_request
+
 import pytest
 import torch
 from torch import nn
@@ -29,7 +31,7 @@ def test_boundary_cache_roundtrip(tmp_path) -> None:
     torch.manual_seed(0)
     model = CacheModel().eval()
     x = torch.randn(2, 3)
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("after:relu"))
+    runtime = tl.split.prepare(model, x, split_request("after:relu"))
     boundary = runtime.run_prefix(x)
 
     runtime.save_boundary(boundary, tmp_path / "boundary")
@@ -46,7 +48,7 @@ def test_training_boundary_cache_is_suffix_only(tmp_path) -> None:
     model = CacheModel().train()
     x = torch.randn(2, 3)
     target = torch.randn(2, 2)
-    runtime = tl.prepare_split(model, x, tl.SplitSpec("after:relu", trainable=True))
+    runtime = tl.split.prepare(model, x, split_request("after:relu", trainable=True))
     boundary = runtime.run_training_prefix(x)
 
     runtime.save_boundary(boundary, tmp_path / "training_boundary")

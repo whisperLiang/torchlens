@@ -15,8 +15,8 @@ from ..frontier import boundary_key_for_node
 from ..graph import SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
 from ..shape import infer_runtime_batch_size_from_overlay, is_dynamic_batch_shape_sensitive_op
-from ..spec import SplitSpec
-from .base import SegmentBundle
+from ..ir import SplitRequest
+from .base import SegmentBundle, SplitPolicyMixin
 
 
 def _tinygrad_tensor_type() -> Any:
@@ -99,16 +99,12 @@ def _tinygrad_shape_tuple(uop: Any) -> tuple[int, ...] | None:
     """Convert a tinygrad shape descriptor UOp into a concrete shape tuple."""
 
     ops = _tinygrad_ops()
-    if getattr(uop, "op", None) is ops.CONST and _is_tinygrad_weakint(
-        getattr(uop, "dtype", None)
-    ):
+    if getattr(uop, "op", None) is ops.CONST and _is_tinygrad_weakint(getattr(uop, "dtype", None)):
         try:
             return (int(getattr(uop, "arg")),)
         except (TypeError, ValueError):
             return None
-    if getattr(uop, "op", None) is ops.STACK and _is_tinygrad_weakint(
-        getattr(uop, "dtype", None)
-    ):
+    if getattr(uop, "op", None) is ops.STACK and _is_tinygrad_weakint(getattr(uop, "dtype", None)):
         dims: list[int] = []
         for source in getattr(uop, "src", ()) or ():
             item = _tinygrad_shape_tuple(source)
@@ -157,7 +153,7 @@ class _TinygradGeneratedSegmentBase:
         *,
         graph: SplitTraceGraph,
         plan: SplitPlan,
-        spec: SplitSpec,
+        spec: SplitRequest,
         node_ids: frozenset[str],
     ) -> None:
         """Create a generated tinygrad replay segment."""
@@ -481,7 +477,9 @@ class TinygradGeneratedPrefix(_TinygradGeneratedSegmentBase):
             node = self._node_by_id[node_id]
             key = boundary_key_for_node(node.canonical_id, node.output_container_path)
             value = overlay[node_id]
-            boundary_tensors[key] = self._backend._realized_copy(value) if detach_boundary else value
+            boundary_tensors[key] = (
+                self._backend._realized_copy(value) if detach_boundary else value
+            )
         return ReplayBoundary(
             backend="tinygrad",
             tensors=boundary_tensors,
@@ -543,7 +541,7 @@ class TinygradGeneratedSuffix(_TinygradGeneratedSegmentBase):
         return tuple(leaves)
 
 
-class TinygradSplitAdapter:
+class TinygradSplitAdapter(SplitPolicyMixin):
     """tinygrad split backend adapter."""
 
     name = "tinygrad"
@@ -551,6 +549,7 @@ class TinygradSplitAdapter:
     supports_training = True
     supports_boundary_cache = True
     supports_dynamic_batch = True
+    native_target_types = frozenset({"TinygradUOpCapture"})
 
     def __init__(self) -> None:
         """Create a tinygrad split adapter."""
@@ -633,22 +632,10 @@ class TinygradSplitAdapter:
         self,
         graph: SplitTraceGraph,
         plan: SplitPlan,
-        spec: SplitSpec,
+        spec: SplitRequest,
     ) -> SegmentBundle:
         """Build tinygrad UOp replay prefix/suffix segments."""
 
-        if spec.mode == "compiled":
-            raise SplitUnsupportedError(
-                "tinygrad compiled split mode is not supported.",
-                context=SplitErrorContext(
-                    backend="tinygrad",
-                    split_point=spec.boundary,
-                    module_path=None,
-                    op_type=None,
-                    layer_label=None,
-                    reason="compiled split mode unsupported",
-                ),
-            )
         prefix = TinygradGeneratedPrefix(
             graph=graph,
             plan=plan,

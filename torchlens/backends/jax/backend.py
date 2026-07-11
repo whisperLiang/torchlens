@@ -3800,7 +3800,7 @@ def _bind_region(capture: JaxRegionCapture, inputs: Sequence[Any]) -> tuple[Any,
         Boundary outputs.
     """
 
-    if capture.primitive == "custom_vjp_call":
+    if capture.primitive in {"custom_jvp_call", "custom_vjp_call"}:
         from .jaxpr import _evaluate_closed_jaxpr_no_capture
 
         return _evaluate_closed_jaxpr_no_capture(capture.params["call_jaxpr"], tuple(inputs))

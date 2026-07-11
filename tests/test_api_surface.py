@@ -22,12 +22,19 @@ TARGET_ALL = [
     "PayloadLoadHints",
     "load",
     "save",
-    "SplitSpec",
-    "BoundaryTensorSpec",
+    "SplitFeatures",
+    "SplitGraphIR",
+    "SplitModelProfile",
+    "SplitPoint",
+    "SplitRequest",
+    "SplitVerificationStatus",
+    "BoundarySchema",
     "ReplayBoundary",
     "SplitRuntime",
-    "prepare_split",
-    "prepare_split_replay",
+    "after",
+    "before",
+    "percent",
+    "prepare",
     "do",
     "push",
     "push_from",
@@ -135,7 +142,7 @@ CANONICAL_SUBMODULES = [
 ]
 
 
-def test_all_size_exactly_98() -> None:
+def test_all_size_exactly_105() -> None:
     """Top-level ``__all__`` should contain exactly the current API budget.
 
     Phase 1a budget was 40; backward-parity sprint added 6 (grad_clip, grad_noise,
@@ -160,13 +167,13 @@ def test_all_size_exactly_98() -> None:
     `record_kpi_in_graph`, `register_tensor_connection`, `show_bundle_graph`,
     `options`, `to_disk`, `grad_input`, `grad_output`, and `in_backward_pass` = 90.
     The provisional structural-hash namespace and CI tripwire add `hash` and
-    `assert_unchanged`, and the backend-neutral split runtime adds six public
-    names = 98.
+    `assert_unchanged`, and the v2 backend-neutral split runtime adds thirteen public
+    names = 105.
     Paper-era compatibility shims remain available through ``__getattr__`` but
     are not advertised in ``__all__``.
     """
 
-    assert len(torchlens.__all__) == 98
+    assert len(torchlens.__all__) == 105
     assert torchlens.__all__ == TARGET_ALL
 
 
@@ -178,12 +185,11 @@ def test_phase_b_and_split_exports_are_top_level_importable() -> None:
     assert importlib.import_module("torchlens.facets") is importlib.import_module(
         "torchlens.semantic.facets"
     )
-    assert torchlens.SplitSpec.__name__ == "SplitSpec"
-    assert torchlens.BoundaryTensorSpec.__name__ == "BoundaryTensorSpec"
+    assert torchlens.SplitRequest.__name__ == "SplitRequest"
+    assert torchlens.BoundarySchema.__name__ == "BoundarySchema"
     assert torchlens.ReplayBoundary.__name__ == "ReplayBoundary"
     assert torchlens.SplitRuntime.__name__ == "SplitRuntime"
-    assert callable(torchlens.prepare_split)
-    assert callable(torchlens.prepare_split_replay)
+    assert callable(torchlens.prepare)
 
 
 def test_all_target_names_importable() -> None:

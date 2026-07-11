@@ -5,15 +5,20 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from ...backends.jax.jaxpr import JaxEquationCapture, JaxRegionCapture, replay_equation
+from ...backends.jax.jaxpr import (
+    JaxEquationCapture,
+    JaxRegionCapture,
+    _evaluate_closed_jaxpr_no_capture,
+    replay_equation,
+)
 from ..boundary import ReplayBoundary
 from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
 from ..graph import SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
 from ..shape import infer_runtime_batch_size_from_overlay, maybe_rewrite_dynamic_batch_value
-from ..spec import SplitSpec
-from .base import SegmentBundle
+from ..ir import SplitRequest
+from .base import SegmentBundle, SplitPolicyMixin
 
 
 def _jax() -> Any:
@@ -130,7 +135,7 @@ class _JaxGeneratedSegmentBase:
         *,
         graph: SplitTraceGraph,
         plan: SplitPlan,
-        spec: SplitSpec,
+        spec: SplitRequest,
         node_ids: frozenset[str],
     ) -> None:
         """Create a generated JAX replay segment."""
@@ -248,10 +253,35 @@ class _JaxGeneratedSegmentBase:
 
         capture = node.target
         if isinstance(capture, JaxRegionCapture):
-            raise SplitUnsupportedError(
-                f"{node.label!r} is a JAX control-flow/region boundary.",
-                context=self._context(node, "unsupported JAX region replay"),
-            )
+            if capture.kind == "region_output":
+                for parent in node.parents:
+                    parent_id = self._label_to_id.get(parent)
+                    if parent_id in overlay:
+                        return overlay[parent_id]
+                return capture.input_values[0]
+            inputs = list(capture.input_values)
+            graph_positions = getattr(node.op, "parent_arg_positions", {}).get("args", {})
+            for position, parent_label in graph_positions.items():
+                if not isinstance(position, int) or position < 0 or position >= len(inputs):
+                    raise SplitUnsupportedError(
+                        f"{node.label!r} has invalid JAX region parent position {position!r}.",
+                        context=self._context(node, "invalid region parent position"),
+                    )
+                inputs[position] = self._resolve_parent_value(str(parent_label), node, overlay)
+            try:
+                if capture.primitive in {"custom_jvp_call", "custom_vjp_call"}:
+                    outputs = _evaluate_closed_jaxpr_no_capture(
+                        capture.params["call_jaxpr"], tuple(inputs)
+                    )
+                else:
+                    result = capture.primitive_obj.bind(*tuple(inputs), **capture.params)
+                    outputs = tuple(result if capture.primitive_obj.multiple_results else (result,))
+            except Exception as exc:
+                raise SplitUnsupportedError(
+                    f"JAX region replay failed for {node.label!r}: {exc}",
+                    context=self._context(node, "JAX region replay failed"),
+                ) from exc
+            return outputs[0] if len(outputs) == 1 else tuple(outputs)
         if not isinstance(capture, JaxEquationCapture):
             raise SplitUnsupportedError(
                 f"{node.label!r} has no JAX equation capture.",
@@ -378,7 +408,7 @@ class JaxGeneratedSuffix(_JaxGeneratedSegmentBase):
         return tuple(leaves)
 
 
-class JaxSplitAdapter:
+class JaxSplitAdapter(SplitPolicyMixin):
     """JAX split backend adapter."""
 
     name = "jax"
@@ -386,6 +416,7 @@ class JaxSplitAdapter:
     supports_training = True
     supports_boundary_cache = True
     supports_dynamic_batch = True
+    native_target_types = frozenset({"JaxEquationCapture", "JaxRegionCapture"})
 
     def is_tensor(self, value: Any) -> bool:
         """Return whether ``value`` is a JAX tensor."""
@@ -454,22 +485,10 @@ class JaxSplitAdapter:
         self,
         graph: SplitTraceGraph,
         plan: SplitPlan,
-        spec: SplitSpec,
+        spec: SplitRequest,
     ) -> SegmentBundle:
         """Build JAX native-IR replay prefix/suffix segments."""
 
-        if spec.mode == "compiled":
-            raise SplitUnsupportedError(
-                "JAX compiled split mode is not supported.",
-                context=SplitErrorContext(
-                    backend="jax",
-                    split_point=spec.boundary,
-                    module_path=None,
-                    op_type=None,
-                    layer_label=None,
-                    reason="compiled split mode unsupported",
-                ),
-            )
         prefix = JaxGeneratedPrefix(
             graph=graph,
             plan=plan,
@@ -479,7 +498,7 @@ class JaxSplitAdapter:
         training_prefix = JaxGeneratedPrefix(
             graph=graph,
             plan=plan,
-            spec=replace(spec, trainable=True),
+            spec=replace(spec, features=replace(spec.features, training=True)),
             node_ids=plan.prefix_node_ids,
         )
         suffix = JaxGeneratedSuffix(

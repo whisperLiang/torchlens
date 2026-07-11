@@ -13,8 +13,8 @@ from ..frontier import boundary_key_for_node
 from ..graph import SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
 from ..shape import infer_runtime_batch_size_from_overlay, maybe_rewrite_dynamic_batch_value
-from ..spec import SplitSpec
-from .base import SegmentBundle
+from ..ir import SplitRequest
+from .base import SegmentBundle, SplitPolicyMixin
 
 
 def _tf() -> Any:
@@ -81,7 +81,7 @@ class _TfGeneratedSegmentBase:
         *,
         graph: SplitTraceGraph,
         plan: SplitPlan,
-        spec: SplitSpec,
+        spec: SplitRequest,
         node_ids: frozenset[str],
     ) -> None:
         """Create a generated TensorFlow replay segment."""
@@ -375,7 +375,7 @@ class TfGeneratedSuffix(_TfGeneratedSegmentBase):
         return tuple(leaves)
 
 
-class TfSplitAdapter:
+class TfSplitAdapter(SplitPolicyMixin):
     """TensorFlow split backend adapter."""
 
     name = "tf"
@@ -383,6 +383,7 @@ class TfSplitAdapter:
     supports_training = True
     supports_boundary_cache = True
     supports_dynamic_batch = True
+    native_target_types = frozenset({"TFOpCapture"})
 
     def is_tensor(self, value: Any) -> bool:
         """Return whether ``value`` is a TensorFlow tensor."""
@@ -451,22 +452,10 @@ class TfSplitAdapter:
         self,
         graph: SplitTraceGraph,
         plan: SplitPlan,
-        spec: SplitSpec,
+        spec: SplitRequest,
     ) -> SegmentBundle:
         """Build TensorFlow raw-op replay prefix/suffix segments."""
 
-        if spec.mode == "compiled":
-            raise SplitUnsupportedError(
-                "TensorFlow compiled split mode is not supported.",
-                context=SplitErrorContext(
-                    backend="tf",
-                    split_point=spec.boundary,
-                    module_path=None,
-                    op_type=None,
-                    layer_label=None,
-                    reason="compiled split mode unsupported",
-                ),
-            )
         prefix = TfGeneratedPrefix(
             graph=graph,
             plan=plan,
@@ -476,7 +465,11 @@ class TfSplitAdapter:
         training_prefix = TfGeneratedPrefix(
             graph=graph,
             plan=plan,
-            spec=spec if spec.trainable else replace(spec, trainable=True),
+            spec=(
+                spec
+                if spec.trainable
+                else replace(spec, features=replace(spec.features, training=True))
+            ),
             node_ids=plan.prefix_node_ids,
         )
         suffix = TfGeneratedSuffix(

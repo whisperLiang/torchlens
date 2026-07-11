@@ -11,7 +11,7 @@ from .adapters import resolve_split_adapter
 from .adapters.base import SplitBackendAdapter
 from .boundary import ReplayBoundary
 from .errors import SplitErrorContext, SplitUnsupportedError
-from .spec import BoundaryTensorSpec
+from .ir import BoundarySchema
 
 
 _CACHE_METADATA_KEYS = (
@@ -28,10 +28,11 @@ def _shape_to_json(shape: Any) -> Any:
 
     if shape is None:
         return None
-    return list(shape.as_tuple())
+    as_tuple = getattr(shape, "as_tuple", None)
+    return list(as_tuple() if callable(as_tuple) else shape)
 
 
-def _spec_to_json(item: BoundaryTensorSpec) -> dict[str, Any]:
+def _spec_to_json(item: BoundarySchema) -> dict[str, Any]:
     """Serialize one boundary spec item for the manifest."""
 
     return {

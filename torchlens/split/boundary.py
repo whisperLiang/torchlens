@@ -8,7 +8,7 @@ from typing import Any
 from .adapters.base import SplitBackendAdapter
 from .errors import SplitBoundaryError, SplitErrorContext
 from .shape import validate_tensor_against_symbolic_shape
-from .spec import BoundaryTensorSpec
+from .ir import BoundarySchema
 
 
 _COLLATE_METADATA_KEYS = (
@@ -17,6 +17,8 @@ _COLLATE_METADATA_KEYS = (
     "batch_symbol",
     "dynamic_batch",
     "device_policy",
+    "profile_hash",
+    "state_fingerprint",
 )
 
 
@@ -26,7 +28,7 @@ class ReplayBoundary:
 
     backend: str
     tensors: dict[str, Any]
-    spec: dict[str, BoundaryTensorSpec]
+    spec: dict[str, BoundarySchema]
     metadata: dict[str, Any]
 
     @staticmethod
@@ -44,9 +46,12 @@ class ReplayBoundary:
 
     def validate(
         self,
-        expected: dict[str, BoundaryTensorSpec] | None = None,
+        expected: dict[str, BoundarySchema] | None = None,
         *,
         split_id: str | None = None,
+        graph_hash: str | None = None,
+        profile_hash: str | None = None,
+        state_fingerprint: str | None = None,
         adapter: SplitBackendAdapter | None = None,
     ) -> None:
         """Validate this boundary against its ABI spec.
@@ -75,6 +80,26 @@ class ReplayBoundary:
                     reason="split_id mismatch",
                 ),
             )
+        expected_metadata = (
+            ("graph_shape_hash", graph_hash),
+            ("profile_hash", profile_hash),
+            ("state_fingerprint", state_fingerprint),
+        )
+        for field_name, expected_value in expected_metadata:
+            if expected_value is None or field_name not in self.metadata:
+                continue
+            if self.metadata[field_name] != expected_value:
+                raise SplitBoundaryError(
+                    f"Replay boundary {field_name} does not match this runtime.",
+                    context=SplitErrorContext(
+                        backend=self.backend,
+                        split_point=str(split_id or self.metadata.get("split_id", "")),
+                        module_path=None,
+                        op_type=None,
+                        layer_label=None,
+                        reason=f"{field_name} mismatch",
+                    ),
+                )
         if set(self.tensors) != set(expected_spec):
             raise SplitBoundaryError(
                 "Replay boundary tensor IDs do not match the boundary spec.",

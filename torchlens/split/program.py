@@ -7,9 +7,10 @@ from typing import Any, Literal
 
 from .errors import SplitErrorContext, SplitUnsupportedError
 from .graph import SplitTraceGraph, SplitTraceNode
+from .ir import SplitGraphIR, SplitModelProfile, SplitVerificationStatus
 from .planner import SplitPlan
 from .shape import is_dynamic_batch_shape_sensitive_op
-from .spec import SplitSpec
+from .ir import SplitRequest
 
 
 ReplaySegment = Literal["prefix", "suffix"]
@@ -22,11 +23,14 @@ class CapabilityStatus:
     supported: bool
     reason: str | None = None
     details: tuple[str, ...] = ()
+    status: SplitVerificationStatus = SplitVerificationStatus.EXACT
 
     def as_dict(self) -> dict[str, Any]:
         """Return this status as JSON-like data."""
 
-        return asdict(self)
+        result = asdict(self)
+        result["status"] = self.status.value
+        return result
 
 
 @dataclass(frozen=True)
@@ -95,6 +99,11 @@ class SplitCapabilityReport:
     preflight: CapabilityStatus
     prefix_ops: int
     suffix_ops: int
+    verification: SplitVerificationStatus = SplitVerificationStatus.EXACT
+    model_profile: str | None = None
+    features: dict[str, Any] | None = None
+    node_statuses: dict[str, SplitVerificationStatus] | None = None
+    backend_capabilities: dict[str, bool] | None = None
 
     @property
     def preflight_ok(self) -> bool:
@@ -123,7 +132,22 @@ class SplitCapabilityReport:
     def as_dict(self) -> dict[str, Any]:
         """Return this report as JSON-like data."""
 
-        return asdict(self)
+        result = asdict(self)
+        for field_name in (
+            "replay",
+            "training",
+            "dynamic_batch",
+            "boundary_cache",
+            "preflight",
+        ):
+            status = getattr(self, field_name)
+            result[field_name]["status"] = status.status.value
+        result["verification"] = self.verification.value
+        if self.node_statuses is not None:
+            result["node_statuses"] = {
+                node_id: status.value for node_id, status in self.node_statuses.items()
+            }
+        return result
 
 
 def _target_kind(node: SplitTraceNode) -> str:
@@ -164,63 +188,29 @@ def _group_has_executor(
     )
 
 
-def _target_is_jax_region(target: Any) -> bool:
-    """Return whether a target is a JAX control-flow region capture."""
+def _adapter_policy(adapter: Any, method_name: str, *args: Any) -> tuple[str, ...]:
+    """Call an adapter-owned capability policy hook when present."""
 
-    return type(target).__name__ == "JaxRegionCapture"
-
-
-def _backend_target_supported(node: SplitTraceNode, graph: SplitTraceGraph) -> tuple[str, ...]:
-    """Return backend-specific target preflight failures."""
-
-    if node.is_input or (node.is_output and node.target is None) or _is_source_like(node):
+    method = getattr(adapter, method_name, None)
+    if method is None:
         return ()
-    if node.target is None:
-        return ("missing replay target/capture",)
-    backend = graph.backend
-    target_type = type(node.target).__name__
-    if backend == "jax":
-        if _target_is_jax_region(node.target):
-            return ("unsupported JAX control-flow/region replay",)
-        if target_type != "JaxEquationCapture":
-            return (f"unsupported JAX target {target_type!r}",)
-    elif backend in {"tf", "tensorflow"} and target_type != "TFOpCapture":
-        return (f"unsupported TensorFlow target {target_type!r}",)
-    elif backend == "tinygrad" and target_type != "TinygradUOpCapture":
-        return (f"unsupported tinygrad target {target_type!r}",)
-    elif backend in {"torch", "paddle"} and not callable(node.target):
-        return (f"unsupported callable target {target_type!r}",)
-    return ()
-
-
-def _stateful_replay_reasons(node: SplitTraceNode, backend: str) -> tuple[str, ...]:
-    """Return conservative stateful/random replay failures."""
-
-    if backend == "torch":
-        return ()
-    op_text = node.op_type.lower()
-    target_name = str(getattr(node.target, "op_type", "") or getattr(node.target, "__name__", ""))
-    target_text = target_name.lower()
-    tokens = (op_text, target_text)
-    is_dropout = any("dropout" in token for token in tokens)
-    if is_dropout and (node.kwargs_template or {}).get("training") is False:
-        return ()
-    if is_dropout or any("random" in token or "rand" in token for token in tokens):
-        return ("stateful/random op requires backend-specific replay policy",)
-    if any("assign" in token or "inplace" in token or "write" in token for token in tokens):
-        return ("state mutation requires backend-specific replay policy",)
-    return ()
+    result = method(*args)
+    return tuple(str(item) for item in result)
 
 
 def _dynamic_shape_reasons(
     node: SplitTraceNode,
     graph: SplitTraceGraph,
-    spec: SplitSpec,
+    spec: SplitRequest,
+    adapter: Any,
 ) -> tuple[str, ...]:
     """Return dynamic-shape preflight failures for a node."""
 
     if spec.dynamic_batch is None:
         return ()
+    adapter_reasons = _adapter_policy(adapter, "dynamic_shape_reasons", node, graph, spec)
+    if adapter_reasons:
+        return adapter_reasons
     func_name = str(getattr(node.target, "op_type", "") or getattr(node.target, "__name__", ""))
     if not is_dynamic_batch_shape_sensitive_op(node.op_type, func_name):
         return ()
@@ -233,7 +223,8 @@ def _unsupported_reasons(
     graph: SplitTraceGraph,
     node: SplitTraceNode,
     node_ids: frozenset[str],
-    spec: SplitSpec,
+    spec: SplitRequest,
+    adapter: Any,
 ) -> tuple[str, ...]:
     """Return strict preflight failures for one replay node."""
 
@@ -248,21 +239,29 @@ def _unsupported_reasons(
     ):
         return ()
     reasons: list[str] = []
-    reasons.extend(_backend_target_supported(node, graph))
-    reasons.extend(_stateful_replay_reasons(node, graph.backend))
-    reasons.extend(_dynamic_shape_reasons(node, graph, spec))
+    target_reasons = _adapter_policy(adapter, "target_support_reasons", node, graph)
+    if not target_reasons and node.target is None and not _is_source_like(node):
+        target_reasons = ("missing replay target/capture",)
+    reasons.extend(target_reasons)
+    reasons.extend(_adapter_policy(adapter, "stateful_replay_reasons", node, graph.backend))
+    reasons.extend(_dynamic_shape_reasons(node, graph, spec, adapter))
     return tuple(dict.fromkeys(reasons))
 
 
 def lower_replay_program(
     graph: SplitTraceGraph,
     plan: SplitPlan,
-    spec: SplitSpec,
+    spec: SplitRequest,
     *,
     segment: ReplaySegment,
+    adapter: Any | None = None,
 ) -> ReplayProgram:
     """Lower a split graph segment to backend-neutral replay instructions."""
 
+    if adapter is None:
+        from .adapters import resolve_split_adapter
+
+        adapter = resolve_split_adapter(graph.backend)
     node_ids = plan.prefix_node_ids if segment == "prefix" else plan.suffix_node_ids
     ops: list[ReplayOp] = []
     for node in graph.nodes:
@@ -286,7 +285,7 @@ def lower_replay_program(
                 replay_source_policy=node.replay_source_policy,
                 dynamic_shape_policy=dynamic_shape_policy,
                 requires_live_params=bool(node.param_refs or node.is_param_source),
-                unsupported_reasons=_unsupported_reasons(graph, node, node_ids, spec),
+                unsupported_reasons=_unsupported_reasons(graph, node, node_ids, spec, adapter),
             )
         )
     return ReplayProgram(
@@ -305,10 +304,13 @@ def build_capability_report(
     adapter: Any,
     graph: SplitTraceGraph,
     plan: SplitPlan,
-    spec: SplitSpec,
+    spec: SplitRequest,
     *,
     prefix_program: ReplayProgram,
     suffix_program: ReplayProgram,
+    graph_ir: SplitGraphIR | None = None,
+    model_profile: SplitModelProfile | None = None,
+    features: dict[str, Any] | None = None,
 ) -> SplitCapabilityReport:
     """Build a strict split capability report for prepared programs."""
 
@@ -316,16 +318,19 @@ def build_capability_report(
         *prefix_program.unsupported_reasons,
         *suffix_program.unsupported_reasons,
     )
+    verification = _overall_verification(graph_ir, program_reasons)
     preflight = CapabilityStatus(
         supported=not program_reasons,
         reason=None if not program_reasons else "split replay preflight failed",
         details=tuple(program_reasons),
+        status=verification if not program_reasons else SplitVerificationStatus.UNSUPPORTED,
     )
     replay_supported = bool(getattr(adapter, "supports_replay", False)) and preflight.supported
     replay = CapabilityStatus(
         supported=replay_supported,
         reason=None if replay_supported else f"backend={graph.backend!r} cannot replay this split",
         details=tuple(program_reasons),
+        status=verification if replay_supported else SplitVerificationStatus.UNSUPPORTED,
     )
     training_requested = spec.trainable
     training_supported = (not training_requested) or bool(
@@ -336,6 +341,7 @@ def build_capability_report(
         reason=None
         if training_supported
         else f"backend={graph.backend!r} does not support split training",
+        status=verification if training_supported else SplitVerificationStatus.UNSUPPORTED,
     )
     dynamic_requested = spec.dynamic_batch is not None
     dynamic_supported = (not dynamic_requested) or bool(
@@ -346,6 +352,7 @@ def build_capability_report(
         reason=None
         if dynamic_supported
         else f"backend={graph.backend!r} does not support dynamic-batch split replay",
+        status=verification if dynamic_supported else SplitVerificationStatus.UNSUPPORTED,
     )
     cache_supported = bool(getattr(adapter, "supports_boundary_cache", False))
     boundary_cache = CapabilityStatus(
@@ -353,6 +360,7 @@ def build_capability_report(
         reason=None
         if cache_supported
         else f"backend={graph.backend!r} does not support boundary cache",
+        status=verification if cache_supported else SplitVerificationStatus.UNSUPPORTED,
     )
     return SplitCapabilityReport(
         backend=graph.backend,
@@ -364,12 +372,58 @@ def build_capability_report(
         preflight=preflight,
         prefix_ops=len(prefix_program.ops),
         suffix_ops=len(suffix_program.ops),
+        verification=verification,
+        model_profile=None if model_profile is None else model_profile.id,
+        features=features,
+        node_statuses=_node_statuses(graph_ir),
+        backend_capabilities={
+            "replay": bool(getattr(adapter, "supports_replay", False)),
+            "training": bool(getattr(adapter, "supports_training", False)),
+            "dynamic_batch": bool(getattr(adapter, "supports_dynamic_batch", False)),
+            "boundary_cache": bool(getattr(adapter, "supports_boundary_cache", False)),
+        },
     )
+
+
+def _overall_verification(
+    graph_ir: SplitGraphIR | None,
+    program_reasons: tuple[str, ...],
+) -> SplitVerificationStatus:
+    """Return the most conservative verification level for a split graph."""
+
+    if program_reasons:
+        return SplitVerificationStatus.UNSUPPORTED
+    if graph_ir is None:
+        return SplitVerificationStatus.EXACT
+    statuses = [operation.verification for operation in graph_ir.ops]
+    statuses.extend(region.verification for region in graph_ir.regions)
+    if SplitVerificationStatus.UNVERIFIED in statuses:
+        return SplitVerificationStatus.UNVERIFIED
+    if SplitVerificationStatus.REGION_VERIFIED in statuses:
+        return SplitVerificationStatus.REGION_VERIFIED
+    if SplitVerificationStatus.UNSUPPORTED in statuses:
+        return SplitVerificationStatus.UNSUPPORTED
+    return SplitVerificationStatus.EXACT
+
+
+def _node_statuses(
+    graph_ir: SplitGraphIR | None,
+) -> dict[str, SplitVerificationStatus] | None:
+    """Return verification levels keyed by normalized node ID."""
+
+    if graph_ir is None:
+        return None
+    result: dict[str, SplitVerificationStatus] = {}
+    for operation in graph_ir.ops:
+        result[operation.node_id] = operation.verification
+    for region in graph_ir.regions:
+        result[region.node_id] = region.verification
+    return result
 
 
 def ensure_capability_report_supported(
     report: SplitCapabilityReport,
-    spec: SplitSpec,
+    spec: SplitRequest,
 ) -> None:
     """Raise a structured unsupported error when a split report is blocked."""
 
