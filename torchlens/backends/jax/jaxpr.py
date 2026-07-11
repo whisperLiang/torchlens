@@ -2203,7 +2203,14 @@ def _write_env(env: dict[Any, Any], var: Any, value: Any, core: Any) -> None:
         The environment is updated in place.
     """
 
-    if not isinstance(var, core.DropVar):
+    drop_var = getattr(core, "DropVar", None)
+    if drop_var is None:
+        # JAX 0.6 keeps DropVar on the legacy public core module while the
+        # interpreter-facing symbols live under jax.extend.core.
+        import jax
+
+        drop_var = jax.core.DropVar
+    if not isinstance(var, drop_var):
         env[var] = value
 
 
