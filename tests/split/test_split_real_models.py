@@ -43,6 +43,20 @@ def _skip_unless_enabled() -> None:
         pytest.skip("TORCHLENS_REAL_MODEL_TESTS=0 disables real-model split tests.")
 
 
+def _skip_unless_rfdetr_exhaustive() -> None:
+    """Skip the RF-DETR all-boundary matrix unless explicitly requested."""
+
+    if os.environ.get("TORCHLENS_RFDETR_EXHAUSTIVE") != "1":
+        pytest.skip("TORCHLENS_RFDETR_EXHAUSTIVE=1 enables the RF-DETR all-boundary matrix.")
+
+
+def _skip_unless_yolov8_exhaustive() -> None:
+    """Skip the YOLOv8n all-boundary matrix unless explicitly requested."""
+
+    if os.environ.get("TORCHLENS_YOLOV8_EXHAUSTIVE") != "1":
+        pytest.skip("TORCHLENS_YOLOV8_EXHAUSTIVE=1 enables the YOLOv8n all-boundary matrix.")
+
+
 def _skip_if_module_missing(module_name: str) -> None:
     """Skip when an optional backend/model dependency is unavailable."""
 
@@ -367,6 +381,164 @@ def test_yolo26_detection_split_replay_cross_batch_and_device() -> None:
     )
 
 
+def test_yolov8n_all_split_nodes_cross_batch_and_device() -> None:
+    """YOLOv8n replays all 552 boundaries across batch and device."""
+
+    _skip_unless_enabled()
+    _skip_unless_yolov8_exhaustive()
+    _skip_if_module_missing("ultralytics")
+    _run_backend_subprocess(
+        """
+        import copy
+        import os
+
+        import torch
+
+        import torchlens as tl
+        from torchlens.utils._torch_compat import get_dynamo_optimized_module_type
+
+        torch.set_num_threads(1)
+        get_dynamo_optimized_module_type()
+        from ultralytics import YOLO
+
+        def assert_same(actual, expected):
+            if isinstance(expected, torch.Tensor):
+                assert isinstance(actual, torch.Tensor)
+                torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-3)
+                return
+            assert type(actual) is type(expected)
+            if isinstance(expected, dict):
+                assert tuple(actual) == tuple(expected)
+                for key in expected:
+                    assert_same(actual[key], expected[key])
+                return
+            if isinstance(expected, (list, tuple)):
+                assert len(actual) == len(expected)
+                for actual_item, expected_item in zip(actual, expected, strict=True):
+                    assert_same(actual_item, expected_item)
+                return
+            assert actual == expected
+
+        def assert_structure(actual, expected, device):
+            if isinstance(expected, torch.Tensor):
+                assert isinstance(actual, torch.Tensor)
+                assert actual.shape == expected.shape
+                assert actual.dtype == expected.dtype
+                assert actual.device.type == device
+                if actual.is_floating_point() or actual.is_complex():
+                    assert torch.isfinite(actual).all()
+                return
+            assert type(actual) is type(expected)
+            if isinstance(expected, dict):
+                assert tuple(actual) == tuple(expected)
+                for key in expected:
+                    assert_structure(actual[key], expected[key], device)
+                return
+            if isinstance(expected, (list, tuple)):
+                assert len(actual) == len(expected)
+                for actual_item, expected_item in zip(actual, expected, strict=True):
+                    assert_structure(actual_item, expected_item, device)
+
+        torch.manual_seed(0)
+        cpu_model = YOLO("yolov8n.yaml").model.eval()
+        gpu_model = copy.deepcopy(cpu_model).cuda().eval() if torch.cuda.is_available() else None
+        request = split_request("50%", dynamic_batch=(1, 3))
+        cpu_seed = tl.split.prepare(
+            cpu_model,
+            torch.zeros(2, 3, 160, 160),
+            request,
+        )
+        assert len(cpu_seed.trace_graph.compute_nodes) == 276
+        assert cpu_seed.trace_graph.shape_program.unresolved == {}
+        assert cpu_seed.trace_graph.shape_program.witness_batch_sizes == (1, 3)
+
+        gpu_seed = None
+        if gpu_model is not None:
+            gpu_seed = tl.split.prepare(
+                gpu_model,
+                torch.zeros(2, 3, 160, 160, device="cuda"),
+                request,
+            )
+            assert [
+                node.canonical_id for node in gpu_seed.trace_graph.compute_nodes
+            ] == [node.canonical_id for node in cpu_seed.trace_graph.compute_nodes]
+
+        all_points = [
+            point
+            for node in cpu_seed.trace_graph.compute_nodes
+            for point in (tl.split.before(node.canonical_id), tl.split.after(node.canonical_id))
+        ]
+        assert len(all_points) == 552
+        partition_count = int(os.environ.get("TORCHLENS_YOLOV8_PARTITIONS", "1"))
+        partition_index = int(os.environ.get("TORCHLENS_YOLOV8_PARTITION", "0"))
+        assert partition_count >= 1
+        assert 0 <= partition_index < partition_count
+        points = all_points[partition_index::partition_count]
+        cpu_inputs = {
+            batch: torch.zeros(batch, 3, 160, 160) for batch in (1, 2, 3)
+        }
+
+        with torch.inference_mode():
+            cpu_expected = {batch: cpu_model(value) for batch, value in cpu_inputs.items()}
+            gpu_inputs = (
+                {
+                    batch: torch.zeros(batch, 3, 160, 160, device="cuda")
+                    for batch in (1, 2, 3)
+                }
+                if gpu_model is not None
+                else {}
+            )
+            gpu_expected = (
+                {batch: gpu_model(value) for batch, value in gpu_inputs.items()}
+                if gpu_model is not None
+                else {}
+            )
+
+            counts = {"cpu": 0, "cuda": 0, "cpu_cuda": 0, "cuda_cpu": 0}
+            for point in points:
+                cpu_runtime = cpu_seed.at(point)
+                gpu_runtime = None if gpu_seed is None else gpu_seed.at(point)
+                for batch in (1, 2, 3):
+                    assert_same(cpu_runtime.replay(cpu_inputs[batch]), cpu_expected[batch])
+                    counts["cpu"] += 1
+                    if gpu_runtime is not None:
+                        assert_same(gpu_runtime.replay(gpu_inputs[batch]), gpu_expected[batch])
+                        counts["cuda"] += 1
+                if gpu_runtime is None:
+                    continue
+                for batch in (1, 3):
+                    cpu_boundary = cpu_runtime.run_prefix(cpu_inputs[batch])
+                    assert cpu_boundary.tensors.keys() == cpu_boundary.spec.keys()
+                    cpu_to_cuda = gpu_runtime.run_suffix(
+                        cpu_boundary.to("cuda", adapter=gpu_runtime.adapter)
+                    )
+                    assert_structure(cpu_to_cuda, gpu_expected[batch], "cuda")
+                    counts["cpu_cuda"] += 1
+
+                    gpu_boundary = gpu_runtime.run_prefix(gpu_inputs[batch])
+                    assert gpu_boundary.tensors.keys() == gpu_boundary.spec.keys()
+                    cuda_to_cpu = cpu_runtime.run_suffix(
+                        gpu_boundary.to("cpu", adapter=cpu_runtime.adapter)
+                    )
+                    assert_structure(cuda_to_cpu, cpu_expected[batch], "cpu")
+                    counts["cuda_cpu"] += 1
+
+        expected_counts = {
+            "cpu": len(points) * 3,
+            "cuda": len(points) * 3,
+            "cpu_cuda": len(points) * 2,
+            "cuda_cpu": len(points) * 2,
+        }
+        assert counts["cpu"] == expected_counts["cpu"]
+        if gpu_seed is not None:
+            assert counts == expected_counts
+        print(partition_index, partition_count, len(points), counts, flush=True)
+        os._exit(0)
+        """,
+        timeout=7200,
+    )
+
+
 def test_rfdetr_detection_split_replay_fixed_batch() -> None:
     """RF-DETR-N official weights replay the full detection core at boundaries."""
 
@@ -442,6 +614,187 @@ def test_rfdetr_detection_split_replay_fixed_batch() -> None:
         os._exit(0)
         """,
         timeout=420,
+    )
+
+
+def test_rfdetr_all_split_nodes_cross_batch_and_device() -> None:
+    """RF-DETR-N replays every before/after boundary across batch and device."""
+
+    _skip_unless_enabled()
+    _skip_unless_rfdetr_exhaustive()
+    _skip_if_module_missing("rfdetr")
+    _run_backend_subprocess(
+        """
+        import copy
+        import os
+        import hashlib
+        from pathlib import Path
+
+        import torch
+        from torch import nn
+
+        import torchlens as tl
+        from torchlens.utils._torch_compat import get_dynamo_optimized_module_type
+
+        torch.set_num_threads(1)
+        os.environ.setdefault(
+            "RF_HOME",
+            str(Path.home() / ".cache" / "torchlens" / "models" / "rfdetr"),
+        )
+        get_dynamo_optimized_module_type()
+        from rfdetr import RFDETRNano
+        from rfdetr.utilities.tensors import NestedTensor
+
+        class RFDETRTensorModel(nn.Module):
+            def __init__(self, core):
+                super().__init__()
+                self.core = core
+
+            def forward(self, images):
+                mask = torch.zeros(
+                    (images.shape[0], images.shape[2], images.shape[3]),
+                    device=images.device,
+                    dtype=torch.bool,
+                )
+                return self.core(NestedTensor(images, mask))
+
+        def assert_same(actual, expected):
+            if isinstance(expected, torch.Tensor):
+                assert isinstance(actual, torch.Tensor)
+                torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-3)
+                return
+            assert type(actual) is type(expected)
+            if isinstance(expected, dict):
+                assert tuple(actual) == tuple(expected)
+                for key in expected:
+                    assert_same(actual[key], expected[key])
+                return
+            if isinstance(expected, (list, tuple)):
+                assert len(actual) == len(expected)
+                for actual_item, expected_item in zip(actual, expected, strict=True):
+                    assert_same(actual_item, expected_item)
+                return
+            assert actual == expected
+
+        def assert_structure(actual, expected, device):
+            if isinstance(expected, torch.Tensor):
+                assert isinstance(actual, torch.Tensor)
+                assert actual.shape == expected.shape
+                assert actual.dtype == expected.dtype
+                assert actual.device.type == device
+                if actual.is_floating_point() or actual.is_complex():
+                    assert torch.isfinite(actual).all()
+                return
+            assert type(actual) is type(expected)
+            if isinstance(expected, dict):
+                assert tuple(actual) == tuple(expected)
+                for key in expected:
+                    assert_structure(actual[key], expected[key], device)
+                return
+            if isinstance(expected, (list, tuple)):
+                assert len(actual) == len(expected)
+                for actual_item, expected_item in zip(actual, expected, strict=True):
+                    assert_structure(actual_item, expected_item, device)
+
+        detector = RFDETRNano()
+        checkpoint_path = Path(os.environ["RF_HOME"]) / "rf-detr-nano.pth"
+        digest = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+        assert digest == "d8d6b9ee57d4d0ed2b1f305163624712a0532cb7bce0c747317984fc5457440d"
+        cpu_model = RFDETRTensorModel(detector.model.model).eval()
+        gpu_model = copy.deepcopy(cpu_model).cuda().eval() if torch.cuda.is_available() else None
+
+        request = split_request("50%", dynamic_batch=(1, 3))
+        cpu_example = torch.zeros(2, 3, 384, 384)
+        cpu_seed = tl.split.prepare(cpu_model, cpu_example, request)
+        assert len(cpu_seed.trace_graph.compute_nodes) == 858
+        assert cpu_seed.trace_graph.shape_program.unresolved == {}
+        assert cpu_seed.trace_graph.shape_program.witness_batch_sizes == (1, 3)
+
+        gpu_seed = None
+        if gpu_model is not None:
+            gpu_seed = tl.split.prepare(
+                gpu_model,
+                torch.zeros(2, 3, 384, 384, device="cuda"),
+                request,
+            )
+            assert [
+                node.canonical_id for node in gpu_seed.trace_graph.compute_nodes
+            ] == [node.canonical_id for node in cpu_seed.trace_graph.compute_nodes]
+
+        all_points = [
+            point
+            for node in cpu_seed.trace_graph.compute_nodes
+            for point in (tl.split.before(node.canonical_id), tl.split.after(node.canonical_id))
+        ]
+        assert len(all_points) == 1716
+        partition_count = int(os.environ.get("TORCHLENS_RFDETR_PARTITIONS", "1"))
+        partition_index = int(os.environ.get("TORCHLENS_RFDETR_PARTITION", "0"))
+        assert partition_count >= 1
+        assert 0 <= partition_index < partition_count
+        points = all_points[partition_index::partition_count]
+        cpu_inputs = {
+            batch: torch.zeros(batch, 3, 384, 384) for batch in (1, 2, 3)
+        }
+        with torch.inference_mode():
+            cpu_expected = {batch: cpu_model(value) for batch, value in cpu_inputs.items()}
+            gpu_inputs = (
+                {
+                    batch: torch.zeros(batch, 3, 384, 384, device="cuda")
+                    for batch in (1, 2, 3)
+                }
+                if gpu_model is not None
+                else {}
+            )
+            gpu_expected = (
+                {batch: gpu_model(value) for batch, value in gpu_inputs.items()}
+                if gpu_model is not None
+                else {}
+            )
+
+            counts = {"cpu": 0, "cuda": 0, "cpu_cuda": 0, "cuda_cpu": 0}
+            for point in points:
+                cpu_runtime = cpu_seed.at(point)
+                gpu_runtime = None if gpu_seed is None else gpu_seed.at(point)
+                for batch in (1, 2, 3):
+                    cpu_actual = cpu_runtime.replay(cpu_inputs[batch])
+                    assert_same(cpu_actual, cpu_expected[batch])
+                    counts["cpu"] += 1
+                    if gpu_runtime is not None:
+                        gpu_actual = gpu_runtime.replay(gpu_inputs[batch])
+                        assert_same(gpu_actual, gpu_expected[batch])
+                        counts["cuda"] += 1
+                if gpu_runtime is None:
+                    continue
+                for batch in (1, 3):
+                    cpu_boundary = cpu_runtime.run_prefix(cpu_inputs[batch])
+                    assert cpu_boundary.tensors.keys() == cpu_boundary.spec.keys()
+                    cpu_to_cuda = gpu_runtime.run_suffix(
+                        cpu_boundary.to("cuda", adapter=gpu_runtime.adapter)
+                    )
+                    assert_structure(cpu_to_cuda, gpu_expected[batch], "cuda")
+                    counts["cpu_cuda"] += 1
+
+                    gpu_boundary = gpu_runtime.run_prefix(gpu_inputs[batch])
+                    assert gpu_boundary.tensors.keys() == gpu_boundary.spec.keys()
+                    cuda_to_cpu = cpu_runtime.run_suffix(
+                        gpu_boundary.to("cpu", adapter=cpu_runtime.adapter)
+                    )
+                    assert_structure(cuda_to_cpu, cpu_expected[batch], "cpu")
+                    counts["cuda_cpu"] += 1
+
+        expected_counts = {
+            "cpu": len(points) * 3,
+            "cuda": len(points) * 3,
+            "cpu_cuda": len(points) * 2,
+            "cuda_cpu": len(points) * 2,
+        }
+        assert counts["cpu"] == expected_counts["cpu"]
+        if gpu_seed is not None:
+            assert counts == expected_counts
+        print(partition_index, partition_count, len(points), counts, flush=True)
+        os._exit(0)
+        """,
+        timeout=7200,
     )
 
 

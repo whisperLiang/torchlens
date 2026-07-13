@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from math import floor
 from typing import Literal
 
+from ..intervention.types import CapturedArgTemplate
 from .errors import SplitRequestError
 from .frontier import (
     boundary_key_for_node,
     classify_boundary_role,
     make_boundary_schema,
 )
-from .graph import SplitTraceGraph, SplitTraceNode
+from .graph import ReplayValueRef, SplitTraceGraph, SplitTraceNode
 from .ir import BoundarySchema, SplitRequest
 
 BoundaryKind = Literal["after", "before"]
@@ -30,6 +31,7 @@ class SplitPlan:
     suffix_node_ids: frozenset[str]
     boundary_node_ids: tuple[str, ...]
     boundary_spec: dict[str, BoundarySchema]
+    boundary_bindings: dict[str, str] = field(default_factory=dict)
 
 
 def _parse_boundary(boundary: str) -> tuple[BoundaryKind | Literal["percent"], str]:
@@ -59,7 +61,9 @@ def _resolve_percent_target(graph: SplitTraceGraph, percent_text: str) -> SplitT
         raise SplitRequestError("Percent split must be strictly between 0 and 100.")
     eligible = graph.compute_nodes
     if not eligible:
-        raise SplitRequestError("Cannot resolve percent split: graph has no eligible compute nodes.")
+        raise SplitRequestError(
+            "Cannot resolve percent split: graph has no eligible compute nodes."
+        )
     index = floor((percent / 100.0) * (len(eligible) - 1))
     return eligible[index]
 
@@ -127,19 +131,8 @@ def _reject_invalid_target(node: SplitTraceNode) -> None:
 def _call_group_ids(graph: SplitTraceGraph, node: SplitTraceNode) -> set[str]:
     """Return all nodes in the same function-call group as ``node``."""
 
-    if node.func_call_id is None:
-        return {node.canonical_id}
-    return {
-        candidate.canonical_id
-        for candidate in graph.nodes
-        if candidate.func_call_id == node.func_call_id
-        and not (
-            candidate.is_input
-            or candidate.is_output
-            or candidate.is_buffer
-            or candidate.is_buffer_only_source
-        )
-    }
+    call = graph.replay_call_by_output_id.get(node.canonical_id)
+    return {node.canonical_id} if call is None else set(call.output_node_ids)
 
 
 def _prefix_suffix_sets(
@@ -252,6 +245,62 @@ def _boundary_specs(
     return specs
 
 
+def _boundary_bindings(
+    graph: SplitTraceGraph,
+    boundary_node_ids: tuple[str, ...],
+) -> dict[str, str]:
+    """Bind public boundary keys to canonical graph value IDs."""
+
+    node_by_id = graph.node_by_id
+    bindings = {
+        boundary_key_for_node(node_id, node_by_id[node_id].output_container_path): node_id
+        for node_id in boundary_node_ids
+    }
+    if len(bindings) != len(boundary_node_ids):
+        raise SplitRequestError("Split boundary contains duplicate canonical value bindings.")
+    return bindings
+
+
+def _validate_replay_dependencies(graph: SplitTraceGraph) -> None:
+    """Require every canonical replay argument dependency to be a graph edge."""
+
+    for node in graph.compute_nodes:
+        parent_ids = {
+            parent.canonical_id
+            for label in node.parents
+            if (parent := graph.node_for_label(label)) is not None
+        }
+        template_ids = {
+            ref.value_id
+            for component in (node.args_template, node.kwargs_template)
+            for ref in _walk_replay_value_refs(component)
+        }
+        missing = template_ids - parent_ids
+        if missing:
+            raise SplitRequestError(
+                f"Replay node {node.canonical_id!r} has untracked canonical dependencies "
+                f"{tuple(sorted(missing))!r}."
+            )
+
+
+def _walk_replay_value_refs(component: object) -> tuple[ReplayValueRef, ...]:
+    """Return replay value references from one nested template component."""
+
+    if isinstance(component, ReplayValueRef):
+        return (component,)
+    if isinstance(component, CapturedArgTemplate):
+        return tuple(
+            ref
+            for item in (*component.args, *(value for _key, value in component.kwargs))
+            for ref in _walk_replay_value_refs(item)
+        )
+    if isinstance(component, (tuple, list)):
+        return tuple(ref for item in component for ref in _walk_replay_value_refs(item))
+    if isinstance(component, dict):
+        return tuple(ref for item in component.values() for ref in _walk_replay_value_refs(item))
+    return ()
+
+
 def _split_id(graph: SplitTraceGraph, spec: SplitRequest, target: SplitTraceNode) -> str:
     """Compute a stable split identifier."""
 
@@ -273,6 +322,7 @@ def _split_id(graph: SplitTraceGraph, spec: SplitRequest, target: SplitTraceNode
 def plan_split(graph: SplitTraceGraph, spec: SplitRequest) -> SplitPlan:
     """Resolve a :class:`SplitRequest` into executable split plan."""
 
+    _validate_replay_dependencies(graph)
     parsed_kind, target_text = _parse_boundary(spec.boundary)
     if parsed_kind == "percent":
         boundary_kind: BoundaryKind = "after"
@@ -286,6 +336,12 @@ def plan_split(graph: SplitTraceGraph, spec: SplitRequest) -> SplitPlan:
         target,
         boundary_kind=boundary_kind,
     )
+    for call in graph.replay_calls:
+        placements = {node_id in prefix_node_ids for node_id in call.output_node_ids}
+        if len(placements) != 1:
+            raise SplitRequestError(
+                f"Replay call {call.call_id!r} has outputs in different segments."
+            )
     boundary_node_ids = _frontier_node_ids(
         graph,
         prefix_node_ids=prefix_node_ids,
@@ -298,6 +354,9 @@ def plan_split(graph: SplitTraceGraph, spec: SplitRequest) -> SplitPlan:
         boundary_kind=boundary_kind,
         boundary_node_ids=boundary_node_ids,
     )
+    boundary_bindings = _boundary_bindings(graph, boundary_node_ids)
+    if boundary_spec.keys() != boundary_bindings.keys():
+        raise SplitRequestError("Split boundary schema and canonical bindings disagree.")
     return SplitPlan(
         split_id=_split_id(graph, spec, target),
         boundary_kind=boundary_kind,
@@ -306,6 +365,7 @@ def plan_split(graph: SplitTraceGraph, spec: SplitRequest) -> SplitPlan:
         suffix_node_ids=suffix_node_ids,
         boundary_node_ids=boundary_node_ids,
         boundary_spec=boundary_spec,
+        boundary_bindings=boundary_bindings,
     )
 
 

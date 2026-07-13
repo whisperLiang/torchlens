@@ -18,11 +18,11 @@ from ...utils.rng import execute_with_restored_rng_autocast
 from ..boundary import ReplayBoundary
 from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
-from ..graph import SplitTraceGraph, SplitTraceNode
+from ..graph import ReplayValueRef, SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
-from ..shape_program import ShapeBinding
+from ..shape_program import ShapeBinding, shape_semantic_for_node
 from ..ir import SplitRequest
-from .base import SegmentBundle, SplitPolicyMixin
+from .base import SegmentBundle, SplitPolicyMixin, boundary_overlay
 
 
 def _torch() -> Any:
@@ -191,16 +191,21 @@ class _GeneratedSegmentBase:
 
     def _resolve_parent_ref(
         self,
-        ref: ParentRef,
+        ref: ParentRef | ReplayValueRef,
         node: SplitTraceNode,
         overlay: dict[str, Any],
     ) -> Any:
         """Resolve a captured parent reference against the replay overlay."""
 
-        parent_id = self._label_to_id.get(ref.parent_label)
+        if isinstance(ref, ReplayValueRef):
+            parent_id = ref.value_id
+            reference = ref.value_id
+        else:
+            parent_id = None
+            reference = ref.parent_label
         if parent_id is None or parent_id not in overlay:
             raise SplitUnsupportedError(
-                f"{node.label!r} references unavailable parent {ref.parent_label!r}.",
+                f"{node.label!r} references unavailable parent {reference!r}.",
                 context=self._context(node, "missing parent replay value"),
             )
         return overlay[parent_id]
@@ -215,7 +220,7 @@ class _GeneratedSegmentBase:
     ) -> Any:
         """Resolve one captured argument-template component."""
 
-        if isinstance(component, ParentRef):
+        if isinstance(component, (ParentRef, ReplayValueRef)):
             return self._resolve_parent_ref(component, node, overlay)
         if isinstance(component, LiteralTensor):
             return param_cursor.maybe_replace(component.value)
@@ -274,10 +279,43 @@ class _GeneratedSegmentBase:
 
         if self.graph.shape_program is None or self._shape_binding is None:
             return args, kwargs
-        return (
-            self.graph.shape_program.rewrite(node.canonical_id, args, self._shape_binding),
-            self.graph.shape_program.rewrite(node.canonical_id, kwargs, self._shape_binding),
+        rewritten_args = self.graph.shape_program.rewrite(
+            node.canonical_id,
+            args,
+            self._shape_binding,
         )
+        rewritten_kwargs = self.graph.shape_program.rewrite(
+            node.canonical_id,
+            kwargs,
+            self._shape_binding,
+        )
+        if shape_semantic_for_node(node) != "reshape":
+            return rewritten_args, rewritten_kwargs
+        runtime_shape = self.graph.shape_program.value_shape(
+            node.canonical_id,
+            self._shape_binding,
+        )
+        if runtime_shape is None or not rewritten_args:
+            return rewritten_args, rewritten_kwargs
+        func_id = getattr(node.args_template, "func_id", None)
+        namespace = getattr(func_id, "namespace", None)
+        qualname = getattr(func_id, "qualname", "").rsplit(".", 1)[-1]
+        if qualname == "flatten":
+            return rewritten_args, rewritten_kwargs
+        if namespace == "torch.Tensor":
+            if len(rewritten_args) == 2 and isinstance(rewritten_args[1], (tuple, list)):
+                shape_type = type(rewritten_args[1])
+                return (rewritten_args[0], shape_type(runtime_shape)), rewritten_kwargs
+            return (rewritten_args[0], *runtime_shape), rewritten_kwargs
+        if namespace == "torch" and len(rewritten_args) >= 2:
+            shape_type = type(rewritten_args[1])
+            shape_value = (
+                shape_type(runtime_shape)
+                if isinstance(rewritten_args[1], (tuple, list))
+                else runtime_shape
+            )
+            return (rewritten_args[0], shape_value, *rewritten_args[2:]), rewritten_kwargs
+        return rewritten_args, rewritten_kwargs
 
     def _reconstruct_args(
         self,
@@ -326,13 +364,19 @@ class _GeneratedSegmentBase:
                 f"{node.label!r} has no callable target for split replay.",
                 context=self._context(node, "missing callable target"),
             )
-        output = execute_with_restored_rng_autocast(
-            node.target,
-            args,
-            kwargs,
-            rng_states=getattr(node.op, "func_rng_states", None),
-            autocast_state=getattr(node.op, "func_autocast_state", None),
-        )
+        try:
+            output = execute_with_restored_rng_autocast(
+                node.target,
+                args,
+                kwargs,
+                rng_states=getattr(node.op, "func_rng_states", None),
+                autocast_state=getattr(node.op, "func_autocast_state", None),
+            )
+        except Exception as exc:
+            raise SplitUnsupportedError(
+                f"Torch replay failed at {node.canonical_id!r} ({node.op_type}): {exc}",
+                context=self._context(node, "backend replay execution failed"),
+            ) from exc
         if output is None and args:
             return args[0]
         return output
@@ -359,7 +403,8 @@ class _GeneratedSegmentBase:
     def _execute_nodes(self, overlay: dict[str, Any]) -> dict[str, Any]:
         """Execute this segment's node set into ``overlay``."""
 
-        executed_call_ids: set[int] = set()
+        executed_call_ids: set[str] = set()
+        call_by_output = self.graph.replay_call_by_output_id
         for node in self.graph.nodes:
             if node.canonical_id not in self.node_ids:
                 continue
@@ -371,30 +416,28 @@ class _GeneratedSegmentBase:
                 if node.canonical_id not in overlay and not node.is_output:
                     overlay[node.canonical_id] = self._source_value(node)
                 continue
-            if node.func_call_id is not None and node.func_call_id in executed_call_ids:
+            call = call_by_output.get(node.canonical_id)
+            call_id = node.canonical_id if call is None else call.call_id
+            if call_id in executed_call_ids:
                 continue
-            if node.func_call_id is None:
-                group = [node]
-            else:
-                group = [
-                    candidate
-                    for candidate in self.graph.nodes
-                    if candidate.canonical_id in self.node_ids
-                    and candidate.func_call_id == node.func_call_id
-                    and not candidate.is_buffer
-                    and not candidate.is_input
-                    and not candidate.is_output
+            group = (
+                [node]
+                if call is None
+                else [
+                    self._node_by_id[node_id]
+                    for node_id in call.output_node_ids
+                    if node_id in self.node_ids
                 ]
-                if not group:
-                    group = [node]
+            )
+            if not group:
+                group = [node]
             executor = next((member for member in group if member.target is not None), None)
             if executor is None:
                 raise SplitUnsupportedError(
                     f"{node.label!r} has no callable target for split replay.",
                     context=self._context(node, "missing callable target"),
                 )
-            if node.func_call_id is not None:
-                executed_call_ids.add(node.func_call_id)
+            executed_call_ids.add(call_id)
             args, kwargs = self._reconstruct_args(executor, overlay)
             output = self._execute_func(executor, args, kwargs)
             for member in group:
@@ -483,16 +526,12 @@ class GeneratedSuffix(_GeneratedSegmentBase):
     def __call__(self, boundary: ReplayBoundary) -> Any:
         """Run the suffix from ``boundary`` and reconstruct final output."""
 
-        overlay = dict(boundary.tensors)
+        overlay = boundary_overlay(boundary, self.plan)
         runtime_batch_size = boundary.metadata.get("runtime_batch_size")
         if self.graph.shape_program is not None and runtime_batch_size is not None:
             self._shape_binding = self.graph.shape_program.binding_from_batch(
                 int(runtime_batch_size)
             )
-        for key, item in boundary.spec.items():
-            node_id = self._label_to_id.get(item.label)
-            if node_id is not None and key in boundary.tensors:
-                overlay[node_id] = boundary.tensors[key]
         self._execute_nodes(overlay)
         return self._reconstruct_output(overlay)
 
@@ -597,6 +636,19 @@ class TorchSplitAdapter(SplitPolicyMixin):
         if isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor):
             return bool(torch.allclose(left, right, atol=atol, rtol=rtol))
         return left == right
+
+    def resize_batch(self, value: Any, axis: int, batch_size: int) -> Any:
+        """Resize a tensor axis by deterministic cyclic selection."""
+
+        torch = _torch()
+        if not isinstance(value, torch.Tensor):
+            return value
+        normalized_axis = axis if axis >= 0 else value.ndim + axis
+        current = int(value.shape[normalized_axis])
+        if current <= 0:
+            raise ValueError("Cannot resize an empty batch axis for shape witnessing.")
+        indexes = torch.arange(batch_size, device=value.device) % current
+        return value.index_select(normalized_axis, indexes)
 
     def build_segments(
         self,

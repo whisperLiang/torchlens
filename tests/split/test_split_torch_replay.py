@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from v2_helpers import split_request
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -38,6 +39,14 @@ def _assert_close(left: Any, right: Any) -> None:
         assert left == right
 
 
+class SharedLabelMultiOutput(nn.Module):
+    """Use every output of one call whose leaves share a display label."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        first, second, third = torch.chunk(x, 3, dim=1)
+        return first + second * 2 + third * 3
+
+
 class TinyMlp(nn.Module):
     """Linear-ReLU-linear toy model."""
 
@@ -49,6 +58,42 @@ class TinyMlp(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc2(self.relu(self.fc1(x)))
+
+
+def test_multi_output_boundaries_bind_canonical_values_not_display_labels() -> None:
+    """Every chunk output survives before/after boundaries with duplicate labels."""
+
+    model = SharedLabelMultiOutput().eval()
+    example = torch.randn(2, 9)
+    seed_runtime = tl.split.prepare(model, example, split_request("50%"))
+    captured_chunk_nodes = tuple(
+        node for node in seed_runtime.trace_graph.compute_nodes if node.op_type == "chunk"
+    )
+    assert len(captured_chunk_nodes) == 3
+    chunk_ids = {node.canonical_id for node in captured_chunk_nodes}
+    seed_runtime.trace_graph = replace(
+        seed_runtime.trace_graph,
+        nodes=tuple(
+            replace(node, label="shared_chunk_output") if node.canonical_id in chunk_ids else node
+            for node in seed_runtime.trace_graph.nodes
+        ),
+    )
+    chunk_nodes = tuple(
+        node for node in seed_runtime.trace_graph.compute_nodes if node.op_type == "chunk"
+    )
+
+    assert len({node.label for node in chunk_nodes}) == 1
+    output_value_ids = {f"value:{node.canonical_id}" for node in chunk_nodes}
+    assert any(
+        set(operation.output_value_ids) == output_value_ids
+        for operation in seed_runtime.graph_ir.ops
+    )
+
+    for node in chunk_nodes:
+        for point in (tl.split.before(node.canonical_id), tl.split.after(node.canonical_id)):
+            runtime = seed_runtime.at(point)
+            assert runtime.plan.boundary_spec.keys() == runtime.plan.boundary_bindings.keys()
+            _assert_close(runtime.replay(example), model(example))
 
 
 class TinyCnn(nn.Module):

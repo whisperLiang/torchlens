@@ -15,7 +15,7 @@ from ..graph import SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
 from ..shape_program import ShapeBinding
 from ..ir import SplitRequest
-from .base import SegmentBundle, SplitPolicyMixin
+from .base import SegmentBundle, SplitPolicyMixin, boundary_overlay
 
 
 def _tf() -> Any:
@@ -361,16 +361,12 @@ class TfGeneratedSuffix(_TfGeneratedSegmentBase):
     def __call__(self, boundary: ReplayBoundary) -> Any:
         """Run the suffix from ``boundary`` and reconstruct final output."""
 
-        overlay = dict(boundary.tensors)
+        overlay = boundary_overlay(boundary, self.plan)
         runtime_batch_size = boundary.metadata.get("runtime_batch_size")
         if self.graph.shape_program is not None and runtime_batch_size is not None:
             self._shape_binding = self.graph.shape_program.binding_from_batch(
                 int(runtime_batch_size)
             )
-        for key, item in boundary.spec.items():
-            node_id = self._label_to_id.get(item.label)
-            if node_id is not None and key in boundary.tensors:
-                overlay[node_id] = boundary.tensors[key]
         self._execute_nodes(overlay)
         return self._reconstruct_output(overlay)
 
@@ -394,7 +390,9 @@ class TfGeneratedSuffix(_TfGeneratedSegmentBase):
             if not overlay:
                 return None
             return overlay[next(reversed(overlay))]
-        leaves = [(node.output_container_path, self._output_leaf(node, overlay)) for node in output_nodes]
+        leaves = [
+            (node.output_container_path, self._output_leaf(node, overlay)) for node in output_nodes
+        ]
         spec = next(
             (node.output_container_spec for node in output_nodes if node.output_container_spec),
             None,

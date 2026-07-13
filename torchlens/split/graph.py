@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from hashlib import sha256
 from typing import Any, Literal
 
-from ..intervention.types import CapturedArgTemplate, LiteralTensor, ParentRef
+from ..intervention.types import CapturedArgTemplate, LiteralTensor, LiteralValue, ParentRef
 from ..utils.tensor_utils import safe_copy
 from .shape import SymbolicShape, infer_traced_batch_size, symbolic_shape_from_tensor_ref
 
@@ -51,6 +52,22 @@ class SplitTraceNode:
     replay_source_policy: ReplaySourcePolicy
     op: Any
     buffer_refs: tuple[Any, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReplayValueRef:
+    """Canonical split-only reference to a previously produced graph value."""
+
+    value_id: str
+
+
+@dataclass(frozen=True)
+class ReplayCall:
+    """One normalized backend call with one or more canonical output values."""
+
+    call_id: str
+    func_call_id: int | None
+    output_node_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -129,6 +146,37 @@ class SplitTraceGraph:
             for node in self.nodes
             if not (node.is_input or node.is_output or node.is_buffer or node.is_buffer_only_source)
         )
+
+    @property
+    def replay_calls(self) -> tuple[ReplayCall, ...]:
+        """Return compute nodes grouped by captured backend invocation."""
+
+        groups: list[list[SplitTraceNode]] = []
+        group_index: dict[int, int] = {}
+        for node in self.compute_nodes:
+            if node.func_call_id is None:
+                groups.append([node])
+                continue
+            index = group_index.get(node.func_call_id)
+            if index is None:
+                group_index[node.func_call_id] = len(groups)
+                groups.append([node])
+            else:
+                groups[index].append(node)
+        return tuple(
+            ReplayCall(
+                call_id=_replay_call_id(tuple(member.canonical_id for member in members)),
+                func_call_id=members[0].func_call_id,
+                output_node_ids=tuple(member.canonical_id for member in members),
+            )
+            for members in groups
+        )
+
+    @property
+    def replay_call_by_output_id(self) -> dict[str, ReplayCall]:
+        """Return normalized calls keyed by each canonical output value ID."""
+
+        return {node_id: call for call in self.replay_calls for node_id in call.output_node_ids}
 
 
 def _module_path_for_op(op: Any) -> str | None:
@@ -357,9 +405,10 @@ def _repair_missing_scalar_parent_refs(
     Torch eager capture intentionally does not materialize every scalar-index
     operation as a replay node.  Some models nevertheless retain a
     ``ParentRef`` to such an operation in a later call template.  If the
-    corresponding saved argument is a zero-dimensional tensor, it is safe to
-    preserve the captured scalar as a literal.  Non-scalar or otherwise
-    unresolved references remain unchanged and are rejected by the adapter.
+    corresponding saved argument is a zero-dimensional tensor or immutable
+    Python scalar, it is safe to preserve the captured scalar as a literal.
+    Non-scalar or otherwise unresolved references remain unchanged and are
+    rejected during graph normalization.
 
     Parameters
     ----------
@@ -379,6 +428,11 @@ def _repair_missing_scalar_parent_refs(
     if isinstance(component, ParentRef):
         if component.parent_label not in available_labels and _is_scalar_tensor(saved_value):
             return LiteralTensor(safe_copy(saved_value))
+        if component.parent_label not in available_labels and isinstance(
+            saved_value,
+            (type(None), bool, int, float, complex, str, bytes),
+        ):
+            return LiteralValue(saved_value)
         return component
     if isinstance(component, tuple):
         if _is_template_dict_component(component):
@@ -413,6 +467,16 @@ def _repair_missing_scalar_parent_refs(
             )
             for index, child in enumerate(component)
         ]
+    if isinstance(component, dict):
+        saved_mapping = saved_value if isinstance(saved_value, dict) else {}
+        return {
+            key: _repair_missing_scalar_parent_refs(
+                child,
+                saved_mapping.get(key, _MISSING_SAVED_VALUE),
+                available_labels,
+            )
+            for key, child in component.items()
+        }
     return component
 
 
@@ -457,8 +521,162 @@ def _repair_node_templates(
                 for key, component in template.kwargs
             ),
         )
-        repaired.append(replace(node, args_template=repaired_template))
+        repaired_kwargs_template = (
+            repaired_template
+            if isinstance(node.kwargs_template, CapturedArgTemplate)
+            else _repair_missing_scalar_parent_refs(
+                node.kwargs_template,
+                saved_kwargs,
+                available_labels,
+            )
+        )
+        repaired.append(
+            replace(
+                node,
+                args_template=repaired_template,
+                kwargs_template=repaired_kwargs_template,
+            )
+        )
     return repaired
+
+
+def _normalize_replay_template_refs(
+    component: Any,
+    aliases: dict[str, str],
+) -> Any:
+    """Replace resolvable captured parent labels with canonical value references."""
+
+    if isinstance(component, ParentRef):
+        value_id = aliases.get(component.parent_label)
+        return component if value_id is None else ReplayValueRef(value_id)
+    if isinstance(component, CapturedArgTemplate):
+        return replace(
+            component,
+            args=tuple(_normalize_replay_template_refs(item, aliases) for item in component.args),
+            kwargs=tuple(
+                (key, _normalize_replay_template_refs(value, aliases))
+                for key, value in component.kwargs
+            ),
+        )
+    if isinstance(component, tuple):
+        return tuple(_normalize_replay_template_refs(item, aliases) for item in component)
+    if isinstance(component, list):
+        return [_normalize_replay_template_refs(item, aliases) for item in component]
+    if isinstance(component, dict):
+        return {
+            key: _normalize_replay_template_refs(value, aliases) for key, value in component.items()
+        }
+    return component
+
+
+def _replay_call_id(output_node_ids: tuple[str, ...]) -> str:
+    """Return a stable call ID derived from all ordered canonical output IDs."""
+
+    if len(output_node_ids) == 1:
+        return output_node_ids[0]
+    digest = sha256("\0".join(output_node_ids).encode("utf-8")).hexdigest()[:20]
+    return f"call:{digest}"
+
+
+def _unresolved_parent_refs(component: Any) -> tuple[str, ...]:
+    """Return captured parent labels that were not normalized canonically."""
+
+    if isinstance(component, ParentRef):
+        return (component.parent_label,)
+    if isinstance(component, CapturedArgTemplate):
+        return tuple(
+            parent
+            for item in (*component.args, *(value for _key, value in component.kwargs))
+            for parent in _unresolved_parent_refs(item)
+        )
+    if isinstance(component, (tuple, list)):
+        return tuple(parent for item in component for parent in _unresolved_parent_refs(item))
+    if isinstance(component, dict):
+        return tuple(
+            parent for item in component.values() for parent in _unresolved_parent_refs(item)
+        )
+    return ()
+
+
+def _canonical_replay_value_refs(component: Any) -> tuple[str, ...]:
+    """Return canonical value IDs referenced by a replay template tree."""
+
+    if isinstance(component, ReplayValueRef):
+        return (component.value_id,)
+    if isinstance(component, CapturedArgTemplate):
+        return tuple(
+            value_id
+            for item in (*component.args, *(value for _key, value in component.kwargs))
+            for value_id in _canonical_replay_value_refs(item)
+        )
+    if isinstance(component, (tuple, list)):
+        return tuple(
+            value_id for item in component for value_id in _canonical_replay_value_refs(item)
+        )
+    if isinstance(component, dict):
+        return tuple(
+            value_id
+            for item in component.values()
+            for value_id in _canonical_replay_value_refs(item)
+        )
+    return ()
+
+
+def _normalize_node_replay_refs(
+    nodes: tuple[SplitTraceNode, ...],
+) -> tuple[SplitTraceNode, ...]:
+    """Normalize all replay-template edges to canonical graph value IDs."""
+
+    graph = SplitTraceGraph(
+        backend="",
+        nodes=nodes,
+        input_node_ids=(),
+        output_node_ids=(),
+        graph_shape_hash=None,
+        traced_batch_size=None,
+    )
+    aliases = graph.node_id_by_alias
+    normalized_nodes: list[SplitTraceNode] = []
+    for node in nodes:
+        args_template = _normalize_replay_template_refs(node.args_template, aliases)
+        kwargs_template = _normalize_replay_template_refs(node.kwargs_template, aliases)
+        replay_dependencies = tuple(
+            dict.fromkeys(
+                (
+                    *_canonical_replay_value_refs(args_template),
+                    *_canonical_replay_value_refs(kwargs_template),
+                )
+            )
+        )
+        normalized_nodes.append(
+            replace(
+                node,
+                args_template=args_template,
+                kwargs_template=kwargs_template,
+                parents=tuple(dict.fromkeys((*node.parents, *replay_dependencies))),
+            )
+        )
+    normalized = tuple(normalized_nodes)
+    unresolved = {
+        node.canonical_id: tuple(
+            dict.fromkeys(
+                (
+                    *_unresolved_parent_refs(node.args_template),
+                    *_unresolved_parent_refs(node.kwargs_template),
+                )
+            )
+        )
+        for node in normalized
+        if _unresolved_parent_refs(node.args_template)
+        or _unresolved_parent_refs(node.kwargs_template)
+    }
+    if unresolved:
+        from .errors import SplitUnsupportedError
+
+        raise SplitUnsupportedError(
+            f"Replay parent references do not resolve uniquely to canonical values: {unresolved!r}."
+        )
+    return normalized
 
 
 def _attach_live_buffer_handles(
@@ -601,12 +819,15 @@ def split_graph_from_trace(
             else node
             for node in nodes
         ]
-    normalized_nodes = _normalize_edge_aliases(nodes)
+    normalized_nodes = _normalize_node_replay_refs(_normalize_edge_aliases(nodes))
     rebuilt_children = _children_from_parents(normalized_nodes)
     fixed_nodes = tuple(
-        node
-        if node.children
-        else replace(node, children=rebuilt_children.get(node.canonical_id, ()))
+        replace(
+            node,
+            children=tuple(
+                dict.fromkeys((*node.children, *rebuilt_children.get(node.canonical_id, ())))
+            ),
+        )
         for node in normalized_nodes
     )
     return SplitTraceGraph(
@@ -621,6 +842,8 @@ def split_graph_from_trace(
 
 __all__ = [
     "ReplaySourcePolicy",
+    "ReplayCall",
+    "ReplayValueRef",
     "SplitTraceGraph",
     "SplitTraceNode",
     "split_graph_from_trace",

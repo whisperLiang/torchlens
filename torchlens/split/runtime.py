@@ -119,6 +119,11 @@ class SplitRuntime:
 
         request = replace(self.request, point=point)
         plan = plan_split(self.trace_graph, request)
+        graph_ir = SplitGraphIR.from_trace_graph(
+            self.trace_graph,
+            plan=plan,
+            profile_hash=(None if self.model_profile is None else self.model_profile.profile_hash),
+        )
         prefix_program = lower_split_program(
             self.trace_graph,
             plan,
@@ -140,7 +145,7 @@ class SplitRuntime:
             request,
             prefix_program=prefix_program,
             suffix_program=suffix_program,
-            graph_ir=self.graph_ir,
+            graph_ir=graph_ir,
             model_profile=self.model_profile,
             features=_features_as_dict(request),
         )
@@ -158,7 +163,7 @@ class SplitRuntime:
             capability_report=capability_report,
             prefix_program=prefix_program,
             suffix_program=suffix_program,
-            graph_ir=self.graph_ir,
+            graph_ir=graph_ir,
             model_profile=self.model_profile,
             prepared_input_kwargs=self.prepared_input_kwargs,
         )

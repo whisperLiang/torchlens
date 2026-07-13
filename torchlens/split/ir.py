@@ -388,10 +388,30 @@ class SplitGraphIR:
                 parameter_ids.append(value_id)
             if node.is_buffer:
                 buffer_ids.append(value_id)
-            if node.is_input or node.is_output or node.is_buffer or node.is_buffer_only_source:
-                continue
-            verification = _verification_for_node(node)
-            input_value_ids = tuple(_value_id_for_parent(graph, parent) for parent in node.parents)
+
+        node_by_id = graph.node_by_id
+        verification_rank = {
+            SplitVerificationStatus.EXACT: 0,
+            SplitVerificationStatus.REGION_VERIFIED: 1,
+            SplitVerificationStatus.UNVERIFIED: 2,
+            SplitVerificationStatus.ENVIRONMENT_UNAVAILABLE: 3,
+            SplitVerificationStatus.UNSUPPORTED: 4,
+        }
+        for call in graph.replay_calls:
+            members = tuple(node_by_id[node_id] for node_id in call.output_node_ids)
+            node = next((member for member in members if member.target is not None), members[0])
+            verification = max(
+                (_verification_for_node(member) for member in members),
+                key=verification_rank.__getitem__,
+            )
+            input_value_ids = tuple(
+                dict.fromkeys(
+                    _value_id_for_parent(graph, parent)
+                    for member in members
+                    for parent in member.parents
+                )
+            )
+            output_value_ids = tuple(_value_id(member) for member in members)
             handle = BackendHandle(
                 backend=graph.backend,
                 kind=type(node.target).__name__ if node.target is not None else "missing",
@@ -401,14 +421,16 @@ class SplitGraphIR:
             if _is_region_node(node):
                 regions.append(
                     RegionIR(
-                        node_id=node.canonical_id,
+                        node_id=call.call_id,
                         region_kind=str(getattr(node.target, "primitive", node.op_type)),
                         input_value_ids=input_value_ids,
-                        output_value_ids=(value_id,),
+                        output_value_ids=output_value_ids,
                         module_path=node.module_path,
                         replayable=verification != SplitVerificationStatus.UNSUPPORTED,
                         trainable=verification != SplitVerificationStatus.UNSUPPORTED,
-                        dynamic_shape=node.symbolic_output_shape is not None,
+                        dynamic_shape=any(
+                            member.symbolic_output_shape is not None for member in members
+                        ),
                         verification=verification,
                         source=node.raw_label or node.label,
                         metadata=dict(getattr(node.target, "region_metadata", {}) or {}),
@@ -418,26 +440,31 @@ class SplitGraphIR:
             else:
                 ops.append(
                     OpIR(
-                        node_id=node.canonical_id,
+                        node_id=call.call_id,
                         op_type=node.op_type,
                         input_value_ids=input_value_ids,
-                        output_value_ids=(value_id,),
+                        output_value_ids=output_value_ids,
                         module_path=node.module_path,
                         backend_location=node.raw_label or node.label,
                         replayable=verification != SplitVerificationStatus.UNSUPPORTED,
                         trainable=verification != SplitVerificationStatus.UNSUPPORTED,
-                        dynamic_shape=node.symbolic_output_shape is not None,
+                        dynamic_shape=any(
+                            member.symbolic_output_shape is not None for member in members
+                        ),
                         verification=verification,
                         source=node.raw_label or node.label,
                         backend_handle=handle,
                     )
                 )
-            if node.symbolic_output_shape is not None and graph.shape_program is None:
+        if graph.shape_program is None:
+            for node in graph.compute_nodes:
+                if node.symbolic_output_shape is None:
+                    continue
                 constraints.append(
                     ShapeConstraint(
                         constraint_id=f"shape:{node.canonical_id}",
                         kind=_shape_constraint_kind(node),
-                        value_ids=(value_id,),
+                        value_ids=(_value_id(node),),
                         expression="*".join(str(dim) for dim in node.symbolic_output_shape),
                         description=f"symbolic shape for {node.label}",
                     )
@@ -507,9 +534,7 @@ class SplitFeatures:
             if not isinstance(path, str) or not (
                 path.startswith("/args/") or path.startswith("/kwargs/")
             ):
-                raise ValueError(
-                    "batch_axes keys must be JSON Pointers rooted at /args or /kwargs"
-                )
+                raise ValueError("batch_axes keys must be JSON Pointers rooted at /args or /kwargs")
             if not isinstance(axis, int):
                 raise TypeError("batch_axes values must be integer axis indexes")
 

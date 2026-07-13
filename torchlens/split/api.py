@@ -125,14 +125,11 @@ def prepare(
         input_kwargs=input_kwargs,
         adapter=adapter,
         model_profile=profile,
+        model=model,
     )
     plan = plan_split(graph, request)
-    prefix_program = lower_split_program(
-        graph, plan, request, segment="prefix", adapter=adapter
-    )
-    suffix_program = lower_split_program(
-        graph, plan, request, segment="suffix", adapter=adapter
-    )
+    prefix_program = lower_split_program(graph, plan, request, segment="prefix", adapter=adapter)
+    suffix_program = lower_split_program(graph, plan, request, segment="suffix", adapter=adapter)
     capability_report = analyze_split_capabilities(
         adapter,
         graph,

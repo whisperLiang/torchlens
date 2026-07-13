@@ -17,7 +17,7 @@ from ..graph import SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
 from ..shape_program import ShapeBinding
 from ..ir import SplitRequest
-from .base import SegmentBundle, SplitPolicyMixin
+from .base import SegmentBundle, SplitPolicyMixin, boundary_overlay
 
 
 def _tinygrad_tensor_type() -> Any:
@@ -380,9 +380,7 @@ class _TinygradGeneratedSegmentBase:
                 *(self._rewrite_shape_uop_tree(node, item) for item in src[1:]),
             )
         else:
-            rewritten_src = tuple(
-                self._rewrite_parameter_expand_tree(node, item) for item in src
-            )
+            rewritten_src = tuple(self._rewrite_parameter_expand_tree(node, item) for item in src)
         if rewritten_src == src:
             return uop
         return uop.replace(src=rewritten_src)
@@ -625,9 +623,7 @@ class TinygradGeneratedPrefix(_TinygradGeneratedSegmentBase):
                 backend="tinygrad",
                 split_point=self.spec.boundary,
             )
-        runtime_batch_size = (
-            None if self._shape_binding is None else self._shape_binding.batch_size
-        )
+        runtime_batch_size = None if self._shape_binding is None else self._shape_binding.batch_size
         self._execute_nodes(overlay, preserve_autograd=not detach_boundary)
         boundary_tensors: dict[str, Any] = {}
         for node_id in self.plan.boundary_node_ids:
@@ -666,16 +662,12 @@ class TinygradGeneratedSuffix(_TinygradGeneratedSegmentBase):
     def __call__(self, boundary: ReplayBoundary) -> Any:
         """Run the suffix from ``boundary`` and reconstruct final output."""
 
-        overlay = dict(boundary.tensors)
+        overlay = boundary_overlay(boundary, self.plan)
         runtime_batch_size = boundary.metadata.get("runtime_batch_size")
         if self.graph.shape_program is not None and runtime_batch_size is not None:
             self._shape_binding = self.graph.shape_program.binding_from_batch(
                 int(runtime_batch_size)
             )
-        for key, item in boundary.spec.items():
-            node_id = self._label_to_id.get(item.label)
-            if node_id is not None and key in boundary.tensors:
-                overlay[node_id] = boundary.tensors[key]
         preserve_autograd = bool(boundary.metadata.get("suffix_training_roots"))
         self._execute_nodes(
             overlay,

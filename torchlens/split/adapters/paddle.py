@@ -13,7 +13,7 @@ from ..graph import SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
 from ..shape_program import ShapeBinding
 from ..ir import SplitRequest
-from .base import SegmentBundle, SplitPolicyMixin
+from .base import SegmentBundle, SplitPolicyMixin, boundary_overlay
 
 
 def _paddle() -> Any:
@@ -363,7 +363,8 @@ class _PaddleGeneratedSegmentBase:
     def _execute_nodes(self, overlay: dict[str, Any]) -> dict[str, Any]:
         """Execute this segment's node set into ``overlay``."""
 
-        executed_call_ids: set[int] = set()
+        executed_call_ids: set[str] = set()
+        call_by_output = self.graph.replay_call_by_output_id
         for node in self.graph.nodes:
             if node.canonical_id not in self.node_ids:
                 continue
@@ -373,29 +374,28 @@ class _PaddleGeneratedSegmentBase:
                 if node.canonical_id not in overlay and not node.is_output:
                     overlay[node.canonical_id] = self._source_value(node)
                 continue
-            if node.func_call_id is not None and node.func_call_id in executed_call_ids:
+            call = call_by_output.get(node.canonical_id)
+            call_id = node.canonical_id if call is None else call.call_id
+            if call_id in executed_call_ids:
                 continue
-            if node.func_call_id is None:
-                group = [node]
-            else:
-                group = [
-                    candidate
-                    for candidate in self.graph.nodes
-                    if candidate.canonical_id in self.node_ids
-                    and candidate.func_call_id == node.func_call_id
-                    and not candidate.is_input
-                    and not candidate.is_output
+            group = (
+                [node]
+                if call is None
+                else [
+                    self._node_by_id[node_id]
+                    for node_id in call.output_node_ids
+                    if node_id in self.node_ids
                 ]
-                if not group:
-                    group = [node]
+            )
+            if not group:
+                group = [node]
             executor = next((member for member in group if member.target is not None), None)
             if executor is None:
                 raise SplitUnsupportedError(
                     f"{node.label!r} has no callable target for Paddle split replay.",
                     context=self._context(node, "missing callable target"),
                 )
-            if node.func_call_id is not None:
-                executed_call_ids.add(node.func_call_id)
+            executed_call_ids.add(call_id)
             args, kwargs = self._reconstruct_args(executor, overlay)
             try:
                 output = self._execute_func(executor, args, kwargs)
@@ -485,16 +485,12 @@ class PaddleGeneratedSuffix(_PaddleGeneratedSegmentBase):
     def __call__(self, boundary: ReplayBoundary) -> Any:
         """Run the suffix from ``boundary`` and reconstruct final output."""
 
-        overlay = dict(boundary.tensors)
+        overlay = boundary_overlay(boundary, self.plan)
         runtime_batch_size = boundary.metadata.get("runtime_batch_size")
         if self.graph.shape_program is not None and runtime_batch_size is not None:
             self._shape_binding = self.graph.shape_program.binding_from_batch(
                 int(runtime_batch_size)
             )
-        for key, item in boundary.spec.items():
-            node_id = self._label_to_id.get(item.label)
-            if node_id is not None and key in boundary.tensors:
-                overlay[node_id] = boundary.tensors[key]
         self._execute_nodes(overlay)
         return self._reconstruct_output(overlay)
 

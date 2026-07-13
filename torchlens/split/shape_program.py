@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 import json
 from math import prod
 from numbers import Integral
 from typing import TYPE_CHECKING, Any, Literal
 
+from ..intervention.types import CapturedArgTemplate, LiteralValue
 from .errors import SplitBoundaryError, SplitErrorContext, SplitUnsupportedError
+from .graph import ReplayValueRef
 
 if TYPE_CHECKING:
     from .adapters.base import SplitBackendAdapter
@@ -19,6 +21,92 @@ if TYPE_CHECKING:
 
 
 DimOp = Literal["const", "symbol", "add", "mul", "floordiv", "ceildiv", "min", "max"]
+ShapeSemantic = Literal[
+    "reshape",
+    "repeat",
+    "permute",
+    "squeeze",
+    "unsqueeze",
+    "expand",
+    "concat",
+    "stack",
+    "split",
+    "unbind",
+    "slice",
+    "reduction",
+    "matmul",
+    "factory",
+]
+
+_SHAPE_RULE_VERSION = 3
+_WITNESS_DISAMBIGUATED_SEMANTICS = frozenset(
+    {
+        "reshape",
+        "squeeze",
+        "unsqueeze",
+        "concat",
+        "stack",
+        "split",
+        "unbind",
+        "slice",
+        "reduction",
+        "matmul",
+        "factory",
+    }
+)
+_TORCH_SHAPE_SEMANTICS: dict[tuple[str, str], ShapeSemantic] = {
+    ("torch.Tensor", "view"): "reshape",
+    ("torch.Tensor", "reshape"): "reshape",
+    ("torch.Tensor", "flatten"): "reshape",
+    ("torch", "reshape"): "reshape",
+    ("torch", "flatten"): "reshape",
+    ("torch.Tensor", "repeat"): "repeat",
+    ("torch", "tile"): "repeat",
+    ("torch.Tensor", "permute"): "permute",
+    ("torch.Tensor", "transpose"): "permute",
+    ("torch", "transpose"): "permute",
+    ("torch.Tensor", "squeeze"): "squeeze",
+    ("torch", "squeeze"): "squeeze",
+    ("torch.Tensor", "unsqueeze"): "unsqueeze",
+    ("torch", "unsqueeze"): "unsqueeze",
+    ("torch.Tensor", "expand"): "expand",
+    ("torch", "broadcast_to"): "expand",
+    ("torch", "cat"): "concat",
+    ("torch", "concat"): "concat",
+    ("torch", "stack"): "stack",
+    ("torch", "split"): "split",
+    ("torch", "chunk"): "split",
+    ("torch.Tensor", "split"): "split",
+    ("torch.Tensor", "chunk"): "split",
+    ("torch", "unbind"): "unbind",
+    ("torch.Tensor", "unbind"): "unbind",
+    ("torch.Tensor", "__getitem__"): "slice",
+    ("torch.Tensor", "select"): "slice",
+    ("torch.Tensor", "narrow"): "slice",
+    ("torch", "index_select"): "slice",
+    ("torch.Tensor", "index_select"): "slice",
+    ("torch", "sum"): "reduction",
+    ("torch.Tensor", "sum"): "reduction",
+    ("torch", "mean"): "reduction",
+    ("torch.Tensor", "mean"): "reduction",
+    ("torch", "amax"): "reduction",
+    ("torch.Tensor", "amax"): "reduction",
+    ("torch", "amin"): "reduction",
+    ("torch.Tensor", "amin"): "reduction",
+    ("torch", "prod"): "reduction",
+    ("torch.Tensor", "prod"): "reduction",
+    ("torch", "matmul"): "matmul",
+    ("torch.Tensor", "matmul"): "matmul",
+    ("torch", "zeros"): "factory",
+    ("torch", "ones"): "factory",
+    ("torch", "empty"): "factory",
+    ("torch", "full"): "factory",
+    ("torch", "new_zeros"): "factory",
+    ("torch", "new_ones"): "factory",
+    ("torch.Tensor", "new_tensor"): "factory",
+    ("torch.Tensor", "new_zeros"): "factory",
+    ("torch.Tensor", "new_ones"): "factory",
+}
 
 
 @dataclass(frozen=True)
@@ -170,6 +258,11 @@ class ShapeProgram:
     unresolved: Mapping[str, str]
     fingerprint: str
     inference_mode: Literal["explicit", "conservative_auto"]
+    witness_batch_sizes: tuple[int, ...] = ()
+    proof_sources: Mapping[str, str] = field(default_factory=dict)
+    witness_axis_diagnostics: Mapping[str, Mapping[str, tuple[int, ...]]] = field(
+        default_factory=dict
+    )
 
     def bind(
         self,
@@ -293,6 +386,12 @@ class ShapeProgram:
             return value
         return _rewrite_recipe_tree(value, node_recipes, binding)
 
+    def value_shape(self, node_id: str, binding: ShapeBinding) -> tuple[int, ...] | None:
+        """Evaluate one graph value shape for the current runtime symbols."""
+
+        shape = self.value_shapes.get(node_id)
+        return None if shape is None else shape.evaluate(binding)
+
 
 def flatten_input_leaves(
     inputs: tuple[Any, ...],
@@ -306,7 +405,9 @@ def flatten_input_leaves(
     for index, value in enumerate(inputs):
         _walk_input(value, f"/args/{index}", adapter, leaves)
     for key in sorted((input_kwargs or {}), key=repr):
-        _walk_input((input_kwargs or {})[key], f"/kwargs/{_escape_pointer(str(key))}", adapter, leaves)
+        _walk_input(
+            (input_kwargs or {})[key], f"/kwargs/{_escape_pointer(str(key))}", adapter, leaves
+        )
     return tuple(leaves)
 
 
@@ -317,6 +418,7 @@ def compile_shape_program(
     request: "SplitRequest",
     *,
     adapter: "SplitBackendAdapter",
+    shape_witnesses: Mapping[int, Mapping[str, tuple[int, ...] | None]] | None = None,
 ) -> ShapeProgram | None:
     """Compile a backend-neutral dynamic-batch shape program."""
 
@@ -378,9 +480,7 @@ def compile_shape_program(
         axes = _infer_batch_axes(leaves, graph, adapter)
         inference_mode = "conservative_auto"
 
-    traced_shapes = {
-        path: tuple(adapter.shape(input_by_path[path].value) or ()) for path in axes
-    }
+    traced_shapes = {path: tuple(adapter.shape(input_by_path[path].value) or ()) for path in axes}
     traced_batch_values = {shape[axes[path]] for path, shape in traced_shapes.items()}
     if len(traced_batch_values) != 1:
         raise SplitUnsupportedError(
@@ -397,13 +497,16 @@ def compile_shape_program(
         node_axis,
         request.batch_symbol,
         traced_batch_size=traced_batch_size,
+        shape_witnesses=shape_witnesses or {},
     )
     constraints = tuple(
         ShapeConstraintIR(
             constraint_id=f"axis:{node_id}",
             kind="axis",
             value_ids=(node_id,),
-            lhs=shape.dims[next(i for i, dim in enumerate(shape.dims) if dim.contains(request.batch_symbol))],
+            lhs=shape.dims[
+                next(i for i, dim in enumerate(shape.dims) if dim.contains(request.batch_symbol))
+            ],
             rhs=DimExpr.symbol(request.batch_symbol),
             description="value carries the declared batch symbol",
         )
@@ -411,19 +514,34 @@ def compile_shape_program(
         if any(dim.contains(request.batch_symbol) for dim in shape.dims)
     )
     recipes = _compile_recipes(graph, value_shapes, request.batch_symbol)
-    unresolved = _unresolved_dynamic_nodes(graph, value_shapes, request.batch_symbol)
+    unresolved = _unresolved_dynamic_nodes(
+        graph,
+        value_shapes,
+        request.batch_symbol,
+        traced_batch_size=traced_batch_size,
+        shape_witnesses=shape_witnesses or {},
+        dynamic_batch=request.dynamic_batch,
+    )
     payload = {
+        "rule_version": _SHAPE_RULE_VERSION,
         "batch_symbol": request.batch_symbol,
         "range": request.dynamic_batch,
         "axes": sorted(axes.items()),
         "values": {
-            key: [dim.as_dict() for dim in value.dims] for key, value in sorted(value_shapes.items())
+            key: [dim.as_dict() for dim in value.dims]
+            for key, value in sorted(value_shapes.items())
         },
         "recipes": {
             key: [recipe.captured for recipe in value] for key, value in sorted(recipes.items())
         },
+        "witness_batch_sizes": sorted(shape_witnesses or {}),
     }
     fingerprint = sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    witness_axis_diagnostics = _witness_axis_diagnostics(
+        graph,
+        traced_batch_size,
+        shape_witnesses or {},
+    )
     return ShapeProgram(
         batch_symbol=request.batch_symbol,
         dynamic_batch=request.dynamic_batch,
@@ -438,6 +556,14 @@ def compile_shape_program(
         unresolved=unresolved,
         fingerprint=fingerprint,
         inference_mode=inference_mode,
+        witness_batch_sizes=tuple(sorted(shape_witnesses or {})),
+        proof_sources=_shape_proof_sources(
+            graph,
+            value_shapes,
+            request.batch_symbol,
+            witness_axis_diagnostics,
+        ),
+        witness_axis_diagnostics=witness_axis_diagnostics,
     )
 
 
@@ -519,6 +645,7 @@ def _propagate_shapes(
     batch_symbol: str,
     *,
     traced_batch_size: int,
+    shape_witnesses: Mapping[int, Mapping[str, tuple[int, ...] | None]],
 ) -> dict[str, TensorShapeIR]:
     """Propagate batch provenance through concrete graph shapes."""
 
@@ -536,7 +663,16 @@ def _propagate_shapes(
                 if parent_node is not None:
                     parent_nodes.extend(_shape_bearing_parents(graph, parent_node, concrete))
             op = node.op_type.lower()
+            semantic = shape_semantic_for_node(node)
             inferred = set(dynamic_axes.get(node.canonical_id, set()))
+            inferred.update(
+                _witness_scaled_axes(
+                    node.canonical_id,
+                    output_shape,
+                    traced_batch_size,
+                    shape_witnesses,
+                )
+            )
             permutation = _node_permutation(node, len(output_shape))
             for parent in parent_nodes:
                 parent_shape = concrete.get(parent.canonical_id)
@@ -545,6 +681,16 @@ def _propagate_shapes(
                         continue
                     if permutation is not None and axis in permutation:
                         inferred.add(permutation.index(axis))
+                        continue
+                    if semantic == "repeat":
+                        aligned = axis + len(output_shape) - len(parent_shape)
+                        if 0 <= aligned < len(output_shape):
+                            inferred.add(aligned)
+                        continue
+                    if semantic in _WITNESS_DISAMBIGUATED_SEMANTICS:
+                        # Equality or divisibility at one traced batch is not a proof
+                        # that a shape-changing output axis carries batch provenance.
+                        # Finite semantic candidates are resolved by declared-range witnesses.
                         continue
                     if (
                         axis == 0
@@ -558,20 +704,28 @@ def _propagate_shapes(
                     if 0 <= aligned < len(output_shape):
                         if output_shape[aligned] == parent_shape[axis] or _preserves_batch(op):
                             inferred.add(aligned)
-            if _is_reshape_like(op) and parent_nodes and any(
-                dynamic_axes.get(parent.canonical_id) for parent in parent_nodes
+            if (
+                _is_reshape_like(op)
+                and parent_nodes
+                and any(dynamic_axes.get(parent.canonical_id) for parent in parent_nodes)
             ):
                 first_parent = parent_nodes[0]
                 first_parent_shape = concrete.get(first_parent.canonical_id)
-                if (
+                witnessed_axes = _witness_scaled_axes(
+                    node.canonical_id,
+                    output_shape,
+                    traced_batch_size,
+                    shape_witnesses,
+                )
+                if semantic == "reshape":
+                    inferred.update(witnessed_axes)
+                elif (
                     first_parent_shape
                     and 0 in dynamic_axes.get(first_parent.canonical_id, set())
                     and output_shape
-                    and output_shape[0] % traced_batch_size == 0
+                    and output_shape[0] == first_parent_shape[0]
                 ):
                     inferred.add(0)
-                else:
-                    inferred.update(_reshape_batch_axes(output_shape, traced_batch_size))
             if inferred != dynamic_axes.get(node.canonical_id, set()):
                 dynamic_axes[node.canonical_id] = inferred
                 changed = True
@@ -631,7 +785,417 @@ def _propagate_shapes(
                         )
                     )
         result[node.canonical_id] = TensorShapeIR(node.canonical_id, tuple(dims))
-    return result
+    return _apply_semantic_shape_expressions(
+        graph,
+        result,
+        batch_symbol=batch_symbol,
+        traced_batch_size=traced_batch_size,
+        shape_witnesses=shape_witnesses,
+    )
+
+
+def _apply_semantic_shape_expressions(
+    graph: "SplitTraceGraph",
+    value_shapes: Mapping[str, TensorShapeIR],
+    *,
+    batch_symbol: str,
+    traced_batch_size: int,
+    shape_witnesses: Mapping[int, Mapping[str, tuple[int, ...] | None]],
+) -> dict[str, TensorShapeIR]:
+    """Propagate non-proportional expressions using exact operation semantics."""
+
+    resolved = dict(value_shapes)
+    for _iteration in range(max(1, len(graph.nodes))):
+        changed = False
+        for node in graph.nodes:
+            candidate = _semantic_shape_candidate(graph, node, resolved)
+            if candidate is None:
+                candidate = _passthrough_shape_candidate(graph, node, resolved)
+            if candidate is None or not _shape_candidate_matches_evidence(
+                node.canonical_id,
+                candidate,
+                node.output_shape,
+                batch_symbol=batch_symbol,
+                traced_batch_size=traced_batch_size,
+                shape_witnesses=shape_witnesses,
+            ):
+                continue
+            if resolved.get(node.canonical_id) != candidate:
+                resolved[node.canonical_id] = candidate
+                changed = True
+        if not changed:
+            break
+    return resolved
+
+
+def _semantic_shape_candidate(
+    graph: "SplitTraceGraph",
+    node: "SplitTraceNode",
+    value_shapes: Mapping[str, TensorShapeIR],
+) -> TensorShapeIR | None:
+    """Return an expression candidate derived from one registered operation rule."""
+
+    semantic = shape_semantic_for_node(node)
+    if semantic == "concat":
+        return _concat_shape_candidate(node, value_shapes)
+    if semantic == "stack":
+        return _stack_shape_candidate(node, value_shapes)
+    if semantic == "slice":
+        return _slice_shape_candidate(node, value_shapes)
+    if semantic == "repeat":
+        return _repeat_shape_candidate(node, value_shapes)
+    if semantic == "permute":
+        return _permuted_shape_candidate(graph, node, value_shapes)
+    return None
+
+
+def _captured_call_parts(node: "SplitTraceNode") -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Return normalized positional and keyword capture components for one call."""
+
+    template = node.args_template
+    if not isinstance(template, CapturedArgTemplate):
+        return (), {}
+    return template.args, dict(template.kwargs)
+
+
+def _literal_component(value: Any) -> Any:
+    """Unwrap a captured immutable literal component."""
+
+    while isinstance(value, LiteralValue):
+        value = value.value
+    if isinstance(value, tuple):
+        return tuple(_literal_component(item) for item in value)
+    if isinstance(value, list):
+        return [_literal_component(item) for item in value]
+    return value
+
+
+def _template_value_refs(component: Any) -> tuple[str, ...]:
+    """Return canonical replay value references while preserving multiplicity."""
+
+    if isinstance(component, ReplayValueRef):
+        return (component.value_id,)
+    if isinstance(component, CapturedArgTemplate):
+        return tuple(
+            value_id
+            for item in (*component.args, *(value for _key, value in component.kwargs))
+            for value_id in _template_value_refs(item)
+        )
+    if isinstance(component, (tuple, list)):
+        return tuple(value_id for item in component for value_id in _template_value_refs(item))
+    if isinstance(component, Mapping):
+        return tuple(
+            value_id for item in component.values() for value_id in _template_value_refs(item)
+        )
+    return ()
+
+
+def _captured_int_argument(
+    node: "SplitTraceNode",
+    position: int,
+    keyword: str,
+    default: int,
+) -> int | None:
+    """Return one captured integer argument without resolving tensor references."""
+
+    args, kwargs = _captured_call_parts(node)
+    component = kwargs.get(keyword, args[position] if position < len(args) else default)
+    value = _literal_component(component)
+    if isinstance(value, Integral) and not isinstance(value, bool):
+        return int(value)
+    return None
+
+
+def _normalize_dim(axis: int, rank: int) -> int | None:
+    """Normalize an operation dimension, returning ``None`` when invalid."""
+
+    normalized = axis if axis >= 0 else rank + axis
+    return normalized if 0 <= normalized < rank else None
+
+
+def _dim_add(*items: DimExpr) -> DimExpr:
+    """Build a simplified additive dimension expression."""
+
+    flattened: list[DimExpr] = []
+    constant = 0
+    for item in items:
+        children = item.args if item.op == "add" else (item,)
+        for child in children:
+            if child.op == "const" and isinstance(child.value, int):
+                constant += child.value
+            else:
+                flattened.append(child)
+    if constant or not flattened:
+        flattened.append(DimExpr.const(constant))
+    return flattened[0] if len(flattened) == 1 else DimExpr("add", args=tuple(flattened))
+
+
+def _dim_mul(left: DimExpr, factor: int) -> DimExpr:
+    """Build a simplified dimension multiplied by an integer factor."""
+
+    if factor == 1:
+        return left
+    if factor == 0:
+        return DimExpr.const(0)
+    return DimExpr("mul", args=(left, DimExpr.const(factor)))
+
+
+def _concat_shape_candidate(
+    node: "SplitTraceNode",
+    value_shapes: Mapping[str, TensorShapeIR],
+) -> TensorShapeIR | None:
+    """Derive concat output dimensions by summing ordered input dimensions."""
+
+    args, _kwargs = _captured_call_parts(node)
+    if not args:
+        return None
+    input_shapes = [
+        value_shapes[value_id]
+        for value_id in _template_value_refs(args[0])
+        if value_id in value_shapes
+    ]
+    if not input_shapes:
+        return None
+    rank = len(input_shapes[0].dims)
+    if any(len(shape.dims) != rank for shape in input_shapes):
+        return None
+    axis_value = _captured_int_argument(node, 1, "dim", 0)
+    axis = None if axis_value is None else _normalize_dim(axis_value, rank)
+    if axis is None:
+        return None
+    dims = list(input_shapes[0].dims)
+    dims[axis] = _dim_add(*(shape.dims[axis] for shape in input_shapes))
+    return TensorShapeIR(node.canonical_id, tuple(dims))
+
+
+def _stack_shape_candidate(
+    node: "SplitTraceNode",
+    value_shapes: Mapping[str, TensorShapeIR],
+) -> TensorShapeIR | None:
+    """Derive stack output dimensions from its first tensor and stack count."""
+
+    args, _kwargs = _captured_call_parts(node)
+    if not args:
+        return None
+    refs = _template_value_refs(args[0])
+    input_shape = next(
+        (value_shapes[value_id] for value_id in refs if value_id in value_shapes),
+        None,
+    )
+    if input_shape is None:
+        return None
+    output_rank = len(input_shape.dims) + 1
+    axis_value = _captured_int_argument(node, 1, "dim", 0)
+    if axis_value is None:
+        return None
+    axis = axis_value if axis_value >= 0 else output_rank + axis_value
+    if not 0 <= axis < output_rank:
+        return None
+    dims = list(input_shape.dims)
+    dims.insert(axis, DimExpr.const(len(refs)))
+    return TensorShapeIR(node.canonical_id, tuple(dims))
+
+
+def _slice_shape_candidate(
+    node: "SplitTraceNode",
+    value_shapes: Mapping[str, TensorShapeIR],
+) -> TensorShapeIR | None:
+    """Derive dimensions for Python basic slicing with positive strides."""
+
+    args, _kwargs = _captured_call_parts(node)
+    if len(args) < 2:
+        return None
+    receiver_refs = _template_value_refs(args[0])
+    parent_shape = next(
+        (value_shapes[value_id] for value_id in receiver_refs if value_id in value_shapes),
+        None,
+    )
+    if parent_shape is None:
+        return None
+    index = _literal_component(args[1])
+    indexes = index if isinstance(index, tuple) else (index,)
+    ellipsis_index = next(
+        (position for position, item in enumerate(indexes) if item is Ellipsis),
+        None,
+    )
+    if ellipsis_index is not None:
+        consumed = sum(item is not None and item is not Ellipsis for item in indexes)
+        fill = max(0, len(parent_shape.dims) - consumed)
+        indexes = (
+            *indexes[:ellipsis_index],
+            *(slice(None) for _ in range(fill)),
+            *indexes[ellipsis_index + 1 :],
+        )
+    dims: list[DimExpr] = []
+    parent_axis = 0
+    for item in indexes:
+        if item is None:
+            dims.append(DimExpr.const(1))
+            continue
+        if parent_axis >= len(parent_shape.dims):
+            return None
+        parent_dim = parent_shape.dims[parent_axis]
+        parent_axis += 1
+        if isinstance(item, Integral) and not isinstance(item, bool):
+            continue
+        if not isinstance(item, slice):
+            return None
+        step = 1 if item.step is None else item.step
+        start = 0 if item.start is None else item.start
+        stop = item.stop
+        if (
+            not isinstance(step, Integral)
+            or isinstance(step, bool)
+            or int(step) <= 0
+            or not isinstance(start, Integral)
+            or isinstance(start, bool)
+            or int(start) < 0
+            or (
+                stop is not None
+                and (
+                    not isinstance(stop, Integral)
+                    or isinstance(stop, bool)
+                    or int(stop) < 0
+                )
+            )
+        ):
+            return None
+        bounded = (
+            parent_dim
+            if stop is None
+            else DimExpr("min", args=(parent_dim, DimExpr.const(int(stop))))
+        )
+        remaining = _dim_add(bounded, DimExpr.const(-int(start)))
+        nonnegative = DimExpr("max", args=(remaining, DimExpr.const(0)))
+        dims.append(
+            nonnegative
+            if int(step) == 1
+            else DimExpr("ceildiv", args=(nonnegative, DimExpr.const(int(step))))
+        )
+    dims.extend(parent_shape.dims[parent_axis:])
+    return TensorShapeIR(node.canonical_id, tuple(dims))
+
+
+def _repeat_shape_candidate(
+    node: "SplitTraceNode",
+    value_shapes: Mapping[str, TensorShapeIR],
+) -> TensorShapeIR | None:
+    """Derive repeat/tile dimensions directly from captured repeat factors."""
+
+    args, _kwargs = _captured_call_parts(node)
+    if len(args) < 2:
+        return None
+    receiver_refs = _template_value_refs(args[0])
+    parent_shape = next(
+        (value_shapes[value_id] for value_id in receiver_refs if value_id in value_shapes),
+        None,
+    )
+    if parent_shape is None:
+        return None
+    raw_repeats: Any = args[1:] if len(args) > 2 else _literal_component(args[1])
+    repeats = raw_repeats if isinstance(raw_repeats, (tuple, list)) else (raw_repeats,)
+    repeat_values = tuple(_literal_component(item) for item in repeats)
+    if not repeat_values or not all(
+        isinstance(item, Integral) and not isinstance(item, bool) for item in repeat_values
+    ):
+        return None
+    factors = tuple(int(item) for item in repeat_values)
+    padded_dims = (
+        (DimExpr.const(1),) * max(0, len(factors) - len(parent_shape.dims))
+        + parent_shape.dims
+    )
+    padded_factors = (1,) * max(0, len(padded_dims) - len(factors)) + factors
+    return TensorShapeIR(
+        node.canonical_id,
+        tuple(_dim_mul(dim, factor) for dim, factor in zip(padded_dims, padded_factors)),
+    )
+
+
+def _permuted_shape_candidate(
+    graph: "SplitTraceGraph",
+    node: "SplitTraceNode",
+    value_shapes: Mapping[str, TensorShapeIR],
+) -> TensorShapeIR | None:
+    """Derive permute/transpose dimensions from the captured axis permutation."""
+
+    parent = next(
+        (
+            candidate
+            for label in node.parents
+            if (candidate := graph.node_for_label(label)) is not None
+        ),
+        None,
+    )
+    if parent is None or parent.canonical_id not in value_shapes:
+        return None
+    parent_shape = value_shapes[parent.canonical_id]
+    permutation = _node_permutation(node, len(parent_shape.dims))
+    if permutation is None:
+        return None
+    return TensorShapeIR(node.canonical_id, tuple(parent_shape.dims[axis] for axis in permutation))
+
+
+def _passthrough_shape_candidate(
+    graph: "SplitTraceGraph",
+    node: "SplitTraceNode",
+    value_shapes: Mapping[str, TensorShapeIR],
+) -> TensorShapeIR | None:
+    """Propagate arbitrary expressions through aligned shape-preserving operations."""
+
+    if node.output_shape is None or not _is_elementwise(node.op_type.lower()):
+        return None
+    dims = [DimExpr.const(dim) for dim in node.output_shape]
+    found_dynamic = False
+    for parent_label in node.parents:
+        parent = graph.node_for_label(parent_label)
+        if parent is None or parent.output_shape is None:
+            continue
+        parent_shape = value_shapes.get(parent.canonical_id)
+        if parent_shape is None:
+            continue
+        offset = len(node.output_shape) - len(parent.output_shape)
+        for parent_axis, expression in enumerate(parent_shape.dims):
+            output_axis = parent_axis + offset
+            if (
+                _symbols_in_expr(expression)
+                and 0 <= output_axis < len(dims)
+                and node.output_shape[output_axis] == parent.output_shape[parent_axis]
+            ):
+                dims[output_axis] = expression
+                found_dynamic = True
+    return TensorShapeIR(node.canonical_id, tuple(dims)) if found_dynamic else None
+
+
+def _symbols_in_expr(expression: DimExpr) -> set[str]:
+    """Return symbol names referenced by one dimension expression."""
+
+    symbols = {str(expression.value)} if expression.op == "symbol" else set()
+    for child in expression.args:
+        symbols.update(_symbols_in_expr(child))
+    return symbols
+
+
+def _shape_candidate_matches_evidence(
+    node_id: str,
+    candidate: TensorShapeIR,
+    traced_shape: tuple[int, ...] | None,
+    *,
+    batch_symbol: str,
+    traced_batch_size: int,
+    shape_witnesses: Mapping[int, Mapping[str, tuple[int, ...] | None]],
+) -> bool:
+    """Return whether a semantic candidate matches trace and all captured witnesses."""
+
+    if traced_shape is None:
+        return False
+    trace_binding = ShapeBinding({batch_symbol: traced_batch_size}, {})
+    if candidate.evaluate(trace_binding) != traced_shape:
+        return False
+    return all(
+        (witness_shape := shapes.get(node_id)) is not None
+        and candidate.evaluate(ShapeBinding({batch_symbol: batch_size}, {})) == witness_shape
+        for batch_size, shapes in shape_witnesses.items()
+    )
 
 
 def _compile_recipes(
@@ -643,6 +1207,9 @@ def _compile_recipes(
 
     recipes: dict[str, tuple[ShapeRecipe, ...]] = {}
     for node in graph.nodes:
+        semantic = shape_semantic_for_node(node)
+        if graph.backend == "torch" and semantic not in {"reshape", "expand", "factory"}:
+            continue
         shape = value_shapes.get(node.canonical_id)
         if shape is None or node.output_shape is None:
             continue
@@ -657,9 +1224,7 @@ def _compile_recipes(
             if parent_shape is not None:
                 relations.append((tuple(parent.output_shape), parent_shape.dims))
         if not any(
-            dim.contains(batch_symbol)
-            for _concrete_shape, dims in relations
-            for dim in dims
+            dim.contains(batch_symbol) for _concrete_shape, dims in relations for dim in dims
         ):
             continue
         descriptors: set[tuple[int, ...]] = set()
@@ -718,9 +1283,7 @@ def _descriptor_exprs(
         for dim in output_dims:
             product = DimExpr("mul", args=(product, dim))
         return (product,)
-    dynamic_axes = [
-        index for index, dim in enumerate(output_dims) if dim.contains(batch_symbol)
-    ]
+    dynamic_axes = [index for index, dim in enumerate(output_dims) if dim.contains(batch_symbol)]
     if (
         len(dynamic_axes) == 1
         and dynamic_axes[0] == 0
@@ -813,12 +1376,17 @@ def _unresolved_dynamic_nodes(
     graph: "SplitTraceGraph",
     value_shapes: Mapping[str, TensorShapeIR],
     batch_symbol: str,
+    *,
+    traced_batch_size: int,
+    shape_witnesses: Mapping[int, Mapping[str, tuple[int, ...] | None]],
+    dynamic_batch: tuple[int, int],
 ) -> dict[str, str]:
     """Return shape-sensitive nodes whose dynamic relation was not solved."""
 
     unresolved: dict[str, str] = {}
     for node in graph.nodes:
-        if not _shape_sensitive(node.op_type.lower()):
+        semantic = shape_semantic_for_node(node)
+        if not _shape_sensitive(node.op_type.lower()) and semantic is None:
             continue
         parent_dynamic = any(
             parent_node is not None
@@ -831,8 +1399,31 @@ def _unresolved_dynamic_nodes(
         output_dynamic = output is not None and any(
             dim.contains(batch_symbol) for dim in output.dims
         )
-        if parent_dynamic and not output_dynamic:
+        expected_witnesses = set(range(dynamic_batch[0], dynamic_batch[1] + 1)) - {
+            traced_batch_size
+        }
+        witnesses_complete = expected_witnesses == set(shape_witnesses)
+        witness_shapes = tuple(shapes.get(node.canonical_id) for shapes in shape_witnesses.values())
+        witnessed_unchanged = witnesses_complete and all(
+            shape == node.output_shape for shape in witness_shapes
+        )
+        if parent_dynamic and not output_dynamic and not witnessed_unchanged:
             unresolved[node.canonical_id] = "dynamic shape relation could not be proven"
+            continue
+        descriptor_mentions_batch = any(
+            traced_batch_size in descriptor for descriptor in _captured_shape_descriptors(node)
+        )
+        if (
+            not parent_dynamic
+            and not output_dynamic
+            and not witnessed_unchanged
+            and descriptor_mentions_batch
+            and node.output_shape is not None
+            and traced_batch_size in node.output_shape
+        ):
+            unresolved[node.canonical_id] = (
+                "captured shape literal may depend on batch and requires proof"
+            )
     return unresolved
 
 
@@ -877,7 +1468,9 @@ def _rewrite_recipe_tree(
 def _flat_int_shape(value: Sequence[Any]) -> tuple[int, ...] | None:
     """Return a flat integer descriptor or ``None``."""
 
-    if not value or not all(isinstance(item, Integral) and not isinstance(item, bool) for item in value):
+    if not value or not all(
+        isinstance(item, Integral) and not isinstance(item, bool) for item in value
+    ):
         return None
     return tuple(int(item) for item in value)
 
@@ -1074,6 +1667,113 @@ def _reshape_batch_axes(
     return divisible if len(divisible) == 1 else set()
 
 
+def shape_semantic_for_node(node: "SplitTraceNode") -> ShapeSemantic | None:
+    """Return an exact semantic category from the captured function identity."""
+
+    template = node.args_template
+    func_id = getattr(template, "func_id", None)
+    namespace = getattr(func_id, "namespace", None)
+    qualname = getattr(func_id, "qualname", None)
+    if isinstance(namespace, str) and isinstance(qualname, str):
+        return _TORCH_SHAPE_SEMANTICS.get((namespace, qualname.rsplit(".", 1)[-1]))
+    return None
+
+
+def _witness_scaled_axes(
+    node_id: str,
+    traced_shape: tuple[int, ...],
+    traced_batch_size: int,
+    witnesses: Mapping[int, Mapping[str, tuple[int, ...] | None]],
+) -> set[int]:
+    """Return axes proven to be a fixed multiple of batch by all witnesses."""
+
+    if not witnesses:
+        return set()
+    witnessed_shapes: list[tuple[int, tuple[int, ...]]] = []
+    for batch_size, shapes in witnesses.items():
+        shape = shapes.get(node_id)
+        if shape is None or len(shape) != len(traced_shape):
+            return set()
+        witnessed_shapes.append((batch_size, shape))
+    return {
+        axis
+        for axis, traced_dim in enumerate(traced_shape)
+        if traced_dim % traced_batch_size == 0
+        and all(
+            shape[axis] * traced_batch_size == traced_dim * batch_size
+            for batch_size, shape in witnessed_shapes
+        )
+    }
+
+
+def _witness_axis_diagnostics(
+    graph: "SplitTraceGraph",
+    traced_batch_size: int,
+    witnesses: Mapping[int, Mapping[str, tuple[int, ...] | None]],
+) -> dict[str, dict[str, tuple[int, ...]]]:
+    """Describe finite axis candidates accepted or eliminated by witnesses."""
+
+    if not witnesses:
+        return {}
+    diagnostics: dict[str, dict[str, tuple[int, ...]]] = {}
+    for node in graph.nodes:
+        if node.output_shape is None:
+            continue
+        candidates = tuple(
+            axis
+            for axis, dim in enumerate(node.output_shape)
+            if traced_batch_size > 0 and dim % traced_batch_size == 0
+        )
+        if not candidates:
+            continue
+        accepted = tuple(
+            sorted(
+                _witness_scaled_axes(
+                    node.canonical_id,
+                    node.output_shape,
+                    traced_batch_size,
+                    witnesses,
+                )
+            )
+        )
+        diagnostics[node.canonical_id] = {
+            "candidate_axes": candidates,
+            "accepted_axes": accepted,
+            "eliminated_axes": tuple(axis for axis in candidates if axis not in accepted),
+        }
+    return diagnostics
+
+
+def _shape_proof_sources(
+    graph: "SplitTraceGraph",
+    value_shapes: Mapping[str, TensorShapeIR],
+    batch_symbol: str,
+    witness_diagnostics: Mapping[str, Mapping[str, tuple[int, ...]]],
+) -> dict[str, str]:
+    """Return the strongest proof source for each batch-dependent graph value."""
+
+    sources: dict[str, str] = {}
+    input_ids = set(graph.input_node_ids)
+    for node in graph.nodes:
+        shape = value_shapes.get(node.canonical_id)
+        if shape is None or not any(dim.contains(batch_symbol) for dim in shape.dims):
+            continue
+        semantic = shape_semantic_for_node(node)
+        witness_axes = witness_diagnostics.get(node.canonical_id, {}).get("accepted_axes", ())
+        if node.canonical_id in input_ids:
+            source = "input_batch_axis"
+        elif semantic == "repeat":
+            source = "semantic:repeat"
+        elif witness_axes:
+            source = "shape_witness"
+        elif semantic is not None:
+            source = f"semantic:{semantic}"
+        else:
+            source = "symbolic_propagation"
+        sources[node.canonical_id] = source
+    return sources
+
+
 __all__ = [
     "DimExpr",
     "InputLeaf",
@@ -1084,4 +1784,5 @@ __all__ = [
     "TensorShapeIR",
     "compile_shape_program",
     "flatten_input_leaves",
+    "shape_semantic_for_node",
 ]

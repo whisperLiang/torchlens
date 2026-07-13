@@ -629,13 +629,18 @@ def _plain_attr_restore_value(snapshot: Any) -> Any:
     return _snapshot_plain_attr_value(snapshot, "<snapshot>")
 
 
-def _module_plain_attr_names(module: nn.Module) -> set[str]:
+def _module_plain_attr_names(
+    module: nn.Module,
+    ignored_names: frozenset[str] = frozenset(),
+) -> set[str]:
     """Return plain attribute names to snapshot for a module.
 
     Parameters
     ----------
     module:
         Module whose non-registered attributes should be inspected.
+    ignored_names:
+        Infrastructure-owned attribute names excluded from the snapshot.
 
     Returns
     -------
@@ -644,30 +649,38 @@ def _module_plain_attr_names(module: nn.Module) -> set[str]:
         module storage.
     """
 
-    return set(module.__dict__) - _PLAIN_ATTR_IGNORED_NAMES
+    return set(module.__dict__) - _PLAIN_ATTR_IGNORED_NAMES - ignored_names
 
 
 class _ModuleTreePlainAttrSnapshot:
     """Snapshot of small value-comparable plain attributes in a module tree."""
 
-    def __init__(self, model: nn.Module) -> None:
+    def __init__(
+        self,
+        model: nn.Module,
+        *,
+        ignored_names: frozenset[str] = frozenset(),
+    ) -> None:
         """Capture a model's plain module-tree attributes.
 
         Parameters
         ----------
         model:
             Model whose ``modules()`` tree should be snapshotted.
+        ignored_names:
+            Infrastructure-owned attribute names that must remain installed.
         """
 
         self._entries: list[tuple[nn.Module, str, str, Any]] = []
         self._module_attr_names: dict[int, tuple[nn.Module, set[str], str]] = {}
+        self._ignored_names = ignored_names
         module_counts: dict[str, int] = {}
         for module in model.modules():
             module_type = type(module).__name__
             module_index = module_counts.get(module_type, 0)
             module_counts[module_type] = module_index + 1
             module_path = f"{module_type}[{module_index}]"
-            attr_names = _module_plain_attr_names(module)
+            attr_names = _module_plain_attr_names(module, self._ignored_names)
             self._module_attr_names[id(module)] = (module, attr_names, module_path)
             for name in sorted(attr_names):
                 attr_path = f"{module_path}.{name}"
@@ -702,7 +715,7 @@ class _ModuleTreePlainAttrSnapshot:
         """
 
         for module, original_names, module_path in self._module_attr_names.values():
-            added_names = _module_plain_attr_names(module) - original_names
+            added_names = _module_plain_attr_names(module, self._ignored_names) - original_names
             for name in sorted(added_names):
                 try:
                     delattr(module, name)

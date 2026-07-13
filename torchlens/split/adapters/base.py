@@ -14,6 +14,19 @@ if TYPE_CHECKING:
     from ..training import BoundaryGradients, TrainingStepResult
 
 
+def boundary_overlay(boundary: "ReplayBoundary", plan: "SplitPlan") -> dict[str, Any]:
+    """Return replay values keyed only by canonical graph value IDs."""
+
+    if not plan.boundary_bindings:
+        return dict(boundary.tensors)
+    missing = tuple(key for key in plan.boundary_bindings if key not in boundary.tensors)
+    if missing:
+        from ..errors import SplitBoundaryError
+
+        raise SplitBoundaryError(f"Boundary is missing canonical values for keys {missing!r}.")
+    return {node_id: boundary.tensors[key] for key, node_id in plan.boundary_bindings.items()}
+
+
 @dataclass(frozen=True)
 class SegmentBundle:
     """Backend-built prefix/suffix segment bundle."""
@@ -66,6 +79,10 @@ class TensorOps(Protocol):
         """Return whether two tensor-like values are numerically close."""
         ...
 
+    def resize_batch(self, value: Any, axis: int, batch_size: int) -> Any:
+        """Clone one tensor leaf with ``axis`` resized for shape witnessing."""
+        ...
+
 
 class SplitPolicyMixin:
     """Reusable adapter-owned capability and boundary policy hooks."""
@@ -74,6 +91,12 @@ class SplitPolicyMixin:
     native_target_types: frozenset[str] = frozenset()
     allow_callable_target = False
     native_state_replay = False
+
+    def resize_batch(self, value: Any, axis: int, batch_size: int) -> Any:
+        """Resize a batch leaf when an adapter supports shape witnessing."""
+
+        del value, axis, batch_size
+        raise NotImplementedError(f"backend={self.name!r} does not support shape witnesses")
 
     def target_support_reasons(self, node: Any, graph: Any) -> tuple[str, ...]:
         """Validate a node against this adapter's native capture handles."""
@@ -207,4 +230,5 @@ __all__ = [
     "SplitBackendAdapter",
     "TensorOps",
     "TrainingEngine",
+    "boundary_overlay",
 ]

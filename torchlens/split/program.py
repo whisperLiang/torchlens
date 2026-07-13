@@ -396,6 +396,13 @@ def build_capability_report(
                 "fingerprint": graph.shape_program.fingerprint,
                 "inference_mode": graph.shape_program.inference_mode,
                 "input_batch_axes": dict(graph.shape_program.input_batch_axes),
+                "witness_batch_sizes": graph.shape_program.witness_batch_sizes,
+                "proof_sources": dict(graph.shape_program.proof_sources),
+                "witness_axis_diagnostics": {
+                    node_id: dict(diagnostics)
+                    for node_id, diagnostics in graph.shape_program.witness_axis_diagnostics.items()
+                },
+                "topology_consistent_witnesses": graph.shape_program.witness_batch_sizes,
                 "unresolved": dict(graph.shape_program.unresolved),
                 "recipes": {
                     node_id: [recipe.recipe_id for recipe in recipes]
