@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from numbers import Integral
-from typing import Any, Callable
+from typing import Any
 
-from .errors import SplitBoundaryError, SplitErrorContext, SplitUnsupportedError
+from .errors import SplitBoundaryError, SplitErrorContext
 
 
 SymbolicDim = int | str
@@ -83,39 +82,6 @@ def infer_traced_batch_size(trace: Any) -> int | None:
                     return leading_dim
     if input_leading_dims:
         return input_leading_dims[0]
-    return None
-
-
-def infer_runtime_batch_size_from_overlay(
-    overlay: dict[str, Any],
-    *,
-    node_by_id: dict[str, Any],
-    traced_batch_size: int | None,
-    is_tensor: Callable[[Any], bool],
-) -> int | None:
-    """Infer runtime leading batch size from currently available replay values.
-
-    Prefix replay usually has original input nodes in ``overlay``; suffix replay
-    usually has only boundary nodes. Scanning all overlay values keeps dynamic
-    shape literal rewriting available on both sides of the split.
-    """
-
-    if traced_batch_size is None:
-        return None
-    for node_id, value in overlay.items():
-        node = node_by_id.get(node_id)
-        if node is None or not getattr(node, "output_shape", None):
-            continue
-        output_shape = node.output_shape
-        if not output_shape or output_shape[0] != traced_batch_size:
-            continue
-        shape = getattr(value, "shape", None)
-        if not is_tensor(value) or shape is None or len(shape) != len(output_shape):
-            continue
-        try:
-            return int(shape[0])
-        except (TypeError, ValueError):
-            continue
     return None
 
 
@@ -251,101 +217,6 @@ def validate_tensor_against_symbolic_shape(
             )
 
 
-def rewrite_dynamic_batch_value(
-    value: Any,
-    *,
-    traced_batch_size: int | None,
-    runtime_batch_size: int | None,
-) -> Any:
-    """Rewrite traced batch literals inside common leading-dim shape values.
-
-    Parameters
-    ----------
-    value:
-        Literal value or nested literal value. Flat integer lists/tuples are
-        treated as shape descriptors; only their leading dimension is eligible
-        for replacement. Other containers are traversed to find nested shape
-        descriptors.
-    traced_batch_size:
-        Batch size captured in the trace.
-    runtime_batch_size:
-        Batch size being replayed.
-
-    Returns
-    -------
-    Any
-        Rewritten value.
-    """
-
-    if traced_batch_size is None or runtime_batch_size is None:
-        return value
-    if isinstance(value, Integral) and not isinstance(value, bool):
-        return value
-    if isinstance(value, tuple):
-        if _is_flat_shape_literal(value):
-            return tuple(
-                _rewrite_leading_shape_dim(
-                    list(value),
-                    traced_batch_size=traced_batch_size,
-                    runtime_batch_size=runtime_batch_size,
-                )
-            )
-        return tuple(
-            rewrite_dynamic_batch_value(
-                item,
-                traced_batch_size=traced_batch_size,
-                runtime_batch_size=runtime_batch_size,
-            )
-            for item in value
-        )
-    if isinstance(value, list):
-        if _is_flat_shape_literal(value):
-            return _rewrite_leading_shape_dim(
-                list(value),
-                traced_batch_size=traced_batch_size,
-                runtime_batch_size=runtime_batch_size,
-            )
-        return [
-            rewrite_dynamic_batch_value(
-                item,
-                traced_batch_size=traced_batch_size,
-                runtime_batch_size=runtime_batch_size,
-            )
-            for item in value
-        ]
-    if isinstance(value, dict):
-        return {
-            key: rewrite_dynamic_batch_value(
-                item,
-                traced_batch_size=traced_batch_size,
-                runtime_batch_size=runtime_batch_size,
-            )
-            for key, item in value.items()
-        }
-    return value
-
-
-def _is_flat_shape_literal(value: tuple[Any, ...] | list[Any]) -> bool:
-    """Return whether ``value`` looks like one shape descriptor."""
-
-    return bool(value) and all(
-        (isinstance(item, Integral) and not isinstance(item, bool)) for item in value
-    )
-
-
-def _rewrite_leading_shape_dim(
-    value: list[Any],
-    *,
-    traced_batch_size: int,
-    runtime_batch_size: int,
-) -> list[Any]:
-    """Rewrite only the leading dimension of a flat shape descriptor."""
-
-    if value and int(value[0]) == traced_batch_size:
-        value[0] = runtime_batch_size
-    return value
-
-
 _SHAPE_SENSITIVE_OP_TOKENS = frozenset(
     {
         "view",
@@ -364,6 +235,14 @@ _SHAPE_SENSITIVE_OP_TOKENS = frozenset(
         "new_ones",
         "new_empty",
         "iota",
+        "slice",
+        "dynamic_slice",
+        # tinygrad lowers convolution and pooling into explicit PAD/SHRINK
+        # shape transforms.  Their shape arguments are just as batch-sensitive
+        # as reshape/view arguments, even though they do not contain the word
+        # "reshape" in the op name.
+        "shrink",
+        "pad",
     }
 )
 
@@ -389,83 +268,12 @@ def is_dynamic_batch_shape_sensitive_op(*names: str | None) -> bool:
     return False
 
 
-def maybe_rewrite_dynamic_batch_value(
-    value: Any,
-    *,
-    op_type: str | None,
-    func_name: str | None = None,
-    traced_batch_size: int | None,
-    runtime_batch_size: int | None,
-    dynamic_batch: tuple[int, int] | None,
-) -> Any:
-    """Rewrite batch literals only for audited shape-sensitive operations.
-
-    Parameters
-    ----------
-    value:
-        Literal value or nested literal value.
-    op_type:
-        Backend operation type.
-    func_name:
-        Optional callable/function name.
-    traced_batch_size:
-        Batch size captured in the trace.
-    runtime_batch_size:
-        Batch size being replayed.
-    dynamic_batch:
-        Optional inclusive runtime batch range.
-
-    Returns
-    -------
-    Any
-        Rewritten value when the op is shape-sensitive, otherwise ``value``.
-    """
-
-    if dynamic_batch is None:
-        return value
-    if not is_dynamic_batch_shape_sensitive_op(op_type, func_name):
-        return value
-    return rewrite_dynamic_batch_value(
-        value,
-        traced_batch_size=traced_batch_size,
-        runtime_batch_size=runtime_batch_size,
-    )
-
-
-def require_safe_dynamic_shape_rewrite(
-    *,
-    op_type: str,
-    backend: str,
-    split_point: str,
-    label: str,
-) -> None:
-    """Raise for shape-sensitive ops without a backend rewrite policy."""
-
-    if is_dynamic_batch_shape_sensitive_op(op_type):
-        return
-    raise SplitUnsupportedError(
-        f"Dynamic batch replay cannot safely rewrite shape literals for {op_type!r}.",
-        context=SplitErrorContext(
-            backend=backend,
-            split_point=split_point,
-            module_path=None,
-            op_type=op_type,
-            layer_label=label,
-            reason="unsafe dynamic shape rewrite",
-        ),
-    )
-
-
 __all__ = [
     "ShapeEnv",
     "SymbolicDim",
     "SymbolicShape",
-    "infer_runtime_batch_size_from_overlay",
     "infer_traced_batch_size",
     "is_dynamic_batch_shape_sensitive_op",
-    "maybe_rewrite_dynamic_batch_value",
-    "require_safe_dynamic_shape_rewrite",
-    "rewrite_dynamic_batch_value",
     "symbolic_shape_from_tensor_ref",
     "validate_tensor_against_symbolic_shape",
 ]

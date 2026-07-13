@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 import torchlens as tl
-from torchlens.split.errors import SplitUnsupportedError
+from torchlens.split.errors import SplitBoundaryError, SplitUnsupportedError
 
 
 def _flatten_numbers(value: Any) -> list[float]:
@@ -31,16 +31,21 @@ def test_jax_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
         return hidden * 2.0 + 1.0
 
     x = jnp.array([[-1.0, 2.0, 3.0], [4.0, -5.0, 6.0]])
-    runtime = tl.split.prepare(model, x, split_request("after:max", backend="jax"))
+    runtime = tl.split.prepare(
+        model,
+        x,
+        split_request("after:max", backend="jax", dynamic_batch=(1, 4)),
+    )
 
-    boundary = runtime.run_prefix(x)
+    replay_x = jnp.ones((3, 3))
+    boundary = runtime.run_prefix(replay_x)
     runtime.validate_boundary(boundary)
-    assert bool(jnp.allclose(runtime.run_suffix(boundary), model(x)))
+    assert bool(jnp.allclose(runtime.run_suffix(boundary), model(replay_x)))
 
     runtime.save_boundary(boundary, tmp_path)
     loaded = runtime.load_boundary(tmp_path)
     runtime.validate_boundary(loaded)
-    assert bool(jnp.allclose(runtime.run_suffix(loaded), model(x)))
+    assert bool(jnp.allclose(runtime.run_suffix(loaded), model(replay_x)))
 
 
 def test_tinygrad_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
@@ -53,19 +58,26 @@ def test_tinygrad_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
         return hidden * 2.0 + 1.0
 
     x = tinygrad.Tensor([[-1.0, 2.0, 3.0], [4.0, -5.0, 6.0]]).realize()
-    runtime = tl.split.prepare(model, x, split_request("after:where", backend="tinygrad"))
+    runtime = tl.split.prepare(
+        model,
+        x,
+        split_request("after:where", backend="tinygrad", dynamic_batch=(1, 4)),
+    )
 
-    boundary = runtime.run_prefix(x)
+    replay_x = tinygrad.Tensor(
+        [[-1.0, 2.0, 3.0], [4.0, -5.0, 6.0], [7.0, -8.0, 9.0]]
+    ).realize()
+    boundary = runtime.run_prefix(replay_x)
     runtime.validate_boundary(boundary)
     assert _flatten_numbers(runtime.run_suffix(boundary).tolist()) == pytest.approx(
-        _flatten_numbers(model(x).realize().tolist())
+        _flatten_numbers(model(replay_x).realize().tolist())
     )
 
     runtime.save_boundary(boundary, tmp_path)
     loaded = runtime.load_boundary(tmp_path)
     runtime.validate_boundary(loaded)
     assert _flatten_numbers(runtime.run_suffix(loaded).tolist()) == pytest.approx(
-        _flatten_numbers(model(x).realize().tolist())
+        _flatten_numbers(model(replay_x).realize().tolist())
     )
 
 
@@ -91,6 +103,46 @@ def test_tf_split_replay_and_cache_roundtrip(tmp_path: Path) -> None:
     assert bool(tf.reduce_all(tf.abs(runtime.run_suffix(loaded) - model(x)) < 1e-5).numpy())
 
 
+def test_jax_split_replay_preserves_integer_dict_and_list_containers() -> None:
+    """JAX replay preserves container kinds when integer keys are present."""
+
+    jnp = pytest.importorskip("jax.numpy")
+
+    def model(x: Any) -> Any:
+        hidden = jnp.maximum(x, 0)
+        result = hidden * 2.0
+        return {0: result, 1: [result + 1.0]}
+
+    x = jnp.ones((2, 3))
+    runtime = tl.split.prepare(model, x, split_request("after:max", backend="jax"))
+    output = runtime.replay(x)
+    assert isinstance(output, dict)
+    assert isinstance(output[1], list)
+    expected = jnp.maximum(x, 0) * 2.0
+    assert bool(jnp.allclose(output[0], expected))
+    assert bool(jnp.allclose(output[1][0], expected + 1.0))
+
+
+def test_tf_split_replay_preserves_integer_dict_and_list_containers() -> None:
+    """TensorFlow replay preserves container kinds when integer keys are present."""
+
+    tf = pytest.importorskip("tensorflow")
+
+    def model(x: Any) -> Any:
+        hidden = tf.nn.relu(x)
+        result = hidden * 2.0
+        return {0: result, 1: [result + 1.0]}
+
+    x = tf.ones((2, 3), dtype=tf.float32)
+    runtime = tl.split.prepare(model, x, split_request("after:relu", backend="tf"))
+    output = runtime.replay(x)
+    assert isinstance(output, dict)
+    assert isinstance(output[1], list)
+    expected = tf.nn.relu(x) * 2.0
+    assert bool(tf.reduce_all(tf.equal(output[0], expected)).numpy())
+    assert bool(tf.reduce_all(tf.equal(output[1][0], expected + 1.0)).numpy())
+
+
 def test_jax_dynamic_batch_replay_for_reshape() -> None:
     """JAX replay rewrites conservative leading-batch shape literals."""
 
@@ -110,6 +162,27 @@ def test_jax_dynamic_batch_replay_for_reshape() -> None:
 
     for batch in (1, 2, 4):
         replay_x = jnp.ones((batch, 3, 2))
+        assert bool(jnp.allclose(runtime.replay(replay_x), model(replay_x)))
+
+
+def test_jax_dynamic_batch_replay_for_broadcast_bias() -> None:
+    """JAX rewrites data-batch broadcast shapes without rewriting parameters."""
+
+    jnp = pytest.importorskip("jax.numpy")
+
+    def model(x: Any) -> Any:
+        hidden = x + jnp.ones((4,), dtype=x.dtype)
+        return hidden * 2.0
+
+    x = jnp.ones((2, 4))
+    runtime = tl.split.prepare(
+        model,
+        x,
+        split_request("after:broadcast_in_dim_2_3_raw", backend="jax", dynamic_batch=(1, 4)),
+    )
+
+    for batch in (1, 2, 4):
+        replay_x = jnp.ones((batch, 4))
         assert bool(jnp.allclose(runtime.replay(replay_x), model(replay_x)))
 
 
@@ -217,7 +290,7 @@ def test_tinygrad_dynamic_batch_rejects_out_of_range_batch() -> None:
         split_request("after:reshape_3", backend="tinygrad", dynamic_batch=(1, 4)),
     )
 
-    with pytest.raises(SplitUnsupportedError, match="outside"):
+    with pytest.raises(SplitBoundaryError, match="outside"):
         runtime.replay(tinygrad.Tensor.ones(5, 3, 2).realize())
 
 

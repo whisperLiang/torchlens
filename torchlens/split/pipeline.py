@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from hashlib import sha256
 from typing import Any
 
 from ..backends import resolve_backend_spec
@@ -16,6 +18,7 @@ from .program import (
     build_capability_report,
     lower_replay_program,
 )
+from .shape_program import compile_shape_program
 
 
 def capture_model(
@@ -54,6 +57,9 @@ def normalize_to_split_ir(
     capture: Any,
     spec: SplitRequest,
     *,
+    inputs: tuple[Any, ...] = (),
+    input_kwargs: dict[str, Any] | None = None,
+    adapter: Any | None = None,
     plan: SplitPlan | None = None,
     model_profile: SplitModelProfile | None = None,
 ) -> tuple[SplitTraceGraph, SplitGraphIR]:
@@ -68,6 +74,28 @@ def normalize_to_split_ir(
             dynamic_batch=spec.dynamic_batch,
         )
     )
+    if spec.dynamic_batch is not None:
+        if adapter is None:
+            from .adapters import resolve_split_adapter
+
+            adapter = resolve_split_adapter(graph.backend)
+        shape_program = compile_shape_program(
+            graph,
+            inputs,
+            input_kwargs,
+            spec,
+            adapter=adapter,
+        )
+        if shape_program is not None:
+            graph_hash = sha256(
+                f"{graph.graph_shape_hash or ''}:{shape_program.fingerprint}".encode("utf-8")
+            ).hexdigest()
+            graph = replace(
+                graph,
+                graph_shape_hash=graph_hash,
+                traced_batch_size=shape_program.traced_batch_size,
+                shape_program=shape_program,
+            )
     resolved_plan = plan if plan is not None else plan_split(graph, spec)
     return graph, SplitGraphIR.from_trace_graph(
         graph,

@@ -7,12 +7,13 @@ from typing import Any
 
 from ...backends.tf.op_callback_capture import TFOpCapture
 from ...backends.tf.validation import _replay_raw_op
+from ...ir.container import rebuild_container_from_spec, reorder_container_leaves
 from ..boundary import ReplayBoundary
 from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
 from ..graph import SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
-from ..shape import infer_runtime_batch_size_from_overlay, maybe_rewrite_dynamic_batch_value
+from ..shape_program import ShapeBinding
 from ..ir import SplitRequest
 from .base import SegmentBundle, SplitPolicyMixin
 
@@ -92,6 +93,7 @@ class _TfGeneratedSegmentBase:
         self.node_ids = node_ids
         self._node_by_id = graph.node_by_id
         self._label_to_id = graph.node_id_by_alias
+        self._shape_binding: ShapeBinding | None = None
 
     def _context(self, node: SplitTraceNode, reason: str) -> SplitErrorContext:
         """Build an error context for ``node``."""
@@ -159,19 +161,6 @@ class _TfGeneratedSegmentBase:
             )
         return overlay[parent_id]
 
-    def _runtime_batch_size(self, overlay: dict[str, Any]) -> int | None:
-        """Infer runtime batch size from available replay tensors."""
-
-        if self.spec.dynamic_batch is None or self.graph.traced_batch_size is None:
-            return None
-        tf = _tf()
-        return infer_runtime_batch_size_from_overlay(
-            overlay,
-            node_by_id=self._node_by_id,
-            traced_batch_size=self.graph.traced_batch_size,
-            is_tensor=lambda value: isinstance(value, (tf.Tensor, tf.Variable)),
-        )
-
     def _rewrite_tf_literal_tensor(
         self,
         value: Any,
@@ -183,17 +172,29 @@ class _TfGeneratedSegmentBase:
 
         tf = _tf()
         tensor = tf.convert_to_tensor(value)
+        capture = node.target
+        if isinstance(capture, TFOpCapture) and capture.inputs:
+            first_input = min(capture.inputs, key=lambda item: item.input_index)
+            parent_label = first_input.producer_label_raw or first_input.source_label_raw
+            parent_id = self._label_to_id.get(parent_label) if parent_label is not None else None
+            parent = self._node_by_id.get(parent_id) if parent_id is not None else None
+            if parent is not None and (
+                parent.is_buffer
+                or parent.is_param_source
+                or parent.replay_source_policy.startswith("live_param")
+                or parent.op_type.lower() in {"readvariableop", "varhandleop"}
+            ):
+                return tensor
+        if self.graph.shape_program is None or self._shape_binding is None:
+            return tensor
         try:
             payload = tensor.numpy().tolist()
         except Exception:
             return tensor
-        rewritten = maybe_rewrite_dynamic_batch_value(
+        rewritten = self.graph.shape_program.rewrite(
+            node.canonical_id,
             payload,
-            op_type=node.op_type,
-            func_name=str(getattr(node.target, "op_type", "") or ""),
-            traced_batch_size=self.graph.traced_batch_size,
-            runtime_batch_size=self._runtime_batch_size(overlay),
-            dynamic_batch=self.spec.dynamic_batch,
+            self._shape_binding,
         )
         if rewritten == payload:
             return tensor
@@ -272,11 +273,17 @@ class _TfGeneratedSegmentBase:
 class TfGeneratedPrefix(_TfGeneratedSegmentBase):
     """Generated-eager TensorFlow prefix segment."""
 
-    def __call__(self, *inputs: Any, detach_boundary: bool) -> ReplayBoundary:
+    def __call__(
+        self,
+        *inputs: Any,
+        input_kwargs: dict[str, Any] | None = None,
+        detach_boundary: bool,
+    ) -> ReplayBoundary:
         """Run the prefix and return a replay boundary."""
 
         tf = _tf()
         input_leaves = _flatten_tensor_leaves(inputs, tf)
+        input_leaves.extend(_flatten_tensor_leaves(input_kwargs or {}, tf))
         if len(input_leaves) != len(self.graph.input_node_ids):
             raise SplitUnsupportedError(
                 "Runtime inputs do not match traced TensorFlow tensor input count.",
@@ -288,6 +295,13 @@ class TfGeneratedPrefix(_TfGeneratedSegmentBase):
                     layer_label=None,
                     reason="input count mismatch",
                 ),
+            )
+        if self.graph.shape_program is not None:
+            self._shape_binding = self.graph.shape_program.bind_flat_values(
+                input_leaves,
+                shape_of=lambda value: tuple(int(dim) for dim in value.shape),
+                backend="tf",
+                split_point=self.spec.boundary,
             )
         tape = None
         if detach_boundary:
@@ -321,6 +335,12 @@ class TfGeneratedPrefix(_TfGeneratedSegmentBase):
             "graph_shape_hash": self.graph.graph_shape_hash,
             "batch_symbol": self.spec.batch_symbol,
             "dynamic_batch": self.spec.dynamic_batch,
+            "runtime_batch_size": (
+                None if self._shape_binding is None else self._shape_binding.batch_size
+            ),
+            "shape_program_hash": (
+                None if self.graph.shape_program is None else self.graph.shape_program.fingerprint
+            ),
             "device_policy": self.spec.device_policy,
             "supports_prefix_backward": not detach_boundary,
         }
@@ -342,6 +362,11 @@ class TfGeneratedSuffix(_TfGeneratedSegmentBase):
         """Run the suffix from ``boundary`` and reconstruct final output."""
 
         overlay = dict(boundary.tensors)
+        runtime_batch_size = boundary.metadata.get("runtime_batch_size")
+        if self.graph.shape_program is not None and runtime_batch_size is not None:
+            self._shape_binding = self.graph.shape_program.binding_from_batch(
+                int(runtime_batch_size)
+            )
         for key, item in boundary.spec.items():
             node_id = self._label_to_id.get(item.label)
             if node_id is not None and key in boundary.tensors:
@@ -369,10 +394,19 @@ class TfGeneratedSuffix(_TfGeneratedSegmentBase):
             if not overlay:
                 return None
             return overlay[next(reversed(overlay))]
-        leaves = [self._output_leaf(node, overlay) for node in output_nodes]
-        if len(leaves) == 1:
-            return leaves[0]
-        return tuple(leaves)
+        leaves = [(node.output_container_path, self._output_leaf(node, overlay)) for node in output_nodes]
+        spec = next(
+            (node.output_container_spec for node in output_nodes if node.output_container_spec),
+            None,
+        )
+        if spec is not None:
+            return rebuild_container_from_spec(
+                spec,
+                reorder_container_leaves(spec, leaves),
+            )
+        if len(leaves) == 1 and not leaves[0][0]:
+            return leaves[0][1]
+        return tuple(value for _path, value in leaves)
 
 
 class TfSplitAdapter(SplitPolicyMixin):

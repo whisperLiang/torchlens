@@ -1169,7 +1169,7 @@ def _literal_value_supported(value: Any) -> bool:
         True when the value can be stored directly in an argument template.
     """
 
-    return isinstance(
+    return value is Ellipsis or isinstance(
         value,
         (int, float, bool, str, bytes, type(None), torch.dtype, torch.device, slice),
     )

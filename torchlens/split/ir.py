@@ -62,11 +62,17 @@ class ShapeConstraint:
         "index",
         "shape_producing",
         "opaque",
+        "equal",
+        "product",
+        "range",
+        "axis",
     ]
     value_ids: tuple[str, ...] = ()
     axes: tuple[int, ...] = ()
     expression: str | None = None
     description: str | None = None
+    lhs: Any | None = None
+    rhs: Any | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Return JSON-like constraint metadata."""
@@ -78,6 +84,8 @@ class ShapeConstraint:
             "axes": self.axes,
             "expression": self.expression,
             "description": self.description,
+            "lhs": self.lhs,
+            "rhs": self.rhs,
         }
 
 
@@ -424,7 +432,7 @@ class SplitGraphIR:
                         backend_handle=handle,
                     )
                 )
-            if node.symbolic_output_shape is not None:
+            if node.symbolic_output_shape is not None and graph.shape_program is None:
                 constraints.append(
                     ShapeConstraint(
                         constraint_id=f"shape:{node.canonical_id}",
@@ -434,6 +442,20 @@ class SplitGraphIR:
                         description=f"symbolic shape for {node.label}",
                     )
                 )
+
+        if graph.shape_program is not None:
+            constraints.extend(
+                ShapeConstraint(
+                    constraint_id=constraint.constraint_id,
+                    kind="batch_axis" if constraint.kind == "axis" else constraint.kind,
+                    value_ids=constraint.value_ids,
+                    expression=None,
+                    description=constraint.description,
+                    lhs=None if constraint.lhs is None else constraint.lhs.as_dict(),
+                    rhs=None if constraint.rhs is None else constraint.rhs.as_dict(),
+                )
+                for constraint in graph.shape_program.constraints
+            )
 
         if plan is not None:
             for key, spec in plan.boundary_spec.items():
@@ -481,6 +503,15 @@ class SplitFeatures:
             low, high = self.dynamic_batch
             if low <= 0 or high < low:
                 raise ValueError("dynamic_batch must be a positive inclusive range")
+        for path, axis in self.batch_axes.items():
+            if not isinstance(path, str) or not (
+                path.startswith("/args/") or path.startswith("/kwargs/")
+            ):
+                raise ValueError(
+                    "batch_axes keys must be JSON Pointers rooted at /args or /kwargs"
+                )
+            if not isinstance(axis, int):
+                raise TypeError("batch_axes values must be integer axis indexes")
 
 
 @dataclass(frozen=True)

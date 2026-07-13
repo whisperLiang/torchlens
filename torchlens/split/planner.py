@@ -182,6 +182,13 @@ def _frontier_node_ids(
     for node in graph.nodes:
         if node.canonical_id not in suffix_node_ids and not node.is_output:
             continue
+        # A branched model can finish one output before the requested split
+        # point while another output branch continues into the suffix.  That
+        # completed output has no suffix child to expose it as a normal
+        # crossing parent, so carry the output node itself through the
+        # boundary ABI.
+        if node.is_output and node.canonical_id in prefix_node_ids:
+            frontier.add(node.canonical_id)
         for parent in node.parents:
             parent_node = graph.node_for_label(parent)
             if parent_node is not None and parent_node.canonical_id in prefix_node_ids:

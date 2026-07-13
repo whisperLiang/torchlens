@@ -13,6 +13,7 @@ from ...backends import BackendName
 from ...data_classes.param import ParamAccessor
 from ...data_classes.trace import Trace
 from ...ir.capture_events import CaptureEvents
+from ...ir.container import ContainerSpec, DictKey, TupleIndex
 from ...intervention.selectors import BaseSelector
 from ...postprocess._materialize import materialize_from_events
 from ...quantities import Duration
@@ -959,7 +960,8 @@ def _mark_outputs(trace: Trace, output: object, producer_by_ref: Mapping[object,
         Mutates output-layer event flags.
     """
 
-    for tensor in _iter_output_tensors(output):
+    container_spec = _tf_output_container_spec(output)
+    for tensor, container_path in _iter_output_tensors_with_paths(output):
         ref = getattr(tensor, "ref", None)
         if not callable(ref):
             continue
@@ -973,7 +975,13 @@ def _mark_outputs(trace: Trace, output: object, producer_by_ref: Mapping[object,
         event = trace.capture_events.op_event_by_label_raw.get(label)
         if event is None:
             continue
-        updated = replace(event, is_output_parent=True)
+        updated_output = replace(
+            event.output,
+            container_path=container_path,
+            in_multi_output=bool(container_path),
+            container_spec=container_spec,
+        )
+        updated = replace(event, is_output_parent=True, output=updated_output)
         trace.capture_events.op_event_by_label_raw[label] = updated
         for index, candidate in enumerate(trace.capture_events.op_events):
             if candidate.label_raw == label:
@@ -1027,19 +1035,58 @@ def _iter_output_tensors(value: object) -> list[Any]:
         Tensor-like leaves with ``ref`` methods.
     """
 
+    return [tensor for tensor, _path in _iter_output_tensors_with_paths(value)]
+
+
+def _iter_output_tensors_with_paths(
+    value: object,
+    path: tuple[object, ...] = (),
+) -> list[tuple[Any, tuple[object, ...]]]:
+    """Return output tensor leaves together with their container paths."""
+
     if callable(getattr(value, "ref", None)):
-        return [value]
+        return [(value, path)]
     if isinstance(value, (list, tuple)):
-        tensors: list[Any] = []
-        for item in value:
-            tensors.extend(_iter_output_tensors(item))
+        tensors: list[tuple[Any, tuple[object, ...]]] = []
+        for index, item in enumerate(value):
+            tensors.extend(_iter_output_tensors_with_paths(item, (*path, index)))
         return tensors
     if isinstance(value, dict):
         tensors = []
-        for item in value.values():
-            tensors.extend(_iter_output_tensors(item))
+        for key, item in value.items():
+            tensors.extend(_iter_output_tensors_with_paths(item, (*path, key)))
         return tensors
     return []
+
+
+def _tf_output_container_spec(value: object) -> ContainerSpec | None:
+    """Build a portable container spec for a TensorFlow model output."""
+
+    if callable(getattr(value, "ref", None)):
+        return None
+    if isinstance(value, tuple) and type(value) is tuple:
+        tuple_child_specs: tuple[tuple[Any, ContainerSpec], ...] = tuple(
+            (TupleIndex(index), child_spec)
+            for index, item in enumerate(value)
+            if (child_spec := _tf_output_container_spec(item)) is not None
+        )
+        return ContainerSpec(kind="tuple", length=len(value), child_specs=tuple_child_specs)
+    if isinstance(value, list):
+        list_child_specs: tuple[tuple[Any, ContainerSpec], ...] = tuple(
+            (TupleIndex(index), child_spec)
+            for index, item in enumerate(value)
+            if (child_spec := _tf_output_container_spec(item)) is not None
+        )
+        return ContainerSpec(kind="list", length=len(value), child_specs=list_child_specs)
+    if isinstance(value, dict) and type(value) is dict:
+        keys = tuple(value)
+        dict_child_specs: tuple[tuple[Any, ContainerSpec], ...] = tuple(
+            (DictKey(key), child_spec)
+            for key in keys
+            if (child_spec := _tf_output_container_spec(value[key])) is not None
+        )
+        return ContainerSpec(kind="dict", keys=keys, child_specs=dict_child_specs)
+    return ContainerSpec(kind="literal", literal_value=value)
 
 
 def _attach_tf_op_params(

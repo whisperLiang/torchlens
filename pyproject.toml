@@ -57,17 +57,19 @@ jax-gpu = ["jax[cuda13]", "equinox", "flax", "dm-haiku"]
 tinygrad = ["tinygrad>=0.13,<0.14"]
 paddle = ["paddlepaddle>=3.3,<3.4"]
 paddle-gpu = [
-    "paddlepaddle-gpu @ https://paddle-whl.bj.bcebos.com/stable/cu130/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0-cp39-cp39-linux_x86_64.whl; python_version == '3.9' and platform_system == 'Linux' and platform_machine == 'x86_64'",
-    "paddlepaddle-gpu @ https://paddle-whl.bj.bcebos.com/stable/cu130/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0-cp310-cp310-linux_x86_64.whl; python_version == '3.10' and platform_system == 'Linux' and platform_machine == 'x86_64'",
-    "paddlepaddle-gpu @ https://paddle-whl.bj.bcebos.com/stable/cu130/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0-cp311-cp311-linux_x86_64.whl; python_version == '3.11' and platform_system == 'Linux' and platform_machine == 'x86_64'",
-    "paddlepaddle-gpu @ https://paddle-whl.bj.bcebos.com/stable/cu130/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0-cp312-cp312-linux_x86_64.whl; python_version == '3.12' and platform_system == 'Linux' and platform_machine == 'x86_64'",
-    "paddlepaddle-gpu @ https://paddle-whl.bj.bcebos.com/stable/cu130/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0-cp313-cp313-linux_x86_64.whl; python_version == '3.13' and platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "paddlepaddle-gpu @ https://paddle-whl.bj.bcebos.com/stable/cu130/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0-cp39-cp39-linux_x86_64.whl ; python_version == '3.9' and platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "paddlepaddle-gpu @ https://paddle-whl.bj.bcebos.com/stable/cu130/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0-cp310-cp310-linux_x86_64.whl ; python_version == '3.10' and platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "paddlepaddle-gpu @ https://paddle-whl.bj.bcebos.com/stable/cu130/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0-cp311-cp311-linux_x86_64.whl ; python_version == '3.11' and platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "paddlepaddle-gpu @ https://paddle-whl.bj.bcebos.com/stable/cu130/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0-cp312-cp312-linux_x86_64.whl ; python_version == '3.12' and platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "paddlepaddle-gpu @ https://paddle-whl.bj.bcebos.com/stable/cu130/paddlepaddle-gpu/paddlepaddle_gpu-3.3.0-cp313-cp313-linux_x86_64.whl ; python_version == '3.13' and platform_system == 'Linux' and platform_machine == 'x86_64'",
 ]
 tf = ["tensorflow>=2.16"]
 tensorflow = ["tensorflow>=2.16"]
 tf-gpu = ["tensorflow[and-cuda]>=2.16"]
 tensorflow-gpu = ["tensorflow[and-cuda]>=2.16"]
-hf = ["transformers~=4.45", "timm~=1.0"]
+hf = ["transformers>=5.1,<6", "timm~=1.0"]
+detection = ["ultralytics>=8.4,<8.5", "rfdetr>=1.8,<1.9"]
+detection-tf = ["keras-cv>=0.9,<1"]
 gradcam = ["pytorch-grad-cam~=1.5"]
 shap = ["shap~=0.46"]
 inseq = ["inseq~=0.6"]
@@ -99,6 +101,7 @@ dev = ["ruff", "pytest", "pytest-cov", "mypy", "pip-audit", "pre-commit"]
 io = ["pyarrow"]
 test = [
     "lightning",
+    "pandas>=2.0",
     "pillow",
     "pytest",
     "pytest-timeout",

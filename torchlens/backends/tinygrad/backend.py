@@ -52,6 +52,65 @@ from .._selective_save import pop_static_label_save_predicate
 _ACTIVE_TINYGRAD_MODULE_STACK: list["TinygradModuleFrame"] = []
 
 
+def _live_tinygrad_tensors_by_uop(model: Any) -> dict[int, Any]:
+    """Collect live Tensor handles reachable from a tinygrad callable.
+
+    UOp snapshots do not retain the Python ``Tensor`` object on which
+    ``requires_grad`` and ``grad`` are stored.  Closure/global references are
+    common for functional tinygrad models, so capture them explicitly for
+    training-time parameter rebinding.  Module parameters are included too;
+    the traversal is identity guarded and stops at Tensor leaves.
+    """
+
+    try:
+        from tinygrad import Tensor
+    except ImportError:
+        return {}
+
+    found: dict[int, Any] = {}
+    visited: set[int] = set()
+
+    def visit(value: Any) -> None:
+        value_id = id(value)
+        if value_id in visited:
+            return
+        visited.add(value_id)
+        if isinstance(value, Tensor):
+            uop = getattr(value, "uop", None)
+            if uop is not None:
+                found.setdefault(id(uop), value)
+            return
+        if inspect.ismodule(value) or inspect.isclass(value):
+            return
+        if isinstance(value, Mapping):
+            for item in value.values():
+                visit(item)
+            return
+        if isinstance(value, (tuple, list, set, frozenset)):
+            for item in value:
+                visit(item)
+            return
+        closure = getattr(value, "__closure__", None)
+        for cell in closure or ():
+            try:
+                visit(cell.cell_contents)
+            except ValueError:
+                continue
+        code = getattr(value, "__code__", None)
+        globals_dict = getattr(value, "__globals__", {})
+        for name in getattr(code, "co_names", ()):
+            if name in globals_dict:
+                visit(globals_dict[name])
+        defaults = getattr(value, "__defaults__", None) or ()
+        for item in defaults:
+            visit(item)
+        for item in getattr(value, "__dict__", {}).values():
+            visit(item)
+
+    visit(model)
+    return found
+
+
 @dataclass(frozen=True)
 class TinygradUOpCapture:
     """Captured tinygrad UOp metadata for validation.
@@ -70,6 +129,9 @@ class TinygradUOpCapture:
         UOp source positions for each raw parent label.
     payload_snapshot
         Realized tinygrad tensor copy saved during capture.
+    live_tensor
+        Live tensor handle for parameter/buffer UOps when it can be resolved
+        from the callable or module object.  This is backend-only metadata.
     """
 
     label_raw: str
@@ -78,6 +140,7 @@ class TinygradUOpCapture:
     parent_labels: tuple[str, ...]
     parent_arg_positions: tuple[tuple[int, str], ...]
     payload_snapshot: Any
+    live_tensor: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -401,6 +464,7 @@ class TinygradBackend:
         trace.capture_start_time = time.time()
         observed_ops: dict[int, list[str]] = {}
         observed_module_stacks: dict[int, tuple[TinygradModuleFrame, ...]] = {}
+        live_tensors_by_uop = _live_tinygrad_tensors_by_uop(model)
         input_identities = self._input_identities(args)
         module_call_context = (
             scoped_tinygrad_module_calls(module_tree, observed_module_stacks)
@@ -434,6 +498,7 @@ class TinygradBackend:
             observed_ops,
             observed_module_stacks,
             module_tree if use_object_module else None,
+            live_tensors_by_uop,
         )
         self._mark_output_events(trace, outputs, uop_labels, captures)
         if use_object_module and module_tree is not None:
@@ -740,6 +805,7 @@ class TinygradBackend:
         observed_ops: Mapping[int, list[str]],
         observed_module_stacks: Mapping[int, tuple[TinygradModuleFrame, ...]],
         module_tree: TinygradModuleTree | None,
+        live_tensors_by_uop: Mapping[int, Any] | None = None,
     ) -> tuple[TinygradUOpCapture, ...]:
         """Emit one event for each tensor-shaped UOp reachable from outputs.
 
@@ -757,6 +823,8 @@ class TinygradBackend:
             First-observed live module stack keyed by returned UOp id.
         module_tree
             Discovered tinygrad module tree for object-module captures, if any.
+        live_tensors_by_uop
+            Optional live Tensor handles keyed by UOp identity.
 
         Returns
         -------
@@ -812,6 +880,7 @@ class TinygradBackend:
                         (cast(int, edge.arg_position), edge.parent_label_raw) for edge in parents
                     ),
                     payload_snapshot=payload,
+                    live_tensor=(live_tensors_by_uop or {}).get(id(uop)),
                 )
             )
         return tuple(captures)
@@ -1576,7 +1645,7 @@ class TinygradBackend:
         return Tensor(uop)
 
     def _realized_copy(self, value: Any) -> Any:
-        """Return a sanctioned live payload copy for ``DEV=PYTHON`` tinygrad.
+        """Return a detached same-device realized tinygrad payload copy.
 
         Parameters
         ----------
@@ -1589,9 +1658,19 @@ class TinygradBackend:
             Realized tinygrad Tensor copy detached from the source UOp lineage.
         """
 
+        detach = getattr(value, "detach", None)
+        source = detach() if callable(detach) else value
+        clone = getattr(source, "clone", None)
+        if callable(clone):
+            return clone().realize()
+
+        # tinygrad 0.13 exposes clone(), but retain a guarded compatibility
+        # path for older adapter probes.  This path is intentionally last: a
+        # normal replay must never round-trip a GPU boundary through Python
+        # lists.
         from tinygrad import Tensor
 
-        return Tensor(value.tolist(), dtype=value.dtype, device=value.device).realize()
+        return Tensor(source.tolist(), dtype=source.dtype, device=source.device).realize()
 
     def _assert_runtime_supported(self) -> None:
         """Reject tinygrad runtimes outside the S0.G-proven live-payload envelope.

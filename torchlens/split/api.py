@@ -118,7 +118,14 @@ def prepare(
         )
 
     capture = capture_model(model, input_tuple, request, input_kwargs=input_kwargs)
-    graph, graph_ir = normalize_to_split_ir(capture, request, model_profile=profile)
+    graph, graph_ir = normalize_to_split_ir(
+        capture,
+        request,
+        inputs=input_tuple,
+        input_kwargs=input_kwargs,
+        adapter=adapter,
+        model_profile=profile,
+    )
     plan = plan_split(graph, request)
     prefix_program = lower_split_program(
         graph, plan, request, segment="prefix", adapter=adapter
@@ -153,6 +160,7 @@ def prepare(
         suffix_program=suffix_program,
         graph_ir=graph_ir,
         model_profile=profile,
+        prepared_input_kwargs=input_kwargs,
     )
 
 

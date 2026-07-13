@@ -124,7 +124,9 @@ def _forward_peak_memory_bracket(trace: "Trace", device: "object | None") -> "It
     torch_module: Any = None
     if device_type in {"cuda", "mps"}:
         try:
-            import torch as torch_module
+            import torch as torch_runtime
+
+            torch_module = torch_runtime
         except ImportError:
             torch_module = None
 

@@ -16,6 +16,8 @@ _COLLATE_METADATA_KEYS = (
     "graph_shape_hash",
     "batch_symbol",
     "dynamic_batch",
+    "runtime_batch_size",
+    "shape_program_hash",
     "device_policy",
     "profile_hash",
     "state_fingerprint",
@@ -52,6 +54,8 @@ class ReplayBoundary:
         graph_hash: str | None = None,
         profile_hash: str | None = None,
         state_fingerprint: str | None = None,
+        shape_program_hash: str | None = None,
+        shape_program: Any | None = None,
         adapter: SplitBackendAdapter | None = None,
     ) -> None:
         """Validate this boundary against its ABI spec.
@@ -84,6 +88,7 @@ class ReplayBoundary:
             ("graph_shape_hash", graph_hash),
             ("profile_hash", profile_hash),
             ("state_fingerprint", state_fingerprint),
+            ("shape_program_hash", shape_program_hash),
         )
         for field_name, expected_value in expected_metadata:
             if expected_value is None or field_name not in self.metadata:
@@ -153,16 +158,33 @@ class ReplayBoundary:
                         dtype=dtype,
                     ),
                 )
-            validate_tensor_against_symbolic_shape(
-                value,
-                expected_item.shape,
-                adapter=resolved_adapter,
-                dynamic_batch=self.metadata.get("dynamic_batch"),
-                batch_symbol=self.metadata.get("batch_symbol", "B"),
-                backend=self.backend,
-                split_point=str(split_id or self.metadata.get("split_id", "")),
-                label=expected_item.label,
-            )
+            if shape_program is None:
+                validate_tensor_against_symbolic_shape(
+                    value,
+                    expected_item.shape,
+                    adapter=resolved_adapter,
+                    dynamic_batch=self.metadata.get("dynamic_batch"),
+                    batch_symbol=self.metadata.get("batch_symbol", "B"),
+                    backend=self.backend,
+                    split_point=str(split_id or self.metadata.get("split_id", "")),
+                    label=expected_item.label,
+                )
+            else:
+                value_shape = shape_program.value_shapes.get(expected_item.canonical_id)
+                runtime_batch = self.metadata.get("runtime_batch_size")
+                if value_shape is not None and runtime_batch is not None:
+                    expected_runtime_shape = value_shape.evaluate(
+                        shape_program.binding_from_batch(int(runtime_batch))
+                    )
+                    actual_runtime_shape = resolved_adapter.shape(value)
+                    if (
+                        actual_runtime_shape is not None
+                        and tuple(actual_runtime_shape) != tuple(expected_runtime_shape)
+                    ):
+                        raise SplitBoundaryError(
+                            f"Boundary tensor {key!r} shape is {actual_runtime_shape}, "
+                            f"expected solved shape {expected_runtime_shape}."
+                        )
 
     def detach(self, adapter: SplitBackendAdapter | None = None) -> "ReplayBoundary":
         """Return a boundary with detached tensor values."""

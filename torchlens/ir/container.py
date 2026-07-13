@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import importlib
 from typing import Any, ClassVar, Literal, TypeAlias
@@ -124,6 +124,90 @@ def rebuild_container_from_spec(spec: ContainerSpec, leaves: list[Any] | tuple[A
     if next(leaf_iter, sentinel) is not sentinel:
         raise ValueError("Too many leaves supplied for ContainerSpec.")
     return rebuilt
+
+
+def reorder_container_leaves(
+    spec: ContainerSpec,
+    leaves: Sequence[tuple[tuple[Any, ...], Any]],
+) -> list[Any]:
+    """Order captured leaves according to a container specification.
+
+    Parameters
+    ----------
+    spec:
+        Container shape captured during output traversal.
+    leaves:
+        Leaves paired with their raw container paths.
+
+    Returns
+    -------
+    list[Any]
+        Leaves in the depth-first order expected by
+        :func:`rebuild_container_from_spec`.
+
+    Raises
+    ------
+    ValueError
+        If the captured paths do not match the specification.
+    """
+
+    values_by_path = {
+        tuple(_raw_path_component(component) for component in path): value
+        for path, value in leaves
+    }
+    expected_paths = _container_spec_leaf_paths(spec)
+    if len(values_by_path) != len(expected_paths) or any(
+        path not in values_by_path for path in expected_paths
+    ):
+        raise ValueError(
+            "ContainerSpec leaf paths do not match captured output paths: "
+            f"expected={expected_paths!r}, actual={tuple(values_by_path)!r}."
+        )
+    return [values_by_path[path] for path in expected_paths]
+
+
+def _container_spec_leaf_paths(
+    spec: ContainerSpec,
+    prefix: tuple[Any, ...] = (),
+) -> tuple[tuple[Any, ...], ...]:
+    """Return tensor-leaf paths in a container specification's DFS order."""
+
+    if spec.kind in {"literal", "opaque"}:
+        return ()
+    child_by_component = dict(spec.child_specs)
+    if spec.kind in {"tuple", "list", "registered"}:
+        components: Sequence[OutputPathComponent] = tuple(
+            TupleIndex(index) for index in range(spec.length or 0)
+        )
+    elif spec.kind in {"dict", "hf_model_output"}:
+        component_type = DictKey if spec.kind == "dict" else HFKey
+        components = tuple(component_type(key) for key in spec.keys)
+    elif spec.kind == "namedtuple":
+        components = tuple(NamedField(field) for field in spec.fields)
+    elif spec.kind == "dataclass":
+        components = tuple(DataclassField(field) for field in spec.fields)
+    else:
+        raise ValueError(f"Unsupported ContainerSpec kind {spec.kind!r}.")
+
+    paths: list[tuple[Any, ...]] = []
+    for component in components:
+        raw_component = _raw_path_component(component)
+        child_spec = child_by_component.get(component)
+        if child_spec is None:
+            paths.append((*prefix, raw_component))
+        else:
+            paths.extend(_container_spec_leaf_paths(child_spec, (*prefix, raw_component)))
+    return tuple(paths)
+
+
+def _raw_path_component(component: OutputPathComponent) -> Any:
+    """Convert a typed spec component to the raw output-path value."""
+
+    if isinstance(component, (TupleIndex, NamedField, DataclassField)):
+        return component.index if isinstance(component, TupleIndex) else component.name
+    if isinstance(component, (DictKey, HFKey)):
+        return component.key
+    return component
 
 
 def _rebuild_container_from_spec(spec: ContainerSpec, leaf_iter: Any) -> Any:
@@ -340,5 +424,6 @@ __all__ = [
     "TupleIndex",
     "get_registered_container",
     "register_container",
+    "reorder_container_leaves",
     "rebuild_container_from_spec",
 ]

@@ -23,6 +23,7 @@ from .ir import (
     before,
     percent,
 )
+from .shape_program import DimExpr, ShapeBinding, ShapeProgram, ShapeRecipe, TensorShapeIR
 from .program import CapabilityStatus, ReplayOp, ReplayProgram, SplitCapabilityReport
 from .profiles import (
     checkpoint_cache_path,
@@ -53,6 +54,11 @@ __all__ = [
     "ReplayBoundary",
     "RegionIR",
     "ShapeConstraint",
+    "DimExpr",
+    "ShapeBinding",
+    "ShapeProgram",
+    "ShapeRecipe",
+    "TensorShapeIR",
     "SplitCapabilityReport",
     "SplitFeatures",
     "SplitGraphIR",

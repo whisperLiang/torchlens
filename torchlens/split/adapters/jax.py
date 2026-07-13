@@ -11,12 +11,13 @@ from ...backends.jax.jaxpr import (
     _evaluate_closed_jaxpr_no_capture,
     replay_equation,
 )
+from ...ir.container import rebuild_container_from_spec, reorder_container_leaves
 from ..boundary import ReplayBoundary
 from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
 from ..graph import SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
-from ..shape import infer_runtime_batch_size_from_overlay, maybe_rewrite_dynamic_batch_value
+from ..shape_program import ShapeBinding
 from ..ir import SplitRequest
 from .base import SegmentBundle, SplitPolicyMixin
 
@@ -42,6 +43,7 @@ def _slice_output_by_path(output: Any, path: tuple[Any, ...]) -> Any:
 
     current = output
     for component in path:
+        component = _jax_tree_key(component)
         if isinstance(current, dict):
             current = current[component]
         elif isinstance(component, str) and hasattr(current, component):
@@ -49,6 +51,51 @@ def _slice_output_by_path(output: Any, path: tuple[Any, ...]) -> Any:
         else:
             current = current[component]
     return current
+
+
+def _jax_tree_key(component: Any) -> Any:
+    """Convert a JAX tree path entry to a native container key."""
+
+    if hasattr(component, "key"):
+        return component.key
+    if hasattr(component, "idx"):
+        return component.idx
+    return component
+
+
+def _rebuild_output_container(
+    leaves: list[tuple[tuple[Any, ...], Any]],
+) -> Any:
+    """Rebuild a JAX output pytree from its recorded leaf paths."""
+
+    def build(items: list[tuple[tuple[Any, ...], Any]]) -> Any:
+        if len(items) == 1 and not items[0][0]:
+            return items[0][1]
+        keys: list[Any] = []
+        for path, _value in items:
+            if path:
+                key = _jax_tree_key(path[0])
+                if key not in keys:
+                    keys.append(key)
+        if not keys:
+            return tuple(value for _path, value in items)
+        children = {
+            key: build(
+                [
+                    (tuple(_jax_tree_key(item) for item in path[1:]), value)
+                    for path, value in items
+                    if path and _jax_tree_key(path[0]) == key
+                ]
+            )
+            for key in keys
+        }
+        if all(isinstance(key, str) for key in keys):
+            return children
+        if all(isinstance(key, int) for key in keys):
+            return tuple(children[index] for index in sorted(children))
+        return children
+
+    return build(leaves)
 
 
 def _is_jax_tensor(value: Any) -> bool:
@@ -94,39 +141,6 @@ def _flatten_tensor_leaves(value: Any) -> list[Any]:
     return flattened
 
 
-_JAX_DYNAMIC_SHAPE_PARAM_KEYS = frozenset(
-    {
-        "shape",
-        "new_sizes",
-        "sizes",
-    }
-)
-
-
-def _jax_dynamic_param_value(
-    *,
-    key: str,
-    value: Any,
-    node: SplitTraceNode,
-    capture: JaxEquationCapture,
-    traced_batch_size: int | None,
-    runtime_batch_size: int | None,
-    dynamic_batch: tuple[int, int] | None,
-) -> Any:
-    """Rewrite only JAX primitive params that are true shape literals."""
-
-    if key not in _JAX_DYNAMIC_SHAPE_PARAM_KEYS:
-        return value
-    return maybe_rewrite_dynamic_batch_value(
-        value,
-        op_type=node.op_type,
-        func_name=capture.primitive,
-        traced_batch_size=traced_batch_size,
-        runtime_batch_size=runtime_batch_size,
-        dynamic_batch=dynamic_batch,
-    )
-
-
 class _JaxGeneratedSegmentBase:
     """Shared JAX native-IR replay helpers."""
 
@@ -146,6 +160,7 @@ class _JaxGeneratedSegmentBase:
         self.node_ids = node_ids
         self._node_by_id = graph.node_by_id
         self._label_to_id = graph.node_id_by_alias
+        self._shape_binding: ShapeBinding | None = None
 
     def _context(self, node: SplitTraceNode, reason: str) -> SplitErrorContext:
         """Build an error context for ``node``."""
@@ -194,18 +209,6 @@ class _JaxGeneratedSegmentBase:
             )
         return overlay[parent_id]
 
-    def _runtime_batch_size(self, overlay: dict[str, Any]) -> int | None:
-        """Infer runtime batch size from available replay tensors."""
-
-        if self.spec.dynamic_batch is None or self.graph.traced_batch_size is None:
-            return None
-        return infer_runtime_batch_size_from_overlay(
-            overlay,
-            node_by_id=self._node_by_id,
-            traced_batch_size=self.graph.traced_batch_size,
-            is_tensor=_is_jax_tensor,
-        )
-
     def _params_override(
         self,
         capture: JaxEquationCapture,
@@ -214,17 +217,12 @@ class _JaxGeneratedSegmentBase:
     ) -> dict[str, Any] | None:
         """Return dynamic-batch rewritten primitive params when needed."""
 
-        runtime_batch_size = self._runtime_batch_size(overlay)
+        shape_program = self.graph.shape_program
+        binding = self._shape_binding
+        if shape_program is None or binding is None:
+            return None
         rewritten = {
-            key: _jax_dynamic_param_value(
-                key=str(key),
-                value=value,
-                node=node,
-                capture=capture,
-                traced_batch_size=self.graph.traced_batch_size,
-                runtime_batch_size=runtime_batch_size,
-                dynamic_batch=self.spec.dynamic_batch,
-            )
+            key: shape_program.rewrite(node.canonical_id, value, binding)
             for key, value in capture.params.items()
         }
         return None if rewritten == dict(capture.params) else rewritten
@@ -315,17 +313,30 @@ class _JaxGeneratedSegmentBase:
             if node.is_output and node.target is None:
                 continue
             output = self._execute_jax_capture(node, overlay)
-            overlay[node.canonical_id] = _slice_output_by_path(output, node.output_container_path)
+            # Final jaxpr outputs are captured as individual leaf equations;
+            # their DictKey/SequenceKey path describes the public container,
+            # not an additional index into the equation result.
+            overlay[node.canonical_id] = (
+                output
+                if node.is_output
+                else _slice_output_by_path(output, node.output_container_path)
+            )
         return overlay
 
 
 class JaxGeneratedPrefix(_JaxGeneratedSegmentBase):
     """Generated-eager JAX prefix segment."""
 
-    def __call__(self, *inputs: Any, detach_boundary: bool) -> ReplayBoundary:
+    def __call__(
+        self,
+        *inputs: Any,
+        input_kwargs: dict[str, Any] | None = None,
+        detach_boundary: bool,
+    ) -> ReplayBoundary:
         """Run the prefix and return a replay boundary."""
 
         input_leaves = _flatten_tensor_leaves(inputs)
+        input_leaves.extend(_flatten_tensor_leaves(input_kwargs or {}))
         if len(input_leaves) != len(self.graph.input_node_ids):
             raise SplitUnsupportedError(
                 "Runtime inputs do not match traced JAX tensor input count.",
@@ -341,6 +352,16 @@ class JaxGeneratedPrefix(_JaxGeneratedSegmentBase):
         overlay = {
             node_id: value for node_id, value in zip(self.graph.input_node_ids, input_leaves)
         }
+        if self.graph.shape_program is not None:
+            self._shape_binding = self.graph.shape_program.bind_flat_values(
+                input_leaves,
+                shape_of=lambda value: tuple(int(dim) for dim in value.shape),
+                backend="jax",
+                split_point=self.spec.boundary,
+            )
+        runtime_batch_size = (
+            None if self._shape_binding is None else self._shape_binding.batch_size
+        )
         self._execute_nodes(overlay)
         boundary_tensors: dict[str, Any] = {}
         prefix_tensors: dict[str, Any] = {}
@@ -355,6 +376,10 @@ class JaxGeneratedPrefix(_JaxGeneratedSegmentBase):
             "graph_shape_hash": self.graph.graph_shape_hash,
             "batch_symbol": self.spec.batch_symbol,
             "dynamic_batch": self.spec.dynamic_batch,
+            "runtime_batch_size": runtime_batch_size,
+            "shape_program_hash": (
+                None if self.graph.shape_program is None else self.graph.shape_program.fingerprint
+            ),
             "device_policy": self.spec.device_policy,
             "supports_prefix_backward": not detach_boundary,
         }
@@ -376,6 +401,11 @@ class JaxGeneratedSuffix(_JaxGeneratedSegmentBase):
         """Run the suffix from ``boundary`` and reconstruct final output."""
 
         overlay = dict(boundary.tensors)
+        runtime_batch_size = boundary.metadata.get("runtime_batch_size")
+        if self.graph.shape_program is not None and runtime_batch_size is not None:
+            self._shape_binding = self.graph.shape_program.binding_from_batch(
+                int(runtime_batch_size)
+            )
         for key, item in boundary.spec.items():
             node_id = self._label_to_id.get(item.label)
             if node_id is not None and key in boundary.tensors:
@@ -402,10 +432,22 @@ class JaxGeneratedSuffix(_JaxGeneratedSegmentBase):
             if not overlay:
                 return None
             return overlay[next(reversed(overlay))]
-        leaves = [self._output_leaf(node, overlay) for node in output_nodes]
-        if len(leaves) == 1:
-            return leaves[0]
-        return tuple(leaves)
+        leaves = [
+            (node.output_container_path, self._output_leaf(node, overlay))
+            for node in output_nodes
+        ]
+        spec = next(
+            (node.output_container_spec for node in output_nodes if node.output_container_spec),
+            None,
+        )
+        if spec is not None:
+            return rebuild_container_from_spec(
+                spec,
+                reorder_container_leaves(spec, leaves),
+            )
+        if len(leaves) == 1 and not leaves[0][0]:
+            return leaves[0][1]
+        return _rebuild_output_container(leaves)
 
 
 class JaxSplitAdapter(SplitPolicyMixin):

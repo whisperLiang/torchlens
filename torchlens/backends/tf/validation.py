@@ -53,6 +53,7 @@ _PURE_REPLAY_ALLOWLIST = frozenset(
         "Relu6",
         "Reshape",
         "Rsqrt",
+        "Split",
         "Softmax",
         "Sqrt",
         "SquaredDifference",
@@ -82,6 +83,7 @@ _VALUE_OPS = _PURE_REPLAY_ALLOWLIST | frozenset(
         "Sigmoid",
         "Sin",
         "Slice",
+        "Split",
         "Squeeze",
         "Sum",
         "Tile",
@@ -686,6 +688,15 @@ def _replay_raw_op(capture: TFOpCapture, inputs: Sequence[Any]) -> Any:
         ),
         "Tanh": lambda item, args: _raw(item).Tanh(x=args[0]),
         "Transpose": lambda item, args: _raw(item).Transpose(x=args[0], perm=args[1]),
+        "ExpandDims": lambda item, args: _raw(item).ExpandDims(
+            input=args[0], axis=args[1]
+        ),
+        "Split": lambda item, args: _raw(item).Split(
+            axis=args[0], value=args[1], num_split=int(item.attrs["num_split"])
+        ),
+        "Tile": lambda item, args: _raw(item).Tile(
+            input=args[0], multiples=args[1]
+        ),
     }
     replay = dispatch.get(capture.op_type)
     if replay is None:

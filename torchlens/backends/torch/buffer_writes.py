@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import weakref
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, ClassVar
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, cast
 
 import torch
 from torch import nn
@@ -95,7 +95,7 @@ class BufferWriteTracker:
             cls = type(module)
             patched = self._patched_classes.get(cls)
             if patched is None:
-                original = cls.__setattr__
+                original = cast(Callable[[Any, str, Any], None], cls.__setattr__)
                 patched = _PatchedClass(
                     original_setattr=original,
                     prepared_instances=weakref.WeakSet(),

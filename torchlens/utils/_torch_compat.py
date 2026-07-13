@@ -39,7 +39,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 import ctypes
-import importlib
+import importlib.util
 import os
 import sys
 from typing import Any

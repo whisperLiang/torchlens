@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from numbers import Integral
 from typing import Any
 
 from ...intervention.types import LiteralTensor, LiteralValue, ParentRef, Unsupported
@@ -21,7 +20,7 @@ from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
 from ..graph import SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
-from ..shape import infer_runtime_batch_size_from_overlay, rewrite_dynamic_batch_value
+from ..shape_program import ShapeBinding
 from ..ir import SplitRequest
 from .base import SegmentBundle, SplitPolicyMixin
 
@@ -94,26 +93,6 @@ def _dtype_name(value: Any) -> str | None:
     return None if dtype is None else str(dtype)
 
 
-def _is_int_literal(value: Any) -> bool:
-    """Return whether ``value`` is an integer shape literal."""
-
-    return isinstance(value, Integral) and not isinstance(value, bool)
-
-
-def _rewrite_leading_shape_arg(
-    values: list[Any],
-    *,
-    traced_batch_size: int | None,
-    runtime_batch_size: int | None,
-) -> list[Any]:
-    """Rewrite only the leading item in a Torch varargs shape list."""
-
-    if traced_batch_size is not None and runtime_batch_size is not None and values:
-        if _is_int_literal(values[0]) and int(values[0]) == traced_batch_size:
-            values[0] = runtime_batch_size
-    return values
-
-
 class _LiveParamCursor:
     """Sequential matcher from literal tensor template leaves to live params."""
 
@@ -159,6 +138,7 @@ class _GeneratedSegmentBase:
         self.use_live_param_sources = use_live_param_sources
         self._node_by_id = graph.node_by_id
         self._label_to_id = self._build_label_lookup(graph)
+        self._shape_binding: ShapeBinding | None = None
 
     @staticmethod
     def _build_label_lookup(graph: SplitTraceGraph) -> dict[str, str]:
@@ -180,23 +160,13 @@ class _GeneratedSegmentBase:
             dtype=node.dtype,
         )
 
-    def _runtime_batch_size(self, overlay: dict[str, Any]) -> int | None:
-        """Infer runtime batch size from available replay tensors."""
-
-        torch = _torch()
-        return infer_runtime_batch_size_from_overlay(
-            overlay,
-            node_by_id=self._node_by_id,
-            traced_batch_size=self.graph.traced_batch_size,
-            is_tensor=lambda value: isinstance(value, torch.Tensor),
-        )
-
     def _param_handles_for_node(self, node: SplitTraceNode) -> list[Any]:
         """Resolve live parameter handles for a replay node."""
 
         handles: list[Any] = []
         if not self.use_live_param_sources:
             return handles
+        seen_handles: set[int] = set()
         for param_ref in node.param_refs:
             handle = getattr(param_ref, "handle", None)
             if handle is None:
@@ -204,7 +174,19 @@ class _GeneratedSegmentBase:
                     f"Cannot resolve live parameter source for {node.label!r}.",
                     context=self._context(node, "missing live parameter source"),
                 )
-            handles.append(handle)
+            if id(handle) not in seen_handles:
+                handles.append(handle)
+                seen_handles.add(id(handle))
+        for param_ref in node.param_refs:
+            module = getattr(param_ref, "module", None)
+            buffers = getattr(module, "buffers", None)
+            if buffers is None:
+                continue
+            for buffer in buffers.values():
+                buffer_handle = getattr(buffer, "handle", None)
+                if buffer_handle is not None and id(buffer_handle) not in seen_handles:
+                    handles.append(buffer_handle)
+                    seen_handles.add(id(buffer_handle))
         return handles
 
     def _resolve_parent_ref(
@@ -230,7 +212,6 @@ class _GeneratedSegmentBase:
         overlay: dict[str, Any],
         *,
         param_cursor: _LiveParamCursor,
-        runtime_batch_size: int | None,
     ) -> Any:
         """Resolve one captured argument-template component."""
 
@@ -242,7 +223,6 @@ class _GeneratedSegmentBase:
             return self._rewrite_literal_value(
                 component.value,
                 node=node,
-                runtime_batch_size=runtime_batch_size,
             )
         if isinstance(component, Unsupported):
             raise SplitUnsupportedError(
@@ -258,7 +238,6 @@ class _GeneratedSegmentBase:
                         node,
                         overlay,
                         param_cursor=param_cursor,
-                        runtime_batch_size=runtime_batch_size,
                     )
                     for key, value in component
                 }
@@ -268,7 +247,6 @@ class _GeneratedSegmentBase:
                     node,
                     overlay,
                     param_cursor=param_cursor,
-                    runtime_batch_size=runtime_batch_size,
                 )
                 for value in component
             )
@@ -279,79 +257,27 @@ class _GeneratedSegmentBase:
         value: Any,
         *,
         node: SplitTraceNode,
-        runtime_batch_size: int | None,
     ) -> Any:
         """Rewrite dynamic-batch shape literals for known shape-sensitive ops."""
 
-        if self.spec.dynamic_batch is None:
+        if self.graph.shape_program is None or self._shape_binding is None:
             return value
-        op_name = node.op_type.lower()
-        func_name = str(getattr(node.op, "func_name", "") or "").lower()
-        shape_sensitive = {
-            "view",
-            "reshape",
-            "flatten",
-            "expand",
-            "repeat",
-            "zeros",
-            "ones",
-            "empty",
-            "new_zeros",
-            "new_ones",
-            "new_empty",
-            "arange",
-            "meshgrid",
-        }
-        if not any(token in op_name or token in func_name for token in shape_sensitive):
-            return value
-        return rewrite_dynamic_batch_value(
-            value,
-            traced_batch_size=self.graph.traced_batch_size,
-            runtime_batch_size=runtime_batch_size,
-        )
+        return self.graph.shape_program.rewrite(node.canonical_id, value, self._shape_binding)
 
     def _rewrite_dynamic_call_args(
         self,
         node: SplitTraceNode,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
-        *,
-        runtime_batch_size: int | None,
     ) -> tuple[tuple[Any, ...], dict[str, Any]]:
         """Rewrite Torch calls whose shape is represented as scalar varargs."""
 
-        if self.spec.dynamic_batch is None:
+        if self.graph.shape_program is None or self._shape_binding is None:
             return args, kwargs
-        op_name = node.op_type.lower()
-        func_name = str(getattr(node.op, "func_name", "") or "").lower()
-        vararg_shape_ops = {"view", "reshape", "expand", "repeat"}
-        if not any(token in op_name or token in func_name for token in vararg_shape_ops):
-            return args, kwargs
-        torch = _torch()
-        if args and isinstance(args[0], torch.Tensor):
-            shape_args = list(args[1:])
-            if len(shape_args) == 1 and isinstance(shape_args[0], (list, tuple)):
-                rewritten_shape = rewrite_dynamic_batch_value(
-                    shape_args[0],
-                    traced_batch_size=self.graph.traced_batch_size,
-                    runtime_batch_size=runtime_batch_size,
-                )
-                return (args[0], rewritten_shape), kwargs
-            if shape_args and all(_is_int_literal(item) for item in shape_args):
-                rewritten = _rewrite_leading_shape_arg(
-                    shape_args,
-                    traced_batch_size=self.graph.traced_batch_size,
-                    runtime_batch_size=runtime_batch_size,
-                )
-                return (args[0], *rewritten), kwargs
-        elif args and all(_is_int_literal(item) for item in args):
-            rewritten = _rewrite_leading_shape_arg(
-                list(args),
-                traced_batch_size=self.graph.traced_batch_size,
-                runtime_batch_size=runtime_batch_size,
-            )
-            return tuple(rewritten), kwargs
-        return args, kwargs
+        return (
+            self.graph.shape_program.rewrite(node.canonical_id, args, self._shape_binding),
+            self.graph.shape_program.rewrite(node.canonical_id, kwargs, self._shape_binding),
+        )
 
     def _reconstruct_args(
         self,
@@ -367,14 +293,12 @@ class _GeneratedSegmentBase:
                 context=self._context(node, "missing args_template"),
             )
         param_cursor = _LiveParamCursor(self._param_handles_for_node(node))
-        runtime_batch_size = self._runtime_batch_size(overlay)
         args = tuple(
             self._resolve_component(
                 component,
                 node,
                 overlay,
                 param_cursor=param_cursor,
-                runtime_batch_size=runtime_batch_size,
             )
             for component in template.args
         )
@@ -384,16 +308,10 @@ class _GeneratedSegmentBase:
                 node,
                 overlay,
                 param_cursor=param_cursor,
-                runtime_batch_size=runtime_batch_size,
             )
             for key, component in template.kwargs
         }
-        return self._rewrite_dynamic_call_args(
-            node,
-            args,
-            kwargs,
-            runtime_batch_size=runtime_batch_size,
-        )
+        return self._rewrite_dynamic_call_args(node, args, kwargs)
 
     def _execute_func(
         self,
@@ -422,6 +340,8 @@ class _GeneratedSegmentBase:
     def _source_value(self, node: SplitTraceNode) -> Any:
         """Return a replay value for an input/buffer/source node."""
 
+        if self.use_live_param_sources and node.buffer_refs:
+            return getattr(node.buffer_refs[0], "handle", node.buffer_refs[0])
         value = getattr(node.op, "out", None)
         if value is None:
             raise SplitUnsupportedError(
@@ -486,11 +406,17 @@ class _GeneratedSegmentBase:
 class GeneratedPrefix(_GeneratedSegmentBase):
     """Generated-eager Torch prefix segment."""
 
-    def __call__(self, *inputs: Any, detach_boundary: bool) -> ReplayBoundary:
+    def __call__(
+        self,
+        *inputs: Any,
+        input_kwargs: dict[str, Any] | None = None,
+        detach_boundary: bool,
+    ) -> ReplayBoundary:
         """Run the prefix and return a replay boundary."""
 
         torch = _torch()
         input_leaves = _flatten_tensor_leaves(inputs, torch)
+        input_leaves.extend(_flatten_tensor_leaves(input_kwargs or {}, torch))
         if len(input_leaves) != len(self.graph.input_node_ids):
             raise SplitUnsupportedError(
                 "Runtime inputs do not match traced tensor input count.",
@@ -506,6 +432,13 @@ class GeneratedPrefix(_GeneratedSegmentBase):
         overlay = {
             node_id: value for node_id, value in zip(self.graph.input_node_ids, input_leaves)
         }
+        if self.graph.shape_program is not None:
+            self._shape_binding = self.graph.shape_program.bind_flat_values(
+                input_leaves,
+                shape_of=lambda value: tuple(int(dim) for dim in value.shape),
+                backend="torch",
+                split_point=self.spec.boundary,
+            )
         self._execute_nodes(overlay)
         boundary_tensors: dict[str, Any] = {}
         prefix_tensors: dict[str, Any] = {}
@@ -522,6 +455,12 @@ class GeneratedPrefix(_GeneratedSegmentBase):
             "graph_shape_hash": self.graph.graph_shape_hash,
             "batch_symbol": self.spec.batch_symbol,
             "dynamic_batch": self.spec.dynamic_batch,
+            "runtime_batch_size": (
+                None if self._shape_binding is None else self._shape_binding.batch_size
+            ),
+            "shape_program_hash": (
+                None if self.graph.shape_program is None else self.graph.shape_program.fingerprint
+            ),
             "device_policy": self.spec.device_policy,
             "supports_prefix_backward": not detach_boundary,
         }
@@ -545,6 +484,11 @@ class GeneratedSuffix(_GeneratedSegmentBase):
         """Run the suffix from ``boundary`` and reconstruct final output."""
 
         overlay = dict(boundary.tensors)
+        runtime_batch_size = boundary.metadata.get("runtime_batch_size")
+        if self.graph.shape_program is not None and runtime_batch_size is not None:
+            self._shape_binding = self.graph.shape_program.binding_from_batch(
+                int(runtime_batch_size)
+            )
         for key, item in boundary.spec.items():
             node_id = self._label_to_id.get(item.label)
             if node_id is not None and key in boundary.tensors:

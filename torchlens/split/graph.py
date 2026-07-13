@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
+from ..intervention.types import CapturedArgTemplate, LiteralTensor, ParentRef
+from ..utils.tensor_utils import safe_copy
 from .shape import SymbolicShape, infer_traced_batch_size, symbolic_shape_from_tensor_ref
 
 
@@ -48,6 +50,7 @@ class SplitTraceNode:
     param_refs: tuple[Any, ...]
     replay_source_policy: ReplaySourcePolicy
     op: Any
+    buffer_refs: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,7 @@ class SplitTraceGraph:
     output_node_ids: tuple[str, ...]
     graph_shape_hash: str | None
     traced_batch_size: int | None
+    shape_program: Any | None = None
 
     @property
     def node_by_id(self) -> dict[str, SplitTraceNode]:
@@ -258,8 +262,7 @@ def _attach_paddle_capture_templates(
                 target=getattr(capture, "func", node.target),
                 args_template=tuple(getattr(capture, "args_template", ()) or ()),
                 kwargs_template=dict(getattr(capture, "kwargs_template", {}) or {}),
-                param_refs=node.param_refs
-                or params_by_module.get(node.module_path or "", ()),
+                param_refs=node.param_refs or params_by_module.get(node.module_path or "", ()),
             )
         )
     return updated
@@ -327,6 +330,156 @@ def _attach_tf_captures(trace: Any, nodes: list[SplitTraceNode]) -> list[SplitTr
         else node
         for node in nodes
     ]
+
+
+_MISSING_SAVED_VALUE = object()
+
+
+def _is_scalar_tensor(value: Any) -> bool:
+    """Return whether ``value`` is a tensor scalar suitable for literal replay."""
+
+    return getattr(value, "ndim", None) == 0 and hasattr(value, "dtype")
+
+
+def _is_template_dict_component(component: tuple[Any, ...]) -> bool:
+    """Return whether a tuple component encodes a dictionary template."""
+
+    return bool(component) and all(isinstance(item, tuple) and len(item) == 2 for item in component)
+
+
+def _repair_missing_scalar_parent_refs(
+    component: Any,
+    saved_value: Any,
+    available_labels: set[str],
+) -> Any:
+    """Replace graph-external scalar parents with their captured tensor value.
+
+    Torch eager capture intentionally does not materialize every scalar-index
+    operation as a replay node.  Some models nevertheless retain a
+    ``ParentRef`` to such an operation in a later call template.  If the
+    corresponding saved argument is a zero-dimensional tensor, it is safe to
+    preserve the captured scalar as a literal.  Non-scalar or otherwise
+    unresolved references remain unchanged and are rejected by the adapter.
+
+    Parameters
+    ----------
+    component:
+        Nested captured argument-template component.
+    saved_value:
+        Concrete saved argument at the same structural position.
+    available_labels:
+        Labels which have a replay node in the normalized graph.
+
+    Returns
+    -------
+    Any
+        Repaired template component.
+    """
+
+    if isinstance(component, ParentRef):
+        if component.parent_label not in available_labels and _is_scalar_tensor(saved_value):
+            return LiteralTensor(safe_copy(saved_value))
+        return component
+    if isinstance(component, tuple):
+        if _is_template_dict_component(component):
+            saved_mapping = saved_value if isinstance(saved_value, dict) else {}
+            return tuple(
+                (
+                    key,
+                    _repair_missing_scalar_parent_refs(
+                        child,
+                        saved_mapping.get(key, _MISSING_SAVED_VALUE),
+                        available_labels,
+                    ),
+                )
+                for key, child in component
+            )
+        saved_sequence = saved_value if isinstance(saved_value, (tuple, list)) else ()
+        return tuple(
+            _repair_missing_scalar_parent_refs(
+                child,
+                saved_sequence[index] if index < len(saved_sequence) else _MISSING_SAVED_VALUE,
+                available_labels,
+            )
+            for index, child in enumerate(component)
+        )
+    if isinstance(component, list):
+        saved_sequence = saved_value if isinstance(saved_value, (tuple, list)) else ()
+        return [
+            _repair_missing_scalar_parent_refs(
+                child,
+                saved_sequence[index] if index < len(saved_sequence) else _MISSING_SAVED_VALUE,
+                available_labels,
+            )
+            for index, child in enumerate(component)
+        ]
+    return component
+
+
+def _repair_node_templates(
+    nodes: list[SplitTraceNode],
+) -> list[SplitTraceNode]:
+    """Repair scalar parent references omitted from eager replay graphs."""
+
+    available_labels = {
+        alias
+        for node in nodes
+        for alias in (node.canonical_id, node.label, node.raw_label)
+        if alias is not None
+    }
+    repaired: list[SplitTraceNode] = []
+    for node in nodes:
+        template = node.args_template
+        saved_args = getattr(node.op, "saved_args", ()) or ()
+        saved_kwargs = getattr(node.op, "saved_kwargs", {}) or {}
+        if not isinstance(template, CapturedArgTemplate):
+            repaired.append(node)
+            continue
+        repaired_template = replace(
+            template,
+            args=tuple(
+                _repair_missing_scalar_parent_refs(
+                    component,
+                    saved_args[index] if index < len(saved_args) else _MISSING_SAVED_VALUE,
+                    available_labels,
+                )
+                for index, component in enumerate(template.args)
+            ),
+            kwargs=tuple(
+                (
+                    key,
+                    _repair_missing_scalar_parent_refs(
+                        component,
+                        saved_kwargs.get(key, _MISSING_SAVED_VALUE),
+                        available_labels,
+                    ),
+                )
+                for key, component in template.kwargs
+            ),
+        )
+        repaired.append(replace(node, args_template=repaired_template))
+    return repaired
+
+
+def _attach_live_buffer_handles(
+    trace: Any,
+    nodes: list[SplitTraceNode],
+) -> list[SplitTraceNode]:
+    """Attach backend-live handles for captured buffer source nodes."""
+
+    buffers = getattr(trace, "buffers", {}) or {}
+    updated: list[SplitTraceNode] = []
+    for node in nodes:
+        if not node.is_buffer:
+            updated.append(node)
+            continue
+        address = getattr(node.op, "address", None)
+        try:
+            buffer = buffers[address] if address is not None else None
+        except (KeyError, TypeError):
+            buffer = None
+        updated.append(replace(node, buffer_refs=(buffer,)) if buffer is not None else node)
+    return updated
 
 
 def _node_from_op(
@@ -438,6 +591,16 @@ def split_graph_from_trace(
         nodes = _attach_tinygrad_captures(trace, nodes)
     elif backend in {"tf", "tensorflow"}:
         nodes = _attach_tf_captures(trace, nodes)
+    nodes = _repair_node_templates(nodes)
+    nodes = _attach_live_buffer_handles(trace, nodes)
+    output_aliases = {str(label) for label in (getattr(trace, "output_layers", ()) or ())}
+    if output_aliases:
+        nodes = [
+            replace(node, is_output=True)
+            if node.raw_label in output_aliases or node.label in output_aliases
+            else node
+            for node in nodes
+        ]
     normalized_nodes = _normalize_edge_aliases(nodes)
     rebuilt_children = _children_from_parents(normalized_nodes)
     fixed_nodes = tuple(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from hashlib import sha256
 from typing import Any
@@ -11,9 +12,11 @@ from .boundary import ReplayBoundary
 from .cache import load_boundary, save_boundary
 from .errors import SplitBoundaryError, SplitErrorContext
 from .graph import SplitTraceGraph
-from .ir import BoundarySchema, SplitGraphIR, SplitModelProfile, SplitRequest
+from .ir import BoundarySchema, SplitGraphIR, SplitModelProfile, SplitPoint, SplitRequest
+from .pipeline import analyze_split_capabilities, execute_split_runtime, lower_split_program
 from .planner import SplitPlan
-from .program import ReplayProgram, SplitCapabilityReport
+from .planner import plan_split
+from .program import ReplayProgram, SplitCapabilityReport, ensure_capability_report_supported
 from .validation import nested_allclose
 
 
@@ -32,6 +35,7 @@ class SplitRuntime:
     suffix_program: ReplayProgram | None
     graph_ir: SplitGraphIR | None
     model_profile: SplitModelProfile | None
+    prepared_input_kwargs: dict[str, Any]
 
     def __init__(
         self,
@@ -48,6 +52,7 @@ class SplitRuntime:
         suffix_program: ReplayProgram | None = None,
         graph_ir: SplitGraphIR | None = None,
         model_profile: SplitModelProfile | None = None,
+        prepared_input_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Create a prepared split runtime."""
 
@@ -63,6 +68,7 @@ class SplitRuntime:
         self.suffix_program = suffix_program
         self.graph_ir = graph_ir
         self.model_profile = model_profile
+        self.prepared_input_kwargs = dict(prepared_input_kwargs or {})
 
     @property
     def split_id(self) -> str:
@@ -91,12 +97,93 @@ class SplitRuntime:
             return {}
         return self.capability_report.as_dict()
 
-    def run_prefix(self, *inputs: Any) -> ReplayBoundary:
+    def at(self, point: SplitPoint) -> "SplitRuntime":
+        """Return a runtime at another boundary in the captured graph.
+
+        The complete backend capture and normalized Split IR are immutable for
+        a model/input pair.  Reusing them lets a contract test validate every
+        compute-node ``before``/``after`` boundary without recapturing the
+        model for each point.  Backend lowering and capability analysis still
+        run independently for the requested boundary.
+
+        Parameters
+        ----------
+        point
+            Typed boundary in the already captured graph.
+
+        Returns
+        -------
+        SplitRuntime
+            A runtime sharing the capture while owning a new split plan.
+        """
+
+        request = replace(self.request, point=point)
+        plan = plan_split(self.trace_graph, request)
+        prefix_program = lower_split_program(
+            self.trace_graph,
+            plan,
+            request,
+            segment="prefix",
+            adapter=self.adapter,
+        )
+        suffix_program = lower_split_program(
+            self.trace_graph,
+            plan,
+            request,
+            segment="suffix",
+            adapter=self.adapter,
+        )
+        capability_report = analyze_split_capabilities(
+            self.adapter,
+            self.trace_graph,
+            plan,
+            request,
+            prefix_program=prefix_program,
+            suffix_program=suffix_program,
+            graph_ir=self.graph_ir,
+            model_profile=self.model_profile,
+            features=_features_as_dict(request),
+        )
+        if request.validation == "strict":
+            ensure_capability_report_supported(capability_report, request)
+        segments = execute_split_runtime(self.adapter, self.trace_graph, plan, request)
+        return SplitRuntime(
+            model=self.model,
+            trace=self.trace,
+            trace_graph=self.trace_graph,
+            request=request,
+            plan=plan,
+            adapter=self.adapter,
+            segments=segments,
+            capability_report=capability_report,
+            prefix_program=prefix_program,
+            suffix_program=suffix_program,
+            graph_ir=self.graph_ir,
+            model_profile=self.model_profile,
+            prepared_input_kwargs=self.prepared_input_kwargs,
+        )
+
+    def run_prefix(
+        self,
+        *inputs: Any,
+        input_kwargs: dict[str, Any] | None = None,
+    ) -> ReplayBoundary:
         """Run the detached inference prefix."""
 
-        return self._annotate_boundary(self.segments.prefix(*inputs, detach_boundary=True))
+        runtime_kwargs = self.prepared_input_kwargs if input_kwargs is None else input_kwargs
+        return self._annotate_boundary(
+            self.segments.prefix(
+                *inputs,
+                input_kwargs=runtime_kwargs,
+                detach_boundary=True,
+            )
+        )
 
-    def run_training_prefix(self, *inputs: Any) -> ReplayBoundary:
+    def run_training_prefix(
+        self,
+        *inputs: Any,
+        input_kwargs: dict[str, Any] | None = None,
+    ) -> ReplayBoundary:
         """Run the graph-connected training prefix."""
 
         if self.segments.training_prefix is None:
@@ -113,8 +200,13 @@ class SplitRuntime:
                     reason="unsupported training prefix",
                 ),
             )
+        runtime_kwargs = self.prepared_input_kwargs if input_kwargs is None else input_kwargs
         return self._annotate_boundary(
-            self.segments.training_prefix(*inputs, detach_boundary=False)
+            self.segments.training_prefix(
+                *inputs,
+                input_kwargs=runtime_kwargs,
+                detach_boundary=False,
+            )
         )
 
     def _annotate_boundary(self, boundary: ReplayBoundary) -> ReplayBoundary:
@@ -155,6 +247,12 @@ class SplitRuntime:
             graph_hash=None if self.graph_ir is None else self.graph_ir.graph_hash,
             profile_hash=None if self.graph_ir is None else self.graph_ir.profile_hash,
             state_fingerprint=(_model_state_fingerprint(self.model) if validate_state else None),
+            shape_program_hash=(
+                None
+                if self.trace_graph.shape_program is None
+                else self.trace_graph.shape_program.fingerprint
+            ),
+            shape_program=self.trace_graph.shape_program,
             adapter=self.adapter,
         )
 
@@ -164,10 +262,14 @@ class SplitRuntime:
         self.validate_boundary(boundary)
         return self.segments.suffix(boundary)
 
-    def replay(self, *inputs: Any) -> Any:
+    def replay(
+        self,
+        *inputs: Any,
+        input_kwargs: dict[str, Any] | None = None,
+    ) -> Any:
         """Run prefix then suffix."""
 
-        return self.run_suffix(self.run_prefix(*inputs))
+        return self.run_suffix(self.run_prefix(*inputs, input_kwargs=input_kwargs))
 
     def validate_equivalence(
         self,
@@ -175,11 +277,13 @@ class SplitRuntime:
         inputs: tuple[Any, ...],
         atol: float = 1e-5,
         rtol: float = 1e-4,
+        input_kwargs: dict[str, Any] | None = None,
     ) -> bool:
         """Return whether full model and split replay outputs match."""
 
-        full_output = model(*inputs)
-        replay_output = self.replay(*inputs)
+        runtime_kwargs = self.prepared_input_kwargs if input_kwargs is None else input_kwargs
+        full_output = model(*inputs, **(runtime_kwargs or {}))
+        replay_output = self.replay(*inputs, input_kwargs=runtime_kwargs)
         return nested_allclose(self.adapter, full_output, replay_output, atol=atol, rtol=rtol)
 
     def train_suffix(
@@ -273,3 +377,18 @@ def _model_state_fingerprint(model: Any) -> str | None:
         except Exception:
             digest.update(repr(value).encode("utf-8"))
     return digest.hexdigest()
+
+
+def _features_as_dict(request: SplitRequest) -> dict[str, Any]:
+    """Serialize request features for a re-bound capability report."""
+
+    features = request.features
+    return {
+        "replay": features.replay,
+        "dynamic_batch": features.dynamic_batch,
+        "training": features.training,
+        "boundary_cache": features.boundary_cache,
+        "batch_axes": dict(features.batch_axes),
+        "cross_device": features.cross_device,
+        "live_param_sources": features.live_param_sources,
+    }

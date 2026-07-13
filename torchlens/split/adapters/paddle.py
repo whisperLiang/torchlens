@@ -11,7 +11,7 @@ from ..errors import SplitErrorContext, SplitUnsupportedError
 from ..frontier import boundary_key_for_node
 from ..graph import SplitTraceGraph, SplitTraceNode
 from ..planner import SplitPlan
-from ..shape import infer_runtime_batch_size_from_overlay, maybe_rewrite_dynamic_batch_value
+from ..shape_program import ShapeBinding
 from ..ir import SplitRequest
 from .base import SegmentBundle, SplitPolicyMixin
 
@@ -124,6 +124,7 @@ class _PaddleGeneratedSegmentBase:
         self.node_ids = node_ids
         self._node_by_id = graph.node_by_id
         self._label_to_id = graph.node_id_by_alias
+        self._shape_binding: ShapeBinding | None = None
 
     def _context(self, node: SplitTraceNode, reason: str) -> SplitErrorContext:
         """Build an error context for ``node``."""
@@ -265,18 +266,6 @@ class _PaddleGeneratedSegmentBase:
             }
         return component
 
-    def _runtime_batch_size(self, overlay: dict[str, Any]) -> int | None:
-        """Infer runtime batch size from available replay tensors."""
-
-        if self.spec.dynamic_batch is None or self.graph.traced_batch_size is None:
-            return None
-        return infer_runtime_batch_size_from_overlay(
-            overlay,
-            node_by_id=self._node_by_id,
-            traced_batch_size=self.graph.traced_batch_size,
-            is_tensor=self._is_paddle_tensor,
-        )
-
     @staticmethod
     def _is_paddle_tensor(value: Any) -> bool:
         """Return whether ``value`` is a Paddle tensor."""
@@ -292,25 +281,11 @@ class _PaddleGeneratedSegmentBase:
     ) -> tuple[tuple[Any, ...], dict[str, Any]]:
         """Rewrite captured batch literals in Paddle shape-sensitive calls."""
 
-        func_name = str(getattr(node.target, "__name__", "") or "")
-        runtime_batch_size = self._runtime_batch_size(overlay)
+        if self.graph.shape_program is None or self._shape_binding is None:
+            return args, kwargs
         return (
-            maybe_rewrite_dynamic_batch_value(
-                args,
-                op_type=node.op_type,
-                func_name=func_name,
-                traced_batch_size=self.graph.traced_batch_size,
-                runtime_batch_size=runtime_batch_size,
-                dynamic_batch=self.spec.dynamic_batch,
-            ),
-            maybe_rewrite_dynamic_batch_value(
-                kwargs,
-                op_type=node.op_type,
-                func_name=func_name,
-                traced_batch_size=self.graph.traced_batch_size,
-                runtime_batch_size=runtime_batch_size,
-                dynamic_batch=self.spec.dynamic_batch,
-            ),
+            self.graph.shape_program.rewrite(node.canonical_id, args, self._shape_binding),
+            self.graph.shape_program.rewrite(node.canonical_id, kwargs, self._shape_binding),
         )
 
     def _reconstruct_args(
@@ -422,7 +397,13 @@ class _PaddleGeneratedSegmentBase:
             if node.func_call_id is not None:
                 executed_call_ids.add(node.func_call_id)
             args, kwargs = self._reconstruct_args(executor, overlay)
-            output = self._execute_func(executor, args, kwargs)
+            try:
+                output = self._execute_func(executor, args, kwargs)
+            except Exception as exc:
+                raise SplitUnsupportedError(
+                    f"Paddle replay failed at {executor.label!r} ({executor.op_type}): {exc}",
+                    context=self._context(executor, "backend replay execution failed"),
+                ) from exc
             for member in group:
                 value = _slice_output_by_path(output, member.output_container_path)
                 overlay[member.canonical_id] = value
@@ -432,11 +413,17 @@ class _PaddleGeneratedSegmentBase:
 class PaddleGeneratedPrefix(_PaddleGeneratedSegmentBase):
     """Generated-eager Paddle prefix segment."""
 
-    def __call__(self, *inputs: Any, detach_boundary: bool) -> ReplayBoundary:
+    def __call__(
+        self,
+        *inputs: Any,
+        input_kwargs: dict[str, Any] | None = None,
+        detach_boundary: bool,
+    ) -> ReplayBoundary:
         """Run the prefix and return a replay boundary."""
 
         paddle = _paddle()
         input_leaves = _flatten_tensor_leaves(inputs, paddle)
+        input_leaves.extend(_flatten_tensor_leaves(input_kwargs or {}, paddle))
         if len(input_leaves) != len(self.graph.input_node_ids):
             raise SplitUnsupportedError(
                 "Runtime inputs do not match traced Paddle tensor input count.",
@@ -452,6 +439,13 @@ class PaddleGeneratedPrefix(_PaddleGeneratedSegmentBase):
         overlay = {
             node_id: value for node_id, value in zip(self.graph.input_node_ids, input_leaves)
         }
+        if self.graph.shape_program is not None:
+            self._shape_binding = self.graph.shape_program.bind_flat_values(
+                input_leaves,
+                shape_of=lambda value: tuple(int(dim) for dim in value.shape),
+                backend="paddle",
+                split_point=self.spec.boundary,
+            )
         self._execute_nodes(overlay)
         boundary_tensors: dict[str, Any] = {}
         prefix_tensors: dict[str, Any] = {}
@@ -466,6 +460,12 @@ class PaddleGeneratedPrefix(_PaddleGeneratedSegmentBase):
             "graph_shape_hash": self.graph.graph_shape_hash,
             "batch_symbol": self.spec.batch_symbol,
             "dynamic_batch": self.spec.dynamic_batch,
+            "runtime_batch_size": (
+                None if self._shape_binding is None else self._shape_binding.batch_size
+            ),
+            "shape_program_hash": (
+                None if self.graph.shape_program is None else self.graph.shape_program.fingerprint
+            ),
             "device_policy": self.spec.device_policy,
             "supports_prefix_backward": not detach_boundary,
         }
@@ -486,6 +486,11 @@ class PaddleGeneratedSuffix(_PaddleGeneratedSegmentBase):
         """Run the suffix from ``boundary`` and reconstruct final output."""
 
         overlay = dict(boundary.tensors)
+        runtime_batch_size = boundary.metadata.get("runtime_batch_size")
+        if self.graph.shape_program is not None and runtime_batch_size is not None:
+            self._shape_binding = self.graph.shape_program.binding_from_batch(
+                int(runtime_batch_size)
+            )
         for key, item in boundary.spec.items():
             node_id = self._label_to_id.get(item.label)
             if node_id is not None and key in boundary.tensors:

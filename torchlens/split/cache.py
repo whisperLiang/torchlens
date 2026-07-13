@@ -10,7 +10,7 @@ from typing import Any
 from .adapters import resolve_split_adapter
 from .adapters.base import SplitBackendAdapter
 from .boundary import ReplayBoundary
-from .errors import SplitErrorContext, SplitUnsupportedError
+from .errors import SplitBoundaryError, SplitErrorContext, SplitUnsupportedError
 from .ir import BoundarySchema
 
 
@@ -19,6 +19,8 @@ _CACHE_METADATA_KEYS = (
     "graph_shape_hash",
     "batch_symbol",
     "dynamic_batch",
+    "runtime_batch_size",
+    "shape_program_hash",
     "device_policy",
 )
 
@@ -106,6 +108,8 @@ def save_boundary(
         "backend": cache_boundary.backend,
         "split_id": cache_boundary.metadata.get("split_id"),
         "graph_shape_hash": cache_boundary.metadata.get("graph_shape_hash"),
+        "runtime_batch_size": cache_boundary.metadata.get("runtime_batch_size"),
+        "shape_program_hash": cache_boundary.metadata.get("shape_program_hash"),
         "boundary_spec": {
             key: _spec_to_json(item) for key, item in cache_boundary.spec.items()
         },
@@ -131,6 +135,10 @@ def load_boundary(
         boundary = pickle.load(handle)
     if not isinstance(boundary, ReplayBoundary):
         raise TypeError("Boundary cache payload did not contain a ReplayBoundary.")
+    if manifest.get("runtime_batch_size") != boundary.metadata.get("runtime_batch_size"):
+        raise SplitBoundaryError("Boundary cache runtime batch metadata does not match payload.")
+    if manifest.get("shape_program_hash") != boundary.metadata.get("shape_program_hash"):
+        raise SplitBoundaryError("Boundary cache shape-program metadata does not match payload.")
     resolved_adapter = adapter or resolve_split_adapter(str(manifest["backend"]))
     boundary.validate(split_id=manifest.get("split_id"), adapter=resolved_adapter)
     return boundary

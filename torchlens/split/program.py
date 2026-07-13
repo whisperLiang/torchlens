@@ -104,6 +104,7 @@ class SplitCapabilityReport:
     features: dict[str, Any] | None = None
     node_statuses: dict[str, SplitVerificationStatus] | None = None
     backend_capabilities: dict[str, bool] | None = None
+    shape_diagnostics: dict[str, Any] | None = None
 
     @property
     def preflight_ok(self) -> bool:
@@ -208,6 +209,12 @@ def _dynamic_shape_reasons(
 
     if spec.dynamic_batch is None:
         return ()
+    shape_program = graph.shape_program
+    if shape_program is None:
+        return ("dynamic batch requested but no ShapeProgram was compiled",)
+    unresolved = shape_program.unresolved.get(node.canonical_id)
+    if unresolved is not None:
+        return (unresolved,)
     adapter_reasons = _adapter_policy(adapter, "dynamic_shape_reasons", node, graph, spec)
     if adapter_reasons:
         return adapter_reasons
@@ -382,6 +389,20 @@ def build_capability_report(
             "dynamic_batch": bool(getattr(adapter, "supports_dynamic_batch", False)),
             "boundary_cache": bool(getattr(adapter, "supports_boundary_cache", False)),
         },
+        shape_diagnostics=(
+            None
+            if graph.shape_program is None
+            else {
+                "fingerprint": graph.shape_program.fingerprint,
+                "inference_mode": graph.shape_program.inference_mode,
+                "input_batch_axes": dict(graph.shape_program.input_batch_axes),
+                "unresolved": dict(graph.shape_program.unresolved),
+                "recipes": {
+                    node_id: [recipe.recipe_id for recipe in recipes]
+                    for node_id, recipes in graph.shape_program.recipes.items()
+                },
+            }
+        ),
     )
 
 
