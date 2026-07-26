@@ -189,6 +189,44 @@ def _cache_dynamic_spec(
 
 
 # ============================================================================
+# Variadic-arity transform ops -- never name-cache a positional ArgSpec
+# ============================================================================
+
+# These functions take a VARIADIC number of tensor operands, either directly
+# (``block_diag(*tensors)``) or via a transformed callable (``vmap``/``grad``).
+# The Tier-3 dynamic cache keys an ``ArgSpec`` by normalized func name from the
+# FIRST observed call. Reusing that narrow spec silently drops later operands'
+# parent edges, orphaning and dropping real ops from the trace. These names must
+# ALWAYS take the fresh Tier-3 crawl and must never populate or read the
+# name-keyed ArgSpec cache. Container APIs such as ``cat(tensors)`` and
+# ``stack(tensors)`` are deliberately excluded: their sequence-position specs
+# already inspect every element of their single container argument.
+VARIADIC_TENSOR_ARG_FUNCS: frozenset[str] = frozenset(
+    {
+        "aligntensors",
+        "atleast1d",
+        "atleast2d",
+        "atleast3d",
+        "blockdiag",
+        "broadcasttensors",
+        "cartesianprod",
+        "chainmatmul",
+        "einsum",
+        "vmap",
+        "grad",
+        "gradandvalue",
+        "autogradjacobian",
+        "autogradhessian",
+        "autogradvjp",
+        "autogradjvp",
+        "autogradhvp",
+        "autogradvhp",
+        "meshgrid",
+    }
+)
+
+
+# ============================================================================
 # Shared ArgSpec instances (reduce object count)
 # ============================================================================
 
@@ -228,6 +266,14 @@ _P012 = ArgSpec(positions=(0, 1, 2))
 _P0123 = ArgSpec(positions=(0, 1, 2, 3))
 _S0 = ArgSpec(positions=tuple(range(10)), tensor_kwargs=("tensors",))
 _NONE = ArgSpec()
+
+# ``min``/``max`` are optional tensor bounds for clamp-family APIs.  Keep the
+# generic binary keyword aliases as well because the Tensor method and torch
+# function forms use different spellings for the primary operand.
+_CLAMP_SPEC = ArgSpec(
+    positions=_P012.positions,
+    tensor_kwargs=(*_P01_BINARY.tensor_kwargs, "min", "max"),
+)
 
 # ============================================================================
 # FUNC_ARG_SPECS — keyed by normalized func_name
@@ -848,6 +894,9 @@ _BINARY_FUNCS = [
 for _name in _BINARY_FUNCS:
     FUNC_ARG_SPECS[_name] = _P01_BINARY
 
+for _name in ["clamp", "clampmin", "clampmax", "clip"]:
+    FUNC_ARG_SPECS[_name] = _CLAMP_SPEC
+
 # ---------------------------------------------------------------------------
 # Ternary: positions 0, 1, 2
 # ---------------------------------------------------------------------------
@@ -1068,9 +1117,7 @@ for _name in [
     "bceloss",
     "bcewithlogitsloss",
     "cosinesimilarity",
-    "cosineembeddingloss",
     "hingeembeddingloss",
-    "marginrankingloss",
     "softmarginloss",
     "multilabelsoftmarginloss",
     "multimarginloss",
@@ -1079,9 +1126,18 @@ for _name in [
     "gaussiannllloss",
     "kldiv",
     "ctcloss",
-    "tripletmarginloss",
 ]:
     FUNC_ARG_SPECS[_name] = _P01_INPUT_TARGET
+
+# Three-input loss functions must retain every value-affecting tensor operand.
+_THREE_INPUT_TARGET_LOSS_SPEC = ArgSpec(
+    positions=(0, 1, 2), tensor_kwargs=("input1", "input2", "target")
+)
+FUNC_ARG_SPECS["marginrankingloss"] = _THREE_INPUT_TARGET_LOSS_SPEC
+FUNC_ARG_SPECS["cosineembeddingloss"] = _THREE_INPUT_TARGET_LOSS_SPEC
+FUNC_ARG_SPECS["tripletmarginloss"] = ArgSpec(
+    positions=(0, 1, 2), tensor_kwargs=("anchor", "positive", "negative")
+)
 
 # bilinear: (input1, input2, weight, bias) — bias can be positional
 FUNC_ARG_SPECS["bilinear"] = ArgSpec(
@@ -1146,8 +1202,8 @@ FUNC_ARG_SPECS["searchsorted"] = ArgSpec(
     positions=(0, 1), tensor_kwargs=("sorted_sequence", "input", "values")
 )
 FUNC_ARG_SPECS["bincount"] = ArgSpec(positions=(0, 1), tensor_kwargs=("input", "weights"))
-FUNC_ARG_SPECS["histogram"] = ArgSpec(positions=(0, 1), tensor_kwargs=("input", "weight"))
-FUNC_ARG_SPECS["histogramdd"] = ArgSpec(positions=(0, 1), tensor_kwargs=("input", "weight"))
+FUNC_ARG_SPECS["histogram"] = ArgSpec(positions=(0, 1), tensor_kwargs=("input", "bins", "weight"))
+FUNC_ARG_SPECS["histogramdd"] = ArgSpec(positions=(0, 1), tensor_kwargs=("input", "bins", "weight"))
 FUNC_ARG_SPECS["stft"] = ArgSpec(positions=(0, 4), tensor_kwargs=("input", "window"))
 FUNC_ARG_SPECS["istft"] = ArgSpec(positions=(0, 4), tensor_kwargs=("input", "window"))
 FUNC_ARG_SPECS["maskedfill"] = ArgSpec(
@@ -1158,6 +1214,11 @@ FUNC_ARG_SPECS["maskedscatter"] = ArgSpec(
 )
 FUNC_ARG_SPECS["maskedselect"] = ArgSpec(positions=(0, 1), tensor_kwargs=("input", "self", "mask"))
 FUNC_ARG_SPECS["multidot"] = _S0
+
+# quantile: ``q`` can be a tensor that changes the selected value.
+_QUANTILE_SPEC = ArgSpec(positions=(0, 1), tensor_kwargs=(*_P0_INPUT.tensor_kwargs, "q"))
+FUNC_ARG_SPECS["quantile"] = _QUANTILE_SPEC
+FUNC_ARG_SPECS["nanquantile"] = _QUANTILE_SPEC
 
 # Matrix-multiply family whose second operand kwarg is NOT named "other":
 # torch.mm(input, mat2), torch.bmm(input, mat2), torch.mv(input, vec).
@@ -1239,7 +1300,6 @@ for _name in [
     "modifiedbesselk1",
     "multigammaln",
     "multinomial",
-    "nanquantile",
     "ndtr",
     "ndtri",
     "normalize",
@@ -1248,7 +1308,6 @@ for _name in [
     "pinv",
     "poisson",
     "psi",
-    "quantile",
     "randintlike",
     "renorm",
     "scaledmodifiedbesselk0",
@@ -1265,6 +1324,14 @@ for _name in [
     "varmean",
 ]:
     FUNC_ARG_SPECS[_name] = _P0_INPUT
+
+# ``spacing`` accepts a tensor or a sequence of tensors.  It is an input to
+# the numerical gradient computation, not display-only metadata, so it must
+# be included in parent extraction.
+FUNC_ARG_SPECS["gradient"] = ArgSpec(
+    positions=_P0_INPUT.positions,
+    tensor_kwargs=(*_P0_INPUT.tensor_kwargs, "spacing"),
+)
 
 _P0_A_SPEC = ArgSpec(positions=(0,), tensor_kwargs=("A",))
 for _name in [

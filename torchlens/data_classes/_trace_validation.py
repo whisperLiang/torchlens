@@ -15,6 +15,7 @@ else:
     _TraceMixinBase = object
 from .._deprecations import MISSING, MissingType, warn_deprecated_alias
 from ..options import ReplayOptions, merge_replay_options
+from ..runnable import DivergencePolicy, RunProvider, RunResult
 from .cleanup import (
     _LIST_FIELDS_TO_CLEAN,
     _clear_entry_attributes,
@@ -147,7 +148,9 @@ class TraceValidationMixin(_TraceMixinBase):
             unavailable status instead of a pass/fail bool.
         """
         from ..backends import get_backend_spec
+        from ..runnable import refuse_poisoned_trace
 
+        refuse_poisoned_trace(self, "validation")
         status = self.validation_replay_status
         if bool(getattr(self, "_loaded_from_bundle", False)) and not status.available:
             setattr(self, "_validation_replay_status", status)
@@ -314,6 +317,9 @@ class TraceValidationMixin(_TraceMixinBase):
         model: Any = None,
         x: Any = None,
         *,
+        inputs: Any | MissingType = MISSING,
+        seed: int | None = None,
+        on_divergence: DivergencePolicy = DivergencePolicy.RAISE,
         append: bool | MissingType = MISSING,
         chunk_size: int | None | MissingType = MISSING,
         chunk_paths: Any | None = None,
@@ -321,8 +327,8 @@ class TraceValidationMixin(_TraceMixinBase):
         replay: ReplayOptions | None = None,
         transform: Callable[[Any], Any] | bool | object = _USE_STORED_TRANSFORM,
         output_transform: Callable[[Any], Any] | bool | object = _USE_STORED_TRANSFORM,
-    ) -> "Trace":
-        """Re-execute a model with this log's active intervention spec.
+    ) -> "Trace | RunResult":
+        """Execute this Trace through its live or loaded provider.
 
         Parameters
         ----------
@@ -332,6 +338,13 @@ class TraceValidationMixin(_TraceMixinBase):
         x:
             Forward input. If ``model`` is omitted, the first positional argument
             is treated as the new user input.
+        inputs:
+            Unified provider input tree. Supplying this keyword returns a
+            transactional :class:`RunResult` and leaves this Trace unchanged.
+        seed:
+            Optional deterministic live refresh, random-state, and runtime RNG seed.
+        on_divergence:
+            Strict divergence behavior or the sole poison-return opt-in.
         append:
             If true, append a compatible chunk along batch dimension 0.
         chunk_size:
@@ -350,9 +363,67 @@ class TraceValidationMixin(_TraceMixinBase):
 
         Returns
         -------
-        Trace
-            This model log, mutated in place after a validated atomic swap.
+        Trace or RunResult
+            A unified transactional result for ``inputs=`` and loaded sparse
+            providers. Legacy ``run(model, x)`` intervention reruns retain their
+            compatibility return until that surface is migrated.
         """
+
+        if seed is not None:
+            # r77 nit + r79 hardening: validate ``seed`` at the run door so junk
+            # raises the typed precondition lane instead of escaping as torch's
+            # raw ``RuntimeError``. r79 extends the r77 non-int check to the two
+            # escapes r78 found: ``bool`` (an int subclass that
+            # ``Generator.manual_seed`` rejects) and an int outside torch's
+            # accepted long range (pybind overflow). The failed call is
+            # transactional either way (global torch RNG untouched).
+            from .._runnable_state import validate_run_seed
+
+            validate_run_seed(seed)
+        readiness = self.__dict__.get("_runnable_readiness")
+        loaded_provider = getattr(readiness, "provider", None)
+        use_unified_provider = inputs is not MISSING or (
+            not isinstance(model, nn.Module)
+            and loaded_provider
+            in {
+                RunProvider.LOADED_SPARSE,
+                RunProvider.LOADED_ANALYSIS,
+            }
+        )
+        if use_unified_provider:
+            if inputs is not MISSING:
+                if model is not None or x is not None:
+                    raise TypeError("Pass inputs= without the legacy model/x arguments.")
+                run_inputs = inputs
+            else:
+                if x is not None:
+                    raise TypeError("Loaded sparse run accepts one input tree.")
+                run_inputs = model
+            if any(value is not MISSING for value in (append, chunk_size, strict)) or (
+                chunk_paths is not None or replay is not None
+            ):
+                raise TypeError("Sparse/unified run does not accept legacy rerun options.")
+            if loaded_provider is RunProvider.LOADED_SPARSE:
+                from .._runnable_execution import run_loaded_sparse_trace
+
+                return run_loaded_sparse_trace(
+                    self,
+                    run_inputs,
+                    seed=seed,
+                    on_divergence=on_divergence,
+                )
+            if loaded_provider is RunProvider.LOADED_ANALYSIS:
+                from .._runnable_execution import raise_analysis_run_unavailable
+
+                raise_analysis_run_unavailable(self)
+            from .._runnable_execution import run_live_trace
+
+            return run_live_trace(
+                self,
+                run_inputs,
+                seed=seed,
+                on_divergence=on_divergence,
+            )
 
         run_model: nn.Module | None
         if isinstance(model, nn.Module):

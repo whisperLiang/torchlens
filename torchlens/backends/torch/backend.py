@@ -13,6 +13,7 @@ import torch
 from ... import _state
 from ...data_classes.internal_types import FuncExecutionContext
 from ..._io import BlobRef as PortableBlobRef
+from ...capture.session import capture_session_for
 from ...fastlog.types import CaptureSpec, ModuleStackFrame, StorageIntent
 from ...ir import replace_op_event
 from ...ir.events import OpEvent
@@ -48,6 +49,7 @@ from .ops import (
     _get_autograd_saved_stats_for_tensor,
     _walk_output_tensors_with_paths,
     log_function_output_tensors,
+    runnable_output_losslessness,
 )
 from .sources import log_source_tensor as _log_source_tensor
 from .wrappers import unwrap_torch, wrap_torch
@@ -306,10 +308,23 @@ class TorchBackend:
             input_objects = None
         else:
             model, input_tensors, input_objects = prepared_model, None, None
-        uninstall_buffer_write_tracker(cast("Trace", session))
-        _cleanup_model_session(
-            cast("Trace", session), cast(torch.nn.Module, model), input_tensors, input_objects
-        )
+
+        def cleanup_action() -> None:
+            """Run the legacy model teardown at its historical call site."""
+
+            uninstall_buffer_write_tracker(cast("Trace", session))
+            _cleanup_model_session(
+                cast("Trace", session),
+                cast(torch.nn.Module, model),
+                input_tensors,
+                input_objects,
+            )
+
+        capture_session = capture_session_for(session)
+        if capture_session is None:
+            cleanup_action()
+            return
+        capture_session.run_cleanup("model_session", cleanup_action)
 
     def active_logging(self, session: object) -> AbstractContextManager[None]:
         """Compose owner-thread/detector guard with the logging context."""
@@ -666,6 +681,19 @@ class TorchBackend:
 
         self_trace = cast("Trace", session)
         output_entries = list(_walk_output_tensors_with_paths(outputs))
+        # r35 I1 (subsumes r33 R32-B1): stamp the POSITIVE model-output losslessness
+        # proof -- exact root kind, recursively supported children, encodable literal
+        # leaves, and a tensor-leaf/typed-path bijection (duplicate paths and any BFS
+        # fallback break the proof). The runnable producer refuses any save whose
+        # output is not PROVED lossless (refuse-unless-proved), closing every lossy
+        # cardinality/depth: bare one-tensor sets, nested sets, opaque tensor
+        # holders, set subclasses, and multi-tensor collapses alike. Ordinary
+        # analysis capture is unaffected by the stamp.
+        setattr(
+            self_trace,
+            "_runnable_output_losslessness",
+            runnable_output_losslessness(outputs, output_entries),
+        )
         # The container_spec is only user-facing metadata when explicitly opted
         # into via capture_container_structure (or implied by intervention_ready);
         # with the default OFF it must stay None on output layers. The container
@@ -716,7 +744,6 @@ class TorchBackend:
         attributable_output_tensors: list[torch.Tensor] = []
         attributable_output_tensor_addresses: list[str] = []
         for t, output_address in zip(output_tensors, output_tensor_addresses):
-            # Only record output_layers during exhaustive pass; fast pass reuses the list.
             _label_raw = _tl.get_tensor_label(t)
             if _label_raw is None:
                 if _is_direct_registered_buffer_output(self_trace, t):
@@ -1022,6 +1049,11 @@ def _register_model_output_container_snapshot(
     spec = next((container_spec for _, _, container_spec in output_entries if container_spec), None)
     if spec is None:
         return
+    # An opaque model-output container (custom Mapping, unsafe defaultdict, unknown
+    # dict subclass, or an unrepresentable non-tensor leaf) is recorded but marked
+    # NON-reconstructable so producer preflight refuses to advertise it runnable and
+    # a live run reports UNVERIFIABLE -- never a silent bare-tensor/plain-dict.
+    reconstructable = spec.kind != "opaque"
     occurrences: list[ContainerLeafOccurrence] = []
     for occ_index, (tensor, path, _container_spec) in enumerate(output_entries):
         producer_label = _tl.get_tensor_label(tensor)
@@ -1042,7 +1074,7 @@ def _register_model_output_container_snapshot(
         observed_at_event_index=int(getattr(trace, "_layer_counter", 0)),
         spec=spec,
         leaf_occurrences=tuple(occurrences),
-        reconstructable=True,
+        reconstructable=reconstructable,
     )
     registry.register_snapshot(
         output,
@@ -1052,7 +1084,7 @@ def _register_model_output_container_snapshot(
         observed_at_event_index=int(getattr(trace, "_layer_counter", 0)),
         spec=spec,
         leaf_occurrences=tuple(occurrences),
-        reconstructable=True,
+        reconstructable=reconstructable,
     )
 
 

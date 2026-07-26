@@ -67,19 +67,14 @@ class CaptureEvents:
     backward_event_seq: int = 0
 
     def copy_for_replay(self) -> "CaptureEvents":
-        """Return a structural copy safe to drain during materialization.
+        """Return a structural working projection for postprocess mutation.
 
-        ``_postprocess`` (``postprocess/_materialize.py``) destructively drains
-        the event containers it is handed -- ``op_events.clear()``,
-        ``module_events.clear()``, ``live_index.clear()``, and so on -- and
-        ``postprocess/graph_traversal.py`` replaces entries in ``op_events`` /
-        ``op_event_by_label_raw`` in place. When a long-lived, frozen
-        ``Recording`` cooks itself into a ``Trace`` via ``Recording.to_trace()``
-        it must NOT alias its own ``_capture_events`` into the new ``Trace``, or
-        that single materialization pass silently empties the Recording's own
-        read-only event stream: a second ``to_trace()`` then crashes and the
-        lazy ``recording_trace`` / ``records`` accessors memoize empty/wrong
-        answers. Hand ``_postprocess`` a copy instead.
+        Later postprocess steps replace entries in ``op_events`` and
+        ``op_event_by_label_raw`` in place. A projector must therefore mutate
+        an independent container projection instead of the sealed capture
+        lanes. This is also used when a long-lived, frozen ``Recording`` cooks
+        itself into a ``Trace`` so repeated projections cannot alter its event
+        stream.
 
         Every mutable container is duplicated into a fresh object (nested list
         values included where they are rebuilt in place); the frozen ``OpEvent``
@@ -131,6 +126,114 @@ class CaptureEvents:
             backward_event_seq=self.backward_event_seq,
         )
 
+    def release_working_projection(self) -> None:
+        """Release mutable projector lanes without touching the sealed source.
+
+        Returns
+        -------
+        None
+            Drops working-container and runtime-handle references after Step 0.
+        """
+
+        self.op_events.clear()
+        self.module_events.clear()
+        self.module_prep_events.clear()
+        self.module_enter_events.clear()
+        self.module_exit_events.clear()
+        self.pre_hook_events.clear()
+        self.conditional_events.clear()
+        self.output_version_events.clear()
+        self.live_by_raw_label.clear()
+        self.op_event_by_label_raw.clear()
+        self.op_event_index_by_label_raw.clear()
+        self.live_index.clear()
+        self.grad_fn_handles_by_label_raw.clear()
+
+    def release_runtime_sidecars(self) -> None:
+        """Detach payload and runtime handles while retaining structural facts.
+
+        Returns
+        -------
+        None
+            Replaces operation entries with payload-free immutable facts.
+        """
+
+        structural_events: list[OpEvent] = []
+        for event in self.op_events:
+            tensor = replace(event.output.tensor, payload=None)
+            transformed = event.output.transformed_tensor
+            if transformed is not None:
+                transformed = replace(transformed, payload=None)
+            child_versions = tuple(
+                (label, replace(child_tensor, payload=None))
+                for label, child_tensor in event.output.child_versions
+            )
+            output = replace(
+                event.output,
+                tensor=tensor,
+                transformed_tensor=transformed,
+                child_versions=child_versions,
+                activation_transform=None,
+            )
+            templates = event.templates
+            if templates is not None:
+                templates = replace(
+                    templates,
+                    saved_args=None,
+                    saved_kwargs=None,
+                    args_template=None,
+                    kwargs_template=None,
+                )
+            structural_events.append(
+                replace(
+                    event,
+                    output=output,
+                    templates=templates,
+                    source_trace=None,
+                )
+            )
+        self.op_events = structural_events
+        self.op_event_by_label_raw = {event.label_raw: event for event in structural_events}
+        self.module_events = [
+            replace(event, forward_args=None, forward_kwargs=None) for event in self.module_events
+        ]
+        self.module_prep_events = [
+            replace(
+                event,
+                forward_pre_hooks=None,
+                forward_hooks=None,
+                backward_pre_hooks=None,
+                backward_hooks=None,
+                full_backward_pre_hooks=None,
+                full_backward_hooks=None,
+            )
+            for event in self.module_prep_events
+        ]
+        self.module_enter_events = [
+            replace(
+                event,
+                forward_args=None,
+                forward_kwargs=None,
+                forward_args_template=None,
+                forward_kwargs_template=None,
+            )
+            for event in self.module_enter_events
+        ]
+        self.pre_hook_events = [
+            replace(
+                event,
+                inputs_before_pre_hooks=None,
+                inputs_after_pre_hooks=None,
+            )
+            for event in self.pre_hook_events
+        ]
+        self.output_version_events = [
+            replace(event, payload=None, transform_state=None)
+            for event in self.output_version_events
+        ]
+        self.live_by_raw_label.clear()
+        self.live_index.clear()
+
     def next_backward_seq(self) -> int:
         """Return the next monotonic backward event sequence number."""
 
@@ -143,6 +246,11 @@ class CaptureEvents:
         self.op_events.append(event)
         self.op_event_by_label_raw[event.label_raw] = event
         self.live_index.append(event)
+        from ..capture.session import capture_session_for_events
+
+        session = capture_session_for_events(self)
+        if session is not None:
+            session.observe_event(event)
 
     def append_backward(
         self,
@@ -292,6 +400,11 @@ def replace_op_event(trace: Any, label_raw: str, **updates: Any) -> OpEvent | No
         events.op_event_index_by_label_raw[label_raw] = index
     events.op_events[index] = updated_event
     events.live_index.replace(updated_event)
+    from ..capture.session import capture_session_for_events
+
+    session = capture_session_for_events(events)
+    if session is not None:
+        session.replace_event(updated_event)
     return updated_event
 
 

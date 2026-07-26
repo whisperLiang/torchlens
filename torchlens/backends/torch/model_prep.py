@@ -22,9 +22,10 @@ from torch import nn
 from ... import _state
 from ...fastlog._halt import HaltSignal
 from ._tl import (
+    begin_label_session,
     clear_meta,
+    end_label_session,
     get_buffer_address,
-    get_label_list,
     get_live_tensor_label,
     get_module_meta,
     get_tensor_label,
@@ -33,7 +34,6 @@ from ._tl import (
     mark_tensor_replacement_wrapped,
     promote_label_to_buffer_source_and_clear_label,
     restore_param_requires_grad,
-    set_buffer_address,
     set_module_meta,
     set_param_meta,
     set_tensor_label,
@@ -446,6 +446,13 @@ def _prepare_model_session(
 
     All session-scoped state is cleaned up by ``_cleanup_model_session``.
     """
+    # r83 C1: install this capture's label-anchoring session FIRST, before any
+    # path can stamp a label. A previously installed session is dropped here,
+    # so a label issued by an earlier capture resolves against nothing. The
+    # registry is module-level state in ``_tl`` (not a Trace field): it must be
+    # reachable from ``set_tensor_label`` itself, which is the choke point every
+    # label stamp flows through and which has no Trace in scope.
+    begin_label_session()
     _module_class_metadata_cache.clear()
     _state._dir_cache.clear()
     trace._exhaustive_module_stack = []
@@ -573,19 +580,6 @@ def _create_session_param_logs(trace: "Trace", model: nn.Module, optimizer: Any 
     if not hasattr(trace, "_param_log_by_pid"):
         raise AttributeError("Trace._param_log_by_pid must be initialized before param logging.")
 
-    # Fast (save_new_outs / second-pass) capture reuses the exhaustive-pass
-    # graph, so the Param log objects -- and the cross-reference metadata
-    # populated on them during the exhaustive pass (used_by_ops, used_by_layers,
-    # num_calls, co_parent_params) -- must be preserved. Rebuilding fresh Param
-    # objects here would (a) drop that metadata, leaving used_by_layers empty,
-    # and (b) desync trace.param_logs from the Op._param_logs that still point at
-    # the exhaustive-pass objects -- exactly the asymmetry the param
-    # cross-reference invariant flags. Re-tag the live tensors with their
-    # existing barcode/address instead of allocating new logs.
-    if trace.capture_mode == "fast" and len(trace.param_logs):
-        _retag_existing_session_param_logs(trace, model)
-        return
-
     optimized_param_ids: set[int] = set()
     if optimizer is not None:
         for group in optimizer.param_groups:
@@ -595,6 +589,11 @@ def _create_session_param_logs(trace: "Trace", model: nn.Module, optimizer: Any 
     param_logs: dict[str, Param] = {}
     seen_param_ids: set[int] = set()
     param_id_to_address: dict[int, str] = {}
+    # r79 session-leak fix: record every parameter this prep STAMPS so cleanup can
+    # clear stamps from this inventory instead of re-traversing the live model tree.
+    # A param popped from ``_parameters`` mid-forward escapes the re-traversal but
+    # never escapes this list (session-scoped strong refs, dropped at cleanup).
+    stamped_params: list[nn.Parameter] = []
     for module in model.modules():
         address = _module_address(module)
         for param_name, param in module._parameters.items():
@@ -635,6 +634,7 @@ def _create_session_param_logs(trace: "Trace", model: nn.Module, optimizer: Any 
                 address=param_address,
                 requires_grad_before=requires_grad_before,
             )
+            stamped_params.append(param)
 
             param_fsize = get_memory_amount(param)
             param_log = Param(
@@ -653,64 +653,8 @@ def _create_session_param_logs(trace: "Trace", model: nn.Module, optimizer: Any 
             param_logs[param_address] = param_log
 
     trace._param_log_by_pid = param_id_to_address
+    trace._session_param_inventory = stamped_params
     trace.param_logs = ParamAccessor(param_logs)
-
-
-def _retag_existing_session_param_logs(trace: "Trace", model: nn.Module) -> None:
-    """Re-tag live parameters for a fast pass without rebuilding Param logs.
-
-    Mirrors the live-tensor side effects of :func:`_create_session_param_logs`
-    (force ``requires_grad`` outside ``backward_ready``, set ``_tl`` param meta,
-    refresh ``Param._param_ref``, rebuild ``_param_log_by_pid``) but keeps the
-    existing :class:`Param` objects so their exhaustive-pass cross-reference
-    metadata survives the second pass. Aliased/shared parameters resolve through
-    each Param's ``all_addresses``.
-    """
-
-    existing_by_address: dict[str, Param] = {pl.address: pl for pl in trace.param_logs}
-    alias_to_primary: dict[str, str] = {}
-    for primary_address, param_log in existing_by_address.items():
-        for alias in getattr(param_log, "all_addresses", []) or [primary_address]:
-            alias_to_primary[alias] = primary_address
-
-    param_id_to_address: dict[int, str] = {}
-    seen_param_ids: set[int] = set()
-    for module in model.modules():
-        address = _module_address(module)
-        for param_name, param in module._parameters.items():
-            if param is None:
-                continue
-            pid = id(param)
-            param_address = f"{address}.{param_name}" if address else param_name
-            primary_address = alias_to_primary.get(param_address, param_address)
-            # Distinct local for the ``Param | None`` lookup so the loop variable
-            # ``param_log`` (bound non-optional in the ``existing_by_address``
-            # iteration above) keeps its narrowed ``Param`` type after the
-            # ``is None`` guard -- avoids a mypy variable-reuse narrowing error.
-            existing_param_log = existing_by_address.get(primary_address)
-            if existing_param_log is None:
-                # Unexpected new parameter on the fast pass: the graph changed.
-                # Leave it untagged; downstream fast-pass alignment checks will
-                # surface the divergence rather than silently mis-saving.
-                continue
-            param_log = existing_param_log
-            if pid not in seen_param_ids:
-                seen_param_ids.add(pid)
-                param_id_to_address[pid] = primary_address
-                requires_grad_before = param.requires_grad
-                if not getattr(trace, "backward_ready", False) and (
-                    torch.is_floating_point(param) or torch.is_complex(param)
-                ):
-                    param.requires_grad = True
-                set_param_meta(
-                    param,
-                    barcode=param_log.barcode,
-                    address=primary_address,
-                    requires_grad_before=requires_grad_before,
-                )
-                param_log._param_ref = param
-
-    trace._param_log_by_pid = param_id_to_address
 
 
 # ---------------------------------------------------------------------------
@@ -965,8 +909,22 @@ def prepare_buffer_tensors(trace: "Trace", model: nn.Module) -> None:
     plain tensor attributes (faster than ``iter_accessible_attributes`` which
     walks the MRO via ``dir()``). Tracks tagged tensor ids in
     ``_state._tagged_buffer_ids`` for fast cleanup.
+
+    r79 session-leak fix: every tensor stamped here is ALSO recorded in
+    ``trace._session_buffer_inventory`` (session-scoped strong refs) so cleanup
+    clears the stamps from the recorded inventory instead of relying on a model
+    re-traversal that a mid-forward ``_buffers.pop(...)`` can escape.
+
+    r81 buffer-rung parity: every stamp routes through
+    ``register_session_buffer_stamp`` so it also joins the session identity
+    registry (``trace._session_buffer_identity``) consulted by the buffer-rung
+    storage-identity belt; the registry is reset here at session start.
     """
+    from .buffer_writes import register_session_buffer_stamp
+
     _state._tagged_buffer_ids.clear()
+    trace._session_buffer_inventory = []
+    trace._session_buffer_identity = {}
     for submodule in model.modules():
         module_addr = _module_address(submodule)
         # Scan registered buffers
@@ -978,7 +936,7 @@ def prepare_buffer_tensors(trace: "Trace", model: nn.Module) -> None:
             ):
                 address = f"{module_addr}.{buf_name}" if module_addr else buf_name
                 try:
-                    set_buffer_address(buf_tensor, address)
+                    register_session_buffer_stamp(trace, buf_tensor, address)
                     _state._tagged_buffer_ids.add(id(buf_tensor))
                 except Exception:
                     pass
@@ -993,7 +951,7 @@ def prepare_buffer_tensors(trace: "Trace", model: nn.Module) -> None:
             ):
                 address = f"{module_addr}.{attr_name}" if module_addr else attr_name
                 try:
-                    set_buffer_address(attr_val, address)
+                    register_session_buffer_stamp(trace, attr_val, address)
                     _state._tagged_buffer_ids.add(id(attr_val))
                 except Exception:
                     pass
@@ -1008,7 +966,7 @@ def prepare_buffer_tensors(trace: "Trace", model: nn.Module) -> None:
                             f"{module_addr}.{attr_name}.{i}" if module_addr else f"{attr_name}.{i}"
                         )
                         try:
-                            set_buffer_address(item, item_addr)
+                            register_session_buffer_stamp(trace, item, item_addr)
                             _state._tagged_buffer_ids.add(id(item))
                         except Exception:
                             pass
@@ -1019,7 +977,7 @@ def prepare_buffer_tensors(trace: "Trace", model: nn.Module) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _tag_untagged_buffers(module: nn.Module) -> None:
+def _tag_untagged_buffers(trace: "Trace", module: nn.Module) -> None:
     """Tag any buffers that lack ``_tl.address`` metadata.
 
     Called during ``_record_module_entry_metadata`` to catch buffers that were created
@@ -1027,7 +985,15 @@ def _tag_untagged_buffers(module: nn.Module) -> None:
     scan. If a buffer already has ``_tl.label_raw`` from being logged as
     an intermediate tensor, that label is moved to ``_tl.buffer_source`` and cleared
     so the buffer gets a fresh source-tensor entry on next use.
+
+    Dynamically stamped buffers join ``trace._session_buffer_inventory`` so the
+    r79 inventory-driven cleanup clears them even if they are popped from
+    ``_buffers`` later in the same forward. r81: the stamp routes through
+    ``register_session_buffer_stamp`` so it also joins the session identity
+    registry consulted by the buffer-rung storage-identity belt.
     """
+    from .buffer_writes import register_session_buffer_stamp
+
     for buffer_name, buffer_tensor in module.named_buffers():
         if get_buffer_address(buffer_tensor) is not None:
             continue
@@ -1036,7 +1002,7 @@ def _tag_untagged_buffers(module: nn.Module) -> None:
             address = buffer_name
         else:
             address = f"{module_addr}.{buffer_name}"
-        set_buffer_address(buffer_tensor, address)
+        register_session_buffer_stamp(trace, buffer_tensor, address)
         # If this buffer was already logged as an intermediate tensor, save the
         # previous label as parent and reset so it gets a proper buffer source entry.
         promote_label_to_buffer_source_and_clear_label(buffer_tensor)
@@ -1066,6 +1032,8 @@ def _record_module_entry_metadata(
         needed by ``_record_module_exit_metadata`` for pass-through detection and
         replacement-output recovery.
     """
+    from .buffer_writes import session_validated_buffer_address
+
     module_address = _module_address(module)
     mod_id = id(module)
     trace._module_build_data["module_training_modes"][module_address] = module.training
@@ -1133,9 +1101,11 @@ def _record_module_entry_metadata(
     for t in input_tensors:
         if is_functorch_wrapped_tensor(t):
             continue
-        # Lazily register buffer tensors that haven't been logged yet.
+        # Lazily register buffer tensors that haven't been logged yet. r81: the
+        # module-entry gate validates the static stamp through the session belt
+        # (current-session object + storage identity), never raw.
         label = get_live_tensor_label(t, trace.capture_events.live_index.by_raw_label)
-        buffer_address = cast(str, get_buffer_address(t))
+        buffer_address = session_validated_buffer_address(trace, t)
         if label is None and buffer_address is not None:
             log_source_tensor(trace, t, "buffer", buffer_address)
             label = get_tensor_label(t)
@@ -1167,7 +1137,7 @@ def _record_module_entry_metadata(
         input_tensor_labels_at_entry.append(label)
 
     # Catch buffers created dynamically (e.g. in forward()) after initial scan.
-    _tag_untagged_buffers(module)
+    _tag_untagged_buffers(trace, module)
     trace.capture_events.module_enter_events.append(
         ModuleEnterEvent(
             address=module_address,
@@ -1865,21 +1835,13 @@ def module_forward_decorator(
     necessary because the same wrapper persists across multiple ``trace``
     calls with different Trace instances.
 
-    **Three execution modes**:
+    **Execution modes**:
 
     1. **Logging off** (``_state._logging_enabled is False``): Pass through to
        ``orig_forward`` with zero overhead beyond one bool check. This is the
        normal production path.
 
-    2. **Fast mode** (``trace.capture_mode == "fast"``): Runs ``orig_forward``
-       first, then handles ``nn.Identity`` and pass-through detection ONLY.
-       Skips ``_record_module_entry_metadata``/``_record_module_exit_metadata`` entirely — the fast
-       path doesn't track module nesting metadata. The ``torch.identity()`` call
-       for nn.Identity/pass-through is still needed to keep tensor counters
-       aligned with the exhaustive pass (which already ran and established the
-       counter sequence).
-
-    3. **Exhaustive mode**: Full entry/exit bookkeeping via
+    2. **Exhaustive mode**: Full entry/exit bookkeeping via
        ``_record_module_entry_metadata`` and ``_record_module_exit_metadata``.
        Wrapped in try/except for **exception safety**:
        if ``orig_forward`` raises, the module pass label is popped from the stack
@@ -1901,33 +1863,6 @@ def module_forward_decorator(
             return orig_forward(*args, **kwargs)
 
         trace = _state._active_trace
-
-        # ---- Fast mode: skip module entry/exit tracking ----
-        # Only nn.Identity and pass-through detection is needed to keep
-        # tensor counters aligned with the exhaustive pass.
-        if trace.capture_mode == "fast":
-            input_tensors_fast = get_vars_of_type_from_obj(
-                [args, kwargs], torch.Tensor, [torch.nn.Parameter], search_depth=5
-            )
-            input_tensor_labels = set(get_label_list(input_tensors_fast))
-            if (
-                _state._escape_detector_mode == "shadow"
-                or _state._completeness_witness_mode == "shadow"
-            ):
-                with expected_original_call(orig_forward, "module_forward:fast"):
-                    out = orig_forward(*args, **kwargs)
-            else:
-                out = orig_forward(*args, **kwargs)
-            output_tensors = get_vars_of_type_from_obj(out, torch.Tensor, search_depth=4)
-            for t in output_tensors:
-                # Force _decorated_identity() for nn.Identity modules and pass-throughs
-                # to create a new tensor entry, matching what exhaustive mode does.
-                tensor_label = get_tensor_label(t)
-                if (_module_type(module).lower() == "identity") or (
-                    tensor_label is not None and tensor_label in input_tensor_labels
-                ):
-                    t = cast(Callable[[torch.Tensor], torch.Tensor], _state._decorated_identity)(t)
-            return out
 
         if trace.capture_mode == "predicate":
             from ...capture.predicates import (
@@ -2191,6 +2126,41 @@ def clear_hooks(hook_handles: list[Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _restore_session_param_state(trace: "Trace", model: nn.Module) -> None:
+    """Restore parameter grad flags and remove session-scoped parameter metadata.
+
+    This cleanup is deliberately independent of the exception that ended the
+    capture. Callers invoke it from teardown paths that may be handling any
+    ``BaseException`` raised by user code.
+
+    r79 session-leak fix: the AUTHORITATIVE clear iterates the RECORDED prep
+    inventory (``trace._session_param_inventory``), never only the live model
+    tree -- a parameter popped from ``_parameters`` mid-forward escapes a
+    ``model.parameters()`` re-traversal, and its surviving prep stamp would let
+    a LATER capture accept stale provenance (false VERIFIED / wrong-bind). The
+    live-tree walk is kept as belt-and-suspenders; both passes are idempotent
+    (``clear_meta`` pops with a default, ``restore_param_requires_grad`` no-ops
+    once the stamp is gone).
+
+    Parameters
+    ----------
+    trace
+        Trace whose session prep recorded the stamped-parameter inventory.
+    model
+        Model whose parameters were prepared for the capture session.
+    """
+
+    inventory = getattr(trace, "_session_param_inventory", None)
+    for param in inventory or ():
+        restore_param_requires_grad(param)
+        clear_meta(param)
+    if inventory:
+        trace._session_param_inventory = []
+    for param in model.parameters():
+        restore_param_requires_grad(param)
+        clear_meta(param)
+
+
 def _cleanup_model_session(
     trace: "Trace",
     model: nn.Module,
@@ -2212,16 +2182,14 @@ def _cleanup_model_session(
         rollback_prehook_provenance(trace)
     finally:
         # Restore requires_grad and remove session-scoped param attributes
-        for param in model.parameters():
-            restore_param_requires_grad(param)
-            clear_meta(param)
+        _restore_session_param_state(trace, model)
 
     # Session-scoped module tracking data lives in Trace dicts (not on
     # modules), so no per-module cleanup iteration is needed — the dicts
     # are GC'd with the Trace.
 
     # Clean tensor labels from model tensors (buffers, etc.)
-    _undecorate_model_tensors(model)
+    _undecorate_model_tensors(trace, model)
 
     # Clean tensor labels from input tensors
     seen: set[int] = set()
@@ -2231,6 +2199,12 @@ def _cleanup_model_session(
             seen.add(id(t))
     if input_objects is not None:
         _clear_session_tensor_metadata(input_objects, seen)
+
+    # r83 C1: retire this capture's label-anchoring session LAST, after every
+    # cleanup pass that consults it. Any label still carried by an object that
+    # outlives the capture is now anchored to a retired session and can never
+    # be accepted as provenance by a later capture, whatever route it escaped by.
+    end_label_session()
 
 
 def _clear_session_tensor_metadata(value: Any, seen: set[int], depth: int = 0) -> None:
@@ -2252,7 +2226,25 @@ def _clear_session_tensor_metadata(value: Any, seen: set[int], depth: int = 0) -
         Mutates reachable tensors in place by removing TorchLens metadata.
     """
 
-    if value is None or isinstance(value, (str, bytes, int, float, bool, ModuleType)):
+    if value is None or isinstance(value, (str, bytes, int, float, bool)):
+        return
+    if isinstance(value, ModuleType):
+        # r81 (r80 F1 root B): a stamped tensor stashed as a DIRECT attribute of
+        # a ``types.ModuleType`` escaped the belt entirely (this walk returned
+        # immediately for modules). Sweep the module namespace SHALLOWLY for
+        # plain tensors only -- deep recursion into arbitrary imported modules
+        # (``torch``, ``numpy``) would be unbounded; deeper stashes are covered
+        # by the session identity belt, which never trusts an unregistered
+        # stamp anyway.
+        obj_id = id(value)
+        if obj_id in seen or depth >= 12:
+            return
+        seen.add(obj_id)
+        namespace = getattr(value, "__dict__", None)
+        if isinstance(namespace, dict):
+            for item in list(namespace.values()):
+                if isinstance(item, torch.Tensor) and not isinstance(item, torch.nn.Parameter):
+                    clear_meta(item)
         return
     if isinstance(value, torch.Tensor):
         if not isinstance(value, torch.nn.Parameter):
@@ -2319,13 +2311,35 @@ def _clear_callable_session_tensor_metadata(callable_obj: Any, seen: set[int]) -
             _clear_session_tensor_metadata(globals_dict[name], seen)
 
 
-def _undecorate_model_tensors(model: nn.Module) -> None:
+def _undecorate_model_tensors(trace: "Trace", model: nn.Module) -> None:
     """Remove session-scoped metadata from non-parameter tensors in the model.
 
     Uses a bounded ``__dict__`` scan instead of ``iter_accessible_attributes``
     (slow dir() + getattr MRO walk). Handles tensors stored directly as
     attributes, inside Python containers, and inside model-owned helper objects.
+
+    r79 session-leak fix: the AUTHORITATIVE clear iterates the RECORDED buffer
+    inventory (``trace._session_buffer_inventory``) first -- a buffer popped
+    from ``_buffers`` mid-forward escapes the ``model.modules()`` re-traversal
+    below, and its surviving ``TensorMeta`` address would let a later capture
+    accept stale buffer provenance. The traversal is kept as belt-and-suspenders
+    for unstamped model-owned tensors; ``clear_meta`` is idempotent.
+
+    r81: the session identity registry (``trace._session_buffer_identity``) is
+    cleared alongside -- its entries pin the stamped objects and their stamp-time
+    storages, so releasing it both clears any stamp the inventory might ever
+    miss and drops the storage keepers.
     """
+    buffer_inventory = getattr(trace, "_session_buffer_inventory", None)
+    for stamped_tensor in buffer_inventory or ():
+        clear_meta(stamped_tensor)
+    if buffer_inventory:
+        trace._session_buffer_inventory = []
+    identity_registry = getattr(trace, "_session_buffer_identity", None)
+    if identity_registry:
+        for stamp_entry in identity_registry.values():
+            clear_meta(stamp_entry.tensor)
+        trace._session_buffer_identity = {}
     seen: set[int] = set()
     for submodule in model.modules():
         for attr_val in submodule.__dict__.values():

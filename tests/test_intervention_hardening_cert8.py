@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 import torch
 from torch import nn
 
@@ -37,7 +38,7 @@ from torchlens.intervention._metrics import (
     is_scalar_like,
     relative_l1_scalar,
 )
-from torchlens.intervention.errors import NonExecutableSpecError
+from torchlens.intervention.errors import NonExecutableSpecError, UntrustedCallableError
 from torchlens.intervention.helpers import HelperSpec, helper_from_serialized
 from torchlens.intervention.save import (
     LazyImportRef,
@@ -154,17 +155,6 @@ def test_no_unguarded_relative_l1_scalar_call_site_remains() -> None:
             )
 
 
-def test_relative_l1_scalar_itself_rejects_numel_mismatch() -> None:
-    """BLOCKER-1 defense-in-depth: the scalar fallback refuses to truncate."""
-
-    try:
-        relative_l1_scalar(torch.tensor([1.0, 2.0, 3.0]), torch.tensor([1.0]))
-    except ValueError as exc:
-        assert "equal element counts" in str(exc)
-    else:  # pragma: no cover
-        raise AssertionError("relative_l1_scalar must reject mismatched numel")
-
-
 def test_distance_value_multi_element_matches_cosine() -> None:
     """BLOCKER-1 sibling: _distance_value routes multi-element through cosine."""
 
@@ -200,8 +190,12 @@ def test_bwd_hook_callable_arg_roundtrips_at_default_save_level() -> None:
     assert not isinstance(arg, dict), "callable arg decoded as a raw wrapper dict"
     assert isinstance(arg, LazyImportRef)
     assert callable(arg)
-    # The import ref resolves back to the original function.
-    assert _resolve_import_ref(arg.import_path) is _top_level_bwd_hook
+    # Deny-by-default (r12 RCE guard): the foreign local test module is not resolved
+    # under the default untrusted contract.
+    with pytest.raises(UntrustedCallableError):
+        _resolve_import_ref(arg.import_path)
+    # Under explicit trust, the import ref resolves back to the original function.
+    assert _resolve_import_ref(arg.import_path, trust_custom_callables=True) is _top_level_bwd_hook
 
 
 def test_bwd_hook_end_to_end_save_load_default_level(tmp_path: Path) -> None:

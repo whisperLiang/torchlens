@@ -50,6 +50,15 @@ MODEL_LOG_FIELD_ORDER = [
     "param_source",
     "derived_grads",
     "capture_mode",
+    "_runnable_descriptor",
+    "_runnable_readiness",
+    "_runnable_staged_user_state",
+    "_runnable_embedded_state",
+    "_runnable_capture_state",
+    "_runnable_archived_activations",
+    "_runnable_path_faithfulness",
+    "_runnable_first_mismatch",
+    "_runnable_poisoned",
     "detached_patch_policy",
     "detached_patch_epoch",
     "escape_detector_mode",
@@ -208,6 +217,7 @@ MODEL_LOG_FIELD_ORDER = [
     "_annotation_blobs",
     "buffer_layers",
     "buffer_num_calls",
+    "_buffer_persistence",
     "internal_source_ops",
     "internal_sink_ops",
     "internally_terminated_bool_ops",
@@ -342,6 +352,7 @@ LAYER_PASS_LOG_FIELD_ORDER = [
     "transformed_gradient_memory",
     # Function call info
     "func",
+    "func_id",
     "func_call_id",
     "func_name",
     "func_qualname",
@@ -1019,6 +1030,11 @@ IGNORED_FUNCS = [
     ("torch.Tensor", "T"),
     ("torch.Tensor", "mT"),
     ("torch.Tensor", "H"),
+    # r45: ``mH`` (batched conjugate transpose) must be wrapped for capture exactly like
+    # its sibling ``H`` / ``mT`` -- otherwise a forward using ``x.mH`` records the adjoint
+    # result as an unattributed literal and the runnable artifact cannot save/run (the r44
+    # corr1_1 / secF_1 finding: ``.mH`` "not modeled as a property op at all").
+    ("torch.Tensor", "mH"),
 ]
 
 

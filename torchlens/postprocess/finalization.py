@@ -46,6 +46,7 @@ from ..data_classes._summary import format_call_arg
 from ..data_classes.module import Module, ModuleCall
 from ..data_classes.prehook import ModuleInputSnapshot, PreHookEffect
 from ..utils.introspection import get_vars_of_type_from_obj
+from ..utils._torch_symbols import torch_attr
 
 if TYPE_CHECKING:
     from ..data_classes.layer import Layer
@@ -777,10 +778,6 @@ def _build_module_logs(self: "Trace") -> None:
     - A root Module for "self" (the model itself).
     - ModuleLogs for each submodule with ModuleCallLogs for each pass.
     - ModuleAccessor and BufferAccessor for user-facing access.
-
-    MUST NOT be called in fast mode (postprocess_fast) because _module_build_data
-    is not repopulated when Step 9 is skipped. Existing module logs from the
-    exhaustive pass remain valid (#108).
 
     Handles shared modules (same nn.Module registered under multiple addresses)
     via an alias-to-metadata map. Computes nesting depths via BFS from root.
@@ -1514,7 +1511,7 @@ def _dtype_from_manifest_string(dtype_name: str) -> torch.dtype:
         If the dtype name is unknown to the current runtime.
     """
 
-    dtype_obj = getattr(torch, dtype_name, None)
+    dtype_obj = torch_attr(dtype_name)  # r47 secD_1: no lazy ``torch.__getattr__``
     if not isinstance(dtype_obj, torch.dtype):
         raise TorchLensIOError(f"Unsupported dtype string in manifest: {dtype_name}.")
     return dtype_obj

@@ -127,7 +127,9 @@ def _make_layers_to_save_predicate(layers_to_save: object) -> PredicateFn:
         if isinstance(layers_to_save, str)
         else set(cast(Iterable[Any], layers_to_save))
     )
-    requested_ints = {int(item) for item in requested if isinstance(item, int)}
+    requested_ints = {
+        int(item) + 1 for item in requested if isinstance(item, int) and int(item) >= 0
+    }
     requested_strings = {str(item) for item in requested if not isinstance(item, int)}
     cache_key = (
         "layers_to_save",
@@ -303,6 +305,39 @@ def _layers_to_save_has_negative_index(layers_to_save: object) -> bool:
             for value in layers_to_save
         )
     return False
+
+
+def _layers_to_save_live_subset(layers_to_save: object) -> object | None:
+    """Return selector components that can be resolved during the forward.
+
+    Parameters
+    ----------
+    layers_to_save
+        Public ``layers_to_save`` selection containing a deferred component.
+
+    Returns
+    -------
+    object | None
+        Positive integer and ordinary label components, or ``None`` when every
+        component requires final graph structure.
+    """
+
+    if isinstance(layers_to_save, bool):
+        return None
+    if isinstance(layers_to_save, int):
+        return layers_to_save if layers_to_save >= 0 else None
+    if isinstance(layers_to_save, str):
+        if layers_to_save.startswith(("output", "identity")):
+            return None
+        return layers_to_save
+    if isinstance(layers_to_save, collections.abc.Iterable):
+        live_components = [
+            component
+            for component in layers_to_save
+            if _layers_to_save_live_subset(component) is not None
+        ]
+        return live_components or None
+    return None
 
 
 def _layers_to_save_has_integer_selector(layers_to_save: object) -> bool:

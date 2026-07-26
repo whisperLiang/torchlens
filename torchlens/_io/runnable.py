@@ -1,0 +1,4680 @@
+"""Sparse runnable descriptor production from a cooked :class:`Trace` projection."""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
+from dataclasses import dataclass, fields, is_dataclass, replace
+from enum import Enum
+from hashlib import sha256
+import json
+import math
+import platform
+from typing import Any, cast
+
+import numpy as np
+import torch
+
+from .. import __version__ as TORCHLENS_VERSION
+from . import TorchLensIOError
+from .._runnable_state import runnable_tensor_byte_digest
+from ..utils._callable_safety import _STORAGE_UNSAFE_NAMES
+from ..data_classes._state_adapter import state_items
+from ..errors import RunnablePreflightError
+from ..intervention.types import (
+    CapturedArgTemplate,
+    FunctionRegistryKey,
+    LiteralTensor,
+    LiteralValue,
+    ParentRef,
+    Unsupported,
+)
+from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
+from ..ir.container_registry import ModelSite, Role
+from ..runnable import (
+    RUNNABLE_ACTIVATION_PAYLOAD_SCHEMA_VERSION,
+    RUNNABLE_CALLABLE_REF_SCHEMA_VERSION,
+    RUNNABLE_CALL_RECIPE_VERSION,
+    RUNNABLE_INITIALIZER_POLICY_VERSION,
+    RUNNABLE_TLSPEC_SCHEMA_VERSION,
+    ActivationPayloadLayerDescriptor,
+    ActivationPayloadMember,
+    AmbientExecutionContext,
+    AutocastDeviceContext,
+    CallControlObligation,
+    CallExecutionContext,
+    CallableRegistryEntry,
+    ControlDependencyEdge,
+    InputAttestationFingerprint,
+    InputBoundarySite,
+    InputBoundaryTensorSite,
+    ControlWitness,
+    ControlWitnessKind,
+    InputSlotBinding,
+    WITNESS_GAP_REGISTRY,
+    WitnessCoverageGap,
+    WitnessGapKind,
+    control_dependency_site_label,
+    decode_input_site_position,
+    derived_witness_completeness,
+    LiteralArgumentRef,
+    LiteralAtom,
+    LiteralAtomKind,
+    LiteralMapping,
+    LiteralMappingEntry,
+    LiteralSequence,
+    LiteralSequenceKind,
+    LiteralSlice,
+    LiteralTorchSymbol,
+    LiteralTupleKey,
+    NonTensorLiteral,
+    PayloadLayerDescriptor,
+    PayloadLayersDescriptor,
+    ProducerPreflight,
+    RequiredWitnessFamily,
+    RequiredWitnessInventory,
+    RunnableCallDescriptor,
+    RunnableCompatibility,
+    RunnableDiagnostic,
+    RunnableErrorCode,
+    RunnableRngProfile,
+    SparseRunDescriptor,
+    WITNESS_FAMILY_REGISTRY,
+    WITNESS_FAMILY_REGISTRY_VERSION,
+    encode_input_site_position,
+    SlotByteDigest,
+    StateByteDigest,
+    StateSlotBinding,
+    StateSlotRole,
+    TensorArgumentRef,
+    TensorSlotDescriptor,
+    TensorSlotRole,
+    TensorUseSite,
+)
+
+
+@dataclass(slots=True)
+class _SlotDraft:
+    """Mutable producer-only accumulator for a frozen tensor-slot descriptor."""
+
+    slot_id: str
+    role: TensorSlotRole
+    shape: tuple[int, ...]
+    dtype: str
+    device_type: str
+    device_index: int | None
+    mutable: bool = False
+    version_of: str | None = None
+    producer_slot_id: str | None = None
+    output_path: tuple[str | int, ...] | None = None
+    input_binding: InputSlotBinding | None = None
+    state_binding: StateSlotBinding | None = None
+    use_sites: list[TensorUseSite] | None = None
+    host_escape: bool = False
+    inert_sink: bool = False
+
+    def freeze(self) -> TensorSlotDescriptor:
+        """Freeze this draft into the Stage-0 descriptor type.
+
+        Returns
+        -------
+        TensorSlotDescriptor
+            Immutable value-free slot descriptor.
+        """
+
+        return TensorSlotDescriptor(
+            slot_id=self.slot_id,
+            role=self.role,
+            use_sites=tuple(self.use_sites or ()),
+            shape=self.shape,
+            dtype=self.dtype,
+            rank=len(self.shape),
+            device_type=self.device_type,
+            device_index=self.device_index,
+            mutable=self.mutable,
+            version_of=self.version_of,
+            producer_slot_id=self.producer_slot_id,
+            output_path=self.output_path,
+            input_binding=self.input_binding,
+            state_binding=self.state_binding,
+            host_escape=self.host_escape,
+            inert_sink=self.inert_sink,
+        )
+
+
+class _UnsupportedLiteralError(ValueError):
+    """Internal signal for a value outside the frozen literal grammar."""
+
+
+def _call_execution_context(representative: Any) -> CallExecutionContext | None:
+    """Build the required v2 per-call execution context from captured op state.
+
+    Reads the op's ``func_autocast_state`` (recorded at the call's execution
+    point), including the reserved ``__execution__`` grad/inference entry. A
+    missing or shapeless record returns ``None`` so the producer fails closed
+    with a typed diagnostic -- context is REQUIRED and EXPLICIT in v2, never
+    defaulted.
+    """
+
+    state = getattr(representative, "func_autocast_state", None)
+    if not isinstance(state, Mapping):
+        return None
+    execution = state.get("__execution__")
+    if not isinstance(execution, Mapping) or "grad_enabled" not in execution:
+        return None
+    autocast_entries: list[AutocastDeviceContext] = []
+    for device_type in sorted(key for key in state if not str(key).startswith("__")):
+        entry = state[device_type]
+        if not isinstance(entry, Mapping) or "enabled" not in entry:
+            return None
+        dtype = entry.get("dtype")
+        autocast_entries.append(
+            AutocastDeviceContext(
+                device_type=str(device_type),
+                enabled=bool(entry["enabled"]),
+                dtype=None if dtype is None else str(dtype),
+            )
+        )
+    return CallExecutionContext(
+        autocast=tuple(autocast_entries),
+        grad_enabled=bool(execution["grad_enabled"]),
+        inference_mode=bool(execution.get("inference_mode", False)),
+    )
+
+
+# Torch ops documented CUDA-nondeterministic in their FORWARD kernels (the
+# transpose-conv cuDNN atomicAdd scatter family plus the documented index/scatter
+# accumulation set). Used ONLY for the fail-safe positive attestation-ineligibility
+# marking (H_B_RESOLUTION R1): a capture running one of these on a CUDA device
+# WITHOUT ``use_deterministic_algorithms(True)`` cannot promise byte-reproducible
+# activations, so its descriptor is marked ineligible at capture (``not_applicable``
+# at run, never a false ATTESTED and never a spurious NumericAttestationError).
+_CUDA_NONDETERMINISTIC_QUALNAME_TAILS: frozenset[str] = frozenset(
+    {
+        "conv_transpose1d",
+        "conv_transpose2d",
+        "conv_transpose3d",
+        "scatter_add",
+        "scatter_add_",
+        "scatter_reduce",
+        "scatter_reduce_",
+        "index_add",
+        "index_add_",
+        "index_copy",
+        "index_copy_",
+        "index_put",
+        "index_put_",
+        "put_",
+        "bincount",
+        "histc",
+        "grid_sample",
+        "grid_sampler_2d",
+        "grid_sampler_3d",
+        "embedding_bag",
+        "median",
+        "kthvalue",
+        "ctc_loss",
+    }
+)
+
+
+def _descriptor_has_cuda_nondeterministic_call(
+    calls: Sequence[RunnableCallDescriptor],
+    registry_entries: Sequence[CallableRegistryEntry],
+    slot_drafts: Mapping[str, _SlotDraft],
+) -> bool:
+    """Return whether a documented CUDA-nondeterministic op runs on a CUDA device."""
+
+    qualname_by_registry = {
+        entry.registry_id: str(getattr(entry.key, "qualname", "") or "")
+        for entry in registry_entries
+    }
+    for call in calls:
+        tail = qualname_by_registry.get(call.registry_id, "").rsplit(".", 1)[-1]
+        if tail not in _CUDA_NONDETERMINISTIC_QUALNAME_TAILS:
+            continue
+        involved_slot_ids = [argument.slot_id for argument in call.tensor_arguments]
+        involved_slot_ids.extend(call.output_slot_ids)
+        for slot_id in involved_slot_ids:
+            draft = slot_drafts.get(slot_id)
+            if draft is not None and draft.device_type == "cuda":
+                return True
+    return False
+
+
+def _ambient_execution_context(
+    trace: Any,
+    calls: Sequence[RunnableCallDescriptor],
+    registry_entries: Sequence[CallableRegistryEntry],
+    slot_drafts: Mapping[str, _SlotDraft],
+) -> AmbientExecutionContext | None:
+    """Build the required v2 capture-scoped ambient context, or ``None`` if absent.
+
+    ``attestation_ineligible_context`` is the POSITIVE capture-time marking for a
+    nondeterministic execution context: ``cudnn.benchmark=True`` (autotuner
+    kernel selection) or a documented CUDA-nondeterministic op running without
+    ``use_deterministic_algorithms(True)`` (H_B_RESOLUTION R1). Fail-safe: the
+    mark only widens ``not_applicable``, never a positive claim.
+    """
+
+    snapshot = getattr(trace, "_runnable_capture_ambient", None)
+    if not isinstance(snapshot, Mapping) or "default_dtype" not in snapshot:
+        return None
+    # r53 hon_1: the global autograd/inference mode is REQUIRED. A capture
+    # snapshot missing either key predates this schema wave (a stale in-memory
+    # dev capture); fail closed to the absent-context producer refusal -- a
+    # guessed grad mode could bless a different-context comparison as verified.
+    grad_enabled = snapshot.get("grad_enabled")
+    inference_mode = snapshot.get("inference_mode")
+    if not isinstance(grad_enabled, bool) or not isinstance(inference_mode, bool):
+        return None
+
+    def _optional_bool(name: str) -> bool | None:
+        value = snapshot.get(name)
+        return None if value is None else bool(value)
+
+    def _optional_str(name: str) -> str | None:
+        value = snapshot.get(name)
+        return None if value is None else str(value)
+
+    cudnn_benchmark = _optional_bool("cudnn_benchmark")
+    deterministic = _optional_bool("deterministic_algorithms")
+    ineligible = bool(cudnn_benchmark) or (
+        deterministic is not True
+        and _descriptor_has_cuda_nondeterministic_call(calls, registry_entries, slot_drafts)
+    )
+    return AmbientExecutionContext(
+        default_dtype=str(snapshot["default_dtype"]),
+        default_device=str(snapshot.get("default_device", "cpu")),
+        float32_matmul_precision=_optional_str("float32_matmul_precision"),
+        deterministic_algorithms=deterministic,
+        deterministic_algorithms_warn_only=_optional_bool("deterministic_algorithms_warn_only"),
+        cuda_matmul_allow_tf32=_optional_bool("cuda_matmul_allow_tf32"),
+        cudnn_allow_tf32=_optional_bool("cudnn_allow_tf32"),
+        cudnn_deterministic=_optional_bool("cudnn_deterministic"),
+        cudnn_benchmark=cudnn_benchmark,
+        cudnn_enabled=_optional_bool("cudnn_enabled"),
+        flash_sdp_enabled=_optional_bool("flash_sdp_enabled"),
+        mem_efficient_sdp_enabled=_optional_bool("mem_efficient_sdp_enabled"),
+        math_sdp_enabled=_optional_bool("math_sdp_enabled"),
+        grad_enabled=grad_enabled,
+        inference_mode=inference_mode,
+        fill_uninitialized_memory=_optional_bool("fill_uninitialized_memory"),
+        attestation_ineligible_context=ineligible,
+    )
+
+
+def build_sparse_run_descriptor(trace: Any) -> SparseRunDescriptor:
+    """Project a cooked Trace into the frozen sparse runnable descriptor.
+
+    Parameters
+    ----------
+    trace:
+        Fully postprocessed Trace produced from a sealed capture core.
+
+    Returns
+    -------
+    SparseRunDescriptor
+        Descriptor with a complete producer preflight report. A failed report
+        is returned for diagnostics and must not be written as runnable.
+    """
+
+    _normalize_trace_numpy_scalar_metadata(trace)
+    diagnostics: list[RunnableDiagnostic] = []
+    backend = str(getattr(trace, "backend", "torch"))
+    if backend != "torch":
+        diagnostics.append(
+            _diagnostic(
+                RunnableErrorCode.UNSUPPORTED_BACKEND_REPLAY,
+                f"Sparse runnable rung 1 supports only the torch backend, not {backend!r}.",
+                detection_stage="producer_backend",
+            )
+        )
+
+    ops = list(getattr(trace, "layer_list", ()))
+    op_by_alias = _op_alias_index(trace, ops)
+    slot_drafts, slot_for_op = _build_op_slot_drafts(trace, ops, diagnostics)
+    _build_child_version_slot_drafts(trace, ops, slot_drafts, slot_for_op)
+    state_slots = _build_parameter_slot_drafts(trace)
+    slot_drafts.update(state_slots)
+    _add_persistent_buffer_slot_drafts(trace, slot_drafts)
+
+    registry_entries: list[CallableRegistryEntry] = []
+    registry_id_by_key: dict[FunctionRegistryKey, str] = {}
+    calls: list[RunnableCallDescriptor] = []
+    producer_call_by_slot: dict[str, str] = {}
+    saw_unmodelled_host_write = False
+    grouped_ops = _group_computational_ops(ops)
+    for call_number, call_ops in grouped_ops:
+        representative = call_ops[0]
+        call_id = f"call:{call_number}"
+        func_id = getattr(representative, "func_id", None)
+        if not isinstance(func_id, FunctionRegistryKey):
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.MISSING_CALLABLE_REF,
+                    "Computational call has no cooked FunctionRegistryKey; capture with "
+                    "intervention_ready=True before saving level='runnable'.",
+                    affected_ops=tuple(str(op.label) for op in call_ops),
+                    detection_stage="producer_callable",
+                )
+            )
+            continue
+        registry_id = registry_id_by_key.get(func_id)
+        if registry_id is None:
+            registry_id = f"callable:{len(registry_entries) + 1}"
+            registry_id_by_key[func_id] = registry_id
+            registry_entries.append(CallableRegistryEntry(registry_id=registry_id, key=func_id))
+
+        # r14-C3: a storage-rebinding / storage-reallocating op (``set_`` / ``resize_`` family)
+        # cannot be faithfully represented in the sparse DAG -- the resolver already denies it at
+        # LOAD as a non-forward callable, which left ``run()`` crashing with a ReattachError. Refuse
+        # it at SAVE with a typed diagnostic so the model fails closed here (RunnablePreflightError)
+        # rather than crashing at run time, and is never a false VERIFIED.
+        storage_unsafe_name = str(getattr(func_id, "qualname", "") or "").rsplit(".", 1)[-1]
+        if (
+            storage_unsafe_name in _STORAGE_UNSAFE_NAMES
+            or str(getattr(representative, "func_name", "")) in _STORAGE_UNSAFE_NAMES
+        ):
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.UNTRUSTED_CUSTOM_IMPORT,
+                    f"Op {storage_unsafe_name or str(getattr(representative, 'func_name', ''))!r} "
+                    "rebinds or reallocates tensor storage (the set_/resize_ family) and is not a "
+                    "faithfully representable pure-forward op, so it cannot be saved as a runnable "
+                    "call; save is refused here (fail closed at save time, never a crash at run "
+                    "time or a false VERIFIED).",
+                    registry_id=registry_id,
+                    affected_ops=tuple(str(op.label) for op in call_ops),
+                    detection_stage="producer_storage_unsafe_op",
+                )
+            )
+            continue
+
+        template = getattr(representative, "args_template", None)
+        if not isinstance(template, CapturedArgTemplate):
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.CALL_STRUCTURE_MISMATCH,
+                    "Computational call has no cooked argument template.",
+                    registry_id=registry_id,
+                    affected_ops=tuple(str(op.label) for op in call_ops),
+                    detection_stage="producer_call_recipe",
+                )
+            )
+            continue
+
+        execution_context = _call_execution_context(representative)
+        if execution_context is None:
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.EXECUTION_CONTEXT_UNAVAILABLE,
+                    "Computational call has no captured execution context "
+                    "(autocast + grad/inference mode); v2 runnable descriptors "
+                    "require an explicit per-call context record.",
+                    registry_id=registry_id,
+                    affected_ops=tuple(str(op.label) for op in call_ops),
+                    detection_stage="producer_execution_context",
+                )
+            )
+            continue
+
+        tensor_args, literal_args, has_unmodelled_host_write = _build_call_arguments(
+            representative,
+            template,
+            call_id=call_id,
+            registry_id=registry_id,
+            op_by_alias=op_by_alias,
+            slot_for_op=slot_for_op,
+            slot_drafts=slot_drafts,
+            diagnostics=diagnostics,
+        )
+        saw_unmodelled_host_write = saw_unmodelled_host_write or has_unmodelled_host_write
+        output_slot_ids = tuple(slot_for_op[id(op)] for op in call_ops)
+        for output_slot_id in output_slot_ids:
+            producer_call_by_slot[output_slot_id] = call_id
+            for version_slot_id, draft in slot_drafts.items():
+                if draft.version_of == output_slot_id:
+                    producer_call_by_slot[version_slot_id] = call_id
+        parent_call_ids = tuple(
+            dict.fromkeys(
+                producer_call_by_slot[argument.slot_id]
+                for argument in tensor_args
+                if argument.slot_id in producer_call_by_slot
+            )
+        )
+        calls.append(
+            RunnableCallDescriptor(
+                call_id=call_id,
+                op_labels=tuple(str(op.label) for op in call_ops),
+                registry_id=registry_id,
+                dispatch_kind=func_id.dispatch_kind,
+                argument_names=tuple(
+                    str(name) for name in getattr(representative, "arg_names", ())
+                ),
+                num_positional_args=int(getattr(representative, "num_pos_args", 0)),
+                num_keyword_args=int(getattr(representative, "num_kwargs", 0)),
+                tensor_arguments=tuple(tensor_args),
+                literal_arguments=tuple(literal_args),
+                output_slot_ids=output_slot_ids,
+                parent_call_ids=parent_call_ids,
+                is_inplace=bool(getattr(representative, "is_inplace", False)),
+                runtime_fingerprint=_runtime_fingerprint(
+                    representative, func_id, call_ops, execution_context
+                ),
+                execution_context=execution_context,
+                control_obligations=(),
+                control_dependencies=(),
+            )
+        )
+
+    _mark_inplace_versions(calls, slot_drafts)
+    # r71 A3: the ordered, typed, source-linked gap ledger REPLACES the former direct
+    # completeness-enum cascade. Every downgrade cause appends one gap in the SAME
+    # historical first-cause-wins order; the persisted summary is DERIVED from the
+    # ledger (``derived_witness_completeness``), never assigned ad hoc.
+    gaps: list[WitnessCoverageGap] = []
+
+    def _gap(kind: WitnessGapKind, member: str) -> None:
+        """Append one typed, source-linked coverage gap from the closed registry."""
+
+        spec = WITNESS_GAP_REGISTRY[kind]
+        gaps.append(
+            WitnessCoverageGap(
+                gap_kind=kind,
+                source_family=spec.source_family,
+                source_member=member,
+                order=len(gaps),
+                resulting_completeness=spec.resulting_completeness,
+            )
+        )
+
+    # r71 A2: the REQUIRED input-boundary record (runtime site/arity + tree-binding
+    # authority + totalized metadata-envelope domain) is built from replay structure
+    # BEFORE any witness is emitted -- structure before witnesses.
+    input_boundary = _build_input_boundary(trace, slot_drafts, diagnostics)
+    witnesses, obligations_by_call, dependencies_by_call = _build_control_witnesses(
+        trace, ops, calls, diagnostics, gap=_gap
+    )
+    literal_witnesses, opaque_leaf_members = _input_literal_witnesses(
+        trace, start_order=len(witnesses)
+    )
+    witnesses.extend(literal_witnesses)
+    for member in opaque_leaf_members:
+        # An opaque non-tensor input leaf cannot be re-verified, so its control
+        # dependency is unobserved: gap-downgrade to keep the run honest
+        # (UNVERIFIABLE + NOT_APPLICABLE), never a false VERIFIED/ATTESTED. The gap is
+        # anchored by the surviving value-free (``encodable=False``) literal fact.
+        _gap(WitnessGapKind.OPAQUE_INPUT_LEAF, member)
+    witnesses.extend(_input_metadata_witnesses(trace, input_boundary, start_order=len(witnesses)))
+    witnesses.extend(_input_structure_witnesses(trace, start_order=len(witnesses)))
+    witnesses.extend(_module_training_mode_witnesses(trace, start_order=len(witnesses)))
+    _stamp_state_binding_facts(trace, slot_drafts, diagnostics)
+    witnesses.extend(_state_metadata_fact_witnesses(slot_drafts, start_order=len(witnesses)))
+    escape_witnesses = _escape_witnesses(
+        trace, ops, calls, slot_drafts, start_order=len(witnesses), gap=_gap
+    )
+    witnesses.extend(escape_witnesses)
+    # r71 A2: attach the owner-record obligations to their calls, then close
+    # terminal-slot accounting with explicit inert_sink claims.
+    calls = [
+        replace(
+            call,
+            control_obligations=tuple(obligations_by_call.get(call.call_id, ())),
+            control_dependencies=tuple(dependencies_by_call.get(call.call_id, ())),
+        )
+        for call in calls
+    ]
+    _stamp_terminal_claims(calls, slot_drafts, gaps)
+    if _has_forward_value_override_intervention(trace):
+        # A forward-modifying intervention (e.g. ``zero_ablate``/``replace_with``)
+        # substituted the captured value of an op INSIDE the forward pass. The sparse
+        # DAG records only the ORIGINAL op recipe, so a replay recomputes the
+        # un-intervened value: the captured output/activations reflect the intervened
+        # forward, but the recorded ops do not encode the override. TorchLens cannot
+        # cheaply prove at save time whether the override happens to be byte-identical
+        # to the natural output (an op-representable no-op like ``scale(1.0)``) without
+        # re-executing, so it fails closed here. The single completeness downgrade
+        # drives BOTH honesty layers together -- ``_path_faithfulness`` reports
+        # UNVERIFIABLE and ``_numeric_attestation_check`` reports NOT_APPLICABLE (never
+        # a false VERIFIED, and never a contradicting NumericAttestationError). An
+        # observe-only or backward/grad intervention leaves the forward output
+        # reproducible byte-for-byte and is NOT flagged here, so it still VERIFIES.
+        _gap(WitnessGapKind.FORWARD_VALUE_OVERRIDE, "capture")
+    if _has_input_metadata_view_read(trace):
+        # A metadata predicate (``is_contiguous`` / ``stride`` / ``storage_offset`` / autograd
+        # flag) was read on a DERIVED VIEW of a model input (``x.t().is_contiguous()``): the
+        # view is an orphan-pruned intermediate the sparse replay never re-derives, so its
+        # layout metadata cannot be re-verified against the runtime input. A same-shape layout
+        # twin flips such a branch on a fresh model while the replay silently follows the
+        # captured arm, so keep the run honestly UNVERIFIABLE + NOT_APPLICABLE rather than a
+        # false VERIFIED. A model that never reads metadata on an input-derived view records
+        # nothing and stays VERIFIED (no over-trigger).
+        _gap(WitnessGapKind.INPUT_METADATA_VIEW_READ, "capture")
+    if _has_pruned_rng_control_flow(trace):
+        # A torch-RNG draw steered pure-Python control flow, so its predicate chain
+        # is input-disconnected and was orphaned out of the visible graph. The
+        # recorded taken branch is nondeterministic (a fresh seeded forward may take
+        # the other arm) yet unwitnessed, so the sparse replay cannot reproduce or
+        # even observe the decision: keep the run honestly UNVERIFIABLE +
+        # NOT_APPLICABLE, never a false VERIFIED + ATTESTED. A genuinely-dead RNG
+        # draw (result influences nothing) is never recorded, so a deterministic
+        # model stays VERIFIED.
+        _gap(WitnessGapKind.PRUNED_RNG_CONTROL, "capture")
+    if _has_pruned_alias_mutation(trace):
+        # An in-place op mutated an UNLABELLED alias (``y.data.add_(5.0)``): the write targets
+        # storage the sparse DAG cannot model, so the op was orphan-pruned and the mutation is
+        # lost. A replay recomputes the PRE-mutation value (wrong output) yet nothing else
+        # witnesses the drop, so keep the run honestly UNVERIFIABLE + NOT_APPLICABLE rather than
+        # a false VERIFIED with the mutation gone. An in-place op on a LABELLED alias is graph-
+        # connected (replayed) and is never recorded, so a normal model stays VERIFIED.
+        _gap(WitnessGapKind.PRUNED_ALIAS_MUTATION, "capture")
+    if saw_unmodelled_host_write:
+        # A surviving in-place op with a removed receiver came from a host alias such as
+        # ``buffer.data.add_(1.0)``. The sparse recipe can keep running by reconnecting the receiver
+        # to the cooked parent, but the original host write bypassed the ordinary labelled tensor
+        # path, so the descriptor cannot honestly prove full path fidelity.
+        _gap(WitnessGapKind.UNMODELLED_HOST_WRITE, "capture")
+    ledger_facts = _runnable_ledger_facts_for_trace(trace)
+    if ledger_facts:
+        # r35 I2 (hon2_1): the event-lifecycle ledger recorded an UNDISCHARGED
+        # dispatch outcome -- a caught in-forward raise (exception-driven control
+        # flow: the taken path was decided by whether an op raised, a channel no
+        # tensor witness can see), an unmodeled successful host/None return, or a
+        # mutation-capable unknown. The sparse DAG cannot recompute or observe
+        # that decision, so EVERY run of this artifact (original or changed
+        # input) must ceiling at UNVERIFIABLE + NOT_APPLICABLE, never a silent
+        # false VERIFIED. A raise-free model records zero facts (no over-trigger).
+        if any(bool(fact.get("mutates")) for fact in ledger_facts):
+            _gap(WitnessGapKind.LIFECYCLE_LEDGER_MUTATION, "capture")
+        else:
+            _gap(WitnessGapKind.LIFECYCLE_LEDGER_DISPATCH, "capture")
+    if bool(getattr(trace, "_runnable_rng_monitor_uncertain", False)):
+        # r37 hon1_2 fail-closed rule: the host-nondeterminism monitor could not
+        # prove its own installation/chain/restoration, so channel coverage for
+        # this forward is unknowable -- INCOMPLETE, never "no consumption".
+        _gap(WitnessGapKind.RNG_MONITOR_UNCERTAIN, "capture")
+    if getattr(trace, "capture_verified", None) is False:
+        # r35 I2 completion: a capture whose own verification tripwire fired
+        # (unaccounted dispatches, escaped callables, unverified transform
+        # routes) cannot claim complete witness coverage for replay either.
+        _gap(WitnessGapKind.CAPTURE_VERIFICATION_FAILED, "capture")
+    # r71 A3: the persisted summary is DERIVED from the ordered gap ledger by the ONE
+    # derivation function -- never assigned directly (first-gap-wins, matching the
+    # historical cascade precedence).
+    completeness = derived_witness_completeness(tuple(gaps))
+    diagnostics.extend(_preflight_output_contracts(trace, ops))
+    diagnostics.extend(_preflight_state_alias_topology(trace, slot_drafts))
+    diagnostics.extend(_preflight_state_metadata(trace))
+    diagnostics.extend(_preflight_input_structure(trace))
+    # r35 corr2_3 note: the torchlens_role_init_v2 totality contract
+    # (``initializer_contract_diagnostics``) is enforced typed at runtime when
+    # random initialization is actually selected. It is deliberately NOT a
+    # producer refusal: a scalar-parameter model saved with embedded weights is
+    # a valid artifact whose random FALLBACK is simply unavailable, and v2's
+    # degenerate totality means every legal empty shape initializes without
+    # sampling, so no advertised descriptor can reach a raw math error.
+    ambient_context = _ambient_execution_context(trace, calls, registry_entries, slot_drafts)
+    if ambient_context is None:
+        diagnostics.append(
+            _diagnostic(
+                RunnableErrorCode.EXECUTION_CONTEXT_UNAVAILABLE,
+                "Capture recorded no ambient execution context; v2 runnable "
+                "descriptors require the explicit capture-scoped backend context "
+                "record (re-capture with this TorchLens version).",
+                detection_stage="producer_execution_context",
+            )
+        )
+        # Failed-preflight placeholder only: this descriptor can never be written
+        # as runnable, and the placeholder is marked attestation-ineligible.
+        ambient_context = AmbientExecutionContext(
+            default_dtype=str(torch.get_default_dtype()),
+            default_device="cpu",
+            float32_matmul_precision=None,
+            deterministic_algorithms=None,
+            deterministic_algorithms_warn_only=None,
+            cuda_matmul_allow_tf32=None,
+            cudnn_allow_tf32=None,
+            cudnn_deterministic=None,
+            cudnn_benchmark=None,
+            cudnn_enabled=None,
+            flash_sdp_enabled=None,
+            mem_efficient_sdp_enabled=None,
+            math_sdp_enabled=None,
+            grad_enabled=bool(torch.is_grad_enabled()),
+            inference_mode=bool(torch.is_inference_mode_enabled()),
+            fill_uninitialized_memory=None,
+            attestation_ineligible_context=True,
+        )
+    diagnostics = _deduplicate_diagnostics(diagnostics)
+    preflight = ProducerPreflight(passed=not diagnostics, diagnostics=tuple(diagnostics))
+    descriptor = SparseRunDescriptor(
+        capability=RUNNABLE_TLSPEC_SCHEMA_VERSION,
+        backend=backend,
+        call_recipe=RUNNABLE_CALL_RECIPE_VERSION,
+        callable_ref_schema=RUNNABLE_CALLABLE_REF_SCHEMA_VERSION,
+        state_binding="module_path_role_v1",
+        input_binding="model_site_io_role_v1",
+        control_witness="scalar_bool_and_arm_entry_v1",
+        initializer_policy_version=RUNNABLE_INITIALIZER_POLICY_VERSION,
+        payload_layers=PayloadLayersDescriptor(
+            weights=PayloadLayerDescriptor(present=False, schema="state_dict_v1"),
+            nonpersistent_buffers=PayloadLayerDescriptor(
+                present=any(
+                    draft.state_binding is not None and not draft.state_binding.persistent
+                    for draft in slot_drafts.values()
+                ),
+                schema="runnable_nonpersistent_buffer_v1",
+            ),
+            activations=PayloadLayerDescriptor(
+                present=False,
+                schema=RUNNABLE_ACTIVATION_PAYLOAD_SCHEMA_VERSION,
+            ),
+        ),
+        callable_registry=tuple(registry_entries),
+        calls=tuple(calls),
+        tensor_slots=tuple(draft.freeze() for draft in slot_drafts.values()),
+        input_boundary=input_boundary,
+        control_witnesses=tuple(witnesses),
+        coverage_gaps=tuple(gaps),
+        # r71 A: the inventory is DEMOTED to a redundant witness-discharge MIRROR
+        # (single-strip trip); required coverage is derived independently from the
+        # witness-free replay structure by ``derive_required_witness_members`` and
+        # re-validated by the producer save-time self-check + the parser.
+        required_witness_inventory=_build_required_witness_inventory(witnesses, slot_drafts),
+        witness_completeness=completeness,
+        rng_profile=_build_rng_profile(trace),
+        ambient_context=ambient_context,
+        compatibility=RunnableCompatibility(
+            torchlens_version=TORCHLENS_VERSION,
+            python_version=platform.python_version(),
+            backend_version=str(torch.__version__),
+            descriptor_version=RUNNABLE_TLSPEC_SCHEMA_VERSION,
+            call_recipe_version=RUNNABLE_CALL_RECIPE_VERSION,
+            callable_ref_schema_version=RUNNABLE_CALLABLE_REF_SCHEMA_VERSION,
+            initializer_policy_version=RUNNABLE_INITIALIZER_POLICY_VERSION,
+        ),
+        preflight=preflight,
+        unsupported_sites=tuple(diagnostics),
+    )
+    # r71 A4: the producer runs the SAME comprehensive obligation validator the
+    # parser runs, over its own descriptor, BEFORE writing -- a producer-emission
+    # regression that drops a control witness (or drifts any obligation/discharge
+    # pair) fails typed at SAVE, never as a shipped false-VERIFIED artifact.
+    if not diagnostics:
+        from .runnable_load import ContextFieldInvalidError, validate_witness_obligations
+
+        container_members = tuple(
+            witness.site_label for witness in _container_structure_witnesses(trace, start_order=0)
+        )
+        try:
+            validate_witness_obligations(descriptor, container_members=container_members)
+        except ContextFieldInvalidError as exc:
+            diagnostics = _deduplicate_diagnostics(
+                [
+                    *diagnostics,
+                    _diagnostic(
+                        RunnableErrorCode.CONTEXT_FIELD_INVALID,
+                        f"Producer save-time self-check failed the shared witness-"
+                        f"obligation validator: {exc}",
+                        detection_stage="producer_obligation_self_check",
+                        details=(("context_field", exc.field), ("reason", exc.detail)),
+                    ),
+                ]
+            )
+            preflight = ProducerPreflight(passed=False, diagnostics=tuple(diagnostics))
+            descriptor = replace(
+                descriptor, preflight=preflight, unsupported_sites=tuple(diagnostics)
+            )
+    assert_sparse_core_has_no_tensor_payload(descriptor)
+    return descriptor
+
+
+def _runnable_ledger_facts_for_trace(trace: Any) -> tuple[Mapping[str, Any], ...]:
+    """Read the capture-time event-lifecycle ledger facts for one trace (r35 I2)."""
+
+    try:
+        from ..backends.torch.completeness_witness import runnable_ledger_facts
+    except ImportError:  # pragma: no cover - torch backend always present for runnable
+        return ()
+    return runnable_ledger_facts(trace)
+
+
+def _normalize_trace_numpy_scalar_metadata(trace: Any) -> None:
+    """Replace NumPy scalar metadata with equivalent Python values before saving.
+
+    NumPy scalar subclasses are not admitted by the safe metadata unpickler.
+    Runnable recipes already use a frozen Python-literal grammar, so preserving a
+    raw NumPy scalar in duplicate trace metadata would make an otherwise valid
+    runnable artifact save successfully but fail during load.
+
+    Parameters
+    ----------
+    trace:
+        Cooked trace whose runnable projection is being built.
+    """
+
+    for op in getattr(trace, "layer_list", ()):
+        for field_name in (
+            "non_tensor_pos_args",
+            "non_tensor_kwargs",
+            "func_non_tensor_args",
+            "args_template",
+            "kwargs_template",
+        ):
+            if hasattr(op, field_name):
+                setattr(op, field_name, _normalize_numpy_scalars(getattr(op, field_name)))
+    leaves = getattr(trace, "_runnable_input_nontensor_leaves", None)
+    if leaves is not None:
+        trace._runnable_input_nontensor_leaves = _normalize_numpy_scalars(leaves)
+
+
+def _normalize_numpy_scalars(value: Any) -> Any:
+    """Recursively convert NumPy scalar leaves to their Python equivalents.
+
+    Parameters
+    ----------
+    value:
+        Arbitrary captured non-tensor metadata.
+
+    Returns
+    -------
+    Any
+        Equivalent metadata whose stock transparent NumPy wrapper leaves are
+        replaced by their exact builtin atoms (r69 B: semantic ``np.generic``
+        subclasses are deliberately NOT laundered -- the classifier-aware
+        encoders refuse them typed downstream).
+    """
+
+    if isinstance(value, np.generic):
+        # r69 B: only the RATIFIED stock transparent wrapper lane normalizes
+        # (classifier-gated); a semantic np.generic SUBCLASS must NOT be laundered
+        # to its base value here -- it stays intact so the downstream classifier-
+        # aware encoders/refusals see the semantic type.
+        from torchlens._input_walk import classify_scalar
+
+        scalar_kind, scalar_payload = classify_scalar(value)
+        if scalar_kind == "numpy":
+            return scalar_payload
+        return value
+    if isinstance(value, LiteralValue):
+        return replace(value, value=_normalize_numpy_scalars(value.value))
+    if isinstance(value, CapturedArgTemplate):
+        return replace(
+            value,
+            args=tuple(_normalize_numpy_scalars(item) for item in value.args),
+            kwargs=tuple((key, _normalize_numpy_scalars(item)) for key, item in value.kwargs),
+        )
+    if isinstance(value, list):
+        return [_normalize_numpy_scalars(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_normalize_numpy_scalars(item) for item in value)
+    if isinstance(value, set):
+        return {_normalize_numpy_scalars(item) for item in value}
+    if isinstance(value, Mapping):
+        return {
+            _normalize_numpy_scalars(key): _normalize_numpy_scalars(item)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _build_rng_profile(trace: Any) -> RunnableRngProfile:
+    """Record host-RNG reproducibility metadata from the capture-time trace.
+
+    ``_runnable_host_rng_consumed`` is stamped during exhaustive capture by
+    bracketing the user forward with side-effect-free host-RNG snapshots;
+    ``random_seed`` is the concrete effective seed every capture is seeded with.
+    """
+
+    consumed = bool(getattr(trace, "_runnable_host_rng_consumed", False))
+    seed = getattr(trace, "random_seed", None)
+    capture_seed = int(seed) if isinstance(seed, int) and not isinstance(seed, bool) else None
+    # r37 hon1_2: a touch on any NON-global monitored channel (RNG instances,
+    # SystemRandom/secrets, os entropy, clocks, the default_rng factory) is
+    # permanently unreplayable -- no seed reproduces it -- so the profile records
+    # host consumption with NO identifiable capture seed, landing every run in
+    # the permanent-unreproduced ceiling (UNVERIFIABLE + NOT_APPLICABLE). The
+    # replayable global engines keep their seeded-reproduction semantics.
+    if bool(getattr(trace, "_runnable_host_rng_unreplayable", False)):
+        return RunnableRngProfile(host_rng_consumed=True, capture_seed=None)
+    return RunnableRngProfile(host_rng_consumed=consumed, capture_seed=capture_seed)
+
+
+def require_sparse_run_descriptor(trace: Any) -> SparseRunDescriptor:
+    """Build a descriptor and reject any failed whole-graph preflight.
+
+    Parameters
+    ----------
+    trace:
+        Cooked Trace to project.
+
+    Returns
+    -------
+    SparseRunDescriptor
+        Passed sparse descriptor.
+
+    Raises
+    ------
+    RunnablePreflightError
+        If any call, slot, input, output, or control site is unsupported.
+    """
+
+    descriptor = build_sparse_run_descriptor(trace)
+    if not descriptor.preflight.passed:
+        raise RunnablePreflightError(
+            "Sparse runnable producer preflight failed.",
+            code=RunnableErrorCode.SPARSE_PREFLIGHT_FAILED.value,
+            diagnostics=descriptor.preflight.diagnostics,
+        )
+    return descriptor
+
+
+def with_weight_payload(descriptor: SparseRunDescriptor) -> SparseRunDescriptor:
+    """Return a descriptor declaring the optional state-dict payload present.
+
+    Parameters
+    ----------
+    descriptor:
+        Value-free sparse descriptor produced for the runnable artifact.
+
+    Returns
+    -------
+    SparseRunDescriptor
+        Descriptor with only the separately stored weight-layer presence flag
+        changed; the sparse tensor-slot recipe remains value-free.
+    """
+
+    return replace(
+        descriptor,
+        payload_layers=replace(
+            descriptor.payload_layers,
+            weights=replace(descriptor.payload_layers.weights, present=True),
+        ),
+    )
+
+
+def with_activation_payload(
+    descriptor: SparseRunDescriptor,
+    *,
+    members: tuple[ActivationPayloadMember, ...],
+    original_input_digests: tuple[SlotByteDigest, ...],
+    capture_state_digests: tuple[StateByteDigest, ...],
+    input_fingerprints: tuple[InputAttestationFingerprint, ...],
+) -> SparseRunDescriptor:
+    """Declare one separately stored selected-activation payload family.
+
+    Parameters
+    ----------
+    descriptor:
+        Value-free sparse descriptor produced for the runnable artifact.
+    members:
+        Exact capture-selected payload membership and logical byte digests.
+    original_input_digests:
+        Available capture-input slot digests used only for attestation eligibility.
+    capture_state_digests:
+        Capture-time state digests used to recognize equivalent real state.
+    input_fingerprints:
+        Physical identity fingerprints of the live capture-time input slots
+        (required in ``selected_activation_v2``).
+
+    Returns
+    -------
+    SparseRunDescriptor
+        Descriptor with activation-layer metadata; the sparse recipe remains value-free.
+    """
+
+    return replace(
+        descriptor,
+        payload_layers=replace(
+            descriptor.payload_layers,
+            activations=ActivationPayloadLayerDescriptor(
+                present=True,
+                schema=RUNNABLE_ACTIVATION_PAYLOAD_SCHEMA_VERSION,
+                members=members,
+                original_input_digests=original_input_digests,
+                capture_state_digests=capture_state_digests,
+                input_fingerprints=input_fingerprints,
+            ),
+        ),
+    )
+
+
+def sparse_descriptor_to_json(descriptor: SparseRunDescriptor) -> dict[str, Any]:
+    """Convert a frozen sparse descriptor to deterministic JSON values.
+
+    Parameters
+    ----------
+    descriptor:
+        Passed Stage-0 sparse descriptor.
+
+    Returns
+    -------
+    dict[str, Any]
+        JSON-ready descriptor preserving dataclass field names and enum values.
+    """
+
+    value = _json_value(descriptor)
+    if not isinstance(value, dict):
+        raise TypeError("Sparse descriptor JSON projection must be an object.")
+    assert_sparse_core_has_no_tensor_payload(value)
+    return value
+
+
+def detach_sparse_core_nested_trace_backrefs(value: Any) -> None:
+    """Detach runtime-only nested-``Trace`` back-references from a scrub product.
+
+    A conditional arm records a private ``_trace`` back-reference to its owning
+    ``Trace`` (bound in postprocess finalization to serve the ``evaluation_ops`` /
+    ``execution_ops`` convenience accessors). ``ConditionalAccessor`` has no
+    ``PORTABLE_STATE_SPEC``, so the bundle scrub returns it verbatim and the arm's
+    ``_trace`` still points at the LIVE trace -- dragging that trace's
+    ``_runnable_capture_state`` (and every other live tensor field) into the value-free
+    sparse core through ``conditionals._list.<i>.arms.<j>._trace``. The top-level
+    capture-state is dropped by ``Trace.PORTABLE_STATE_SPEC`` (``FieldPolicy.DROP``) and
+    routed to the separate ``state_dict_v1`` blob; the arm back-reference must get the
+    SAME treatment. Arm replay is driven entirely by the descriptor's recorded
+    ``conditional_arm_entry_edges`` control witnesses and top-level state, never by this
+    back-reference, so it is dropped (not routed): the sparse core stays value-free.
+
+    This mutates only the passed SCRUB-PRODUCT container (a throwaway dict built by the
+    bundle scrub for pickling) -- it rebuilds the ``conditionals`` entry from detached
+    shallow arm copies and leaves the LIVE ``Trace`` fully intact (its own accessor
+    object is untouched, so ``evaluation_ops`` keeps working after ``save``). It is a
+    no-op for the frozen ``SparseRunDescriptor`` projection (which carries no nested
+    trace back-reference), and it does NOT weaken the tensor-payload tripwire: any
+    OTHER stray tensor still fails :func:`assert_sparse_core_has_no_tensor_payload`.
+    """
+
+    from .scrub import detach_conditional_trace_backrefs
+
+    if isinstance(value, MutableMapping):
+        detach_conditional_trace_backrefs(value)
+
+
+def assert_sparse_core_has_no_tensor_payload(value: Any) -> None:
+    """Assert that a sparse core contains no tensor or tensor-blob value.
+
+    Parameters
+    ----------
+    value:
+        Descriptor, JSON projection, or scrubbed sparse metadata tree.
+
+    Raises
+    ------
+    AssertionError
+        If a tensor, parameter, or portable tensor blob reference is present.
+    """
+
+    from . import BlobRef
+
+    # Detach runtime-only nested-Trace back-references (conditional arm ``_trace``)
+    # from the scrub product BEFORE the value-free invariant is enforced. These are
+    # not sparse-core payload; leaving them bound would drag the live trace's
+    # capture-state tensors into the core (mirrors the top-level DROP-and-route). The
+    # tensor-payload walk below is unchanged and still fails on any genuine stray.
+    detach_sparse_core_nested_trace_backrefs(value)
+
+    seen: set[int] = set()
+
+    def visit(node: Any, path: tuple[str, ...]) -> None:
+        """Visit one node in the sparse-core invariant walk."""
+
+        if isinstance(node, (torch.Tensor, BlobRef)):
+            dotted_path = ".".join(path) or "<root>"
+            raise AssertionError(f"Sparse core tensor payload at {dotted_path}.")
+        if node is None or isinstance(node, (str, bytes, bool, int, float, Enum)):
+            return
+        node_id = id(node)
+        if node_id in seen:
+            return
+        seen.add(node_id)
+        if is_dataclass(node) and not isinstance(node, type):
+            for field in fields(node):
+                try:
+                    field_value = getattr(node, field.name)
+                except AttributeError:
+                    continue
+                visit(field_value, (*path, field.name))
+            return
+        if isinstance(node, Mapping):
+            for key, item in node.items():
+                visit(key, (*path, "<key>"))
+                visit(item, (*path, str(key)))
+            return
+        if isinstance(node, (list, tuple, set, frozenset)):
+            for index, item in enumerate(node):
+                visit(item, (*path, str(index)))
+            return
+        for field_name, field_value in state_items(node):
+            visit(field_value, (*path, str(field_name)))
+
+    visit(value, ())
+
+
+def _build_op_slot_drafts(
+    trace: Any,
+    ops: Sequence[Any],
+    diagnostics: list[RunnableDiagnostic],
+) -> tuple[dict[str, _SlotDraft], dict[int, str]]:
+    """Build source, intermediate, and output slot drafts for cooked ops."""
+
+    drafts: dict[str, _SlotDraft] = {}
+    slot_for_op: dict[int, str] = {}
+    for op in ops:
+        slot_id = f"slot:{op.label}"
+        slot_for_op[id(op)] = slot_id
+        shape = _shape_tuple(getattr(op, "shape", None))
+        dtype = _dtype_name(op)
+        if shape is None or dtype is None:
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.MISSING_TENSOR_SLOT,
+                    "Cooked tensor op is missing shape or dtype metadata.",
+                    affected_ops=(str(op.label),),
+                    detection_stage="producer_tensor_slot",
+                )
+            )
+            shape = shape or ()
+            dtype = dtype or "unknown"
+        role = _op_slot_role(op)
+        if role is TensorSlotRole.BUFFER:
+            buffer_names = set((getattr(trace, "_buffer_initial_values", {}) or {}).keys())
+            address = getattr(op, "address", None)
+            if address not in buffer_names:
+                role = TensorSlotRole.CONSTANT_LIKE_TENSOR
+                diagnostics.append(
+                    _diagnostic(
+                        RunnableErrorCode.UNSUPPORTED_TENSOR_CONSTANT,
+                        "Internal tensor source is not present in captured named buffer state "
+                        "and has no reproducible initializer recipe.",
+                        affected_ops=(str(op.label),),
+                        detection_stage="producer_tensor_constant",
+                        details=(("address", str(address)),),
+                    )
+                )
+        try:
+            output_path = _normalize_container_path(getattr(op, "container_path", ()))
+        except ValueError:
+            # An output/container path with a non-str/int key (tuple, float, ...)
+            # cannot be represented in the frozen slot-path vocabulary. Reject
+            # honestly with a typed diagnostic instead of a raw ValueError crash;
+            # the run is refused rather than advertised-then-broken.
+            output_path = ()
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.MISSING_OUTPUT_CONTAINER_CONTRACT,
+                    "Output container path uses a key that cannot be represented in the "
+                    "runnable slot-path vocabulary (only str/int keys are supported).",
+                    affected_ops=(str(op.label),),
+                    detection_stage="producer_output_binding",
+                )
+            )
+        input_binding = None
+        if role is TensorSlotRole.MODEL_INPUT:
+            input_binding = _input_binding_for_op(trace, op, diagnostics)
+        producer_slot_id = None
+        if role is TensorSlotRole.OUTPUT:
+            parents = list(getattr(op, "parents", ()))
+            if parents:
+                parent_op = _resolve_op(trace, parents[0])
+                if parent_op is not None:
+                    producer_slot_id = f"slot:{parent_op.label}"
+        device_type, device_index = _device_parts(getattr(op, "device_ref", None))
+        drafts[slot_id] = _SlotDraft(
+            slot_id=slot_id,
+            role=role,
+            shape=shape,
+            dtype=dtype,
+            device_type=device_type,
+            device_index=device_index,
+            mutable=bool(getattr(op, "is_inplace", False)),
+            producer_slot_id=producer_slot_id,
+            output_path=output_path
+            if output_path
+            else (() if role is TensorSlotRole.OUTPUT else None),
+            input_binding=input_binding,
+            state_binding=(_buffer_binding(trace, op) if role is TensorSlotRole.BUFFER else None),
+            use_sites=[],
+        )
+    return drafts, slot_for_op
+
+
+def _build_parameter_slot_drafts(trace: Any) -> dict[str, _SlotDraft]:
+    """Build value-free parameter slots from cooked Param metadata."""
+
+    drafts: dict[str, _SlotDraft] = {}
+    param_logs = getattr(trace, "param_logs", {})
+    values = getattr(param_logs, "values", lambda: ())()
+    for param in values:
+        device_type, device_index = _device_parts(getattr(param, "device_ref", None))
+        addresses = tuple(str(address) for address in getattr(param, "all_addresses", ()))
+        if not addresses:
+            addresses = (str(param.address),)
+        alias_group = f"alias:{param.barcode}" if len(addresses) > 1 else None
+        for address in addresses:
+            module_path, separator, _name = address.rpartition(".")
+            slot_id = f"state:{address}"
+            drafts[slot_id] = _SlotDraft(
+                slot_id=slot_id,
+                role=TensorSlotRole.PARAMETER,
+                shape=tuple(int(dim) for dim in param.shape),
+                dtype=str(param.dtype),
+                device_type=device_type,
+                device_index=device_index,
+                state_binding=StateSlotBinding(
+                    module_path=module_path if separator else "self",
+                    state_dict_name=address,
+                    semantic_role=_parameter_role(param),
+                    trainable=bool(param.is_trainable),
+                    persistent=True,
+                    alias_group=alias_group,
+                    # Provisional draft values; ``_stamp_state_binding_facts`` /
+                    # ``_escape_witnesses`` stamp the final totalized facts + claims.
+                    captured_requires_grad=bool(param.is_trainable),
+                    captured_grad_fn=False,
+                    host_escape_disposition=None,
+                ),
+                use_sites=[],
+            )
+    return drafts
+
+
+def _add_persistent_buffer_slot_drafts(
+    trace: Any,
+    drafts: dict[str, _SlotDraft],
+) -> None:
+    """Add every persistent source-model buffer to the value-free state map.
+
+    Prefers the LIVE source model (weak reference, inspection-only). When the model is
+    gone -- a caller that never held it plus one ``gc.collect()`` between trace and save
+    (r75 F2) -- the SAME state universe is rebuilt from capture-time records: the
+    capture-boundary state snapshot supplies the ``state_dict`` name set and per-slot
+    shape/dtype/device, cooked ``Param`` addresses partition parameters from persistent
+    buffers, and the capture-time alias-topology snapshot supplies buffer alias groups.
+    A silent early return here DROPPED never-forward-used persistent buffers (BN's
+    ``num_batches_tracked``) from the declared slot universe, so the embedded snapshot
+    failed strict binding with ``state_unexpected_key`` -- the second, downstream leg of
+    the same gc-timing honest-save over-refusal as the parameter-identity rung.
+
+    Parameters
+    ----------
+    trace:
+        Live cooked Trace whose weak source-model reference is inspection-only.
+    drafts:
+        Mutable descriptor slots, including any buffers already represented by
+        graph source ops.
+    """
+
+    source_ref = getattr(trace, "_source_model_ref", None)
+    model = source_ref() if callable(source_ref) else None
+    state_dict_method = getattr(model, "state_dict", None)
+    named_parameters_method = getattr(model, "named_parameters", None)
+    named_buffers_method = getattr(model, "named_buffers", None)
+    if (
+        callable(state_dict_method)
+        and callable(named_parameters_method)
+        and callable(named_buffers_method)
+    ):
+        state = state_dict_method()
+        if not isinstance(state, Mapping):
+            return
+        parameter_names = {
+            str(name) for name, _value in named_parameters_method(remove_duplicate=False)
+        }
+        buffers = {str(name): value for name, value in named_buffers_method(remove_duplicate=False)}
+        buffer_names = tuple(
+            name
+            for name, value in state.items()
+            if name not in parameter_names and name in buffers and isinstance(value, torch.Tensor)
+        )
+        geometry_by_name: dict[str, tuple[tuple[int, ...], str, Any]] = {
+            name: (
+                tuple(int(dim) for dim in cast(torch.Tensor, state[name]).shape),
+                str(cast(torch.Tensor, state[name]).dtype),
+                cast(torch.Tensor, state[name]).device,
+            )
+            for name in buffer_names
+        }
+        names_by_object: dict[int, list[str]] = defaultdict(list)
+        for name in buffer_names:
+            names_by_object[id(buffers[name])].append(name)
+        alias_by_name = {
+            name: (f"buffer_alias:{min(names)}" if len(names) > 1 else None)
+            for names in names_by_object.values()
+            for name in names
+        }
+    else:
+        # r75 F2 capture-time fallback: the model died before the save.
+        snapshot = getattr(trace, "_runnable_capture_state", None)
+        if isinstance(snapshot, Mapping):
+            parameter_names = set()
+            param_logs = getattr(trace, "param_logs", None)
+            for param_log in tuple(param_logs) if param_logs is not None else ():
+                address = getattr(param_log, "address", None)
+                if address is not None:
+                    parameter_names.add(str(address))
+                for alias_address in getattr(param_log, "all_addresses", ()) or ():
+                    parameter_names.add(str(alias_address))
+            # ``state_dict`` contains exactly parameters + persistent buffers, and the
+            # snapshot admitted tensor-only values, so the complement IS the persistent
+            # buffer set.
+            buffer_names = tuple(name for name in snapshot if name not in parameter_names)
+            geometry_by_name = {
+                name: (
+                    tuple(int(dim) for dim in cast(torch.Tensor, snapshot[name]).shape),
+                    str(cast(torch.Tensor, snapshot[name]).dtype),
+                    cast(torch.Tensor, snapshot[name]).device,
+                )
+                for name in buffer_names
+            }
+        else:
+            # r77 F2: a NON-TENSOR-STATE model (``get_extra_state()``, packed or
+            # quantized entries) has NO value snapshot by design; the persistent-
+            # buffer NAME universe must still equal the live lane's, so it comes
+            # from the capture-time universe record (which walks ``state_dict``
+            # names against ``named_parameters``/``named_buffers`` and survives
+            # extra state). A silent return here DROPPED never-forward-used
+            # buffers (``num_batches_tracked``) and refused honest binds with
+            # ``state_unexpected_key``.
+            universe = getattr(trace, "_runnable_persistent_buffer_universe", None)
+            if not isinstance(universe, Mapping):
+                # No capture-time record either (``state_dict()`` failed at the
+                # capture boundary): the universe is UNKNOWN. Refuse loudly and
+                # typed -- mirroring the include_weights=True lane -- never
+                # silently under-declare.
+                raise TorchLensIOError(
+                    "Runnable save requires the persistent-buffer state universe, "
+                    "but the source model is no longer alive and no capture-time "
+                    "state records are available. The declared slot universe "
+                    "cannot be proven complete, so the runnable save is refused. "
+                    "Ordinary analysis save levels remain available."
+                )
+            buffer_names = tuple(str(name) for name in universe)
+            geometry_by_name = {
+                str(name): (
+                    tuple(int(dim) for dim in record["shape"]),
+                    str(record["dtype"]),
+                    record["device"],
+                )
+                for name, record in universe.items()
+            }
+        topology = getattr(trace, "_runnable_state_alias_topology", None)
+        topology_groups = (topology.get("groups") if isinstance(topology, Mapping) else None) or {}
+        buffer_name_set = set(buffer_names)
+        names_by_group: dict[str, list[str]] = defaultdict(list)
+        for name in buffer_names:
+            group = topology_groups.get(name)
+            if isinstance(group, str):
+                names_by_group[group].append(name)
+        alias_by_name = {name: None for name in buffer_names}
+        for names in names_by_group.values():
+            # Same convention as the live path: only groups with >=2 BUFFER members
+            # (a param<->buffer identity pair is the alias-topology gates' domain).
+            buffer_members = [name for name in names if name in buffer_name_set]
+            if len(buffer_members) > 1:
+                group_id = f"buffer_alias:{min(buffer_members)}"
+                for name in buffer_members:
+                    alias_by_name[name] = group_id
+    existing_by_name = {
+        draft.state_binding.state_dict_name: draft
+        for draft in drafts.values()
+        if draft.state_binding is not None
+    }
+    for name in buffer_names:
+        alias_group = alias_by_name[name]
+        existing = existing_by_name.get(name)
+        if existing is not None:
+            binding = existing.state_binding
+            assert binding is not None
+            existing.state_binding = replace(
+                binding,
+                persistent=True,
+                alias_group=alias_group,
+            )
+            continue
+        shape, dtype, device = geometry_by_name[name]
+        module_path, separator, leaf_name = name.rpartition(".")
+        device_type, device_index = _device_parts(device)
+        slot_id = f"state:{name}"
+        drafts[slot_id] = _SlotDraft(
+            slot_id=slot_id,
+            role=TensorSlotRole.BUFFER,
+            shape=shape,
+            dtype=dtype,
+            device_type=device_type,
+            device_index=device_index,
+            state_binding=StateSlotBinding(
+                module_path=module_path if separator else "self",
+                state_dict_name=name,
+                semantic_role=_buffer_role(leaf_name or name),
+                trainable=False,
+                persistent=True,
+                alias_group=alias_group,
+                # Provisional draft values; ``_stamp_state_binding_facts`` /
+                # ``_escape_witnesses`` stamp the final totalized facts + claims.
+                captured_requires_grad=False,
+                captured_grad_fn=False,
+                host_escape_disposition=None,
+            ),
+            use_sites=[],
+        )
+
+
+def _build_child_version_slot_drafts(
+    trace: Any,
+    ops: Sequence[Any],
+    drafts: dict[str, _SlotDraft],
+    slot_for_op: Mapping[int, str],
+) -> None:
+    """Add value-free per-child tensor-version identities from cooked mapping keys."""
+
+    aliases = _op_alias_index(trace, ops)
+    for parent in ops:
+        versions = getattr(parent, "out_versions_by_child", {}) or {}
+        if not isinstance(versions, Mapping):
+            continue
+        base_slot_id = slot_for_op[id(parent)]
+        base = drafts[base_slot_id]
+        for child_label in versions:
+            child = aliases.get(str(child_label))
+            stable_child_label = str(getattr(child, "label", child_label))
+            version_slot_id = f"{base_slot_id}:use:{stable_child_label}"
+            drafts[version_slot_id] = _SlotDraft(
+                slot_id=version_slot_id,
+                role=base.role,
+                shape=base.shape,
+                dtype=base.dtype,
+                device_type=base.device_type,
+                device_index=base.device_index,
+                mutable=True,
+                version_of=base_slot_id,
+                producer_slot_id=base_slot_id,
+                output_path=base.output_path,
+                input_binding=base.input_binding,
+                state_binding=base.state_binding,
+                use_sites=[],
+            )
+
+
+def _child_version_slot_id(
+    parent: Any,
+    child: Any,
+    base_slot_id: str,
+    drafts: Mapping[str, _SlotDraft],
+) -> str:
+    """Return the child-specific version slot when the cooked core records one."""
+
+    exact_slot_id = f"{base_slot_id}:use:{child.label}"
+    if exact_slot_id in drafts:
+        return exact_slot_id
+    versions = getattr(parent, "out_versions_by_child", {}) or {}
+    child_aliases = {
+        str(getattr(child, "label", "")),
+        str(getattr(child, "layer_label", "")),
+    }
+    matching_label = next((label for label in versions if str(label) in child_aliases), None)
+    if matching_label is None:
+        return base_slot_id
+    fallback_slot_id = f"{base_slot_id}:use:{matching_label}"
+    return fallback_slot_id if fallback_slot_id in drafts else base_slot_id
+
+
+def _build_call_arguments(
+    op: Any,
+    template: CapturedArgTemplate,
+    *,
+    call_id: str,
+    registry_id: str,
+    op_by_alias: Mapping[str, Any],
+    slot_for_op: Mapping[int, str],
+    slot_drafts: dict[str, _SlotDraft],
+    diagnostics: list[RunnableDiagnostic],
+) -> tuple[list[TensorArgumentRef], list[LiteralArgumentRef], bool]:
+    """Build tensor and literal call leaves from one cooked argument template."""
+
+    tensor_args: list[TensorArgumentRef] = []
+    literal_args: list[LiteralArgumentRef] = []
+    parameter_candidates = list(getattr(op, "_param_logs", ()) or ())
+    non_tensor_positional = iter(getattr(op, "non_tensor_pos_args", ()) or ())
+    has_unmodelled_host_write = False
+
+    for index, component in enumerate(template.args):
+        path: tuple[str | int, ...] = ("args", index)
+        if _should_recover_removed_inplace_receiver(op, component, path):
+            if _append_first_parent_tensor_argument(
+                op,
+                path=path,
+                call_id=call_id,
+                op_by_alias=op_by_alias,
+                slot_for_op=slot_for_op,
+                slot_drafts=slot_drafts,
+                tensor_args=tensor_args,
+            ):
+                has_unmodelled_host_write = True
+                continue
+        if _should_recover_unattributed_inplace_receiver(op, component, path):
+            if _append_unattributed_inplace_receiver(
+                op,
+                path=path,
+                call_id=call_id,
+                op_by_alias=op_by_alias,
+                slot_for_op=slot_for_op,
+                slot_drafts=slot_drafts,
+                tensor_args=tensor_args,
+            ):
+                has_unmodelled_host_write = True
+                continue
+        override = None
+        if not _component_contains_tensor(component):
+            override = next(non_tensor_positional, _NO_OVERRIDE)
+        _append_argument_component(
+            component,
+            path=path,
+            literal_override=override,
+            op=op,
+            call_id=call_id,
+            registry_id=registry_id,
+            op_by_alias=op_by_alias,
+            slot_for_op=slot_for_op,
+            slot_drafts=slot_drafts,
+            parameter_candidates=parameter_candidates,
+            tensor_args=tensor_args,
+            literal_args=literal_args,
+            diagnostics=diagnostics,
+        )
+    non_tensor_kwargs = getattr(op, "non_tensor_kwargs", {}) or {}
+    for key, component in template.kwargs:
+        path = ("kwargs", str(key))
+        override = non_tensor_kwargs.get(key, _NO_OVERRIDE)
+        _append_argument_component(
+            component,
+            path=path,
+            literal_override=override,
+            op=op,
+            call_id=call_id,
+            registry_id=registry_id,
+            op_by_alias=op_by_alias,
+            slot_for_op=slot_for_op,
+            slot_drafts=slot_drafts,
+            parameter_candidates=parameter_candidates,
+            tensor_args=tensor_args,
+            literal_args=literal_args,
+            diagnostics=diagnostics,
+        )
+    return tensor_args, literal_args, has_unmodelled_host_write
+
+
+def _should_recover_removed_inplace_receiver(
+    op: Any,
+    component: Any,
+    path: tuple[str | int, ...],
+) -> bool:
+    """Return whether an in-place receiver was removed as an unmodelled host alias.
+
+    Parameters
+    ----------
+    op:
+        Cooked op whose sparse call recipe is being built.
+    component:
+        Captured argument component at ``path``.
+    path:
+        Sparse argument path for ``component``.
+
+    Returns
+    -------
+    bool
+        True when an in-place call's receiver was formerly a ``ParentRef`` but
+        cleanup replaced it with an unsupported marker.
+    """
+
+    return (
+        path == ("args", 0)
+        and bool(getattr(op, "is_inplace", False))
+        and isinstance(component, Unsupported)
+        and component.reason == "removed_parent_ref"
+        and component.value_type == "ParentRef"
+    )
+
+
+def _should_recover_unattributed_inplace_receiver(
+    op: Any,
+    component: Any,
+    path: tuple[str | int, ...],
+) -> bool:
+    """Return whether an in-place receiver was captured as an unattributed literal.
+
+    Parameters
+    ----------
+    op:
+        Cooked op whose sparse call recipe is being built.
+    component:
+        Captured argument component at ``path``.
+    path:
+        Sparse argument path for ``component``.
+
+    Returns
+    -------
+    bool
+        True when the first argument of an in-place call is an unbound tensor
+        literal, as produced by labelled-RHS ``.data`` writes.
+    """
+
+    return (
+        path == ("args", 0)
+        and bool(getattr(op, "is_inplace", False))
+        and isinstance(component, LiteralTensor)
+    )
+
+
+def _append_first_parent_tensor_argument(
+    op: Any,
+    *,
+    path: tuple[str | int, ...],
+    call_id: str,
+    op_by_alias: Mapping[str, Any],
+    slot_for_op: Mapping[int, str],
+    slot_drafts: dict[str, _SlotDraft],
+    tensor_args: list[TensorArgumentRef],
+) -> bool:
+    """Append the first cooked parent as a recovered in-place receiver.
+
+    Parameters
+    ----------
+    op:
+        Cooked in-place op.
+    path:
+        Sparse argument path for the receiver.
+    call_id:
+        Sparse call identifier.
+    op_by_alias:
+        Lookup table from raw/final labels to cooked ops.
+    slot_for_op:
+        Lookup table from cooked op identity to tensor slot id.
+    slot_drafts:
+        Mutable tensor slot descriptors.
+    tensor_args:
+        Accumulator receiving tensor arguments.
+
+    Returns
+    -------
+    bool
+        True when the receiver was recovered and appended.
+    """
+
+    parents = tuple(str(parent) for parent in getattr(op, "parents", ()) or ())
+    if not parents:
+        return False
+    parent = op_by_alias.get(parents[0])
+    if parent is None:
+        return False
+    base_slot_id = slot_for_op.get(id(parent))
+    if base_slot_id is None:
+        return False
+    slot_id = _child_version_slot_id(parent, op, base_slot_id, slot_drafts)
+    _append_tensor_argument(
+        tensor_args,
+        path,
+        slot_id,
+        call_id=call_id,
+        slot_drafts=slot_drafts,
+    )
+    return True
+
+
+def _append_unattributed_inplace_receiver(
+    op: Any,
+    *,
+    path: tuple[str | int, ...],
+    call_id: str,
+    op_by_alias: Mapping[str, Any],
+    slot_for_op: Mapping[int, str],
+    slot_drafts: dict[str, _SlotDraft],
+    tensor_args: list[TensorArgumentRef],
+) -> bool:
+    """Append the unique graph receiver for an unattributed in-place mutation.
+
+    Parameters
+    ----------
+    op:
+        Cooked in-place op.
+    path:
+        Sparse argument path for the receiver.
+    call_id:
+        Sparse call identifier.
+    op_by_alias:
+        Lookup table from raw/final labels to cooked ops.
+    slot_for_op:
+        Lookup table from cooked op identity to tensor slot id.
+    slot_drafts:
+        Mutable tensor slot descriptors.
+    tensor_args:
+        Accumulator receiving tensor arguments.
+
+    Returns
+    -------
+    bool
+        True when exactly one cooked slot can be identified as the missing
+        receiver.
+    """
+
+    matches = _unattributed_inplace_receiver_candidates(op, op_by_alias, slot_for_op)
+    if len(matches) != 1:
+        return False
+    slot_id = matches[0]
+    _append_tensor_argument(
+        tensor_args,
+        path,
+        slot_id,
+        call_id=call_id,
+        slot_drafts=slot_drafts,
+    )
+    return True
+
+
+def _unattributed_inplace_receiver_candidates(
+    op: Any,
+    op_by_alias: Mapping[str, Any],
+    slot_for_op: Mapping[int, str],
+) -> tuple[str, ...]:
+    """Return candidate receiver slots for a labelled-RHS ``.data`` write.
+
+    Parameters
+    ----------
+    op:
+        Cooked in-place op whose receiver lacks graph provenance.
+    op_by_alias:
+        Lookup table from raw/final labels to cooked ops.
+    slot_for_op:
+        Lookup table from cooked op identity to tensor slot id.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Unique slot IDs whose recorded output-version snapshot matches the
+        mutation result.
+    """
+
+    target_digest = _tensor_digest(getattr(op, "out", None))
+    if target_digest is None:
+        return ()
+    parent_labels = {str(parent) for parent in getattr(op, "parents", ()) or ()}
+    candidates: dict[str, str] = {}
+    seen_ops: set[int] = set()
+    for candidate in op_by_alias.values():
+        candidate_id = id(candidate)
+        if candidate_id in seen_ops or candidate_id == id(op):
+            continue
+        seen_ops.add(candidate_id)
+        if str(getattr(candidate, "label", "")) in parent_labels:
+            continue
+        slot_id = slot_for_op.get(candidate_id)
+        if slot_id is None:
+            continue
+        versions = getattr(candidate, "out_versions_by_child", {}) or {}
+        for value in versions.values():
+            if _tensor_digest(value) == target_digest:
+                candidates[slot_id] = slot_id
+                break
+    return tuple(candidates)
+
+
+def _tensor_digest(value: Any) -> str | None:
+    """Return a byte digest for a tensor-like value, if available."""
+
+    if not isinstance(value, torch.Tensor):
+        return None
+    return runnable_tensor_byte_digest(value)
+
+
+_NO_OVERRIDE = object()
+
+
+def _append_argument_component(
+    component: Any,
+    *,
+    path: tuple[str | int, ...],
+    literal_override: Any,
+    op: Any,
+    call_id: str,
+    registry_id: str,
+    op_by_alias: Mapping[str, Any],
+    slot_for_op: Mapping[int, str],
+    slot_drafts: dict[str, _SlotDraft],
+    parameter_candidates: list[Any],
+    tensor_args: list[TensorArgumentRef],
+    literal_args: list[LiteralArgumentRef],
+    diagnostics: list[RunnableDiagnostic],
+) -> None:
+    """Append one captured argument component to a sparse call recipe."""
+
+    if not _component_contains_tensor(component):
+        value = component.value if isinstance(component, LiteralValue) else component
+        if literal_override is not _NO_OVERRIDE:
+            value = literal_override
+        try:
+            literal_args.append(LiteralArgumentRef(path, _encode_literal(value)))
+        except _UnsupportedLiteralError as exc:
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.UNSUPPORTED_LITERAL,
+                    str(exc),
+                    registry_id=registry_id,
+                    affected_ops=(str(op.label),),
+                    detection_stage="producer_literal",
+                    details=(("argument_path", repr(path)),),
+                )
+            )
+        return
+    if isinstance(component, (list, tuple)):
+        try:
+            literal_args.append(LiteralArgumentRef(path, _tensor_container_skeleton(component)))
+        except _UnsupportedLiteralError as exc:
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.CALL_STRUCTURE_MISMATCH,
+                    str(exc),
+                    registry_id=registry_id,
+                    affected_ops=(str(op.label),),
+                    detection_stage="producer_call_recipe",
+                    details=(("argument_path", repr(path)),),
+                )
+            )
+            return
+        for index, item in enumerate(component):
+            _append_argument_component(
+                item,
+                path=(*path, index),
+                literal_override=_NO_OVERRIDE,
+                op=op,
+                call_id=call_id,
+                registry_id=registry_id,
+                op_by_alias=op_by_alias,
+                slot_for_op=slot_for_op,
+                slot_drafts=slot_drafts,
+                parameter_candidates=parameter_candidates,
+                tensor_args=tensor_args,
+                literal_args=literal_args,
+                diagnostics=diagnostics,
+            )
+        return
+    if isinstance(component, Mapping):
+        try:
+            literal_args.append(LiteralArgumentRef(path, _tensor_container_skeleton(component)))
+        except _UnsupportedLiteralError as exc:
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.CALL_STRUCTURE_MISMATCH,
+                    str(exc),
+                    registry_id=registry_id,
+                    affected_ops=(str(op.label),),
+                    detection_stage="producer_call_recipe",
+                    details=(("argument_path", repr(path)),),
+                )
+            )
+            return
+        for key, item in component.items():
+            if not isinstance(key, (str, int)):
+                diagnostics.append(
+                    _diagnostic(
+                        RunnableErrorCode.CALL_STRUCTURE_MISMATCH,
+                        "A tensor-containing mapping argument has a key outside the sparse "
+                        "argument-path grammar.",
+                        registry_id=registry_id,
+                        affected_ops=(str(op.label),),
+                        detection_stage="producer_call_recipe",
+                        details=(("argument_path", repr(path)),),
+                    )
+                )
+                continue
+            _append_argument_component(
+                item,
+                path=(*path, key),
+                literal_override=_NO_OVERRIDE,
+                op=op,
+                call_id=call_id,
+                registry_id=registry_id,
+                op_by_alias=op_by_alias,
+                slot_for_op=slot_for_op,
+                slot_drafts=slot_drafts,
+                parameter_candidates=parameter_candidates,
+                tensor_args=tensor_args,
+                literal_args=literal_args,
+                diagnostics=diagnostics,
+            )
+        return
+    if isinstance(component, ParentRef):
+        parent = op_by_alias.get(component.parent_label)
+        if parent is None:
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.MISSING_TENSOR_SLOT,
+                    f"No cooked parent slot matches {component.parent_label!r}.",
+                    registry_id=registry_id,
+                    affected_ops=(str(op.label),),
+                    detection_stage="producer_tensor_argument",
+                )
+            )
+            return
+        base_slot_id = slot_for_op[id(parent)]
+        slot_id = _child_version_slot_id(parent, op, base_slot_id, slot_drafts)
+        _append_tensor_argument(
+            tensor_args,
+            path,
+            slot_id,
+            call_id=call_id,
+            slot_drafts=slot_drafts,
+        )
+        return
+    if isinstance(component, LiteralTensor):
+        param = _match_parameter(
+            component.value,
+            path,
+            op,
+            parameter_candidates,
+            template_barcode=getattr(component, "param_barcode", None),
+        )
+        if param is None:
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.UNSUPPORTED_TENSOR_CONSTANT,
+                    "Tensor literal is not a named parameter, registered buffer, model input, "
+                    "or reproducible source call.",
+                    registry_id=registry_id,
+                    affected_ops=(str(op.label),),
+                    detection_stage="producer_tensor_constant",
+                    details=(("argument_path", repr(path)),),
+                )
+            )
+            return
+        parameter_candidates.remove(param)
+        slot_id = f"state:{param.address}"
+        draft = slot_drafts.get(slot_id)
+        if draft is not None:
+            draft.device_type, draft.device_index = _device_parts(
+                getattr(component.value, "device", None)
+            )
+        _append_tensor_argument(
+            tensor_args,
+            path,
+            slot_id,
+            call_id=call_id,
+            slot_drafts=slot_drafts,
+        )
+        return
+    if isinstance(component, Unsupported):
+        diagnostics.append(
+            _diagnostic(
+                RunnableErrorCode.UNSUPPORTED_LITERAL,
+                component.reason,
+                registry_id=registry_id,
+                affected_ops=(str(op.label),),
+                detection_stage="producer_literal",
+                details=(("argument_path", repr(path)), ("value_type", component.value_type)),
+            )
+        )
+        return
+
+    diagnostics.append(
+        _diagnostic(
+            RunnableErrorCode.CALL_STRUCTURE_MISMATCH,
+            "A tensor-containing argument container lacks a preserved list/tuple/mapping "
+            "contract in the cooked projection.",
+            registry_id=registry_id,
+            affected_ops=(str(op.label),),
+            detection_stage="producer_call_recipe",
+            details=(("argument_path", repr(path)),),
+        )
+    )
+
+
+def _append_tensor_argument(
+    tensor_args: list[TensorArgumentRef],
+    path: tuple[str | int, ...],
+    slot_id: str,
+    *,
+    call_id: str,
+    slot_drafts: dict[str, _SlotDraft],
+) -> None:
+    """Append a tensor reference and its reverse use-site metadata."""
+
+    tensor_args.append(TensorArgumentRef(argument_path=path, slot_id=slot_id))
+    draft = slot_drafts.get(slot_id)
+    if draft is not None:
+        if draft.use_sites is None:
+            draft.use_sites = []
+        draft.use_sites.append(TensorUseSite(call_id=call_id, argument_path=path))
+
+
+def _match_parameter(
+    tensor: Any,
+    path: tuple[str | int, ...],
+    op: Any,
+    candidates: Sequence[Any],
+    template_barcode: "str | None" = None,
+) -> Any | None:
+    """Match a template tensor literal to one cooked named parameter.
+
+    Identity ladder, most reliable rung first:
+
+    * CAPTURE-TIME BARCODE (r75 F2): model prep stamped a per-capture random barcode on
+      each parameter (weak registry meta) and mirrored it onto the cooked ``Param``
+      record; ``_classify_arg_component`` snapshotted it onto the arg template
+      (``LiteralTensor.param_barcode``) mid-capture, while the model was provably alive.
+      Comparing snapshot to record is gc-immune: the r74 F2 refusal came from the
+      LIVE-REFERENCE rung below, whose ``_param_ref`` / ``_source_model_ref`` chain dies
+      with the model (postprocess releases ``_param_ref``, session cleanup strips the
+      registry meta; a caller that never held the model plus one ``gc.collect()`` between
+      trace and save kills the weakref), so BN-like models with two same-shape+dtype
+      params refused ``unsupported_tensor_constant`` nondeterministically. A missing
+      snapshot (pre-r75 template, foreign/unstamped parameter) falls back to the live
+      registry meta and then simply falls through -- this rung only ever ADDS a positive
+      match, never blocks the others.
+    * LIVE-REFERENCE identity (object or data pointer) while the model survives.
+    * argument-name and single-candidate fallbacks (shape+dtype-filtered).
+    """
+
+    shape = _shape_tuple(getattr(tensor, "shape", None))
+    dtype = str(getattr(tensor, "dtype", ""))
+    matches = [
+        param for param in candidates if tuple(param.shape) == shape and str(param.dtype) == dtype
+    ]
+    barcode = template_barcode or _captured_parameter_barcode(tensor)
+    if barcode is not None:
+        barcode_matches = [
+            param for param in matches if str(getattr(param, "barcode", "")) == barcode
+        ]
+        if len(barcode_matches) == 1:
+            return barcode_matches[0]
+    identity_matches = [param for param in matches if _same_tensor_identity(tensor, param)]
+    if len(identity_matches) == 1:
+        return identity_matches[0]
+    argument_names = tuple(getattr(op, "arg_names", ()) or ())
+    top_index = path[1] if len(path) > 1 and isinstance(path[1], int) else None
+    argument_name = (
+        str(argument_names[top_index])
+        if top_index is not None and top_index < len(argument_names)
+        else None
+    )
+    named_matches = [param for param in matches if str(param.name) == argument_name]
+    if len(named_matches) == 1:
+        return named_matches[0]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _captured_parameter_barcode(tensor: Any) -> str | None:
+    """Return the capture-time barcode stamped on a template ``nn.Parameter``, if any (r75 F2).
+
+    The barcode was written into the parameter's identity-keyed weak meta registry at model
+    prep (model provably alive) and mirrored onto the cooked ``Param`` record; the template's
+    strong hold on the Parameter object keeps the registry entry alive, so this identity
+    survives the caller dropping the model and any ``gc.collect()`` before the save. Returns
+    ``None`` for non-Parameter literals and unstamped parameters (callers fall through to the
+    other rungs).
+    """
+
+    if not isinstance(tensor, torch.nn.Parameter):
+        return None
+    from ..backends.torch._tl import get_param_meta
+
+    meta = get_param_meta(tensor)
+    barcode = getattr(meta, "param_barcode", None) if meta is not None else None
+    return str(barcode) if barcode is not None else None
+
+
+def _same_tensor_identity(tensor: Any, param: Any) -> bool:
+    """Return whether ``tensor`` is the exact captured parameter object/storage."""
+
+    return any(_same_tensor_ref(tensor, param_ref) for param_ref in _parameter_refs(param))
+
+
+def _parameter_refs(param: Any) -> tuple[Any, ...]:
+    """Return live parameter objects associated with one cooked ``Param`` record."""
+
+    refs: list[Any] = []
+    param_ref = getattr(param, "_param_ref", None)
+    if param_ref is not None:
+        refs.append(param_ref)
+    source_trace_ref = getattr(param, "_source_trace_ref", None)
+    trace = source_trace_ref() if callable(source_trace_ref) else None
+    source_model_ref = getattr(trace, "_source_model_ref", None)
+    model = source_model_ref() if callable(source_model_ref) else None
+    named_parameters = getattr(model, "named_parameters", None)
+    if callable(named_parameters):
+        addresses = {str(getattr(param, "address", ""))}
+        addresses.update(str(address) for address in getattr(param, "all_addresses", ()) or ())
+        try:
+            for name, value in named_parameters(remove_duplicate=False):
+                if str(name) in addresses:
+                    refs.append(value)
+        except TypeError:
+            for name, value in named_parameters():
+                if str(name) in addresses:
+                    refs.append(value)
+    return tuple(dict.fromkeys(refs))
+
+
+def _same_tensor_ref(tensor: Any, reference: Any) -> bool:
+    """Return whether two tensors are the same object or share the same data pointer."""
+
+    if tensor is reference or id(tensor) == id(reference):
+        return True
+    tensor_ptr = _tensor_data_ptr(tensor)
+    reference_ptr = _tensor_data_ptr(reference)
+    return tensor_ptr is not None and tensor_ptr == reference_ptr
+
+
+def _tensor_data_ptr(tensor: Any) -> int | None:
+    """Return a tensor data pointer without raising for non-tensors."""
+
+    data_ptr = getattr(tensor, "data_ptr", None)
+    if not callable(data_ptr):
+        return None
+    try:
+        return int(data_ptr())
+    except RuntimeError:
+        return None
+
+
+def _group_computational_ops(ops: Sequence[Any]) -> list[tuple[int, list[Any]]]:
+    """Group cooked computational output tensors by capture call ID."""
+
+    groups: dict[int, list[Any]] = defaultdict(list)
+    first_index: dict[int, int] = {}
+    for index, op in enumerate(ops):
+        call_number = getattr(op, "func_call_id", None)
+        if call_number is None or bool(getattr(op, "is_input", False)):
+            continue
+        if bool(getattr(op, "is_buffer", False)) or bool(getattr(op, "is_output", False)):
+            continue
+        call_number = int(call_number)
+        groups[call_number].append(op)
+        first_index.setdefault(call_number, index)
+    return sorted(groups.items(), key=lambda item: first_index[item[0]])
+
+
+def _op_alias_index(trace: Any, ops: Sequence[Any]) -> dict[str, Any]:
+    """Index cooked ops under raw, layer, pass-qualified, and short labels."""
+
+    aliases: dict[str, Any] = {}
+    raw_to_final = getattr(trace, "_raw_to_final_op_labels", {}) or {}
+    for op in ops:
+        for value in (
+            getattr(op, "label", None),
+            getattr(op, "layer_label", None),
+            getattr(op, "label_short", None),
+            getattr(op, "layer_label_short", None),
+        ):
+            if isinstance(value, str):
+                aliases[value] = op
+        label = str(getattr(op, "label", ""))
+        if ":" in label:
+            aliases.setdefault(label.rsplit(":", 1)[0], op)
+    for raw_label, final_label in raw_to_final.items():
+        final_op = aliases.get(str(final_label))
+        if final_op is not None:
+            aliases[str(raw_label)] = final_op
+    return aliases
+
+
+def _resolve_op(trace: Any, label: str) -> Any | None:
+    """Resolve one cooked op label through the Trace lookup tables."""
+
+    layer_dict = getattr(trace, "layer_dict_all_keys", {}) or {}
+    if label in layer_dict:
+        return layer_dict[label]
+    try:
+        layer = trace[label]
+    except (KeyError, TypeError, ValueError):
+        return None
+    ops = getattr(layer, "ops", None)
+    if ops:
+        return ops[0]
+    return layer
+
+
+def _input_binding_for_op(
+    trace: Any,
+    op: Any,
+    diagnostics: list[RunnableDiagnostic],
+) -> InputSlotBinding | None:
+    """Resolve an input source op to a captured model-boundary container site."""
+
+    containers = getattr(trace, "__dict__", {}).get("_containers", {}) or {}
+    raw_candidates = {
+        str(getattr(op, "label", "")),
+        str(getattr(op, "layer_label", "")),
+    }
+    final_to_raw = getattr(trace, "_final_to_raw_layer_labels", {}) or {}
+    raw_label = final_to_raw.get(getattr(op, "layer_label", None))
+    if isinstance(raw_label, str):
+        raw_candidates.add(raw_label)
+    for record in containers.values():
+        for snapshot in getattr(record, "snapshots", ()):
+            if getattr(snapshot, "role", None) is not Role.MODEL_INPUT:
+                continue
+            site = getattr(snapshot, "site", None)
+            if not isinstance(site, ModelSite):
+                continue
+            for occurrence in getattr(snapshot, "leaf_occurrences", ()):
+                producer = getattr(occurrence, "producer_op_label", None)
+                if not isinstance(producer, str):
+                    continue
+                cooked = (getattr(trace, "_raw_to_final_op_labels", {}) or {}).get(producer)
+                if producer not in raw_candidates and cooked not in raw_candidates:
+                    continue
+                position = _normalize_model_site_position(site.position)
+                if position is None:
+                    break
+                try:
+                    container_path = _normalize_container_path(occurrence.path)
+                except ValueError:
+                    # r67 C2: a non-grammar mapping key on the binding path refuses
+                    # TYPED (the positive structure proof also refuses the site),
+                    # never a raw ValueError escaping the producer.
+                    diagnostics.append(
+                        _diagnostic(
+                            RunnableErrorCode.MISSING_INPUT_CONTAINER_CONTRACT,
+                            "Model input binding path carries a non-grammar mapping "
+                            "key; the runnable save is refused "
+                            "(missing_input_container_contract).",
+                            affected_ops=(str(op.label),),
+                            detection_stage="producer_input_binding",
+                        )
+                    )
+                    return None
+                return InputSlotBinding(
+                    io_role="model_input",
+                    model_ref=site.model_ref,
+                    model_site_position=position,
+                    container_record_id=int(record.ordinal),
+                    container_path=container_path,
+                )
+
+    io_role = str(getattr(op, "io_role", ""))
+    if io_role.count(".") > 1:
+        diagnostics.append(
+            _diagnostic(
+                RunnableErrorCode.MISSING_INPUT_CONTAINER_CONTRACT,
+                "Nested model input has no captured ContainerRecord/ModelSite contract; "
+                "capture with capture_container_structure=True.",
+                affected_ops=(str(op.label),),
+                detection_stage="producer_input_binding",
+            )
+        )
+        return None
+    input_ops = [item for item in getattr(trace, "layer_list", ()) if item.is_input]
+    input_index = next((index for index, item in enumerate(input_ops) if item is op), 0)
+    return InputSlotBinding(
+        io_role="model_input",
+        model_ref="self:1",
+        model_site_position=("arg", input_index),
+        container_record_id=-1,
+        container_path=(),
+    )
+
+
+def _build_control_witnesses(
+    trace: Any,
+    ops: Sequence[Any],
+    calls: Sequence[RunnableCallDescriptor],
+    diagnostics: list[RunnableDiagnostic],
+    *,
+    gap: "Callable[[WitnessGapKind, str], None]",
+) -> tuple[
+    list[ControlWitness],
+    dict[str, list[CallControlObligation]],
+    dict[str, list[ControlDependencyEdge]],
+]:
+    """Build ordered scalar/loop/arm witnesses AND their owner-record obligations (r71 A2).
+
+    Every emitted scalar-bool / loop-predicate witness creates a
+    :class:`CallControlObligation` on its OWNING call, and every arm-entry witness a
+    :class:`ControlDependencyEdge` on its CHILD call -- structure the parser
+    independently re-derives required members from and the runtime check builders
+    consume. A predicate that cannot be witnessed (no recorded bool value, no owning
+    call) or an arm edge that cannot attach to a surviving call becomes a typed
+    source-linked coverage gap, never a silent drop.
+    """
+
+    witnesses: list[ControlWitness] = []
+    obligations_by_call: dict[str, list[CallControlObligation]] = {}
+    dependencies_by_call: dict[str, list[ControlDependencyEdge]] = {}
+    known_call_ids = {call.call_id for call in calls}
+    for op in ops:
+        if not bool(getattr(op, "is_scalar_bool", False)):
+            continue
+        bool_value = getattr(op, "bool_value", None)
+        context_kind = getattr(op, "conditional_context_kind", None)
+        if bool_value is None:
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.MISSING_CONTROL_CLASSIFICATION,
+                    "Scalar-bool op has no recorded bool_value.",
+                    affected_ops=(str(op.label),),
+                    detection_stage="producer_control_witness",
+                )
+            )
+            gap(WitnessGapKind.UNOBSERVED_PREDICATE, f"slot:{op.label}")
+            continue
+        if context_kind in {None, "unknown"} and bool(getattr(op, "is_terminal_bool", False)):
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.MISSING_CONTROL_CLASSIFICATION,
+                    "Terminal scalar-bool escaped without a classified consumer.",
+                    affected_ops=(str(op.label),),
+                    detection_stage="producer_control_witness",
+                )
+            )
+            gap(WitnessGapKind.UNCLASSIFIED_TERMINAL_BOOL, f"slot:{op.label}")
+        kind = (
+            ControlWitnessKind.LOOP_PREDICATE
+            if context_kind == "while"
+            else ControlWitnessKind.SCALAR_BOOL
+        )
+        call_number = getattr(op, "func_call_id", None)
+        call_id = None if call_number is None else f"call:{call_number}"
+        if call_id is None or call_id not in known_call_ids:
+            # No surviving owner record can anchor this predicate: fail closed as an
+            # explicit gap (the accompanying skipped-call diagnostic already fails
+            # preflight on every known route here), never an orphan witness whose
+            # presence no independent structure requires.
+            gap(WitnessGapKind.UNOBSERVED_PREDICATE, f"slot:{op.label}")
+            continue
+        conditional_id = getattr(op, "terminal_conditional_id", None)
+        obligations_by_call.setdefault(call_id, []).append(
+            CallControlObligation(
+                kind=kind,
+                output_slot_id=f"slot:{op.label}",
+                site_label=str(op.label),
+                conditional_id=None if conditional_id is None else int(conditional_id),
+            )
+        )
+        witnesses.append(
+            ControlWitness(
+                witness_id=f"witness:{len(witnesses) + 1}",
+                kind=kind,
+                order=len(witnesses),
+                call_id=call_id,
+                site_label=str(op.label),
+                observed_value=_encode_literal(bool(bool_value)),
+            )
+        )
+
+    call_by_op_label: dict[str, str] = {}
+    for call in calls:
+        for label in call.op_labels:
+            call_by_op_label.setdefault(str(label), call.call_id)
+            # Arm-edge endpoints are pass-free LAYER labels (the raw->final parent
+            # layer map), while call op labels carry the pass suffix: register the
+            # stripped alias so a loop-arm child resolves to its first owning call.
+            if ":" in str(label):
+                call_by_op_label.setdefault(str(label).rsplit(":", 1)[0], call.call_id)
+    arm_edges = getattr(trace, "conditional_arm_entry_edges", {}) or {}
+    for (conditional_id, arm_kind), edges in sorted(
+        arm_edges.items(), key=lambda item: (int(item[0][0]), str(item[0][1]))
+    ):
+        for parent, child in edges:
+            edge = ControlDependencyEdge(
+                conditional_id=int(conditional_id),
+                arm_kind=str(arm_kind),
+                parent_op_label=str(parent),
+                child_op_label=str(child),
+            )
+            site_label = control_dependency_site_label(edge)
+            child_call_id = call_by_op_label.get(str(child))
+            if child_call_id is None:
+                # Sol A2: an arm edge that cannot attach to a surviving call is an
+                # anchored incompleteness gap (UNVERIFIABLE floor), never silently
+                # dropped and never an orphan witness.
+                gap(WitnessGapKind.UNANCHORABLE_ARM_EDGE, site_label)
+                continue
+            dependencies_by_call.setdefault(child_call_id, []).append(edge)
+            witnesses.append(
+                ControlWitness(
+                    witness_id=f"witness:{len(witnesses) + 1}",
+                    kind=ControlWitnessKind.CONDITIONAL_ARM_ENTRY,
+                    order=len(witnesses),
+                    call_id=None,
+                    site_label=site_label,
+                    observed_value=_encode_literal(True),
+                )
+            )
+
+    witnesses.extend(_container_structure_witnesses(trace, start_order=len(witnesses)))
+    return witnesses, obligations_by_call, dependencies_by_call
+
+
+def _op_retained_tensor(trace: Any, op: Any) -> torch.Tensor | None:
+    """Return one op's retained capture-time output tensor, or ``None``.
+
+    Reads the retained capture-time output activation for any shape/dtype. A
+    missing or non-tensor activation yields ``None`` so an unsaved slot is treated
+    conservatively as un-witnessable rather than being forced to an unverifiable
+    run.
+    """
+
+    label = getattr(op, "label", None)
+    if label is None:
+        return None
+    try:
+        value = trace[label].out
+    except (KeyError, AttributeError, RuntimeError, TypeError, IndexError, ValueError):
+        # A selectively-captured op whose activation was not retained raises when
+        # its ``out`` is read; treat it as un-witnessable rather than failing build.
+        return None
+    return value if isinstance(value, torch.Tensor) else None
+
+
+_TENSOR_SOURCE_ESCAPE_MAX_SEQUENCE_NUMEL = 4096
+"""Upper bound on element count scanned for a value-equality sequence bake match."""
+
+
+def _collect_baked_literal_values(
+    calls: Sequence[RunnableCallDescriptor],
+) -> tuple[set[int], set[float], set[tuple[Any, ...]]]:
+    """Collect baked non-bool scalar and flat-numeric sequence literal values.
+
+    Returns the set of int literals, float literals, and flat numeric sequence
+    tuples that appear anywhere in a downstream call's literal arguments -- the
+    exact host-side footprints a tensor->Python escape leaves when its value is
+    baked verbatim into a later op.
+    """
+
+    ints: set[int] = set()
+    floats: set[float] = set()
+    sequences: set[tuple[Any, ...]] = set()
+
+    def visit(node: Any) -> None:
+        if isinstance(node, LiteralAtom):
+            if node.kind is LiteralAtomKind.INT and isinstance(node.value, int):
+                ints.add(int(node.value))
+            elif node.kind is LiteralAtomKind.FLOAT and isinstance(node.value, float):
+                floats.add(float(node.value))
+            return
+        if isinstance(node, LiteralSequence):
+            flat: list[Any] = []
+            numeric = True
+            for item in node.items:
+                if (
+                    isinstance(item, LiteralAtom)
+                    and item.kind in {LiteralAtomKind.INT, LiteralAtomKind.FLOAT}
+                    and not isinstance(item.value, bool)
+                ):
+                    flat.append(item.value)
+                else:
+                    numeric = False
+                visit(item)
+            if numeric and flat:
+                sequences.add(tuple(flat))
+
+    for call in calls:
+        for literal in call.literal_arguments:
+            visit(literal.value)
+    return ints, floats, sequences
+
+
+def _value_matches_baked_literal(
+    value: torch.Tensor,
+    ints: set[int],
+    floats: set[float],
+    sequences: set[tuple[Any, ...]],
+    sequence_lengths: set[int],
+) -> bool:
+    """Return whether a tensor's exact value was baked verbatim into a literal.
+
+    This is the value-equality net for a DUAL-USE escape: an op whose output also
+    feeds the traced graph (so it is not an internal sink) but whose Python-escaped
+    value was baked verbatim into a downstream op. Matches a scalar against baked
+    int/float atoms and a small tensor against a baked flat-numeric sequence.
+    """
+
+    numel = int(value.numel())
+    if numel == 1:
+        try:
+            scalar = value.item()
+        except (RuntimeError, ValueError):
+            return False
+        if isinstance(scalar, bool):
+            return False
+        if isinstance(scalar, int):
+            return scalar in ints
+        if isinstance(scalar, float):
+            return scalar in floats
+        return False
+    if 1 < numel <= _TENSOR_SOURCE_ESCAPE_MAX_SEQUENCE_NUMEL and numel in sequence_lengths:
+        try:
+            flat = tuple(value.detach().flatten().tolist())
+        except (RuntimeError, ValueError):
+            return False
+        return flat in sequences
+    return False
+
+
+def _has_input_metadata_view_read(trace: Any) -> bool:
+    """Return whether a metadata predicate was read on a DERIVED VIEW of a model input.
+
+    The completeness-witness scoped patch records (in a weak-keyed module table) any trace
+    that read a layout/autograd predicate (``is_contiguous`` / ``stride`` / ``storage_offset``
+    / ``requires_grad`` / ``grad_fn`` / ``is_leaf``) on a pure view of a model-input leaf
+    (``x.t().is_contiguous()``). That view is an orphan-pruned intermediate the sparse replay
+    never re-derives, so the read cannot be re-verified against the runtime input and the
+    producer must downgrade witness completeness to keep the run honest.
+    """
+
+    from ..backends.torch.completeness_witness import input_metadata_view_read
+
+    return bool(input_metadata_view_read(trace))
+
+
+def _has_pruned_rng_control_flow(trace: Any) -> bool:
+    """Return whether a torch-RNG op that steered control flow was orphan-pruned.
+
+    Postprocess orphan removal records (in a weak-keyed side table) any
+    ``nondeterministic_seeded`` torch-RNG op whose result drove a pure-Python
+    control decision but was input-disconnected and pruned from the visible
+    graph (see ``graph_traversal._record_pruned_rng_control_flow``). Such an op
+    never reaches the runnable descriptor, so the producer consults this fact to
+    downgrade witness completeness and keep the model honestly UNVERIFIABLE +
+    NOT_APPLICABLE rather than falsely VERIFIED + ATTESTED. A deterministic model
+    (or one with only genuinely-dead RNG draws) records nothing here.
+    """
+
+    from ..backends.torch.completeness_witness import pruned_rng_control_source_labels
+
+    return bool(pruned_rng_control_source_labels(trace))
+
+
+def _has_pruned_alias_mutation(trace: Any) -> bool:
+    """Return whether an in-place op mutating an unlabelled alias was orphan-pruned.
+
+    Postprocess orphan removal records (in a weak-keyed side table) any in-place op whose
+    mutation target carried no resolvable capture label -- an invisible ``.data`` / foreign
+    alias (``y.data.add_(5.0)``) -- that was actually dropped from the visible graph (see
+    ``graph_traversal._record_pruned_alias_mutation``). The dropped write never reaches the
+    runnable descriptor, so a replay recomputes the pre-mutation value: the producer consults
+    this fact to downgrade witness completeness and keep the model honestly UNVERIFIABLE +
+    NOT_APPLICABLE rather than falsely VERIFIED with the mutation lost. A model whose in-place
+    ops all target graph-connected (labelled) tensors records nothing here.
+    """
+
+    from ..backends.torch.completeness_witness import pruned_alias_mutation_source_labels
+
+    return bool(pruned_alias_mutation_source_labels(trace))
+
+
+def _has_forward_value_override_intervention(trace: Any) -> bool:
+    """Return whether the capture applied a forward-modifying value-override.
+
+    A forward intervention that REPLACED an op's output value (``zero_ablate``,
+    ``replace_with``, ``scale``, ``mean_ablate``, ...) makes the captured forward
+    diverge from what the recorded sparse DAG ops recompute: the DAG stores only the
+    original op recipe, never the value substitution. Such an artifact cannot
+    faithfully re-run the intervention-captured forward, so the producer downgrades
+    witness completeness to keep the run honestly UNVERIFIABLE + NOT_APPLICABLE
+    rather than falsely VERIFIED (with a contradicting NumericAttestationError when
+    activations are archived).
+
+    Only forward-direction, value-replacing interventions are flagged. An
+    observe-only intervention (``replaced=False``) or a backward/grad intervention
+    (``direction != "forward"``) leaves the forward output reproducible byte-for-byte
+    and is intentionally NOT flagged, so it still saves and VERIFIES. A plain,
+    non-intervened capture records no such op and is unchanged.
+    """
+
+    for op in getattr(trace, "layer_list", ()) or ():
+        if not getattr(op, "intervention_replaced", False):
+            continue
+        for record in getattr(op, "interventions", ()) or ():
+            direction = getattr(record, "direction", None)
+            if bool(getattr(record, "replaced", False)) and direction == "forward":
+                return True
+    return False
+
+
+def _build_input_boundary(
+    trace: Any,
+    slot_drafts: Mapping[str, _SlotDraft],
+    diagnostics: list[RunnableDiagnostic],
+) -> tuple[InputBoundarySite, ...]:
+    """Build the REQUIRED input-boundary record from replay structure (r71 A2).
+
+    One :class:`InputBoundarySite` per captured top-level model-input site (from the
+    capture structure snapshots -- the same source as the structure facts) carrying
+    the tensor leaves from the MODEL_INPUT slot bindings plus each leaf's EXPLICIT
+    (possibly empty) metadata-read name set. This record is the runtime site/arity
+    and metadata-envelope domain authority; the required-witness inventory becomes a
+    redundant mirror. A binding that cannot join the snapshot site set (or a
+    duplicate tensor path) refuses typed at save -- fail closed, never a silently
+    partial boundary record.
+    """
+
+    snapshots = trace.__dict__.get("_runnable_input_structure")
+    if not isinstance(snapshots, tuple):
+        # The positive-proof preflight (``_preflight_input_structure``) owns this
+        # refusal; an empty boundary can never bless a run (parse requires the
+        # boundary to cross-anchor every MODEL_INPUT binding).
+        return ()
+    reads = trace.__dict__.get("_runnable_input_metadata_reads")
+    reads_map: Mapping[Any, Any] = reads if isinstance(reads, Mapping) else {}
+    tensor_by_position: dict[tuple[Any, ...], list[InputBoundaryTensorSite]] = {}
+    for draft in slot_drafts.values():
+        if (
+            draft.role is not TensorSlotRole.MODEL_INPUT
+            or draft.input_binding is None
+            or draft.version_of is not None
+        ):
+            continue
+        position = draft.input_binding.model_site_position
+        if not isinstance(position, tuple) or len(position) != 2:
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.MISSING_INPUT_CONTAINER_CONTRACT,
+                    f"Model-input binding position {position!r} is outside the root "
+                    "site grammar; the input-boundary record cannot anchor it.",
+                    detection_stage="producer_input_boundary",
+                )
+            )
+            continue
+        path = tuple(draft.input_binding.container_path)
+        site_facts = reads_map.get((tuple(position), path))
+        read_names: tuple[str, ...] = ()
+        if isinstance(site_facts, Mapping):
+            read_names = tuple(
+                sorted(str(name) for name in site_facts if str(name) in _INPUT_METADATA_FACT_NAMES)
+            )
+        tensor_by_position.setdefault(tuple(position), []).append(
+            InputBoundaryTensorSite(
+                container_path=path,
+                slot_id=draft.slot_id,
+                metadata_reads=read_names,
+            )
+        )
+    sites: list[InputBoundarySite] = []
+    seen_positions: set[tuple[Any, ...]] = set()
+    for snapshot in snapshots:
+        raw_position = snapshot.get("position")
+        snapshot_position = tuple(raw_position) if isinstance(raw_position, (list, tuple)) else None
+        try:
+            member = encode_input_site_position(snapshot_position)
+        except ValueError:
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.MISSING_INPUT_CONTAINER_CONTRACT,
+                    f"Captured input site position {raw_position!r} is outside the "
+                    "root site grammar; the input-boundary record cannot anchor it.",
+                    detection_stage="producer_input_boundary",
+                )
+            )
+            continue
+        assert snapshot_position is not None
+        seen_positions.add(snapshot_position)
+        tensor_sites = sorted(
+            tensor_by_position.get(snapshot_position, []),
+            key=lambda site: repr(site.container_path),
+        )
+        paths = [site.container_path for site in tensor_sites]
+        if len(set(paths)) != len(paths):
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.MISSING_INPUT_CONTAINER_CONTRACT,
+                    f"Model-input site {snapshot_position!r} binds duplicate tensor "
+                    "container paths; the metadata-envelope domain would be ambiguous.",
+                    detection_stage="producer_input_boundary",
+                )
+            )
+            continue
+        sites.append(InputBoundarySite(position=member, tensor_sites=tuple(tensor_sites)))
+    for position in tensor_by_position:
+        if position not in seen_positions:
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.MISSING_INPUT_CONTAINER_CONTRACT,
+                    f"Model-input binding position {position!r} has no captured "
+                    "structure snapshot; the input-boundary record cannot anchor it.",
+                    detection_stage="producer_input_boundary",
+                )
+            )
+    return tuple(sites)
+
+
+def _stamp_state_binding_facts(
+    trace: Any,
+    slot_drafts: Mapping[str, _SlotDraft],
+    diagnostics: list[RunnableDiagnostic],
+) -> None:
+    """Stamp the TOTALIZED declared state-metadata facts on every state binding (r71 E1).
+
+    ``captured_requires_grad`` records the capture-time trainable bit for EVERY
+    declared state name from the pre-clone live signature (fallback: the binding's
+    role-derived ``trainable`` when no signature entry exists); staging applies it
+    -- capture truth always wins, strictly more oracle-1-faithful than the detached
+    default and aligned with the LOCKED r65 F-1 declared-fact ruling.
+    ``captured_grad_fn`` totalizes grad_fn PRESENCE: ``True`` (a non-leaf live state
+    tensor) refuses at save -- no staged leaf can carry a grad_fn, so the declared
+    state model cannot reproduce it. A recorded READ fact disagreeing with the
+    signature-derived bit (a mid-forward flip) refuses: one bit cannot honestly
+    describe both observations.
+    """
+
+    from ..backends.torch.completeness_witness import host_escape_state_metadata_facts
+
+    signatures = trace.__dict__.get("_runnable_capture_state_signatures")
+    signature_map: Mapping[str, Any] = signatures if isinstance(signatures, Mapping) else {}
+    read_facts = host_escape_state_metadata_facts(trace)
+    for draft in slot_drafts.values():
+        binding = draft.state_binding
+        if binding is None:
+            continue
+        name = binding.state_dict_name
+        signature = signature_map.get(name)
+        requires_grad: bool | None
+        grad_fn_present: bool | None
+        if isinstance(signature, Mapping) and str(signature.get("class_category", "")) in {
+            "parameter",
+            "tensor",
+        }:
+            raw_requires = signature.get("requires_grad")
+            requires_grad = raw_requires if isinstance(raw_requires, bool) else None
+            raw_leaf = signature.get("is_leaf")
+            grad_fn_present = (not raw_leaf) if isinstance(raw_leaf, bool) else None
+        else:
+            # Subclass / non-tensor signature lanes short-circuit the autograd reads BY
+            # DESIGN (a hostile ``__torch_function__`` subclass must observe nothing),
+            # and nested/non-strided values leave them UNKNOWN. Those lanes fall back
+            # to the same inert cooked-metadata truth as the no-signature lane below;
+            # actual admissibility of exotic state stays the binding/alias gates' job.
+            signature = None
+        if signature is None:
+            # Legacy/no-signature lane: parameters carry their cooked trainable bit
+            # (the live ``requires_grad`` at capture); buffers default to the
+            # detached truth. grad_fn presence is unprovable without a signature,
+            # and every state_dict transport value is a leaf, so ``False`` is the
+            # declared-state truth (a READ ``True`` still refuses via the r65 lane).
+            requires_grad = bool(binding.trainable)
+            grad_fn_present = False
+        recorded = read_facts.get(name, {})
+        recorded_requires = recorded.get("requires_grad")
+        if requires_grad is None or grad_fn_present is None:
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.STATE_METADATA_MISMATCH,
+                    f"State tensor {name!r} has an unreadable capture-time autograd "
+                    "signature (requires_grad / is_leaf); the totalized declared "
+                    "state-metadata facts cannot be recorded, so the runnable save "
+                    "is refused (fail closed).",
+                    detection_stage="producer_state_metadata",
+                    details=(("reason", "state_metadata_signature_unreadable"), ("state", name)),
+                )
+            )
+            requires_grad = bool(binding.trainable)
+            grad_fn_present = False
+        elif isinstance(recorded_requires, bool) and recorded_requires != requires_grad:
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.STATE_METADATA_MISMATCH,
+                    f"State tensor {name!r} READ requires_grad={recorded_requires!r} "
+                    f"during the captured forward but its capture signature records "
+                    f"{requires_grad!r}; a single declared bit cannot reproduce both "
+                    "observations, so the runnable save is refused.",
+                    detection_stage="producer_state_metadata",
+                    details=(("reason", "state_metadata_read_disagrees"), ("state", name)),
+                )
+            )
+        if grad_fn_present:
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.STATE_METADATA_MISMATCH,
+                    f"State tensor {name!r} carries a grad_fn at capture (non-leaf "
+                    "registered state); no staged or fresh-oracle state can reproduce "
+                    "grad_fn presence, so the runnable save is refused "
+                    "(state_metadata_mismatch).",
+                    detection_stage="producer_state_metadata",
+                    details=(("reason", "state_metadata_grad_fn_present"), ("state", name)),
+                )
+            )
+        draft.state_binding = replace(
+            binding,
+            captured_requires_grad=bool(requires_grad),
+            captured_grad_fn=bool(grad_fn_present),
+        )
+
+
+def _stamp_terminal_claims(
+    calls: Sequence[RunnableCallDescriptor],
+    slot_drafts: Mapping[str, _SlotDraft],
+    gaps: Sequence[WitnessCoverageGap],
+) -> None:
+    """Close terminal-slot accounting with explicit ``inert_sink`` claims (r71 A2).
+
+    Domain: call-produced slots consumed by NO call's tensor arguments and not bound
+    by the output contract (an OUTPUT-role slot, its producer, or an output-container
+    path) and not a mutation-version record (anchored by the mutation contracts).
+    Every such slot must be claimed by EXACTLY one of {scalar_bool, loop_predicate,
+    tensor_derived_scalar_literal, inert_sink, typed coverage gap}; the remainder are
+    genuinely dead values (e.g. the unused half of a multi-output op) and receive the
+    EXPLICIT ``inert_sink`` claim, so a stripped control/escape claim can never
+    masquerade as an honest dead slot (the strip leaves an UNCLAIMED terminal ->
+    parse refuses).
+    """
+
+    produced = {slot_id for call in calls for slot_id in call.output_slot_ids}
+    consumed = {argument.slot_id for call in calls for argument in call.tensor_arguments}
+    output_bound: set[str] = set()
+    for draft in slot_drafts.values():
+        if draft.role is TensorSlotRole.OUTPUT:
+            output_bound.add(draft.slot_id)
+            if draft.producer_slot_id is not None:
+                output_bound.add(draft.producer_slot_id)
+        elif draft.output_path is not None:
+            output_bound.add(draft.slot_id)
+    claimed: set[str] = set()
+    for call in calls:
+        for obligation in call.control_obligations:
+            claimed.add(obligation.output_slot_id)
+    for draft in slot_drafts.values():
+        if draft.host_escape:
+            claimed.add(draft.slot_id)
+    claim_families = {"scalar_bool", "loop_predicate", "tensor_derived_scalar_literal"}
+    for gap_record in gaps:
+        if gap_record.source_family in claim_families:
+            claimed.add(gap_record.source_member)
+    for slot_id in sorted(produced - consumed - output_bound):
+        terminal_draft = slot_drafts.get(slot_id)
+        if terminal_draft is None or terminal_draft.version_of is not None:
+            continue
+        if slot_id in claimed:
+            continue
+        terminal_draft.inert_sink = True
+
+
+def _escape_witnesses(
+    trace: Any,
+    ops: Sequence[Any],
+    calls: Sequence[RunnableCallDescriptor],
+    slot_drafts: Mapping[str, _SlotDraft],
+    *,
+    start_order: int,
+    gap: "Callable[[WitnessGapKind, str], None]",
+) -> list[ControlWitness]:
+    """Witness the SOURCE of every tensor->host escape in one exhaustive fail-closed pass.
+
+    A tensor->Python escape (``.item()`` / ``int()`` / ``float()`` / ``__index__``
+    / ``.tolist()`` / ``.numpy()`` / ``aten._local_scalar_dense``) reads a captured
+    op's output tensor and hands a host value to Python. That host value is then
+    consumed as a baked op-arg literal (verbatim OR after arbitrary Python
+    arithmetic) or as a pure-Python control-flow predicate. The escape breaks the
+    tensor graph, so the sparse DAG never recomputes it: on a CHANGED input the
+    baked literal / taken branch is STALE while the run would otherwise falsely
+    report VERIFIED (+ATTESTED). This is the honesty tripwire.
+
+    This single pass closes the whole (SOURCE class x ESCAPE mechanism x USE) matrix
+    so no per-net seam can leave a recognized escape un-witnessed-and-not-flagged:
+
+    * SOURCE class -- model INPUT, INTERNAL op output, BOUND param, BOUND buffer, and
+      UNBOUND param/buffer are ALL witnessed. A bound state slot that also feeds a
+      graph op still gets an ESCAPE witness (its capture-time state digest): bound-ness
+      only exempts the UNBOUND-state net, never the escape witness.
+    * ESCAPE mechanism -- census-VISIBLE ``.item()`` / ``int()`` / ``float()`` /
+      ``__index__`` / ``bool()`` (``aten._local_scalar_dense``) AND census-INVISIBLE
+      ``.tolist()`` / ``.numpy()`` / ``__array__`` (observed at the torch-function
+      layer, recorded into the SAME source tables). The witness keys on the SOURCE
+      tensor's digest, so host ARITHMETIC on the escaped value (``s*2+1`` /
+      ``sum(...)`` / ``.sum()``) is irrelevant -- the source is what changes.
+    * USE -- verbatim literal, host-arithmetic literal, and pure-Python control flow
+      are all covered by witnessing the SOURCE rather than correlating a baked value.
+
+    PASS A witnesses state slots by their capture-time state digest: every UNBOUND
+    state slot (the host-only-read net) PLUS every state slot that is an escape source
+    by name (bound or unbound) PLUS a state slot whose scalar value equals an
+    unattributable (unlabelled-source) escaped value. PASS B witnesses non-state
+    tensor-op escape sources (input / internal) by their retained-output digest, plus
+    the value-equality OPTIMIZATION for a dual-use verbatim bake.
+
+    At run time each witnessed slot is re-digested; a differing digest (a CHANGED input
+    or CHANGED staged state) means the escaped value / branch may be stale -> the run
+    reports UNVERIFIABLE + NOT_APPLICABLE rather than a false VERIFIED. Capture-equivalent
+    input+state re-digests byte-identically -> still VERIFIED (+ATTESTED where eligible).
+    A source that genuinely cannot be witnessed (an orphan-pruned census label, an
+    unattributable bool control predicate, an unattributable census-invisible escape,
+    or an unattributable value matching no sink/state) makes the witness set INCOMPLETE
+    (fail closed), never a silent pass. Scalar-*bool* escapes with a resolvable source
+    are the control-witness net's domain and excluded from the tensor-op gate here.
+    """
+
+    from ..backends.torch.completeness_witness import (
+        host_escape_has_cross_thread_captured_tensor,
+        host_escape_has_mutable_writeback,
+        host_escape_has_raw_pointer,
+        host_escape_has_unattributable_bool,
+        host_escape_has_unattributable_opaque,
+        host_escape_observer_install_failed,
+        host_escape_state_source_names,
+    )
+
+    witnesses: list[ControlWitness] = []
+    escaped_labels, fallback_state_names, unresolvable_escape = _host_escape_source_labels(trace)
+    # PASS A witnesses the census-recorded state escape names PLUS any leaf-origin
+    # fallback state names (a pruned host-only chain whose value derives from state).
+    state_names = host_escape_state_source_names(trace) | fallback_state_names
+    # Fail closed for the genuinely-unwitnessable escape shapes: an orphan-pruned census
+    # tensor-op source (:_host_escape_source_labels), an unattributable (``.data`` alias) bool
+    # control predicate covered by no net, an unattributable census-invisible
+    # (``.tolist``/``.numpy``) escape with no source slot, and a detected host WRITE-BACK through
+    # a mutable zero-copy alias (``.numpy()[0] = 99``) -- the write mutates the source bytes with
+    # no dispatch and no version bump, so the sparse replay recomputes the pre-write value and the
+    # source digest cannot witness it; keep the run honestly UNVERIFIABLE. A raw ``data_ptr()``
+    # pointer escape is likewise unobservable (r15-H1) and fails closed here too.
+    if unresolvable_escape:
+        gap(WitnessGapKind.UNWITNESSABLE_ESCAPE_SOURCE, "capture")
+    if host_escape_has_unattributable_bool(trace):
+        gap(WitnessGapKind.UNATTRIBUTABLE_BOOL_ESCAPE, "capture")
+    if host_escape_has_unattributable_opaque(trace):
+        gap(WitnessGapKind.UNATTRIBUTABLE_OPAQUE_ESCAPE, "capture")
+    if host_escape_has_mutable_writeback(trace):
+        gap(WitnessGapKind.MUTABLE_WRITEBACK_ESCAPE, "capture")
+    # A raw ``Tensor.data_ptr()`` pointer escape (r15-H1) leaves the source tensor's subsequent
+    # value unobservable (a raw ctypes read/write bypasses every dispatch and byte watch), so the
+    # run must fail closed to UNVERIFIABLE rather than a false VERIFIED.
+    if host_escape_has_raw_pointer(trace):
+        gap(WitnessGapKind.RAW_POINTER_ESCAPE, "capture")
+    # r39 hon2_1: a REQUIRED mode-independent host-value observer (the scalar numeric protocol
+    # / predicate belt) failed to install or restore, so a ``_disable_current_modes()``-region
+    # value escape could have gone unwitnessed this forward -- coverage is unknowable, fail closed.
+    if host_escape_observer_install_failed(trace):
+        gap(WitnessGapKind.ESCAPE_OBSERVER_UNCERTAIN, "capture")
+    # r43 CLASS 2 (JMT-locked): any NON-OWNER thread that touched a CAPTURED tensor during the
+    # armed forward window is outside the single-owner-thread replay model -- the escape is not
+    # witnessable as a precise source, so the run must fail closed to UNVERIFIABLE + NOT_APPLICABLE
+    # rather than a false VERIFIED. Subsumes the r42 hon2_1/hon2_2/hon2_3/hon2_4 findings.
+    if host_escape_has_cross_thread_captured_tensor(trace):
+        gap(WitnessGapKind.CROSS_THREAD_TENSOR_ACCESS, "capture")
+
+    # r37 INV-1 (hon2_2): the former unattributable-VALUE plumbing is deleted. An
+    # unlabelled-source escape now resolves through the census attribution ladder
+    # (direct state alias / dispatch origins) into ``state_names`` / the raw-label
+    # sets, or fails closed as UNATTRIBUTABLE_OPAQUE -- scalar value equality never
+    # attributes anything (a collision may only ADD witnesses, never discharge).
+    ints, floats, sequences = _collect_baked_literal_values(calls)
+    sequence_lengths = {len(item) for item in sequences}
+
+    call_id_by_slot: dict[str, str] = {}
+    for call in calls:
+        for slot_id in call.output_slot_ids:
+            call_id_by_slot.setdefault(slot_id, call.call_id)
+    bound_slot_ids: set[str] = set()
+    for call in calls:
+        for argument in call.tensor_arguments:
+            bound_slot_ids.add(argument.slot_id)
+    # State NAMES that feed at least one traced call as a tensor argument. A registered buffer
+    # whose value is consumed by a traced op (BatchNorm ``running_mean`` / ``running_var`` /
+    # ``num_batches_tracked``, read by the ``batch_norm`` call) is graph-connected: its in-place
+    # running-stat update is a TRACKED side effect the replay reproduces natively, so its extra
+    # post-update orphan buffer VERSION must NOT be treated as an untraced host-path escape
+    # (r15-C3). The unbound-state-escape net is for buffers/params consumed by NO traced call.
+    bound_state_names: set[str] = set()
+    for slot_id, draft in slot_drafts.items():
+        binding = draft.state_binding
+        if binding is not None and slot_id in bound_slot_ids:
+            bound_state_names.add(binding.state_dict_name)
+    capture_state = trace.__dict__.get("_runnable_capture_state")
+
+    # ---- PASS A: state-slot escape/host-path witnesses (bound-or-unbound) ----
+    for slot_id, draft in slot_drafts.items():
+        binding = draft.state_binding
+        if binding is None:
+            continue
+        name = binding.state_dict_name
+        captured = capture_state.get(name) if isinstance(capture_state, Mapping) else None
+        is_named_escape = name in state_names
+        # Name-level, not slot-level: a buffer with ANY slot consumed by a traced call is
+        # graph-connected (r15-C3), so a normal tracked in-place running-stat update is
+        # replayable and stays VERIFIED. A buffer/param read only on an untraced host path has
+        # NO bound slot for its name and is still witnessed here (fails closed on changed state).
+        is_unbound = slot_id not in bound_slot_ids and name not in bound_state_names
+        if not (is_named_escape or is_unbound):
+            continue
+        # r71 A2 owner-record obligation: the binding CLAIMS the host escape whether or
+        # not a witness can be produced -- a witness failure below discharges through
+        # an explicit typed gap, so a later strip of the witness leaves the surviving
+        # claim contradicted (parse refuses) rather than an honest-looking absence.
+        draft.state_binding = replace(binding, host_escape_disposition="escaped")
+        binding = draft.state_binding
+        if not isinstance(captured, torch.Tensor):
+            # A state slot that must be witnessed but whose capture value is not
+            # available cannot be re-verified: fail closed (UNVERIFIABLE).
+            gap(WitnessGapKind.UNWITNESSABLE_STATE_ESCAPE, f"{name}::{slot_id}")
+            continue
+        try:
+            digest = runnable_tensor_byte_digest(captured)
+        except (RuntimeError, ValueError, TypeError):
+            gap(WitnessGapKind.UNWITNESSABLE_STATE_ESCAPE, f"{name}::{slot_id}")
+            continue
+        fact = {
+            UNBOUND_STATE_ESCAPE_FACT_KEY: True,
+            "state_dict_name": name,
+            "slot_id": slot_id,
+            "digest": digest,
+        }
+        try:
+            observed = _encode_literal(fact)
+        except _UnsupportedLiteralError:
+            gap(WitnessGapKind.UNWITNESSABLE_STATE_ESCAPE, f"{name}::{slot_id}")
+            continue
+        order = start_order + len(witnesses)
+        witnesses.append(
+            ControlWitness(
+                witness_id=f"witness:{order + 1}",
+                kind=ControlWitnessKind.SHAPE_STRUCTURE_FACT,
+                order=order,
+                call_id=None,
+                site_label=f"{UNBOUND_STATE_ESCAPE_SITE_PREFIX}{name}",
+                observed_value=observed,
+            )
+        )
+
+    # ---- PASS B: non-state tensor-op escape sources (input / internal) ----
+    seen_slots: set[str] = set()
+    covered_labels: set[str] = set()
+    for op in ops:
+        is_input = bool(getattr(op, "is_input", False))
+        is_output = bool(getattr(op, "is_output", False))
+        is_escape = str(op.label) in escaped_labels
+        # A bound param/buffer escape source (state address recorded) is witnessed by
+        # PASS A's state digest; do NOT re-witness it as a tensor-op slot, and never
+        # treat it as INCOMPLETE here (its state digest already covers the escape).
+        address = getattr(op, "address", None)
+        if address is not None and str(address) in state_names:
+            if is_escape:
+                covered_labels.add(str(op.label))
+            continue
+        # An input/output BOUNDARY op is witnessed ONLY when the census recorded a host
+        # escape reading it; a non-escape boundary op is skipped (witnessing the always-
+        # present output/un-escaped input would falsely downgrade every changed run).
+        if (is_input or is_output) and not is_escape:
+            continue
+        if bool(getattr(op, "is_scalar_bool", False)) or bool(
+            getattr(op, "is_terminal_bool", False)
+        ):
+            continue
+        slot_id = f"slot:{op.label}"
+        if slot_id in seen_slots:
+            continue
+        call_id = call_id_by_slot.get(slot_id)
+        if call_id is None and not (is_input or is_output):
+            continue
+        is_sink = bool(getattr(op, "is_internal_sink", False))
+        if not is_escape and not is_sink:
+            continue
+        escape_draft = slot_drafts.get(slot_id)
+        if is_escape and escape_draft is not None:
+            # r71 A2 owner-record obligation: a census-recognized escape source slot
+            # CLAIMS its host escape structurally; a witness failure below discharges
+            # through an explicit typed gap, so a stripped witness leaves the claim
+            # contradicted at parse instead of an honest-looking absence.
+            escape_draft.host_escape = True
+        value = _op_retained_tensor(trace, op)
+        if value is None:
+            if is_escape:
+                gap(WitnessGapKind.UNWITNESSABLE_ESCAPE_SOURCE, slot_id)
+            continue
+        matched = is_escape
+        # Value-equality OPTIMIZATION (secondary, ADDITIVE-only per INV-1): a dual-use
+        # internal sink whose exact value was baked verbatim into a downstream literal
+        # gains a witness. A value match may only ADD a witness -- it never attributes
+        # or discharges an escape (hon2_2).
+        if not matched and is_sink:
+            matched = _value_matches_baked_literal(value, ints, floats, sequences, sequence_lengths)
+        if not matched:
+            continue
+        try:
+            digest = runnable_tensor_byte_digest(value)
+        except (RuntimeError, ValueError, TypeError):
+            if is_escape:
+                gap(WitnessGapKind.UNWITNESSABLE_ESCAPE_SOURCE, slot_id)
+            continue
+        try:
+            observed = _encode_literal(digest)
+        except _UnsupportedLiteralError:
+            if is_escape:
+                gap(WitnessGapKind.UNWITNESSABLE_ESCAPE_SOURCE, slot_id)
+            continue
+        if escape_draft is not None:
+            # The witnessed slot (escape source or dual-use baked sink) carries the
+            # owner-record obligation the witness discharges.
+            escape_draft.host_escape = True
+        order = start_order + len(witnesses)
+        witnesses.append(
+            ControlWitness(
+                witness_id=f"witness:{order + 1}",
+                kind=ControlWitnessKind.TENSOR_DERIVED_SCALAR_LITERAL,
+                order=order,
+                call_id=call_id,
+                site_label=slot_id,
+                observed_value=observed,
+            )
+        )
+        seen_slots.add(slot_id)
+        if is_escape:
+            covered_labels.add(str(op.label))
+
+    # ---- Structural invariant: every recorded escape fact is witnessed OR gapped ----
+    # No net-exclusion may silently drop a recognized escape.
+    from ..backends.torch.completeness_witness import host_escape_bool_source_labels
+
+    raw_bool = host_escape_bool_source_labels(trace)
+    raw_to_final = getattr(trace, "_raw_to_final_op_labels", {}) or {}
+    bool_final_labels = {
+        raw_to_final[raw] for raw in raw_bool if isinstance(raw_to_final.get(raw), str)
+    }
+    for label in sorted(escaped_labels):
+        if label in covered_labels or label in bool_final_labels:
+            continue
+        # A resolvable non-bool escape source that PASS A/B did not witness would
+        # otherwise slip through a net seam: fail closed instead.
+        uncovered_slot_id = f"slot:{label}"
+        uncovered = slot_drafts.get(uncovered_slot_id)
+        if uncovered is not None and not uncovered.host_escape:
+            uncovered.host_escape = True
+            gap(WitnessGapKind.UNWITNESSABLE_ESCAPE_SOURCE, uncovered_slot_id)
+        elif uncovered is None:
+            gap(WitnessGapKind.UNWITNESSABLE_ESCAPE_SOURCE, uncovered_slot_id)
+    return witnesses
+
+
+def _host_escape_source_labels(trace: Any) -> tuple[frozenset[str], frozenset[str], bool]:
+    """Return final escape-source labels, fallback state names, and unresolvability.
+
+    The dispatch census records, for each ``aten._local_scalar_dense`` escape, the
+    RAW capture label of the source tensor's producing op (see
+    ``completeness_witness._record_host_escape_source``). This resolves those raw
+    labels to their final cooked op labels via the trace's raw->final map so the
+    descriptor can witness the escape's source slot.
+
+    A census raw label that does NOT resolve to a final op is a real escape whose
+    source chain was orphan-PRUNED -- a host-only chain that reached neither an
+    input nor an output (e.g. a param-rooted ``float((w + 1).sum())``). r37
+    mechanism A: such a label first consults the census-recorded LEAF-ORIGIN
+    fallback basis -- the terminal inputs/state the pruned chain's VALUE derives
+    from. A resolvable fallback substitutes an equivalent witness set (every leaf
+    label re-resolved here; leaf state names returned for PASS A); an absent,
+    fail-closed (``None``), or itself-unresolvable fallback flags the third return
+    value and the caller must fail honest (INCOMPLETE). Silently dropping a pruned
+    label (the pre-R10 behavior) left completeness COMPLETE -> false VERIFIED on
+    changed state; discharging it by scalar value equality (the pre-r37 behavior)
+    did the same under a value collision (hon2_2). A RESOLVED bool predicate is a
+    real captured conditional covered by the control-witness net; an unresolved
+    STATE source is covered by the state net and never closes as a pruned chain.
+    """
+
+    from ..backends.torch.completeness_witness import (
+        host_escape_label_leaf_origins,
+        host_escape_source_labels,
+        host_escape_state_source_labels,
+    )
+
+    raw_labels = host_escape_source_labels(trace)
+    if not raw_labels:
+        return frozenset(), frozenset(), False
+    state_labels = host_escape_state_source_labels(trace)
+    leaf_fallbacks = host_escape_label_leaf_origins(trace)
+    raw_to_final = getattr(trace, "_raw_to_final_op_labels", {}) or {}
+    final_labels: set[str] = set()
+    fallback_state_names: set[str] = set()
+    unresolvable = False
+    for raw_label in raw_labels:
+        if not isinstance(raw_label, str):
+            unresolvable = True
+            continue
+        final = raw_to_final.get(raw_label)
+        if isinstance(final, str):
+            final_labels.add(final)
+            continue
+        if raw_label in state_labels:
+            continue
+        fallback = leaf_fallbacks.get(raw_label)
+        if fallback is None:
+            # No sound fallback basis (absent, or the census recorded a fail-closed
+            # marker: an unknown/rng-tainted leaf) -> INCOMPLETE.
+            unresolvable = True
+            continue
+        leaf_labels, leaf_states = fallback
+        resolved_leaves: set[str] = set()
+        for leaf_label in leaf_labels:
+            leaf_final = raw_to_final.get(leaf_label)
+            if isinstance(leaf_final, str):
+                resolved_leaves.add(leaf_final)
+            else:
+                # A fallback leaf that is itself unwitnessable: fail honest.
+                unresolvable = True
+                resolved_leaves = set()
+                break
+        else:
+            final_labels |= resolved_leaves
+            fallback_state_names |= set(leaf_states)
+    return frozenset(final_labels), frozenset(fallback_state_names), unresolvable
+
+
+UNBOUND_STATE_ESCAPE_SITE_PREFIX = "unbound_state_escape:"
+"""``site_label`` prefix marking a witnessed unbound state (buffer/param) escape."""
+
+UNBOUND_STATE_ESCAPE_FACT_KEY = "unbound_state_escape"
+"""Discriminator key present in every unbound-state escape fact.
+
+The site prefix and fact key are shared by the unified ``_escape_witnesses`` PASS A,
+which witnesses UNBOUND state slots (host-only reads) AND bound state slots that are
+escape sources (a ``self.gate.item()`` on a buffer that also feeds a graph op), both by
+their capture-time state digest. bound-ness exempts a state slot from the unbound net
+only, never from the escape witness.
+"""
+
+
+def _container_structure_witnesses(trace: Any, *, start_order: int) -> list[ControlWitness]:
+    """Encode captured model-boundary container facts as non-tensor witnesses."""
+
+    witnesses: list[ControlWitness] = []
+    containers = getattr(trace, "__dict__", {}).get("_containers", {}) or {}
+    for record_id, record in sorted(containers.items()):
+        for snapshot_index, snapshot in enumerate(getattr(record, "snapshots", ())):
+            if getattr(snapshot, "role", None) not in {Role.MODEL_INPUT, Role.MODEL_OUTPUT}:
+                continue
+            spec = getattr(snapshot, "spec", None)
+            fact = {
+                "record_id": int(record_id),
+                "snapshot": snapshot_index,
+                "role": snapshot.role.value,
+                "kind": getattr(spec, "kind", "unknown"),
+                "reconstructable": bool(getattr(snapshot, "reconstructable", False)),
+                "leaf_paths": [
+                    list(normalized)
+                    for occurrence in getattr(snapshot, "leaf_occurrences", ())
+                    if (normalized := _safe_normalize_container_path(occurrence.path)) is not None
+                ],
+            }
+            try:
+                observed = _encode_literal(fact)
+            except _UnsupportedLiteralError:
+                continue
+            order = start_order + len(witnesses)
+            witnesses.append(
+                ControlWitness(
+                    witness_id=f"witness:{order + 1}",
+                    kind=ControlWitnessKind.SHAPE_STRUCTURE_FACT,
+                    order=order,
+                    call_id=None,
+                    site_label=f"container:{record_id}:{snapshot_index}",
+                    observed_value=observed,
+                )
+            )
+    return witnesses
+
+
+INPUT_STRUCTURE_SITE_PREFIX = "input_structure:"
+"""``site_label`` prefix of a persisted per-site input-boundary structure fact (r67 C2)."""
+
+INPUT_STRUCTURE_FACT_KEY = "input_structure"
+"""Discriminator key present in every input-boundary structure fact."""
+
+
+def _input_structure_witnesses(trace: Any, *, start_order: int) -> list[ControlWitness]:
+    """Persist the per-site input-boundary snapshots as REQUIRED structure facts (r67 C2).
+
+    Each fact carries the site position, the COMPLETE site count (top-level arity), and
+    the full per-node record list from the snapshot spine -- kind, exact class, child
+    schema, ordered codec keys, registered aux. The executor re-derives the runtime
+    snapshot with the SAME spine function and diverges on any mismatch, closing the r66
+    nested-kind/class-identity/empty-dataclass/hidden-state classes at every depth.
+    """
+
+    snapshots = trace.__dict__.get("_runnable_input_structure")
+    if not isinstance(snapshots, tuple):
+        return []
+    witnesses: list[ControlWitness] = []
+    for snapshot in snapshots:
+        fact = {
+            INPUT_STRUCTURE_FACT_KEY: True,
+            "position": list(snapshot.get("position", [])),
+            "site_count": len(snapshots),
+            "nodes": snapshot.get("nodes", []),
+        }
+        try:
+            observed = _encode_literal(fact)
+        except _UnsupportedLiteralError:
+            # An unencodable node fact cannot be witnessed: the preflight refusal below
+            # (positive proof) owns the failure; never emit a partial fact.
+            continue
+        order = start_order + len(witnesses)
+        witnesses.append(
+            ControlWitness(
+                witness_id=f"witness:{order + 1}",
+                kind=ControlWitnessKind.SHAPE_STRUCTURE_FACT,
+                order=order,
+                call_id=None,
+                site_label=f"{INPUT_STRUCTURE_SITE_PREFIX}{snapshot.get('position')!r}",
+                observed_value=observed,
+            )
+        )
+    return witnesses
+
+
+def witness_family_of(site_label: str) -> "str | None":
+    """Resolve one ``SHAPE_STRUCTURE_FACT`` site label to its registered family.
+
+    Returns the ``WITNESS_FAMILY_REGISTRY`` family whose declared ``site_prefix``
+    matches, or ``None`` for an unregistered label (the parser refuses such a
+    witness; the r71 registry-closure meta-test fails when a new builder ships
+    without a registry row). Direct-kind and claim-only families carry no prefix and
+    can never match a site label.
+    """
+
+    for family, spec in WITNESS_FAMILY_REGISTRY.items():
+        if spec.site_prefix is not None and site_label.startswith(spec.site_prefix):
+            return family
+    return None
+
+
+def witness_family_of_witness(witness: "ControlWitness") -> "str | None":
+    """Resolve ANY control witness to its registered family (r71 A).
+
+    Direct-kind witnesses (scalar_bool / loop_predicate / conditional_arm_entry /
+    tensor_derived_scalar_literal) map by their enum kind; ``SHAPE_STRUCTURE_FACT``
+    witnesses map by site-label prefix.
+    """
+
+    if witness.kind is ControlWitnessKind.SHAPE_STRUCTURE_FACT:
+        return witness_family_of(witness.site_label)
+    return witness.kind.value
+
+
+def required_witness_family_members(
+    witnesses: "Sequence[ControlWitness]",
+) -> "dict[str, list[str]]":
+    """Derive per-family member IDs from the emitted witness stream (r69 A).
+
+    THE single member-ID authority: the producer builds the persisted
+    ``RequiredWitnessInventory`` rows from this function over its final emitted
+    witness list (facts and inventory come from ONE draft result), and the parser
+    re-derives the present member sets with the SAME function to require exact
+    equality. Member vocabulary per family follows ``WITNESS_FAMILY_REGISTRY``:
+    ``input_structure`` -> canonical root site positions; ``state_metadata`` ->
+    ``<state>::<fact_name>`` identities; ``model_input_literal`` -> none
+    (independent bidirectional structure-leaf cross-anchor); ``unbound_state_escape``
+    -> ``<state_dict_name>::<slot_id>`` (the producer legitimately emits ONE witness
+    per qualifying SLOT under a name-keyed site label, so a state name owning
+    multiple slots yields several same-label facts whose true identity is the
+    per-fact ``slot_id`` -- r15 buffer-numpy-writeback shape); every other family ->
+    its exact witness ``site_label``. Lists are returned UNSORTED and with
+    duplicates preserved so the parser can refuse duplicate member identities.
+
+    Raises ``ValueError`` for a malformed family envelope (undecodable fact,
+    missing/malformed position or state entry) -- the parser converts it into the
+    typed ``context_field_invalid`` refusal.
+    """
+
+    from .._runnable_execution import _decode_literal
+
+    members: dict[str, list[str]] = {family: [] for family in WITNESS_FAMILY_REGISTRY}
+    for witness in witnesses:
+        if witness.kind is not ControlWitnessKind.SHAPE_STRUCTURE_FACT:
+            # r71 A: the four direct control kinds are first-class registry families.
+            if witness.kind in {
+                ControlWitnessKind.SCALAR_BOOL,
+                ControlWitnessKind.LOOP_PREDICATE,
+            }:
+                if not isinstance(witness.call_id, str) or not witness.call_id:
+                    raise ValueError("scalar-bool/loop-predicate witness carries no owning call id")
+                members[witness.kind.value].append(f"{witness.call_id}::{witness.site_label}")
+            elif witness.kind is ControlWitnessKind.CONDITIONAL_ARM_ENTRY:
+                members["conditional_arm_entry"].append(witness.site_label)
+            elif witness.kind is ControlWitnessKind.TENSOR_DERIVED_SCALAR_LITERAL:
+                members["tensor_derived_scalar_literal"].append(witness.site_label)
+            continue
+        family = witness_family_of(witness.site_label)
+        if family is None:
+            continue  # parser-side closure refuses unknown families before this point
+        if family == "model_input_literal":
+            continue  # independent_ceiling: anchored to structure leaves, not indexed
+        if family == "input_structure":
+            fact = _decode_literal(witness.observed_value)
+            if not isinstance(fact, Mapping):
+                raise ValueError("undecodable input-structure fact envelope")
+            members[family].append(encode_input_site_position(fact.get("position")))
+            continue
+        if family == "state_metadata":
+            fact = _decode_literal(witness.observed_value)
+            if not isinstance(fact, Mapping):
+                raise ValueError("undecodable state-metadata fact envelope")
+            state = fact.get("state")
+            facts = fact.get("facts")
+            if not isinstance(state, str) or not isinstance(facts, Mapping):
+                raise ValueError("malformed state-metadata fact envelope")
+            for fact_name in sorted(str(name) for name in facts):
+                members[family].append(f"{state}::{fact_name}")
+            continue
+        if family == "unbound_state_escape":
+            fact = _decode_literal(witness.observed_value)
+            if not isinstance(fact, Mapping):
+                raise ValueError("undecodable unbound-state-escape fact envelope")
+            state_name = fact.get("state_dict_name")
+            slot_id = fact.get("slot_id")
+            if not isinstance(state_name, str) or not isinstance(slot_id, str):
+                raise ValueError("malformed unbound-state-escape fact envelope")
+            if witness.site_label != f"{UNBOUND_STATE_ESCAPE_SITE_PREFIX}{state_name}":
+                raise ValueError("unbound-state-escape site label disagrees with its state entry")
+            members[family].append(f"{state_name}::{slot_id}")
+            continue
+        members[family].append(witness.site_label)
+    return members
+
+
+def _build_required_witness_inventory(
+    witnesses: "Sequence[ControlWitness]",
+    slot_drafts: Mapping[str, _SlotDraft],
+) -> RequiredWitnessInventory:
+    """Author the redundant discharge MIRROR from the final witnesses + claims (r71 A).
+
+    Witness-carrying families mirror the emitted witness stream (the single-strip
+    trip: stripping a witness alone breaks mirror equality); claim-only families
+    mirror the structural claims on the slots/bindings. The inventory is a MIRROR,
+    never authority: required coverage is derived independently from the witness-free
+    replay structure (``derive_required_witness_members``) at parse and by the
+    producer save-time self-check.
+    """
+
+    members = required_witness_family_members(witnesses)
+    for draft in slot_drafts.values():
+        if draft.inert_sink:
+            members["inert_sink"].append(draft.slot_id)
+        binding = draft.state_binding
+        if binding is not None and binding.host_escape_disposition == "inert":
+            members["unbound_state_inert"].append(f"{binding.state_dict_name}::{draft.slot_id}")
+    return RequiredWitnessInventory(
+        registry_version=WITNESS_FAMILY_REGISTRY_VERSION,
+        families=tuple(
+            RequiredWitnessFamily(
+                family=family,
+                disposition=spec.disposition,
+                members=tuple(sorted(members[family])),
+            )
+            for family, spec in WITNESS_FAMILY_REGISTRY.items()
+        ),
+    )
+
+
+def _preflight_input_structure(trace: Any) -> list[RunnableDiagnostic]:
+    """Require a POSITIVE structure proof for every input site before payload writing.
+
+    r67 C2 disposition matrix: a site whose snapshot carries a refusal -- opaque
+    (non-grammar) mapping key, undeclared dataclass/namedtuple/subclass instance state,
+    throwing/nonconforming/state-incomplete container registration, unsafe registered
+    aux -- refuses the runnable save through the EXISTING
+    ``missing_input_container_contract`` (no new enum). An absent snapshot on an
+    intervention-ready capture refuses the same way: absence of proof is never proof.
+    """
+
+    snapshots = trace.__dict__.get("_runnable_input_structure")
+    diagnostics: list[RunnableDiagnostic] = []
+    if not isinstance(snapshots, tuple):
+        diagnostics.append(
+            _diagnostic(
+                RunnableErrorCode.MISSING_INPUT_CONTAINER_CONTRACT,
+                "Model-input boundary structure snapshot is missing; the runnable save "
+                "requires a positive per-site structure proof.",
+                detection_stage="producer_input_structure",
+            )
+        )
+        return diagnostics
+    for snapshot in snapshots:
+        for refusal in snapshot.get("refusals", ()):
+            diagnostics.append(
+                _diagnostic(
+                    RunnableErrorCode.MISSING_INPUT_CONTAINER_CONTRACT,
+                    "Model input site "
+                    f"{snapshot.get('position')!r} has no complete container contract at "
+                    f"path {tuple(refusal.get('path', ()))!r}: {refusal.get('reason')!r}. "
+                    "Opaque mapping keys, undeclared per-instance container state, and "
+                    "unproven container registrations cannot be replayed faithfully, so "
+                    "the runnable save is refused (missing_input_container_contract); "
+                    "analysis save levels remain available.",
+                    detection_stage="producer_input_structure",
+                )
+            )
+    return diagnostics
+
+
+MODEL_INPUT_LITERAL_SITE_PREFIX = "model_input_literal:"
+"""``site_label`` prefix marking a witnessed non-tensor model-input leaf."""
+
+MODEL_INPUT_LITERAL_FACT_KEY = "model_input_literal"
+"""Discriminator key present in every non-tensor model-input leaf fact."""
+
+MODULE_TRAINING_MODE_SITE_PREFIX = "module_training_mode:"
+"""``site_label`` prefix marking the declared capture-time per-module train/eval mode."""
+
+MODULE_TRAINING_MODE_FACT_KEY = "module_training_mode"
+"""Discriminator key present in the declared per-module train/eval mode fact."""
+
+
+def _module_training_mode_witnesses(
+    trace: Any,
+    *,
+    start_order: int,
+) -> list[ControlWitness]:
+    """Declare the capture-time per-module ``training`` mode as a structure fact.
+
+    ``self.training`` is module state outside the ``state_dict``, but it steers
+    mode-sensitive ops (BatchNorm running-stats vs batch-stats, Dropout on/off). The
+    runnable VERIFIED oracle is a fresh instance IN THE CAPTURED MODE on the given inputs,
+    so the captured mode is DECLARED state the replay reproduces. Emitting it as a single
+    ``SHAPE_STRUCTURE_FACT`` witness lets the executor anchor VERIFIED to the recorded mode;
+    a mode-sensitive op replayed without this fact is downgraded to UNVERIFIABLE (fail
+    closed). No tensors are recorded.
+    """
+
+    modes = getattr(trace, "__dict__", {}).get("_runnable_module_training_modes", None)
+    if not isinstance(modes, Mapping) or not modes:
+        return []
+    fact = {
+        MODULE_TRAINING_MODE_FACT_KEY: True,
+        "modes": {str(address): bool(training) for address, training in modes.items()},
+    }
+    try:
+        observed = _encode_literal(fact)
+    except _UnsupportedLiteralError:
+        return []
+    return [
+        ControlWitness(
+            witness_id=f"witness:{start_order + 1}",
+            kind=ControlWitnessKind.SHAPE_STRUCTURE_FACT,
+            order=start_order,
+            call_id=None,
+            site_label=MODULE_TRAINING_MODE_SITE_PREFIX,
+            observed_value=observed,
+        )
+    ]
+
+
+STATE_METADATA_FACT_SITE_PREFIX = "state_metadata:"
+"""``site_label`` prefix marking a DECLARED capture-time state-metadata fact (r65 F-1)."""
+
+STATE_METADATA_FACT_KEY = "state_metadata"
+"""Discriminator key present in every declared state-metadata fact."""
+
+_STATE_METADATA_FACT_NAMES = frozenset({"requires_grad", "grad_fn"})
+"""CLOSED vocabulary of persistable declared state-metadata fact names (r65 F-1).
+
+``requires_grad`` persists its capture-time bool (staging reproduces it via
+``requires_grad_``); ``grad_fn`` persists PRESENCE (True refuses at save -- no staged leaf
+can carry a grad_fn). Parse-side validation rejects any other name or a non-bool value as a
+``context_field_invalid``-class refusal; extending this vocabulary is an explicit schema
+decision, never an incidental producer change.
+"""
+
+
+def _state_metadata_fact_witnesses(
+    slot_drafts: Mapping[str, _SlotDraft],
+    *,
+    start_order: int,
+) -> list[ControlWitness]:
+    """Witness the TOTALIZED declared state-metadata facts per state NAME (r71 E1).
+
+    A forward that reads ``self.w.requires_grad`` (or branches on ``self.w.grad_fn``)
+    steers Python control flow on a bit that ``state_dict()`` transport DETACHES away
+    (r65 F-1). r71 totalizes BOTH facts over the declared state-name universe: every
+    state name emits exactly one witness carrying its capture-time ``requires_grad``
+    bit (staging applies it -- capture truth wins) and its ``grad_fn`` presence
+    (``True`` refused at save, so every admitted artifact records ``False``). The
+    fact values come from the stamped :class:`StateSlotBinding` owner records, so the
+    witness stream, the binding fields, and the inventory mirror agree by
+    construction and any strip leaves a surviving contradiction. The former
+    read-gated zero-overhead rationale is obsolete: PRESENCE is the anchor now, and
+    the cost is one bool pair per declared state name.
+    """
+
+    facts_by_name: dict[str, tuple[bool, bool]] = {}
+    for draft in slot_drafts.values():
+        binding = draft.state_binding
+        if binding is None:
+            continue
+        facts_by_name.setdefault(
+            binding.state_dict_name,
+            (binding.captured_requires_grad, binding.captured_grad_fn),
+        )
+    witnesses: list[ControlWitness] = []
+    for name in sorted(facts_by_name):
+        requires_grad, grad_fn_present = facts_by_name[name]
+        fact = {
+            STATE_METADATA_FACT_KEY: True,
+            "state": str(name),
+            "facts": {"grad_fn": bool(grad_fn_present), "requires_grad": bool(requires_grad)},
+        }
+        observed = _encode_literal(fact)
+        order = start_order + len(witnesses)
+        witnesses.append(
+            ControlWitness(
+                witness_id=f"witness:{order + 1}",
+                kind=ControlWitnessKind.SHAPE_STRUCTURE_FACT,
+                order=order,
+                call_id=None,
+                site_label=f"{STATE_METADATA_FACT_SITE_PREFIX}{name}",
+                observed_value=observed,
+            )
+        )
+    return witnesses
+
+
+MODEL_INPUT_METADATA_SITE_PREFIX = "model_input_metadata:"
+"""``site_label`` prefix marking a witnessed model-input metadata-predicate read."""
+
+MODEL_INPUT_METADATA_FACT_KEY = "model_input_metadata"
+"""Discriminator key present in every model-input metadata-predicate fact."""
+
+_INPUT_METADATA_FACT_NAMES = frozenset(
+    {
+        "is_contiguous",
+        "stride",
+        "storage_offset",
+        "requires_grad",
+        "grad_fn",
+        "is_leaf",
+        "storage_nbytes",
+        "retains_grad",
+        "_base",
+        "_is_view",
+        "is_conj",
+        "is_neg",
+        "is_inference",
+        "is_pinned",
+        "is_shared",
+        "is_coalesced",
+        "grad",
+        "_grad",
+        "_version",
+        "output_nr",
+        "derived_layout_read",
+    }
+)
+"""Metadata predicates the capture-time observer records for model-input receivers (r27-H2,
+extended r29-C1 with ``storage_offset`` / ``grad_fn`` / ``is_leaf`` / ``storage_nbytes``; r31
+adds the capability-driven surface ``retains_grad`` / ``_base`` / ``_is_view`` / ``is_conj`` /
+``is_neg`` / ``is_inference`` / ``is_pinned`` / ``is_shared`` / ``is_coalesced``; r33 adds
+``grad`` / ``_grad`` presence + ``_version`` / ``output_nr`` int facts; r73 adds the synthetic
+``derived_layout_read`` fact -- a layout-trio read on an activation whose value DAG roots at
+this input site, carrying the leaf's capture-time stride tuple; the executor consumes it as a
+run-time UNVERIFIABLE ceiling on a layout-changed input, never a DIVERGED compare -- see
+``torchlens.backends.torch.completeness_witness.INPUT_DERIVED_LAYOUT_FACT_NAME``)."""
+
+_INPUT_METADATA_SYNTHETIC_FACT_NAMES = frozenset({"derived_layout_read"})
+"""The SYNTHETIC (non-accessor) subset of :data:`_INPUT_METADATA_FACT_NAMES` (r73).
+
+Every other fact name IS a wrappable tensor accessor and therefore owes the r65 Cluster-X
+state-mirror a per-accessor disposition (the T-X1 parity tripwire). A synthetic fact is
+ancestry-ATTRIBUTED, not accessor-dispatched: the reads that produce ``derived_layout_read``
+are the layout trio, whose state dispositions the mirror already carries, and its STATE-rooted
+twin (``(self.w * 2).is_contiguous()``) is deliberately unwitnessed -- contract residual (3),
+state strides being canonicalized at save. The parity test subtracts exactly this named set,
+so adding a future synthetic fact still REDs the test until the state-side decision is made
+explicit here."""
+
+
+def _input_metadata_witnesses(
+    trace: Any,
+    input_boundary: "tuple[InputBoundarySite, ...]",
+    *,
+    start_order: int,
+) -> list[ControlWitness]:
+    """Emit ONE totalized metadata envelope per input-boundary tensor site (r71 A2).
+
+    A forward that reads ``x.is_contiguous()`` / ``x.stride()`` / ``x.requires_grad`` on a
+    model input steers Python control flow on facts the input contract does NOT check
+    (only shape+dtype): a same-shape runtime input differing in layout or grad flag would
+    silently replay the wrong recorded arm as a false VERIFIED+ATTESTED (r27-H2).
+
+    r71 totalized PRESENCE (free-F1 closure): the producer ALWAYS emits exactly one
+    envelope witness per tensor MODEL_INPUT site named by the REQUIRED input-boundary
+    record -- an unread site carries the EXPLICIT empty fact set -- so a lockstep
+    witness+inventory-member strip leaves a bound site without its envelope and refuses
+    at parse. The read-gated COMPARISON semantics are unchanged: the executor compares
+    only the facts the envelope carries (an empty envelope compares nothing), against
+    the RAW runtime input, diverging on mismatch. The envelope's fact-NAME set must
+    equal the boundary record's declared ``metadata_reads`` (the owner record carries
+    the read-site existence; the witness carries the observed values).
+    """
+
+    reads = getattr(trace, "__dict__", {}).get("_runnable_input_metadata_reads", None)
+    reads_map: Mapping[Any, Any] = reads if isinstance(reads, Mapping) else {}
+    witnesses: list[ControlWitness] = []
+    for site in input_boundary:
+        position = decode_input_site_position(site.position)
+        for tensor_site in site.tensor_sites:
+            path = tuple(tensor_site.container_path)
+            site_facts = reads_map.get((position, path))
+            recorded: dict[str, Any] = {}
+            if isinstance(site_facts, Mapping):
+                recorded = {
+                    str(name): (list(value) if isinstance(value, tuple) else value)
+                    for name, value in site_facts.items()
+                    if str(name) in _INPUT_METADATA_FACT_NAMES
+                }
+            fact = {
+                MODEL_INPUT_METADATA_FACT_KEY: True,
+                "position": list(position),
+                "path": list(path),
+                "facts": recorded,
+            }
+            try:
+                observed = _encode_literal(fact)
+            except _UnsupportedLiteralError:
+                # Defensive: an unencodable observed VALUE cannot silently shrink the
+                # envelope -- emit the envelope with an empty fact set so PRESENCE
+                # stays total; the boundary record still declares the read names, and
+                # the parse-time envelope/owner agreement check refuses the artifact
+                # typed (fail closed, never a silent partial envelope).
+                fact["facts"] = {}
+                observed = _encode_literal(fact)
+            order = start_order + len(witnesses)
+            witnesses.append(
+                ControlWitness(
+                    witness_id=f"witness:{order + 1}",
+                    kind=ControlWitnessKind.SHAPE_STRUCTURE_FACT,
+                    order=order,
+                    call_id=None,
+                    site_label=f"{MODEL_INPUT_METADATA_SITE_PREFIX}{position!r}:{list(path)!r}",
+                    observed_value=observed,
+                )
+            )
+    return witnesses
+
+
+def _input_literal_witnesses(
+    trace: Any,
+    *,
+    start_order: int,
+) -> tuple[list[ControlWitness], list[str]]:
+    """Witness capture-time non-tensor model-input leaves as structure facts.
+
+    The runnable executor binds only tensor input leaves; a changed non-tensor
+    Python input (bool/int/float/str/None) can silently steer control flow that
+    was never captured as an op, making the recorded taken path wrong. Each
+    grammar-encodable non-tensor leaf is recorded as a ``SHAPE_STRUCTURE_FACT``
+    witness carrying its site position, container path, and literal value so the
+    executor can diverge on a changed non-tensor input rather than falsely
+    reporting a verified, attested result.
+
+    A leaf *outside* the frozen literal grammar (enum, dataclass, set, bytes,
+    complex, numpy scalar, ...) cannot be
+    compared across save/load, so its value is recorded ``None`` -- a value-free
+    fact. Such a leaf can still steer unobserved Python control flow, and because
+    the executor cannot re-verify it, the run's witness coverage is genuinely
+    INCOMPLETE: the caller must downgrade ``witness_completeness`` so the run
+    reports ``UNVERIFIABLE`` + ``NOT_APPLICABLE`` instead of a false
+    ``VERIFIED``/``ATTESTED`` over a possibly-wrong replayed path. This function
+    signals that condition by returning ``saw_opaque_leaf=True`` so the caller can
+    downgrade ``witness_completeness``. It does *not* fail producer preflight: an
+    opaque-leaf artifact still saves and runs, but honestly reports
+    ``UNVERIFIABLE`` rather than a false ``VERIFIED``. No tensors are recorded.
+
+    Parameters
+    ----------
+    trace:
+        Cooked Trace carrying the capture-time non-tensor input leaf stash.
+    start_order:
+        First dense witness order to assign, continuing the existing sequence.
+
+    Returns
+    -------
+    tuple[list[ControlWitness], list[str]]
+        Ordered non-tensor model-input leaf witnesses, and the canonical member
+        identity of every value-free (opaque) leaf -- each becomes a typed
+        ``OPAQUE_INPUT_LEAF`` coverage gap anchored by its surviving
+        ``encodable=False`` literal fact.
+    """
+
+    leaves = getattr(trace, "__dict__", {}).get("_runnable_input_nontensor_leaves", ())
+    witnesses: list[ControlWitness] = []
+    opaque_members: list[str] = []
+    for position, path, value in leaves:
+        encodable = _is_encodable_model_input_leaf(value)
+        if not encodable:
+            opaque_members.append(f"{position!r}:{list(path)!r}")
+        fact = {
+            MODEL_INPUT_LITERAL_FACT_KEY: True,
+            "position": list(position) if isinstance(position, tuple) else position,
+            "path": list(path),
+            "encodable": encodable,
+            "value": value if encodable else None,
+        }
+        try:
+            observed = _encode_literal(fact)
+        except _UnsupportedLiteralError:
+            # Defensive: an exotic path/position component that cannot be encoded
+            # cannot be witnessed. Tensor-slot binding still constrains arity.
+            continue
+        order = start_order + len(witnesses)
+        witnesses.append(
+            ControlWitness(
+                witness_id=f"witness:{order + 1}",
+                kind=ControlWitnessKind.SHAPE_STRUCTURE_FACT,
+                order=order,
+                call_id=None,
+                site_label=f"{MODEL_INPUT_LITERAL_SITE_PREFIX}{position!r}:{list(path)!r}",
+                observed_value=observed,
+            )
+        )
+    return witnesses, opaque_members
+
+
+def _is_encodable_model_input_leaf(value: Any) -> bool:
+    """Return whether a non-tensor model-input leaf is runtime-comparable.
+
+    Non-finite Python floats are intentionally outside the comparable input-leaf
+    subset even though the literal grammar can serialize them for call recipes.
+    A ``nan``/``inf`` input leaf cannot honestly support value attestation, so it
+    must be recorded as opaque and force incomplete witness coverage.
+    """
+
+    if isinstance(value, float) and not math.isfinite(value):
+        return False
+    try:
+        _encode_literal(value)
+    except _UnsupportedLiteralError:
+        return False
+    return True
+
+
+def _preflight_state_alias_topology(
+    trace: Any, slot_drafts: Mapping[str, _SlotDraft]
+) -> list[RunnableDiagnostic]:
+    """Refuse a runnable save whose bound state has unsupported alias topology (corr2-4).
+
+    The capture-time topology snapshot (taken from the LIVE model objects before
+    state cloning) records every DISTINCT-object pair of named state tensors whose
+    touched bytes overlap or whose relation is unprovable. The v2 schema serializes
+    per-name VALUES with no backing-storage/view recipe, so replaying such a pair as
+    independent allocations silently changes in-place propagation semantics (a write
+    through one name no longer reaches the other) -- the corr2-4 false-VERIFIED
+    class. Refusal is filtered to names the descriptor actually binds (plus the
+    required non-persistent-buffer family, which serializes every non-persistent
+    name). Repeated live object IDENTITY is NOT refused: it is reproduced exactly
+    through a shared ``alias_group`` and one staged allocation. Proved-disjoint
+    same-storage views serialize independently and stay admitted.
+    """
+
+    topology = getattr(trace, "_runnable_state_alias_topology", None)
+    if not isinstance(topology, Mapping):
+        return []
+    refusals = topology.get("refusals") or ()
+    if not refusals:
+        return []
+    bound_names = {
+        draft.state_binding.state_dict_name
+        for draft in slot_drafts.values()
+        if draft.state_binding is not None
+    }
+    # The Option-A non-persistent-buffer family serializes every non-persistent
+    # buffer name, so those participate even without a graph slot.
+    persistence = getattr(trace, "_buffer_persistence", {}) or {}
+    nonpersistent_names = {str(name) for name, persistent in persistence.items() if not persistent}
+    used_names = bound_names | nonpersistent_names
+    diagnostics: list[RunnableDiagnostic] = []
+    for left, right, relation in refusals:
+        if left not in used_names and right not in used_names:
+            continue
+        diagnostics.append(
+            _diagnostic(
+                RunnableErrorCode.STATE_ALIAS_TOPOLOGY_UNSUPPORTED,
+                "Bound state tensors "
+                f"{left!r} and {right!r} are distinct objects whose touched bytes "
+                f"{'overlap' if relation == 'overlap' else 'cannot be proven disjoint'}; "
+                "the v2 schema serializes independent per-name values (no "
+                "storage/view recipe), so replay would silently drop in-place "
+                "propagation between them. The runnable save is refused "
+                "(state_alias_topology_unsupported); analysis save levels remain "
+                "available.",
+                detection_stage="producer_state_alias_topology",
+                details=(
+                    ("reason", "state_alias_topology_unsupported"),
+                    ("left_state", left),
+                    ("right_state", right),
+                    ("relation", relation),
+                ),
+            )
+        )
+    return diagnostics
+
+
+def _preflight_state_metadata(trace: Any) -> list[RunnableDiagnostic]:
+    """Refuse a runnable save whose READ captured-state physical metadata is lossy (r63 C1).
+
+    Escape-GATED (JMT Option-A ruling): a captured param/buffer with a non-canonical PHYSICAL
+    form (non-default stride/contiguity, nonzero storage offset, conj/neg lazy bit) refuses at
+    save ONLY when the model actually READ that physical dim on the slot during the captured
+    forward (the r63-closed ``is_contiguous`` / ``stride`` / ``storage_offset`` / ``is_conj`` /
+    ``is_neg`` state-metadata read witnesses). Transport normalizes every such dim away (the
+    snapshot clone compacts offset and materializes conj/neg; safetensors re-lays stride), so a
+    READ non-canonical fact steers the recorded path yet cannot be reproduced by any staged or
+    fresh-oracle state -- the loaded replay would report a false ``verified``. An UNREAD
+    non-canonical slot (a channels-last conv weight, a transposed dense param) is provably
+    value-faithful under the oracle-1 default-copy pin and stays saveable + ``verified`` --
+    zero collateral is the point of the escape gate.
+
+    Fail-closed edges: a witnessed read whose slot has NO stamped pre-clone signature, an
+    unreadable signature dim, or an unknown read kind all refuse. Detection stage
+    ``producer_state_metadata``; code ``state_metadata_mismatch``.
+    """
+
+    from .._runnable_state import state_metadata_read_violations
+    from ..backends.torch.completeness_witness import (
+        host_escape_state_metadata_facts,
+        host_escape_state_metadata_observations,
+        host_escape_state_metadata_reads,
+    )
+
+    diagnostics: list[RunnableDiagnostic] = []
+    reads = host_escape_state_metadata_reads(trace)
+    # r67 C3: the ACTUAL values returned by placement accessor calls (``is_shared`` /
+    # ``is_pinned``) -- the observed-value kinds validate the user's one real return
+    # against the device-defined staged canonical, never a speculative signature stamp.
+    observations = host_escape_state_metadata_observations(trace)
+    signatures = trace.__dict__.get("_runnable_capture_state_signatures")
+    signature_map: Mapping[str, Any] = signatures if isinstance(signatures, Mapping) else {}
+    for name in sorted(reads):
+        violations = state_metadata_read_violations(
+            signature_map.get(name), reads[name], observations.get(name)
+        )
+        if not violations:
+            continue
+        diagnostics.append(
+            _diagnostic(
+                RunnableErrorCode.STATE_METADATA_MISMATCH,
+                f"The captured forward READ physical metadata of state tensor {name!r} "
+                f"that transport normalizes away (violations: {violations!r}); the "
+                "recorded taken path depends on a state form no staged or fresh-oracle "
+                "state can reproduce, so the runnable save is refused "
+                "(state_metadata_mismatch). Analysis save levels remain available; an "
+                "UNREAD non-canonical slot saves normally.",
+                detection_stage="producer_state_metadata",
+                details=(
+                    ("reason", "state_metadata_mismatch"),
+                    ("state_dict_name", name),
+                    ("read_kinds", ",".join(sorted(reads[name]))),
+                    ("violations", repr(violations)),
+                ),
+            )
+        )
+    # r65 F-1: a DECLARED state-metadata fact refuses ONLY when staging provably cannot
+    # reproduce it -- ``grad_fn`` presence True (no staged leaf can carry a grad_fn; the
+    # exotic non-leaf-state capture), or ``requires_grad`` True on a slot whose captured
+    # dtype cannot require grad (or whose capture value is unavailable to prove it can).
+    # The ordinary population (frozen OR trainable models reading ``requires_grad`` on
+    # float state) records facts staging reproduces exactly -- no refusal, no ceiling.
+    facts_by_state = host_escape_state_metadata_facts(trace)
+    capture_state = trace.__dict__.get("_runnable_capture_state")
+    capture_map: Mapping[str, Any] = capture_state if isinstance(capture_state, Mapping) else {}
+    for name in sorted(facts_by_state):
+        slot_facts = facts_by_state[name]
+        problems: list[str] = []
+        if slot_facts.get("grad_fn"):
+            problems.append("grad_fn_present")
+        if slot_facts.get("requires_grad"):
+            captured = capture_map.get(name)
+            differentiable = isinstance(captured, torch.Tensor) and (
+                captured.is_floating_point() or captured.is_complex()
+            )
+            if not differentiable:
+                problems.append("requires_grad_unreproducible_dtype")
+        if not problems:
+            continue
+        diagnostics.append(
+            _diagnostic(
+                RunnableErrorCode.STATE_METADATA_MISMATCH,
+                f"The captured forward READ declared autograd metadata of state tensor "
+                f"{name!r} that no staged state can reproduce ({', '.join(problems)}): a "
+                "staged slot is always a grad_fn-free leaf, and a non-differentiable slot "
+                "cannot carry requires_grad=True. The runnable save is refused "
+                "(state_metadata_mismatch); analysis save levels remain available.",
+                detection_stage="producer_state_metadata",
+                details=(
+                    ("reason", "state_metadata_mismatch"),
+                    ("state_dict_name", name),
+                    ("facts", repr(dict(sorted(slot_facts.items())))),
+                    ("problems", ",".join(problems)),
+                ),
+            )
+        )
+    return diagnostics
+
+
+def _preflight_output_contracts(trace: Any, ops: Sequence[Any]) -> list[RunnableDiagnostic]:
+    """Report structured model outputs whose container contract is unavailable."""
+
+    diagnostics: list[RunnableDiagnostic] = []
+    output_ops = [op for op in ops if bool(getattr(op, "is_output", False))]
+    # r35 I1 (decision B, subsumes r33 R32-B1): a runnable save requires a POSITIVE
+    # capture-time losslessness proof of the model output -- exact root kind,
+    # recursively supported children, encodable literal leaves, and a tensor-leaf/
+    # typed-path bijection. Refuse-unless-proved: an absent or failed proof refuses
+    # the runnable save uniformly (bare/nested/one-tensor/empty sets, frozensets and
+    # subclasses, opaque tensor holders, duplicate paths, BFS fallback), never a
+    # save-then-UNVERIFIABLE landmine and never an advertise-then-crash artifact.
+    losslessness = getattr(trace, "__dict__", {}).get("_runnable_output_losslessness")
+    if not isinstance(losslessness, Mapping) or not losslessness.get("lossless", False):
+        reason = (
+            str(losslessness.get("reason", "unknown"))
+            if isinstance(losslessness, Mapping)
+            else "losslessness_not_proven"
+        )
+        root_type = (
+            str(losslessness.get("root_type", "unknown"))
+            if isinstance(losslessness, Mapping)
+            else "unknown"
+        )
+        diagnostics.append(
+            _diagnostic(
+                RunnableErrorCode.MISSING_OUTPUT_CONTAINER_CONTRACT,
+                "Model output is not provably lossless for runnable replay "
+                f"(root {root_type!r}, reason {reason!r}); runnable replay could "
+                "silently drop elements or mis-report the container kind, so the "
+                "save is refused. Ordinary analysis save levels remain available.",
+                affected_ops=tuple(str(op.label) for op in output_ops),
+                detection_stage="producer_output_binding",
+                details=(("reason", reason), ("root_type", root_type)),
+            )
+        )
+        return diagnostics
+    if not output_ops:
+        # r37 corr1_1 (INV-3): a PROVED-lossless output tree with ZERO tensor
+        # slots (all-literal / literal-root / empty containers) has no output Op
+        # to carry the root ContainerSpec in the v2 schema, so the run would
+        # reconstruct ``None`` -- an accepted-then-dropped output. Unrepresentable
+        # means REFUSE AT SAVE, uniformly with every other output refusal; the
+        # relaxation path is a future versioned root-spec schema bump, not an
+        # implicit carrier.
+        diagnostics.append(
+            _diagnostic(
+                RunnableErrorCode.MISSING_OUTPUT_CONTAINER_CONTRACT,
+                "Model output contains no tensor leaves (zero output slots), so the "
+                "v2 descriptor has no carrier for its container contract and the "
+                "loaded artifact could not reconstruct it "
+                "(missing_output_container_contract). The runnable save is refused; "
+                "ordinary analysis save levels remain available.",
+                detection_stage="producer_output_binding",
+                details=(("reason", "zero_tensor_slot_output"),),
+            )
+        )
+        return diagnostics
+    containers = getattr(trace, "__dict__", {}).get("_containers", {}) or {}
+    model_output_snapshots = [
+        snapshot
+        for record in containers.values()
+        for snapshot in getattr(record, "snapshots", ())
+        if getattr(snapshot, "role", None) is Role.MODEL_OUTPUT
+    ]
+    # A recorded model-output container that is non-reconstructable (opaque custom
+    # Mapping, unsafe defaultdict, unknown dict subclass, or an unrepresentable
+    # non-tensor leaf) must NOT advertise runnable regardless of how many tensors it
+    # holds: otherwise the loaded run silently returns a bare tensor / plain dict and
+    # reports VERIFIED. Honest-reject at save closes that class.
+    if any(
+        not getattr(snapshot, "reconstructable", True)
+        or getattr(getattr(snapshot, "spec", None), "kind", None) == "opaque"
+        for snapshot in model_output_snapshots
+    ):
+        diagnostics.append(
+            _diagnostic(
+                RunnableErrorCode.MISSING_OUTPUT_CONTAINER_CONTRACT,
+                "Model output is a non-reconstructable container; runnable replay cannot "
+                "restore its exact type and non-tensor leaves.",
+                affected_ops=tuple(str(op.label) for op in output_ops),
+                detection_stage="producer_output_binding",
+            )
+        )
+        return diagnostics
+    if len(output_ops) <= 1:
+        return diagnostics
+    if any(getattr(op, "container_path", None) for op in output_ops):
+        return diagnostics
+    has_model_output = bool(model_output_snapshots)
+    if not has_model_output:
+        diagnostics.append(
+            _diagnostic(
+                RunnableErrorCode.MISSING_OUTPUT_CONTAINER_CONTRACT,
+                "Multi-tensor model output has no cooked container contract.",
+                affected_ops=tuple(str(op.label) for op in output_ops),
+                detection_stage="producer_output_binding",
+            )
+        )
+    return diagnostics
+
+
+def _mark_inplace_versions(
+    calls: Sequence[RunnableCallDescriptor], slot_drafts: Mapping[str, _SlotDraft]
+) -> None:
+    """Attach version relations for in-place call outputs."""
+
+    for call in calls:
+        version_of = _mutation_target_slot_id(call)
+        if not call.is_inplace or version_of is None:
+            continue
+        for output_slot_id in call.output_slot_ids:
+            draft = slot_drafts.get(output_slot_id)
+            if draft is not None:
+                draft.mutable = True
+                draft.version_of = version_of
+
+
+def _mutation_target_slot_id(call: RunnableCallDescriptor) -> str | None:
+    """Return the tensor slot mutated by one recorded call.
+
+    Parameters
+    ----------
+    call:
+        Frozen runnable call descriptor.
+
+    Returns
+    -------
+    str | None
+        The ``out=`` tensor slot when present, otherwise the first tensor
+        argument for conventional in-place operators.
+    """
+
+    for argument in call.tensor_arguments:
+        if argument.argument_path == ("kwargs", "out"):
+            return argument.slot_id
+    return call.tensor_arguments[0].slot_id if call.tensor_arguments else None
+
+
+def _buffer_binding(trace: Any, op: Any) -> StateSlotBinding | None:
+    """Build a named buffer binding from a cooked source op.
+
+    Persistence is defined by canonical ``state_dict`` membership. Registered
+    buffer membership is captured on the trace while the source model is alive,
+    so save-time classification never depends on weak-reference or GC state.
+    Buffers excluded with ``persistent=False`` retain a buffer binding for replay,
+    but never claim or require a canonical state-dict key.
+    """
+
+    address = getattr(op, "address", None)
+    if not isinstance(address, str) or not address:
+        return None
+    persistence = getattr(trace, "_buffer_persistence", {}) or {}
+    persistent = bool(persistence.get(address, False))
+    module_path, _, name = address.rpartition(".")
+    # r37 corr2-4: repeated live object identity (captured before state cloning)
+    # becomes a shared alias group so the loader stages ONE allocation per group and
+    # preserves ``a is b`` / in-place propagation semantics across the tied names.
+    topology = getattr(trace, "_runnable_state_alias_topology", None)
+    groups = topology.get("groups") if isinstance(topology, Mapping) else None
+    alias_group = groups.get(address) if isinstance(groups, Mapping) else None
+    return StateSlotBinding(
+        module_path=module_path or "self",
+        state_dict_name=address,
+        semantic_role=_buffer_role(name or address),
+        trainable=False,
+        persistent=persistent,
+        alias_group=alias_group,
+        # Provisional draft values; ``_stamp_state_binding_facts`` /
+        # ``_escape_witnesses`` stamp the final totalized facts + claims.
+        captured_requires_grad=False,
+        captured_grad_fn=False,
+        host_escape_disposition=None,
+    )
+
+
+def _parameter_role(param: Any) -> StateSlotRole:
+    """Classify one cooked parameter into the frozen initializer role table."""
+
+    name = str(getattr(param, "name", ""))
+    module_address = str(getattr(param, "module_address", ""))
+    trace = getattr(param, "source_trace", None)
+    modules = getattr(trace, "modules", {}) if trace is not None else {}
+    module = modules.get(module_address) if isinstance(modules, Mapping) else None
+    class_name = str(getattr(module, "class_name", module_address)).lower()
+    is_norm = "norm" in class_name
+    if name == "weight":
+        return StateSlotRole.NORM_SCALE if is_norm else StateSlotRole.WEIGHT
+    if name == "bias":
+        return StateSlotRole.NORM_OFFSET if is_norm else StateSlotRole.BIAS
+    return StateSlotRole.WEIGHT
+
+
+def _buffer_role(name: str) -> StateSlotRole:
+    """Classify a named buffer into the frozen state role vocabulary."""
+
+    if name == "running_mean":
+        return StateSlotRole.RUNNING_MEAN
+    if name in {"running_var", "running_variance"}:
+        return StateSlotRole.RUNNING_VAR
+    if name in {"num_batches_tracked", "counter", "step"}:
+        return StateSlotRole.COUNTER
+    return StateSlotRole.GENERIC_BUFFER
+
+
+def _op_slot_role(op: Any) -> TensorSlotRole:
+    """Classify one cooked op tensor into the frozen slot role vocabulary."""
+
+    if bool(getattr(op, "is_input", False)):
+        return TensorSlotRole.MODEL_INPUT
+    if bool(getattr(op, "is_buffer", False)):
+        return TensorSlotRole.BUFFER
+    if bool(getattr(op, "is_output", False)):
+        return TensorSlotRole.OUTPUT
+    if str(getattr(op, "func_name", "")) in {
+        "rand",
+        "randn",
+        "randint",
+        "rand_like",
+        "randn_like",
+        "bernoulli",
+    }:
+        return TensorSlotRole.RNG_SOURCE
+    return TensorSlotRole.INTERMEDIATE
+
+
+def _component_contains_tensor(component: Any) -> bool:
+    """Return whether a captured component contains a tensor-valued leaf."""
+
+    if isinstance(component, (ParentRef, LiteralTensor)):
+        return True
+    if isinstance(component, tuple):
+        return any(_component_contains_tensor(item) for item in component)
+    if isinstance(component, list):
+        return any(_component_contains_tensor(item) for item in component)
+    if isinstance(component, Mapping):
+        return any(_component_contains_tensor(item) for item in component.values())
+    return False
+
+
+def _tensor_container_skeleton(component: Any) -> NonTensorLiteral:
+    """Encode a mutable sparse-call container shell without tensor values.
+
+    Tensor leaves are represented by ``None`` placeholders and overwritten
+    with ``ParentRef`` slots during sparse execution. Captured tensor
+    containers are projected as tuples by the eager capture layer, so their
+    runnable shell intentionally uses a list, which is accepted by the
+    relevant variadic torch operators and supports leaf replacement.
+
+    Parameters
+    ----------
+    component:
+        Captured argument component containing at least one tensor leaf.
+
+    Returns
+    -------
+    NonTensorLiteral
+        Value-free literal shell used to reconstruct the argument tree.
+    """
+
+    if isinstance(component, (ParentRef, LiteralTensor)):
+        return LiteralAtom(LiteralAtomKind.NONE, None)
+    if isinstance(component, LiteralValue):
+        return _encode_literal(component.value)
+    if isinstance(component, Unsupported):
+        raise _UnsupportedLiteralError(component.reason)
+    if isinstance(component, (list, tuple)):
+        return LiteralSequence(
+            LiteralSequenceKind.LIST,
+            tuple(_tensor_container_skeleton(item) for item in component),
+        )
+    if isinstance(component, Mapping):
+        return LiteralMapping(
+            tuple(
+                LiteralMappingEntry(
+                    _encode_literal_key(key),
+                    _tensor_container_skeleton(item),
+                )
+                for key, item in component.items()
+            )
+        )
+    return _encode_literal(component)
+
+
+def _encode_literal(value: Any) -> NonTensorLiteral:
+    """Encode a Python value using only the frozen safe literal grammar.
+
+    r69 B: scalar admission is CLASSIFIER-FIRST (``torchlens._input_walk.
+    classify_scalar``), before any ``isinstance`` numeric/string normalization, so
+    no call-recipe or fact-envelope path can launder a semantic-typed scalar (enum
+    member, builtin/np-scalar subclass) into a plain atom -- such a value raises
+    ``_UnsupportedLiteralError`` (typed refusal / opaque routing at the caller).
+    Stock NumPy numeric/bool wrappers normalize through the RATIFIED transparent
+    value lane (``.item()``); exact builtin atoms encode as before.
+    """
+
+    from torchlens._input_walk import classify_scalar
+
+    scalar_kind, scalar_payload = classify_scalar(value)
+    if scalar_kind == "semantic":
+        value_type = f"{type(value).__module__}.{type(value).__qualname__}"
+        raise _UnsupportedLiteralError(
+            f"Value of type {value_type} carries semantic type identity (enum or "
+            "scalar subclass) and is outside the frozen non-tensor literal grammar."
+        )
+    if scalar_kind == "numpy":
+        # Ratified stock-wrapper VALUE transparency: encode the exact builtin atom.
+        value = scalar_payload
+    if value is None:
+        return LiteralAtom(LiteralAtomKind.NONE, None)
+    if isinstance(value, bool):
+        return LiteralAtom(LiteralAtomKind.BOOL, value)
+    if isinstance(value, int):
+        return LiteralAtom(LiteralAtomKind.INT, int(value))
+    if isinstance(value, float):
+        # Finiteness is a pure host check on a Python float; use ``math.isfinite`` rather
+        # than ``torch.isfinite(torch.tensor(value)).item()`` so encoding a float literal
+        # key/leaf during capture emits NO ``aten._local_scalar_dense`` dispatch. That
+        # internal read would otherwise be recorded by the host-escape witness as a
+        # spurious (bool) user escape and falsely downgrade an exotic-key model (e.g. a
+        # ``dict[float, int]`` branch) to UNVERIFIABLE on the unchanged input.
+        if not math.isfinite(value):
+            return LiteralAtom(LiteralAtomKind.NONFINITE_FLOAT, _nonfinite_float_payload(value))
+        return LiteralAtom(LiteralAtomKind.FLOAT, float(value))
+    if isinstance(value, str):
+        return LiteralAtom(LiteralAtomKind.STR, value)
+    if value is Ellipsis:
+        return LiteralAtom(LiteralAtomKind.ELLIPSIS, None)
+    if isinstance(value, slice):
+        return LiteralSlice(
+            start=_encode_slice_component(value.start, "start"),
+            stop=_encode_slice_component(value.stop, "stop"),
+            step=_encode_slice_component(value.step, "step"),
+        )
+    torch_symbol = _torch_symbol_qualname(value)
+    if torch_symbol is not None:
+        return LiteralTorchSymbol(torch_symbol)
+    if isinstance(value, list):
+        return LiteralSequence(
+            LiteralSequenceKind.LIST,
+            tuple(_encode_literal(item) for item in value),
+        )
+    if isinstance(value, tuple):
+        return LiteralSequence(
+            LiteralSequenceKind.TUPLE,
+            tuple(_encode_literal(item) for item in value),
+        )
+    if isinstance(value, Mapping):
+        return LiteralMapping(
+            tuple(
+                LiteralMappingEntry(_encode_literal_key(key), _encode_literal(item))
+                for key, item in value.items()
+            )
+        )
+    value_type = f"{type(value).__module__}.{type(value).__qualname__}"
+    raise _UnsupportedLiteralError(
+        f"Value of type {value_type} is outside the frozen non-tensor literal grammar."
+    )
+
+
+def _nonfinite_float_payload(value: float) -> str:
+    """Return the stable string payload for a non-finite float literal.
+
+    Parameters
+    ----------
+    value:
+        Python float known to be non-finite.
+
+    Returns
+    -------
+    str
+        One of ``"nan"``, ``"inf"``, or ``"-inf"``.
+    """
+
+    if math.isnan(value):
+        return "nan"
+    return "inf" if value > 0 else "-inf"
+
+
+def _encode_slice_component(value: Any, field_name: str) -> LiteralAtom:
+    """Encode one ``slice.start``/``.stop``/``.step`` component (r71 B: classifier-first).
+
+    A ``slice`` object does NOT normalize its components: ``slice(MyIntEnum.FAST).start``
+    retains the semantic type (secA-F1). r71 routes the component through the ONE
+    ``classify_scalar`` lattice BEFORE any ``isinstance`` coercion, so a semantic-typed
+    component (IntEnum member, int subclass, non-stock np scalar) can never launder into
+    a plain ``LiteralAtom(INT)`` -- it refuses typed (``semantic_scalar_type``), mirroring
+    the direct-leaf path. Accepted: ``None``, an EXACT builtin non-bool ``int``, and a
+    ratified stock-numpy wrapper whose ``.item()`` is an exact non-bool ``int``. A
+    ``bool`` (bool is not a slice index) and every non-int type refuse.
+    """
+
+    from torchlens._input_walk import classify_scalar
+
+    if value is None:
+        return LiteralAtom(LiteralAtomKind.NONE, None)
+    scalar_kind, scalar_payload = classify_scalar(value)
+    if scalar_kind == "semantic":
+        value_type = f"{type(value).__module__}.{type(value).__qualname__}"
+        raise _UnsupportedLiteralError(
+            f"Slice component {field_name!r} of type {value_type} carries semantic type "
+            "identity (enum or scalar subclass) and is outside the frozen non-tensor "
+            "literal grammar (semantic_scalar_type)."
+        )
+    if scalar_kind == "numpy":
+        value = scalar_payload
+    if isinstance(value, bool) or not isinstance(value, int) or type(value) is not int:
+        value_type = f"{type(value).__module__}.{type(value).__qualname__}"
+        raise _UnsupportedLiteralError(
+            f"Slice component {field_name!r} of type {value_type} is outside the frozen "
+            "non-tensor literal grammar; only int or None slice components are supported."
+        )
+    return LiteralAtom(LiteralAtomKind.INT, int(value))
+
+
+EMPTY_CONTAINER_PATH_MARKER = "\x00tl_empty_container"
+"""Reserved terminal path component marking an EMPTY non-tensor input container (r29-C2).
+
+An empty dict/list/tuple contributes NO leaf path, so the non-tensor leaf-path SET witness
+(H1) is blind to an EXTRA empty container a model branches on (``if not d.get('flag', {})``).
+Both the capture and runtime walks emit a synthetic leaf at ``(*container_path, MARKER)``
+carrying the container KIND string, so an added/removed/kind-changed empty container diverges
+the run. The null-byte prefix makes collision with a real string dict key effectively
+impossible.
+"""
+
+BOOL_KEY_PATH_TAG = "\x00tl_bool_key"
+"""Reserved tag distinguishing a BOOL mapping key from the equal-valued int (r29-C2, F6).
+
+``bool`` is a subclass of ``int`` and ``hash(True) == hash(1)``, so a raw ``(True,)`` path
+component compares equal to ``(1,)`` in the leaf-path set and ``_value_at_path`` resolves both
+against either key. Encoding a bool key as ``(BOOL_KEY_PATH_TAG, bool(key))`` keeps the key
+TYPE distinct across capture/runtime, matching the type-strict ``_literal_leaf_equal`` used for
+values.
+"""
+
+
+def input_path_key_component(key: Any) -> Any:
+    """Return the canonical type-strict path component for one mapping key (r67 C2).
+
+    Delegates to the ONE codec (``torchlens._input_walk.encode_mapping_key``): ``str``/
+    ``int`` keys stay raw, bool/float/None/safe-tuple keys encode into tagged STRING
+    components (``True != 1`` and ``1.0 != 1`` stay type-distinct), retiring the r29
+    tuple-tag spelling and the dual raw/tagged vocabulary (residual R6 closed).
+    """
+
+    from torchlens._input_walk import encode_mapping_key
+
+    try:
+        return encode_mapping_key(key)
+    except ValueError as exc:
+        raise _UnsupportedLiteralError(str(exc)) from exc
+
+
+def empty_container_kind(value: Any) -> str | None:
+    """Return the KIND string of an EMPTY non-tensor container, else ``None`` (r29-C2).
+
+    ``None`` for non-containers and for NON-empty containers (whose leaves are witnessed
+    ordinarily). Namedtuples are treated as sequences by field arity; an empty namedtuple has
+    no fields. r67 C2 (free-F2/hon1-F2c): a ZERO-FIELD dataclass is an EMPTY container by
+    KIND -- without the row it emitted nothing at all, so the argument vanished from the
+    input contract and a run against a different-arity model falsely VERIFIED.
+    """
+
+    import dataclasses as _dataclasses
+
+    if isinstance(value, tuple) and hasattr(value, "_fields"):
+        return "namedtuple" if len(value._fields) == 0 else None
+    if _dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return "dataclass" if len(_dataclasses.fields(value)) == 0 else None
+    if isinstance(value, Mapping):
+        return "mapping" if len(value) == 0 else None
+    if isinstance(value, (list, tuple)):
+        return "sequence" if len(value) == 0 else None
+    return None
+
+
+def _encode_literal_key(value: Any) -> LiteralAtom | LiteralTupleKey:
+    """Encode a mapping key using the frozen safe key subset."""
+
+    encoded = _encode_literal(value)
+    if isinstance(encoded, LiteralAtom):
+        return encoded
+    if isinstance(encoded, LiteralSequence) and encoded.kind is LiteralSequenceKind.TUPLE:
+        items: list[LiteralAtom | LiteralTupleKey] = []
+        for item in encoded.items:
+            if isinstance(item, LiteralAtom):
+                items.append(item)
+            elif isinstance(item, LiteralSequence) and item.kind is LiteralSequenceKind.TUPLE:
+                items.append(_encode_literal_key(_literal_sequence_to_python(item)))
+            else:
+                raise _UnsupportedLiteralError("Mapping tuple keys may contain only scalar atoms.")
+        return LiteralTupleKey(tuple(items))
+    raise _UnsupportedLiteralError("Mapping keys must be scalar atoms or safe tuples.")
+
+
+def _literal_sequence_to_python(value: LiteralSequence) -> tuple[Any, ...]:
+    """Convert an encoded scalar tuple key back to a Python tuple for recursion."""
+
+    result: list[Any] = []
+    for item in value.items:
+        if isinstance(item, LiteralAtom):
+            result.append(item.value)
+        elif isinstance(item, LiteralSequence):
+            result.append(_literal_sequence_to_python(item))
+        else:
+            raise _UnsupportedLiteralError("Mapping tuple keys may contain only scalar atoms.")
+    return tuple(result)
+
+
+def _torch_symbol_qualname(value: Any) -> str | None:
+    """Return an allowlisted torch symbolic name for a non-callable value."""
+
+    if isinstance(value, torch.device):
+        return f"torch.device({value})"
+    for name, candidate in vars(torch).items():
+        if callable(candidate):
+            continue
+        if candidate is value and isinstance(
+            value, (torch.dtype, torch.layout, torch.memory_format)
+        ):
+            return f"torch.{name}"
+    return None
+
+
+def _runtime_fingerprint(
+    op: Any,
+    func_id: FunctionRegistryKey,
+    call_ops: Sequence[Any],
+    execution_context: CallExecutionContext,
+) -> str:
+    """Hash the recorded runtime call signature without tensor values.
+
+    The canonical serialized per-call execution context participates in the
+    fingerprint (v2): a context change is a signature-relevant replay fact.
+    """
+
+    payload = {
+        "callable": {
+            "namespace": func_id.namespace,
+            "qualname": func_id.qualname,
+            "dispatch_kind": func_id.dispatch_kind,
+            "version": func_id.version,
+            "import_path": func_id.import_path,
+        },
+        "argument_names": list(getattr(op, "arg_names", ()) or ()),
+        "num_positional_args": int(getattr(op, "num_pos_args", 0)),
+        "num_keyword_args": int(getattr(op, "num_kwargs", 0)),
+        "outputs": [
+            {"shape": list(_shape_tuple(item.shape) or ()), "dtype": _dtype_name(item)}
+            for item in call_ops
+        ],
+        "execution_context": {
+            "autocast": [
+                {
+                    "device_type": entry.device_type,
+                    "enabled": entry.enabled,
+                    "dtype": entry.dtype,
+                }
+                for entry in execution_context.autocast
+            ],
+            "grad_enabled": execution_context.grad_enabled,
+            "inference_mode": execution_context.inference_mode,
+        },
+    }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _diagnostic(
+    code: RunnableErrorCode,
+    message: str,
+    *,
+    registry_id: str | None = None,
+    affected_ops: tuple[str, ...] = (),
+    detection_stage: str,
+    details: tuple[tuple[str, str], ...] = (),
+) -> RunnableDiagnostic:
+    """Construct one structured producer diagnostic."""
+
+    return RunnableDiagnostic(
+        code=code,
+        message=message,
+        registry_id=registry_id,
+        affected_op_labels=affected_ops,
+        recorded_runtime=str(torch.__version__),
+        current_runtime=str(torch.__version__),
+        detection_stage=detection_stage,
+        resolver_provenance=None,
+        analysis_load_available=True,
+        details=details,
+    )
+
+
+def _deduplicate_diagnostics(
+    diagnostics: Iterable[RunnableDiagnostic],
+) -> list[RunnableDiagnostic]:
+    """Deduplicate diagnostics while retaining deterministic first occurrence."""
+
+    result: list[RunnableDiagnostic] = []
+    seen: set[tuple[Any, ...]] = set()
+    for diagnostic in diagnostics:
+        key = (
+            diagnostic.code,
+            diagnostic.registry_id,
+            diagnostic.affected_op_labels,
+            diagnostic.detection_stage,
+            diagnostic.details,
+        )
+        if key not in seen:
+            seen.add(key)
+            result.append(diagnostic)
+    return result
+
+
+def _shape_tuple(value: Any) -> tuple[int, ...] | None:
+    """Normalize shape metadata to a tuple of integers."""
+
+    if value is None:
+        return None
+    try:
+        return tuple(int(dim) for dim in value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _dtype_name(op: Any) -> str | None:
+    """Return canonical dtype metadata for one cooked op."""
+
+    dtype_ref = getattr(op, "dtype_ref", None)
+    if dtype_ref is not None:
+        return str(dtype_ref)
+    dtype = getattr(op, "dtype", None)
+    return None if dtype is None else str(dtype)
+
+
+def _device_parts(value: Any) -> tuple[str, int | None]:
+    """Split cooked device metadata into type and optional index."""
+
+    text = "cpu" if value is None else str(value)
+    device = torch.device(text)
+    return device.type, device.index
+
+
+def _safe_normalize_container_path(path: Iterable[Any]) -> tuple[str | int, ...] | None:
+    """Return the frozen container path, or ``None`` when a key is unrepresentable.
+
+    Used where an unrepresentable output-container path (non-str/int key) must
+    degrade gracefully -- the enclosing container is recorded opaque and rejected
+    at preflight, so its leaf paths are advisory and must never crash descriptor
+    build with a raw ``ValueError``.
+    """
+
+    try:
+        return _normalize_container_path(path)
+    except ValueError:
+        return None
+
+
+def _normalize_container_path(path: Iterable[Any]) -> tuple[str | int, ...]:
+    """Convert cooked container path components to frozen string/int paths."""
+
+    from torchlens._input_walk import encode_mapping_key
+
+    normalized: list[str | int] = []
+    for component in path:
+        if isinstance(component, TupleIndex):
+            normalized.append(component.index)
+        elif isinstance(component, (DictKey, HFKey)):
+            # r67 C2 (hon1-F1): mapping keys normalize through the ONE type-strict codec,
+            # so grammar keys (bool/float/None/safe tuple) become first-class str|int
+            # path components -- a tensor child under ``{2.5: x}`` enters the leaf-path
+            # accounting instead of silently vanishing. A non-grammar key still raises
+            # (the caller's refusal/skip semantics are unchanged).
+            try:
+                normalized.append(encode_mapping_key(component.key))
+            except ValueError as exc:
+                raise ValueError(
+                    "Runnable container paths require grammar-encodable mapping keys."
+                ) from exc
+        elif isinstance(component, (NamedField, DataclassField)):
+            normalized.append(component.name)
+        elif isinstance(component, (str, int)):
+            normalized.append(component)
+        else:
+            raise ValueError(f"Unsupported runnable container path component {component!r}.")
+    return tuple(normalized)
+
+
+def _normalize_model_site_position(value: Any) -> str | int | tuple[str | int, ...] | None:
+    """Normalize a captured ModelSite position to the frozen path vocabulary."""
+
+    if isinstance(value, (str, int)):
+        return value
+    if isinstance(value, tuple) and all(isinstance(item, (str, int)) for item in value):
+        return value
+    return None
+
+
+def _json_value(value: Any) -> Any:
+    """Recursively convert dataclasses, enums, tuples, and mappings to JSON values."""
+
+    if isinstance(value, Enum):
+        return value.value
+    if is_dataclass(value) and not isinstance(value, type):
+        return {field.name: _json_value(getattr(value, field.name)) for field in fields(value)}
+    if isinstance(value, Mapping):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_json_value(item) for item in value]
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    raise TypeError(f"Sparse descriptor contains non-JSON value {type(value).__qualname__}.")
+
+
+from .runnable_load import (  # noqa: E402 - keep producer helpers grouped above
+    attach_sparse_run_readiness,
+    parse_sparse_run_descriptor,
+    preflight_sparse_run_descriptor,
+)
+
+
+__all__ = [
+    "assert_sparse_core_has_no_tensor_payload",
+    "attach_sparse_run_readiness",
+    "build_sparse_run_descriptor",
+    "parse_sparse_run_descriptor",
+    "preflight_sparse_run_descriptor",
+    "require_sparse_run_descriptor",
+    "sparse_descriptor_to_json",
+    "with_activation_payload",
+    "with_weight_payload",
+]

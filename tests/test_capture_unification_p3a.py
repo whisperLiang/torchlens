@@ -9,6 +9,9 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens.capture.kernel import OpObservation
+from torchlens.capture.plan import CapturePlan, EnrichmentLevel
+from torchlens.capture.session import CaptureSession
 from torchlens.fastlog import RecordContext
 
 
@@ -81,6 +84,64 @@ class IntegerSelectorToy(nn.Module):
         x = torch.relu(self.fc1(x))
         x = torch.relu(self.fc2(x))
         return self.fc3(x)
+
+
+def test_capture_kernel_compiles_away_disabled_enrichment_tiers() -> None:
+    """A shell-only sparse operation enters neither metadata nor payload work."""
+
+    plan = CapturePlan.compile(
+        projection_target="recording",
+        available_capabilities=(),
+        default_enrichment=EnrichmentLevel.SHELL,
+    )
+    session = CaptureSession(plan=plan)
+    emitted: list[str] = []
+
+    session.kernel.emit("relu", emitted.append, "event")
+
+    assert emitted == ["event"]
+    assert session.counters["kernel_observations"] == 1
+    assert "kernel_metadata" not in session.counters
+    assert "kernel_payload" not in session.counters
+
+
+def test_sparse_shell_ops_skip_exhaustive_enrichment_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unselected sparse operations never enter metadata or payload machinery."""
+
+    from torchlens.backends.torch import ops, wrappers
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        """Fail if shell-only capture enters an exhaustive enrichment helper."""
+
+        del args, kwargs
+        raise AssertionError("shell-only sparse capture entered enrichment work")
+
+    monkeypatch.setattr(ops, "detect_torch_alias_contract", forbidden)
+    monkeypatch.setattr(ops, "detect_torch_output_alias_contract", forbidden)
+    monkeypatch.setattr(ops, "_record_predicate_output", forbidden)
+    monkeypatch.setattr(wrappers, "copy_arg_tree", forbidden)
+    monkeypatch.setattr(wrappers, "log_current_rng_states", forbidden)
+
+    recording = tl.record(PredicateToy(), torch.randn(2, 4), save=tl.func("never_matches"))
+
+    assert not recording.records
+
+
+def test_capture_kernel_intervenes_on_live_value_before_emission() -> None:
+    """A live replacement reaches the producer before its durable append."""
+
+    plan = CapturePlan.compile(projection_target="trace", available_capabilities=())
+    session = CaptureSession(plan=plan)
+    observation = OpObservation(operation_key="add", value=torch.tensor(1.0))
+    replacement = session.kernel.apply_intervention(observation, lambda value: value + 2)
+    emitted: list[torch.Tensor] = []
+
+    session.kernel.emit("add", emitted.append, replacement)
+
+    assert replacement.item() == 3.0
+    assert emitted[0] is replacement
 
 
 def _pseudo_random_subset(ctx: RecordContext) -> bool:
@@ -159,6 +220,23 @@ def test_selective_save_keeps_unsaved_non_orphan_op_metadata() -> None:
     assert unsaved.dtype == torch.float32
     with pytest.raises(ValueError, match="not saved"):
         _ = unsaved.out
+
+
+def test_postprocess_preserves_repeatedly_readable_capture_lanes() -> None:
+    """Postprocess preserves the canonical event lanes for repeated reads."""
+
+    log = tl.trace(PredicateToy(), torch.randn(2, 4))
+    events = log.event_stream
+    assert events is not None
+    first_labels = tuple(event.label_raw for event in events.op_events)
+
+    assert first_labels
+    assert tuple(event.label_raw for event in events.op_events) == first_labels
+    assert events.module_prep_events
+    assert events.module_enter_events
+    assert events.module_exit_events
+    assert events.op_event_by_label_raw
+    assert events.op_event_index_by_label_raw
 
 
 def test_selective_save_oracle_matches_full_trace_for_recurrent_passes() -> None:

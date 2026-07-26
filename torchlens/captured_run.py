@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import gc
 from typing import Any, Protocol, TypeVar, runtime_checkable
 from weakref import WeakKeyDictionary
 
@@ -16,6 +17,18 @@ def remember_event_stream(run: object, events: CaptureEvents) -> None:
     """Retain a raw event stream without adding public instance fields."""
 
     _EVENT_STREAMS[run] = events
+
+
+def forget_event_stream(run: object) -> None:
+    """Release the retained raw event stream for an explicitly cleaned run."""
+
+    try:
+        events = _EVENT_STREAMS.pop(run, None)
+    except TypeError:
+        return
+    if events is not None:
+        events.release_working_projection()
+        gc.collect(0)
 
 
 @runtime_checkable
@@ -44,10 +57,16 @@ class CapturedRun:
     def event_stream(self) -> CaptureEvents | None:
         """Return the raw capture event bundle when retained."""
 
-        events = getattr(self, "capture_events", None)
+        try:
+            events = object.__getattribute__(self, "capture_events")
+        except AttributeError:
+            events = None
         if events is not None:
             return events
-        events = getattr(self, "_capture_events", None)
+        try:
+            events = object.__getattribute__(self, "_capture_events")
+        except AttributeError:
+            events = None
         if events is not None:
             return events
         try:

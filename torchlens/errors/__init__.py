@@ -16,6 +16,18 @@ from ._base import (
     TraceNotReproducibleWarning,
     ValidationError,
 )
+from .runnable import (
+    NumericAttestationError,
+    PathDivergenceError,
+    PoisonedRunError,
+    ReattachError,
+    RunCapabilityUnavailableError,
+    RunPreconditionError,
+    RunnablePreflightError,
+    RunnableTLSPECError,
+    RuntimeSignatureDriftError,
+    StateBindingError,
+)
 
 _LEGACY_EXCEPTION_PATHS = {
     "MutatedReferenceError": ("torchlens._errors", "MutatedReferenceError"),
@@ -66,6 +78,10 @@ _LEGACY_EXCEPTION_PATHS = {
     "ReplayPreconditionError": (
         "torchlens.intervention.errors",
         "ReplayPreconditionError",
+    ),
+    "UntrustedCallableError": (
+        "torchlens.intervention.errors",
+        "UntrustedCallableError",
     ),
     "OpaqueCallableInExecutableSaveError": (
         "torchlens.intervention.errors",
@@ -171,7 +187,17 @@ __all__ = [
     "CompatibilityError",
     "ConfigurationError",
     "InterventionError",
+    "NumericAttestationError",
+    "PathDivergenceError",
+    "PoisonedRunError",
+    "ReattachError",
+    "RunCapabilityUnavailableError",
+    "RunPreconditionError",
+    "RunnablePreflightError",
+    "RunnableTLSPECError",
+    "RuntimeSignatureDriftError",
     "Severity",
+    "StateBindingError",
     "TorchLensError",
     "TorchLensWarning",
     "TraceNotReproducibleWarning",

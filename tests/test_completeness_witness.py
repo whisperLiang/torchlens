@@ -253,6 +253,51 @@ def test_direct_aten_call_trips_non_vacuous_witness() -> None:
     assert report["reason"] == "unowned_dispatch"
     assert report["function"] == "forward"
     assert report["owner_wrapper"] is None
+    # A forward-body drop did NOT fire inside a replacement hook, so it is a real
+    # silent drop that the validation census must fail on (not excused).
+    assert report["in_replacement_hook"] is False
+
+
+@pytest.mark.smoke
+def test_genuine_replacement_hook_dispatch_is_tagged_in_replacement_hook() -> None:
+    """A genuine raw replacement hook's untraceable dispatch is tagged per-event.
+
+    A raw ``register_forward_hook`` output replacement runs inside the torchlens
+    ``wrapped_hook`` frame. Its raw-aten call (unowned) and python-wrapped call
+    (an accounted owner orphaned out of the trace) must both carry
+    ``in_replacement_hook=True`` so the validation census can excuse ONLY genuine
+    replacement construction. This pins the frame-detection signal: a rename of
+    the ``wrapped_hook`` bracket would surface here first.
+    """
+
+    class _Mlp(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fc1 = nn.Linear(4, 4)
+            self.relu = nn.ReLU()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.relu(self.fc1(x))
+
+    def _replacement_hook(module, inputs, output):  # type: ignore[no-untyped-def]
+        return torch.ops.aten.mul.Tensor(output, torch.tensor(0.5))
+
+    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    model = _Mlp().eval()
+    model.relu.register_forward_hook(_replacement_hook)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trace = tl.trace(model, torch.randn(3, 4))
+
+    # The raw-aten replacement call is unowned AND tagged as replacement construction.
+    unowned = [d for d in trace.completeness_diagnostics if d["reason"] == "unowned_dispatch"]
+    assert unowned, "expected the raw replacement aten call to be recorded as unowned"
+    assert all(d["in_replacement_hook"] is True for d in unowned)
+    # The python-wrapped construction owner (torch.tensor) is orphaned yet tagged.
+    hooked_owners = [
+        d for d in trace.completeness_decompositions if d.get("in_replacement_hook") is True
+    ]
+    assert hooked_owners, "expected a wrapped replacement owner tagged in_replacement_hook"
 
 
 @pytest.mark.smoke
@@ -475,4 +520,124 @@ def test_expected_opaque_boundary_table_is_exact_and_budgeted() -> None:
     }
     assert {row.operator for row in scalar_rows} == {"aten._local_scalar_dense.default"}
     assert all(row.reason for row in AUDITED_COMPLETENESS_BOUNDARIES)
+
+
+def test_is_mutating_operator_reads_schema_not_name() -> None:
+    """Mutation detection uses the operator schema, covering out= overloads too."""
+
+    from torchlens.backends.torch.completeness_witness import _is_mutating_operator
+
+    assert _is_mutating_operator(torch.ops.aten.mul_.Tensor) is True
+    assert _is_mutating_operator(torch.ops.aten.add_.Tensor) is True
+    assert _is_mutating_operator(torch.ops.aten.copy_.default) is True
+    assert _is_mutating_operator(torch.ops.aten.zero_.default) is True
+    # out= overload mutates yet its name does NOT end in an underscore.
+    assert _is_mutating_operator(torch.ops.aten.add.out) is True
+    # Pure reads -- exactly the benign owner_not_captured control-flow comparisons.
+    assert _is_mutating_operator(torch.ops.aten.equal.default) is False
+    assert _is_mutating_operator(torch.ops.aten.allclose.default) is False
+    assert _is_mutating_operator(torch.ops.aten.add.Tensor) is False
+    assert _is_mutating_operator(torch.ops.aten.sigmoid.default) is False
+    # A callable with no schema is treated as non-mutating (fail-safe).
+    assert _is_mutating_operator(object()) is False
+
+
+class _DirectMutatingAtenModel(nn.Module):
+    """Perform an OBSERVABLE in-place aten mutation via an unwrapped route."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Mutate a tensor in place through a direct (unwrapped) aten call."""
+
+        y = x + 1
+        torch.ops.aten.mul_.Tensor(y, 2)
+        return torch.sigmoid(y)
+
+
+@pytest.mark.smoke
+def test_observable_uncaptured_mutation_is_flagged_mutates() -> None:
+    """An observable uncaptured in-place aten op is tripped AND tagged mutates.
+
+    A direct ``aten.mul_`` call is unowned (a real silent drop) and, being an
+    in-place op, carries ``mutates=True``. This proves the witness observes and
+    tags value-affecting drops it can actually see, distinct from a pure read.
+    """
+
+    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    with pytest.warns(TorchLensCaptureGapWarning, match="unaccounted aten dispatch"):
+        trace = tl.trace(_DirectMutatingAtenModel(), torch.randn(4))
+
+    assert trace.completeness_witness_verified is False
+    mutating = [d for d in trace.completeness_diagnostics if d["mutates"] is True]
+    assert mutating, "expected the in-place mul_ drop to be tagged mutates=True"
+    assert any(d["operator"].startswith("aten.mul_") for d in mutating)
+    # A pure-read op that also dispatched (e.g. add) is never tagged mutates.
+    assert all(
+        d["mutates"] is False
+        for d in trace.completeness_diagnostics
+        if d["operator"].startswith("aten.add.")
+    )
+
+
+class _SubclassHiddenMutationTensor(torch.Tensor):
+    """Hide an in-place mutation inside ``aten.equal`` under disabled dispatch."""
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):  # type: ignore[no-untyped-def]
+        """Zero the first equal operand while the dispatcher is suppressed."""
+
+        del types
+        if func is torch.ops.aten.equal.default:
+            with torch._C._DisableTorchDispatch():
+                torch.ops.aten.mul_.Tensor(args[0], 0)
+            return True
+        with torch._C._DisableTorchDispatch():
+            return func(*args, **(kwargs or {}))
+
+
+class _SubclassHiddenMutationModel(nn.Module):
+    """Mutate a tensor through a subclass ``equal`` the witness cannot observe."""
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Alias the input as the adversarial subclass and mutate via equal."""
+
+        subclass = torch.Tensor._make_subclass(
+            _SubclassHiddenMutationTensor, value, require_grad=False
+        )
+        torch.equal(subclass, subclass)
+        with torch._C._DisableTorchDispatch():
+            base = subclass.as_subclass(torch.Tensor)
+        return torch.sigmoid(base + 1)
+
+
+def test_subclass_disabled_dispatch_mutation_is_outside_observational_reach() -> None:
+    """DOCUMENTED BOUNDARY: a mutation hidden under _DisableTorchDispatch is invisible.
+
+    PyTorch suppresses dispatcher re-entry while a tensor subclass handles an op,
+    so an aten mutation the subclass performs under
+    ``torch._C._DisableTorchDispatch()`` never reaches the witness. This pins the
+    exact observational boundary: the witness sees only the OUTER pure-read
+    ``aten.equal.default`` (benign ``owner_not_captured``) and cannot see the
+    nested ``aten.mul_``. This is honestly recorded here rather than silently
+    claimed as caught -- the strengthening closes every OBSERVABLE mutation, but a
+    subclass that deliberately disables dispatch is a cooperative-model boundary.
+    """
+
+    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trace = tl.trace(
+            _SubclassHiddenMutationModel(), torch.tensor([1.0, 2.0]), save_arg_values=True
+        )
+
+    operators = [d["operator"] for d in trace.completeness_diagnostics]
+    # The nested mutating op is fundamentally invisible to the witness.
+    assert not any(op.startswith("aten.mul_") for op in operators)
+    equal_diags = [
+        d for d in trace.completeness_diagnostics if d["operator"] == "aten.equal.default"
+    ]
+    assert equal_diags, "the outer equal is the only observable dispatch"
+    # What IS observed is a pure read (mutates=False) -> correctly NOT counted as a
+    # value-affecting drop. The mutation is out of reach, by design of dispatch.
+    assert all(d["reason"] == "owner_not_captured" for d in equal_diags)
+    assert all(d["mutates"] is False for d in equal_diags)
     assert len(AUDITED_COMPLETENESS_BOUNDARIES) <= MAX_AUDITED_COMPLETENESS_BOUNDARIES

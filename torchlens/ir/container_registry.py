@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 import inspect
@@ -425,7 +425,11 @@ def walk_container(value: Any, *, role: Role, capability: str) -> WalkResult | N
         )
         for occ_index, occurrence in enumerate(_walk_tensor_occurrences(value, path=()))
     )
-    return WalkResult(spec=spec, leaf_occurrences=occurrences, reconstructable=True)
+    return WalkResult(
+        spec=spec,
+        leaf_occurrences=occurrences,
+        reconstructable=spec.kind != "opaque",
+    )
 
 
 def _snapshots_dedup_equivalent(left: ContainerSnapshot, right: ContainerSnapshot) -> bool:
@@ -478,6 +482,39 @@ def _container_has_tensor_leaf(value: Any, *, memo: set[int]) -> bool:
     return False
 
 
+def _leaf_is_reconstructable(value: Any) -> bool:
+    """Return whether a childless boundary-container leaf can be restored.
+
+    A tensor leaf is supplied by the captured leaf stream and a replay-safe
+    literal is stored in the spec. An opaque object that holds tensors retains
+    the existing fallback traversal; a tensor-free non-literal cannot be
+    reproduced and must make its enclosing output container opaque.
+    """
+
+    if isinstance(value, torch.Tensor):
+        return True
+    if _is_literal(value) or isinstance(value, torch.Size):
+        return True
+    return _container_has_tensor_leaf(value, memo=set())
+
+
+def _children_are_reconstructable(
+    children: tuple[tuple[OutputPathComponent, Any], ...],
+    child_specs: list[tuple[OutputPathComponent, ContainerSpec]],
+) -> bool:
+    """Return whether every child can be represented in a parent container spec."""
+
+    specs_by_component = dict(child_specs)
+    for component, child in children:
+        child_spec = specs_by_component.get(component)
+        if child_spec is not None:
+            if child_spec.kind == "opaque":
+                return False
+        elif not _leaf_is_reconstructable(child):
+            return False
+    return True
+
+
 def _build_container_spec(value: Any) -> ContainerSpec | None:
     """Build a portable spec for a supported container value."""
 
@@ -510,6 +547,8 @@ def _build_container_spec(value: Any) -> ContainerSpec | None:
     if _is_hf_model_output(value):
         keys = tuple(value.keys())
         module, qualname = _container_type_ref(value)
+        if not _children_are_reconstructable(children, child_specs):
+            return ContainerSpec(kind="opaque", type_module=module, type_qualname=qualname)
         return ContainerSpec(
             kind="hf_model_output",
             length=len(keys),
@@ -522,6 +561,8 @@ def _build_container_spec(value: Any) -> ContainerSpec | None:
     if _is_namedtuple_instance(value) or torch_fields:
         fields = torch_fields or tuple(value._fields)
         module, qualname = _container_type_ref(value)
+        if not _children_are_reconstructable(children, child_specs):
+            return ContainerSpec(kind="opaque", type_module=module, type_qualname=qualname)
         return ContainerSpec(
             kind="namedtuple",
             length=len(value),
@@ -533,6 +574,8 @@ def _build_container_spec(value: Any) -> ContainerSpec | None:
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         fields = tuple(field.name for field in dataclasses.fields(value))
         module, qualname = _container_type_ref(value)
+        if not _children_are_reconstructable(children, child_specs):
+            return ContainerSpec(kind="opaque", type_module=module, type_qualname=qualname)
         return ContainerSpec(
             kind="dataclass",
             length=len(fields),
@@ -541,7 +584,10 @@ def _build_container_spec(value: Any) -> ContainerSpec | None:
             type_qualname=qualname,
             child_specs=tuple(child_specs),
         )
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
+        # A boundary INPUT that is any Mapping subclass (custom Mapping, OrderedDict,
+        # defaultdict, ...) is bound by leaf path like a plain dict; the user supplies
+        # the concrete object at run time, so no subtype reconstruction is needed.
         return ContainerSpec(
             kind="dict",
             length=len(value),
@@ -598,7 +644,7 @@ def _iter_container_children(value: Any) -> Iterator[tuple[OutputPathComponent, 
         for field in dataclasses.fields(value):
             yield DataclassField(field.name), getattr(value, field.name)
         return
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         for key, child in value.items():
             if isinstance(key, torch.Tensor):
                 continue

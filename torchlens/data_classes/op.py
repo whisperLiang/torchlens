@@ -53,7 +53,7 @@ from typing import (
 
 import torch
 
-import importlib
+from ..utils._torch_compat import tensor_version_or_none
 
 from .._deprecations import MISSING
 from .._io import (
@@ -68,7 +68,11 @@ from .._errors import MutatedReferenceError, TorchLensPostfuncError
 from .._trace_state import TraceState
 from .._training_validation import _NON_GRAD_DTYPES, TrainingModeConfigError
 from ..constants import ARG_EXPRESSIONS_FIELD, LAYER_PASS_LOG_FIELD_ORDER, RAW_LABEL_SUFFIX
-from ..intervention.types import EdgeUseRecord, LAYER_PASS_LOG_FIELD_FORK_POLICY
+from ..intervention.types import (
+    EdgeUseRecord,
+    FunctionRegistryKey,
+    LAYER_PASS_LOG_FIELD_FORK_POLICY,
+)
 from ..ir.refs import DeviceRef, DtypeRef
 from ..intervention.errors import DirectActivationWriteWarning
 from ..quantities import Bytes, Flops, Macs, as_bytes, as_duration, as_flops, as_macs
@@ -135,6 +139,7 @@ _LAYER_PASS_LOG_DEFAULT_FILL: dict[str, Any] = {
     "transformed_grad_dtype": None,
     "transformed_gradient_memory": None,
     "func_call_id": None,
+    "func_id": None,
     "container_path": (),
     "multi_output_name": None,
     "intervention_replaced": False,
@@ -233,6 +238,8 @@ _OP_DYNAMIC_SLOT_NAMES = (
     "_pending_transformed_grad_blob_id",
     "_grad_records",
     "_facets_cache",
+    "_receptive_field_cache",
+    "_projective_field_cache",
     "_arg_expressions_cache",
     "_is_in_conditional_body",
     "_construction_done",
@@ -498,33 +505,6 @@ def _summarize_call_kwargs(saved_kwargs: Any, non_tensor_kwargs: Any) -> str | N
     return ", ".join(rendered)
 
 
-def _resolve_container_type(
-    type_module: str | None, type_qualname: str | None
-) -> type | str | None:
-    """Resolve a stored container type reference to a runtime class.
-
-    Falls back to the qualified name string when the class cannot be imported
-    (e.g. after ``.tlspec`` load with the defining module unavailable). Returns
-    ``None`` when no type reference was captured.
-    """
-
-    if type_qualname is None:
-        return None
-    if type_module:
-        try:
-            module = importlib.import_module(type_module)
-            obj: Any = module
-            for part in type_qualname.split("."):
-                obj = getattr(obj, part)
-            if isinstance(obj, type):
-                return obj
-        except (ImportError, AttributeError):
-            pass
-    if type_module:
-        return f"{type_module}.{type_qualname}"
-    return type_qualname
-
-
 def apply_transform(
     *,
     label: str | None,
@@ -781,7 +761,7 @@ def _stamp_reference_out(
     if save_mode != "reference":
         return
     annotations["save_mode"] = "reference"
-    annotations["saved_out_version"] = getattr(raw_out, "_version", None)
+    annotations["saved_out_version"] = tensor_version_or_none(raw_out)
 
 
 def _validate_reference_out_not_mutated(state: dict[str, Any]) -> None:
@@ -794,7 +774,7 @@ def _validate_reference_out_not_mutated(state: dict[str, Any]) -> None:
     if not isinstance(out, torch.Tensor):
         return
     saved_version = annotations.get("saved_out_version")
-    current_version = getattr(out, "_version", None)
+    current_version = tensor_version_or_none(out)
     if saved_version is not None and current_version != saved_version:
         label = state.get("label") or state.get("layer_label") or state.get("_label_raw")
         raise MutatedReferenceError(
@@ -891,7 +871,16 @@ def _dedup_saved_activation_out(
         setattr(trace, "_out_identity_cache", identity_cache)
 
     source_key = id(source_tensor)
-    source_version = getattr(source_tensor, "_version", None)
+    # r65: TorchLens's OWN dedup-bookkeeping ``_version`` read runs under the explicit
+    # internal-read marker so the r65 state-metadata property observer never mistakes it
+    # for a user ``._version`` read on a registered buffer/param receiver (unmarked it
+    # fires for every saved state source and would spuriously refuse any model whose
+    # consumed buffer was ever mutated in place before capture). Imported lazily:
+    # ``data_classes`` sits below the torch backend in the layering.
+    from ..backends.torch.completeness_witness import internal_scalar_read
+
+    with internal_scalar_read():
+        source_version = tensor_version_or_none(source_tensor)
     cached = identity_cache.get(source_key)
     if cached is not None:
         cached_source, cached_label, cached_out, cached_version = cached
@@ -909,6 +898,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from .._io.lazy import LazyActivationRef
+    from ..receptive_field._view import ReceptiveFieldView
     from .func_call_location import FuncCallLocation
     from .layer import Layer
     from .layer import OpAccessor
@@ -1011,6 +1001,7 @@ class Op:
         "gradient_memory": FieldPolicy.KEEP,
         "transformed_gradient_memory": FieldPolicy.KEEP,
         "func": FieldPolicy.DROP,
+        "func_id": FieldPolicy.KEEP,
         "func_call_id": FieldPolicy.KEEP,
         "func_name": FieldPolicy.KEEP,
         "func_qualname": FieldPolicy.KEEP,
@@ -1129,6 +1120,8 @@ class Op:
         "out_ref": FieldPolicy.DROP,
         "grad_ref": FieldPolicy.DROP,
         "_grad_records": FieldPolicy.BLOB_RECURSIVE,
+        "_receptive_field_cache": FieldPolicy.DROP,
+        "_projective_field_cache": FieldPolicy.DROP,
         "_arg_expressions_cache": FieldPolicy.DROP,
         "_pending_blob_id": FieldPolicy.DROP,
         "_pending_transformed_out_blob_id": FieldPolicy.DROP,
@@ -1405,6 +1398,7 @@ class Op:
 
         # Function call info:
         self.func = fields_dict["func"]
+        self.func_id: FunctionRegistryKey | None = fields_dict["func_id"]
         self.func_call_id = fields_dict["func_call_id"]
         self.func_name = fields_dict["func_name"]
         self.func_qualname = fields_dict["func_qualname"]
@@ -1849,21 +1843,46 @@ class Op:
     def multi_output_type(self) -> type | str | None:
         """Python class of the multi-output container this Op came from.
 
-        Resolves ``container_spec.type_module``/``type_qualname`` to a runtime
-        class when importable, falling back to the qualified name string when the
-        class cannot be imported (e.g. after ``.tlspec`` load). ``None`` when this
-        Op is not from a multi-output container.
+        Resolves ``container_spec.type_module``/``type_qualname`` to a runtime class
+        through the single default-deny container resolver in
+        ``torchlens.ir.container`` -- the SAME resolver used by output-container
+        reconstruction. That resolver NEVER imports an attacker-named module (the
+        ``ContainerSpec`` fields are portable, bundle-controlled strings that ride
+        through the safe unpickler untouched, so importing one would execute its
+        top-level code = arbitrary-code-execution); it resolves only from a module
+        already present in ``sys.modules`` and only to a type that structurally
+        matches the recorded container kind. When the type cannot be resolved
+        WITHOUT importing (its defining module is not loaded), fall back to the
+        qualified name string exactly as before, rather than importing it. ``None``
+        when this Op is not from a multi-output container.
+
+        Raises
+        ------
+        ContainerReconstructionError
+            If the reference resolves to an already-loaded type that is not
+            admissible for the recorded container kind (a tampered spec). This is
+            the security tripwire firing, not a legit-capture path.
         """
+
+        from ..ir.container import resolve_container_type
 
         if not self.in_multi_output:
             return None
         spec = self.container_spec
         if spec is None:
             return None
-        return _resolve_container_type(
-            getattr(spec, "type_module", None),
-            getattr(spec, "type_qualname", None),
-        )
+        resolved = resolve_container_type(spec)
+        if resolved is not None:
+            return resolved
+        # Unresolvable without importing an untrusted, bundle-controlled module
+        # name. Preserve the historical graceful string fallback WITHOUT importing.
+        type_module = getattr(spec, "type_module", None)
+        type_qualname = getattr(spec, "type_qualname", None)
+        if type_qualname is None:
+            return None
+        if type_module:
+            return f"{type_module}.{type_qualname}"
+        return type_qualname
 
     @property
     def container(self) -> Any:
@@ -2645,6 +2664,8 @@ class Op:
         state = dict(state_items(self))
         state["_source_trace_ref"] = None
         state.pop("_facets_cache", None)
+        state.pop("_receptive_field_cache", None)
+        state.pop("_projective_field_cache", None)
         state["func"] = None
         state["grad_fn_handle"] = None
         state["tlspec_version"] = TLSPEC_VERSION
@@ -2770,6 +2791,61 @@ class Op:
 
         try:
             object.__delattr__(self, "_facets_cache")
+        except AttributeError:
+            pass
+
+    @property
+    def receptive_field(self) -> "ReceptiveFieldView":
+        """Return the lazy receptive-field query view for this Op."""
+
+        from ..receptive_field import _engine
+        from ..receptive_field._view import ReceptiveFieldView
+
+        trace = self.source_trace
+        solution = _engine.solve(trace)
+        cache = self._slot("_receptive_field_cache")
+        if cache is not None and cache._solution is not solution:
+            for op in trace.layer_list:
+                if op._slot("_receptive_field_cache") is not None:
+                    object.__setattr__(
+                        op,
+                        "_receptive_field_cache",
+                        ReceptiveFieldView(op, solution),
+                    )
+            cache = self._slot("_receptive_field_cache")
+        if cache is None:
+            cache = ReceptiveFieldView(self, solution)
+            object.__setattr__(self, "_receptive_field_cache", cache)
+        return cache
+
+    @receptive_field.deleter
+    def receptive_field(self) -> None:
+        """Drop the cached receptive-field query view for this Op."""
+
+        try:
+            object.__delattr__(self, "_receptive_field_cache")
+        except AttributeError:
+            pass
+
+    @property
+    def projective_field(self) -> "ReceptiveFieldView":
+        """Return the lazy source-anchored projective-field query view."""
+
+        from ..receptive_field._view import ReceptiveFieldView
+
+        cache = self._slot("_projective_field_cache")
+        current = ReceptiveFieldView.projective(self)
+        if cache is None or cache._solution is not current._solution:
+            cache = current
+            object.__setattr__(self, "_projective_field_cache", cache)
+        return cache
+
+    @projective_field.deleter
+    def projective_field(self) -> None:
+        """Drop the cached source-anchored projective-field query view."""
+
+        try:
+            object.__delattr__(self, "_projective_field_cache")
         except AttributeError:
             pass
 

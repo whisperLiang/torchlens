@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torchlens"
-version = "2.31.0"
+version = "2.32.3"
 description = "A package for extracting activations from PyTorch models and saving portable bundles"
 readme = "README.md"
 license = "Apache-2.0"
@@ -26,8 +26,14 @@ classifiers = [
 dependencies = [
     "numpy",
     "packaging",
-    # Torch 2.4+ is the supported floor for the current autocast and torch.amp APIs.
-    "torch>=2.4",
+    # torch>=2.1 supported. The only torch-2.4-specific APIs TorchLens used were
+    # torch.is_autocast_enabled(device_type) / torch.get_autocast_dtype(device_type)
+    # (the device_type argument is torch 2.4+ only); these are now routed through
+    # a backward-compatible shim (torchlens/utils/_torch_compat.py) that falls back
+    # to the legacy per-device autocast helpers on torch 2.1-2.3. Lowering the floor
+    # to 2.1 unblocks frameworks pinned to older torch (e.g. the OpenMMLab stack,
+    # which caps mmcv<2.2 -> prebuilt wheels only for torch<=2.1).
+    "torch>=2.1",
     "safetensors>=0.4",
     "tqdm",
     "graphviz",
@@ -97,11 +103,12 @@ all-stretch = [
     "torchshow~=0.5",
     "lovely-tensors~=0.1.18",
 ]
-dev = ["ruff", "pytest", "pytest-cov", "mypy", "pip-audit", "pre-commit"]
+dev = ["ruff==0.15.4", "pytest", "pytest-cov", "mypy==2.1.0", "pip-audit==2.10.1", "pre-commit"]
 io = ["pyarrow"]
 test = [
     "lightning",
     "pandas>=2.0",
+    "pydot",
     "pillow",
     "pytest",
     "pytest-timeout",

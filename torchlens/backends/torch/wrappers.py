@@ -7,6 +7,7 @@ This module also patches detached torch references and torch transform boundarie
 import inspect
 import sys
 import sysconfig
+import threading
 import time
 import types
 import weakref
@@ -32,7 +33,6 @@ from ... import _state
 from ...constants import get_orig_torch_funcs
 from ...data_classes.func_call_location import FuncCallLocation
 from ._tl import (
-    get_buffer_address,
     get_tensor_label,
     is_decorated_function,
     mark_decorated_function,
@@ -65,6 +65,7 @@ from .ops import (
 from .buffer_writes import (
     record_op_buffer_writes,
     resolve_registered_buffer_address,
+    session_validated_buffer_address,
     snapshot_buffer_args,
 )
 from .escape_detection import (
@@ -76,7 +77,10 @@ from .escape_detection import (
 from .completeness_witness import (
     CompletenessWitnessMode,
     completeness_scope_for_wrapper,
+    observe_nonowner_operands,
+    record_host_string_escape_source,
     record_uncaptured_owner_callsite,
+    string_escape_is_owner_thread,
 )
 from .sources import log_source_tensor
 
@@ -100,7 +104,11 @@ def _diagnostic_edge_armed() -> bool:
         ``True`` when a shared one-shot token is required.
     """
 
-    return _state._escape_detector_mode == "shadow" or _state._completeness_witness_mode == "shadow"
+    return (
+        _state._escape_detector_mode == "shadow"
+        or _state._completeness_witness_mode == "shadow"
+        or _state._runnable_ledger_armed
+    )
 
 
 _KNOWN_TORCH_FREE_PREFIXES = (
@@ -939,7 +947,28 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
         # When logging is off, pass through with minimal overhead.
         # DeviceContext injection is still needed even when not logging,
         # because the user's model may rely on torch.device('meta') context.
-        if not _state._logging_enabled or _state._active_trace is None:
+        # r43 hon2_4: op-logging is OWNER-thread-scoped. A NON-owner thread running torch ops
+        # during a capture (a worker formatting ``str(tensor)``, a DataLoader thread) must NOT
+        # be logged into the owner's Trace -- doing so tags its temporaries with capture labels
+        # (a false cross-thread ceiling) and corrupts owner-op attribution (an observed crash).
+        # Cross-thread tensor->host escapes are still observed by the mode-independent belt
+        # (tensor-method patches), which is independent of this wrapper.
+        if (
+            not _state._logging_enabled
+            or _state._active_trace is None
+            or _state._active_owner_thread_id != threading.get_ident()
+        ):
+            # r45 hon2_1: while a runnable capture is armed, a NON-owner thread's op that consumes
+            # a captured tensor as an operand ceilings replay proof to ``unverifiable`` (the
+            # worker-DERIVED cross-thread escape sibling: fresh worker-side storage the
+            # owner-only census never registered). ``_nonowner_belt_armed`` is False for every
+            # plain trace and the whole steady state, so the disarmed hot path pays one bool read.
+            if (
+                _state._nonowner_belt_armed
+                and _state._active_trace is not None
+                and _state._active_owner_thread_id != threading.get_ident()
+            ):
+                observe_nonowner_operands(args, kwargs)
             kwargs = _maybe_inject_device_kwarg(func_name, kwargs)
             return func(*args, **kwargs)
 
@@ -1012,7 +1041,12 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
         for t in arg_tensorlike:
             if isinstance(t, torch.nn.Parameter):
                 continue
-            address = get_buffer_address(t)
+            # r81: the first-encounter registration gate must not trust the raw
+            # static stamp (stale cross-capture stamps and input-rebound storage
+            # would be re-rooted as internal state); require current-session
+            # object + storage identity, with the storage-anchored tracker as
+            # the alias fallback.
+            address = session_validated_buffer_address(trace, t)
             if address is None:
                 address = resolve_registered_buffer_address(trace, t)
             if address is not None and get_tensor_label(t) is None:
@@ -1020,8 +1054,24 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
 
         # Intercept print functions to show TorchLens label info in repr.
         if (func_name in print_funcs) and (len(arg_tensorlike) > 0):
-            out = print_override(args[0], func_name)
-            return out
+            # r39 hon2_1: stringifying a captured tensor extracts its VALUES into the returned
+            # string (a genuine tensor->host value escape the user can fold back into control
+            # flow -- a string NaN guard). ``print_override`` runs that extraction under
+            # ``pause_logging()``, blinding the ordinary ``.numpy()``/``.item()`` escape
+            # observers, so record the source here BEFORE the paused format, through the same
+            # attribution ladder. A runnable capture then ceilings a changed-input run whose
+            # stringified source differs, exactly like a ``.numpy()`` escape.
+            for stringified in arg_tensorlike:
+                record_host_string_escape_source(trace, stringified)
+            # r43 hon2_4: ``print_override`` formats under a GLOBAL ``pause_logging()``; a
+            # NON-OWNER thread must NEVER flip that toggle mid-forward (it blinds owner op
+            # capture -> the observed crash). The owner keeps ``print_override``; a worker
+            # calls the original torch string function unchanged (the captured-tensor ceiling
+            # was already applied by ``record_host_string_escape_source`` above).
+            if string_escape_is_owner_thread(trace):
+                out = print_override(args[0], func_name)
+                return out
+            return func(*args, **kwargs)
 
         # Snapshot args before the call in case in-place ops mutate them.
         if trace.save_arg_values:

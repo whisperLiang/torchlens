@@ -42,6 +42,33 @@ def _add_tensor_backward_hook(trace: "Trace", t: torch.Tensor, tensor_label: str
         tensor_label: Raw tensor label (e.g. ``"conv2d_3_47_raw"``) used to
             look up the corresponding log entry when the grad arrives.
     """
+    # r65: TorchLens's OWN hook-bookkeeping ``grad_fn``/``requires_grad`` reads, hoisted
+    # under the explicit internal-read marker so the r65 state-metadata property observer
+    # never mistakes them for user autograd reads on a registered buffer/param receiver.
+    from .completeness_witness import internal_scalar_read
+
+    with internal_scalar_read():
+        _grad_fn = t.grad_fn
+        _requires_grad = bool(t.requires_grad)
+    if _grad_fn is not None:
+        from .backward import _register_forward_grad_fn
+
+        _register_forward_grad_fn(trace, _grad_fn, tensor_label)
+    should_defer_hook = getattr(
+        trace, "_deferred_gradient_selector", None
+    ) is not None and not getattr(trace, "_installing_deferred_gradient_hooks", False)
+    if should_defer_hook:
+        from ...capture.session import capture_session_for
+
+        session = capture_session_for(trace)
+        should_defer_hook = session is None or tensor_label not in session.live_gradient_labels
+    if (
+        not getattr(trace, "capture_tensor_grad_hooks", True)
+        or should_defer_hook
+        or (_grad_fn is None and not _requires_grad)
+    ):
+        return
+
     hooked_tensors = trace.__dict__.setdefault("_tl_backward_hooked_tensor_keys", set())
     hook_key = (tensor_label, id(t))
     if hook_key in hooked_tensors:
@@ -54,28 +81,27 @@ def _add_tensor_backward_hook(trace: "Trace", t: torch.Tensor, tensor_label: str
     def log_grad_to_model_history(grad: torch.Tensor) -> None:
         """Emit and optionally retain one gradient observed by a tensor hook."""
         active_trace = trace_ref()
+        refresh_target_ref = getattr(active_trace, "_refresh_projection_target_ref", None)
+        if refresh_target_ref is not None:
+            active_trace = refresh_target_ref()
+        if active_trace is not None and getattr(active_trace, "_tl_rf_probe_active", False):
+            return
         if active_trace is not None:
             _emit_tensor_grad_event(active_trace, grad, tensor_label)
             if getattr(active_trace, "save_grads", None) not in (None, False):
                 _log_tensor_grad(active_trace, grad, tensor_label)
 
-    if t.grad_fn is not None:
-        from .backward import _register_forward_grad_fn
-
-        _register_forward_grad_fn(trace, t.grad_fn, tensor_label)
-    if getattr(trace, "capture_tensor_grad_hooks", True) and (
-        (t.grad_fn is not None) or t.requires_grad
-    ):
-        t.register_hook(log_grad_to_model_history)  # type: ignore[no-untyped-call]
+    t.register_hook(log_grad_to_model_history)  # type: ignore[no-untyped-call]
 
 
 def _ensure_backward_event_stream(trace: "Trace") -> Any:
     """Return the mutable capture event bundle for backward sidecar emission."""
 
-    events = getattr(trace, "_capture_events", None)
-    if events is not None:
-        return events
-    events = getattr(trace, "capture_events", None)
+    events = getattr(trace, "event_stream", None)
+    if events is None:
+        events = getattr(trace, "_capture_events", None)
+    if events is None:
+        events = getattr(trace, "capture_events", None)
     if events is not None:
         return events
     from ...ir import CaptureEvents

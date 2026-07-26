@@ -19,8 +19,12 @@ from torchlens.intervention.errors import (
     MultiMatchWarning,
     OpaqueCallableInExecutableSaveError,
     ReplayPreconditionError,
+    UntrustedCallableError,
 )
-from torchlens.intervention.resolver import _selector_from_spec
+from torchlens.intervention.resolver import (
+    _selector_from_spec,
+    function_registry_key_from_callable,
+)
 from torchlens.intervention.save import _write_tlspec_tensor_blob
 from torchlens.intervention.save import _sync_spec_records_from_log
 from torchlens.intervention.save import resolve_function_registry_key, save_intervention
@@ -130,7 +134,7 @@ def test_audit_save_load_and_compat(tmp_path: Path) -> None:
     assert (path / "manifest.json").exists()
     assert (path / "README.md").exists()
     assert (path / "tensors").is_dir()
-    spec = load_intervention_spec(path)
+    spec = load_intervention_spec(path, trust_custom_callables=True)
     assert tl.load(path) == spec
     compat = check_spec_compat(spec, _log(_ReluModel(), x))
     assert compat.outcome in {"EXACT", "COMPATIBLE_WITH_CONFIRMATION"}
@@ -154,7 +158,7 @@ def test_live_forward_records_persist_in_saved_intervention_spec(tmp_path: Path)
     assert log._intervention_spec.records
 
     log.save_intervention(path, level="portable")
-    spec = load_intervention_spec(path)
+    spec = load_intervention_spec(path, trust_custom_callables=True)
 
     assert spec.records
     assert all(isinstance(record, FireRecord) for record in spec.records)
@@ -179,7 +183,7 @@ def test_predicate_intervention_spec_round_trip_preserves_targets_and_hooks(
     assert log._intervention_spec.records
 
     log.save_intervention(path, level="portable")
-    spec = load_intervention_spec(path)
+    spec = load_intervention_spec(path, trust_custom_callables=True)
 
     assert spec.targets
     assert spec.hook_specs
@@ -325,7 +329,20 @@ def test_loaded_import_ref_has_no_load_side_effect_until_execution(tmp_path: Pat
         sentinel.unlink()
         sys.modules.pop("side_effect_mod", None)
 
-        spec = load_intervention_spec(path)
+        # DEFAULT-trust load is deny-by-default (r12 RCE guard): the foreign module is
+        # never imported at load and applying the spec raises WITHOUT executing it.
+        untrusted = load_intervention_spec(path)
+        assert not sentinel.exists()
+        assert "side_effect_mod" not in sys.modules
+        denied = _log(_ReluModel(), torch.ones(1, 3))
+        denied._intervention_spec = untrusted
+        with pytest.raises(UntrustedCallableError):
+            denied.run(_ReluModel(), torch.ones(1, 3))
+        assert not sentinel.exists()
+        assert "side_effect_mod" not in sys.modules
+
+        # A TRUSTED load stays lazy: still no import until the spec is executed.
+        spec = load_intervention_spec(path, trust_custom_callables=True)
 
         assert not sentinel.exists()
         fresh = _log(_ReluModel(), torch.ones(1, 3))
@@ -371,7 +388,20 @@ def test_loaded_helper_import_ref_preserves_identity_and_executes_lazily(
         sentinel.unlink()
         sys.modules.pop("side_effect_helper_mod", None)
 
-        spec = load_intervention_spec(path)
+        # DEFAULT-trust load is deny-by-default (r12 RCE guard): applying the import-ref
+        # helper raises WITHOUT importing or executing the foreign module.
+        untrusted = load_intervention_spec(path)
+        assert not sentinel.exists()
+        assert "side_effect_helper_mod" not in sys.modules
+        denied = _log(_ReluModel(), torch.ones(1, 3))
+        denied._intervention_spec = untrusted
+        with pytest.raises(UntrustedCallableError):
+            denied.run(_ReluModel(), torch.ones(1, 3))
+        assert not sentinel.exists()
+        assert "side_effect_helper_mod" not in sys.modules
+
+        # A TRUSTED load stays lazy and preserves the executable helper spec.
+        spec = load_intervention_spec(path, trust_custom_callables=True)
 
         assert not sentinel.exists()
         assert spec.hook_specs[0].helper is not None
@@ -402,7 +432,7 @@ def test_live_backward_records_persist_in_saved_intervention_spec(tmp_path: Path
     path = tmp_path / "backward_records.tlspec"
 
     log.save_intervention(path, level="portable")
-    spec = load_intervention_spec(path)
+    spec = load_intervention_spec(path, trust_custom_callables=True)
 
     backward_records = [record for record in spec.records if record.direction == "backward"]
     assert backward_records
@@ -424,7 +454,7 @@ def test_loaded_backward_grad_fn_spec_executes_after_round_trip(tmp_path: Path) 
     path = tmp_path / "backward_execute.tlspec"
 
     log.save_intervention(path, level="portable")
-    spec = load_intervention_spec(path)
+    spec = load_intervention_spec(path, trust_custom_callables=True)
 
     assert isinstance(spec.hook_specs[0].site_target.selector_value, dict)
     x_fresh = torch.ones(1, 3, requires_grad=True)
@@ -454,7 +484,7 @@ def test_backward_hook_spec_saves_before_first_backward_and_executes(
     path = tmp_path / "backward_before_pass.tlspec"
 
     log.save_intervention(path, level="portable")
-    spec = load_intervention_spec(path)
+    spec = load_intervention_spec(path, trust_custom_callables=True)
 
     assert spec.metadata["target_manifest"][0]["resolved_status"] == "unresolved_backward"
     x_fresh = torch.ones(1, 3, requires_grad=True)
@@ -604,6 +634,371 @@ def test_function_resolution_failure_raises() -> None:
     )
     with pytest.raises(ReplayPreconditionError):
         resolve_function_registry_key(key)
+
+
+@pytest.mark.smoke
+def test_custom_function_key_is_refused_without_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default resolution refuses bundle custom keys before importing modules."""
+
+    key = FunctionRegistryKey(
+        namespace="custom",
+        qualname="neg",
+        dispatch_kind="function",
+        import_path="operator:neg",
+    )
+
+    def fail_import(module_name: str) -> object:
+        """Fail if an untrusted custom module import is attempted.
+
+        Parameters
+        ----------
+        module_name:
+            Module name passed to the import system.
+
+        Returns
+        -------
+        object
+            This function always raises.
+        """
+
+        raise AssertionError(f"unexpected import of {module_name}")
+
+    monkeypatch.setattr("torchlens.intervention.resolver.importlib.import_module", fail_import)
+
+    with pytest.raises(UntrustedCallableError, match="arbitrary code"):
+        resolve_function_registry_key(key)
+
+
+@pytest.mark.smoke
+def test_loaded_spec_tolerates_custom_key_without_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Analysis-mode loading tolerates custom keys without importing them."""
+
+    path = tmp_path / "custom_key.tlspec"
+    _log().save_intervention(path, level="audit")
+    spec_path = path / "spec.json"
+    payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    payload["function_registry_keys"] = [
+        {
+            "layer_label": "malicious_1_1",
+            "key": {
+                "namespace": "custom",
+                "qualname": "neg",
+                "dispatch_kind": "function",
+                "import_path": "operator:neg",
+            },
+        }
+    ]
+    spec_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def fail_import(module_name: str) -> object:
+        """Fail if loading attempts to import an untrusted custom module.
+
+        Parameters
+        ----------
+        module_name:
+            Module name passed to the import system.
+
+        Returns
+        -------
+        object
+            This function always raises.
+        """
+
+        raise AssertionError(f"unexpected import of {module_name}")
+
+    with monkeypatch.context() as import_patch:
+        import_patch.setattr("torchlens.intervention.resolver.importlib.import_module", fail_import)
+        assert load_intervention_spec(path)
+
+    assert load_intervention_spec(path, allowed_custom_callable_modules={"operator"})
+
+
+@pytest.mark.smoke
+def test_loaded_custom_key_is_denied_at_execution_until_trusted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Loaded foreign callables remain gated until execution explicitly trusts them."""
+
+    module_name = "torchlens_loaded_execution_gate"
+    marker = tmp_path / "imported_at_execution"
+    (tmp_path / f"{module_name}.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed')\n"
+        "def payload(value):\n    return -value\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    # The temp module has a fixed name and an import-time side effect (writes the
+    # marker). Ensure it is NOT already cached so this run imports it fresh, and let
+    # monkeypatch drop it at teardown (restoring the absent state) so the test is
+    # order-independent -- otherwise a cached module makes the trusted import a no-op.
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+
+    path = tmp_path / "execution_gate.tlspec"
+    _log().save_intervention(path, level="audit")
+    spec_path = path / "spec.json"
+    payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    payload["function_registry_keys"] = [
+        {
+            "layer_label": "foreign_1_1",
+            "key": {
+                "namespace": "custom",
+                "qualname": "payload",
+                "dispatch_kind": "function",
+                "import_path": f"{module_name}:payload",
+            },
+        }
+    ]
+    spec_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_intervention_spec(path)
+    loaded_key = FunctionRegistryKey(**loaded.metadata["function_registry_keys"][0]["key"])
+    assert not marker.exists()
+
+    with pytest.raises(UntrustedCallableError):
+        resolve_function_registry_key(loaded_key)
+    assert not marker.exists()
+
+    resolved = resolve_function_registry_key(loaded_key, trust_custom_callables=True)
+    assert marker.read_text(encoding="utf-8") == "executed"
+    assert resolved(3) == -3
+
+
+@pytest.mark.smoke
+def test_custom_function_key_trust_gate_and_allowlist() -> None:
+    """Trusted custom keys resolve, while a supplied allowlist stays restrictive."""
+
+    key = FunctionRegistryKey(
+        namespace="custom",
+        qualname="neg",
+        dispatch_kind="function",
+        import_path="operator:neg",
+    )
+
+    assert (
+        resolve_function_registry_key(key, trust_custom_callables=True)
+        is __import__("operator").neg
+    )
+    assert (
+        resolve_function_registry_key(key, allowed_custom_callable_modules={"operator"})
+        is __import__("operator").neg
+    )
+    with pytest.raises(UntrustedCallableError, match="not in allowed_custom_callable_modules"):
+        resolve_function_registry_key(
+            key,
+            trust_custom_callables=True,
+            allowed_custom_callable_modules={"torch"},
+        )
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    ("namespace", "qualname"),
+    [
+        ("torch", "relu"),
+        ("torch.Tensor", "relu"),
+        ("torch.nn.functional", "relu"),
+        ("operator", "neg"),
+    ],
+)
+def test_trusted_function_namespaces_resolve_unchanged(namespace: str, qualname: str) -> None:
+    """Fixed trusted registry roots remain available without a trust opt-in."""
+
+    key = FunctionRegistryKey(namespace=namespace, qualname=qualname, dispatch_kind="function")
+
+    assert callable(resolve_function_registry_key(key))
+
+
+@pytest.mark.smoke
+def test_internal_torch_builtin_key_preserves_replay_identity() -> None:
+    """Internal torch builtins resolve without collapsing to public wrappers."""
+
+    builtin = torch._C._VariableFunctionsClass.tensordot
+    key = function_registry_key_from_callable(builtin)
+
+    assert key.namespace == "custom"
+    assert key.import_path == "torch._C._VariableFunctionsClass:tensordot"
+    assert resolve_function_registry_key(key) is builtin
+
+
+@pytest.mark.smoke
+def test_red_team_custom_module_side_effect_is_not_imported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malicious custom import path cannot execute its module side effect by default."""
+
+    module_name = "torchlens_custom_import_side_effect"
+    marker = tmp_path / "imported"
+    (tmp_path / f"{module_name}.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed')\n"
+        "def payload():\n    return None\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    key = FunctionRegistryKey(
+        namespace="custom",
+        qualname="payload",
+        dispatch_kind="function",
+        import_path=f"{module_name}:payload",
+    )
+
+    with pytest.raises(UntrustedCallableError):
+        resolve_function_registry_key(key)
+
+    assert not marker.exists()
+
+
+# --- Round-2 RCE regression: torchlens.* auto-trust bypass -------------------
+# A custom key whose import PATH starts with "torchlens" but whose resolved
+# callable really lives in os/importlib/builtins/subprocess (reached by walking
+# attributes off a torchlens module that did ``import os`` etc. at top level)
+# must be DENIED. Trust is decided by the resolved callable's real ``__module__``,
+# never by the import-path string prefix.
+
+_R2_TORCHLENS_PATH_TO_FOREIGN_CALLABLE = [
+    ("torchlens._io.tlspec:os.system", "system"),
+    ("torchlens.utils:importlib.import_module", "import_module"),
+    ("torchlens.intervention.selectors:builtins.eval", "eval"),
+    ("torchlens.utils:subprocess.getoutput", "getoutput"),
+]
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(("import_path", "qualname"), _R2_TORCHLENS_PATH_TO_FOREIGN_CALLABLE)
+def test_r2_torchlens_prefixed_foreign_callable_denied_by_default(
+    import_path: str, qualname: str
+) -> None:
+    """os/importlib/builtins/subprocess reached via a torchlens path stay denied."""
+
+    key = FunctionRegistryKey(
+        namespace="custom",
+        qualname=qualname,
+        dispatch_kind="function",
+        import_path=import_path,
+    )
+
+    with pytest.raises(UntrustedCallableError):
+        resolve_function_registry_key(key)
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(("import_path", "qualname"), _R2_TORCHLENS_PATH_TO_FOREIGN_CALLABLE)
+def test_r2_torchlens_prefixed_foreign_callable_denied_under_strict_allowlist(
+    import_path: str, qualname: str
+) -> None:
+    """The torchlens fast-path cannot bypass an explicit allowlist that omits os."""
+
+    key = FunctionRegistryKey(
+        namespace="custom",
+        qualname=qualname,
+        dispatch_kind="function",
+        import_path=import_path,
+    )
+
+    # An allowlist that does NOT name os/importlib/builtins/subprocess must still
+    # deny, even though the import path is torchlens-prefixed.
+    with pytest.raises(UntrustedCallableError):
+        resolve_function_registry_key(key, allowed_custom_callable_modules={"operator"})
+
+
+@pytest.mark.smoke
+def test_r2_os_system_not_reachable_and_not_executed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The concrete os.system RCE key resolves to nothing and never executes."""
+
+    import os
+
+    calls: list[str] = []
+    monkeypatch.setattr(os, "system", lambda cmd: calls.append(cmd) or 0)
+    key = FunctionRegistryKey(
+        namespace="custom",
+        qualname="system",
+        dispatch_kind="function",
+        import_path="torchlens._io.tlspec:os.system",
+    )
+
+    with pytest.raises(UntrustedCallableError):
+        resolved = resolve_function_registry_key(key)
+        resolved("touch /tmp/pwned")
+
+    assert calls == []
+
+
+@pytest.mark.smoke
+def test_r2_genuine_torchlens_custom_callable_still_resolves() -> None:
+    """A real torchlens-owned custom callable stays auto-trusted after the fix."""
+
+    key = FunctionRegistryKey(
+        namespace="custom",
+        qualname="clamp",
+        dispatch_kind="function",
+        import_path="torchlens.intervention.helpers:clamp",
+    )
+
+    resolved = resolve_function_registry_key(key)
+    assert callable(resolved)
+    assert str(getattr(resolved, "__module__", "")).startswith("torchlens")
+
+
+@pytest.mark.smoke
+def test_r2_load_tolerates_torchlens_prefixed_foreign_key_no_foreign_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Analysis-only load tolerates the malicious key, importing no foreign module.
+
+    The foreign-deny split is preserved: load tolerates the well-formed key (does
+    not fail closed), never imports a NON-torchlens module, and never executes
+    os.system. Inspecting the resolved identity only touches the already-installed
+    torchlens module the path names.
+    """
+
+    import importlib as _importlib
+    import os
+
+    path = tmp_path / "r2_foreign.tlspec"
+    _log().save_intervention(path, level="audit")
+    spec_path = path / "spec.json"
+    payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    payload["function_registry_keys"] = [
+        {
+            "layer_label": "malicious_1_1",
+            "key": {
+                "namespace": "custom",
+                "qualname": "system",
+                "dispatch_kind": "function",
+                "import_path": "torchlens._io.tlspec:os.system",
+            },
+        }
+    ]
+    spec_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    calls: list[str] = []
+    monkeypatch.setattr(os, "system", lambda cmd: calls.append(cmd) or 0)
+
+    real_import_module = _importlib.import_module
+
+    def guarded_import(module_name: str) -> object:
+        """Allow torchlens imports; fail on any foreign (non-torchlens) import.
+
+        Parameters
+        ----------
+        module_name:
+            Module name passed to the import system.
+
+        Returns
+        -------
+        object
+            The imported torchlens module.
+        """
+
+        assert module_name == "torchlens" or module_name.startswith("torchlens."), (
+            f"unexpected foreign import of {module_name}"
+        )
+        return real_import_module(module_name)
+
+    monkeypatch.setattr("torchlens.intervention.resolver.importlib.import_module", guarded_import)
+    assert load_intervention_spec(path)
+    assert calls == []
 
 
 @pytest.mark.smoke

@@ -13,9 +13,7 @@ Key design patterns:
   model's tensors are keyed by their raw internal barcodes in
   transient raw graph state. After postprocessing flips ``_tracing_finished=True``,
   the friendly ``layer_list`` / ``layer_dict_all_keys`` / ``layer_logs``
-  structures are populated and used instead.  ``_tracing_finished`` also
-  persists across the fast pass on purpose: fast-path postprocessing
-  relies on the fully-populated lookup dicts from the exhaustive pass.
+  structures are populated and used instead.
 
 * **Explicit Trace custom_methods** - Public custom_methods are defined directly on
   ``Trace``. Heavier implementations may delegate into subpackages
@@ -47,6 +45,7 @@ from typing import (
     Optional,
     TYPE_CHECKING,
     Tuple,
+    cast,
 )
 
 import torch
@@ -55,6 +54,13 @@ from torch import nn
 if TYPE_CHECKING:
     from ..debug._audit import TraceAudit
     from .._io.streaming import BundleStreamWriter
+    from ..runnable import (
+        ArchivedActivation,
+        PathFaithfulness,
+        ReadinessReport,
+        RunnableDiagnostic,
+        SparseRunDescriptor,
+    )
     from .func_call_location import FuncCallLocation
 
 from .. import _state
@@ -158,6 +164,17 @@ _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "module_identity_mode": "torch_module",
     "param_source": "native-module",
     "derived_grads": DerivedGradAccessor(),
+    "_runnable_descriptor": None,
+    "_runnable_readiness": None,
+    "_runnable_staged_user_state": None,
+    "_runnable_embedded_state": None,
+    "_runnable_capture_state": None,
+    "_runnable_embedded_nonpersistent_buffers": None,
+    "_runnable_archived_activations": None,
+    "_runnable_path_faithfulness": None,
+    "_runnable_first_mismatch": None,
+    "_runnable_poisoned": False,
+    "_buffer_persistence": {},
     "intervention_ready": False,
     "save_arg_templates": False,
     "raw_input": None,
@@ -766,6 +783,71 @@ class Trace(
     integer index, layer label, module address, or substring.
     """
 
+    @property
+    def readiness(self) -> "ReadinessReport | None":
+        """Return non-executing sparse-run readiness for a loaded artifact.
+
+        Returns
+        -------
+        ReadinessReport | None
+            Structured load-time report, or ``None`` for a live Trace.
+        """
+
+        return cast("ReadinessReport | None", self.__dict__.get("_runnable_readiness"))
+
+    @property
+    def runnable_descriptor(self) -> "SparseRunDescriptor | None":
+        """Return the parsed sparse descriptor retained by a loaded artifact.
+
+        Returns
+        -------
+        SparseRunDescriptor | None
+            Parsed descriptor, or ``None`` for analysis-only/live traces and
+            structurally unparseable runnable descriptors.
+        """
+
+        return cast("SparseRunDescriptor | None", self.__dict__.get("_runnable_descriptor"))
+
+    @property
+    def archived_activations(self) -> Mapping[str, "ArchivedActivation"]:
+        """Return inspection-only activation payloads from a runnable archive.
+
+        Returns
+        -------
+        Mapping[str, ArchivedActivation]
+            Mapping keyed by ``"<slot_id>:<field>"``. Values are never read by
+            the sparse scheduler or used as intermediate execution inputs.
+        """
+
+        return cast(
+            Mapping[str, "ArchivedActivation"],
+            self.__dict__.get("_runnable_archived_activations", {}),
+        )
+
+    def load_state_dict(self, sd: Mapping[str, Any]) -> None:
+        """Strictly validate and atomically stage sparse-run state.
+
+        Parameters
+        ----------
+        sd:
+            Canonically named parameter and persistent-buffer tensor mapping.
+
+        Raises
+        ------
+        StateBindingError
+            If names, module paths, roles, shapes, dtypes, or aliases violate
+            the recorded state-slot contract.
+
+        Notes
+        -----
+        This method stages transient run state only. It does not execute the
+        graph or write tensor values into the sparse descriptor.
+        """
+
+        from .._runnable_state import load_trace_state_dict
+
+        load_trace_state_dict(self, sd)
+
     def find_nan(self) -> Any:
         """Return the first NaN or Inf among saved outputs in execution order.
 
@@ -846,6 +928,10 @@ class Trace(
     def __getattr__(self, name: str) -> Any:
         """Route transient capture attributes through private build state."""
 
+        if name == "_capture_events":
+            events = self.event_stream
+            if events is not None:
+                return events
         state_field = self._build_state_attr_map().get(name)
         if state_field is None:
             raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
@@ -875,6 +961,12 @@ class Trace(
     def __delattr__(self, name: str) -> None:
         """Delete transient capture attributes from private build state."""
 
+        if name == "_capture_events":
+            from ..captured_run import forget_event_stream
+
+            self.__dict__.pop(name, None)
+            forget_event_stream(self)
+            return
         state_field = self._build_state_attr_map().get(name)
         if state_field is None:
             super().__delattr__(name)
@@ -911,6 +1003,16 @@ class Trace(
     last_run: Any | None
     capture_start_time: float
     capture_end_time: float
+    _runnable_descriptor: "SparseRunDescriptor | None"
+    _runnable_readiness: "ReadinessReport | None"
+    _runnable_staged_user_state: Mapping[str, torch.Tensor] | None
+    _runnable_embedded_state: Mapping[str, torch.Tensor] | None
+    _runnable_capture_state: Mapping[str, torch.Tensor] | None
+    _runnable_embedded_nonpersistent_buffers: Mapping[str, torch.Tensor] | None
+    _runnable_archived_activations: Mapping[str, "ArchivedActivation"] | None
+    _runnable_path_faithfulness: "PathFaithfulness | None"
+    _runnable_first_mismatch: "RunnableDiagnostic | None"
+    _runnable_poisoned: bool
     backward_root_grad_fn_object_ids: list[int]
     backward_pass_logs: Dict[int, BackwardPass]
     code_context: list["FuncCallLocation"]
@@ -950,6 +1052,16 @@ class Trace(
         "tlspec_version": FieldPolicy.KEEP,
         "_tracing_finished": FieldPolicy.KEEP,
         "capture_mode": FieldPolicy.KEEP,
+        "_runnable_descriptor": FieldPolicy.DROP,
+        "_runnable_readiness": FieldPolicy.DROP,
+        "_runnable_staged_user_state": FieldPolicy.DROP,
+        "_runnable_embedded_state": FieldPolicy.DROP,
+        "_runnable_capture_state": FieldPolicy.DROP,
+        "_runnable_embedded_nonpersistent_buffers": FieldPolicy.DROP,
+        "_runnable_archived_activations": FieldPolicy.DROP,
+        "_runnable_path_faithfulness": FieldPolicy.DROP,
+        "_runnable_first_mismatch": FieldPolicy.DROP,
+        "_runnable_poisoned": FieldPolicy.DROP,
         "detached_patch_policy": FieldPolicy.DROP,
         "detached_patch_epoch": FieldPolicy.DROP,
         "escape_detector_mode": FieldPolicy.DROP,
@@ -1120,7 +1232,9 @@ class Trace(
         "_buffer_accessor": FieldPolicy.DROP,
         "_buffer_write_events": FieldPolicy.DROP,
         "_buffer_write_tracker": FieldPolicy.DROP,
+        "_param_storage_addresses": FieldPolicy.DROP,
         "_buffer_initial_values": FieldPolicy.BLOB_RECURSIVE,
+        "_buffer_persistence": FieldPolicy.KEEP,
         "internal_source_ops": FieldPolicy.KEEP,
         "internal_sink_ops": FieldPolicy.KEEP,
         "internally_terminated_bool_ops": FieldPolicy.KEEP,
@@ -1171,12 +1285,36 @@ class Trace(
         "_module_forward_args": FieldPolicy.DROP,
         "_grad_fn_strong_refs": FieldPolicy.DROP,
         "_in_exhaustive_pass": FieldPolicy.DROP,
+        # r83 S4: live-capture scratch reinstated by ``__setstate__`` alongside
+        # ``_tl_backward_hooked_tensor_keys``, but never registered here. Any
+        # trace that went through ``__setstate__`` -- which ``cache=True`` makes
+        # routine -- therefore tripped the catalog tripwire and failed
+        # ``save(level="runnable")`` outright on the SECOND capture. DROP, like
+        # its sibling: pending live-fire records are session state and are
+        # already reset on rehydrate.
+        "_pending_live_fire_records": FieldPolicy.DROP,
         "_module_containment_engine": FieldPolicy.DROP,
         "_exhaustive_module_stack": FieldPolicy.DROP,
         "_module_logs": FieldPolicy.DROP,
         "_param_logs_by_module": FieldPolicy.DROP,
         "_build_state": FieldPolicy.DROP,
         "_pre_forward_rng_states": FieldPolicy.DROP,
+        "_runnable_host_rng_consumed": FieldPolicy.DROP,
+        "_runnable_capture_ambient": FieldPolicy.DROP,
+        "_runnable_state_alias_topology": FieldPolicy.DROP,
+        # r63 C1: pre-clone per-slot state metadata signatures (producer-side only,
+        # never portable) and the buffer storage-pointer attribution index.
+        "_runnable_capture_state_signatures": FieldPolicy.DROP,
+        # r77 F2: capture-time persistent-buffer name universe + geometry
+        # (producer-side only, never portable).
+        "_runnable_persistent_buffer_universe": FieldPolicy.DROP,
+        "_buffer_storage_addresses": FieldPolicy.DROP,
+        "_runnable_host_rng_unreplayable": FieldPolicy.DROP,
+        "_runnable_host_rng_channels": FieldPolicy.DROP,
+        "_runnable_host_rng_replayable_reads": FieldPolicy.DROP,
+        "_runnable_rng_monitor_uncertain": FieldPolicy.DROP,
+        "_runnable_rng_monitor_uncertain_detail": FieldPolicy.DROP,
+        "_runnable_output_losslessness": FieldPolicy.DROP,
         "_mlx_saved_payloads": FieldPolicy.DROP,
         "_mlx_capture_depth": FieldPolicy.DROP,
         "_out_writer": FieldPolicy.DROP,
@@ -1184,6 +1322,9 @@ class Trace(
         "_grad_stream_retain_in_memory": FieldPolicy.DROP,
         "_defer_streaming_bundle_finalization": FieldPolicy.DROP,
         "_out_sink": FieldPolicy.DROP,
+        # Runtime-only: the set of dispatchable op func-call-ids the orphan-removal
+        # pass pruned, read by the validation dispatch-count backstop. Never portable.
+        "_orphan_pruned_func_call_ids": FieldPolicy.DROP,
         "_capture_events": FieldPolicy.DROP,
         "_tl_backward_hooked_tensor_keys": FieldPolicy.DROP,
         "_active_backward_pass_index": FieldPolicy.DROP,
@@ -1206,6 +1347,9 @@ class Trace(
         "_grad_fn_param_refs": FieldPolicy.KEEP,
         "_grad_fn_param_refs_by_object_id": FieldPolicy.DROP,
         "_param_log_by_pid": FieldPolicy.DROP,
+        "_session_param_inventory": FieldPolicy.DROP,
+        "_session_buffer_inventory": FieldPolicy.DROP,
+        "_session_buffer_identity": FieldPolicy.DROP,
         "backward_root_grad_fn_object_ids": FieldPolicy.KEEP,
         "backward_durations": FieldPolicy.KEEP,
         "num_backward_passes": FieldPolicy.KEEP,
@@ -1327,12 +1471,18 @@ class Trace(
         # _tracing_finished is the master behavioural switch: False during logging,
         # True after postprocessing.  Many custom_methods (len, getitem, str, iter)
         # branch on this flag to choose raw-barcode vs final-label access.
-        # It intentionally persists across the fast pass so fast-path
-        # postprocessing can use the exhaustive pass's lookup dicts.
         self._tracing_finished = False
-        # "exhaustive" captures all metadata; "fast" reuses exhaustive-pass
-        # structure, only re-capturing tensor contents.
-        self.capture_mode: Literal["exhaustive", "fast", "predicate"] = "exhaustive"
+        self.capture_mode: Literal["exhaustive", "predicate"] = "exhaustive"
+        self._runnable_descriptor: SparseRunDescriptor | None = None
+        self._runnable_readiness: ReadinessReport | None = None
+        self._runnable_staged_user_state: Mapping[str, torch.Tensor] | None = None
+        self._runnable_embedded_state: Mapping[str, torch.Tensor] | None = None
+        self._runnable_capture_state: Mapping[str, torch.Tensor] | None = None
+        self._runnable_embedded_nonpersistent_buffers: Mapping[str, torch.Tensor] | None = None
+        self._runnable_archived_activations: Mapping[str, ArchivedActivation] | None = None
+        self._runnable_path_faithfulness: PathFaithfulness | None = None
+        self._runnable_first_mismatch: RunnableDiagnostic | None = None
+        self._runnable_poisoned = False
         self.halted = False
         self.halt_reason: str | None = None
         self.halt_frontier: str | None = None
@@ -1543,6 +1693,19 @@ class Trace(
         self.backward_pass_logs: Dict[int, BackwardPass] = OrderedDict()
         self._grad_fn_param_refs: dict[str, str] = {}
         self._param_log_by_pid: dict[int, str] = {}
+        # r79 session-leak fix: the RECORDED prep inventories of stamped
+        # parameters/buffers. Session-scoped strong refs -- authoritative source
+        # for stamp cleanup (a param/buffer popped from the live module tree
+        # mid-forward escapes re-traversal but never this list); emptied by
+        # ``_cleanup_model_session``. Never portable.
+        self._session_param_inventory: list[Any] = []
+        self._session_buffer_inventory: list[Any] = []
+        # r81: id(tensor) -> _SessionBufferStamp identity records for every
+        # buffer stamp written this session -- the buffer-rung storage-identity
+        # belt (param-rung ``_param_ref is value`` parity). Session-scoped
+        # strong refs (tensor + stamp-time storage keeper); emptied by
+        # ``_cleanup_model_session``. Never portable.
+        self._session_buffer_identity: dict[int, Any] = {}
         self.backward_root_grad_fn_object_ids: list[int] = []
         self.backward_durations: list[Duration] = []
         self.num_backward_passes: int = 0
@@ -2225,6 +2388,24 @@ class Trace(
     def save(self, path: str | Path, **kwargs: Any) -> None:
         """Call :func:`torchlens.save` for this model log.
 
+        Parameters
+        ----------
+        path:
+            Destination bundle directory.
+        **kwargs:
+            Portable save options. For runnable saves, ``include_weights=True``
+            bundles the full capture-time ``state_dict``: all named parameters
+            and persistent buffers, as state rather than a reconstructed model.
+            Independently, ``include_activations=True`` archives exactly the
+            capture-time ``save=``-selected payloads for inspection and eligible
+            byte-exact attestation; those payloads never seed execution.
+            ``include_source`` (default ``True``) controls whether the captured
+            model source code is embedded; set it ``False`` to strip verbatim
+            source, docstrings, and source-file references from a shared
+            ``.tlspec``. Absolute source paths are always relativized to a bare
+            basename, so no ``$HOME`` / username is ever embedded. See
+            :func:`torchlens.save` for the full option list.
+
         Warning
         -------
         Portable bundles contain a pickle file. Only load bundles from trusted
@@ -2301,6 +2482,28 @@ class Trace(
         state["_last_hook_handle_ids"] = ()
         state["_activation_transform_repr"] = (
             repr(self.activation_transform) if self.activation_transform is not None else None
+        )
+        # Runnable traces bind these as immutable MappingProxyType views, which cannot
+        # be pickled/deepcopied. The fork path special-cases them; the generic pickle
+        # path must neutralize them to a plain dict so capture-time, embedded, and
+        # staged state survives pickle/deepcopy. Run execution only reads these bindings.
+        state["_runnable_embedded_state"] = (
+            dict(self._runnable_embedded_state)
+            if self._runnable_embedded_state is not None
+            else None
+        )
+        state["_runnable_capture_state"] = (
+            dict(self._runnable_capture_state) if self._runnable_capture_state is not None else None
+        )
+        state["_runnable_embedded_nonpersistent_buffers"] = (
+            dict(self._runnable_embedded_nonpersistent_buffers)
+            if self._runnable_embedded_nonpersistent_buffers is not None
+            else None
+        )
+        state["_runnable_staged_user_state"] = (
+            dict(self._runnable_staged_user_state)
+            if self._runnable_staged_user_state is not None
+            else None
         )
         state["tlspec_version"] = TLSPEC_VERSION
         return state
@@ -2438,6 +2641,8 @@ class Trace(
             state["inference_only"] = False
         if state["chunked_forward"] is None:
             state["chunked_forward"] = False
+        if state["_runnable_poisoned"] is None:
+            state["_runnable_poisoned"] = False
         for field_name in (
             "setup_duration",
             "forward_duration",
@@ -2482,6 +2687,9 @@ class Trace(
             state[field_name] = Bytes(state.get(field_name, 0) or 0)
         if state.get("total_autograd_memory") is not None:
             state["total_autograd_memory"] = Bytes(state["total_autograd_memory"])
+        from .._io.state_keys import refuse_callable_shadowing_state_keys
+
+        refuse_callable_shadowing_state_keys(type(self), state)
         self.__dict__.update(state)
         if not containers_were_serialized:
             self.__dict__.pop("_containers", None)

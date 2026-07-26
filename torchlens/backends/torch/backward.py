@@ -21,6 +21,7 @@ import torch
 
 from ... import _state
 from ...utils._torch_compat import get_accumulate_grad_class
+from ...utils._torch_symbols import torch_attr
 
 from ..._deprecations import MISSING, MissingType
 from ...quantities import Bytes, Duration
@@ -348,8 +349,10 @@ def _traces_for_roots(roots: Any) -> tuple[Any, ...]:
             trace = trace_ref()
             if trace is None or not hasattr(trace, "layer_list"):
                 stale_ids.append(grad_fn_object_id)
-            elif id(trace) not in matched_ids and not getattr(
-                trace, "_tl_backward_triggers_disarmed", False
+            elif (
+                id(trace) not in matched_ids
+                and not getattr(trace, "_tl_backward_triggers_disarmed", False)
+                and not getattr(trace, "_tl_rf_probe_active", False)
             ):
                 matched.append(trace)
                 matched_ids.add(id(trace))
@@ -1376,7 +1379,7 @@ def _torch_dtype_from_string(dtype_name: str) -> torch.dtype | str:
 
     if dtype_name.startswith("torch."):
         dtype_attr = dtype_name.removeprefix("torch.")
-        dtype = getattr(torch, dtype_attr, None)
+        dtype = torch_attr(dtype_attr)  # r47 secD_1: no lazy ``torch.__getattr__``
         if isinstance(dtype, torch.dtype):
             return dtype
     return dtype_name
@@ -2357,6 +2360,8 @@ def _run_backward_with_capture(
 
     _ensure_not_inference_only_backward(trace)
     _ensure_not_chunked_forward_backward(trace)
+    if loss.grad_fn is None:
+        raise ValueError("cannot run backward: loss has no grad_fn / is detached")
     previous_trace = _state._active_trace
     previous_plan = _state._active_hook_plan
     previous_spec = _state._active_intervention_spec
@@ -2378,35 +2383,49 @@ def _run_backward_with_capture(
     events = _ensure_backward_event_stream(trace)
     trace._active_backward_pass_index = pass_index
     trace._implicit_backward_pass_open = False
-    events.append_backward(
-        BackwardPassStart(
-            pass_index=pass_index,
-            trigger=cast(Any, trigger),
-            implicit=False,
-            outer_context=outer_context,
-            call_context_ref=backward_call_context,
-            root_meta=(
-                {
-                    "shape": tuple(loss.shape),
-                    "dtype": str(loss.dtype),
-                    "device": str(loss.device),
-                },
-            ),
-            root_grad_arguments=None,
-            inputs_subset=(),
-            order=None,
-            origin_backward_pass=None,
-            save_grads_policy_repr=repr(active_save_grads_policy),
-            engine_flags=engine_flags,
-            forward_op_count_at_trigger=(
-                forward_op_count_at_trigger
-                if forward_op_count_at_trigger is not None
-                else _forward_op_count_at_backward_trigger(trace)
-            ),
-            timestamp=time.time(),
-        )
+    start_event = BackwardPassStart(
+        pass_index=pass_index,
+        trigger=cast(Any, trigger),
+        implicit=False,
+        outer_context=outer_context,
+        call_context_ref=backward_call_context,
+        root_meta=(
+            {
+                "shape": tuple(loss.shape),
+                "dtype": str(loss.dtype),
+                "device": str(loss.device),
+            },
+        ),
+        root_grad_arguments=None,
+        inputs_subset=(),
+        order=None,
+        origin_backward_pass=None,
+        save_grads_policy_repr=repr(active_save_grads_policy),
+        engine_flags=engine_flags,
+        forward_op_count_at_trigger=(
+            forward_op_count_at_trigger
+            if forward_op_count_at_trigger is not None
+            else _forward_op_count_at_backward_trigger(trace)
+        ),
+        timestamp=time.time(),
     )
-    handles = _walk_and_hook_backward_graph(trace, loss)
+    events.append_backward(start_event)
+    try:
+        handles = _walk_and_hook_backward_graph(trace, loss)
+    except BaseException:
+        # The graph walk can fail after the start event and global capture state have
+        # been installed. Restore both so a failed backward cannot poison later traces.
+        if events.backward_events and events.backward_events[-1] is start_event:
+            events.backward_events.pop()
+        _state._active_trace = previous_trace
+        _state._active_hook_plan = previous_plan
+        _state._active_intervention_spec = previous_spec
+        trace.__dict__.pop("_active_backward_pass_index", None)
+        if previous_had_save_grads_policy:
+            trace._active_save_grads_policy = previous_save_grads_policy
+        else:
+            trace.__dict__.pop("_active_save_grads_policy", None)
+        raise
     backend, before = _reset_peak_memory(loss.device)
     backward_start_time = time.time()
     status = "ok"

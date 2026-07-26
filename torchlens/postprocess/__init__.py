@@ -27,20 +27,19 @@ Step ordering invariants:
 - Step 15.5 (_build_layer_logs) MUST precede Step 16 (_build_module_logs) because
   Module.layers references Layer keys.
 
-Fast mode skips Steps 1-9 and Step 16, reusing the exhaustive pass's metadata.
-It only copies outs from parent to output nodes, trims, renames, builds
-LayerLogs, and marks the pass as finished. See postprocess_fast() below.
 """
 
 from dataclasses import dataclass
 import os
-from typing import TYPE_CHECKING, List, cast
+from typing import TYPE_CHECKING, List
 
 import time
 import torch
 import warnings
 
-from ..utils.tensor_utils import _is_cuda_available, safe_copy
+from ..capture.session import capture_session_for_events
+from ..capture.projectors import TraceProjector
+from ..utils.tensor_utils import _is_cuda_available
 from ..utils.hashing import (
     compute_graph_shape_hash,
     compute_raw_event_shape_hash,
@@ -86,7 +85,6 @@ from ._materialize import materialize_from_events
 from .ast_branches import resolve_var_names
 
 if TYPE_CHECKING:
-    from ..data_classes.op import Op
     from ..data_classes.trace import Trace
 
 from ..quantities import Bytes
@@ -97,13 +95,13 @@ __all__ = [
     "RecurrenceNode",
     "group_recurrent_nodes",
     "postprocess",
-    "postprocess_fast",
 ]
 from ..utils.display import _vprint, _vtimed
 from ..captured_run import remember_event_stream
 
 
 _POSTPROCESS_ASSERT_ENV = "TORCHLENS_POSTPROCESS_ASSERTIONS"
+_materialize_refresh_events = materialize_from_events
 
 
 @dataclass(frozen=True)
@@ -434,9 +432,7 @@ def postprocess(
     """Run the full postprocessing pipeline in exhaustive mode.
 
     Transforms the raw Trace captured during the forward pass into its
-    final user-facing form. In fast mode, delegates to ``postprocess_fast``
-    which skips most steps (graph traversal, loop detection, module annotation)
-    and only copies outs, trims fields, and builds LayerLogs.
+    final user-facing form.
 
     Parameters
     ----------
@@ -446,11 +442,8 @@ def postprocess(
         Hierarchical address strings for each output, for example ``"0.1"``
         for nested tuple outputs.
     """
-    if self.capture_mode == "fast":
-        postprocess_fast(self)
-        return
-
     capture_events = getattr(self, "capture_events", None)
+    capture_session = None
     # Resolve each output tensor's graph parent BEFORE materializing events:
     # a registered buffer returned directly from forward() without ever being
     # used by a traced op has no graph node yet, and is logged here as a late
@@ -459,9 +452,29 @@ def postprocess(
     if capture_events is not None:
         self._raw_event_shape_hash = compute_raw_event_shape_hash(capture_events)
         remember_event_stream(self, capture_events)
-        self._capture_events = capture_events
+        capture_session = capture_session_for_events(capture_events)
+        sealed_op_events = (
+            list(TraceProjector(capture_session.seal()).events())
+            if capture_session is not None
+            else list(capture_events.op_events)
+        )
+        working_events = capture_events.copy_for_replay()
+        working_events.op_events = sealed_op_events
+        working_events.op_event_by_label_raw = {
+            event.label_raw: event for event in sealed_op_events
+        }
+        working_events.op_event_index_by_label_raw = {
+            event.label_raw: index for index, event in enumerate(sealed_op_events)
+        }
+        self._capture_events = working_events
         with _vtimed(self, "  Step 0: Materialize capture events"):
-            materialize_from_events(self, capture_events)
+            materializer = (
+                _materialize_refresh_events
+                if getattr(self, "_refresh_projection_capture", False)
+                else materialize_from_events
+            )
+            materializer(self, working_events)
+        working_events.release_working_projection()
         _assert_postprocess_contract(self, "0")
         delattr(self, "capture_events")
 
@@ -472,6 +485,9 @@ def postprocess(
         warnings.warn("No layers were logged during the forward pass; skipping postprocessing.")
         _set_tracing_finished(self)
         _drop_transient_capture_state(self)
+        if capture_events is not None:
+            capture_events.release_runtime_sidecars()
+            self.__dict__.pop("_capture_events", None)
         return
 
     _vprint(
@@ -551,6 +567,10 @@ def postprocess(
     with _vtimed(self, "  Step 11.5: Populate source var names"):
         _populate_var_names(self)
     _assert_postprocess_contract(self, "11.5")
+
+    if capture_session is not None:
+        with _vtimed(self, "  Step 11.75: Resolve deferred retention"):
+            capture_session.resolve_deferred_retention(self, list(output_tensors))
 
     # Step 12: Undecorate all saved tensors and remove saved grad_fns.
     with _vtimed(self, "  Step 12: Undecorate tensors"):
@@ -632,83 +652,6 @@ def postprocess(
     if getattr(self, "verbose", False):
         print(f"[torchlens] Postprocessing complete ({time.time() - _post_t0:.2f}s)")
     _drop_transient_capture_state(self)
-
-
-def postprocess_fast(self: "Trace") -> None:
-    """Lightweight postprocessing for fast (second-pass) logging mode.
-
-    The fast pass reuses the exhaustive pass's graph structure, loop groupings,
-    and labels. It only needs to:
-    1. Copy out data from each output's parent tensor into the output node.
-    2. Trim and reorder fields.
-    3. Refresh saved-output summaries.
-    4. Undecorate saved tensors.
-    5. Build Layer aggregates.
-    6. Mark the pass as finished.
-
-    Skipped steps (already computed by the exhaustive pass):
-    - Steps 1-4: Graph structure (output nodes, ancestry, orphans, distances)
-    - Steps 5-6: Conditional branches and buffer fixing
-    - Step 7: Loop detection
-    - Steps 8-9: Label mapping and final info logging
-    - Step 16: _build_module_logs — module structure doesn't change between
-      ops and _module_build_data isn't repopulated in fast mode (#108).
-    """
-    _vprint(self, "Fast-pass postprocessing...")
-    # Use layer_dict_main_keys to get Op directly (not Layer)
-    for output_layer_label in self.output_layers:
-        output_layer = cast("Op", self.layer_dict_all_keys[output_layer_label])
-        if not output_layer.parents:
-            continue  # Guard for parentless output layers (#152)
-        parent_layer = cast("Op", self.layer_dict_all_keys[output_layer.parents[0]])
-        parent_contents = parent_layer.out
-        parent_transformed = parent_layer.transformed_out
-        output_layer._internal_set(
-            "out",
-            safe_copy(parent_contents, detach_tensor=self.detach_saved_activations)
-            if parent_contents is not None
-            else None,
-        )
-        output_layer._internal_set(
-            "transformed_out",
-            safe_copy(parent_transformed, detach_tensor=self.detach_saved_activations)
-            if isinstance(parent_transformed, torch.Tensor)
-            else parent_transformed,
-        )
-        output_layer.activation_memory = parent_layer.activation_memory
-        output_layer.transformed_out_shape = parent_layer.transformed_out_shape
-        output_layer.transformed_out_dtype = parent_layer.transformed_out_dtype
-        output_layer.transformed_activation_memory = parent_layer.transformed_activation_memory
-        output_layer.has_saved_activation = parent_layer.has_saved_activation
-        output_layer.has_grad = parent_layer.has_grad
-        output_layer._internal_set("grad", parent_layer.grad)
-        output_layer._internal_set("transformed_grad", parent_layer.transformed_grad)
-        output_layer.transformed_grad_shape = parent_layer.transformed_grad_shape
-        output_layer.transformed_grad_dtype = parent_layer.transformed_grad_dtype
-        output_layer.transformed_gradient_memory = parent_layer.transformed_gradient_memory
-    _refresh_fast_saved_summary(self)
-    _undecorate_all_saved_tensors(self)
-
-    # Gated behind cached cuda.is_available() so CPU-only fast-pass runs don't
-    # pay the CUDA driver / NVML probe cost.
-    if _is_cuda_available():
-        torch.cuda.empty_cache()
-    _log_time_elapsed(self)
-    _build_layer_logs(self)
-    # Note: _build_module_logs is NOT called here because module structure
-    # doesn't change between ops and _module_build_data isn't repopulated
-    # in fast mode (Step 9 is skipped). Existing module logs remain valid. (#108)
-    if self.intervention_ready and not getattr(self, "save_arg_templates", False):
-        self.intervention_ready = False
-    populate_normalized_layer_addresses(self)
-    self.graph_shape_hash = compute_graph_shape_hash(self)
-    _set_tracing_finished(self)
-
-    should_finalize_streaming = getattr(self, "_out_writer", None) is not None and not getattr(
-        self, "_defer_streaming_bundle_finalization", False
-    )
-    if should_finalize_streaming:
-        _finalize_streamed_bundle(self)
-    if should_finalize_streaming and not self._keep_outs_in_memory:
-        _evict_streamed_outs(self)
-    _drop_transient_capture_state(self)
+    if capture_events is not None:
+        capture_events.release_runtime_sidecars()
+        self.__dict__.pop("_capture_events", None)

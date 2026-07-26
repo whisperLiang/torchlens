@@ -8,13 +8,8 @@ model outs:
    parent-child relationships, module context, etc.) into Op entries.
    This builds the complete computational graph.
 
-2. **Fast pass** (``capture_mode="fast"``): Re-runs the model using the graph
-   structure from the exhaustive pass, only saving new out values.
-   Much faster because it skips all metadata collection.  Used by
-   ``save_new_outs()`` to refresh outs for new inputs without
-   rebuilding the entire graph. Public selective saves usually use predicate-time
-   filtering in the primary pass and only reach this path when finalized labels or
-   gradient-specific selections require replay.
+2. **Predicate pass** (``capture_mode="predicate"``): Captures selectively
+   while preserving the shared event journal and fixed-order kernel.
 
 Key ordering constraint:
     RNG state must be captured/restored BEFORE ``active_logging()`` is entered,
@@ -32,7 +27,6 @@ import contextlib
 import random
 import sys
 import time
-from collections import defaultdict
 from collections.abc import Callable, Iterator
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, cast
@@ -51,14 +45,44 @@ from ..ir.container_registry import ModelSite, Phase, Role, walk_container
 from ..quantities import Bytes, Duration
 from .._capture_state_helpers import unwrap_compiled_submodules
 from .config import InternalCaptureConfig
+from .session import (
+    CaptureSession,
+    attach_capture_events_session,
+    attach_legacy_capture_session,
+    detach_capture_session,
+)
 from .stop import StopDirective, evaluate_halt_stop
 
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
 from ..data_classes._lookup_keys import _give_user_feedback_about_lookup_key
 from ..utils.display import _timed_phase, _vprint
+from ..utils.rng import host_rng_advanced, snapshot_host_rng
 
 _ACTIVE_CAPTURE_BACKEND: CaptureBackend | None = None
+
+
+def _cleanup_forward_memory_once(
+    trace: "Trace",
+    backend: CaptureBackend,
+    session: CaptureSession | None,
+) -> None:
+    """Run the legacy forward-memory teardown through the active session.
+
+    Parameters
+    ----------
+    trace
+        Legacy trace compatibility owner.
+    backend
+        Selected capture backend.
+    session
+        Stage-2 run owner, when the compatibility adapter was initialized.
+    """
+
+    if session is None:
+        backend.cleanup_forward_memory(trace)
+        return
+    session.run_cleanup("forward_memory", lambda: backend.cleanup_forward_memory(trace))
 
 
 def _process_rss_bytes() -> int:
@@ -115,10 +139,6 @@ def _forward_peak_memory_bracket(trace: "Trace", device: "object | None") -> "It
     None
         Context body in which the model forward executes.
     """
-
-    if getattr(trace, "capture_mode", None) == "fast":
-        yield
-        return
 
     device_type = getattr(device, "type", None)
     torch_module: Any = None
@@ -444,17 +464,16 @@ def save_new_outs(
     random_seed: int | None = None,
     backward_ready: bool | None = None,
 ) -> None:
-    """Re-run the model with new inputs, saving only outs (fast pass).
+    """Re-run the model with new inputs, saving refreshed outs.
 
     This is the public API for refreshing outs without rebuilding the
     computational graph.  Much faster than ``trace`` because all
     metadata (graph structure, labels, module context) was captured in the
     original exhaustive pass and is reused here.
 
-    The fast pass assumes the computational graph is identical to the exhaustive
-    pass.  If the model has dynamic control flow that changes between inputs,
-    the counter-alignment checks in ``log_function_output_tensors_fast`` will
-    detect the mismatch and raise ``ValueError``.
+    The refresh assumes the computational graph is identical to the original
+    pass. The refresh projector validates the captured graph and raises
+    ``ValueError`` when dynamic control flow changes it.
 
     Parameters
 
@@ -503,63 +522,80 @@ def save_new_outs(
                 layer_log_entry.detach_saved_activations = detach_saved_activations
         return
 
-    # Switch to fast mode: reuse graph structure, only capture new outs.
-    self.capture_mode = "fast"
-    backend = _capture_backend_from_registry(
-        _backend_name_for_trace(self),
-        model,
-        input_args,
-        input_kwargs,
+    from ..user_funcs import _run_model_and_save_specified_outs
+    from .projectors import RefreshProjector
+
+    save_grads_policy = getattr(self, "save_grads", None)
+    layer_nums_to_save = _get_op_nums_from_user_labels(self, layers_to_save)
+    grad_layer_nums_to_save = _get_op_nums_from_user_labels(self, grad_layers_to_save)
+    refresh_seed = self.random_seed if random_seed is None else random_seed
+    resolved_layer_nums: tuple[int, ...] | None = None
+    if layer_nums_to_save != "all":
+        expanded_layer_nums = set(cast(list[int], layer_nums_to_save))
+        for output_label in self.output_layers:
+            output = self.layer_dict_all_keys[output_label]
+            expanded_layer_nums.update(
+                self.layer_dict_all_keys[parent].raw_index for parent in output.parents
+            )
+        resolved_layer_nums = tuple(sorted(expanded_layer_nums))
+    refreshed = _run_model_and_save_specified_outs(
+        model=cast(nn.Module, model),
+        input_args=input_args,
+        input_kwargs=input_kwargs or {},
+        layers_to_save="all" if resolved_layer_nums is None else "none",
+        output_device=getattr(self, "output_device", "same"),
+        activation_transform=getattr(self, "activation_transform", None),
+        grad_transform=getattr(self, "grad_transform", None),
+        save_raw_activations=getattr(self, "save_raw_activations", True),
+        save_raw_gradients=getattr(self, "save_raw_gradients", True),
+        save_mode=getattr(self, "save_mode", "copy"),
+        capture_tensor_grad_hooks=getattr(self, "capture_tensor_grad_hooks", True),
+        keep_orphans=getattr(self, "keep_orphans", False),
+        mark_layer_depths=getattr(self, "mark_layer_depths", False),
+        detach_saved_activations=getattr(self, "detach_saved_activations", False),
+        save_arg_values=getattr(self, "save_arg_values", False),
+        save_grads=save_grads_policy not in (None, False),
+        grads_to_save=grad_layers_to_save,
+        random_seed=refresh_seed,
+        num_context_lines=getattr(self, "num_context_lines", 7),
+        optimizer=getattr(self, "_optimizer", None),
+        save_code_context=getattr(self, "save_code_context", False),
+        save_rng_states=getattr(self, "save_rng_states", False),
+        recurrence_detection=getattr(self, "recurrence_detection", True),
+        verbose=getattr(self, "verbose", False),
+        backward_ready=getattr(self, "backward_ready", False),
+        inference_only=getattr(self, "inference_only", False),
+        output_transform=getattr(self, "_output_transform", None),
+        save_raw_output=getattr(self, "save_raw_output", "small"),
+        retain_output_parents_for_layers_to_save=True,
+        _resolved_layer_nums_to_save=resolved_layer_nums,
+        _resolved_grad_layer_nums_to_save=(
+            grad_layer_nums_to_save
+            if grad_layer_nums_to_save == "all"
+            else tuple(cast(list[int], grad_layer_nums_to_save))
+        ),
+        _refresh_projection_capture=True,
     )
-    backend.set_capture_producer_policy(self, "fast")
-    self._in_exhaustive_pass = False
-
-    # Clear all existing outs from the previous pass.
-    for layer_log_entry in self:
-        layer_log_entry._internal_set("out", None)
-        layer_log_entry._internal_set("transformed_out", None)
-        layer_log_entry.transformed_out_shape = None
-        layer_log_entry.transformed_out_dtype = None
-        layer_log_entry.transformed_activation_memory = None
-        layer_log_entry.has_saved_activation = False
-        layer_log_entry.has_grad = False
-        layer_log_entry._internal_set("grad", None)
-        layer_log_entry._internal_set("transformed_grad", None)
-        layer_log_entry.transformed_grad_shape = None
-        layer_log_entry.transformed_grad_dtype = None
-        layer_log_entry.transformed_gradient_memory = None
-        layer_log_entry.has_out_variations = False
-        # Fast capture rebuilds any needed entries during replay via
-        # _track_fast_parent_output_versions; this reset only clears stale
-        # exhaustive-pass child snapshots.
-        layer_log_entry.out_versions_by_child = {}
-    self._replay_arg_version_data_complete = False
-
-    # Reset per-pass bookkeeping fields.  Graph-level totals (total_activation_memory,
-    # num_tensors) are NOT reset — they describe the static graph structure.
-    self._saved_grad_labels = set()
-    self.has_gradients = False
-    self.num_saved_ops = 0
-    self.saved_activation_memory = Bytes(0)
-    self.total_gradient_memory = Bytes(0)
-    self.saved_gradient_memory = Bytes(0)
-    self.func_calls_duration = Duration(0)  # #87: reset timing
-    # Reset counters so fast-pass operations align 1:1 with exhaustive-pass labels.
-    # Counter alignment is the mechanism that lets the fast pass verify the graph
-    # hasn't changed: same counter value → same raw label → same operation.
-    self._layer_counter = 0
-    self._raw_layer_type_counter = defaultdict(lambda: 0)
-    # #97: clear stale internal lookup caches.  User-facing dicts
-    # (layer_dict_all_keys, _lookup_keys_to_layer_num_dict) are NOT cleared
-    # because _get_op_nums_from_user_labels needs them for layers_to_save lookup
-    # before the new forward pass populates them.  They're rebuilt in postprocessing.
-    if hasattr(self, "_tensor_num_to_lookup_keys_dict"):
-        self._tensor_num_to_lookup_keys_dict.clear()
-
-    # Now run and log the new inputs.
-    _vprint(self, "Running fast pass (saving requested outs)")
-    self._run_and_log_inputs_through_model(
-        model, input_args, input_kwargs, layers_to_save, grad_layers_to_save, random_seed
+    projected_layer_nums = (
+        "all" if layer_nums_to_save == "all" else tuple(cast(list[int], layer_nums_to_save))
+    )
+    projected_grad_layer_nums = (
+        "all"
+        if grad_layer_nums_to_save == "all"
+        else tuple(cast(list[int], grad_layer_nums_to_save))
+    )
+    RefreshProjector(
+        self,
+        projected_layer_nums,
+        projected_grad_layer_nums,
+    ).project(refreshed)
+    # r39 corr2_5: copy the FRESH refresh forward's output-losslessness proof onto the
+    # projected fork. A changed input may select a different return-container KIND than the
+    # original capture, so the live provider must gate its bare-tensor fast path on the fresh
+    # proof (``bare_tensor_root``), not the stale capture-time one. Missing/malformed fresh
+    # proof leaves the field absent -> the live reconstructor fails closed (not faithful).
+    self.__dict__["_runnable_output_losslessness"] = refreshed.__dict__.get(
+        "_runnable_output_losslessness"
     )
     if self.save_arg_values:
         self._replay_arg_version_data_complete = True
@@ -572,7 +608,7 @@ def _get_op_nums_from_user_labels(
 
     Supports exact key match, substring match across all lookup keys, and the
     special sentinel ``"all"`` (which ops through as-is).  Returns sorted
-    unique tensor numbers so the fast pass can check membership efficiently.
+    unique raw operation numbers for refresh projection.
     """
     if which_layers == "all":
         return which_layers  # type: ignore[return-value]
@@ -758,6 +794,250 @@ def _register_model_input_container_snapshots(
         trace.__dict__["input_structure"] = first_spec
 
 
+_OPAQUE_INPUT_LEAF = object()
+"""Sentinel marking a non-tensor input subtree that cannot be witnessed.
+
+Recorded in place of the children under a mapping key that is not representable
+in the frozen literal grammar. The runnable producer treats it as an opaque
+(value-free) leaf, so the run honestly downgrades to ``UNVERIFIABLE`` instead of
+silently skipping the subtree.
+"""
+
+
+def _record_runnable_input_literal_leaves(
+    trace: "Trace",
+    input_args: list[Any],
+    input_kwargs: dict[Any, Any],
+) -> None:
+    """Stash capture-time non-tensor model-input leaves for runnable honesty.
+
+    A sparse runnable descriptor replays the *recorded taken-path* DAG, which is
+    only valid for the recorded inputs. Non-tensor Python inputs
+    (``bool``/``int``/``float``/``str``/``None`` literal leaves) can steer
+    Python-level control flow that TorchLens never observes as an op, so a
+    changed non-tensor input can silently make the recorded path wrong. TorchLens
+    binds only tensor input leaves at run time, so without this record a changed
+    non-tensor input is invisible and the run would falsely report a verified,
+    attested -- but numerically wrong -- result.
+
+    This records the model-boundary non-tensor leaves (site position, container
+    path, and immutable literal value) so the sparse producer can witness them
+    and the runnable executor can diverge on a changed non-tensor input instead
+    of silently replaying the recorded path. It runs only when replay templates
+    are captured (the runnable prerequisite), touches no tensors, and stores an
+    in-memory list consumed by the producer at save time.
+
+    Parameters
+    ----------
+    trace:
+        Active trace.
+    input_args:
+        Normalized positional model inputs.
+    input_kwargs:
+        Normalized keyword model inputs.
+    """
+
+    if not bool(getattr(trace, "intervention_ready", False)):
+        return
+
+    from torchlens._input_walk import tagged_mapping_key_component, walk_input_boundary
+    from torchlens._io.runnable import EMPTY_CONTAINER_PATH_MARKER
+
+    leaves: list[tuple[object, tuple[str | int, ...], Any]] = []
+
+    def _walk_site(position: object, value: Any) -> None:
+        """Record one boundary site's non-tensor leaves through the shared traversal.
+
+        Container dispatch is single-sourced in ``torchlens._input_walk`` (r65
+        Cluster Y): this walker only declares WHAT it records. A mapping child under
+        a literal-grammar key is recorded at its tagged path (bool keys stay distinct
+        from equal-valued int keys in the leaf-path set); a child under a
+        NON-representable key (enum, object, bytes, ...) cannot be
+        re-derived at run time, so the whole subtree is recorded as one OPAQUE marker
+        leaf -- downgrading witness coverage to UNVERIFIABLE rather than silently
+        dropping it (a silently skipped leaf under an exotic key is the false-VERIFIED
+        money bug this walker exists to prevent). An EMPTY container adds no child
+        leaf, so it is witnessed by a synthetic marker leaf carrying its KIND at
+        ``(*path, EMPTY_CONTAINER_PATH_MARKER)`` so an added/removed/kind-changed
+        empty container (which can steer ``'flag' in d`` / ``if not lst`` control
+        flow) diverges instead of silently replaying the recorded path. r42 corr1_2:
+        dataclass containers descend by DECLARED FIELD with the same leaf vocabulary,
+        so a tensor-only dataclass input records ZERO opaque leaves (stays fully
+        witnessable -> VERIFIED) while a genuinely-opaque field still surfaces.
+        """
+
+        walk_input_boundary(
+            value,
+            (),
+            key_component=tagged_mapping_key_component,
+            on_leaf=lambda leaf, p: leaves.append((position, p, leaf)),
+            on_empty_container=lambda kind, p: leaves.append(
+                (position, (*p, EMPTY_CONTAINER_PATH_MARKER), kind)
+            ),
+            on_opaque_key_subtree=lambda _child, p: leaves.append(
+                (position, p, _OPAQUE_INPUT_LEAF)
+            ),
+        )
+
+    for index, arg in enumerate(input_args):
+        _walk_site(("arg", index), arg)
+    for key, value in input_kwargs.items():
+        _walk_site(("kwarg", key), value)
+
+    if leaves:
+        trace.__dict__["_runnable_input_nontensor_leaves"] = tuple(leaves)
+
+
+def _record_runnable_input_structure(
+    trace: "Trace",
+    input_args: list[Any],
+    input_kwargs: dict[Any, Any],
+) -> None:
+    """Stash ONE per-site input-boundary structure snapshot for runnable honesty (r67 C2).
+
+    One traversal per normalized model-input site (the snapshot spine in
+    ``torchlens._input_walk``) records the complete site set/arity and every nested node
+    -- kind, exact ``(module, qualname)`` type, declared child schema, ordered
+    type-strict-encoded mapping keys, registered aux, and the instance-state proof. The
+    runnable producer persists the records as REQUIRED structure facts (positive proof:
+    a site without a snapshot, or a snapshot carrying a refusal, refuses the runnable
+    save); the executor re-derives the runtime snapshot with the SAME function and
+    diverges on any node mismatch. Analysis captures are unaffected.
+    """
+
+    if not bool(getattr(trace, "intervention_ready", False)):
+        return
+
+    from torchlens._input_walk import snapshot_input_boundary
+
+    snapshots: list[dict[str, Any]] = []
+    for index, arg in enumerate(input_args):
+        record = snapshot_input_boundary(arg)
+        record["position"] = ["arg", index]
+        snapshots.append(record)
+    for key, value in input_kwargs.items():
+        record = snapshot_input_boundary(value)
+        record["position"] = ["kwarg", str(key)]
+        snapshots.append(record)
+    trace.__dict__["_runnable_input_structure"] = tuple(snapshots)
+
+
+def _record_runnable_input_tensor_sites(
+    trace: "Trace",
+    input_args: list[Any],
+    input_kwargs: dict[Any, Any],
+) -> None:
+    """Index model-input TENSOR leaves by object identity for metadata-read witnessing.
+
+    A Python-level metadata predicate read on a model input (``x.is_contiguous()`` /
+    ``x.stride()`` / ``x.requires_grad``) can steer control flow that TorchLens never
+    observes as an op: the input contract checks only shape+dtype, so a same-shape
+    runtime input differing in layout or grad flag would silently replay the wrong
+    recorded path. The completeness-witness scoped patch observes such reads during
+    the runnable forward; this map lets it attribute a read RECEIVER back to its
+    model-boundary site (position, container path) so the producer can witness the
+    read fact and the executor can diverge on a mismatched runtime input. Keys are
+    ``id(tensor)`` -- stable for the forward's duration because ``input_args`` /
+    ``input_kwargs`` hold strong references until the capture completes. It runs only
+    for intervention-ready captures and stores no tensors.
+
+    Parameters
+    ----------
+    trace:
+        Active trace.
+    input_args:
+        Normalized positional model inputs.
+    input_kwargs:
+        Normalized keyword model inputs.
+    """
+
+    if not bool(getattr(trace, "intervention_ready", False)):
+        return
+
+    from torchlens._input_walk import raw_mapping_key_component, walk_input_boundary
+
+    sites: dict[int, tuple[object, tuple[str | int, ...]]] = {}
+    # (tensor, site) leaves so the completeness witness can additionally index model-input
+    # leaves by STORAGE identity (r31): a metadata read routed through a ``.data`` / ``.detach()``
+    # alias shares the leaf's storage but is a distinct object the id map above misses.
+    tensor_leaves: list[tuple[Any, tuple[object, tuple[str | int, ...]]]] = []
+
+    def _walk_site(position: object, value: Any) -> None:
+        """Index one boundary site's tensor leaves by identity through the shared traversal.
+
+        Container dispatch is single-sourced in ``torchlens._input_walk`` (r65
+        Cluster Y), so this walker descends EXACTLY the container set the literal
+        walker descends -- including dataclasses (the r64 Finding-1 false-VERIFIED: a
+        missing dataclass branch here recorded no metadata witness for
+        ``box.x.is_contiguous()`` on a dataclass input field, so a same-value
+        non-contiguous twin replayed the captured branch as VERIFIED). Mapping
+        children are indexed under EVERY key with the RAW key component (the declared
+        dual vocabulary, residual R6): a fact site whose path carries a
+        non-representable key simply fails literal encoding at witness time and is
+        dropped, and the literal-leaf walker independently records such a subtree as
+        an OPAQUE leaf that downgrades the run to UNVERIFIABLE -- so a dropped
+        metadata fact under an exotic key can never yield a false VERIFIED.
+        """
+
+        def _index_tensor(tensor: Any, path: tuple[Any, ...]) -> None:
+            """Record one tensor leaf's identity-keyed site."""
+
+            site = (position, path)
+            sites[id(tensor)] = site
+            tensor_leaves.append((tensor, site))
+
+        walk_input_boundary(
+            value, (), key_component=raw_mapping_key_component, on_tensor=_index_tensor
+        )
+
+    for index, arg in enumerate(input_args):
+        _walk_site(("arg", index), arg)
+    for key, value in input_kwargs.items():
+        _walk_site(("kwarg", key), value)
+
+    if sites:
+        trace.__dict__["_runnable_input_tensor_sites"] = sites
+        from ..backends.torch.completeness_witness import record_runnable_input_storage_sites
+
+        record_runnable_input_storage_sites(trace, tensor_leaves)
+
+
+def _record_runnable_module_training_modes(trace: "Trace", model: Any) -> None:
+    """Stash the capture-time per-module ``training`` mode for runnable honesty.
+
+    ``self.training`` is module state that is NOT part of the ``state_dict`` and is not a
+    model input, yet it steers mode-sensitive ops (BatchNorm running-stats vs batch-stats,
+    Dropout on/off). The runnable VERIFIED oracle is a *fresh instance in the captured mode*
+    on the given inputs, so the captured mode is DECLARED state the replay reproduces.
+    Recording it (per submodule -- submodules can differ) lets the producer declare the mode
+    as a witness fact; a mode-sensitive op replayed without a recorded mode fact is downgraded
+    to UNVERIFIABLE (fail closed). It runs only for intervention-ready captures, touches no
+    tensors, and stores an in-memory map consumed by the producer at save time.
+
+    Parameters
+    ----------
+    trace:
+        Active trace.
+    model:
+        The prepared source model whose per-module ``training`` flags are recorded.
+    """
+
+    if not bool(getattr(trace, "intervention_ready", False)):
+        return
+    named_modules = getattr(model, "named_modules", None)
+    if not callable(named_modules):
+        return
+    modes: dict[str, bool] = {}
+    try:
+        for name, module in named_modules():
+            address = name or "self"
+            modes[address] = bool(getattr(module, "training", False))
+    except (AttributeError, TypeError):
+        return
+    if modes:
+        trace.__dict__["_runnable_module_training_modes"] = modes
+
+
 def _extract_and_mark_outputs(
     self: "Trace",
     outputs: Any,
@@ -878,7 +1158,7 @@ def run_and_log_inputs_through_model(
       2. Resolve ``layers_to_save`` to internal tensor numbers.
       3. Normalize/copy inputs, detect device.
       4. Move inputs to model device.
-      5. Capture/restore RNG state for fast-pass reproducibility.
+      5. Capture RNG state for explicit-refresh reproducibility.
       6. Prepare model (one-time decoration + per-session hooks).
       7. Enter ``active_logging()`` context — toggles ``_state._logging_enabled``.
       8. Log source tensors (inputs), then run ``model(*args, **kwargs)``.
@@ -916,12 +1196,23 @@ def run_and_log_inputs_through_model(
         self._layer_nums_to_save = []
         self._grad_op_nums_to_save = []
     else:
-        self._layer_nums_to_save = _get_op_nums_from_user_labels(self, layers_to_save)  # type: ignore[assignment]
-        self._grad_op_nums_to_save = _get_op_nums_from_user_labels(self, grad_layers_to_save)
+        if hasattr(self, "_deferred_retention_selector"):
+            self._layer_nums_to_save = []
+        elif hasattr(self, "_refresh_resolved_layer_nums_to_save"):
+            self._layer_nums_to_save = self.__dict__.pop("_refresh_resolved_layer_nums_to_save")
+        else:
+            self._layer_nums_to_save = _get_op_nums_from_user_labels(self, layers_to_save)  # type: ignore[assignment]
+        if hasattr(self, "_deferred_gradient_selector"):
+            self._grad_op_nums_to_save = []
+        elif hasattr(self, "_refresh_resolved_grad_layer_nums_to_save"):
+            self._grad_op_nums_to_save = self.__dict__.pop(
+                "_refresh_resolved_grad_layer_nums_to_save"
+            )
+        else:
+            self._grad_op_nums_to_save = _get_op_nums_from_user_labels(self, grad_layers_to_save)
 
-    # In fast mode, output layers' out are derived from their parents
-    # (see postprocess_fast).  If the user requested a subset of layers, we must
-    # also include output-layer parents so their outs are available (#46).
+    # Selective captures retain output-layer parents so output payloads remain
+    # available when the synthetic output node itself is requested (#46).
     layer_nums_to_save = cast(Any, self._layer_nums_to_save)
     if layer_nums_to_save != "all" and self._tracing_finished:
         output_parent_nums = set()
@@ -944,6 +1235,8 @@ def run_and_log_inputs_through_model(
 
     self.capture_start_time = time.time()
     input_tensors: list[Any] = []
+    capture_session: CaptureSession | None = None
+    capture_events: object | None = None
     compiled_unwrap_exception: tuple[
         type[BaseException] | None, BaseException | None, TracebackType | None
     ] = (None, None, None)
@@ -974,18 +1267,15 @@ def run_and_log_inputs_through_model(
         self._input_tensor_addresses = list(input_tensor_addresses)
         self._output_attribution_input_tensors = input_tensors
 
-        # RNG state snapshot/restore for two-pass consistency (#58).
-        # Exhaustive pass: snapshot state BEFORE forward so fast pass can replay.
-        # Fast pass: restore the snapshot so dropout masks, etc. are identical,
-        # ensuring the same computational graph (counter alignment depends on this).
+        # RNG state snapshot for deterministic explicit refreshes and legacy
+        # two-pass consistency (#58).
         if self.capture_mode == "exhaustive":
             self._pre_forward_rng_states = backend.snapshot_rng(self)  # type: ignore[attr-defined]
-        elif self.capture_mode == "fast" and hasattr(self, "_pre_forward_rng_states"):
-            backend.restore_rng(self, self._pre_forward_rng_states)
 
         from ..ir import CaptureEvents
 
         self.capture_events = CaptureEvents()
+        capture_events = self.capture_events
         if not isinstance(getattr(self, "_stop_directive", None), StopDirective):
             self._stop_directive = StopDirective(
                 halt_options=getattr(self, "_predicate_save_options", None),
@@ -1005,6 +1295,16 @@ def run_and_log_inputs_through_model(
             postprocess=postprocess,
             stop=self._stop_directive,
         )
+        capture_session = attach_legacy_capture_session(
+            self,
+            backend_token=backend,
+            backend_name=str(_backend_name_for_trace(self)),
+            layers_to_save=layers_to_save,
+            grad_layers_to_save=grad_layers_to_save,
+            random_seed=random_seed,
+            postprocess=postprocess,
+        )
+        attach_capture_events_session(capture_events, capture_session)
 
         with _timed_phase(self, "ctx_build:model_prepare"):
             # One-time model preparation + incremental sys.modules crawl
@@ -1024,6 +1324,32 @@ def run_and_log_inputs_through_model(
             device_str = ", ".join(sorted(devices)) if devices else "unknown"
             _vprint(self, f"Inputs: {len(input_tensors)} tensor(s) on {device_str}")
 
+        if bool(getattr(self, "intervention_ready", False)):
+            from .._runnable_state import (
+                snapshot_capture_state,
+                snapshot_capture_state_signatures,
+                snapshot_persistent_buffer_universe,
+                snapshot_state_alias_topology,
+            )
+
+            # r37 corr2-4: the live bound-state alias topology (object identity,
+            # storage overlap) must be captured BEFORE ``snapshot_capture_state``'s
+            # clones erase it; the runnable producer refuses unsupported topologies
+            # at save and reproduces identity groups from this record.
+            self._runnable_state_alias_topology = snapshot_state_alias_topology(model)
+            # r63 C1: per-slot metadata signatures are stamped from the LIVE tensors
+            # PRE-clone -- the clone itself compacts ``storage_offset`` and
+            # materializes conj/neg, so a post-clone signature is blind to two of
+            # the four transport-lossy physical dims. Consumed by the escape-gated
+            # ``producer_state_metadata`` preflight.
+            self._runnable_capture_state_signatures = snapshot_capture_state_signatures(model)
+            self._runnable_capture_state = snapshot_capture_state(model)
+            # r77 F2: the persistent-buffer NAME universe survives non-tensor state
+            # (``get_extra_state()`` / packed entries), so a dead-model
+            # include_weights=False save declares the SAME slot universe as the
+            # live lane instead of silently dropping never-forward-used buffers.
+            self._runnable_persistent_buffer_universe = snapshot_persistent_buffer_universe(model)
+
         # Turn on the logging toggle and run the forward pass.
         # Inside this context, every decorated torch function will log its
         # inputs/outputs.  Source tensors (model inputs) are logged explicitly
@@ -1034,6 +1360,18 @@ def run_and_log_inputs_through_model(
             for i, t in enumerate(input_tensors):
                 backend.log_source_tensor(self, t, "input", input_tensor_addresses[i])
             _register_model_input_container_snapshots(self, input_args, input_kwargs)
+            _record_runnable_input_literal_leaves(self, input_args, input_kwargs)
+            _record_runnable_input_tensor_sites(self, input_args, input_kwargs)
+            _record_runnable_input_structure(self, input_args, input_kwargs)
+            _record_runnable_module_training_modes(self, model)
+            if bool(getattr(self, "intervention_ready", False)):
+                # r35 decision E: capture the ambient backend execution context the
+                # forward is about to run under (defaults, matmul precision,
+                # determinism, TF32/cuDNN flags, SDP toggles) so the sparse runnable
+                # descriptor can restore it explicitly at replay.
+                from ..utils._torch_compat import snapshot_ambient_execution_context
+
+                self._runnable_capture_ambient = snapshot_ambient_execution_context()
 
             if self.capture_mode == "predicate":
                 outputs = _run_predicate_forward_with_root_frame(
@@ -1048,7 +1386,51 @@ def run_and_log_inputs_through_model(
                 with _timed_phase(self, "dispatch:forward_model"):
                     with _forward_peak_memory_bracket(self, model_device):
                         with backend.inference_context(self):
-                            outputs = cast(Callable[..., Any], model)(*input_args, **input_kwargs)
+                            # Bracket the user forward with host-RNG snapshots so a
+                            # runnable descriptor can honestly record whether Python
+                            # ``random`` / NumPy control flow (an unwitnessed branch)
+                            # ran. TorchLens itself never draws host RNG here (its only
+                            # host draw seeds before this point), so any advance is the
+                            # user's. Reads are side-effect free -> capture unchanged.
+                            # r37 hon1_2: the four-layer channel monitor additionally
+                            # observes NON-global channels (RNG instances, SystemRandom,
+                            # os entropy, clocks, the default_rng factory) over the
+                            # frozen vocabulary. Any touch is permanently unreplayable
+                            # (no identifiable seed); monitor uncertainty downgrades
+                            # completeness, never reads as no-consumption.
+                            from ..utils.rng import host_nondeterminism_monitor
+
+                            _host_rng_before = snapshot_host_rng()
+                            with host_nondeterminism_monitor(model) as _rng_channels:
+                                outputs = cast(Callable[..., Any], model)(
+                                    *input_args, **input_kwargs
+                                )
+                            _global_advanced = host_rng_advanced(
+                                _host_rng_before, snapshot_host_rng()
+                            )
+                            # r65 CLUSTER Z stamping split: a torch RNG
+                            # ``replayable_read`` (the ``initial_seed`` family --
+                            # a host scalar fully determined by the capture seed)
+                            # sets CONSUMED without poisoning the capture seed, so
+                            # a run at the capture seed stays verified while any
+                            # other/absent seed ceilings; ceiling ``channels``
+                            # alone decide UNREPLAYABLE.
+                            self._runnable_host_rng_consumed = (
+                                _global_advanced
+                                or bool(_rng_channels.channels)
+                                or bool(_rng_channels.replayable_reads)
+                            )
+                            self._runnable_host_rng_unreplayable = bool(_rng_channels.channels)
+                            self._runnable_host_rng_channels = tuple(sorted(_rng_channels.channels))
+                            self._runnable_host_rng_replayable_reads = tuple(
+                                sorted(_rng_channels.replayable_reads)
+                            )
+                            self._runnable_rng_monitor_uncertain = bool(_rng_channels.uncertain)
+                            # r39 CLASS A: name the offending threads / coverage failure so
+                            # the INCOMPLETE ceiling's readiness diagnostic is actionable.
+                            self._runnable_rng_monitor_uncertain_detail = tuple(
+                                _rng_channels.uncertain_detail
+                            )
 
         backend.finalize_forward_session(self)
 
@@ -1092,10 +1474,17 @@ def run_and_log_inputs_through_model(
             )
             self._fastlog_output_tensors = list(output_tensors_any)
             self._fastlog_output_tensor_addresses = output_tensor_addresses
+            capture_session.snapshot_recording_projection(
+                self,
+                output_tensors=list(output_tensors_any),
+                output_tensor_addresses=output_tensor_addresses,
+            )
+            self._fastlog_captured_run_core = capture_session.seal()
             self.__dict__.pop("_output_attribution_input_tensors", None)
             backend.cleanup_model_session(self, (model, input_tensors, (input_args, input_kwargs)))
             self.capture_end_time = time.time()
             self.__dict__.pop("_capture_producer_policy", None)
+            capture_session.transition("complete")
             return outputs
 
         output_tensors_any, output_tensor_addresses = backend.extract_and_mark_outputs(
@@ -1108,6 +1497,7 @@ def run_and_log_inputs_through_model(
         _vprint(self, f"Postprocessing {len(self.capture_events.op_events)} operations...")
         self._postprocess(output_tensors, output_tensor_addresses)
         self.__dict__.pop("_capture_producer_policy", None)
+        capture_session.transition("complete")
         return outputs
 
     except HaltSignal as halt_exc:
@@ -1127,26 +1517,58 @@ def run_and_log_inputs_through_model(
                 postprocess,
             )
             self.__dict__.pop("_capture_producer_policy", None)
+            if capture_session is not None:
+                capture_session.transition(
+                    "halted",
+                )
             return halted_output
+        if capture_session is not None and not postprocess:
+            capture_session.snapshot_recording_projection(self)
+            self._fastlog_captured_run_core = capture_session.seal()
         backend.cleanup_halted_forward_session(
             self, (model, input_tensors, (input_args, input_kwargs))
         )
         self.__dict__.pop("_capture_producer_policy", None)
+        if capture_session is not None:
+            capture_session.transition("halted")
         raise
 
     except Exception as e:
         compiled_unwrap_exception = sys.exc_info()
+        if capture_session is not None and not postprocess:
+            capture_session.snapshot_recording_projection(self)
+            self._fastlog_captured_run_core = capture_session.seal()
         backend.cleanup_failed_forward_session(
             self, (model, input_tensors, (input_args, input_kwargs)), e
         )
         self.__dict__.pop("_capture_producer_policy", None)
+        if capture_session is not None:
+            capture_session.transition(
+                "failed",
+            )
         raise e
+
+    except BaseException:
+        # ``except Exception`` above handles ordinary failed-forward diagnostics,
+        # but user code may raise e.g. KeyboardInterrupt or a custom BaseException.
+        # The torch session forces gradient-capable parameters to require grads, so
+        # its teardown must run before re-raising any such escape.
+        compiled_unwrap_exception = sys.exc_info()
+        backend.cleanup_model_session(self, (model, input_tensors, (input_args, input_kwargs)))
+        self.__dict__.pop("_capture_producer_policy", None)
+        if capture_session is not None:
+            capture_session.transition("failed")
+        raise
 
     finally:
         try:
             _clear_saved_activation_dedup_caches(self)
             # Release input tensor references so GC can reclaim backend memory.
             input_tensors = None  # type: ignore[assignment]
-            backend.cleanup_forward_memory(self)
+            try:
+                _cleanup_forward_memory_once(self, backend, capture_session)
+            finally:
+                if capture_session is not None and capture_events is not None:
+                    detach_capture_session(self, capture_events, capture_session)
         finally:
             compiled_unwrap_context.__exit__(*compiled_unwrap_exception)
