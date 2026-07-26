@@ -27,7 +27,6 @@ SAFE_JIT_NAMES = frozenset(
 REJECTED_NESTED_PRIMITIVES = frozenset(
     {
         "cond",
-        "custom_jvp_call",
         "custom_vjp_call",
         "remat2",
         "scan",
@@ -520,7 +519,9 @@ def interpret_closed_jaxpr_with_inlining(
                 for var, value in zip(eqn.outvars, outputs):
                     _write_env(env, var, value, core)
                 continue
-            if primitive_name in {"custom_jvp_call", "custom_vjp_call"}:
+            if primitive_name == "custom_vjp_call" or (
+                primitive_name == "custom_jvp_call" and not _can_inline_call(eqn, core)
+            ):
                 if jax_control_flow == "reject":
                     raise ValueError(f"unsupported nested primitive: {primitive_name}")
                 outputs = _interpret_region(
