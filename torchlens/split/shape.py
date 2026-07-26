@@ -33,15 +33,6 @@ class SymbolicShape:
         return self.dims
 
 
-@dataclass(frozen=True)
-class ShapeEnv:
-    """Runtime shape environment for a prepared split."""
-
-    batch_symbol: str
-    traced_batch_size: int | None
-    dynamic_batch: tuple[int, int] | None = None
-
-
 def infer_traced_batch_size(trace: Any) -> int | None:
     """Infer the leading traced batch dimension from trace input layers.
 
@@ -269,7 +260,6 @@ def is_dynamic_batch_shape_sensitive_op(*names: str | None) -> bool:
 
 
 __all__ = [
-    "ShapeEnv",
     "SymbolicDim",
     "SymbolicShape",
     "infer_traced_batch_size",

@@ -236,11 +236,13 @@ def _paddle_can_handle(
     if _contains_other_backend_tensor("paddle", input_args, input_kwargs):
         return False
     try:
-        import paddle  # noqa: F401
+        import paddle
     except ImportError:
         return False
-    return _is_paddle_object_hint(model) or any(
-        _is_paddle_object_hint(leaf)
+    if isinstance(model, paddle.nn.Layer) or _is_paddle_object_hint(model):
+        return True
+    return any(
+        isinstance(leaf, paddle.Tensor) or _is_paddle_object_hint(leaf)
         for leaf in (*_simple_leaves(input_args), *_simple_leaves(input_kwargs))
     )
 

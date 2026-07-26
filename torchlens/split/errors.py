@@ -34,10 +34,10 @@ class SplitErrorContext:
 
     backend: str
     split_point: str
-    module_path: str | None
-    op_type: str | None
-    layer_label: str | None
     reason: str
+    module_path: str | None = None
+    op_type: str | None = None
+    layer_label: str | None = None
     traced_shape: Any | None = None
     runtime_shape: Any | None = None
     dtype: str | None = None

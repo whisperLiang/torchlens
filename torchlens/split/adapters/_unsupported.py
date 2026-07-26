@@ -29,9 +29,6 @@ class UnsupportedSplitAdapter(SplitPolicyMixin):
             context=SplitErrorContext(
                 backend=self.name,
                 split_point="",
-                module_path=None,
-                op_type=None,
-                layer_label=None,
                 reason=f"unsupported split {capability}",
             ),
         )

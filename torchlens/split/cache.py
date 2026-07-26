@@ -95,9 +95,6 @@ def save_boundary(
             context=SplitErrorContext(
                 backend=boundary.backend,
                 split_point=str(boundary.metadata.get("split_id", "")),
-                module_path=None,
-                op_type=None,
-                layer_label=None,
                 reason="unsupported boundary cache",
             ),
         )

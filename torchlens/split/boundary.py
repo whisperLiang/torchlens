@@ -78,9 +78,6 @@ class ReplayBoundary:
                 context=SplitErrorContext(
                     backend=self.backend,
                     split_point=str(split_id),
-                    module_path=None,
-                    op_type=None,
-                    layer_label=None,
                     reason="split_id mismatch",
                 ),
             )
@@ -99,9 +96,6 @@ class ReplayBoundary:
                     context=SplitErrorContext(
                         backend=self.backend,
                         split_point=str(split_id or self.metadata.get("split_id", "")),
-                        module_path=None,
-                        op_type=None,
-                        layer_label=None,
                         reason=f"{field_name} mismatch",
                     ),
                 )
@@ -111,9 +105,6 @@ class ReplayBoundary:
                 context=SplitErrorContext(
                     backend=self.backend,
                     split_point=str(split_id or self.metadata.get("split_id", "")),
-                    module_path=None,
-                    op_type=None,
-                    layer_label=None,
                     reason="tensor id set mismatch",
                 ),
             )
@@ -123,9 +114,6 @@ class ReplayBoundary:
                 context=SplitErrorContext(
                     backend=self.backend,
                     split_point=str(split_id or self.metadata.get("split_id", "")),
-                    module_path=None,
-                    op_type=None,
-                    layer_label=None,
                     reason="spec id set mismatch",
                 ),
             )

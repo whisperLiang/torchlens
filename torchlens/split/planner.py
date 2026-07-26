@@ -7,14 +7,14 @@ from hashlib import sha256
 from math import floor
 from typing import Literal
 
-from ..intervention.types import CapturedArgTemplate
 from .errors import SplitRequestError
 from .frontier import (
     boundary_key_for_node,
     classify_boundary_role,
     make_boundary_schema,
 )
-from .graph import ReplayValueRef, SplitTraceGraph, SplitTraceNode
+from .graph import SplitTraceGraph, SplitTraceNode
+from .graph import iter_replay_value_refs as _walk_replay_value_refs
 from .ir import BoundarySchema, SplitRequest
 
 BoundaryKind = Literal["after", "before"]
@@ -281,24 +281,6 @@ def _validate_replay_dependencies(graph: SplitTraceGraph) -> None:
                 f"Replay node {node.canonical_id!r} has untracked canonical dependencies "
                 f"{tuple(sorted(missing))!r}."
             )
-
-
-def _walk_replay_value_refs(component: object) -> tuple[ReplayValueRef, ...]:
-    """Return replay value references from one nested template component."""
-
-    if isinstance(component, ReplayValueRef):
-        return (component,)
-    if isinstance(component, CapturedArgTemplate):
-        return tuple(
-            ref
-            for item in (*component.args, *(value for _key, value in component.kwargs))
-            for ref in _walk_replay_value_refs(item)
-        )
-    if isinstance(component, (tuple, list)):
-        return tuple(ref for item in component for ref in _walk_replay_value_refs(item))
-    if isinstance(component, dict):
-        return tuple(ref for item in component.values() for ref in _walk_replay_value_refs(item))
-    return ()
 
 
 def _split_id(graph: SplitTraceGraph, spec: SplitRequest, target: SplitTraceNode) -> str:

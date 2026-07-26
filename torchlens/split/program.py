@@ -402,7 +402,6 @@ def build_capability_report(
                     node_id: dict(diagnostics)
                     for node_id, diagnostics in graph.shape_program.witness_axis_diagnostics.items()
                 },
-                "topology_consistent_witnesses": graph.shape_program.witness_batch_sizes,
                 "unresolved": dict(graph.shape_program.unresolved),
                 "recipes": {
                     node_id: [recipe.recipe_id for recipe in recipes]
@@ -471,9 +470,6 @@ def ensure_capability_report_supported(
         context=SplitErrorContext(
             backend=report.backend,
             split_point=spec.boundary,
-            module_path=None,
-            op_type=None,
-            layer_label=None,
             reason="split preflight rejected",
         ),
     )

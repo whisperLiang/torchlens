@@ -3069,9 +3069,11 @@ def _build_param_fields(
     """
     _param_logs = []
     resolved_parameters = []
+    param_addresses: list[tuple[torch.nn.Parameter, str | None]] = []
     for param in arg_parameters:
         param_meta = get_param_meta(param)
         addr = None if param_meta is None else param_meta.param_address
+        param_addresses.append((param, addr))
         if addr is not None and addr in self.param_logs:
             param_log = self.param_logs[addr]
             if getattr(param_log, "_param_ref", None) is not param:
@@ -3089,12 +3091,7 @@ def _build_param_fields(
     fields_dict["param_shapes"] = [tuple(param.shape) for param in resolved_parameters]
     fields_dict["num_params"] = sum(prod(shape) for shape in fields_dict["param_shapes"])
     logged_addresses = {pl.address for pl in _param_logs}
-    unlogged_params = []
-    for param in arg_parameters:
-        param_meta = get_param_meta(param)
-        addr = None if param_meta is None else param_meta.param_address
-        if addr not in logged_addresses:
-            unlogged_params.append(param)
+    unlogged_params = [param for param, addr in param_addresses if addr not in logged_addresses]
     fields_dict["num_params_trainable"] = sum(
         pl.num_params for pl in _param_logs if pl.is_trainable
     ) + sum(param.numel() for param in unlogged_params if param.requires_grad)

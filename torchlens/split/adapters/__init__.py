@@ -45,9 +45,6 @@ def resolve_split_adapter(backend: BackendSpec | str) -> SplitBackendAdapter:
         context=SplitErrorContext(
             backend=name,
             split_point="",
-            module_path=None,
-            op_type=None,
-            layer_label=None,
             reason="unknown split backend adapter",
         ),
     )

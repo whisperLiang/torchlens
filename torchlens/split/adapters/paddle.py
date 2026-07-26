@@ -430,9 +430,6 @@ class PaddleGeneratedPrefix(_PaddleGeneratedSegmentBase):
                 context=SplitErrorContext(
                     backend="paddle",
                     split_point=self.spec.boundary,
-                    module_path=None,
-                    op_type=None,
-                    layer_label=None,
                     reason="input count mismatch",
                 ),
             )

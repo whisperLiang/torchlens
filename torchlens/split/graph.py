@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from functools import cached_property
 from hashlib import sha256
 from typing import Any, Literal
 
@@ -82,13 +84,13 @@ class SplitTraceGraph:
     traced_batch_size: int | None
     shape_program: Any | None = None
 
-    @property
+    @cached_property
     def node_by_id(self) -> dict[str, SplitTraceNode]:
         """Return nodes keyed by canonical ID."""
 
         return {node.canonical_id: node for node in self.nodes}
 
-    @property
+    @cached_property
     def node_by_label(self) -> dict[str, SplitTraceNode]:
         """Return nodes keyed by unique final display label."""
 
@@ -104,7 +106,7 @@ class SplitTraceGraph:
             labels.pop(label, None)
         return labels
 
-    @property
+    @cached_property
     def node_id_by_alias(self) -> dict[str, str]:
         """Return unique raw/display/canonical label aliases to canonical IDs."""
 
@@ -131,13 +133,13 @@ class SplitTraceGraph:
             return None
         return self.node_by_id[node_id]
 
-    @property
+    @cached_property
     def order_by_id(self) -> dict[str, int]:
         """Return topological order indexes keyed by canonical ID."""
 
         return {node.canonical_id: index for index, node in enumerate(self.nodes)}
 
-    @property
+    @cached_property
     def compute_nodes(self) -> tuple[SplitTraceNode, ...]:
         """Return eligible compute-ish nodes before target-specific rejection."""
 
@@ -147,7 +149,7 @@ class SplitTraceGraph:
             if not (node.is_input or node.is_output or node.is_buffer or node.is_buffer_only_source)
         )
 
-    @property
+    @cached_property
     def replay_calls(self) -> tuple[ReplayCall, ...]:
         """Return compute nodes grouped by captured backend invocation."""
 
@@ -172,7 +174,7 @@ class SplitTraceGraph:
             for members in groups
         )
 
-    @property
+    @cached_property
     def replay_call_by_output_id(self) -> dict[str, ReplayCall]:
         """Return normalized calls keyed by each canonical output value ID."""
 
@@ -284,12 +286,14 @@ def _attach_paddle_capture_templates(
 ) -> list[SplitTraceNode]:
     """Attach Paddle replay templates that live on backend capture records."""
 
-    params_by_module: dict[str, tuple[Any, ...]] = {}
+    grouped_params: dict[str, list[Any]] = {}
     for param in getattr(trace, "param_logs", ()) or ():
         module_address = getattr(param, "module_address", None)
         if isinstance(module_address, str):
-            params_by_module.setdefault(module_address, ())
-            params_by_module[module_address] = (*params_by_module[module_address], param)
+            grouped_params.setdefault(module_address, []).append(param)
+    params_by_module: dict[str, tuple[Any, ...]] = {
+        address: tuple(params) for address, params in grouped_params.items()
+    }
 
     captures = {
         str(getattr(capture, "label_raw")): capture
@@ -598,28 +602,28 @@ def _unresolved_parent_refs(component: Any) -> tuple[str, ...]:
     return ()
 
 
+def iter_replay_value_refs(component: Any) -> tuple["ReplayValueRef", ...]:
+    """Return replay value references from a template tree, preserving multiplicity."""
+
+    if isinstance(component, ReplayValueRef):
+        return (component,)
+    if isinstance(component, CapturedArgTemplate):
+        return tuple(
+            ref
+            for item in (*component.args, *(value for _key, value in component.kwargs))
+            for ref in iter_replay_value_refs(item)
+        )
+    if isinstance(component, (tuple, list)):
+        return tuple(ref for item in component for ref in iter_replay_value_refs(item))
+    if isinstance(component, Mapping):
+        return tuple(ref for item in component.values() for ref in iter_replay_value_refs(item))
+    return ()
+
+
 def _canonical_replay_value_refs(component: Any) -> tuple[str, ...]:
     """Return canonical value IDs referenced by a replay template tree."""
 
-    if isinstance(component, ReplayValueRef):
-        return (component.value_id,)
-    if isinstance(component, CapturedArgTemplate):
-        return tuple(
-            value_id
-            for item in (*component.args, *(value for _key, value in component.kwargs))
-            for value_id in _canonical_replay_value_refs(item)
-        )
-    if isinstance(component, (tuple, list)):
-        return tuple(
-            value_id for item in component for value_id in _canonical_replay_value_refs(item)
-        )
-    if isinstance(component, dict):
-        return tuple(
-            value_id
-            for item in component.values()
-            for value_id in _canonical_replay_value_refs(item)
-        )
-    return ()
+    return tuple(ref.value_id for ref in iter_replay_value_refs(component))
 
 
 def _normalize_node_replay_refs(
@@ -657,8 +661,9 @@ def _normalize_node_replay_refs(
             )
         )
     normalized = tuple(normalized_nodes)
-    unresolved = {
-        node.canonical_id: tuple(
+    unresolved: dict[str, tuple[str, ...]] = {}
+    for node in normalized:
+        refs = tuple(
             dict.fromkeys(
                 (
                     *_unresolved_parent_refs(node.args_template),
@@ -666,10 +671,8 @@ def _normalize_node_replay_refs(
                 )
             )
         )
-        for node in normalized
-        if _unresolved_parent_refs(node.args_template)
-        or _unresolved_parent_refs(node.kwargs_template)
-    }
+        if refs:
+            unresolved[node.canonical_id] = refs
     if unresolved:
         from .errors import SplitUnsupportedError
 

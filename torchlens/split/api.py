@@ -7,7 +7,7 @@ from typing import Any
 from ..backends import resolve_backend_spec
 from .adapters import resolve_split_adapter
 from .errors import SplitErrorContext, SplitUnsupportedError
-from .ir import SplitFeatures, SplitRequest
+from .ir import SplitRequest
 from .pipeline import (
     analyze_split_capabilities,
     capture_model,
@@ -27,20 +27,6 @@ def _normalize_inputs(inputs: Any) -> tuple[Any, ...]:
     if isinstance(inputs, tuple):
         return inputs
     return (inputs,)
-
-
-def _features_as_dict(features: SplitFeatures) -> dict[str, Any]:
-    """Serialize requested feature flags for capability diagnostics."""
-
-    return {
-        "replay": features.replay,
-        "dynamic_batch": features.dynamic_batch,
-        "training": features.training,
-        "boundary_cache": features.boundary_cache,
-        "batch_axes": dict(features.batch_axes),
-        "cross_device": features.cross_device,
-        "live_param_sources": features.live_param_sources,
-    }
 
 
 def prepare(
@@ -86,9 +72,6 @@ def prepare(
             context=SplitErrorContext(
                 backend=str(backend_spec.name),
                 split_point=request.boundary,
-                module_path=None,
-                op_type=None,
-                layer_label=None,
                 reason="unsupported split replay",
             ),
         )
@@ -98,9 +81,6 @@ def prepare(
             context=SplitErrorContext(
                 backend=str(backend_spec.name),
                 split_point=request.boundary,
-                module_path=None,
-                op_type=None,
-                layer_label=None,
                 reason="unsupported split training",
             ),
         )
@@ -110,9 +90,6 @@ def prepare(
             context=SplitErrorContext(
                 backend=str(backend_spec.name),
                 split_point=request.boundary,
-                module_path=None,
-                op_type=None,
-                layer_label=None,
                 reason="unsupported dynamic batch",
             ),
         )
@@ -139,7 +116,7 @@ def prepare(
         suffix_program=suffix_program,
         graph_ir=graph_ir,
         model_profile=profile,
-        features=_features_as_dict(request.features),
+        features=request.features.as_dict(),
     )
     if request.validation == "strict":
         ensure_capability_report_supported(capability_report, request)

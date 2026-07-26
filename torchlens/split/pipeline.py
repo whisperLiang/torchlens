@@ -20,16 +20,10 @@ from .program import (
     build_capability_report,
     lower_replay_program,
 )
-from .shape_program import ShapeProgram, compile_shape_program
+from .shape_program import ShapeProgram, _escape_pointer, compile_shape_program
 
 
 _MAX_EXHAUSTIVE_SHAPE_WITNESSES = 32
-
-
-def _escape_pointer(value: str) -> str:
-    """Escape one RFC 6901 JSON Pointer component."""
-
-    return value.replace("~", "~0").replace("/", "~1")
 
 
 def _resize_witness_tree(

@@ -290,9 +290,6 @@ class TfGeneratedPrefix(_TfGeneratedSegmentBase):
                 context=SplitErrorContext(
                     backend="tf",
                     split_point=self.spec.boundary,
-                    module_path=None,
-                    op_type=None,
-                    layer_label=None,
                     reason="input count mismatch",
                 ),
             )

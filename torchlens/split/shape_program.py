@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from ..intervention.types import CapturedArgTemplate, LiteralValue
 from .errors import SplitBoundaryError, SplitErrorContext, SplitUnsupportedError
-from .graph import ReplayValueRef
+from .graph import iter_replay_value_refs
 
 if TYPE_CHECKING:
     from .adapters.base import SplitBackendAdapter
@@ -264,25 +264,6 @@ class ShapeProgram:
         default_factory=dict
     )
 
-    def bind(
-        self,
-        inputs: tuple[Any, ...],
-        input_kwargs: Mapping[str, Any] | None,
-        *,
-        adapter: "SplitBackendAdapter",
-        backend: str,
-        split_point: str,
-    ) -> ShapeBinding:
-        """Bind and validate the batch symbol from runtime inputs."""
-
-        leaves = flatten_input_leaves(inputs, input_kwargs, adapter=adapter)
-        return self.bind_flat_values(
-            tuple(leaf.value for leaf in leaves),
-            shape_of=adapter.shape,
-            backend=backend,
-            split_point=split_point,
-        )
-
     def bind_flat_values(
         self,
         values: Sequence[Any],
@@ -306,9 +287,6 @@ class ShapeProgram:
                 context=SplitErrorContext(
                     backend=backend,
                     split_point=split_point,
-                    module_path=None,
-                    op_type=None,
-                    layer_label=None,
                     reason="missing batch input path",
                 ),
             )
@@ -343,9 +321,6 @@ class ShapeProgram:
                 context=SplitErrorContext(
                     backend=backend,
                     split_point=split_point,
-                    module_path=None,
-                    op_type=None,
-                    layer_label=None,
                     reason="inconsistent runtime batch",
                 ),
             )
@@ -357,9 +332,6 @@ class ShapeProgram:
                 context=SplitErrorContext(
                     backend=backend,
                     split_point=split_point,
-                    module_path=None,
-                    op_type=None,
-                    layer_label=None,
                     reason="dynamic batch outside allowed range",
                 ),
             )
@@ -432,9 +404,6 @@ def compile_shape_program(
             context=SplitErrorContext(
                 backend=graph.backend,
                 split_point=request.boundary,
-                module_path=None,
-                op_type=None,
-                layer_label=None,
                 reason="input path alignment failed",
             ),
         )
@@ -873,21 +842,7 @@ def _literal_component(value: Any) -> Any:
 def _template_value_refs(component: Any) -> tuple[str, ...]:
     """Return canonical replay value references while preserving multiplicity."""
 
-    if isinstance(component, ReplayValueRef):
-        return (component.value_id,)
-    if isinstance(component, CapturedArgTemplate):
-        return tuple(
-            value_id
-            for item in (*component.args, *(value for _key, value in component.kwargs))
-            for value_id in _template_value_refs(item)
-        )
-    if isinstance(component, (tuple, list)):
-        return tuple(value_id for item in component for value_id in _template_value_refs(item))
-    if isinstance(component, Mapping):
-        return tuple(
-            value_id for item in component.values() for value_id in _template_value_refs(item)
-        )
-    return ()
+    return tuple(ref.value_id for ref in iter_replay_value_refs(component))
 
 
 def _captured_int_argument(
@@ -1644,27 +1599,6 @@ def _shape_sensitive(op: str) -> bool:
             "tile",
         )
     )
-
-
-def _reshape_batch_axes(
-    output_shape: tuple[int, ...],
-    traced_batch_size: int | None,
-) -> set[int]:
-    """Return candidate output dimensions carrying a batch product."""
-
-    if traced_batch_size is None or traced_batch_size <= 0:
-        return set()
-    exact = {index for index, dim in enumerate(output_shape) if dim == traced_batch_size}
-    if len(exact) == 1:
-        return exact
-    if exact:
-        return set()
-    divisible = {
-        index
-        for index, dim in enumerate(output_shape)
-        if dim > traced_batch_size and dim % traced_batch_size == 0
-    }
-    return divisible if len(divisible) == 1 else set()
 
 
 def shape_semantic_for_node(node: "SplitTraceNode") -> ShapeSemantic | None:

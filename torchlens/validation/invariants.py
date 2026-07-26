@@ -4196,10 +4196,10 @@ def _check_param_xrefs(ml: "Trace") -> None:
     # uses_params forward check
     for lpl in ml.layer_list:
         if lpl.uses_params:
-            if not lpl._param_logs and not lpl.num_params:
+            if not lpl._param_logs:
                 raise MetadataInvariantError(
                     name,
-                    f"Layer '{lpl.layer_label}' has uses_params=True but no param metadata",
+                    f"Layer '{lpl.layer_label}' has uses_params=True but _param_logs is empty",
                 )
 
     # layers_with_params labels exist

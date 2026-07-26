@@ -362,7 +362,7 @@ class SplitGraphIR:
             value_id = _value_id(node)
             value_kind = _value_kind(node)
             source_id = _state_source_id(node)
-            alias_group = _alias_group(node)
+            alias_group = _state_source_id(node)
             values.append(
                 ValueIR(
                     value_id=value_id,
@@ -485,8 +485,7 @@ class SplitGraphIR:
             )
 
         if plan is not None:
-            for key, spec in plan.boundary_spec.items():
-                boundary_schema.append(_boundary_schema_from_spec(key, spec))
+            boundary_schema.extend(plan.boundary_spec.values())
 
         return cls(
             backend=graph.backend,
@@ -537,6 +536,19 @@ class SplitFeatures:
                 raise ValueError("batch_axes keys must be JSON Pointers rooted at /args or /kwargs")
             if not isinstance(axis, int):
                 raise TypeError("batch_axes values must be integer axis indexes")
+
+    def as_dict(self) -> dict[str, Any]:
+        """Serialize requested feature flags for capability diagnostics."""
+
+        return {
+            "replay": self.replay,
+            "dynamic_batch": self.dynamic_batch,
+            "training": self.training,
+            "boundary_cache": self.boundary_cache,
+            "batch_axes": dict(self.batch_axes),
+            "cross_device": self.cross_device,
+            "live_param_sources": self.live_param_sources,
+        }
 
 
 @dataclass(frozen=True)
@@ -736,12 +748,6 @@ def _state_source_id(node: "SplitTraceNode") -> str | None:
     return f"state:{sha256(path.encode('utf-8')).hexdigest()[:16]}"
 
 
-def _alias_group(node: "SplitTraceNode") -> str | None:
-    """Return an alias group based on stable source metadata."""
-
-    source = _state_source_id(node)
-    return source
-
 
 def _is_region_node(node: "SplitTraceNode") -> bool:
     """Return whether a node is represented by an opaque backend region."""
@@ -791,12 +797,6 @@ def _shape_constraint_kind(
         return "shape_producing"
     return "batch_axis"
 
-
-def _boundary_schema_from_spec(key: str, spec: BoundarySchema) -> BoundarySchema:
-    """Convert the existing planner boundary spec to the v2 ABI."""
-
-    del key
-    return spec
 
 
 def _shape_tuple(shape: Any) -> tuple[Any, ...] | None:

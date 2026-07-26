@@ -1021,23 +1021,6 @@ def _mark_static_outputs(trace: Trace, output_label_raws: Sequence[str]) -> None
                 break
 
 
-def _iter_output_tensors(value: object) -> list[Any]:
-    """Return tensor-like leaves from a TensorFlow output container.
-
-    Parameters
-    ----------
-    value
-        Output value.
-
-    Returns
-    -------
-    list[Any]
-        Tensor-like leaves with ``ref`` methods.
-    """
-
-    return [tensor for tensor, _path in _iter_output_tensors_with_paths(value)]
-
-
 def _iter_output_tensors_with_paths(
     value: object,
     path: tuple[object, ...] = (),

@@ -18,7 +18,6 @@ class TrainingStepResult:
 
     loss: Any
     boundary_grads: BoundaryGradients
-    param_grads: dict[str, Any] | None = None
     optimizer_applied: bool = False
 
     def as_tuple(self) -> tuple[Any, BoundaryGradients]:
@@ -63,9 +62,6 @@ def _require_torch(runtime: Any) -> Any:
             context=SplitErrorContext(
                 backend=runtime.adapter.name,
                 split_point=runtime.request.boundary,
-                module_path=None,
-                op_type=None,
-                layer_label=None,
                 reason="unsupported split training",
             ),
         )
@@ -80,11 +76,18 @@ def _context(runtime: Any, reason: str) -> SplitErrorContext:
     return SplitErrorContext(
         backend=runtime.adapter.name,
         split_point=runtime.request.boundary,
-        module_path=None,
-        op_type=None,
-        layer_label=None,
         reason=reason,
     )
+
+
+def _require_training_boundary(runtime: Any, boundary: Any) -> None:
+    """Reject prefix backward for boundaries without a graph-connected prefix."""
+
+    if not boundary.metadata.get("supports_prefix_backward"):
+        raise SplitUnsupportedError(
+            "backward_prefix requires a boundary from run_training_prefix().",
+            context=_context(runtime, "boundary is not graph-connected"),
+        )
 
 
 def _is_diff_tensor(torch: Any, value: Any) -> bool:
@@ -102,9 +105,6 @@ def _default_loss(torch: Any, output: Any, targets: Any) -> Any:
             context=SplitErrorContext(
                 backend="torch",
                 split_point="",
-                module_path=None,
-                op_type=None,
-                layer_label=None,
                 reason="default loss requires tensor output and target",
             ),
         )
@@ -259,9 +259,6 @@ def _default_tf_loss(tf: Any, output: Any, targets: Any) -> Any:
             context=SplitErrorContext(
                 backend="tf",
                 split_point="",
-                module_path=None,
-                op_type=None,
-                layer_label=None,
                 reason="default loss requires tensor output",
             ),
         )
@@ -352,9 +349,6 @@ def _default_paddle_loss(paddle: Any, output: Any, targets: Any) -> Any:
             context=SplitErrorContext(
                 backend="paddle",
                 split_point="",
-                module_path=None,
-                op_type=None,
-                layer_label=None,
                 reason="default loss requires tensor output",
             ),
         )
@@ -433,7 +427,7 @@ def _is_diff_jax_tensor(value: Any) -> bool:
 def _default_jax_loss(output: Any, targets: Any) -> Any:
     """Compute a default JAX split-training loss."""
 
-    jnp = __import__("jax.numpy", fromlist=["numpy"])
+    import jax.numpy as jnp
     target_dtype = getattr(getattr(targets, "dtype", None), "kind", None)
     if target_dtype in {"i", "u"} and len(output.shape) >= 2:
         if len(targets.shape) == len(output.shape) - 1:
@@ -518,9 +512,6 @@ def _default_tinygrad_loss(output: Any, targets: Any) -> Any:
             context=SplitErrorContext(
                 backend="tinygrad",
                 split_point="",
-                module_path=None,
-                op_type=None,
-                layer_label=None,
                 reason="default loss requires tensor output",
             ),
         )
@@ -561,13 +552,11 @@ def _tinygrad_optimizer_step(runtime: Any, optimizer: Any | None, *, before: boo
         Tensor.training = previous_training
 
 
-def _tinygrad_clone_grad(value: Any) -> Any:
+def _tinygrad_clone_grad(adapter: Any, value: Any) -> Any:
     """Return a detached realized copy of a tinygrad gradient tensor."""
 
-    from .adapters.tinygrad import TinygradSplitAdapter
-
     try:
-        return TinygradSplitAdapter().clone(value)
+        return adapter.clone(value)
     except (RuntimeError, AssertionError):
         return value
 
@@ -610,7 +599,7 @@ def _train_suffix_tinygrad(
     for key, root in root_tensors.items():
         grad = getattr(root, "grad", None)
         if grad is not None:
-            gradients[key] = _tinygrad_clone_grad(grad)
+            gradients[key] = _tinygrad_clone_grad(runtime.adapter, grad)
     _tinygrad_optimizer_step(runtime, optimizer, before=False)
     return loss, gradients, optimizer is not None
 
@@ -816,9 +805,6 @@ def training_engine_for(backend: str) -> BackendTrainingEngine:
             context=SplitErrorContext(
                 backend=backend,
                 split_point="",
-                module_path=None,
-                op_type=None,
-                layer_label=None,
                 reason="unsupported split training",
             ),
         ) from exc
@@ -870,18 +856,7 @@ def _backward_prefix_torch(
 
     torch = _require_torch(runtime)
     runtime.validate_boundary(boundary, validate_state=False)
-    if not boundary.metadata.get("supports_prefix_backward"):
-        raise SplitUnsupportedError(
-            "backward_prefix requires a boundary from run_training_prefix().",
-            context=SplitErrorContext(
-                backend="torch",
-                split_point=runtime.request.boundary,
-                module_path=None,
-                op_type=None,
-                layer_label=None,
-                reason="boundary is not graph-connected",
-            ),
-        )
+    _require_training_boundary(runtime, boundary)
     prefix_tensors = boundary.metadata.get("prefix_boundary_tensors", {})
     tensors: list[Any] = []
     grads: list[Any] = []
@@ -910,11 +885,7 @@ def _backward_prefix_tf(
     import tensorflow as tf
 
     runtime.validate_boundary(boundary, validate_state=False)
-    if not boundary.metadata.get("supports_prefix_backward"):
-        raise SplitUnsupportedError(
-            "backward_prefix requires a boundary from run_training_prefix().",
-            context=_context(runtime, "boundary is not graph-connected"),
-        )
+    _require_training_boundary(runtime, boundary)
     tape = boundary.metadata.get("tf_tape")
     prefix_tensors = boundary.metadata.get("prefix_boundary_tensors", {})
     targets: list[Any] = []
@@ -959,11 +930,7 @@ def _backward_prefix_paddle(
     import paddle
 
     runtime.validate_boundary(boundary, validate_state=False)
-    if not boundary.metadata.get("supports_prefix_backward"):
-        raise SplitUnsupportedError(
-            "backward_prefix requires a boundary from run_training_prefix().",
-            context=_context(runtime, "boundary is not graph-connected"),
-        )
+    _require_training_boundary(runtime, boundary)
     prefix_tensors = boundary.metadata.get("prefix_boundary_tensors", {})
     tensors: list[Any] = []
     grads: list[Any] = []
@@ -998,11 +965,7 @@ def _backward_prefix_jax(
     import jax
 
     runtime.validate_boundary(boundary, validate_state=False)
-    if not boundary.metadata.get("supports_prefix_backward"):
-        raise SplitUnsupportedError(
-            "backward_prefix requires a boundary from run_training_prefix().",
-            context=_context(runtime, "boundary is not graph-connected"),
-        )
+    _require_training_boundary(runtime, boundary)
     keys = [key for key in boundary.spec if key in boundary_grads]
     if not keys:
         return {}
@@ -1026,11 +989,7 @@ def _backward_prefix_tinygrad(
     """Backpropagate tinygrad suffix gradients through a graph-connected prefix."""
 
     runtime.validate_boundary(boundary, validate_state=False)
-    if not boundary.metadata.get("supports_prefix_backward"):
-        raise SplitUnsupportedError(
-            "backward_prefix requires a boundary from run_training_prefix().",
-            context=_context(runtime, "boundary is not graph-connected"),
-        )
+    _require_training_boundary(runtime, boundary)
     prefix_tensors = boundary.metadata.get("prefix_boundary_tensors", {})
     _tinygrad_optimizer_step(runtime, optimizer, before=True)
     applied: dict[str, Any] = {}

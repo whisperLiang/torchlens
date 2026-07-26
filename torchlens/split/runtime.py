@@ -147,7 +147,7 @@ class SplitRuntime:
             suffix_program=suffix_program,
             graph_ir=graph_ir,
             model_profile=self.model_profile,
-            features=_features_as_dict(request),
+            features=request.features.as_dict(),
         )
         if request.validation == "strict":
             ensure_capability_report_supported(capability_report, request)
@@ -199,9 +199,6 @@ class SplitRuntime:
                 context=SplitErrorContext(
                     backend=self.adapter.name,
                     split_point=self.request.boundary,
-                    module_path=None,
-                    op_type=None,
-                    layer_label=None,
                     reason="unsupported training prefix",
                 ),
             )
@@ -240,9 +237,6 @@ class SplitRuntime:
                 context=SplitErrorContext(
                     backend=boundary.backend,
                     split_point=self.request.boundary,
-                    module_path=None,
-                    op_type=None,
-                    layer_label=None,
                     reason="backend mismatch",
                 ),
             )
@@ -383,17 +377,3 @@ def _model_state_fingerprint(model: Any) -> str | None:
             digest.update(repr(value).encode("utf-8"))
     return digest.hexdigest()
 
-
-def _features_as_dict(request: SplitRequest) -> dict[str, Any]:
-    """Serialize request features for a re-bound capability report."""
-
-    features = request.features
-    return {
-        "replay": features.replay,
-        "dynamic_batch": features.dynamic_batch,
-        "training": features.training,
-        "boundary_cache": features.boundary_cache,
-        "batch_axes": dict(features.batch_axes),
-        "cross_device": features.cross_device,
-        "live_param_sources": features.live_param_sources,
-    }
