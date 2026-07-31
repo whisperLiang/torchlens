@@ -3110,7 +3110,7 @@ def _build_param_fields(
     marker via ``_tensor_has_known_provenance``).
     """
     _param_logs = []
-    resolved_parameters = []
+    resolved_parameters: list[torch.nn.Parameter] = []
     param_addresses: list[tuple[torch.nn.Parameter, str | None]] = []
     for param in arg_parameters:
         param_meta = get_param_meta(param)
