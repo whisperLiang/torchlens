@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import torch
 from torch import nn
 
@@ -38,6 +39,27 @@ class TinyReportModel(nn.Module):
         """
 
         return torch.relu(self.proj(x))
+
+
+class FailingShapeModel(nn.Module):
+    """Model that fails at a recorded shape-mismatch boundary."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Fail after completing a ReLU and constant construction.
+
+        Parameters
+        ----------
+        x:
+            Input tensor with four features.
+
+        Returns
+        -------
+        torch.Tensor
+            Unreachable matrix product.
+        """
+
+        activated = torch.relu(x)
+        return activated @ torch.ones(3, 2)
 
 
 def _captured_log() -> tl.Trace:
@@ -82,6 +104,66 @@ def test_explain_returns_sensible_string_for_each_audience() -> None:
         assert "Notable patterns" in text
         assert "TinyReportModel" in text
         assert "No backward passes are recorded" in text
+
+
+def test_explain_json_uses_stable_full_trace_schema() -> None:
+    """JSON reports expose the documented v1 keys for complete traces."""
+
+    report = tl.report.explain(_captured_log(), format="json")
+
+    assert isinstance(report, dict)
+    assert report["schema"] == "torchlens.explain.v1"
+    assert report["capture_status"] == "complete"
+    assert {
+        "audience",
+        "model_class",
+        "layer_count",
+        "operation_count",
+        "saved_tensor_count",
+        "total_tensor_count",
+        "has_backward_pass",
+        "exception_type",
+        "exception_message",
+        "last_completed_op_label",
+        "last_completed_op_shape",
+        "last_completed_op_dtype",
+        "last_completed_op_device",
+        "failing_boundary",
+        "first_nonfinite",
+    }.issubset(report)
+
+
+def test_explain_and_audit_diagnose_real_partial_failure() -> None:
+    """Partial reports name recorded last-op and captured exception evidence."""
+
+    with pytest.raises(RuntimeError) as exc_info:
+        tl.trace(FailingShapeModel(), torch.randn(2, 4))
+    partial = tl.partial.from_failed_capture(exc_info.value)
+    last = partial.raw_layers[-1]
+    last_label = str(getattr(last, "_label_raw"))
+
+    text = tl.report.explain(partial)
+    report = tl.report.explain(partial, format="json")
+    audit = partial.audit()
+
+    assert isinstance(text, str)
+    assert "This is a partial capture" in text
+    assert last_label in text
+    assert "RuntimeError" in text
+    assert "mat1 and mat2 shapes cannot be multiplied" in text
+    assert isinstance(report, dict)
+    assert report["capture_status"] == "partial"
+    assert report["last_completed_op_label"] == last_label
+    assert report["exception_type"] == "RuntimeError"
+    assert report["exception_message"] == str(exc_info.value)
+    assert "forward at" in report["failing_boundary"]
+    assert audit == tl.debug.audit_trace(partial)
+    failure = next(
+        finding for finding in audit.findings if finding.check == "partial_capture_exception"
+    )
+    assert failure.message == f"RuntimeError: {exc_info.value}"
+    assert failure.ops == (last_label,)
+    assert all("may" not in finding.message.lower() for finding in audit.findings)
 
 
 def test_operational_status_line_reports_real_streamed_ops_not_a_fake_constant(

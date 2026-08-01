@@ -533,6 +533,7 @@ class TraceStatsMixin(_TraceMixinBase):
         *,
         sort_by: Literal["time", "flops", "activation_memory", "param_count"] = "time",
         ascending: bool = False,
+        top_k: int | None = None,
     ) -> "TraceProfile":
         """Return a unified resource profile assembled from this trace.
 
@@ -544,6 +545,8 @@ class TraceStatsMixin(_TraceMixinBase):
             Resource column used for sorting. Time is descending by default.
         ascending:
             Whether to sort the selected metric ascending.
+        top_k:
+            Number of rows to keep after sorting, or ``None`` for all rows.
 
         Returns
         -------
@@ -558,7 +561,13 @@ class TraceStatsMixin(_TraceMixinBase):
 
         from ..report._profile import build_profile
 
-        return build_profile(self, level=level, sort_by=sort_by, ascending=ascending)
+        return build_profile(
+            self,
+            level=level,
+            sort_by=sort_by,
+            ascending=ascending,
+            top_k=top_k,
+        )
 
     def receptive_fields(
         self: "Trace",

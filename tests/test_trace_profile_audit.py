@@ -116,6 +116,46 @@ def test_trace_profile_sparse_save_preserves_honest_availability() -> None:
     assert frame["flops"].notna().any()
 
 
+def test_trace_profile_top_k_truncates_after_sorting() -> None:
+    """top_k retains only the leading rows after the requested stable sort."""
+
+    trace = tl.trace(ProfileModel().eval(), torch.randn(2, 4))
+    full = trace.profile(sort_by="activation_memory").to_pandas()
+    bottlenecks = trace.profile(sort_by="activation_memory", top_k=3).to_pandas()
+
+    assert len(bottlenecks) == 3
+    assert bottlenecks["name"].tolist() == full["name"].tolist()[:3]
+
+
+def test_trace_profile_tree_follows_module_call_nesting() -> None:
+    """Tree indentation follows invocation parents rather than address parsing."""
+
+    profile = tl.trace(ProfileModel().eval(), torch.randn(2, 4)).profile()
+    lines = profile.tree().splitlines()
+
+    features_line = next(line for line in lines if line.endswith("features:1"))
+    linear_line = next(line for line in lines if line.endswith("features.0:1"))
+    assert features_line.startswith("├── ")
+    assert linear_line.startswith("│   ")
+    assert lines.index(linear_line) > lines.index(features_line)
+
+
+def test_trace_profile_honesty_labels_missing_timing_as_unknown() -> None:
+    """Resource provenance distinguishes measured, estimated, and absent values."""
+
+    trace = tl.trace(ProfileModel().eval(), torch.randn(2, 4))
+    missing_timing_op = trace.layer_list[0]
+    missing_timing_op._internal_set("func_duration", None)
+    profile = trace.profile(sort_by="activation_memory")
+    honesty = profile.honesty()
+    row = honesty.loc[honesty["name"] == missing_timing_op.label].iloc[0]
+
+    assert row["time"] == "unknown"
+    assert set(honesty["time"]).issubset({"measured", "unknown"})
+    assert set(honesty["activation_memory"]).issubset({"estimated", "unknown"})
+    assert "estimated" in set(honesty["flops"])
+
+
 def test_trace_audit_clean_model_reports_run_and_skipped_scope() -> None:
     """audit gives a clean result while retaining unsupported-check accounting."""
 
