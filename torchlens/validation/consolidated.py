@@ -102,7 +102,7 @@ def _validate_scope_keywords(
     perturb_saved_grads: bool,
     atol: float,
     rtol: float,
-    validate_layer_grads: bool,
+    validate_layer_grads: bool | None,
     layer_grad_atol: float | None,
     layer_grad_rtol: float | None,
 ) -> None:
@@ -121,7 +121,7 @@ def _validate_scope_keywords(
     rtol:
         Backward relative tolerance.
     validate_layer_grads:
-        Backward layer-gradient validation flag.
+        Backward layer-gradient validation flag, or None when omitted.
     layer_grad_atol:
         Backward layer-gradient absolute tolerance.
     layer_grad_rtol:
@@ -138,7 +138,7 @@ def _validate_scope_keywords(
         _raise_backward_only("atol", scope)
     if rtol != 1e-4:
         _raise_backward_only("rtol", scope)
-    if validate_layer_grads:
+    if validate_layer_grads is not None:
         _raise_backward_only("validate_layer_grads", scope)
     if layer_grad_atol is not None:
         _raise_backward_only("layer_grad_atol", scope)
@@ -302,7 +302,7 @@ def validate(
     perturb_saved_grads: bool = False,
     atol: float = 1e-5,
     rtol: float = 1e-4,
-    validate_layer_grads: bool = False,
+    validate_layer_grads: bool | None = None,
     layer_grad_atol: float | None = None,
     layer_grad_rtol: float | None = None,
     backend: BackendName | None = None,
@@ -335,7 +335,8 @@ def validate(
     rtol:
         Backward-only relative tolerance.
     validate_layer_grads:
-        Backward-only layer-gradient validation flag.
+        Backward-only layer-gradient validation flag. Omission enables honest
+        captured-gradient validation by default for backward scope.
     layer_grad_atol:
         Backward-only layer-gradient absolute tolerance.
     layer_grad_rtol:
@@ -380,7 +381,7 @@ def validate(
             random_seed=random_seed,
             atol=atol,
             rtol=rtol,
-            validate_layer_grads=validate_layer_grads,
+            validate_layer_grads=(True if validate_layer_grads is None else validate_layer_grads),
             layer_grad_atol=layer_grad_atol,
             layer_grad_rtol=layer_grad_rtol,
         )

@@ -100,6 +100,26 @@ class _PlainAttrManagedTensorSnapshot:
 
 
 @dataclasses.dataclass(frozen=True)
+class _PlainAttrE3nnTupleSnapshot:
+    """Value snapshot for e3nn's immutable tuple-backed irreps specs.
+
+    Parameters
+    ----------
+    value:
+        Independent copy used to restore attribute replacement.
+    items:
+        Snapshots of the raw tuple payload, obtained without calling the
+        deliberately unsupported ``Irreps.__len__`` implementation.
+    attributes:
+        Snapshot of any instance attributes attached to the spec.
+    """
+
+    value: Any
+    items: tuple[Any, ...]
+    attributes: dict[str, Any]
+
+
+@dataclasses.dataclass(frozen=True)
 class _CompiledSubmoduleSwap:
     """Snapshot of one temporarily unwrapped compiled submodule slot.
 
@@ -435,7 +455,14 @@ def _snapshot_plain_attr_value(value: Any, attr_path: str) -> Any:
         validation restore. External objects remain unsupported in this path.
     """
 
-    if isinstance(value, (_PlainAttrIdentitySnapshot, _PlainAttrManagedTensorSnapshot)):
+    if isinstance(
+        value,
+        (
+            _PlainAttrIdentitySnapshot,
+            _PlainAttrManagedTensorSnapshot,
+            _PlainAttrE3nnTupleSnapshot,
+        ),
+    ):
         return value
     if value is None or isinstance(value, (bool, int, float, complex, str, bytes)):
         return value
@@ -460,10 +487,39 @@ def _snapshot_plain_attr_value(value: Any, attr_path: str) -> Any:
             for index, item in enumerate(value)
         ]
     if isinstance(value, tuple):
-        if len(value) > _PLAIN_ATTR_MAX_CONTAINER_ITEMS:
+        value_type = type(value)
+        is_e3nn_irreps_tuple = (
+            value_type.__module__ == "e3nn.o3._irreps"
+            and value_type.__qualname__ in {"Irreps", "_MulIr", "Irrep"}
+        )
+        if is_e3nn_irreps_tuple:
+            tuple_len = tuple.__len__(value)
+            if tuple_len > _PLAIN_ATTR_MAX_CONTAINER_ITEMS:
+                raise RuntimeError(
+                    "TorchLens validation deepcopy fallback cannot snapshot plain "
+                    f"attribute '{attr_path}' because its e3nn Irreps has {tuple_len} items."
+                )
+            items = tuple(
+                _snapshot_plain_attr_value(tuple.__getitem__(value, index), f"{attr_path}[{index}]")
+                for index in range(tuple_len)
+            )
+            attributes = _snapshot_plain_attr_value(dict(vars(value)), f"{attr_path}.__dict__")
+            return _PlainAttrE3nnTupleSnapshot(
+                value=copy.deepcopy(value),
+                items=items,
+                attributes=cast(dict[str, Any], attributes),
+            )
+        try:
+            tuple_len = len(value)
+        except Exception as exc:
             raise RuntimeError(
                 "TorchLens validation deepcopy fallback cannot snapshot plain "
-                f"attribute '{attr_path}' because its tuple has {len(value)} items."
+                f"attribute '{attr_path}' because its tuple length is unavailable."
+            ) from exc
+        if tuple_len > _PLAIN_ATTR_MAX_CONTAINER_ITEMS:
+            raise RuntimeError(
+                "TorchLens validation deepcopy fallback cannot snapshot plain "
+                f"attribute '{attr_path}' because its tuple has {tuple_len} items."
             )
         return tuple(
             _snapshot_plain_attr_value(item, f"{attr_path}[{index}]")
@@ -561,6 +617,20 @@ def _plain_attr_values_equal(left: Any, right: Any, attr_path: str) -> bool:
             and left.device == right.device
             and left.manager == right.manager
         )
+    if isinstance(left, _PlainAttrE3nnTupleSnapshot) or isinstance(
+        right, _PlainAttrE3nnTupleSnapshot
+    ):
+        if not isinstance(left, _PlainAttrE3nnTupleSnapshot) or not isinstance(
+            right, _PlainAttrE3nnTupleSnapshot
+        ):
+            return False
+        return _plain_attr_values_equal(left.items, right.items, f"{attr_path}.<items>") and (
+            _plain_attr_values_equal(
+                left.attributes,
+                right.attributes,
+                f"{attr_path}.__dict__",
+            )
+        )
     if isinstance(left, torch.Tensor) or isinstance(right, torch.Tensor):
         if not isinstance(left, torch.Tensor) or not isinstance(right, torch.Tensor):
             return False
@@ -626,6 +696,8 @@ def _plain_attr_restore_value(snapshot: Any) -> Any:
         return snapshot.value
     if isinstance(snapshot, _PlainAttrManagedTensorSnapshot):
         return getattr(snapshot.module, snapshot.name)
+    if isinstance(snapshot, _PlainAttrE3nnTupleSnapshot):
+        return copy.deepcopy(snapshot.value)
     return _snapshot_plain_attr_value(snapshot, "<snapshot>")
 
 
@@ -661,6 +733,7 @@ class _ModuleTreePlainAttrSnapshot:
 
         self._entries: list[tuple[nn.Module, str, str, Any]] = []
         self._module_attr_names: dict[int, tuple[nn.Module, set[str], str]] = {}
+        self._unsupported_attr_paths: list[str] = []
         module_counts: dict[str, int] = {}
         for module in model.modules():
             module_type = type(module).__name__
@@ -674,6 +747,7 @@ class _ModuleTreePlainAttrSnapshot:
                 try:
                     snapshot = _snapshot_module_plain_attr_value(module, name, attr_path)
                 except RuntimeError as exc:
+                    self._unsupported_attr_paths.append(attr_path)
                     warnings.warn(
                         "TorchLens validation deepcopy fallback could not snapshot plain "
                         f"attribute '{attr_path}'; skipping restoration for this attribute "
@@ -690,6 +764,30 @@ class _ModuleTreePlainAttrSnapshot:
                         snapshot,
                     )
                 )
+
+    @property
+    def is_complete(self) -> bool:
+        """Return whether every discovered plain attribute was snapshotted.
+
+        Returns
+        -------
+        bool
+            True only when validation can restore every plain attribute.
+        """
+
+        return not self._unsupported_attr_paths
+
+    @property
+    def unsupported_attr_paths(self) -> tuple[str, ...]:
+        """Return paths whose values could not be snapshotted.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Stable-order unsupported attribute paths.
+        """
+
+        return tuple(self._unsupported_attr_paths)
 
     def restore_changed_attrs(self) -> None:
         """Restore attributes whose values changed since the snapshot.
@@ -1365,11 +1463,24 @@ def _reject_opaque_wrappers(model: nn.Module) -> None:
                 "underlying unwrapped nn.Module."
             )
 
-    # torch.jit.script / torch.jit.trace -> ScriptModule
-    if isinstance(model, torch.jit.ScriptModule):
+    # torch.jit.script / torch.jit.trace -> ScriptModule. Descendants are just
+    # as opaque as a scripted root: their forward executes in the TorchScript
+    # interpreter and their non-state_dict attributes cannot be restored by the
+    # validation fallback.
+    scripted_module = next(
+        (
+            (address, module)
+            for address, module in model.named_modules()
+            if isinstance(module, torch.jit.ScriptModule)
+        ),
+        None,
+    )
+    if scripted_module is not None:
+        address, _module = scripted_module
+        location = "model root" if address == "" else f"submodule '{address}'"
         raise RuntimeError(
             "torchlens.trace does not support torch.jit ScriptModule "
-            "or traced models: the forward runs on the TorchScript interpreter "
+            f"or traced models ({location}): the forward runs on the TorchScript interpreter "
             "rather than Python, so TorchLens' function wrappers don't fire. "
             "Call trace on the original (un-scripted / un-traced) "
             "model."

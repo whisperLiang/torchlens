@@ -79,11 +79,12 @@ class _CustomParamModel(nn.Module):
 
         super().__init__()
         self.weight = nn.Parameter(torch.randn(3, 3))
+        self.output = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run the custom function on a parameterized activation."""
 
-        return _SquareFunction.apply(x @ self.weight).sum()
+        return self.output(_SquareFunction.apply(x @ self.weight)).sum()
 
 
 class _WeightTiedModel(nn.Module):
@@ -397,6 +398,36 @@ def test_validate_backward_pass_correct() -> None:
     model = _TinyBackwardModel()
     x = torch.randn(2, 3, requires_grad=True)
     assert tl_validation.validate_backward_pass(model, x)
+
+
+def test_validate_backward_default_detects_corrupted_captured_op_grad(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default backward validation must read captured ``Op.grad`` payloads."""
+
+    original_log_backward = tl.Trace.log_backward
+    corrupted_labels: list[str] = []
+
+    def corrupt_captured_grad(trace: tl.Trace, *args: object, **kwargs: object) -> object:
+        """Corrupt one captured module-output grad after backward logging."""
+
+        result = original_log_backward(trace, *args, **kwargs)
+        for op in trace.layer_list:
+            grad = getattr(op, "grad", None)
+            if not isinstance(grad, torch.Tensor) or not getattr(op, "modules", None):
+                continue
+            record = op.grads.for_pass(1)
+            record.grad = torch.full_like(grad, 12345.0)
+            corrupted_labels.append(op.label)
+            break
+        return result
+
+    monkeypatch.setattr(tl.Trace, "log_backward", corrupt_captured_grad)
+
+    model = _TinyBackwardModel()
+    x = torch.randn(2, 3, requires_grad=True)
+    assert not tl_validation.validate_backward_pass(model, x, random_seed=42)
+    assert corrupted_labels
 
 
 def test_validate_backward_pass_random_seed_kwarg_public_wrapper() -> None:

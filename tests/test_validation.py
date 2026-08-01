@@ -72,6 +72,15 @@ _TEST_FORWARD_GLOBAL_TENSOR: torch.Tensor | None = None
 _TEST_FORWARD_GLOBAL_PAYLOAD: dict[str, torch.Tensor] | None = None
 
 
+class _ValidationScriptChild(nn.Module):
+    """Scriptable child used to verify nested TorchScript rejection."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return one scripted tensor operation."""
+
+        return torch.relu(x) + 1
+
+
 def _assert_validation_capture_is_clean(model: nn.Module, x: torch.Tensor) -> None:
     """Assert forward validation completes without a completeness-witness gap.
 
@@ -1222,8 +1231,8 @@ def test_validate_forward_pass_deepcopy_fallback_warns_for_registered_state() ->
         assert validate_forward_pass(UndeepcopyableRegisteredState(), torch.randn(3)) is True
 
 
-def test_validate_forward_pass_replay_copy_fallback_warns_for_lock_attr() -> None:
-    """Replay copy failure falls back to live state with an explicit warning."""
+def test_validate_forward_pass_replay_copy_fallback_fails_for_lock_attr() -> None:
+    """An opaque lock makes fallback state restoration unverifiable."""
 
     class LockBackedModel(nn.Module):
         """Model holding an uncopyable external resource."""
@@ -1242,9 +1251,9 @@ def test_validate_forward_pass_replay_copy_fallback_warns_for_lock_attr() -> Non
 
     with pytest.warns(
         RuntimeWarning,
-        match="validation replay against live model state; model could not be copied",
+        match="cannot prove model-state restoration",
     ):
-        assert validate_forward_pass(LockBackedModel(), torch.randn(3)) is True
+        assert validate_forward_pass(LockBackedModel(), torch.randn(3)) is False
 
 
 def test_validate_forward_pass_warns_on_stateful_retrace_divergence() -> None:
@@ -1435,10 +1444,12 @@ def test_ground_truth_copy_fallback_warns_when_plain_attrs_cannot_be_snapshotted
 
     assert fallback_model is model
     assert snapshot is not None
+    assert snapshot.is_complete is False
+    assert snapshot.unsupported_attr_paths == ("UncopyableOpaqueState[0].opaque_state",)
 
 
-def test_unsnapshotable_attr_restores_other_state_and_skips_pristine_retrace() -> None:
-    """An opaque attr preserves replay while safely skipping only the new check."""
+def test_unsnapshotable_attr_fails_closed_before_validation() -> None:
+    """An opaque fallback attribute can never produce a bare validation success."""
 
     class LockBackedToggle(nn.Module):
         """Stateful model with one unsnapshotable but unused lock."""
@@ -1457,27 +1468,107 @@ def test_unsnapshotable_attr_restores_other_state_and_skips_pristine_retrace() -
             self.step += 1
             return output
 
-    diagnostics: list[tuple[ValidationDiagnostic, ...]] = []
-
-    def observe_trace(trace: Trace) -> None:
-        """Retain diagnostics before validation cleans up its trace."""
-
-        diagnostics.append(get_validation_diagnostics(trace))
-
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         result = user_public_impls._validate_forward_pass_torch(
             LockBackedToggle(),
             torch.randn(3),
-            _trace_observer=observe_trace,
         )
 
-    assert result is True
+    assert result is False
     assert any(
         "skipping restoration for this attribute only" in str(item.message) for item in caught
     )
-    assert not any(issubclass(item.category, TraceNotReproducibleWarning) for item in caught)
-    assert diagnostics[0][0].check == "trace_retrace_pristine_copy_unavailable"
+    assert any("cannot prove model-state restoration" in str(item.message) for item in caught)
+
+
+def test_uncopyable_opaque_branch_state_fails_closed() -> None:
+    """Opaque state cannot hide a branch-changing fallback validation."""
+
+    class OpaqueBox:
+        """Mutable opaque state holder."""
+
+        def __init__(self) -> None:
+            """Initialize the branch counter."""
+
+            self.step = 0
+
+    class UncopyableOpaqueEqualOutput(nn.Module):
+        """Change graph shape while preserving values for positive inputs."""
+
+        def __init__(self) -> None:
+            """Initialize uncopyable and opaque state."""
+
+            super().__init__()
+            self.lock = threading.Lock()
+            self.box = OpaqueBox()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Select a branch using opaque mutable state."""
+
+            output = x + 1 if self.box.step == 0 else torch.relu(x) + 1
+            self.box.step += 1
+            return output
+
+    model = UncopyableOpaqueEqualOutput()
+    with pytest.warns(RuntimeWarning, match="cannot prove model-state restoration"):
+        assert validate_forward_pass(model, torch.ones(2, 3), validate_metadata=False) is False
+    assert model.box.step == 0
+
+
+def test_e3nn_irreps_fallback_snapshot_is_complete() -> None:
+    """e3nn ``Irreps`` bypasses its unsupported ``__len__`` without being skipped."""
+
+    o3 = pytest.importorskip("e3nn.o3")
+
+    class IrrepsModel(nn.Module):
+        """Force fallback snapshotting around an e3nn spec."""
+
+        def __init__(self) -> None:
+            """Initialize the immutable tuple-backed spec."""
+
+            super().__init__()
+            self.irreps = o3.Irreps("1x0e + 1x1o")
+
+        def __deepcopy__(self, memo: dict[int, object]) -> "IrrepsModel":
+            """Force validation's plain-attribute fallback."""
+
+            del memo
+            raise TypeError("force fallback")
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return a stable tensor result."""
+
+            return x + 1
+
+    model = IrrepsModel()
+    with pytest.warns(RuntimeWarning, match="could not deepcopy the model"):
+        fallback_model, snapshot = user_public_impls._model_for_ground_truth_validation(model)
+    assert fallback_model is model
+    assert snapshot is not None
+    assert snapshot.is_complete is True
+    assert validate_forward_pass(model, torch.ones(2, 3), validate_metadata=False) is True
+
+
+def test_validate_rejects_nested_script_module_before_snapshot_walk() -> None:
+    """Nested TorchScript is rejected at the same honesty boundary as a scripted root."""
+
+    class NestedScriptModel(nn.Module):
+        """Parent containing an opaque scripted child."""
+
+        def __init__(self) -> None:
+            """Script and register the child module."""
+
+            super().__init__()
+            self.child = torch.jit.script(_ValidationScriptChild())
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Delegate to the scripted child."""
+
+            return self.child(x)
+
+    with pytest.raises(RuntimeError, match="submodule 'child'.*TorchScript interpreter"):
+        validate_forward_pass(NestedScriptModel(), torch.ones(2, 3), validate_metadata=False)
 
 
 def test_validate_forward_pass_ground_truth_copy_strips_traced_forward_wrappers() -> None:
@@ -2402,6 +2493,64 @@ def test_replay_validation_detects_corrupted_third_recurrent_pass_inputs() -> No
     assert any(
         decision["op_label"] == "linear_1_1"
         and decision["phase"] == "replay"
+        and decision["decision"] == "failed"
+        for decision in decision_recorder.as_status().decisions
+    )
+
+
+def test_perturbation_validation_catches_spurious_third_recurrent_pass_edge() -> None:
+    """Every recurrent pass's concrete parent edges must be perturbation-tested."""
+
+    class NanToNumCell(nn.Module):
+        """Replace non-finite values in one tensor."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return finite inputs unchanged."""
+
+            return torch.nan_to_num(x)
+
+    class RecurrentNanToNum(nn.Module):
+        """Apply one ``nan_to_num`` cell repeatedly."""
+
+        def __init__(self) -> None:
+            """Initialize the shared recurrent cell."""
+
+            super().__init__()
+            self.cell = NanToNumCell()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Run five recurrent cell passes."""
+
+            for _ in range(5):
+                x = self.cell(x)
+            return x
+
+    model = RecurrentNanToNum().eval()
+    inputs = torch.tensor(0.5)
+    trace = trace_fn(model, inputs, save_arg_values=True, save_rng_states=True)
+    third_pass = next(op for op in trace.layer_list if op.label == "nantonum_1_1:3")
+    first_pass = next(op for op in trace.layer_list if op.label == "nantonum_1_1:1")
+    assert third_pass.saved_args is not None
+    third_pass.saved_args.append(first_pass.out.detach().clone())
+    third_pass.parents.append(first_pass.label)
+    third_pass.parent_arg_positions["args"][1] = first_pass.label
+
+    decision_recorder = ValidationDecisionRecorder()
+    result = validate_parents_of_saved_layer(
+        trace,
+        "nantonum_1_1",
+        set(),
+        set(),
+        defaultdict(set),
+        deque(),
+        decision_recorder=decision_recorder,
+    )
+
+    assert result.failed
+    assert result.reason == "perturbation_insensitive"
+    assert any(
+        decision["op_label"] == "nantonum_1_1:3"
+        and decision["phase"] == "perturbation"
         and decision["decision"] == "failed"
         for decision in decision_recorder.as_status().decisions
     )

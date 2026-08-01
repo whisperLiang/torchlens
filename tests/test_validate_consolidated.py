@@ -87,6 +87,32 @@ def test_validate_backward_scope(model_and_input: tuple[TinyModel, torch.Tensor]
     assert tl.validate(model, x, scope="backward", loss_fn=loss_fn)
 
 
+def test_validate_backward_scope_detects_corrupted_captured_grad(
+    model_and_input: tuple[TinyModel, torch.Tensor],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The consolidated default must inspect captured gradient payloads."""
+
+    model, x = model_and_input
+    original_log_backward = tl.Trace.log_backward
+
+    def corrupt_captured_grad(trace: tl.Trace, *args: object, **kwargs: object) -> object:
+        """Corrupt one captured module-output grad after backward logging."""
+
+        result = original_log_backward(trace, *args, **kwargs)
+        for op in trace.layer_list:
+            grad = getattr(op, "grad", None)
+            if not isinstance(grad, torch.Tensor) or not getattr(op, "modules", None):
+                continue
+            op.grads.for_pass(1).grad = torch.full_like(grad, 12345.0)
+            break
+        return result
+
+    monkeypatch.setattr(tl.Trace, "log_backward", corrupt_captured_grad)
+
+    assert not tl.validate(model, x, scope="backward", random_seed=42)
+
+
 def test_scope_backward_with_metadata(model_and_input: tuple[TinyModel, torch.Tensor]) -> None:
     """Backward scope forwards default validate_metadata=True."""
 

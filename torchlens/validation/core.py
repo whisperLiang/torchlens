@@ -1450,7 +1450,7 @@ def _representative_ops_for_replay(self: "Trace", ops_to_validate: List[Op]) -> 
 
 
 def _representative_parent_edges(self: "Trace", ops_to_validate: List[Op]) -> List[tuple[Op, str]]:
-    """Return one concrete op edge for each parent Layer edge.
+    """Return every concrete parent edge for perturbation validation.
 
     Parameters
     ----------
@@ -1460,15 +1460,16 @@ def _representative_parent_edges(self: "Trace", ops_to_validate: List[Op]) -> Li
     Returns
     -------
     list of tuple of Op and str
-        Pairs of child op and pass-qualified parent label to perturb.
+        Pairs of concrete child op and pass-qualified parent label to perturb,
+        including every recurrent pass.
     """
 
-    representative_edges: dict[str, tuple[Op, str]] = {}
-    for target_op in ops_to_validate:
-        for parent_label in sorted(_data_parent_labels(target_op)):
-            parent_layer_label = _op_for_validation_label(self, parent_label).layer_label
-            representative_edges.setdefault(parent_layer_label, (target_op, parent_label))
-    return list(representative_edges.values())
+    del self
+    return [
+        (target_op, parent_label)
+        for target_op in ops_to_validate
+        for parent_label in sorted(_data_parent_labels(target_op))
+    ]
 
 
 def _data_parent_labels(op: Op) -> set[str]:
