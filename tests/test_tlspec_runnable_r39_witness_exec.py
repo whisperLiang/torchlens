@@ -24,6 +24,7 @@ import shutil
 import sys
 import threading
 import time
+import types
 import warnings
 from pathlib import Path
 from typing import Any
@@ -119,6 +120,14 @@ class _PlainNumpyRngHolder:
 
 _NUMPY2_INDIRECT_RNG_HOLDER = _PlainNumpyRngHolder()
 
+_RETURNED_BIT_GENERATOR = np.random.PCG64()
+
+
+def _get_returned_bit_generator() -> np.random.BitGenerator:
+    """Return a persistent BitGenerator only after its caller frame has entered."""
+
+    return _RETURNED_BIT_GENERATOR
+
 
 class _FastLocalNumpyRngBranch(nn.Module):
     """Branch on a pre-constructed NumPy RNG reachable only as a helper fast local."""
@@ -172,6 +181,17 @@ class _GlobalObjectNumpyRngBranch(nn.Module):
         else:
             value = float(_NUMPY2_INDIRECT_RNG_HOLDER.randomstate.standard_normal())
         return x * 2.0 if value < 0.0 else x * 3.0
+
+
+class _ReturnedBitGeneratorBranch(nn.Module):
+    """Branch on a direct BitGenerator draw obtained from a helper return value."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Draw through NumPy 2.x's profile-silent ``random_raw`` method."""
+
+        bit_generator = _get_returned_bit_generator()
+        raw = int(bit_generator.random_raw())
+        return x * 2.0 if raw & 1 else x * 3.0
 
 
 class _ThreadedNpGenBranch(nn.Module):
@@ -378,6 +398,108 @@ def test_numpy2_indirect_preconstructed_rng_never_false_verified(
     result = _roundtrip(model_type(rng_kind), x, tmp=tmp_path, capture_seed=1, run_seed=2)
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
+
+
+def test_numpy_frame_digest_scope_cache_keys_code_identity() -> None:
+    """Structurally equal code from distinct origins receives independent scope decisions."""
+
+    source = "def helper():\n    return None\n"
+    internal_namespace: dict[str, Any] = {}
+    user_namespace: dict[str, Any] = {}
+    internal_filename = (
+        rng_utils._NUMPY_FRAME_DIGEST_INTERNAL_PATH_PREFIXES[0] + "synthetic_internal.py"
+    )
+    exec(compile(source, internal_filename, "exec"), internal_namespace)
+    exec(compile(source, "/home/user/my_model.py", "exec"), user_namespace)
+    internal_code = internal_namespace["helper"].__code__
+    user_code = user_namespace["helper"].__code__
+    assert internal_code == user_code
+    assert hash(internal_code) == hash(user_code)
+
+    monitor = rng_utils.host_nondeterminism_monitor(None)
+    assert monitor._numpy_frame_needs_rng_snapshot(internal_code) is False
+    assert monitor._numpy_frame_needs_rng_snapshot(user_code) is True
+
+
+@pytest.mark.skipif(
+    not rng_utils._NUMPY_RNG_METHODS_NEED_FRAME_DIGEST,
+    reason="NumPy build emits c_call for RNG draw methods",
+)
+def test_numpy2_structurally_equal_code_origins_never_false_verified(tmp_path: Path) -> None:
+    """An internal structural code twin cannot suppress a user-frame NumPy digest."""
+
+    class _ConstantRng:
+        def random(self) -> float:
+            """Return a deterministic value through the same callable surface."""
+
+            return 0.25
+
+    source = "def helper():\n    return float(RNG.random())\n"
+    internal_namespace: dict[str, Any] = {"RNG": _ConstantRng()}
+    user_namespace: dict[str, Any] = {"RNG": np.random.default_rng()}
+    internal_filename = (
+        rng_utils._NUMPY_FRAME_DIGEST_INTERNAL_PATH_PREFIXES[0] + "synthetic_internal.py"
+    )
+    exec(compile(source, internal_filename, "exec"), internal_namespace)
+    exec(compile(source, "/home/user/my_model.py", "exec"), user_namespace)
+    internal_helper = internal_namespace["helper"]
+    user_helper = user_namespace["helper"]
+    assert internal_helper.__code__ == user_helper.__code__
+    assert hash(internal_helper.__code__) == hash(user_helper.__code__)
+
+    class _CollisionBranch(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Seed the scope cache from the internal twin before the user draw."""
+
+            internal_helper()
+            value = user_helper()
+            return x * 2.0 if value < 0.5 else x * 3.0
+
+    x = torch.randn(2, 4)
+    assert _host_rng_consumed(_CollisionBranch(), x) is True
+    result = _roundtrip(_CollisionBranch(), x, tmp=tmp_path, capture_seed=1, run_seed=2)
+    assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
+
+
+@pytest.mark.skipif(
+    not rng_utils._NUMPY_RNG_METHODS_NEED_FRAME_DIGEST,
+    reason="NumPy build emits c_call for RNG draw methods",
+)
+def test_numpy2_returned_bit_generator_draw_never_false_verified(tmp_path: Path) -> None:
+    """A profile-silent BitGenerator draw after helper return is digest-witnessed."""
+
+    x = torch.randn(2, 4)
+    assert _host_rng_consumed(_ReturnedBitGeneratorBranch(), x) is True
+    result = _roundtrip(_ReturnedBitGeneratorBranch(), x, tmp=tmp_path, capture_seed=1, run_seed=2)
+    assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
+
+
+@pytest.mark.parametrize(
+    ("receiver", "method_name"),
+    [
+        (types.ModuleType("synthetic_inert_receiver"), "__repr__"),
+        ({}, "get"),
+        ([], "append"),
+        (set(), "add"),
+        ("", "upper"),
+    ],
+    ids=["module", "dict", "list", "set", "str"],
+)
+def test_inert_profile_receiver_types_are_inert_to_tail_classifiers(
+    monkeypatch: Any, receiver: Any, method_name: str
+) -> None:
+    """Every early-return receiver remains meaningless to all tail classifiers."""
+
+    assert type(receiver) in rng_utils._INERT_PROFILE_C_CALL_RECEIVER_TYPES
+    monkeypatch.setattr(rng_utils, "_INERT_PROFILE_C_CALL_RECEIVER_TYPES", frozenset())
+    monitor = rng_utils.host_nondeterminism_monitor(None)
+    frame = types.SimpleNamespace(f_globals={})
+    monitor._classify_c_call(frame, getattr(receiver, method_name))
+    assert monitor.result.channels == set()
+    assert monitor.result.replayable_reads == set()
+    assert monitor.result.uncertain is False
 
 
 @pytest.mark.skipif(
