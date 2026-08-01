@@ -551,7 +551,7 @@ def json(
 
 
 def model_explorer(log: Any, path: str | Path) -> Path:
-    """Export a JSON graph compatible with static graph explorer tools.
+    """Export a JSON graph using Google Model Explorer's graph schema.
 
     Parameters
     ----------
@@ -569,8 +569,17 @@ def model_explorer(log: Any, path: str | Path) -> Path:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     data = _static_graph_data(log)
+    incoming_edges: dict[str, list[dict[str, str]]] = {
+        str(node["id"]): [] for node in data["nodes"]
+    }
+    for edge in data["edges"]:
+        incoming_edges[str(edge["target"])].append({"sourceNodeId": str(edge["source"])})
     payload = {
         "schema": "torchlens.model_explorer.v1",
+        "disclaimer": (
+            "TorchLens writes and structurally validates this Google Model Explorer graph JSON; "
+            "acceptance by any particular external Model Explorer release is not guaranteed."
+        ),
         "graphs": [
             {
                 "id": str(
@@ -581,11 +590,14 @@ def model_explorer(log: Any, path: str | Path) -> Path:
                         "id": node["id"],
                         "label": node["label"],
                         "namespace": node["type"],
-                        "attrs": {"shape": node["shape"], "memory": node["memory"]},
+                        "attrs": [
+                            {"key": "shape", "value": node["shape"]},
+                            {"key": "memory", "value": node["memory"]},
+                        ],
+                        "incomingEdges": incoming_edges[str(node["id"])],
                     }
                     for node in data["nodes"]
                 ],
-                "edges": data["edges"],
             }
         ],
     }
@@ -622,7 +634,10 @@ def netron(log: Any, path: str | Path) -> Path:
         "ir_version": "torchlens-lossy-onnx-shaped-v1",
         "producer_name": "torchlens",
         "runnable": False,
-        "disclaimer": "Lossy ONNX-shaped inspection graph; not a real ONNX runtime model.",
+        "disclaimer": (
+            "TorchLens writes and structurally validates this lossy ONNX-shaped JSON; it is not "
+            "a real ONNX model, is not runnable, and acceptance by Netron is not guaranteed."
+        ),
         "graph": {
             "name": str(getattr(log, "model_class_name", "TorchLens graph")),
             "node": [
