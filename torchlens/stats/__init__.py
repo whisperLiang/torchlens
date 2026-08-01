@@ -291,6 +291,209 @@ class Covariance:
         return self._m2 / (self._count - 1)
 
 
+def _as_feature_matrix(value: Any) -> torch.Tensor:
+    """Return ``value`` as a detached CPU float64 feature matrix.
+
+    Parameters
+    ----------
+    value:
+        Tensor-like batch. One-dimensional inputs are treated as one row.
+
+    Returns
+    -------
+    torch.Tensor
+        A two-dimensional ``(n_rows, n_features)`` tensor.
+    """
+
+    tensor = torch.as_tensor(value).detach().to(device="cpu", dtype=torch.float64)
+    if tensor.ndim == 0:
+        raise ValueError("A feature batch must have at least one dimension.")
+    if tensor.ndim == 1:
+        tensor = tensor.unsqueeze(0)
+    return tensor.reshape(tensor.shape[0], -1)
+
+
+class CrossCovariance:
+    """Running cross-covariance matrix accumulator.
+
+    The accumulator retains only feature-sized running means and the cross
+    second moment. Inputs are converted to detached CPU ``float64`` tensors.
+    """
+
+    def __init__(self, name: str | None = None) -> None:
+        """Initialize the accumulator.
+
+        Parameters
+        ----------
+        name:
+            Optional metric name.
+        """
+
+        self.name = name
+        self._count = 0
+        self._mean_a: torch.Tensor | None = None
+        self._mean_b: torch.Tensor | None = None
+        self._m2: torch.Tensor | None = None
+
+    def update(self, a: Any, b: Any) -> None:
+        """Update cross-covariance from one paired batch.
+
+        Parameters
+        ----------
+        a:
+            First tensor-like batch, with rows as observations.
+        b:
+            Second tensor-like batch, with rows as observations.
+
+        Raises
+        ------
+        ValueError
+            If the batches have different row counts or a feature dimension
+            changes across updates.
+        """
+
+        matrix_a = _as_feature_matrix(a)
+        matrix_b = _as_feature_matrix(b)
+        if matrix_a.shape[0] != matrix_b.shape[0]:
+            raise ValueError(
+                "CrossCovariance requires matched row counts; "
+                f"got {matrix_a.shape[0]} and {matrix_b.shape[0]}."
+            )
+        if self._mean_a is not None and matrix_a.shape[1] != self._mean_a.numel():
+            raise ValueError("CrossCovariance feature dimensions cannot change across updates.")
+        if self._mean_b is not None and matrix_b.shape[1] != self._mean_b.numel():
+            raise ValueError("CrossCovariance feature dimensions cannot change across updates.")
+        for row_a, row_b in zip(matrix_a, matrix_b, strict=True):
+            self._count += 1
+            if self._mean_a is None or self._mean_b is None:
+                self._mean_a = torch.zeros_like(row_a)
+                self._mean_b = torch.zeros_like(row_b)
+                self._m2 = torch.zeros((row_a.numel(), row_b.numel()), dtype=torch.float64)
+            assert self._m2 is not None
+            delta_a = row_a - self._mean_a
+            delta_b = row_b - self._mean_b
+            self._mean_a = self._mean_a + delta_a / self._count
+            self._mean_b = self._mean_b + delta_b / self._count
+            self._m2 = self._m2 + torch.outer(delta_a, row_b - self._mean_b)
+
+    def result(self) -> torch.Tensor:
+        """Return the finalized sample cross-covariance matrix.
+
+        Returns
+        -------
+        torch.Tensor
+            Cross-covariance with shape ``(d_a, d_b)``. Fewer than two rows
+            produce a zero matrix of the established feature shape.
+        """
+
+        if self._m2 is None:
+            return torch.empty((0, 0), dtype=torch.float64)
+        if self._count < 2:
+            return torch.zeros_like(self._m2)
+        return self._m2 / (self._count - 1)
+
+
+class CKA:
+    r"""Streaming linear centered kernel alignment accumulator.
+
+    Linear CKA is
+
+    .. math::
+
+        \operatorname{CKA}(A, B) =
+        \frac{\lVert C_{AB}\rVert_F^2}
+        {\lVert C_{AA}\rVert_F\,\lVert C_{BB}\rVert_F}.
+
+    Only feature-sized covariance terms are retained. If either input has
+    zero variance, ``result()`` returns NaN because the alignment denominator
+    is zero. This follows the linear CKA formulation of Kornblith et al. (2019).
+    """
+
+    def __init__(self, name: str | None = None) -> None:
+        """Initialize the accumulator.
+
+        Parameters
+        ----------
+        name:
+            Optional metric name.
+        """
+
+        self.name = name
+        self._cross = CrossCovariance()
+        self._covariance_a = Covariance()
+        self._covariance_b = Covariance()
+
+    def update(self, a: Any, b: Any) -> None:
+        """Update linear CKA from one paired batch.
+
+        Parameters
+        ----------
+        a:
+            First tensor-like batch, with rows as observations.
+        b:
+            Second tensor-like batch, with rows as observations.
+        """
+
+        matrix_a = _as_feature_matrix(a)
+        matrix_b = _as_feature_matrix(b)
+        self._cross.update(matrix_a, matrix_b)
+        self._covariance_a.update(matrix_a)
+        self._covariance_b.update(matrix_b)
+
+    def result(self) -> float:
+        """Return the finalized linear CKA value.
+
+        Returns
+        -------
+        float
+            Linear CKA, or NaN when either representation has zero variance.
+        """
+
+        cross = self._cross.result()
+        covariance_a = self._covariance_a.result()
+        covariance_b = self._covariance_b.result()
+        numerator = torch.linalg.matrix_norm(cross, ord="fro").square()
+        denominator = torch.linalg.matrix_norm(covariance_a, ord="fro") * torch.linalg.matrix_norm(
+            covariance_b, ord="fro"
+        )
+        if denominator.item() == 0.0:
+            return math.nan
+        return float((numerator / denominator).item())
+
+
+def cka(a: Any, b: Any) -> float:
+    r"""Compute one-shot linear centered kernel alignment.
+
+    Linear CKA is
+
+    .. math::
+
+        \operatorname{CKA}(A, B) =
+        \frac{\lVert C_{AB}\rVert_F^2}
+        {\lVert C_{AA}\rVert_F\,\lVert C_{BB}\rVert_F}.
+
+    This is the linear CKA measure described by Kornblith et al. (2019).
+    Inputs are treated as ``(n_observations, n_features)`` matrices and all
+    computation uses CPU ``float64``. A zero-variance input produces NaN.
+
+    Parameters
+    ----------
+    a:
+        First tensor-like representation.
+    b:
+        Second tensor-like representation with the same row count.
+
+    Returns
+    -------
+    float
+        Linear CKA value, or NaN for a degenerate zero-variance input.
+    """
+
+    accumulator = CKA()
+    accumulator.update(a, b)
+    return accumulator.result()
+
+
 class PCA:
     """Simple incremental PCA backed by running covariance."""
 
@@ -521,7 +724,9 @@ def aggregate(
 
 __all__ = [
     "Aggregator",
+    "CKA",
     "Covariance",
+    "CrossCovariance",
     "Mean",
     "Norm",
     "PCA",
@@ -529,4 +734,5 @@ __all__ = [
     "StreamingStat",
     "TopK",
     "aggregate",
+    "cka",
 ]
