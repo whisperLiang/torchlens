@@ -31,7 +31,7 @@ from collections.abc import Callable, Iterator
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, cast
 
-from torch import nn
+from torch import get_default_dtype, nn
 
 from ..backends import (
     BackendName,
@@ -1347,6 +1347,12 @@ def run_and_log_inputs_through_model(
             # include_weights=False save declares the SAME slot universe as the
             # live lane instead of silently dropping never-forward-used buffers.
             self._runnable_persistent_buffer_universe = snapshot_persistent_buffer_universe(model)
+
+        if str(_backend_name_for_trace(self)) == "torch":
+            # The provenance manifest needs the capture-time default, never the
+            # potentially different save-time default. Runnable-ready captures
+            # replace this minimal snapshot below with the complete ambient record.
+            self._runnable_capture_ambient = {"default_dtype": str(get_default_dtype())}
 
         # Turn on the logging toggle and run the forward pass.
         # Inside this context, every decorated torch function will log its

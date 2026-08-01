@@ -270,6 +270,69 @@ def _corrupt_blob_byte(blob_path: Path) -> None:
     blob_path.write_bytes(bytes(blob_bytes))
 
 
+def test_manifest_provenance_roundtrip_and_hash_determinism(tmp_path: Path) -> None:
+    """Trace saves should carry a compact, deterministic provenance certificate."""
+
+    torch.manual_seed(44)
+    model = _InputTransformModel().eval()
+    inputs = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    captured = trace_fn(model, inputs, layers_to_save="all", random_seed=44)
+    first_path = tmp_path / "first.tlspec"
+    second_path = tmp_path / "second.tlspec"
+
+    save(captured, first_path)
+    save(captured, second_path)
+    restored = load(first_path)
+    first = Manifest.read(first_path / "manifest.json")
+    second = Manifest.read(second_path / "manifest.json")
+
+    assert restored.num_ops == captured.num_ops
+    assert first.provenance is not None
+    assert second.provenance is not None
+    assert first.provenance.provenance_version == 1
+    assert first.provenance.capture_devices == ["cpu"]
+    assert first.provenance.dtype_policy["default_dtype"] == "torch.float32"
+    assert first.provenance.dtype_policy["observed_autocast"]
+    assert first.provenance.input_hash == second.provenance.input_hash
+    assert first.provenance.model_structure_hash == second.provenance.model_structure_hash
+    assert first.provenance.rng_state_digests == second.provenance.rng_state_digests
+    assert len(json.dumps(first.to_dict()["provenance"])) < 16_384
+
+
+def test_manifest_without_optional_provenance_still_loads(tmp_path: Path) -> None:
+    """Pre-change manifests with no provenance block should retain load compatibility."""
+
+    bundle_path, _captured = _save_bundle(tmp_path)
+    manifest = _read_manifest(bundle_path)
+    manifest.pop("provenance")
+    _write_manifest(bundle_path, manifest)
+
+    parsed = Manifest.read(bundle_path / "manifest.json")
+    restored = load(bundle_path)
+
+    assert parsed.provenance is None
+    assert restored.num_ops > 0
+
+
+def test_manifest_git_commit_is_absent_outside_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provenance collection should record no Git hash outside a repository."""
+
+    outside_repo = tmp_path / "outside"
+    outside_repo.mkdir()
+    monkeypatch.chdir(outside_repo)
+    captured = trace_fn(_InputTransformModel(), torch.ones(2, 3), layers_to_save="all")
+    bundle_path = tmp_path / "outside.tlspec"
+
+    save(captured, bundle_path)
+    manifest = Manifest.read(bundle_path / "manifest.json")
+
+    assert manifest.provenance is not None
+    assert manifest.provenance.git_commit_hash is None
+
+
 def test_bundle_roundtrip_preserves_saved_outs_bit_exactly(tmp_path: Path) -> None:
     """Eager bundle load should restore all saved outs exactly."""
 
