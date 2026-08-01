@@ -29,6 +29,7 @@ from ._tl import (
     get_tensor_label,
     get_tensor_meta,
     is_tensor_data_alias,
+    mark_detached_saved_activation,
     session_label_storage_intact,
     session_meta_is_anchored,
     set_tensor_label,
@@ -4459,6 +4460,12 @@ def _save_activation_fields(
                 fields_dict["annotations"],
                 getattr(trace, "save_arg_values", False),
             )
+            if isinstance(raw_out, torch.Tensor):
+                mark_detached_saved_activation(
+                    t,
+                    raw_out,
+                    fields_dict.get("_layer_label_raw"),
+                )
         fields_dict["out"] = raw_out if store_raw else None
         fields_dict["transformed_out"] = None
         fields_dict["transformed_out_shape"] = None
@@ -4608,6 +4615,12 @@ def _save_predicate_activation_fields(
         fields_dict["dtype"],
     )
     fields_dict["out"] = ram_payload
+    if isinstance(ram_payload, torch.Tensor):
+        mark_detached_saved_activation(
+            tensor,
+            ram_payload,
+            fields_dict.get("_layer_label_raw"),
+        )
     fields_dict["transformed_out"] = transformed_ram_payload
     transformed_metadata = transformed_ram_payload
     if transformed_metadata is None:

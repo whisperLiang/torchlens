@@ -40,7 +40,7 @@ from ...ir.events import (
     GradFnFired,
     OpGradObserved,
 )
-from ._tl import get_tensor_label
+from ._tl import detached_saved_activation_label, get_tensor_label
 from .tensor_tracking import _ensure_backward_event_stream
 from .escape_detection import expected_original_call
 
@@ -59,6 +59,50 @@ _CHUNKED_FORWARD_BACKWARD_ERROR = (
     "concatenates forward payloads across independent sub-batches and does not retain a "
     "single full-batch autograd graph. Re-capture without chunk_size to enable deferred backward."
 )
+_NO_GRAD_AUTOGRAD_ERROR = "element 0 of tensors does not require grad and does not have a grad_fn"
+
+
+def _run_with_detached_activation_guidance(
+    roots: Any,
+    engine_callable: Callable[[], Any],
+) -> Any:
+    """Run autograd and augment only a proven TorchLens-detached-root failure.
+
+    Parameters
+    ----------
+    roots:
+        Tensor roots passed to the PyTorch autograd engine.
+    engine_callable:
+        Zero-argument invocation of the original PyTorch entry point.
+
+    Returns
+    -------
+    Any
+        Original autograd return value.
+
+    Raises
+    ------
+    RuntimeError
+        The original PyTorch exception object, with guidance appended to its message only
+        when an exact weak-identity marker and the canonical no-grad failure both match.
+    """
+
+    labels = [
+        label
+        for root in _root_tensors(roots)
+        if (label := detached_saved_activation_label(root)) is not None
+    ]
+    try:
+        return engine_callable()
+    except RuntimeError as exc:
+        if labels and str(exc) == _NO_GRAD_AUTOGRAD_ERROR:
+            guidance = (
+                f"TorchLens retained activation {labels[0]!r} after detaching it from autograd "
+                "in the default capture mode. Re-trace with backward_ready=True before "
+                "building a loss from this saved activation."
+            )
+            exc.args = (f"{exc}\n\n{guidance}", *exc.args[1:])
+        raise
 
 
 def _ensure_not_inference_only_backward(trace: Any) -> None:
@@ -2528,7 +2572,7 @@ def _capture_autograd_engine_call(
     )
     loss = _first_root_tensor(roots)
     if loss is None or not matched_traces:
-        return engine_callable()
+        return _run_with_detached_activation_guidance(roots, engine_callable)
     if len(matched_traces) == 1:
         matched_trace = matched_traces[0]
         root_forward_op_count = _root_forward_op_count(matched_trace, roots)

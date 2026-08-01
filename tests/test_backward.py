@@ -15,6 +15,8 @@ from torchlens.data_classes.grad_fn import GradFn
 from torchlens.ir.events import BackwardPassStart
 from torchlens.options import CaptureOptions, SaveOptions
 
+_NO_GRAD_AUTOGRAD_ERROR = "element 0 of tensors does not require grad and does not have a grad_fn"
+
 
 class _TinyBackwardModel(nn.Module):
     """Small MLP with view op coverage."""
@@ -158,6 +160,75 @@ def _logged_model(
 def _output_loss(trace: tl.Trace) -> torch.Tensor:
     """Return scalar sum loss from the logged output out."""
     return trace[trace.output_layers[0]].out.sum()
+
+
+def _saved_relu(trace: tl.Trace) -> torch.Tensor:
+    """Return the selectively retained ReLU activation from a trace."""
+
+    return next(op.out for op in trace if op.has_saved_activation and op.func_name == "relu")
+
+
+def test_detached_saved_activation_backward_names_backward_ready_remedy() -> None:
+    """A TorchLens-detached retained activation gives targeted backward guidance."""
+
+    model = _TinyBackwardModel()
+    x = torch.randn(2, 3, requires_grad=True)
+    trace = tl.trace(model, x, save=tl.func("relu"))
+    saved = _saved_relu(trace)
+
+    with pytest.raises(RuntimeError, match=r"Re-trace with backward_ready=True") as exc_info:
+        saved.sum().backward()
+
+    assert type(exc_info.value) is RuntimeError
+    assert str(exc_info.value).startswith(_NO_GRAD_AUTOGRAD_ERROR)
+    assert x.grad is None
+
+
+def test_unrelated_detached_tensor_backward_keeps_native_error() -> None:
+    """An unrelated user-detached tensor keeps the unmodified PyTorch error."""
+
+    detached = torch.randn(3, requires_grad=True).detach()
+
+    with pytest.raises(RuntimeError) as exc_info:
+        detached.sum().backward()
+
+    assert str(exc_info.value) == _NO_GRAD_AUTOGRAD_ERROR
+
+    trace = tl.trace(_TinyBackwardModel(), torch.randn(2, 3), save=tl.func("relu"))
+    explicitly_detached = _saved_relu(trace).detach()
+    with pytest.raises(RuntimeError) as marked_exc_info:
+        explicitly_detached.sum().backward()
+
+    assert str(marked_exc_info.value) == _NO_GRAD_AUTOGRAD_ERROR
+
+    metadata_only = torch.randn_like(_saved_relu(trace)).view_as(_saved_relu(trace))
+    with pytest.raises(RuntimeError) as metadata_exc_info:
+        metadata_only.sum().backward()
+
+    assert str(metadata_exc_info.value) == _NO_GRAD_AUTOGRAD_ERROR
+
+
+def test_connected_output_and_backward_ready_saved_activation_are_unchanged() -> None:
+    """Connected model outputs and backward-ready retained activations still backpropagate."""
+
+    output_model = _TinyBackwardModel()
+    output_x = torch.randn(2, 3, requires_grad=True)
+    output_trace = tl.trace(output_model, output_x)
+    output = output_trace.output_ops[0].out
+    output.sum().backward()
+    assert output_x.grad is not None
+
+    ready_model = _TinyBackwardModel()
+    ready_x = torch.randn(2, 3, requires_grad=True)
+    ready_trace = tl.trace(
+        ready_model,
+        ready_x,
+        save=tl.func("relu"),
+        backward_ready=True,
+    )
+    ready_saved = _saved_relu(ready_trace)
+    ready_saved.sum().backward()
+    assert ready_x.grad is not None
 
 
 def test_detached_log_backward_does_not_poison_later_capture() -> None:

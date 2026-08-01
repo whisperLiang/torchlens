@@ -35,10 +35,12 @@ from ...data_classes.func_call_location import FuncCallLocation
 from ._tl import (
     get_param_meta,
     get_tensor_label,
+    has_detached_saved_activations,
     is_tensor_data_alias,
     is_decorated_function,
-    mark_tensor_data_alias,
     mark_decorated_function,
+    mark_tensor_data_alias,
+    propagate_detached_saved_activation,
     set_tensor_label,
 )
 from ...data_classes.internal_types import FuncExecutionContext
@@ -1140,7 +1142,14 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
             ):
                 observe_nonowner_operands(args, kwargs)
             kwargs = _maybe_inject_device_kwarg(func_name, kwargs)
-            return func(*args, **kwargs)
+            out = func(*args, **kwargs)
+            if has_detached_saved_activations():
+                propagate_detached_saved_activation(
+                    func_name,
+                    _collect_tensor_args(args, kwargs),
+                    _collect_output_tensors(out),
+                )
+            return out
 
         trace = cast(Any, _state._active_trace)
         kwargs = _maybe_inject_device_kwarg(func_name, kwargs)
