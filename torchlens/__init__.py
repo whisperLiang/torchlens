@@ -836,6 +836,10 @@ def extract_dataset(
 ) -> dict[str, _torch.Tensor] | list[_Path]:
     """Extract outs from an iterable dataset in batches.
 
+    Row ``i`` of every returned tensor corresponds to stimulus ``i`` in iteration
+    order. Batch files are consumed in ``batch_00000.pt``, ``batch_00001.pt``, ...
+    order.
+
     Parameters
     ----------
     model:

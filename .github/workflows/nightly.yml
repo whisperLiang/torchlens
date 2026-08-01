@@ -10,6 +10,73 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  perf-gate:
+    name: Same-run performance regression gate
+    runs-on: ubuntu-24.04
+    # Scheduled/manual only: two smoke-suite runs cost several minutes and must
+    # not extend the PR-blocking path. Comparing adjacent commits on the same
+    # runner avoids treating developer-machine absolute baselines as portable.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install exact canonical CPU benchmark environment
+        run: |
+          uv venv "${{ runner.temp }}/perf-venv" --python 3.11
+          uv pip install --python "${{ runner.temp }}/perf-venv/bin/python" \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-best-match \
+            -e ".[dev,tabular]" \
+            "torch==2.8.0+cpu" \
+            "torchvision==0.23.0+cpu" \
+            numpy
+
+      - name: Prepare adjacent-commit baseline checkout
+        run: |
+          git worktree add --detach "${{ runner.temp }}/perf-base" HEAD^
+
+      - name: Measure baseline and current commit on the same runner
+        env:
+          PERF_PYTHON: ${{ runner.temp }}/perf-venv/bin/python
+        run: |
+          cd "${{ runner.temp }}/perf-base"
+          PYTHONPATH=. "$PERF_PYTHON" -m benchmarks.perf_suite \
+            --smoke --samples 10 --timeout 180 \
+            --out-json "${{ runner.temp }}/perf-base.json" \
+            --out-md "${{ runner.temp }}/perf-base.md"
+          cd "$GITHUB_WORKSPACE"
+          PYTHONPATH=. "$PERF_PYTHON" -m benchmarks.perf_suite \
+            --smoke --samples 10 --timeout 180 \
+            --out-json "${{ runner.temp }}/perf-current.json" \
+            --out-md "${{ runner.temp }}/perf-current.md"
+
+      - name: Fail on a measured regression
+        env:
+          PERF_PYTHON: ${{ runner.temp }}/perf-venv/bin/python
+        run: |
+          PYTHONPATH=. "$PERF_PYTHON" -m benchmarks.perf_gate \
+            --baseline "${{ runner.temp }}/perf-base.json" \
+            --current "${{ runner.temp }}/perf-current.json" \
+            --out "${{ runner.temp }}/perf-comparison.json"
+
+      - name: Upload performance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-perf-gate
+          path: |
+            ${{ runner.temp }}/perf-base.json
+            ${{ runner.temp }}/perf-current.json
+            ${{ runner.temp }}/perf-comparison.json
+
   fast-tier:
     name: Full fast tier
     runs-on: ubuntu-latest

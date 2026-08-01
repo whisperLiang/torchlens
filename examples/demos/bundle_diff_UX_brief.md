@@ -14,13 +14,13 @@ demo contract.
 ## Layout
 
 - Render as two columns: clean on the left, intervention on the right.
-- Align rows vertically by node pairs from `bundle.aligned_pairs`.
-- Use `bundle.delta_map` for per-node color values.
+- Align rows vertically with `bundle.show_diff(layout="paired")`.
+- Use `bundle.compare(...)["nodes"]` for per-node color values.
 - Unmatched nodes receive a gray border on the side where their pair is missing.
 
 ## Color Scale
 
-- Use a diverging `delta_map` palette from blue→white→red.
+- Use a diverging comparison palette from blue→white→red.
 - The caption legend defines the scale as per-node L2 norm delta.
 
 ## Caption

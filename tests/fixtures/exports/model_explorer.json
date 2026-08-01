@@ -1,0 +1,107 @@
+{
+  "disclaimer": "TorchLens writes and structurally validates this Google Model Explorer graph JSON; acceptance by any particular external Model Explorer release is not guaranteed.",
+  "graphs": [
+    {
+      "id": "<trace-id>",
+      "nodes": [
+        {
+          "attrs": [
+            {
+              "key": "shape",
+              "value": "2x3"
+            },
+            {
+              "key": "memory",
+              "value": "24 B"
+            }
+          ],
+          "id": "input_1",
+          "incomingEdges": [],
+          "label": "input_1",
+          "namespace": "input"
+        },
+        {
+          "attrs": [
+            {
+              "key": "shape",
+              "value": "2x4"
+            },
+            {
+              "key": "memory",
+              "value": "32 B"
+            }
+          ],
+          "id": "linear_1_1",
+          "incomingEdges": [
+            {
+              "sourceNodeId": "input_1"
+            }
+          ],
+          "label": "linear_1_1",
+          "namespace": "parameterized"
+        },
+        {
+          "attrs": [
+            {
+              "key": "shape",
+              "value": "2x4"
+            },
+            {
+              "key": "memory",
+              "value": "32 B"
+            }
+          ],
+          "id": "relu_1_2",
+          "incomingEdges": [
+            {
+              "sourceNodeId": "linear_1_1"
+            }
+          ],
+          "label": "relu_1_2",
+          "namespace": "operation"
+        },
+        {
+          "attrs": [
+            {
+              "key": "shape",
+              "value": "2x2"
+            },
+            {
+              "key": "memory",
+              "value": "16 B"
+            }
+          ],
+          "id": "linear_2_3",
+          "incomingEdges": [
+            {
+              "sourceNodeId": "relu_1_2"
+            }
+          ],
+          "label": "linear_2_3",
+          "namespace": "parameterized"
+        },
+        {
+          "attrs": [
+            {
+              "key": "shape",
+              "value": "2x2"
+            },
+            {
+              "key": "memory",
+              "value": "16 B"
+            }
+          ],
+          "id": "output_1",
+          "incomingEdges": [
+            {
+              "sourceNodeId": "linear_2_3"
+            }
+          ],
+          "label": "output_1",
+          "namespace": "output"
+        }
+      ]
+    }
+  ],
+  "schema": "torchlens.model_explorer.v1"
+}

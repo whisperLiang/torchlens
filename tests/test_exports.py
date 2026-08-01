@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -15,6 +16,124 @@ from torch import nn
 pd = pytest.importorskip("pandas")
 
 import torchlens as tl  # noqa: E402
+
+
+EXPORT_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "exports"
+
+
+def _assert_model_explorer_structure(payload: dict[str, Any]) -> None:
+    """Validate required Model Explorer keys and graph referential integrity.
+
+    Parameters
+    ----------
+    payload:
+        Parsed Model Explorer artifact.
+    """
+
+    assert payload["schema"] == "torchlens.model_explorer.v1"
+    assert isinstance(payload["disclaimer"], str)
+    assert isinstance(payload["graphs"], list) and payload["graphs"]
+    for graph in payload["graphs"]:
+        assert isinstance(graph["id"], str)
+        assert isinstance(graph["nodes"], list) and graph["nodes"]
+        node_ids = [node["id"] for node in graph["nodes"]]
+        assert all(isinstance(node_id, str) for node_id in node_ids)
+        assert len(node_ids) == len(set(node_ids))
+        for node in graph["nodes"]:
+            assert isinstance(node["label"], str)
+            assert isinstance(node["namespace"], str)
+            assert isinstance(node["attrs"], list)
+            assert all(
+                isinstance(attr, dict)
+                and isinstance(attr.get("key"), str)
+                and isinstance(attr.get("value"), str)
+                for attr in node["attrs"]
+            )
+            assert isinstance(node["incomingEdges"], list)
+            assert all(
+                set(edge) == {"sourceNodeId"}
+                and isinstance(edge["sourceNodeId"], str)
+                and edge["sourceNodeId"] in node_ids
+                for edge in node["incomingEdges"]
+            )
+
+
+def _assert_netron_structure(payload: dict[str, Any]) -> None:
+    """Validate required Netron-shaped keys and graph referential integrity.
+
+    Parameters
+    ----------
+    payload:
+        Parsed Netron-shaped artifact.
+    """
+
+    assert payload["ir_version"] == "torchlens-lossy-onnx-shaped-v1"
+    assert payload["producer_name"] == "torchlens"
+    assert payload["runnable"] is False
+    assert isinstance(payload["disclaimer"], str)
+    graph = payload["graph"]
+    assert isinstance(graph["name"], str)
+    assert isinstance(graph["node"], list) and graph["node"]
+    node_names = [node["name"] for node in graph["node"]]
+    outputs = [output for node in graph["node"] for output in node["output"]]
+    assert len(node_names) == len(set(node_names))
+    assert len(outputs) == len(set(outputs))
+    for node in graph["node"]:
+        assert isinstance(node["op_type"], str)
+        assert isinstance(node["input"], list)
+        assert all(isinstance(input_id, str) and input_id in outputs for input_id in node["input"])
+        assert isinstance(node["output"], list) and node["output"]
+        assert isinstance(node["attribute"], list)
+        assert all(
+            isinstance(attribute, dict)
+            and isinstance(attribute.get("name"), str)
+            and isinstance(attribute.get("value"), list)
+            for attribute in node["attribute"]
+        )
+
+
+def _assert_or_regenerate_export_golden(name: str, payload: dict[str, Any]) -> None:
+    """Compare an export payload with its golden, with explicit opt-in regeneration.
+
+    Set ``TORCHLENS_REGEN_EXPORT_GOLDENS=1`` and run the export test to regenerate
+    fixtures after an intentional contract change.
+
+    Parameters
+    ----------
+    name:
+        Golden fixture filename.
+    payload:
+        Normalized parsed export payload.
+    """
+
+    fixture_path = EXPORT_FIXTURE_DIR / name
+    if os.environ.get("TORCHLENS_REGEN_EXPORT_GOLDENS") == "1":
+        fixture_path.parent.mkdir(parents=True, exist_ok=True)
+        fixture_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    expected = json.loads(fixture_path.read_text(encoding="utf-8"))
+    assert payload == expected
+
+
+def _normalize_export_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize process-global trace identifiers in an export payload.
+
+    Parameters
+    ----------
+    payload:
+        Parsed export payload.
+
+    Returns
+    -------
+    dict[str, Any]
+        A detached payload with its generated graph identifier normalized.
+    """
+
+    normalized = json.loads(json.dumps(payload))
+    if "graphs" in normalized:
+        normalized["graphs"][0]["id"] = "<trace-id>"
+    else:
+        normalized["graph"]["name"] = "<trace-id>"
+    return normalized
 
 
 def test_hash_namespace_is_available_through_all_public_import_patterns() -> None:
@@ -260,12 +379,21 @@ def test_static_graph_adapters_and_hub_dry_run(export_log: Any, tmp_path: Path) 
 
     explorer_path = tl.export.model_explorer(export_log, tmp_path / "explorer.json")
     explorer_payload = json.loads(explorer_path.read_text(encoding="utf-8"))
-    assert explorer_payload["graphs"][0]["nodes"]
+    _assert_model_explorer_structure(explorer_payload)
+    assert (
+        "acceptance by any particular external Model Explorer release is not guaranteed"
+        in (explorer_payload["disclaimer"])
+    )
+    _assert_or_regenerate_export_golden(
+        "model_explorer.json", _normalize_export_payload(explorer_payload)
+    )
 
     netron_path = tl.export.netron(export_log, tmp_path / "netron.json")
     netron_payload = json.loads(netron_path.read_text(encoding="utf-8"))
-    assert netron_payload["runnable"] is False
-    assert "not a real ONNX" in netron_payload["disclaimer"]
+    _assert_netron_structure(netron_payload)
+    assert "not a real ONNX model" in netron_payload["disclaimer"]
+    assert "acceptance by Netron is not guaranteed" in netron_payload["disclaimer"]
+    _assert_or_regenerate_export_golden("netron.json", _normalize_export_payload(netron_payload))
 
     result = tl.bridge.huggingface.push_to_hub(
         export_log,
@@ -308,12 +436,32 @@ def test_recurrent_static_graph_exports_use_unique_pass_qualified_ids(tmp_path: 
     explorer_graph = json.loads(explorer_path.read_text(encoding="utf-8"))["graphs"][0]
     explorer_ids = [node["id"] for node in explorer_graph["nodes"]]
     assert len(explorer_ids) == len(set(explorer_ids)) == 8
-    assert len(explorer_graph["edges"]) == 7
+    assert sum(len(node["incomingEdges"]) for node in explorer_graph["nodes"]) == 7
 
-    netron_nodes = json.loads(netron_path.read_text(encoding="utf-8"))["graph"]["node"]
+    _assert_model_explorer_structure(json.loads(explorer_path.read_text(encoding="utf-8")))
+
+    netron_payload = json.loads(netron_path.read_text(encoding="utf-8"))
+    _assert_netron_structure(netron_payload)
+    netron_nodes = netron_payload["graph"]["node"]
     netron_outputs = {output for node in netron_nodes for output in node["output"]}
     assert len(netron_nodes) == len(netron_outputs) == 8
     assert all(input_id in netron_outputs for node in netron_nodes for input_id in node["input"])
+
+
+def test_model_explorer_package_accepts_graph_schema(export_log: Any, tmp_path: Path) -> None:
+    """The optional Model Explorer graph dataclass loader should accept the artifact."""
+
+    model_explorer = pytest.importorskip("model_explorer")
+    dacite = pytest.importorskip("dacite")
+    explorer_path = tl.export.model_explorer(export_log, tmp_path / "explorer.json")
+    payload = json.loads(explorer_path.read_text(encoding="utf-8"))
+
+    parsed = [
+        dacite.from_dict(data_class=model_explorer.graph_builder.Graph, data=graph)
+        for graph in payload["graphs"]
+    ]
+
+    assert parsed and parsed[0].nodes
 
 
 def test_hub_push_uploads_real_bundle_not_metadata_stub(export_log: Any) -> None:

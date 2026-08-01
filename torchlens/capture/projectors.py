@@ -187,8 +187,10 @@ class RefreshProjector:
         error = ValueError(
             "The computational graph changed for this forward pass compared to the original "
             "call to trace (either due to different inputs or a different "
-            "random seed), so save_new_outs failed. Please re-run "
-            "trace with the desired inputs."
+            "random seed). Live-model state mutation across run() calls (for example "
+            "BatchNorm running stats, caches, or counters) is another likely cause; use "
+            "run(..., pristine=True) to isolate re-execution. save_new_outs failed. Please "
+            "re-run trace with the desired inputs."
         )
         error.partial_log = PartialTrace(refreshed, error)  # type: ignore[attr-defined]
         return error

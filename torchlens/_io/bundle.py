@@ -16,6 +16,7 @@ import json
 import platform
 import pickle
 import shutil
+import subprocess
 import sys
 import uuid
 import warnings
@@ -31,7 +32,7 @@ from . import BlobRef, FieldPolicy, PayloadLoadHints, TLSPEC_VERSION, TorchLensI
 from . import _json
 from ._safe_unpickle import SafeBundleUnpickler
 from .lazy import LazyActivationRef
-from .manifest import Manifest, TensorEntry, enforce_version_policy, sha256_of_file
+from .manifest import Manifest, Provenance, TensorEntry, enforce_version_policy, sha256_of_file
 from .payload_codec import (
     PayloadCodec,
     get_payload_codec,
@@ -2818,7 +2819,138 @@ def _build_manifest(
         n_auxiliary_blobs=n_auxiliary_blobs,
         tensors=tensor_entries,
         unsupported_tensors=unsupported_tensors,
+        provenance=_collect_provenance(trace),
     )
+
+
+def _collect_provenance(trace: Trace) -> Provenance:
+    """Collect a best-effort, bounded provenance certificate for one save.
+
+    Parameters
+    ----------
+    trace:
+        Source trace whose already-recorded capture facts should be certified.
+
+    Returns
+    -------
+    Provenance
+        Provenance certificate. Individual unavailable facts are empty or ``None``.
+    """
+
+    from .. import hash as trace_hash
+
+    devices = sorted(
+        {
+            str(device)
+            for op in getattr(trace, "layer_list", ())
+            if (device := getattr(op, "device_ref", None)) is not None
+        }
+    )
+    ambient = getattr(trace, "_runnable_capture_ambient", None)
+    default_dtype = ambient.get("default_dtype") if isinstance(ambient, Mapping) else None
+    autocast_facts: list[dict[str, Any]] = []
+    seen_autocast: set[str] = set()
+    for op in getattr(trace, "layer_list", ()):
+        state = getattr(op, "func_autocast_state", None)
+        if not isinstance(state, Mapping) or not state:
+            continue
+        normalized = _json_ready_provenance_value(state)
+        encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+        if encoded not in seen_autocast:
+            seen_autocast.add(encoded)
+            autocast_facts.append(cast(dict[str, Any], normalized))
+
+    rng_digests: dict[str, str] = {}
+    rng_states = getattr(trace, "_pre_forward_rng_states", None)
+    if isinstance(rng_states, Mapping):
+        for engine, state in rng_states.items():
+            try:
+                rng_digests[str(engine)] = trace_hash.content(state)
+            except Exception:
+                continue
+
+    input_hash: str | None = None
+    try:
+        inputs = [input_op.out for input_op in trace.input_ops]
+        if inputs:
+            input_hash = trace_hash.content(inputs)
+    except Exception:
+        input_hash = None
+
+    model_structure_hash: str | None = None
+    try:
+        model_structure_hash = trace_hash.trace(trace)
+    except Exception:
+        model_structure_hash = None
+
+    return Provenance(
+        provenance_version=1,
+        capture_devices=devices,
+        dtype_policy={
+            "default_dtype": None if default_dtype is None else str(default_dtype),
+            "observed_autocast": autocast_facts,
+        },
+        rng_state_digests=rng_digests,
+        input_hash=input_hash,
+        model_structure_hash=model_structure_hash,
+        git_commit_hash=_git_commit_hash(Path.cwd()),
+    )
+
+
+def _json_ready_provenance_value(value: Any) -> Any:
+    """Convert recorded provenance facts into bounded JSON-ready values.
+
+    Parameters
+    ----------
+    value:
+        Recorded value to normalize.
+
+    Returns
+    -------
+    Any
+        JSON-ready scalar or nested container.
+    """
+
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _json_ready_provenance_value(item) for key, item in value.items()}
+    if isinstance(value, Collection) and not isinstance(value, str | bytes | bytearray):
+        return [_json_ready_provenance_value(item) for item in value]
+    return str(value)
+
+
+def _git_commit_hash(cwd: Path) -> str | None:
+    """Return the Git commit for ``cwd`` with a short best-effort timeout.
+
+    Parameters
+    ----------
+    cwd:
+        User working directory active at save time.
+
+    Returns
+    -------
+    str | None
+        Full commit hash, or ``None`` on any failure or timeout.
+    """
+
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=0.25,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    commit = completed.stdout.strip()
+    if completed.returncode != 0 or not 7 <= len(commit) <= 64:
+        return None
+    if any(character not in "0123456789abcdef" for character in commit.lower()):
+        return None
+    return commit
 
 
 def _validate_activation_transform_outputs(

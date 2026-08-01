@@ -34,6 +34,40 @@ _MLX_VALIDATION_REPLAY_BACKEND = "mlx"
 _TINYGRAD_VALIDATION_REPLAY_BACKEND = "tinygrad"
 
 
+def _warn_stateful_live_run_once(trace: Any, model: nn.Module) -> None:
+    """Warn once when a live rerun has an obvious model-state mutation risk.
+
+    Parameters
+    ----------
+    trace:
+        Source Trace carrying the once-only warning marker.
+    model:
+        Live model that is about to be re-executed.
+    """
+
+    if trace.__dict__.get("_stateful_run_warning_emitted", False):
+        return
+    running_stat_risk = False
+    for module in model.modules():
+        buffers = getattr(module, "_buffers", {})
+        if bool(getattr(module, "track_running_stats", False)) or any(
+            name in buffers for name in ("running_mean", "running_var", "num_batches_tracked")
+        ):
+            running_stat_risk = True
+            break
+    if not model.training and not running_stat_risk:
+        return
+    import warnings
+
+    warnings.warn(
+        "run() re-executes the live model and mutates its state (BatchNorm running stats, "
+        "caches, counters); pass pristine=True to execute an isolated deep copy.",
+        UserWarning,
+        stacklevel=3,
+    )
+    trace.__dict__["_stateful_run_warning_emitted"] = True
+
+
 def _loaded_non_torch_validation_replay_unavailable(trace: Any) -> bool:
     """Return whether loaded non-torch replay validation cannot run.
 
@@ -367,6 +401,14 @@ class TraceValidationMixin(_TraceMixinBase):
             A unified transactional result for ``inputs=`` and loaded sparse
             providers. Legacy ``run(model, x)`` intervention reruns retain their
             compatibility return until that surface is migrated.
+
+        Notes
+        -----
+        A live-provider run re-executes the retained model object. Training-mode
+        modules, BatchNorm running statistics, caches, and user counters can mutate;
+        TorchLens warns once when it can cheaply identify this risk. Such mutation
+        can also change the captured graph and trigger the normal graph-change
+        tripwire.
         """
 
         if seed is not None:
@@ -418,6 +460,11 @@ class TraceValidationMixin(_TraceMixinBase):
                 raise_analysis_run_unavailable(self)
             from .._runnable_execution import run_live_trace
 
+            source_ref = getattr(self, "_source_model_ref", None)
+            live_model = source_ref() if source_ref is not None else None
+            if live_model is not None:
+                _warn_stateful_live_run_once(self, live_model)
+
             return run_live_trace(
                 self,
                 run_inputs,
@@ -449,6 +496,7 @@ class TraceValidationMixin(_TraceMixinBase):
         )
         if isinstance(model, nn.Module):
             transformed_input = self._apply_rerun_transform(user_input, transform=transform)
+        _warn_stateful_live_run_once(self, run_model)
 
         from ..intervention.rerun import run as _impl
 

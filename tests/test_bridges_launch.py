@@ -106,6 +106,22 @@ class _TinySae:
 
         return out @ self.weight.to(out.device)
 
+    def decode(self, features: torch.Tensor) -> torch.Tensor:
+        """Decode SAE features.
+
+        Parameters
+        ----------
+        features:
+            Encoded feature tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Decoded out.
+        """
+
+        return features @ self.weight.T.to(features.device)
+
 
 class _OfflineBenchmark:
     """Callable Brain-Score-style offline benchmark fixture."""
@@ -182,13 +198,48 @@ def test_sae_lens_bridge_encode_matches_direct_sae() -> None:
     model = _TinyTransformer().eval()
     tokens = torch.tensor([[1, 2, 3], [4, 5, 6]])
     log = tl.trace(model, tokens, layers_to_save="all")
-    out = log.resolve_sites("linear", max_fanout=1).first().out
+    out = log["linear_1_2"].out
     sae = _TinySae(width=out.shape[-1])
 
-    bridge_result = tl.bridge.sae_lens.encode(log, "linear", sae)
+    bridge_result = tl.bridge.sae_lens.encode(log, "linear_1_2", sae)
     direct_result = sae.encode(out)
 
     assert torch.allclose(bridge_result, direct_result)
+
+
+def test_sae_lens_bridge_decode_matches_direct_sae() -> None:
+    """SAE Lens bridge decoding should match a direct SAE decode call."""
+
+    pytest.importorskip("sae_lens")
+    torch.manual_seed(14)
+    model = _TinyTransformer().eval()
+    tokens = torch.tensor([[1, 2, 3], [4, 5, 6]])
+    log = tl.trace(model, tokens, layers_to_save="all")
+    out = log["linear_1_2"].out
+    sae = _TinySae(width=out.shape[-1])
+
+    bridge_result = tl.bridge.sae_lens.decode(log, "linear_1_2", sae)
+    direct_result = sae.decode(out)
+
+    assert torch.allclose(bridge_result, direct_result)
+
+
+def test_sae_lens_bridge_decode_with_fake_optional_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fake SAE object should exercise decode without installing SAE Lens."""
+
+    monkeypatch.setitem(sys.modules, "sae_lens", type(sys)("sae_lens"))
+    torch.manual_seed(15)
+    model = _TinyTransformer().eval()
+    tokens = torch.tensor([[1, 2, 3], [4, 5, 6]])
+    log = tl.trace(model, tokens, layers_to_save="all")
+    out = log["linear_1_2"].out
+    sae = _TinySae(width=out.shape[-1])
+
+    result = tl.bridge.sae_lens.decode(log, "linear_1_2", sae)
+
+    assert torch.equal(result, sae.decode(out))
 
 
 def test_rsatoolbox_bridge_rdm_matches_direct_dataset() -> None:

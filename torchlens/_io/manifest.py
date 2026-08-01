@@ -187,6 +187,94 @@ class TensorEntry:
         return {key: value for key, value in asdict(self).items() if value is not None}
 
 
+@dataclass(frozen=True)
+class Provenance:
+    """Optional capture provenance certificate embedded in ``manifest.json``.
+
+    Parameters
+    ----------
+    provenance_version:
+        Version of this nested provenance schema.
+    capture_devices:
+        Sorted device strings observed on captured operations.
+    dtype_policy:
+        Recorded default-dtype and autocast facts; unavailable facts remain ``None``.
+    rng_state_digests:
+        Compact SHA-256 digests for capture-time RNG engines actually recorded.
+    input_hash:
+        Content digest of materialized captured input tensors, when available.
+    model_structure_hash:
+        Address-free structural trace digest, when collection succeeds.
+    git_commit_hash:
+        Commit of the user's current working directory, when it is a Git repository.
+    """
+
+    provenance_version: int
+    capture_devices: list[str]
+    dtype_policy: dict[str, Any]
+    rng_state_digests: dict[str, str]
+    input_hash: str | None
+    model_structure_hash: str | None
+    git_commit_hash: str | None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Provenance:
+        """Validate and construct one provenance certificate.
+
+        Parameters
+        ----------
+        data:
+            JSON-decoded provenance mapping.
+
+        Returns
+        -------
+        Provenance
+            Validated provenance certificate.
+
+        Raises
+        ------
+        TorchLensIOError
+            If the nested schema is malformed or unsupported.
+        """
+
+        if data.get("provenance_version") != 1:
+            raise TorchLensIOError("Manifest provenance_version must be exactly 1.")
+        capture_devices = data.get("capture_devices")
+        if not isinstance(capture_devices, list) or any(
+            not isinstance(device, str) or not device for device in capture_devices
+        ):
+            raise TorchLensIOError("Manifest provenance capture_devices must be strings.")
+        dtype_policy = data.get("dtype_policy")
+        if not isinstance(dtype_policy, dict):
+            raise TorchLensIOError("Manifest provenance dtype_policy must be an object.")
+        rng_state_digests = data.get("rng_state_digests")
+        if not isinstance(rng_state_digests, dict) or any(
+            not isinstance(engine, str) or not _is_sha256(digest)
+            for engine, digest in rng_state_digests.items()
+        ):
+            raise TorchLensIOError(
+                "Manifest provenance rng_state_digests must map names to SHA-256 digests."
+            )
+        input_hash = _optional_sha256(data, "input_hash")
+        model_structure_hash = _optional_sha256(data, "model_structure_hash")
+        git_commit_hash = data.get("git_commit_hash")
+        if git_commit_hash is not None and (
+            not isinstance(git_commit_hash, str)
+            or not 7 <= len(git_commit_hash) <= 64
+            or any(character not in "0123456789abcdef" for character in git_commit_hash.lower())
+        ):
+            raise TorchLensIOError("Manifest provenance git_commit_hash must be a Git hex hash.")
+        return cls(
+            provenance_version=1,
+            capture_devices=list(capture_devices),
+            dtype_policy=dict(dtype_policy),
+            rng_state_digests=dict(rng_state_digests),
+            input_hash=input_hash,
+            model_structure_hash=model_structure_hash,
+            git_commit_hash=git_commit_hash,
+        )
+
+
 def _optional_str(data: dict[str, Any], field_name: str) -> str | None:
     """Return an optional manifest string field after validation.
 
@@ -253,6 +341,8 @@ class Manifest:
         Persisted tensor entries.
     unsupported_tensors:
         Best-effort records for tensors skipped under ``strict=False``.
+    provenance:
+        Optional versioned capture provenance certificate. Older manifests omit it.
     """
 
     tlspec_version: int
@@ -268,6 +358,7 @@ class Manifest:
     n_auxiliary_blobs: int
     tensors: list[TensorEntry]
     unsupported_tensors: list[dict[str, str]]
+    provenance: Provenance | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Manifest:
@@ -329,6 +420,10 @@ class Manifest:
         tensors = [TensorEntry.from_dict(entry) for entry in raw_tensors]
 
         unsupported_tensors = _validate_unsupported_tensors(data.get("unsupported_tensors"))
+        raw_provenance = data.get("provenance")
+        if raw_provenance is not None and not isinstance(raw_provenance, dict):
+            raise TorchLensIOError("Manifest field 'provenance' must be an object when present.")
+        provenance = None if raw_provenance is None else Provenance.from_dict(raw_provenance)
         manifest = cls(
             tlspec_version=data["tlspec_version"],
             torchlens_version=data["torchlens_version"],
@@ -343,6 +438,7 @@ class Manifest:
             n_auxiliary_blobs=data["n_auxiliary_blobs"],
             tensors=tensors,
             unsupported_tensors=unsupported_tensors,
+            provenance=provenance,
         )
         manifest._validate_counts()
         return manifest
@@ -410,6 +506,8 @@ class Manifest:
 
         data = asdict(self)
         data["tensors"] = [entry.to_dict() for entry in self.tensors]
+        if self.provenance is None:
+            data.pop("provenance")
         return data
 
     def _validate_counts(self) -> None:
@@ -451,6 +549,54 @@ def sha256_of_file(path: str | Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _is_sha256(value: Any) -> bool:
+    """Return whether a value is a lowercase or uppercase SHA-256 hex digest.
+
+    Parameters
+    ----------
+    value:
+        Candidate digest.
+
+    Returns
+    -------
+    bool
+        Whether ``value`` is a 64-character hexadecimal string.
+    """
+
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value.lower())
+    )
+
+
+def _optional_sha256(data: dict[str, Any], field_name: str) -> str | None:
+    """Validate an optional SHA-256 provenance field.
+
+    Parameters
+    ----------
+    data:
+        Provenance mapping.
+    field_name:
+        Field to validate.
+
+    Returns
+    -------
+    str | None
+        Validated digest or ``None``.
+
+    Raises
+    ------
+    TorchLensIOError
+        If the present value is not a SHA-256 digest.
+    """
+
+    value = data.get(field_name)
+    if value is not None and not _is_sha256(value):
+        raise TorchLensIOError(f"Manifest provenance {field_name} must be a SHA-256 digest.")
+    return value
 
 
 def enforce_version_policy(manifest: Manifest) -> None:

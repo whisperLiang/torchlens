@@ -1,0 +1,104 @@
+{
+  "disclaimer": "TorchLens writes and structurally validates this lossy ONNX-shaped JSON; it is not a real ONNX model, is not runnable, and acceptance by Netron is not guaranteed.",
+  "graph": {
+    "name": "<trace-id>",
+    "node": [
+      {
+        "attribute": [
+          {
+            "name": "shape",
+            "value": [
+              2,
+              3
+            ]
+          }
+        ],
+        "input": [],
+        "name": "input_1",
+        "op_type": "none",
+        "output": [
+          "input_1"
+        ]
+      },
+      {
+        "attribute": [
+          {
+            "name": "shape",
+            "value": [
+              2,
+              4
+            ]
+          }
+        ],
+        "input": [
+          "input_1"
+        ],
+        "name": "linear_1_1",
+        "op_type": "linear",
+        "output": [
+          "linear_1_1"
+        ]
+      },
+      {
+        "attribute": [
+          {
+            "name": "shape",
+            "value": [
+              2,
+              4
+            ]
+          }
+        ],
+        "input": [
+          "linear_1_1"
+        ],
+        "name": "relu_1_2",
+        "op_type": "relu",
+        "output": [
+          "relu_1_2"
+        ]
+      },
+      {
+        "attribute": [
+          {
+            "name": "shape",
+            "value": [
+              2,
+              2
+            ]
+          }
+        ],
+        "input": [
+          "relu_1_2"
+        ],
+        "name": "linear_2_3",
+        "op_type": "linear",
+        "output": [
+          "linear_2_3"
+        ]
+      },
+      {
+        "attribute": [
+          {
+            "name": "shape",
+            "value": [
+              2,
+              2
+            ]
+          }
+        ],
+        "input": [
+          "linear_2_3"
+        ],
+        "name": "output_1",
+        "op_type": "none",
+        "output": [
+          "output_1"
+        ]
+      }
+    ]
+  },
+  "ir_version": "torchlens-lossy-onnx-shaped-v1",
+  "producer_name": "torchlens",
+  "runnable": false
+}
