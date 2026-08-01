@@ -139,6 +139,8 @@ def _reset_capability(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     if name == "HAS_DYNAMO_OPTIMIZED_MODULE":
         monkeypatch.setattr(tc, "_DYNAMO_OPTIMIZED_MODULE_TYPE", None)
         monkeypatch.setattr(tc, "_DYNAMO_OPTIMIZED_MODULE_PROBED", False)
+    if name == "HAS_DYNAMO_ORIG_CALLABLE_MARKER":
+        monkeypatch.setattr(tc, "_DYNAMO_ORIG_CALLABLE_MARKER_PROBED", False)
     tc._warned_missing_capabilities.discard(name)
 
 
@@ -290,6 +292,7 @@ def test_private_torch_capability_flags_present_on_supported_range() -> None:
         "HAS_ACCUMULATE_GRAD_CLASS",
         "HAS_FX_GRAPH_MODULE",
         "HAS_DYNAMO_OPTIMIZED_MODULE",
+        "HAS_DYNAMO_ORIG_CALLABLE_MARKER",
         "HAS_TENSOR_SEQUENCE_SLOT_FIX",
     }
 
@@ -336,6 +339,7 @@ def test_torch_capability_snapshot_contract() -> None:
             tc.HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE
         ),
         "HAS_DYNAMO_OPTIMIZED_MODULE": True,
+        "HAS_DYNAMO_ORIG_CALLABLE_MARKER": tc.HAS_DYNAMO_ORIG_CALLABLE_MARKER,
         "HAS_GENERATOR_CLONE_STATE": hasattr(torch.Generator, "clone_state"),
         "HAS_GENERATOR_GRAPHSAFE_GET_STATE": hasattr(torch.Generator, "graphsafe_get_state"),
         "HAS_GENERATOR_GRAPHSAFE_SET_STATE": hasattr(torch.Generator, "graphsafe_set_state"),

@@ -148,6 +148,11 @@ that wraps the original eager ``nn.Module`` at ``._orig_mod``. TorchLens is an
 eager-capture tool, so it does not trace the compiled graph, generated kernels,
 or fusion decisions.
 
+On torch releases where ``torch.compile(torch.compile(model))`` returns a plain
+Dynamo-produced function rather than an ``nn.Module``, TorchLens rejects it with
+a specific error. Pass the original eager module; a double-compiled callable
+cannot be safely unwrapped through the module capture path.
+
 ``trace`` detects ``OptimizedModule`` and transparently traces the eager source
 module it wraps. If a compiled wrapper appears as a submodule, TorchLens
 temporarily routes that child slot to ``._orig_mod`` for the capture and restores

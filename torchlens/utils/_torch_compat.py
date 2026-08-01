@@ -78,6 +78,7 @@ __all__ = [
     "HAS_NAMED_TENSOR_API",
     "HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE",
     "HAS_DYNAMO_OPTIMIZED_MODULE",
+    "HAS_DYNAMO_ORIG_CALLABLE_MARKER",
     "HAS_SAFE_WEIGHTS_ONLY_LOAD",
     "HAS_CACHED_UNTYPED_STORAGE_WRAPPER",
     "HAS_TENSOR_SEQUENCE_SLOT_FIX",
@@ -104,6 +105,7 @@ __all__ = [
     "get_variable_function_names",
     "fix_tensor_sequence_slot",
     "mark_torch_capability_missing",
+    "is_dynamo_compiled_callable",
     "resolve_runnable_torch_alias",
     "tensor_has_named_dims",
 ]
@@ -678,6 +680,24 @@ def _probe_dynamo_optimized_module() -> bool:
     return _import_module_attr_or_none("torch._dynamo.eval_frame", "OptimizedModule") is not None
 
 
+def _probe_dynamo_orig_callable_marker() -> bool:
+    """Return whether Dynamo publishes its original-callable marker contract.
+
+    Returns
+    -------
+    bool
+        True when ``torch._dynamo.eval_frame.innermost_fn`` recognizes the
+        ``_torchdynamo_orig_callable`` marker used on compiled callables.
+    """
+    innermost_fn = _import_module_attr_or_none("torch._dynamo.eval_frame", "innermost_fn")
+    code = getattr(innermost_fn, "__code__", None)
+    return (
+        callable(innermost_fn)
+        and code is not None
+        and ("_torchdynamo_orig_callable" in code.co_names)
+    )
+
+
 class _PySequenceMethods(ctypes.Structure):
     """Minimal ctypes mirror of CPython's PySequenceMethods struct."""
 
@@ -814,6 +834,7 @@ HAS_FX_GRAPH_MODULE: bool = _probe_fx_graph_module()
 HAS_NAMED_TENSOR_API: bool = _probe_named_tensor_api()
 HAS_CACHED_UNTYPED_STORAGE_WRAPPER: bool = _probe_cached_untyped_storage_wrapper()
 HAS_DYNAMO_OPTIMIZED_MODULE: bool = False
+HAS_DYNAMO_ORIG_CALLABLE_MARKER: bool = False
 HAS_GENERATOR_CLONE_STATE: bool = hasattr(torch.Generator, "clone_state")
 HAS_GENERATOR_GRAPHSAFE_GET_STATE: bool = hasattr(torch.Generator, "graphsafe_get_state")
 HAS_GENERATOR_GRAPHSAFE_SET_STATE: bool = hasattr(torch.Generator, "graphsafe_set_state")
@@ -822,6 +843,7 @@ HAS_TENSOR_SEQUENCE_SLOT_FIX: bool = _probe_tensor_sequence_slot_fix()
 HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE: bool = _probe_parameter_as_subclass_in_dispatch_mode()
 _DYNAMO_OPTIMIZED_MODULE_TYPE: type[Any] | None = None
 _DYNAMO_OPTIMIZED_MODULE_PROBED: bool = False
+_DYNAMO_ORIG_CALLABLE_MARKER_PROBED: bool = False
 
 _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_AUTOCAST_DEVICE_TYPE_ARG",
@@ -839,6 +861,7 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_NAMED_TENSOR_API",
     "HAS_CACHED_UNTYPED_STORAGE_WRAPPER",
     "HAS_DYNAMO_OPTIMIZED_MODULE",
+    "HAS_DYNAMO_ORIG_CALLABLE_MARKER",
     "HAS_GENERATOR_CLONE_STATE",
     "HAS_GENERATOR_GRAPHSAFE_GET_STATE",
     "HAS_GENERATOR_GRAPHSAFE_SET_STATE",
@@ -902,6 +925,7 @@ def get_torch_capability_snapshot() -> TorchCapabilitySnapshot:
     # path, so force the probe here to report the real capability instead of
     # the pre-probe placeholder.
     get_dynamo_optimized_module_type()
+    _ensure_dynamo_orig_callable_marker_probed()
     snapshot = {name: bool(globals()[name]) for name in _CAPABILITY_ATTRS}
     snapshot["AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED"] = bool(AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED)
     return snapshot
@@ -1199,6 +1223,52 @@ def get_dynamo_optimized_module_type() -> type[Any] | None:
         )
         return None
     return optimized_module_type
+
+
+def _ensure_dynamo_orig_callable_marker_probed() -> None:
+    """Populate the lazy Dynamo original-callable marker capability flag.
+
+    Returns
+    -------
+    None
+        Module-level capability state is updated at most once.
+    """
+    global HAS_DYNAMO_ORIG_CALLABLE_MARKER, _DYNAMO_ORIG_CALLABLE_MARKER_PROBED
+
+    if _DYNAMO_ORIG_CALLABLE_MARKER_PROBED:
+        return
+    HAS_DYNAMO_ORIG_CALLABLE_MARKER = _probe_dynamo_orig_callable_marker()
+    _DYNAMO_ORIG_CALLABLE_MARKER_PROBED = True
+
+
+def is_dynamo_compiled_callable(value: Any) -> bool:
+    """Return whether a non-module callable carries Dynamo's compile marker.
+
+    Parameters
+    ----------
+    value:
+        Candidate model or callable supplied to a capture API.
+
+    Returns
+    -------
+    bool
+        True only for a callable with Dynamo's direct original-callable marker
+        on a runtime that exposes the marker contract.
+
+    Notes
+    -----
+    The direct ``__dict__`` read avoids invoking arbitrary descriptors. The
+    capability probe remains lazy and runs only after the cheap marker lookup
+    succeeds, so ordinary eager-module capture pays no Dynamo import cost.
+    """
+    namespace = getattr(value, "__dict__", None)
+    if not isinstance(namespace, dict):
+        return False
+    original = namespace.get("_torchdynamo_orig_callable")
+    if not callable(original):
+        return False
+    _ensure_dynamo_orig_callable_marker_probed()
+    return HAS_DYNAMO_ORIG_CALLABLE_MARKER
 
 
 def fix_tensor_sequence_slot() -> bool:

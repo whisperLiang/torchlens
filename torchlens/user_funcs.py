@@ -53,6 +53,7 @@ from .backends.torch._tl import get_tensor_label
 from .bridge import hf as _hf_bridge
 from .ir import ParentEdge, replace_op_event
 from ._training_validation import TrainingModeConfigError, validate_training_compatibility
+from .utils._torch_compat import is_dynamo_compiled_callable
 from . import _state
 from .types import ActivationPostfunc, GradientPostfunc
 from .data_classes.trace import (
@@ -1591,6 +1592,12 @@ def trace(
     -------
         A ``Trace`` containing layer outs (if requested) and full metadata.
     """
+    if not isinstance(model, nn.Module) and is_dynamo_compiled_callable(model):
+        raise ValueError(
+            "TorchLens cannot capture this torch.compile-produced callable; applying "
+            "torch.compile more than once can return a plain function. Pass the original "
+            "eager nn.Module instead."
+        )
     if capture_output_structure is not MISSING:
         if capture_container_structure is not MISSING:
             raise TypeError(

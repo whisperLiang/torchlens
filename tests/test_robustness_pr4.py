@@ -134,6 +134,19 @@ def test_torch_compile_top_level_unwrap_matches_eager_trace() -> None:
 
 
 @pytest.mark.skipif(not _torch_compile_available(), reason="torch.compile not available")
+def test_double_torch_compile_callable_names_eager_module_remedy() -> None:
+    """A double-compiled plain callable gets a specific eager-module rejection."""
+    model = _Tiny()
+    compiled_once = torch.compile(model, backend="eager")
+    compiled_twice = torch.compile(compiled_once, backend="eager")
+    if isinstance(compiled_twice, nn.Module):
+        pytest.skip("this torch runtime keeps double compile as an nn.Module")
+
+    with pytest.raises(ValueError, match=r"torch\.compile.*original eager nn\.Module"):
+        tl.trace(compiled_twice, torch.randn(2, 4))  # type: ignore[arg-type]
+
+
+@pytest.mark.skipif(not _torch_compile_available(), reason="torch.compile not available")
 def test_torch_compile_unwrap_note_emits_once_across_two_traces() -> None:
     """Compiled-model eager unwrapping should emit one process-local note."""
     first = torch.compile(_Tiny(), backend="eager")
