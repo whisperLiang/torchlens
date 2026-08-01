@@ -178,12 +178,17 @@ class TraceNotReproducibleWarning(TorchLensWarning):
     """Warning emitted when validation captures different graph structures."""
 
 
+class ScalarEscapeWarning(TorchLensWarning):
+    """Warning emitted when captured tensor data escapes to a Python scalar."""
+
+
 __all__ = [
     "CaptureError",
     "CompatibilityError",
     "ConfigurationError",
     "InterventionError",
     "Severity",
+    "ScalarEscapeWarning",
     "TorchLensError",
     "TorchLensWarning",
     "TraceNotReproducibleWarning",
