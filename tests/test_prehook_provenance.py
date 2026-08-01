@@ -783,3 +783,5 @@ def test_registration_bypass_downgrades_but_keeps_after_snapshot_truthful() -> N
     assert torch.equal(call.inputs_after_pre_hooks.args[0], torch.tensor([8.0]))
     assert call.inputs_after_pre_hooks.capture_complete is False
     assert "registration_interposition_bypassed" in (call.inputs_after_pre_hooks.incomplete_reasons)
+    assert call.forward_pre_hook_effects == ()
+    assert call.had_pre_hook_input_change is None
