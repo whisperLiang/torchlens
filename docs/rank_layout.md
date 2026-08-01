@@ -6,7 +6,7 @@ layout dependency is required.
 
 ## Engine Selection
 
-`vis_node_placement="auto"` is the default. It estimates layout cost from the render graph
+`layout="auto"` is the default. It estimates layout cost from the render graph
 before invoking Graphviz:
 
 ```text
@@ -29,10 +29,10 @@ ops label each arrow with its argument slot.
 
 ```python
 log = tl.trace(model, x)
-log.render_graph(vis_node_placement="auto", vis_outpath="graph", vis_fileformat="svg")
+log.draw(layout="auto", vis_outpath="graph", vis_fileformat="svg")
 ```
 
-Use `vis_node_placement="dot"` to force Graphviz or `vis_node_placement="rank"` to force
+Use `layout="dot"` to force Graphviz or `layout="rank"` to force
 the rank layout.
 
 Use SVG for very large graphs. PDF renderers can produce empty or impractically large output at
@@ -43,4 +43,4 @@ high node counts.
 | Symptom | Check |
 | --- | --- |
 | Empty large PDF | Render `vis_fileformat="svg"` instead. |
-| Slow layout | Reduce nesting/detail with `vis_call_depth`, rolled mode, or `module=` focus. |
+| Slow layout | Reduce nesting/detail with `depth`, rolled mode, or `module=` focus. |

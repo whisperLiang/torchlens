@@ -256,11 +256,6 @@ if your log looks wrong in one of these scenarios, suspect the caveat:
   capture. This sticky flag is intentionally conservative because later private
   registry edits cannot prove that no hook execution was missed.
 
-  <!-- TODO(pre-hook-glossary-finishing-phase): Add glossary entries for the
-  provisional ModuleCall fields `inputs_before_pre_hooks`,
-  `inputs_after_pre_hooks`, `forward_pre_hook_effects`, and the derived
-  `had_pre_hook_input_change` property after the human naming session. Also add
-  entries for ModuleInputSnapshot, TensorInputObservation, and PreHookEffect. -->
 - **Input-routed interventions on in-place operations**: `splice_module(...,
   input="in")` snapshots semantic inputs for recognized in-place calls, but raw
   callable hooks that read `ctx.args` still receive live references. `out=`
