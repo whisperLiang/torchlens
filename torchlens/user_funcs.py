@@ -2563,6 +2563,31 @@ def _public_impls_module() -> Any:
     return _user_public_impls
 
 
+def release_model(model: nn.Module) -> None:
+    """Release a traced PyTorch model from persistent TorchLens preparation.
+
+    Parameters
+    ----------
+    model:
+        Model whose full module tree should be restored. The operation is safe
+        for never-traced and already-released models.
+
+    Returns
+    -------
+    None
+        The model is restored in place and may be pickled or traced again.
+
+    Notes
+    -----
+    TorchLens installs persistent, toggle-gated wrappers on non-root module
+    ``forward`` methods. Call ``release_model`` after the final trace when the
+    complete model object must be serialized with :func:`torch.save` or
+    :mod:`pickle`. Saving ``model.state_dict()`` is unaffected by preparation
+    and does not require release.
+    """
+    _public_impls_module().release_model(model)
+
+
 def summary(*args: Any, **kwargs: Any) -> None:
     """Forward to the summary-printing implementation."""
 

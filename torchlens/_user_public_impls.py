@@ -61,6 +61,33 @@ trace = _user_funcs.trace
 _run_model_and_save_specified_outs = _user_funcs._run_model_and_save_specified_outs
 
 
+def release_model(model: nn.Module) -> None:
+    """Release a traced PyTorch model from persistent TorchLens preparation.
+
+    Parameters
+    ----------
+    model:
+        Model whose full module tree should be restored. The operation is safe
+        for never-traced and already-released models.
+
+    Returns
+    -------
+    None
+        The model is restored in place and may be pickled or traced again.
+
+    Notes
+    -----
+    TorchLens installs persistent, toggle-gated wrappers on non-root module
+    ``forward`` methods. Call ``release_model`` after the final trace when the
+    complete model object must be serialized with :func:`torch.save` or
+    :mod:`pickle`. Saving ``model.state_dict()`` is unaffected by preparation
+    and does not require release.
+    """
+    from .backends.torch.model_prep import release_model as release_torch_model
+
+    release_torch_model(model)
+
+
 def log_model_metadata(
     model: nn.Module,
     input_args: torch.Tensor | list[Any] | tuple[Any, ...],

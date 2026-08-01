@@ -76,6 +76,7 @@ print(tl.report.explain(log))
 log.draw(order_siblings=True)  # default: verified sibling ordering for dot/unrolled graphs
 log.draw(collapse="auto", show_containers=False)  # readability-targeted module overview
 print(log.module_collapse_order[:10])
+tl.release_model(model)  # restore whole-model pickle / torch.save serializability
 
 # Influence geometry is lazy: the first property access solves the captured DAG.
 op = log["relu_1_2"]
@@ -134,7 +135,7 @@ print(tl.compat.report(model, x).to_markdown())
 
 ## Current 2.x Surface
 
-- Top-level `torchlens.__all__` has 90 names: capture, save/load, intervention,
+- Top-level `torchlens.__all__` has 93 names: capture, save/load, intervention,
   selectors, helper transforms, observers, validation, and the three main log classes.
 - `tl.record(..., save=...)` is the sparse predicate recorder; it returns `Recording`.
   `Recording.to_trace()` cooks the event stream into a full-structure `Trace`, with unsaved

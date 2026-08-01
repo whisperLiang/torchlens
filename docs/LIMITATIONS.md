@@ -104,6 +104,17 @@ earlier saved activation. Use `"copy"` unless that aliasing tradeoff is explicit
 
 ## Details
 
+### Whole-model serialization after tracing
+
+TorchLens persistently wraps each non-root module's ``forward`` method after the first trace.
+Consequently, ``pickle.dumps(model)`` and ``torch.save(model)`` can raise ``PicklingError`` after
+tracing because Python cannot serialize those instance-level wrapper functions by reference. Call
+``tl.release_model(model)`` after the final trace to restore the original forwards and make the
+whole model serializable again. The release operation is idempotent, and the model can be traced
+again later; TorchLens will prepare it again from scratch.
+
+Saving ``model.state_dict()`` was never affected and does not require ``tl.release_model``.
+
 ## Where other tools are the better fit
 
 TorchLens is a capture and provenance substrate, not a replacement for every specialized
