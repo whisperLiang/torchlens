@@ -982,7 +982,7 @@ def validate_backward_pass(
     random_seed: int | None = None,
     atol: float = 1e-5,
     rtol: float = 1e-4,
-    validate_layer_grads: bool = False,
+    validate_layer_grads: bool = True,
     layer_grad_atol: float | None = None,
     layer_grad_rtol: float | None = None,
 ) -> bool:

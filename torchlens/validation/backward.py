@@ -268,7 +268,7 @@ def validate_backward_pass(
     random_seed: int | None = None,
     atol: float = 1e-5,
     rtol: float = 1e-4,
-    validate_layer_grads: bool = False,
+    validate_layer_grads: bool = True,
     layer_grad_atol: float | None = None,
     layer_grad_rtol: float | None = None,
 ) -> bool:
@@ -298,7 +298,9 @@ def validate_backward_pass(
     rtol:
         Relative tolerance for ``torch.allclose``.
     validate_layer_grads:
-        If True, additionally validate per-module-output gradients.
+        If True (default), validate captured per-module-output gradients in
+        addition to parameter gradients. False preserves the legacy
+        parameter-only validation path as an explicit opt-out.
     layer_grad_atol:
         Optional absolute tolerance for per-module-output gradients.
     layer_grad_rtol:
@@ -345,6 +347,8 @@ def validate_backward_pass(
     state_dict = _clone_state_dict_with_metadata(model)
     original_training = model.training
     trace = None
+    stock_module_grads = None
+    stock_identity_addresses = None
 
     try:
         set_random_seed(random_seed)
@@ -352,8 +356,20 @@ def validate_backward_pass(
             input_args, input_kwargs, model_device
         )
         model.zero_grad(set_to_none=True)
-        stock_loss = loss_fn(model(*stock_inputs, **stock_kwargs))
-        stock_loss.backward()  # type: ignore[no-untyped-call]
+        if validate_layer_grads:
+            from ._stock_layer_grads import _stock_layer_grads
+
+            stock_module_grads, stock_identity_addresses = _stock_layer_grads(
+                model,
+                stock_inputs,
+                stock_kwargs,
+                loss_fn=loss_fn,
+                random_seed=random_seed,
+                state_dict_snapshot=state_dict,
+            )
+        else:
+            stock_loss = loss_fn(model(*stock_inputs, **stock_kwargs))
+            stock_loss.backward()  # type: ignore[no-untyped-call]
         expected_param_grads = _param_grads(model)
 
         model.load_state_dict(state_dict)
@@ -381,14 +397,16 @@ def validate_backward_pass(
         observed_param_grads = _param_grads(model)
 
         if validate_layer_grads:
-            layer_report = _validate_layer_grads(
-                model,
-                input_args,
-                input_kwargs,
-                loss_fn,
+            from ._layer_grad_report import _compare_module_output_grads
+
+            assert stock_module_grads is not None
+            assert stock_identity_addresses is not None
+            layer_report = _compare_module_output_grads(
+                trace,
+                stock_module_grads,
+                stock_identity_addresses,
                 atol=layer_grad_atol if layer_grad_atol is not None else atol,
                 rtol=layer_grad_rtol if layer_grad_rtol is not None else rtol,
-                random_seed=random_seed,
             )
             if not bool(layer_report):
                 return False

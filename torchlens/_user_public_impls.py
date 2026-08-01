@@ -1217,6 +1217,16 @@ def _validate_forward_pass_torch(
         torch.set_num_threads(num_threads)
     try:
         ground_truth_model, plain_attr_snapshot = _model_for_ground_truth_validation(model)
+        if plain_attr_snapshot is not None and not plain_attr_snapshot.is_complete:
+            warnings.warn(
+                "TorchLens validation cannot prove model-state restoration after deepcopy "
+                "failed because these plain attributes are unsupported: "
+                f"{plain_attr_snapshot.unsupported_attr_paths!r}. Returning False rather "
+                "than reporting unverified success.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return False
         from .backends.torch.ops import _walk_output_tensors_with_paths
 
         ground_truth_output = ground_truth_model(*input_args_copy, **input_kwargs_copy)
@@ -1258,6 +1268,19 @@ def _validate_forward_pass_torch(
         validation_model, validation_plain_attr_snapshot, validation_model_copied = (
             _model_for_validation_replay(model)
         )
+        if (
+            validation_plain_attr_snapshot is not None
+            and not validation_plain_attr_snapshot.is_complete
+        ):
+            warnings.warn(
+                "TorchLens validation cannot prove replay-state restoration after deepcopy "
+                "failed because these plain attributes are unsupported: "
+                f"{validation_plain_attr_snapshot.unsupported_attr_paths!r}. Returning False "
+                "rather than reporting unverified success.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return False
         validation_state_dict = _clone_state_dict_with_metadata(validation_model)
         validation_input_args = safe_copy_args(input_args)
         validation_input_kwargs = safe_copy_kwargs(input_kwargs)
@@ -1362,7 +1385,7 @@ def validate_backward_pass(
     random_seed: int | None = None,
     atol: float = 1e-5,
     rtol: float = 1e-4,
-    validate_layer_grads: bool = False,
+    validate_layer_grads: bool = True,
     layer_grad_atol: float | None = None,
     layer_grad_rtol: float | None = None,
 ) -> bool:
@@ -1390,7 +1413,7 @@ def validate_backward_pass(
     rtol:
         Relative allclose tolerance.
     validate_layer_grads:
-        If True, also validate per-module-output gradients.
+        If True (default), also validate captured per-module-output gradients.
     layer_grad_atol:
         Optional layer-gradient absolute tolerance.
     layer_grad_rtol:

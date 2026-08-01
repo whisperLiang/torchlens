@@ -438,16 +438,26 @@ def test_validate_backward_pass_validate_layer_grads_public_flag() -> None:
 
 
 @pytest.mark.smoke
-def test_layer_grad_default_off_no_overhead(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default public validator does not run PATH E."""
+def test_layer_grad_default_runs_captured_grad_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default public validator runs the captured-gradient oracle."""
 
-    def fail_if_called(*args: Any, **kwargs: Any) -> LayerGradReport:
-        """Fail if the optional layer-grad path is invoked."""
+    calls = 0
 
-        raise AssertionError("layer grad oracle should be opt-in")
+    def count_comparison(*args: Any, **kwargs: Any) -> LayerGradReport:
+        """Count and delegate captured-gradient comparisons."""
 
-    monkeypatch.setattr(backward_validation, "_validate_layer_grads", fail_if_called)
+        nonlocal calls
+        calls += 1
+        return _compare_module_output_grads(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "torchlens.validation._layer_grad_report._compare_module_output_grads",
+        count_comparison,
+    )
     assert backward_validation.validate_backward_pass(TinyMLP(), torch.randn(2, 3), random_seed=42)
+    assert calls == 1
 
 
 def test_nested_module_parent_and_child_outputs_are_covered() -> None:

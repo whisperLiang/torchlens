@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import numpy as np
 import torch
 from torch import nn
 
@@ -709,6 +710,32 @@ def test_external_profile_hook_is_chained_and_restored_on_success_and_error() ->
         assert calls > 0
     finally:
         sys.setprofile(None)
+
+
+def test_rng_and_escape_profile_detectors_coarm_without_lost_detection() -> None:
+    """The nested RNG profile hook chains the escape detector and restores both."""
+
+    if hasattr(sys, "monitoring"):
+        pytest.skip("escape detection uses sys.monitoring instead of setprofile on Python 3.12+")
+    generator = np.random.default_rng(123)
+    raw_relu = torch.relu
+
+    class DualDetectionModel(nn.Module):
+        """Exercise one NumPy RNG draw and one raw torch callable escape."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Trigger both profile-hook receivers in one owner-thread forward."""
+
+            generator.random()
+            return torch.sigmoid(raw_relu(x))
+
+    wrap_torch(patch_policy="scoped", escape_detector="shadow")
+    with pytest.warns(TorchLensCaptureGapWarning, match="relu"):
+        trace = tl.trace(DualDetectionModel(), torch.randn(3))
+
+    assert len(trace.escape_diagnostics) == 1
+    assert "c_rng_instance_draw" in trace._runnable_host_rng_channels
+    assert sys.getprofile() is None
 
 
 def test_record_fastlog_uses_same_guard_and_backward_boundary_is_explicit() -> None:
