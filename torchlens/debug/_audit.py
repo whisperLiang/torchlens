@@ -5,16 +5,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+import torch
+
 from ._common import _compute_ops
 from ._cost import hot_path
 from ._gradients import gradient_flow_audit
 from ._graph import dead_neurons
-from ._nan import bisect_nan, find_nan_in_trace
+from ._nan import _nonfinite_kind, bisect_nan, find_nan_in_trace
 from ._recompute import recompute_candidates
 
 
 if TYPE_CHECKING:
     from torchlens.data_classes.trace import Trace
+    from torchlens.partial import PartialTrace
 
 
 AuditSeverity = Literal["critical", "warning", "info"]
@@ -136,7 +139,99 @@ def _has_saved_gradients(trace: "Trace") -> tuple[bool, str | None]:
     return True, None
 
 
-def audit_trace(trace: "Trace") -> TraceAudit:
+def _audit_partial_trace(partial: "PartialTrace") -> TraceAudit:
+    """Audit a failed partial capture without full-trace assumptions.
+
+    Parameters
+    ----------
+    partial:
+        Partial capture and its original exception.
+
+    Returns
+    -------
+    TraceAudit
+        Evidence-backed exception/non-finite findings and explicit skipped scope.
+    """
+
+    raw_layers = partial.raw_layers
+    last = raw_layers[-1] if raw_layers else None
+    last_label = (
+        str(getattr(last, "_label_raw", getattr(last, "_layer_label_raw", "unknown")))
+        if last is not None
+        else "unknown"
+    )
+    modules = tuple(
+        str(module)
+        for module in (getattr(last, "module_call_stack", ()) if last is not None else ())
+    )
+    exception = partial.original_exception
+    findings = [
+        AuditFinding(
+            severity="critical",
+            check="partial_capture_exception",
+            message=f"{type(exception).__name__}: {exception}",
+            ops=(last_label,) if last is not None else (),
+            modules=modules,
+            follow_up="tl.report.explain(partial, format='json')",
+        )
+    ]
+    nonfinite = partial.first_nonfinite()
+    checks_run = ["partial_capture_exception", "find_nan"]
+    if not nonfinite.startswith("No non-finite"):
+        nonfinite_op = next(
+            (
+                op
+                for op in raw_layers
+                if isinstance((output := getattr(op, "out", None)), torch.Tensor)
+                and _nonfinite_kind(output) != "none"
+            ),
+            None,
+        )
+        nonfinite_label = (
+            str(
+                getattr(
+                    nonfinite_op,
+                    "_label_raw",
+                    getattr(nonfinite_op, "_layer_label_raw", "unknown"),
+                )
+            )
+            if nonfinite_op is not None
+            else "unknown"
+        )
+        nonfinite_modules = tuple(
+            str(module) for module in getattr(nonfinite_op, "module_call_stack", ())
+        )
+        findings.append(
+            AuditFinding(
+                severity="critical",
+                check="find_nan",
+                message=nonfinite,
+                ops=(nonfinite_label,) if nonfinite_op is not None else (),
+                modules=nonfinite_modules,
+                follow_up="partial.first_nonfinite()",
+            )
+        )
+    reason = "partial capture did not complete full-trace postprocessing"
+    skipped = tuple(
+        (check, reason)
+        for check in (
+            "bisect_nan",
+            "compare",
+            "dead_neurons",
+            "gradient_flow_audit",
+            "hot_path",
+            "infer_input_shape",
+            "lineage",
+            "recompute_candidates",
+        )
+    )
+    findings.sort(
+        key=lambda finding: (_SEVERITY_ORDER[finding.severity], finding.check, finding.ops)
+    )
+    return TraceAudit(tuple(findings), tuple(checks_run), skipped)
+
+
+def audit_trace(trace: "Trace | PartialTrace") -> TraceAudit:
     """Run every trace-local health diagnostic supported by one capture.
 
     Diagnostics requiring a second trace, a selected start operation, or a
@@ -147,13 +242,18 @@ def audit_trace(trace: "Trace") -> TraceAudit:
     Parameters
     ----------
     trace:
-        Completed TorchLens trace.
+        Completed TorchLens trace or failed :class:`PartialTrace`.
 
     Returns
     -------
     TraceAudit
         Severity-ordered findings, executed checks, and honest skip reasons.
     """
+
+    from torchlens.partial import PartialTrace
+
+    if isinstance(trace, PartialTrace):
+        return _audit_partial_trace(trace)
 
     findings: list[AuditFinding] = []
     checks_run: list[str] = []

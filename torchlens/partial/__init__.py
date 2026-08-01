@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import torch
 
 if TYPE_CHECKING:
+    from torchlens.debug._audit import TraceAudit
     from torchlens.data_classes.op import Op
     from torchlens.data_classes.trace import Trace
 
@@ -97,6 +98,20 @@ class PartialTrace:
                 f"parents={fields.get('parents', [])}."
             )
         return "No non-finite tensor values found in partial capture."
+
+    def audit(self) -> "TraceAudit":
+        """Return an evidence-backed health report for this partial capture.
+
+        Returns
+        -------
+        TraceAudit
+            Structured failure and saved-payload findings. Full-trace checks are
+            explicitly skipped because postprocessing did not complete.
+        """
+
+        from torchlens.debug._audit import audit_trace
+
+        return audit_trace(self)
 
     def draw(self, vis_outpath: str | None = None, **_: Any) -> str:
         """Render the failed capture as minimal Graphviz DOT source.
