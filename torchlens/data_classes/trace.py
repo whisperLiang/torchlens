@@ -137,6 +137,9 @@ if TYPE_CHECKING:
     class TraceStatsMixin(_TraceMixinTypingBase):
         """Typing-only TraceStatsMixin stand-in."""
 
+    class TraceStackMixin(_TraceMixinTypingBase):
+        """Typing-only TraceStackMixin stand-in."""
+
     class TraceInterventionMixin(_TraceMixinTypingBase):
         """Typing-only TraceInterventionMixin stand-in."""
 
@@ -152,6 +155,7 @@ if TYPE_CHECKING:
 else:
     from ._trace_export import TraceExportMixin
     from ._trace_intervention import TraceInterventionMixin
+    from ._trace_stack import TraceStackMixin
     from ._trace_stats import TraceStatsMixin
     from ._trace_validation import TraceValidationMixin
     from ._trace_viz import TraceVisualizationMixin
@@ -766,6 +770,7 @@ def _append_conditional_arm_edge(
 @dataclass(init=False, repr=False, eq=False)
 class Trace(
     TraceStatsMixin,
+    TraceStackMixin,
     TraceInterventionMixin,
     TraceValidationMixin,
     TraceExportMixin,

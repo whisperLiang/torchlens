@@ -340,6 +340,7 @@ def test_torch_capability_snapshot_contract() -> None:
         ),
         "HAS_DYNAMO_OPTIMIZED_MODULE": True,
         "HAS_DYNAMO_ORIG_CALLABLE_MARKER": tc.HAS_DYNAMO_ORIG_CALLABLE_MARKER,
+        "HAS_DYNAMO_EXPLAIN": tc.HAS_DYNAMO_EXPLAIN,
         "HAS_GENERATOR_CLONE_STATE": hasattr(torch.Generator, "clone_state"),
         "HAS_GENERATOR_GRAPHSAFE_GET_STATE": hasattr(torch.Generator, "graphsafe_get_state"),
         "HAS_GENERATOR_GRAPHSAFE_SET_STATE": hasattr(torch.Generator, "graphsafe_set_state"),

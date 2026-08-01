@@ -58,6 +58,7 @@ __all__ = [
     "HAS_CUDA_MATMUL_TF32",
     "HAS_CUDNN_FLAGS",
     "HAS_DETERMINISTIC_ALGORITHMS_QUERY",
+    "HAS_DYNAMO_EXPLAIN",
     "HAS_FILL_UNINITIALIZED_MEMORY",
     "HAS_FLOAT32_MATMUL_PRECISION",
     "HAS_SDP_TOGGLES",
@@ -94,6 +95,7 @@ __all__ = [
     "get_device_constructors",
     "get_device_context_type",
     "get_dynamo_optimized_module_type",
+    "get_dynamo_explain",
     "get_functorch_maybe_current_level",
     "get_functorch_wrapped_tensor_checker",
     "get_fx_graph_module_type",
@@ -169,6 +171,19 @@ class RunnableTorchAlias:
     recorded_min_version: tuple[int, int]
     recorded_max_version: tuple[int, int]
     strip_target_prefix: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _NormalizedDynamoBreak:
+    """Version-neutral graph-break evidence from ``torch._dynamo.explain``."""
+
+    reason: str
+    source_file: str | None
+    line_number: int | None
+
+
+class _DynamoExplainOutputError(RuntimeError):
+    """Raised when a Dynamo explain result has an unsupported runtime shape."""
 
 
 _RUNNABLE_TORCH_ALIASES: tuple[RunnableTorchAlias, ...] = (
@@ -698,6 +713,21 @@ def _probe_dynamo_orig_callable_marker() -> bool:
     )
 
 
+def _probe_dynamo_explain_module() -> bool:
+    """Return whether the Dynamo package is discoverable without importing it.
+
+    Returns
+    -------
+    bool
+        Whether a later lazy probe can inspect ``torch._dynamo.explain``.
+    """
+
+    try:
+        return importlib.util.find_spec("torch._dynamo") is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return False
+
+
 class _PySequenceMethods(ctypes.Structure):
     """Minimal ctypes mirror of CPython's PySequenceMethods struct."""
 
@@ -835,6 +865,7 @@ HAS_NAMED_TENSOR_API: bool = _probe_named_tensor_api()
 HAS_CACHED_UNTYPED_STORAGE_WRAPPER: bool = _probe_cached_untyped_storage_wrapper()
 HAS_DYNAMO_OPTIMIZED_MODULE: bool = False
 HAS_DYNAMO_ORIG_CALLABLE_MARKER: bool = False
+HAS_DYNAMO_EXPLAIN: bool = _probe_dynamo_explain_module()
 HAS_GENERATOR_CLONE_STATE: bool = hasattr(torch.Generator, "clone_state")
 HAS_GENERATOR_GRAPHSAFE_GET_STATE: bool = hasattr(torch.Generator, "graphsafe_get_state")
 HAS_GENERATOR_GRAPHSAFE_SET_STATE: bool = hasattr(torch.Generator, "graphsafe_set_state")
@@ -862,6 +893,7 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_CACHED_UNTYPED_STORAGE_WRAPPER",
     "HAS_DYNAMO_OPTIMIZED_MODULE",
     "HAS_DYNAMO_ORIG_CALLABLE_MARKER",
+    "HAS_DYNAMO_EXPLAIN",
     "HAS_GENERATOR_CLONE_STATE",
     "HAS_GENERATOR_GRAPHSAFE_GET_STATE",
     "HAS_GENERATOR_GRAPHSAFE_SET_STATE",
@@ -926,6 +958,7 @@ def get_torch_capability_snapshot() -> TorchCapabilitySnapshot:
     # the pre-probe placeholder.
     get_dynamo_optimized_module_type()
     _ensure_dynamo_orig_callable_marker_probed()
+    get_dynamo_explain()
     snapshot = {name: bool(globals()[name]) for name in _CAPABILITY_ATTRS}
     snapshot["AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED"] = bool(AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED)
     return snapshot
@@ -1269,6 +1302,173 @@ def is_dynamo_compiled_callable(value: Any) -> bool:
         return False
     _ensure_dynamo_orig_callable_marker_probed()
     return HAS_DYNAMO_ORIG_CALLABLE_MARKER
+
+
+def get_dynamo_explain() -> Callable[..., Any] | None:
+    """Return ``torch._dynamo.explain`` after a lazy capability probe.
+
+    Returns
+    -------
+    Callable[..., Any] | None
+        Dynamo explain callable, or ``None`` when unavailable.
+    """
+
+    if not HAS_DYNAMO_EXPLAIN:
+        return None
+    explain = _import_module_attr_or_none("torch._dynamo", "explain")
+    if not callable(explain):
+        mark_torch_capability_missing(
+            "HAS_DYNAMO_EXPLAIN",
+            "graph-break diagnostics are disabled",
+        )
+        return None
+    return explain
+
+
+def run_dynamo_explain(
+    model: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> Any:
+    """Execute Dynamo explain across old and new invocation conventions.
+
+    Parameters
+    ----------
+    model:
+        Eager model or callable to inspect.
+    args:
+        Positional model arguments.
+    kwargs:
+        Keyword model arguments.
+
+    Returns
+    -------
+    Any
+        Raw version-specific explain output.
+
+    Raises
+    ------
+    RuntimeError
+        If the explain capability is unavailable.
+    """
+
+    explain = get_dynamo_explain()
+    if explain is None:
+        raise RuntimeError("torch._dynamo.explain is unavailable in this torch runtime")
+    try:
+        candidate = explain(model)
+    except TypeError:
+        return explain(model, *args, **kwargs)
+    if callable(candidate):
+        return candidate(*args, **kwargs)
+    return candidate
+
+
+def _dynamo_break_source(reason: Any) -> tuple[str | None, int | None]:
+    """Extract one source location from a version-specific break reason.
+
+    Parameters
+    ----------
+    reason:
+        Dynamo break-reason object or mapping.
+
+    Returns
+    -------
+    tuple[str | None, int | None]
+        Source file and one-indexed line number when supplied by Dynamo.
+    """
+
+    user_stack = (
+        reason.get("user_stack")
+        if isinstance(reason, dict)
+        else getattr(reason, "user_stack", None)
+    )
+    for frame in user_stack or ():
+        source_file = (
+            frame.get("filename")
+            if isinstance(frame, dict)
+            else getattr(frame, "filename", getattr(frame, "file", None))
+        )
+        line_number = (
+            frame.get("lineno", frame.get("line"))
+            if isinstance(frame, dict)
+            else getattr(frame, "lineno", getattr(frame, "line", None))
+        )
+        if source_file is not None and isinstance(line_number, int):
+            return str(source_file), line_number
+    source_file = (
+        reason.get("filename") if isinstance(reason, dict) else getattr(reason, "filename", None)
+    )
+    line_number = (
+        reason.get("lineno", reason.get("line"))
+        if isinstance(reason, dict)
+        else getattr(reason, "lineno", getattr(reason, "line", None))
+    )
+    if source_file is not None and isinstance(line_number, int):
+        return str(source_file), line_number
+    return None, None
+
+
+def normalize_dynamo_explain_output(output: Any) -> tuple[_NormalizedDynamoBreak, ...]:
+    """Normalize supported Dynamo explain result shapes without version parsing.
+
+    Supported shapes are attribute objects and mappings carrying
+    ``break_reasons``, plus the historical tuple whose fourth element contains
+    break reasons. Individual reasons may be objects, mappings, or strings.
+
+    Parameters
+    ----------
+    output:
+        Raw result from :func:`run_dynamo_explain`.
+
+    Returns
+    -------
+    tuple[_NormalizedDynamoBreak, ...]
+        Version-neutral graph-break evidence.
+
+    Raises
+    ------
+    _DynamoExplainOutputError
+        If the runtime result shape cannot be interpreted safely.
+    """
+
+    break_count: Any = None
+    if isinstance(output, dict):
+        reasons = output.get("break_reasons")
+        break_count = output.get("graph_break_count")
+    elif hasattr(output, "break_reasons"):
+        reasons = getattr(output, "break_reasons")
+        break_count = getattr(output, "graph_break_count", None)
+    elif isinstance(output, tuple) and len(output) >= 4:
+        reasons = output[3]
+        break_count = output[2]
+    else:
+        raise _DynamoExplainOutputError(
+            f"unsupported torch._dynamo.explain output type {type(output).__name__}"
+        )
+    if reasons is None:
+        if break_count == 0:
+            return ()
+        raise _DynamoExplainOutputError("Dynamo explain output omitted break_reasons")
+    if not isinstance(reasons, (list, tuple)):
+        raise _DynamoExplainOutputError("Dynamo break_reasons is not a sequence")
+
+    normalized: list[_NormalizedDynamoBreak] = []
+    for item in reasons:
+        reason_text: object | None
+        if isinstance(item, str):
+            reason_text = item
+        elif isinstance(item, dict):
+            reason_text = item.get("reason")
+        else:
+            reason_text = getattr(item, "reason", None)
+        if reason_text is None:
+            raise _DynamoExplainOutputError(
+                f"unsupported Dynamo break reason type {type(item).__name__}"
+            )
+        source_file, line_number = _dynamo_break_source(item)
+        normalized.append(_NormalizedDynamoBreak(str(reason_text), source_file, line_number))
+    return tuple(normalized)
 
 
 def fix_tensor_sequence_slot() -> bool:

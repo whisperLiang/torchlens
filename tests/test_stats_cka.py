@@ -1,0 +1,98 @@
+"""Tests for streaming cross-covariance and linear CKA."""
+
+from __future__ import annotations
+
+import math
+
+import pytest
+import torch
+
+from torchlens.stats import CKA, CrossCovariance, cka
+
+
+def _gram_cka(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Return a direct centered-Gram linear CKA reference value.
+
+    Parameters
+    ----------
+    a:
+        First representation matrix.
+    b:
+        Second representation matrix.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar linear CKA value.
+    """
+
+    centered_a = a - a.mean(dim=0)
+    centered_b = b - b.mean(dim=0)
+    gram_a = centered_a @ centered_a.T
+    gram_b = centered_b @ centered_b.T
+    return (gram_a * gram_b).sum() / torch.sqrt(gram_a.square().sum() * gram_b.square().sum())
+
+
+def test_cka_matches_centered_gram_reference() -> None:
+    """Feature-covariance CKA matches the direct centered-Gram definition."""
+
+    generator = torch.Generator().manual_seed(123)
+    a = torch.randn(31, 7, generator=generator, dtype=torch.float64)
+    b = torch.randn(31, 11, generator=generator, dtype=torch.float64)
+
+    assert cka(a, b) == pytest.approx(float(_gram_cka(a, b)), abs=1e-8)
+
+
+def test_cka_identity_orthogonal_and_scaling_invariance() -> None:
+    """Linear CKA has its expected identity and representation invariances."""
+
+    generator = torch.Generator().manual_seed(456)
+    a = torch.randn(40, 8, generator=generator, dtype=torch.float64)
+    b = torch.randn(40, 8, generator=generator, dtype=torch.float64)
+    orthogonal, _ = torch.linalg.qr(torch.randn(8, 8, generator=generator, dtype=torch.float64))
+
+    assert cka(a, a) == pytest.approx(1.0, abs=1e-12)
+    assert cka(a @ orthogonal, b) == pytest.approx(cka(a, b), abs=1e-12)
+    assert cka(a, b * 7.5) == pytest.approx(cka(a, b), abs=1e-12)
+
+
+def test_streaming_cka_matches_one_shot() -> None:
+    """Chunked updates produce the same result as a one-shot update."""
+
+    generator = torch.Generator().manual_seed(789)
+    a = torch.randn(29, 5, generator=generator, dtype=torch.float64)
+    b = torch.randn(29, 9, generator=generator, dtype=torch.float64)
+    accumulator = CKA()
+    boundaries = (0, 3, 14, 20, 29)
+    for start, stop in zip(boundaries, boundaries[1:]):
+        accumulator.update(a[start:stop], b[start:stop])
+
+    assert accumulator.result() == pytest.approx(cka(a, b), abs=1e-12)
+
+
+def test_cka_degenerate_input_returns_nan() -> None:
+    """A zero-variance representation has a documented NaN result."""
+
+    assert math.isnan(cka(torch.ones(5, 3), torch.randn(5, 4)))
+
+
+def test_cross_covariance_matches_direct_computation() -> None:
+    """Streaming cross-covariance matches direct centered multiplication."""
+
+    generator = torch.Generator().manual_seed(246)
+    a = torch.randn(17, 4, generator=generator, dtype=torch.float64)
+    b = torch.randn(17, 6, generator=generator, dtype=torch.float64)
+    accumulator = CrossCovariance()
+    accumulator.update(a[:4], b[:4])
+    accumulator.update(a[4:], b[4:])
+    expected = (a - a.mean(dim=0)).T @ (b - b.mean(dim=0)) / (a.shape[0] - 1)
+
+    torch.testing.assert_close(accumulator.result(), expected, atol=1e-12, rtol=1e-12)
+
+
+def test_cross_covariance_refuses_mismatched_rows() -> None:
+    """Paired batches must contain the same number of observations."""
+
+    accumulator = CrossCovariance()
+    with pytest.raises(ValueError, match="matched row counts.*3 and 4"):
+        accumulator.update(torch.randn(3, 2), torch.randn(4, 5))

@@ -1587,6 +1587,69 @@ class Op:
         return Macs(self.flops_total // 2)
 
     @property
+    def bytes_read(self) -> Bytes | None:
+        """Theoretical ideal read-once traffic for this operation.
+
+        This access-time model uses only recorded shape/dtype metadata. It is
+        not measured hardware traffic and can diverge under caching, kernel
+        fusion, or backend implementation details. Logical view/alias operations
+        report zero bytes moved; insufficient metadata returns ``None``.
+
+        Returns
+        -------
+        Bytes | None
+            Theoretical bytes read once from inputs and parameters.
+        """
+
+        from ..debug._cost import theoretical_op_bytes
+
+        return theoretical_op_bytes(self)[0]
+
+    @property
+    def bytes_written(self) -> Bytes | None:
+        """Theoretical ideal write-once traffic for this operation.
+
+        This access-time model uses only recorded shape/dtype metadata. It is
+        not measured hardware traffic and can diverge under caching, kernel
+        fusion, or backend implementation details. Logical view/alias operations
+        report zero bytes moved; insufficient metadata returns ``None``.
+
+        Returns
+        -------
+        Bytes | None
+            Theoretical bytes written once for the logical output.
+        """
+
+        from ..debug._cost import theoretical_op_bytes
+
+        return theoretical_op_bytes(self)[1]
+
+    @property
+    def arithmetic_intensity(self) -> float | None:
+        """Return theoretical forward FLOPs per ideal traffic byte.
+
+        The value is ``flops_forward / (bytes_read + bytes_written)`` using the
+        theoretical ideal read-once/write-once model. It is not measured roofline
+        intensity and can diverge under kernel fusion, caching, or real memory
+        transactions. Missing FLOPs/traffic and zero-traffic logical views return
+        ``None``.
+
+        Returns
+        -------
+        float | None
+            Theoretical forward arithmetic intensity in FLOPs per byte.
+        """
+
+        bytes_read = self.bytes_read
+        bytes_written = self.bytes_written
+        if self.flops_forward is None or bytes_read is None or bytes_written is None:
+            return None
+        total_bytes = int(bytes_read) + int(bytes_written)
+        if total_bytes == 0:
+            return None
+        return float(self.flops_forward) / total_bytes
+
+    @property
     def param_names(self) -> list[str]:
         """Return short names of parameters consumed by this Op.
 

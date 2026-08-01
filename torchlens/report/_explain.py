@@ -4,13 +4,19 @@ from __future__ import annotations
 
 from collections import Counter
 from typing import Any, Literal
+import traceback
 
 import torch
 
 Audience = Literal["researcher", "practitioner", "auto"]
+ExplainFormat = Literal["text", "json"]
 
 
-def explain(log: Any, audience: Audience = "auto") -> str:
+def explain(
+    log: Any,
+    audience: Audience = "auto",
+    format: ExplainFormat = "text",
+) -> str | dict[str, Any]:
     """Explain a TorchLens log in plain language.
 
     Parameters
@@ -21,20 +27,46 @@ def explain(log: Any, audience: Audience = "auto") -> str:
         Report style. ``"researcher"`` includes graph-pattern detail,
         ``"practitioner"`` emphasizes operational status, and ``"auto"``
         selects a balanced report.
+    format:
+        ``"text"`` for the existing prose report or ``"json"`` for a
+        structured dictionary.
 
     Returns
     -------
-    str
-        Multi-section plain-language report.
+    str | dict[str, Any]
+        Multi-section prose, or the stable flat schema documented below.
 
     Raises
     ------
     ValueError
-        If ``audience`` is not supported.
+        If ``audience`` or ``format`` is not supported.
+
+    Notes
+    -----
+    The JSON schema is identified by ``schema="torchlens.explain.v1"`` and
+    contains these stable snake-case keys: ``schema``, ``audience``,
+    ``capture_status``, ``model_class``, ``layer_count``, ``operation_count``,
+    ``saved_tensor_count``, ``total_tensor_count``, ``has_backward_pass``,
+    ``exception_type``, ``exception_message``, ``last_completed_op_label``,
+    ``last_completed_op_shape``, ``last_completed_op_dtype``,
+    ``last_completed_op_device``, ``failing_boundary``, and
+    ``first_nonfinite``. Evidence unavailable from the supplied log is reported
+    as ``"unknown"`` rather than inferred.
     """
 
     if audience not in {"researcher", "practitioner", "auto"}:
         raise ValueError("audience must be 'researcher', 'practitioner', or 'auto'.")
+    if format not in {"text", "json"}:
+        raise ValueError("format must be 'text' or 'json'.")
+
+    if _is_partial_trace(log):
+        diagnosis = _partial_diagnosis(log)
+        if format == "json":
+            return _partial_json(log, audience, diagnosis)
+        return _partial_text(diagnosis)
+
+    if format == "json":
+        return _full_json(log, audience)
 
     lines = [
         "TorchLens report",
@@ -58,6 +90,275 @@ def explain(log: Any, audience: Audience = "auto") -> str:
         *_pattern_lines(log, audience=audience),
     ]
     return "\n".join(lines)
+
+
+def _is_partial_trace(log: Any) -> bool:
+    """Return whether ``log`` is a :class:`PartialTrace` instance.
+
+    Parameters
+    ----------
+    log:
+        Candidate capture object.
+
+    Returns
+    -------
+    bool
+        Whether the object is a failed partial capture wrapper.
+    """
+
+    from ..partial import PartialTrace
+
+    return isinstance(log, PartialTrace)
+
+
+def _last_partial_op(log: Any) -> Any | None:
+    """Return the last recorded completed operation in a partial capture.
+
+    Parameters
+    ----------
+    log:
+        Partial capture wrapper.
+
+    Returns
+    -------
+    Any | None
+        Last raw operation, or ``None`` when none completed.
+    """
+
+    raw_layers = tuple(getattr(log, "raw_layers", ()))
+    return raw_layers[-1] if raw_layers else None
+
+
+def _partial_boundary(log: Any) -> str:
+    """Return the nearest evidence-backed failure boundary description.
+
+    Parameters
+    ----------
+    log:
+        Partial capture wrapper.
+
+    Returns
+    -------
+    str
+        Recorded exception field or traceback location, otherwise ``"unknown"``.
+    """
+
+    exception = log.original_exception
+    fields = getattr(exception, "fields", {})
+    if isinstance(fields, dict) and (fields.get("layer") or fields.get("op")):
+        return f"layer={fields.get('layer', 'unknown')}, op={fields.get('op', 'unknown')}"
+    extracted = traceback.extract_tb(exception.__traceback__)
+    forward_frames = [frame for frame in extracted if frame.name == "forward"]
+    if forward_frames:
+        frame = forward_frames[-1]
+        return f"forward at {frame.filename}:{frame.lineno}"
+    if extracted:
+        frame = extracted[-1]
+        return f"{frame.name} at {frame.filename}:{frame.lineno}"
+    return "unknown"
+
+
+def _partial_diagnosis(log: Any) -> dict[str, Any]:
+    """Collect evidence-backed fields for a failed partial capture.
+
+    Parameters
+    ----------
+    log:
+        Partial capture wrapper.
+
+    Returns
+    -------
+    dict[str, Any]
+        Last-op, boundary, exception, and non-finite evidence.
+    """
+
+    op = _last_partial_op(log)
+    output = getattr(op, "out", None) if op is not None else None
+    label = (
+        str(getattr(op, "_label_raw", getattr(op, "_layer_label_raw", "unknown")))
+        if op is not None
+        else "unknown"
+    )
+    shape = getattr(op, "shape", None) if op is not None else None
+    dtype = getattr(op, "dtype", None) if op is not None else None
+    device = getattr(op, "device", None) if op is not None else None
+    if isinstance(output, torch.Tensor):
+        shape = tuple(output.shape) if shape is None else shape
+        dtype = output.dtype if dtype is None else dtype
+        device = output.device if device is None else device
+    exception = log.original_exception
+    return {
+        "last_completed_op_label": label,
+        "last_completed_op_shape": tuple(shape) if shape is not None else "unknown",
+        "last_completed_op_dtype": str(dtype) if dtype is not None else "unknown",
+        "last_completed_op_device": str(device) if device is not None else "unknown",
+        "failing_boundary": _partial_boundary(log),
+        "exception_type": type(exception).__name__,
+        "exception_message": str(exception),
+        "first_nonfinite": str(log.first_nonfinite()),
+    }
+
+
+def _partial_text(diagnosis: dict[str, Any]) -> str:
+    """Render a partial-capture diagnosis as text.
+
+    Parameters
+    ----------
+    diagnosis:
+        Evidence fields from :func:`_partial_diagnosis`.
+
+    Returns
+    -------
+    str
+        Human-readable failed-capture report.
+    """
+
+    return "\n".join(
+        [
+            "TorchLens report",
+            "",
+            "Capture status",
+            "- This is a partial capture; only operations completed before the failure are known.",
+            "",
+            "Failure diagnosis",
+            (
+                "- Last completed op: "
+                f"{diagnosis['last_completed_op_label']} "
+                f"(shape={diagnosis['last_completed_op_shape']}, "
+                f"dtype={diagnosis['last_completed_op_dtype']}, "
+                f"device={diagnosis['last_completed_op_device']})."
+            ),
+            f"- Failing boundary: {diagnosis['failing_boundary']}.",
+            (
+                "- Captured exception: "
+                f"{diagnosis['exception_type']}: {diagnosis['exception_message']}"
+            ),
+            f"- First non-finite evidence: {diagnosis['first_nonfinite']}",
+        ]
+    )
+
+
+def _base_json(log: Any, audience: Audience) -> dict[str, Any]:
+    """Return fields common to complete and partial JSON reports.
+
+    Parameters
+    ----------
+    log:
+        Capture object.
+    audience:
+        Requested audience label.
+
+    Returns
+    -------
+    dict[str, Any]
+        Common stable-schema fields.
+    """
+
+    return {
+        "schema": "torchlens.explain.v1",
+        "audience": audience,
+        "capture_status": "complete",
+        "model_class": getattr(log, "model_class_name", type(log).__name__),
+        "layer_count": _safe_len(getattr(log, "layer_list", None)),
+        "operation_count": int(getattr(log, "num_ops", 0) or 0),
+        "saved_tensor_count": int(getattr(log, "num_saved_ops", 0) or 0),
+        "total_tensor_count": int(getattr(log, "num_tensors", 0) or 0),
+        "has_backward_pass": bool(getattr(log, "has_backward_pass", False)),
+        "exception_type": "unknown",
+        "exception_message": "unknown",
+        "last_completed_op_label": "unknown",
+        "last_completed_op_shape": "unknown",
+        "last_completed_op_dtype": "unknown",
+        "last_completed_op_device": "unknown",
+        "failing_boundary": "unknown",
+        "first_nonfinite": _first_nonfinite_summary(log),
+    }
+
+
+def _full_json(log: Any, audience: Audience) -> dict[str, Any]:
+    """Build the stable JSON schema for a completed trace.
+
+    Parameters
+    ----------
+    log:
+        Completed trace.
+    audience:
+        Requested audience label.
+
+    Returns
+    -------
+    dict[str, Any]
+        Stable full-trace report dictionary.
+    """
+
+    return _base_json(log, audience)
+
+
+def _partial_json(
+    log: Any,
+    audience: Audience,
+    diagnosis: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the stable JSON schema for a partial trace.
+
+    Parameters
+    ----------
+    log:
+        Partial capture wrapper.
+    audience:
+        Requested audience label.
+    diagnosis:
+        Evidence fields from :func:`_partial_diagnosis`.
+
+    Returns
+    -------
+    dict[str, Any]
+        Stable failed-capture report dictionary.
+    """
+
+    result = _base_json(log, audience)
+    result.update(diagnosis)
+    result.update(
+        {
+            "capture_status": "partial",
+            "model_class": getattr(log.trace, "model_class_name", type(log.trace).__name__),
+            "layer_count": len(log.raw_layers),
+            "operation_count": len(log.raw_layers),
+            "saved_tensor_count": sum(
+                bool(getattr(op, "has_saved_activation", False)) for op in log.raw_layers
+            ),
+            "total_tensor_count": len(log.raw_layers),
+        }
+    )
+    return result
+
+
+def _first_nonfinite_summary(log: Any) -> str:
+    """Return a saved-output non-finite summary without speculation.
+
+    Parameters
+    ----------
+    log:
+        Completed trace-like object.
+
+    Returns
+    -------
+    str
+        First recorded non-finite detail, or a scoped clean statement.
+    """
+
+    for layer in getattr(log, "layer_list", []) or []:
+        out = getattr(layer, "out", None)
+        if not isinstance(out, torch.Tensor) or out.numel() == 0:
+            continue
+        try:
+            if bool((~torch.isfinite(out.detach())).any().item()):
+                if hasattr(log, "first_nonfinite"):
+                    return str(log.first_nonfinite())
+                return f"saved output {getattr(layer, 'layer_label', 'unknown')} is non-finite"
+        except (RuntimeError, TypeError):
+            continue
+    return "No non-finite values found in saved outputs."
 
 
 def _model_summary_lines(log: Any) -> list[str]:
