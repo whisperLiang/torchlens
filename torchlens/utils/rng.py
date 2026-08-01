@@ -79,6 +79,11 @@ _NUMPY_RNG_INSTANCE_TYPES: tuple[type, ...] = (
 )
 """Public NumPy RNG receiver types covered by the host-nondeterminism witness."""
 
+_INERT_PROFILE_C_CALL_RECEIVER_TYPES: frozenset[type] = frozenset(
+    {ModuleType, dict, list, set, str}
+)
+"""Exact receiver types that cannot own any monitored host-nondeterminism channel."""
+
 
 def _numpy_rng_receiver(value: Any) -> Any | None:
     """Return the NumPy RNG receiver bound to ``value``, when present.
@@ -2244,6 +2249,14 @@ class host_nondeterminism_monitor:
         receiver = getattr(arg, "__self__", None)
         if receiver is None:
             return
+        # Profile hooks observe every C call made by capture internals. More than 90%
+        # of those calls are methods on these five exact built-in receiver types. The
+        # held-reference identity check above must still run first because a monitored
+        # module function also has a module receiver. After an identity miss, however,
+        # these exact types cannot be a torch/NumPy/Python RNG or datetime class, so
+        # bypassing the remaining receiver classifiers is behavior-preserving.
+        if type(receiver) in _INERT_PROFILE_C_CALL_RECEIVER_TYPES:
+            return
         # r67 C1: method c_calls on ANY ``torch.Generator`` receiver -- process/device
         # defaults, user-constructed, model-held, RETURNED clones, and subclasses (an
         # inherited C method's c_call receiver IS the subclass instance) -- dispatch
@@ -2341,13 +2354,20 @@ class host_nondeterminism_monitor:
                 if event == "c_call":
                     self._classify_c_call(frame, arg)
                 elif event == "call":
-                    self._snapshot_numpy_frame_rngs(frame)
+                    # Avoid two Python helper calls for the overwhelmingly common
+                    # internal frame whose cached digest scope is false. Cache misses
+                    # and positive scopes still enter the unchanged snapshot helper.
+                    digest_scope = self._numpy_frame_digest_scope_cache.get(frame.f_code)
+                    if digest_scope is not False:
+                        self._snapshot_numpy_frame_rngs(frame)
                     # r65 CLUSTER Z: held-reference torch RNG spellings are Python
                     # functions -- classified by code identity on ``call`` events (the
                     # r41 builtin-identity layer only ever sees ``c_call``).
-                    self._classify_call(frame)
+                    if id(frame.f_code) in self._held_code_marks:
+                        self._classify_call(frame)
                 elif event == "return":
-                    self._compare_numpy_frame_rngs(frame)
+                    if id(frame) in self._numpy_frame_rng_states:
+                        self._compare_numpy_frame_rngs(frame)
             except Exception:
                 self._flag_uncertain("profile_classifier_error")
             if predecessor is not None:
