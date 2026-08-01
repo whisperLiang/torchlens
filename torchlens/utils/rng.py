@@ -1833,7 +1833,11 @@ class host_nondeterminism_monitor:
         # preserving the no-method-name invariant.
         self._numpy_frame_rng_states: dict[int, list[tuple[Any, str]]] = {}
         self._numpy_global_name_cache: dict[tuple[int, int], tuple[str, ...]] = {}
-        self._numpy_frame_digest_scope_cache: dict[CodeType, bool] = {}
+        # Code objects compare structurally and ignore ``co_filename``. Key by identity
+        # and retain the code object strongly in the value so an id cannot be reused
+        # during the monitoring window and an internal structural twin cannot suppress
+        # the digest for a user frame.
+        self._numpy_frame_digest_scope_cache: dict[int, tuple[CodeType, bool]] = {}
         # r49 hon1_1: re-entrancy depth for monitor-INTERNAL probes. While > 0 the monitor is
         # reading through its OWN inventory probe (owner-thread, ``__enter__``-scoped, BEFORE the
         # user forward runs), so any channel a probe transitively touches must NOT be marked as a
@@ -2127,14 +2131,15 @@ class host_nondeterminism_monitor:
             Whether the frame may originate a user-owned NumPy RNG draw.
         """
 
-        cached = self._numpy_frame_digest_scope_cache.get(code)
-        if cached is not None:
-            return cached
+        cache_key = id(code)
+        cached = self._numpy_frame_digest_scope_cache.get(cache_key)
+        if cached is not None and cached[0] is code:
+            return cached[1]
         filename = code.co_filename
         needs_snapshot = not any(
             filename.startswith(prefix) for prefix in _NUMPY_FRAME_DIGEST_INTERNAL_PATH_PREFIXES
         )
-        self._numpy_frame_digest_scope_cache[code] = needs_snapshot
+        self._numpy_frame_digest_scope_cache[cache_key] = (code, needs_snapshot)
         return needs_snapshot
 
     def _snapshot_numpy_frame_rngs(self, frame: FrameType) -> None:
@@ -2220,6 +2225,47 @@ class host_nondeterminism_monitor:
             if changed:
                 self._mark("c_rng_instance_draw")
                 return
+
+    def _snapshot_returned_numpy_rngs(self, frame: FrameType, returned: Any) -> None:
+        """Snapshot NumPy RNG receivers returned into a still-running user frame.
+
+        NumPy 2.x Cython RNG methods emit no profile event. A receiver obtained from a
+        Python helper after its caller entered therefore misses the caller's entry
+        snapshot unless it is transferred at the helper's ``return`` event. Tracking
+        the returned receiver and one inert holder edge is method-name-independent and
+        lets the caller's ordinary return comparison witness any later state change.
+
+        Parameters
+        ----------
+        frame:
+            Python frame returning ``returned``.
+        returned:
+            Value delivered to the caller.
+        """
+
+        if not _NUMPY_RNG_METHODS_NEED_FRAME_DIGEST:
+            return
+        caller = frame.f_back
+        if caller is None or not self._numpy_frame_needs_rng_snapshot(caller.f_code):
+            return
+        snapshots = self._numpy_frame_rng_states.setdefault(id(caller), [])
+        seen_ids = {id(holder) for holder, _ in snapshots}
+        for candidate in (returned, *self._numpy_frame_candidate_children(returned)):
+            receiver = _numpy_rng_receiver(candidate)
+            holder = receiver if receiver is not None else candidate
+            if (
+                id(holder) in seen_ids
+                or id(holder) in self._exempt_ids
+                or not isinstance(holder, _NUMPY_RNG_INSTANCE_TYPES)
+            ):
+                continue
+            seen_ids.add(id(holder))
+            try:
+                snapshots.append((holder, self._digest_rng_instance(holder)))
+            except Exception:
+                self._flag_uncertain("profile_rng_state_read_failed")
+        if not snapshots:
+            self._numpy_frame_rng_states.pop(id(caller), None)
 
     def _classify_c_call(self, frame: Any, arg: Any) -> None:
         # r41 hon1_1: held-reference identity FIRST. A pre-window ``from time import
@@ -2357,8 +2403,12 @@ class host_nondeterminism_monitor:
                     # Avoid two Python helper calls for the overwhelmingly common
                     # internal frame whose cached digest scope is false. Cache misses
                     # and positive scopes still enter the unchanged snapshot helper.
-                    digest_scope = self._numpy_frame_digest_scope_cache.get(frame.f_code)
-                    if digest_scope is not False:
+                    digest_scope = self._numpy_frame_digest_scope_cache.get(id(frame.f_code))
+                    if (
+                        digest_scope is None
+                        or digest_scope[0] is not frame.f_code
+                        or digest_scope[1] is not False
+                    ):
                         self._snapshot_numpy_frame_rngs(frame)
                     # r65 CLUSTER Z: held-reference torch RNG spellings are Python
                     # functions -- classified by code identity on ``call`` events (the
@@ -2368,6 +2418,7 @@ class host_nondeterminism_monitor:
                 elif event == "return":
                     if id(frame) in self._numpy_frame_rng_states:
                         self._compare_numpy_frame_rngs(frame)
+                    self._snapshot_returned_numpy_rngs(frame, arg)
             except Exception:
                 self._flag_uncertain("profile_classifier_error")
             if predecessor is not None:
