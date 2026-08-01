@@ -53,6 +53,7 @@ from .backends.torch._tl import get_tensor_label
 from .bridge import hf as _hf_bridge
 from .ir import ParentEdge, replace_op_event
 from ._training_validation import TrainingModeConfigError, validate_training_compatibility
+from .utils._torch_compat import is_dynamo_compiled_callable
 from . import _state
 from .types import ActivationPostfunc, GradientPostfunc
 from .data_classes.trace import (
@@ -1591,6 +1592,12 @@ def trace(
     -------
         A ``Trace`` containing layer outs (if requested) and full metadata.
     """
+    if not isinstance(model, nn.Module) and is_dynamo_compiled_callable(model):
+        raise ValueError(
+            "TorchLens cannot capture this torch.compile-produced callable; applying "
+            "torch.compile more than once can return a plain function. Pass the original "
+            "eager nn.Module instead."
+        )
     if capture_output_structure is not MISSING:
         if capture_container_structure is not MISSING:
             raise TypeError(
@@ -2561,6 +2568,31 @@ def _public_impls_module() -> Any:
     _user_public_impls.trace = trace
     _user_public_impls._run_model_and_save_specified_outs = _run_model_and_save_specified_outs
     return _user_public_impls
+
+
+def release_model(model: nn.Module) -> None:
+    """Release a traced PyTorch model from persistent TorchLens preparation.
+
+    Parameters
+    ----------
+    model:
+        Model whose full module tree should be restored. The operation is safe
+        for never-traced and already-released models.
+
+    Returns
+    -------
+    None
+        The model is restored in place and may be pickled or traced again.
+
+    Notes
+    -----
+    TorchLens installs persistent, toggle-gated wrappers on non-root module
+    ``forward`` methods. Call ``release_model`` after the final trace when the
+    complete model object must be serialized with :func:`torch.save` or
+    :mod:`pickle`. Saving ``model.state_dict()`` is unaffected by preparation
+    and does not require release.
+    """
+    _public_impls_module().release_model(model)
 
 
 def summary(*args: Any, **kwargs: Any) -> None:

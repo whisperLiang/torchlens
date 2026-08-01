@@ -97,12 +97,33 @@ earlier saved activation. Use `"copy"` unless that aliasing tradeoff is explicit
 | **Multi-process spawn / `DataLoader` workers** | `RuntimeError` if called from a worker | Log in the main process |
 | **Tensor subclasses with custom `__torch_function__`** | May work; limited metadata fidelity | Log with a plain `torch.Tensor` input if possible |
 | **Tensor `.data` attribute access** | The getter is captured as its detach-like read op; any in-place write through the alias or a storage-sharing view ceilings runnable faithfulness to `unverifiable` | Prefer ordinary tensor operations or an explicit `detach()` when detachment is intended |
+| **Tensor-derived Python scalars** | Plain capture emits one `ScalarEscapeWarning`; the tensor-to-scalar dependence is not represented by an edge | Keep the value as a tensor or pass the Python value as an explicit input |
 | **Very deep module hierarchy (>1000 levels)** | May hit Python recursion limit | Flatten the hierarchy, or raise `sys.setrecursionlimit` |
 | **Buffer `.data = tensor` reassignment** | `RuntimeError` during end-of-capture reconciliation | Use `self.buffer = tensor` or `self.buffer.copy_(tensor)`; see [Buffers](buffers.md) |
 
 ---
 
 ## Details
+
+### Whole-model serialization after tracing
+
+TorchLens persistently wraps each non-root module's ``forward`` method after the first trace.
+Consequently, ``pickle.dumps(model)`` and ``torch.save(model)`` can raise ``PicklingError`` after
+tracing because Python cannot serialize those instance-level wrapper functions by reference. Call
+``tl.release_model(model)`` after the final trace to restore the original forwards and make the
+whole model serializable again. The release operation is idempotent, and the model can be traced
+again later; TorchLens will prepare it again from scratch.
+
+Saving ``model.state_dict()`` was never affected and does not require ``tl.release_model``.
+
+### Tensor-derived Python scalar escapes
+
+Calling ``item()``, ``bool()``, ``int()``, ``float()``, ``operator.index()``, or ``complex()``
+on a captured tensor moves its value into ordinary Python. If that value later controls execution
+or becomes a literal argument to another tensor operation, the tensor dependence cannot appear as
+a graph edge. Plain capture emits one aggregate ``torchlens.errors.ScalarEscapeWarning`` per Trace,
+including the number of occurrences and the first user source location. Keep the computation as a
+tensor or pass the Python value as an explicit model input when the dependence must be represented.
 
 ## Where other tools are the better fit
 
@@ -126,6 +147,11 @@ interpretability package:
 that wraps the original eager ``nn.Module`` at ``._orig_mod``. TorchLens is an
 eager-capture tool, so it does not trace the compiled graph, generated kernels,
 or fusion decisions.
+
+On torch releases where ``torch.compile(torch.compile(model))`` returns a plain
+Dynamo-produced function rather than an ``nn.Module``, TorchLens rejects it with
+a specific error. Pass the original eager module; a double-compiled callable
+cannot be safely unwrapped through the module capture path.
 
 ``trace`` detects ``OptimizedModule`` and transparently traces the eager source
 module it wraps. If a compiled wrapper appears as a submodule, TorchLens

@@ -61,6 +61,7 @@ from ...utils._torch_symbols import torch_attr
 from ...utils._callable_safety import private_c_forward_op_module_names
 from ... import _state
 from ..._errors import TorchLensCaptureGapWarning
+from ...errors import ScalarEscapeWarning
 from ._tl import (
     get_buffer_address,
     get_tensor_label,
@@ -4892,6 +4893,171 @@ def _make_host_value_escape_method(original: Any, state: _WitnessState, name: st
         return original(self, *args, **kwargs)
 
     return wrapper
+
+
+@dataclass
+class _PlainScalarEscapeState:
+    """Aggregate tensor-to-Python scalar escapes for one plain capture."""
+
+    trace: Any
+    owner_thread_id: int
+    count: int = 0
+    first_file: str | None = None
+    first_line: int | None = None
+
+
+def _first_scalar_escape_source() -> tuple[str | None, int | None]:
+    """Return the first non-TorchLens frame for a scalar escape call.
+
+    Returns
+    -------
+    tuple[str | None, int | None]
+        Source filename and line, or ``(None, None)`` if no user frame is visible.
+    """
+    frame = inspect.currentframe()
+    try:
+        frame = frame.f_back if frame is not None else None
+        while frame is not None:
+            filename = Path(frame.f_code.co_filename).resolve()
+            try:
+                filename.relative_to(_TORCHLENS_ROOT)
+            except ValueError:
+                return str(filename), frame.f_lineno
+            frame = frame.f_back
+    finally:
+        del frame
+    return None, None
+
+
+def _make_plain_scalar_escape_method(
+    original: Any,
+    state: _PlainScalarEscapeState,
+) -> Any:
+    """Wrap one tensor scalar protocol method for a plain capture.
+
+    Parameters
+    ----------
+    original:
+        Exact PyTorch method to call unchanged.
+    state:
+        Per-capture warning aggregate.
+
+    Returns
+    -------
+    Any
+        Read-through wrapper around ``original``.
+    """
+
+    @functools.wraps(original)
+    def wrapper(self: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
+        if (
+            _state._logging_enabled
+            and _state._active_trace is state.trace
+            and threading.get_ident() == state.owner_thread_id
+            and not _internal_read_active()
+            and get_tensor_label(self) is not None
+        ):
+            state.count += 1
+            if state.first_file is None:
+                state.first_file, state.first_line = _first_scalar_escape_source()
+        return original(self, *args, **kwargs)
+
+    return wrapper
+
+
+def _external_warning_stacklevel() -> int:
+    """Return a warning stack level that resolves outside the TorchLens package.
+
+    Returns
+    -------
+    int
+        Stack level suitable for :func:`warnings.warn`.
+    """
+    level = 1
+    frame = inspect.currentframe()
+    try:
+        frame = frame.f_back if frame is not None else None
+        while frame is not None:
+            try:
+                Path(frame.f_code.co_filename).resolve().relative_to(_TORCHLENS_ROOT)
+            except ValueError:
+                return level
+            level += 1
+            frame = frame.f_back
+    finally:
+        del frame
+    return level
+
+
+@contextmanager
+def capture_scalar_escape_warning(trace: Any) -> Iterator[None]:
+    """Warn once when a plain capture reads captured tensor data as Python scalars.
+
+    Parameters
+    ----------
+    trace:
+        Active plain Trace receiving the per-capture aggregate.
+
+    Yields
+    ------
+    None
+        The backend enters active logging inside this scoped method patch.
+
+    Notes
+    -----
+    Runnable-eligible captures already install the full completeness witness
+    belt and are deliberately excluded. This lightweight observer neither
+    constructs witness state nor changes capture verification verdicts.
+    """
+    if bool(getattr(trace, "intervention_ready", False)):
+        yield
+        return
+
+    state = _PlainScalarEscapeState(trace=trace, owner_thread_id=threading.get_ident())
+    restores: dict[str, tuple[bool, Any]] = {}
+    for name in HOST_VALUE_ESCAPE_METHODS & {
+        "item",
+        "__bool__",
+        "__int__",
+        "__float__",
+        "__index__",
+        "__complex__",
+    }:
+        original = getattr(torch.Tensor, name, None)
+        if original is None or not callable(original):
+            continue
+        shadowed = name in torch.Tensor.__dict__
+        try:
+            setattr(torch.Tensor, name, _make_plain_scalar_escape_method(original, state))
+        except (TypeError, AttributeError):
+            continue
+        restores[name] = (shadowed, original)
+    try:
+        yield
+    finally:
+        for name, (shadowed, original) in restores.items():
+            if shadowed:
+                setattr(torch.Tensor, name, original)
+            else:
+                delattr(torch.Tensor, name)
+        if state.count:
+            location = (
+                f"{state.first_file}:{state.first_line}"
+                if state.first_file is not None and state.first_line is not None
+                else "an unknown user source location"
+            )
+            warnings.warn(
+                ScalarEscapeWarning(
+                    "TorchLens observed "
+                    f"{state.count} tensor-to-Python scalar escape(s) during capture; "
+                    f"first at {location}. Keep it as a tensor or pass the value as an "
+                    "explicit input; the dependence is not captured.",
+                    file_path=state.first_file,
+                    line_no=state.first_line,
+                    count=state.count,
+                ),
+                stacklevel=_external_warning_stacklevel(),
+            )
 
 
 def _make_host_value_predicate_module_wrapper(original: Any, state: _WitnessState) -> Any:

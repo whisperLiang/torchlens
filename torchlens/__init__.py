@@ -107,6 +107,7 @@ _LAZY_ATTRS = {
     "receptive_field": ("torchlens.receptive_field", None),
     "regex": ("torchlens.intervention", "regex"),
     "register_tensor_connection": ("torchlens.user_funcs", "register_tensor_connection"),
+    "release_model": ("torchlens.user_funcs", "release_model"),
     "replace_with": ("torchlens.intervention", "replace_with"),
     "replay": ("torchlens.intervention", "replay"),
     "replay_from": ("torchlens.intervention", "replay_from"),
@@ -1216,6 +1217,7 @@ _set_variadic_wrapper_signature(draw_combined, str)
 
 __all__ = [
     "trace",
+    "release_model",
     "export",
     "hash",
     "assert_unchanged",

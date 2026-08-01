@@ -77,6 +77,7 @@ from ..ir.refs import DeviceRef, DtypeRef
 from ..intervention.errors import DirectActivationWriteWarning
 from ..quantities import Bytes, Flops, Macs, as_bytes, as_duration, as_flops, as_macs
 from .._state import pause_logging
+from ..backends.torch._tl import mark_detached_saved_activation
 from ._accessor_base import Accessor
 from .field_policy import (
     build_record_field_policy_table,
@@ -3050,6 +3051,8 @@ class Op:
                     self.annotations,
                     save_arg_values,
                 )
+                if isinstance(raw_out, torch.Tensor):
+                    mark_detached_saved_activation(t, raw_out, self._layer_label_raw)
             self._internal_set("out", raw_out if store_raw else None)
 
             self._internal_set("transformed_out", None)

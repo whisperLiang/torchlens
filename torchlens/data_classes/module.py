@@ -737,14 +737,24 @@ class ModuleCall:
         """Return whether any user pre-hook changed effective module inputs.
 
         This public name is provisional pending the TorchLens human naming
-        session. ``None`` means at least one executed transition lacked enough
-        evidence to claim that no change occurred.
+        session. ``None`` means either an executed transition lacked enough
+        evidence to claim that no change occurred, or pre-hook attribution was
+        incomplete after a detected private-registry bypass. In the latter
+        case an empty effects tuple cannot honestly establish ``False``.
         """
 
         if any(effect.changed is True for effect in self.forward_pre_hook_effects):
             return True
         if any(effect.changed is None for effect in self.forward_pre_hook_effects):
             return None
+        if not self.forward_pre_hook_effects:
+            snapshots = (self.inputs_before_pre_hooks, self.inputs_after_pre_hooks)
+            if any(
+                snapshot is not None
+                and "registration_interposition_bypassed" in snapshot.incomplete_reasons
+                for snapshot in snapshots
+            ):
+                return None
         return False
 
     @property

@@ -37,7 +37,7 @@ from ...utils.tensor_utils import _is_cuda_available, safe_copy
 from . import _tl
 from .aliasing import detect_torch_alias_contract
 from .buffer_writes import reconcile_buffer_writes, uninstall_buffer_write_tracker
-from .completeness_witness import capture_completeness_witness
+from .completeness_witness import capture_completeness_witness, capture_scalar_escape_warning
 from .escape_detection import capture_escape_guard
 from .model_prep import (
     _cleanup_model_session,
@@ -336,8 +336,9 @@ class TorchBackend:
             trace = cast("Trace", session)
             with capture_escape_guard(trace):
                 with capture_completeness_witness(trace):
-                    with _state.active_logging(trace):
-                        yield
+                    with capture_scalar_escape_warning(trace):
+                        with _state.active_logging(trace):
+                            yield
 
         return guarded_logging()
 

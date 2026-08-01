@@ -588,6 +588,45 @@ def clear_root_prep_stale(root: Any) -> None:
     _stale_prepared_roots.discard(root)
 
 
+def release_model_prep(root: Any, modules: tuple[Any, ...]) -> None:
+    """Evict a released module tree from persistent preparation bookkeeping.
+
+    Parameters
+    ----------
+    root:
+        Root model passed to the public release operation.
+    modules:
+        Current full module tree rooted at ``root``.
+
+    Returns
+    -------
+    None
+        Preparation and role-swap registries are updated in place.
+
+    Notes
+    -----
+    A current descendant may have last been prepared beneath another root after
+    a role swap. Those displaced roots are evicted too: releasing the shared
+    descendant removes its forward wrapper, so their next capture must rebuild
+    the full role-dependent preparation state.
+    """
+    released_modules = set(modules)
+    affected_roots = {root}
+    entries_to_remove: list[Any] = []
+    for module, prepared_root_ref in list(_prepared_root_by_module.items()):
+        prepared_root = prepared_root_ref()
+        if module in released_modules or prepared_root is root:
+            entries_to_remove.append(module)
+            if prepared_root is not None:
+                affected_roots.add(prepared_root)
+
+    for module in entries_to_remove:
+        _prepared_root_by_module.pop(module, None)
+    for affected_root in affected_roots:
+        _prepared_models.discard(affected_root)
+        _stale_prepared_roots.discard(affected_root)
+
+
 # ---------------------------------------------------------------------------
 # Usage stats — opt-in per-function call counting for coverage analysis
 # ---------------------------------------------------------------------------

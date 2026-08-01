@@ -340,6 +340,36 @@ def _restore_undecorated_forward(module: nn.Module) -> None:
         module.__dict__.pop("forward", None)
 
 
+def release_model(model: nn.Module) -> None:
+    """Remove persistent TorchLens preparation from a PyTorch module tree.
+
+    Parameters
+    ----------
+    model:
+        Root module whose full current module tree should be released.
+
+    Returns
+    -------
+    None
+        The model is modified in place. Releasing an unprepared model is a no-op.
+
+    Notes
+    -----
+    Persistent non-root ``forward`` wrappers make whole-model pickling fail.
+    This operation restores those forwards, clears TorchLens-owned module
+    metadata and legacy ``tl_*`` instance attributes, and evicts all related
+    preparation bookkeeping so a later trace prepares the tree from scratch.
+    """
+    modules = tuple(model.modules())
+    for module in modules:
+        _restore_undecorated_forward(module)
+        for attr_name in tuple(module.__dict__):
+            if attr_name.startswith("tl_"):
+                module.__dict__.pop(attr_name, None)
+        clear_meta(module)
+    _state.release_model_prep(model, modules)
+
+
 def _prepare_model_once(model: nn.Module) -> None:
     """Phase 1: One-time (per role) model preparation.
 
