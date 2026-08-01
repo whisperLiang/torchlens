@@ -11,6 +11,20 @@ from torch import nn
 import torchlens as tl
 
 
+def test_training_mode_stateless_model_does_not_warn() -> None:
+    """Training mode alone should not trigger the live-state warning."""
+
+    model = nn.Sequential(nn.Linear(3, 3), nn.ReLU()).train()
+    captured = tl.trace(model, torch.randn(2, 3))
+
+    with warnings.catch_warnings(record=True) as observed:
+        captured.run(inputs=torch.randn(2, 3))
+
+    assert not [
+        warning for warning in observed if "training-mode BatchNorm" in str(warning.message)
+    ]
+
+
 def test_live_run_warns_once_and_batchnorm_stats_mutate() -> None:
     """Default live execution should warn before mutating BatchNorm state."""
 
@@ -20,17 +34,35 @@ def test_live_run_warns_once_and_batchnorm_stats_mutate() -> None:
 
     with pytest.warns(
         UserWarning,
-        match=r"run\(\) re-executes the live model and mutates its state.*pristine=True",
-    ):
+        match=r"run\(\) detected training-mode BatchNorm running-stat buffers.*pristine=True",
+    ) as observed:
         with pytest.raises(ValueError, match="pristine=True"):
             captured.run(inputs=torch.randn(4, 3))
 
+    assert "running_mean, running_var, num_batches_tracked on module '<root>'" in str(
+        observed[0].message
+    )
     assert not torch.equal(model.running_mean, before)
     with warnings.catch_warnings(record=True) as observed:
         with pytest.raises(ValueError, match="pristine=True"):
             captured.run(inputs=torch.randn(4, 3))
     assert not [
-        warning for warning in observed if "re-executes the live model" in str(warning.message)
+        warning for warning in observed if "training-mode BatchNorm" in str(warning.message)
+    ]
+
+
+def test_eval_mode_batchnorm_does_not_warn() -> None:
+    """Eval-mode BatchNorm reads running statistics without updating them."""
+
+    model = nn.BatchNorm1d(3).eval()
+    captured = tl.trace(model, torch.randn(4, 3))
+
+    with warnings.catch_warnings(record=True) as observed:
+        with pytest.raises(ValueError, match="pristine=True"):
+            captured.run(inputs=torch.randn(4, 3))
+
+    assert not [
+        warning for warning in observed if "training-mode BatchNorm" in str(warning.message)
     ]
 
 

@@ -47,21 +47,30 @@ def _warn_stateful_live_run_once(trace: Any, model: nn.Module) -> None:
 
     if trace.__dict__.get("_stateful_run_warning_emitted", False):
         return
-    running_stat_risk = False
-    for module in model.modules():
+    if not model.training:
+        return
+    running_stat_risk: tuple[str, tuple[str, ...]] | None = None
+    for module_name, module in model.named_modules():
+        if not isinstance(module, nn.modules.batchnorm._BatchNorm) or not module.training:
+            continue
         buffers = getattr(module, "_buffers", {})
-        if bool(getattr(module, "track_running_stats", False)) or any(
-            name in buffers for name in ("running_mean", "running_var", "num_batches_tracked")
-        ):
-            running_stat_risk = True
+        running_stat_buffers = tuple(
+            name
+            for name in ("running_mean", "running_var", "num_batches_tracked")
+            if buffers.get(name) is not None
+        )
+        if bool(getattr(module, "track_running_stats", False)) and running_stat_buffers:
+            running_stat_risk = (module_name or "<root>", running_stat_buffers)
             break
-    if not model.training and not running_stat_risk:
+    if running_stat_risk is None:
         return
     import warnings
 
+    module_name, buffer_names = running_stat_risk
     warnings.warn(
-        "run() re-executes the live model and mutates its state (BatchNorm running stats, "
-        "caches, counters); pass pristine=True to execute an isolated deep copy.",
+        "run() detected training-mode BatchNorm running-stat buffers "
+        f"{', '.join(buffer_names)} on module {module_name!r}; re-executing the live model can "
+        "mutate them. Pass pristine=True to execute an isolated deep copy.",
         UserWarning,
         stacklevel=3,
     )
@@ -404,11 +413,12 @@ class TraceValidationMixin(_TraceMixinBase):
 
         Notes
         -----
-        A live-provider run re-executes the retained model object. Training-mode
-        modules, BatchNorm running statistics, caches, and user counters can mutate;
-        TorchLens warns once when it can cheaply identify this risk. Such mutation
-        can also change the captured graph and trigger the normal graph-change
-        tripwire.
+        A live-provider run re-executes the retained model object. TorchLens warns
+        once when it detects training-mode BatchNorm running-stat buffers, which the
+        forward pass can mutate. Custom mutable attributes such as caches and user
+        counters cannot be detected generically; use ``pristine=True`` when the model
+        may contain them. Live-state mutation can also change the captured graph and
+        trigger the normal graph-change tripwire.
         """
 
         if seed is not None:
