@@ -15,8 +15,6 @@ from ..ir.events import OpEvent
 from ..utils.tensor_utils import safe_copy
 from .kernel import CaptureKernel
 from .ledgers import (
-    CompletenessManifest,
-    CompletenessState,
     DecisionLedger,
     DecisionRecord,
     EventFact,
@@ -67,14 +65,11 @@ class CapturedRunCore:
         Selection and intervention sidecars keyed by stable event identity.
     payloads
         Payload leases keyed by stable event identity.
-    completeness
-        Truthful observability states recorded for the run.
     """
 
     event_facts: tuple[EventFact, ...]
     decisions: Mapping[EventId, DecisionRecord]
     payloads: Mapping[EventId, PayloadRecord]
-    completeness: Mapping[str, CompletenessState]
     projection_facts: Mapping[str, Any]
 
 
@@ -147,7 +142,6 @@ class CaptureSession:
     event_journal: EventJournal = field(default_factory=EventJournal)
     decision_ledger: DecisionLedger = field(default_factory=DecisionLedger)
     payload_ledger: PayloadLedger = field(default_factory=PayloadLedger)
-    completeness: CompletenessManifest = field(default_factory=CompletenessManifest)
     output_bindings: dict[str, object] = field(default_factory=dict)
     counters: dict[str, int] = field(default_factory=dict)
     module_state: dict[str, object] = field(default_factory=dict)
@@ -194,7 +188,6 @@ class CaptureSession:
         self.event_journal.clear()
         self.decision_ledger.clear()
         self.payload_ledger.clear()
-        self.completeness.clear()
         self.output_bindings.clear()
         self.counters.clear()
         self.module_state.clear()
@@ -513,7 +506,6 @@ class CaptureSession:
                 event_facts=self.event_journal.facts,
                 decisions=MappingProxyType(dict(self.decision_ledger.records)),
                 payloads=MappingProxyType(dict(self.payload_ledger.records)),
-                completeness=MappingProxyType(dict(self.completeness.states)),
                 projection_facts=MappingProxyType(dict(self.projection_facts)),
             )
         return self._sealed_core
@@ -567,7 +559,7 @@ class CaptureSession:
             }
         )
 
-    def register_cleanup(self, name: str, callback: CleanupCallback) -> None:
+    def register_cleanup(self, name: str, callback: CleanupCallback) -> _CleanupEntry:
         """Register one teardown action on the session-owned cleanup stack.
 
         Parameters
@@ -577,11 +569,19 @@ class CaptureSession:
             the original callback so cleanup remains exactly once.
         callback
             Existing teardown callback to invoke.
+
+        Returns
+        -------
+        _CleanupEntry
+            Existing or newly registered cleanup entry.
         """
 
-        if any(entry.name == name for entry in self.cleanup_stack):
-            return
-        self.cleanup_stack.append(_CleanupEntry(name=name, callback=callback))
+        for entry in self.cleanup_stack:
+            if entry.name == name:
+                return entry
+        entry = _CleanupEntry(name=name, callback=callback)
+        self.cleanup_stack.append(entry)
+        return entry
 
     def run_cleanup(self, name: str, callback: CleanupCallback) -> bool:
         """Run one registered teardown action exactly once.
@@ -600,16 +600,12 @@ class CaptureSession:
             ``True`` when this invocation ran the callback, otherwise ``False``.
         """
 
-        self.register_cleanup(name, callback)
-        for entry in reversed(self.cleanup_stack):
-            if entry.name != name:
-                continue
-            if entry.completed:
-                return False
-            entry.completed = True
-            entry.callback()
-            return True
-        raise RuntimeError(f"CaptureSession cleanup action was not registered: {name!r}")
+        entry = self.register_cleanup(name, callback)
+        if entry.completed:
+            return False
+        entry.completed = True
+        entry.callback()
+        return True
 
     def transition(
         self,
@@ -723,8 +719,6 @@ def compile_legacy_capture_plan(
     )
     return CapturePlan.compile(
         projection_target=projection_target,
-        available_capabilities=(),
-        required_completeness=(),
         default_enrichment=default_enrichment,
         selectors={"layers": layers_to_save, "grad_layers": grad_layers_to_save},
         interventions=getattr(trace, "_intervention_plan", None),

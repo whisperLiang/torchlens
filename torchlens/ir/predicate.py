@@ -117,7 +117,93 @@ class ModuleStackFrame:
 
 @dataclass(frozen=True, slots=True)
 class RecordContext:
-    """Predicate input schema for one chronological capture event."""
+    """Predicate input schema for one chronological capture event.
+
+    Attributes
+    ----------
+    kind
+        Event category: operation, module entry/exit, input, or buffer.
+    label
+        In-flight capture label passed to the current predicate invocation. Final
+        postprocessed labels do not exist yet: a normal PyTorch op uses a raw
+        spelling such as ``"relu_1_2_raw"``. A compatibility retry for a
+        non-match may instead use the prefix alias ``"relu_1"``; predicates must
+        therefore not assume this field contains the later final label
+        ``"relu_1_2"``.
+    raw_label
+        Authoritative full raw capture label, such as ``"relu_1_2_raw"``, or
+        ``None`` when the backend cannot supply one.
+    pass_index
+        One-based forward-pass index within a multi-pass recording.
+    event_index
+        Chronological event index within the active capture.
+    step_index
+        Chronological operation index, or ``None`` for events outside the op stream.
+    layer_type
+        Normalized TorchLens operation or source type.
+    type_index
+        One-based occurrence index within ``layer_type``.
+    raw_index
+        One-based operation index used by raw graph labels.
+    func_name
+        Backend function name, when the event represents a function call.
+    address
+        Nearest active module address.
+    module_type
+        Nearest active module class name.
+    module_pass_index
+        Call index for the nearest active module.
+    module_stack
+        Active module frames from outermost to innermost.
+    recent_events
+        Bounded chronological lookback including configured source events.
+    recent_ops
+        Operation-only view of the bounded lookback.
+    parent_labels
+        Parent labels exposed by the active predicate adapter.
+    input_output_address
+        Structural address for an input or output boundary event.
+    shape
+        Output tensor shape, when tensor metadata is observable.
+    dtype
+        Backend-neutral output dtype reference.
+    tensor_device
+        Backend-neutral output device reference.
+    tensor_requires_grad
+        Whether the output requires gradients. MLX may provide a deferred-value
+        sentinel that raises when consumed because resolving it would force evaluation.
+    output_index
+        Position of this tensor within a multi-output operation.
+    is_bottom_level_func
+        Whether the event came from a leaf decorated function call.
+    time_since_pass_start
+        Elapsed wall-clock seconds since capture began.
+    sample_id
+        Optional identifier supplied by a batched predicate caller.
+    label_raw
+        Non-optional compatibility spelling of ``raw_label``; it contains the
+        same full raw label or ``""`` when unavailable. It is never the final label.
+    label_prefix
+        Short raw compatibility alias, for example ``"relu_1"``.
+    func_call_id
+        Stable identifier for the decorated function invocation.
+    parent_labels_raw
+        Full raw parent labels when the backend records them separately.
+    is_output_parent
+        Whether this event directly parents a model output.
+    backend_requires_isolation
+        Whether predicate evaluation must be isolated for backend safety.
+    is_scalar_bool
+        Whether the output is a scalar boolean. MLX may defer this value.
+    bool_value
+        Scalar boolean value when safely observable. MLX may defer this value.
+    is_transform
+        Whether this event is a captured transform boundary.
+    transform_kind
+        Backend-neutral transform name when ``is_transform`` is true.
+    window_miss
+        Whether a history-dependent selector exceeded the retained lookback window.
+    """
 
     kind: EventKind | str
     label: str

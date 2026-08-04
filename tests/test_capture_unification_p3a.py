@@ -86,20 +86,33 @@ class IntegerSelectorToy(nn.Module):
         return self.fc3(x)
 
 
-def test_capture_kernel_compiles_away_disabled_enrichment_tiers() -> None:
-    """A shell-only sparse operation enters neither metadata nor payload work."""
+def test_capture_kernel_process_gates_disabled_enrichment_targets() -> None:
+    """A shell-only observation skips real metadata and payload callbacks."""
 
     plan = CapturePlan.compile(
         projection_target="recording",
-        available_capabilities=(),
         default_enrichment=EnrichmentLevel.SHELL,
     )
     session = CaptureSession(plan=plan)
-    emitted: list[str] = []
+    stages: list[str] = []
 
-    session.kernel.emit("relu", emitted.append, "event")
+    def forbidden(_observation: OpObservation) -> None:
+        """Fail if a disabled enrichment callback runs."""
 
-    assert emitted == ["event"]
+        raise AssertionError("shell-only observation entered disabled enrichment")
+
+    observation = OpObservation(
+        operation_key="relu",
+        value=torch.tensor(1.0),
+        normalize_metadata=forbidden,
+        retain_payload=forbidden,
+        append=lambda _observation: stages.append("append"),
+        update_indexes_history=lambda _observation: stages.append("update"),
+        evaluate_nonfinite_halt=lambda _observation: stages.append("halt"),
+    )
+    session.kernel.process(observation)
+
+    assert stages == ["append", "update", "halt"]
     assert session.counters["kernel_observations"] == 1
     assert "kernel_metadata" not in session.counters
     assert "kernel_payload" not in session.counters
@@ -132,7 +145,7 @@ def test_sparse_shell_ops_skip_exhaustive_enrichment_work(
 def test_capture_kernel_intervenes_on_live_value_before_emission() -> None:
     """A live replacement reaches the producer before its durable append."""
 
-    plan = CapturePlan.compile(projection_target="trace", available_capabilities=())
+    plan = CapturePlan.compile(projection_target="trace")
     session = CaptureSession(plan=plan)
     observation = OpObservation(operation_key="add", value=torch.tensor(1.0))
     replacement = session.kernel.apply_intervention(observation, lambda value: value + 2)

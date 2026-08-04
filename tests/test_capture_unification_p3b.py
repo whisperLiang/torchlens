@@ -251,7 +251,6 @@ def _retention_session(profile: RetentionProfile) -> CaptureSession:
     return CaptureSession(
         CapturePlan.compile(
             projection_target="trace",
-            available_capabilities=(),
             retention_profile=profile,
         )
     )

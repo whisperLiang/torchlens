@@ -82,9 +82,27 @@ def test_small_model_default_output_golden(tiny_summary_log: tl.Trace) -> None:
         "Branching factor: 1.00\n"
         "Saved outs: 0 B\n"
         "Forward FLOPs: 19.2 KFLOPs  MACs: 9.6 KFLOPs\n"
+        "Unknown-FLOPs ops: 0\n"
         "FLOP convention: counts use the captured TorchLens convention; "
         "MACs are reported as FLOPs // 2."
     )
+
+
+def test_summary_discloses_unknown_flops_operations() -> None:
+    """Summary reports unknown operations excluded from aggregate FLOP totals."""
+
+    class _PadModel(nn.Module):
+        """Model containing an intentionally unregistered pad operation."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Pad the final dimension."""
+
+            return torch.nn.functional.pad(x, (1, 1))
+
+    log = tl.trace(_PadModel(), torch.randn(2, 3))
+
+    assert "Unknown-FLOPs ops: 1 (excluded from FLOP/MAC totals)" in log.summary()
+    assert "Unknown-FLOPs ops: 1 (excluded from FLOP/MAC totals)" in log.summary(level="compute")
 
 
 @pytest.mark.parametrize("training", [True, False])

@@ -90,6 +90,8 @@ class RefreshProjector:
             "has_saved_args",
             "shape",
             "dtype",
+            "dtype_ref",
+            "device_ref",
             "activation_memory",
             "transformed_out_shape",
             "transformed_out_dtype",
@@ -97,6 +99,9 @@ class RefreshProjector:
             "grad",
             "transformed_grad",
             "has_grad",
+            "grad_shape",
+            "grad_dtype",
+            "gradient_memory",
             "transformed_grad_shape",
             "transformed_grad_dtype",
             "transformed_gradient_memory",
@@ -113,9 +118,14 @@ class RefreshProjector:
             "func_autocast_state",
             "non_tensor_pos_args",
             "non_tensor_kwargs",
+            "func_non_tensor_args",
             "func_config",
             "has_out_variations",
             "out_versions_by_child",
+            "is_scalar_bool",
+            "bool_value",
+            "flops_forward",
+            "flops_backward",
         }
     )
 

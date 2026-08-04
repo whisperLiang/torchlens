@@ -671,6 +671,30 @@ def test_flops_matmul():
     assert result == 2 * 3 * 4 * 5  # 120
 
 
+@pytest.mark.parametrize(
+    "a_shape,b_shape,output_shape,expected",
+    [
+        ((5, 3), (3,), (5,), 30),
+        ((2, 4, 5), (5,), (2, 4), 80),
+        ((3,), (3, 5), (5,), 30),
+    ],
+)
+def test_flops_matmul_vector_operands(
+    a_shape: tuple[int, ...],
+    b_shape: tuple[int, ...],
+    output_shape: tuple[int, ...],
+    expected: int,
+) -> None:
+    """Matmul accounts for unit axes removed from vector-operand outputs."""
+
+    a = torch.randn(a_shape)
+    b = torch.randn(b_shape)
+
+    result = compute_forward_flops("matmul", output_shape, [], (a, b), {})
+
+    assert result == expected
+
+
 def test_flops_bmm():
     """bmm: 2*batch*M*K*N."""
     a = torch.randn(2, 3, 4)
@@ -830,6 +854,25 @@ def test_flops_conv_model():
     assert mh.total_flops_forward > 800000
 
 
+def test_flops_conv_transpose_uses_input_work_basis() -> None:
+    """Grouped transposed convolution counts input scatter MACs exactly."""
+
+    model = nn.ConvTranspose2d(
+        6,
+        4,
+        kernel_size=3,
+        stride=2,
+        padding=1,
+        groups=2,
+        bias=False,
+    )
+    trace = trace_fn(model, torch.randn(1, 6, 8, 8))
+    operation = next(entry for entry in trace.layer_list if entry.func_name == "conv_transpose2d")
+
+    assert operation.shape == (1, 4, 15, 15)
+    assert operation.flops_forward == 2 * 6 * 8 * 8 * (4 // 2) * 3 * 3
+
+
 def test_flops_coverage_on_model():
     """At least 50% of non-input layers should have non-None FLOPs."""
     model = nn.Sequential(
@@ -919,6 +962,84 @@ def test_flops_einsum_matmul():
     output_shape = (3, 5)
     result = compute_forward_flops("einsum", output_shape, [], ("ij,jk->ik", a, b), {})
     assert result == 2 * 3 * 4 * 5  # 120
+
+
+def test_flops_einsum_attention_contraction() -> None:
+    """Attention einsum contracts the shared feature axis, not a matrix tail axis."""
+
+    class _AttentionEinsum(nn.Module):
+        """Two-operand attention-score einsum."""
+
+        def forward(self, query: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
+            """Contract query and key over their shared feature axis."""
+
+            return torch.einsum("bid,bjd->bij", query, key)
+
+    q = torch.randn(2, 5, 4)
+    k = torch.randn(2, 7, 4)
+    output_shape = (2, 5, 7)
+
+    direct = compute_forward_flops("einsum", output_shape, [], ("bid,bjd->bij", q, k), {})
+    nested = compute_forward_flops("einsum", output_shape, [], ("bid,bjd->bij", (q, k)), {})
+
+    assert direct == 2 * 2 * 5 * 7 * 4
+    assert nested == 2 * 2 * 5 * 7 * 4
+    trace = trace_fn(_AttentionEinsum(), (q, k))
+    operation = next(entry for entry in trace.layer_list if entry.func_name == "einsum")
+    assert operation.flops_forward == 2 * 2 * 5 * 7 * 4
+
+
+def test_unknown_flops_survive_trace_materialization() -> None:
+    """An unregistered operation remains unknown instead of becoming zero FLOPs."""
+
+    class _PadModel(nn.Module):
+        """Model containing an intentionally unregistered pad operation."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Pad the final dimension."""
+
+            return torch.nn.functional.pad(x, (1, 1))
+
+    trace = trace_fn(_PadModel(), torch.randn(2, 3))
+    operation = next(entry for entry in trace.layer_list if entry.func_name == "pad")
+
+    assert operation.flops_forward is None
+    assert operation.flops_backward is None
+    assert trace.total_flops_forward == 0
+
+
+def test_rerun_refreshes_shape_derived_flops_everywhere() -> None:
+    """A changed batch size refreshes every public route to one operation's FLOPs."""
+
+    class _LinearModel(nn.Module):
+        """One biased linear operation with batch-dependent FLOPs."""
+
+        def __init__(self) -> None:
+            """Initialize a four-to-eight feature projection."""
+
+            super().__init__()
+            self.linear = nn.Linear(4, 8)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Apply the projection."""
+
+            return self.linear(x)
+
+    model = _LinearModel()
+    trace = trace_fn(model, torch.randn(2, 4))
+    captured = next(entry for entry in trace.layer_list if entry.func_name == "linear")
+    assert captured.flops_forward == 144
+
+    with pytest.warns(UserWarning, match="Tensor shape changed"):
+        result = trace.run(inputs=torch.randn(8, 4))
+    refreshed = next(entry for entry in result.trace.layer_list if entry.func_name == "linear")
+
+    assert refreshed.shape == (8, 8)
+    assert refreshed.flops_forward == 576
+    assert result.trace[refreshed.layer_label].flops_forward == 576
+    assert result.trace.total_flops_forward == sum(
+        entry.flops_forward for entry in result.trace.layer_list if entry.flops_forward is not None
+    )
 
 
 def test_flops_pool_with_kernel():
