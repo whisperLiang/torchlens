@@ -167,8 +167,10 @@ def assign_into_container_by_path(
             copied = obj.copy()
             copied[key] = assign_into_container_by_path(copied[key], rest, new_value)
             return copied
-        except Exception:
-            return obj
+        except Exception as exc:
+            raise TypeError(
+                f"cannot assign into {type(obj).__qualname__} at path component {head!r}"
+            ) from exc
     raise TypeError(f"cannot assign into {type(obj).__qualname__} at path component {head!r}")
 
 

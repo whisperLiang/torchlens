@@ -12,6 +12,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.ir.container import HFKey, NamedField, TupleIndex
+from torchlens.utils.collections import assign_into_container_by_path
 
 
 class DemoModelOutput(dict):
@@ -121,6 +122,72 @@ class PairBox:
 
     left: torch.Tensor
     right: torch.Tensor
+
+
+class FailingCopyMapping:
+    """Mapping-like container whose writes fail after copying."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        """Store the underlying mapping payload.
+
+        Parameters
+        ----------
+        payload:
+            Initial mapping contents.
+        """
+
+        self._payload = dict(payload)
+
+    def keys(self) -> Any:
+        """Return the mapping keys.
+
+        Returns
+        -------
+        Any
+            Underlying key view.
+        """
+
+        return self._payload.keys()
+
+    def __getitem__(self, key: Any) -> Any:
+        """Return one payload entry.
+
+        Parameters
+        ----------
+        key:
+            Mapping key.
+
+        Returns
+        -------
+        Any
+            Stored value.
+        """
+
+        return self._payload[key]
+
+    def copy(self) -> "FailingCopyMapping":
+        """Return a same-type shallow copy.
+
+        Returns
+        -------
+        FailingCopyMapping
+            Copied mapping.
+        """
+
+        return type(self)(self._payload)
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        """Reject all writes to exercise the fallback assignment path.
+
+        Parameters
+        ----------
+        key:
+            Mapping key.
+        value:
+            Proposed new value.
+        """
+
+        raise RuntimeError("write blocked")
 
 
 class PairBoxModel(nn.Module):
@@ -248,6 +315,13 @@ def test_capture_container_structure_default_off_preserves_output_shape_metadata
     )
     with pytest.raises(ValueError, match="No reconstructable final-output container"):
         default_trace.reconstruct_output()
+
+
+def test_assign_into_container_by_path_raises_on_mapping_assignment_failure() -> None:
+    """Mapping-like assignment failures must not look like successful no-ops."""
+
+    with pytest.raises(TypeError, match="cannot assign into FailingCopyMapping"):
+        assign_into_container_by_path(FailingCopyMapping({"key": 1}), ("key",), 2)
 
 
 def test_opaque_nested_output_fallback_preserves_each_tensor_leaf() -> None:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import inspect
 import importlib
+import importlib.metadata
+import re
 import subprocess
 from collections import Counter
 from collections.abc import Callable, Iterable
@@ -12,6 +14,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, cast, get_args, get_origin, get_type_hints
 
 import torch
+from packaging.requirements import Requirement
 from torch import nn
 
 from .. import _state
@@ -136,28 +139,97 @@ class DoctorReport:
         return self.show()
 
 
-_EXTRA_PROBES: dict[str, tuple[str, ...]] = {
-    "notebook": ("IPython", "jupyter_client"),
-    "viz": ("torchshow", "lovely_tensors"),
-    "tabular": ("pandas",),
-    "captum": ("captum",),
-    "neuro": ("rsatoolbox", "brainscore_core"),
-    "lightning": ("lightning",),
-    "wandb": ("wandb",),
-    "hf": ("transformers", "timm"),
-    "gradcam": ("pytorch_grad_cam",),
-    "shap": ("shap",),
-    "inseq": ("inseq",),
-    "steering": ("steering_vectors",),
-    "repeng": ("repeng",),
-    "dialz": ("dialz",),
-    "nnsight": ("nnsight",),
-    "lit": ("lit_nlp",),
-    "depyf": ("depyf",),
-    "compat-shims": ("torchextractor", "sentence_transformers"),
-    "vision-shims": ("torchvision",),
-    "io": ("pyarrow",),
+_DOCTOR_EXCLUDED_EXTRAS = frozenset({"all", "all-stretch", "dev", "test"})
+_EXTRA_MARKER_RE = re.compile(r"""extra\s*==\s*['"](?P<extra>[^'"]+)['"]""")
+_REQUIREMENT_IMPORT_NAME_OVERRIDES: dict[str, tuple[str, ...]] = {
+    "brain-score": ("brainscore_core",),
+    "jupyter-client": ("jupyter_client",),
+    "lit-nlp": ("lit_nlp",),
+    "lovely-tensors": ("lovely_tensors",),
+    "paddlepaddle": ("paddle",),
+    "pytorch-grad-cam": ("pytorch_grad_cam",),
+    "sae-lens": ("sae_lens",),
+    "sentence-transformers": ("sentence_transformers",),
+    "steering-vectors": ("steering_vectors",),
 }
+
+
+def _extras_from_requirement_marker(requirement: Requirement) -> tuple[str, ...]:
+    """Return every extra referenced by a requirement marker.
+
+    Parameters
+    ----------
+    requirement:
+        Parsed requirement line from package metadata.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Extras referenced in the requirement marker, preserving first-seen
+        order.
+    """
+
+    marker = requirement.marker
+    if marker is None:
+        return ()
+    extras = [
+        match.group("extra")
+        for match in _EXTRA_MARKER_RE.finditer(str(marker))
+        if match.group("extra") not in _DOCTOR_EXCLUDED_EXTRAS
+    ]
+    return tuple(dict.fromkeys(extras))
+
+
+def _probe_modules_for_requirement(requirement: Requirement) -> tuple[str, ...]:
+    """Return import-module probes for one optional requirement.
+
+    Parameters
+    ----------
+    requirement:
+        Parsed requirement line from package metadata.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Module names whose importability best approximates whether the
+        requirement is installed for diagnostic reporting.
+    """
+
+    normalized_name = requirement.name.lower()
+    override = _REQUIREMENT_IMPORT_NAME_OVERRIDES.get(normalized_name)
+    if override is not None:
+        return override
+    return (requirement.name.replace("-", "_"),)
+
+
+def _declared_extra_probes() -> dict[str, tuple[str, ...]]:
+    """Return doctor extra probes derived from installed package metadata.
+
+    Returns
+    -------
+    dict[str, tuple[str, ...]]
+        Optional extra names mapped to representative import-module probes.
+
+    Raises
+    ------
+    importlib.metadata.PackageNotFoundError
+        If the installed ``torchlens`` distribution metadata is unavailable.
+    """
+
+    distribution = importlib.metadata.distribution("torchlens")
+    extra_names = sorted(
+        extra
+        for extra in (distribution.metadata.get_all("Provides-Extra") or [])
+        if extra not in _DOCTOR_EXCLUDED_EXTRAS
+    )
+    probes: dict[str, list[str]] = {extra: [] for extra in extra_names}
+    for requirement_line in distribution.requires or ():
+        requirement = Requirement(requirement_line)
+        for extra in _extras_from_requirement_marker(requirement):
+            if extra not in probes:
+                continue
+            probes[extra].extend(_probe_modules_for_requirement(requirement))
+    return {extra: tuple(dict.fromkeys(module_names)) for extra, module_names in probes.items()}
 
 
 def _module_is_installed(module_name: str) -> bool:
@@ -225,14 +297,26 @@ def _probe_extras() -> DoctorCheck:
         Optional-extras health-check row.
     """
 
+    try:
+        extra_probes = _declared_extra_probes()
+    except importlib.metadata.PackageNotFoundError as exc:
+        return DoctorCheck("extras", "FAIL", f"package metadata unavailable ({exc})")
+
     installed = []
     missing = []
-    for extra, modules in _EXTRA_PROBES.items():
+    no_python_probes = []
+    for extra, modules in extra_probes.items():
+        if not modules:
+            no_python_probes.append(extra)
+            continue
         if all(_module_is_installed(module_name) for module_name in modules):
             installed.append(extra)
         else:
             missing.append(extra)
-    detail = f"installed={installed or 'none'}; missing={missing or 'none'}"
+    detail = (
+        f"installed={installed or 'none'}; missing={missing or 'none'}; "
+        f"no_python_probes={no_python_probes or 'none'}"
+    )
     return DoctorCheck("extras", "PASS", detail)
 
 

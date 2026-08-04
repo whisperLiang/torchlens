@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import importlib.metadata
+
+from packaging.requirements import Requirement
 import pytest
 
 import torchlens as tl
 from torchlens import _state
 from torchlens.backends.torch.wrappers import wrap_torch
 from torchlens.backends.tf._tf_compat import get_tf_capability_snapshot
+from torchlens.utils import _DOCTOR_EXCLUDED_EXTRAS
 from torchlens.utils._torch_compat import get_torch_capability_snapshot
 
 
@@ -56,3 +60,28 @@ def test_doctor_warns_on_stale_torch_wrapper_binding(monkeypatch: pytest.MonkeyP
 
     assert row.status == "WARN"
     assert "torch.relu" in row.detail
+
+
+def test_declared_extra_probes_track_packaging_metadata() -> None:
+    """Doctor extra probes must stay in lockstep with declared package extras."""
+
+    distribution = importlib.metadata.distribution("torchlens")
+    expected = {
+        extra
+        for extra in (distribution.metadata.get_all("Provides-Extra") or [])
+        if extra not in _DOCTOR_EXCLUDED_EXTRAS
+    }
+    requirement_extras = set()
+    for requirement_line in distribution.requires or ():
+        requirement = Requirement(requirement_line)
+        if requirement.marker is None:
+            continue
+        requirement_extras.update(tl.utils._extras_from_requirement_marker(requirement))
+
+    probes = tl.utils._declared_extra_probes()
+
+    assert set(probes) == expected
+    assert requirement_extras <= set(probes)
+    assert {"jax", "mlx", "paddle", "profiler", "sae", "tensorflow", "tf", "tinygrad"} <= set(
+        probes
+    )

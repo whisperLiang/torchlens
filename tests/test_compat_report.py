@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+import warnings
 
 import pytest
 import torch
@@ -10,6 +11,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.backends.tf._tf_compat import get_tf_capability_snapshot
+from torchlens.compat import _report as compat_report_module
 from torchlens.compat import CompatReport, report
 from torchlens.options import CaptureOptions
 from torchlens.utils._torch_compat import get_torch_capability_snapshot
@@ -222,6 +224,46 @@ class DeviceContextFactoryModel(nn.Module):
         return x + 1
 
 
+class FalsePositiveOptimizedModule(nn.Module):
+    """Model whose class name should not imply ``torch.compile``."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the input unchanged.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Input tensor.
+        """
+
+        return x
+
+
+def _reference_quantized_input() -> torch.Tensor:
+    """Build the quantized compatibility-report fixture under a warning filter.
+
+    Returns
+    -------
+    torch.Tensor
+        Quantized reference input.
+    """
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"torch\.quantize_per_tensor, torch\.quantize_per_channel.*deprecated",
+            category=UserWarning,
+        )
+        return torch.quantize_per_tensor(
+            torch.tensor([1.0, 2.0]), scale=0.1, zero_point=10, dtype=torch.quint8
+        )
+
+
 def _reference_models() -> Iterator[tuple[nn.Module, torch.Tensor]]:
     """Yield the required five Phase 13 reference model/input pairs.
 
@@ -233,12 +275,7 @@ def _reference_models() -> Iterator[tuple[nn.Module, torch.Tensor]]:
 
     yield SmallCnn(), torch.randn(2, 1, 4, 4)
     yield MockPreTrainedModel(), torch.randn(2, 4)
-    yield (
-        QuantizedInputModel(),
-        torch.quantize_per_tensor(
-            torch.tensor([1.0, 2.0]), scale=0.1, zero_point=10, dtype=torch.quint8
-        ),
-    )
+    yield (QuantizedInputModel(), _reference_quantized_input())
     yield MultiGpuEmulationModel(), torch.randn(2, 4)
     yield FullyShardedDataParallel(), torch.randn(2, 4)
 
@@ -271,6 +308,23 @@ def test_report_renderers_include_truth_table_rows() -> None:
     assert "Single-thread design" in text_table
     assert "| Row | Status | Severity | Detected | Details | Suggestion |" in markdown_table
     assert "`pass`" in markdown_table
+
+
+def test_torch_compile_row_uses_feature_detection_not_class_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A user class named like Dynamo's wrapper must not trip the compile row."""
+
+    monkeypatch.setattr(
+        compat_report_module,
+        "get_dynamo_optimized_module_type",
+        lambda: None,
+    )
+
+    row = report(FalsePositiveOptimizedModule(), torch.randn(1)).row("torch_compile")
+
+    assert row.detected is False
+    assert row.status == "pass"
 
 
 def test_report_surfaces_every_runtime_capability() -> None:

@@ -14,6 +14,7 @@ from torch import nn
 
 from torchlens._robustness import _iter_tensors
 from torchlens.utils._torch_compat import (
+    get_dynamo_optimized_module_type,
     get_fx_graph_module_type,
     get_torch_capability_snapshot,
 )
@@ -710,7 +711,8 @@ def _torch_compile_row(model: nn.Module) -> CompatRow:
         Report row.
     """
 
-    detected = _model_class_contains(model, ("optimizedmodule", "_dynamo"))
+    optimized_module_type = get_dynamo_optimized_module_type()
+    detected = optimized_module_type is not None and isinstance(model, optimized_module_type)
     status: Status = "scope" if detected else "pass"
     details = (
         "torch.compile OptimizedModule detected; compiled graph capture is outside TorchLens' "
