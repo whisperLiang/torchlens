@@ -213,7 +213,7 @@ def _assert_save_new_outs_matches_fresh_log(
 
 
 @pytest.mark.slow
-def test_save_new_outs_alexnet_fails() -> None:
+def test_save_new_outs_alexnet_matches_fresh_log() -> None:
     """AlexNet fast out refresh matches a fresh exhaustive log."""
     torchvision = pytest.importorskip("torchvision")
     model = torchvision.models.alexnet(weights=None)
@@ -223,13 +223,21 @@ def test_save_new_outs_alexnet_fails() -> None:
 
 
 @pytest.mark.slow
-def test_save_new_outs_resnet_fails() -> None:
-    """ResNet18 fast out refresh matches a fresh exhaustive log."""
+def test_save_new_outs_resnet_rejects_buffer_sink_refresh() -> None:
+    """ResNet18 refresh stays on the documented graph-change refusal path."""
     torchvision = pytest.importorskip("torchvision")
     model = torchvision.models.resnet18(weights=None)
     model.eval()
     x = torch.randn(1, 3, 224, 224)
-    _assert_save_new_outs_matches_fresh_log(model, x, torch.randn(1, 3, 224, 224))
+    log = trace_fn(model, x, random_seed=42)
+    try:
+        assert any(
+            log.layer_dict_all_keys[label].layer_type == "buffer" for label in log.internal_sink_ops
+        )
+        with pytest.raises(ValueError, match="computational graph changed"):
+            log.save_new_outs(model, torch.randn(1, 3, 224, 224), random_seed=42)
+    finally:
+        log.cleanup()
 
 
 # =============================================================================
@@ -262,96 +270,135 @@ class _SharedBufferModel(nn.Module):
 class TestSaveNewActivationsRegression:
     """Zombie OpLogs on repeated calls."""
 
-    def test_save_new_outs_3x(self):
-        """3+ sequential save_new_outs calls should not crash."""
+    def test_save_new_outs_3x(self) -> None:
+        """Three default-selector refreshes should keep outputs aligned with the model."""
         model = _SimpleLinear()
         x = torch.randn(2, 10)
         log = trace_fn(model, x)
-        for _ in range(3):
-            log.save_new_outs(model, torch.randn(2, 10))
+        try:
+            for _ in range(3):
+                next_x = torch.randn(2, 10)
+                log.save_new_outs(model, next_x)
+                expected = model(next_x)
+                output = log[log.output_layers[0]].out
+                assert output is not None
+                assert log.num_saved_ops > 0
+                assert torch.allclose(output, expected)
+        finally:
+            log.cleanup()
 
-    def test_save_new_outs_different_values(self):
+    def test_save_new_outs_different_values(self) -> None:
         """Activations should change with new inputs."""
         model = _SimpleLinear()
         x1 = torch.randn(2, 10)
         log = trace_fn(model, x1)
-        first_output = log[log.output_layers[0]].out.clone()
-        x2 = torch.randn(2, 10) + 10
-        log.save_new_outs(model, x2)
-        second_output = log[log.output_layers[0]].out
-        assert not torch.equal(first_output, second_output)
+        try:
+            first_output = log[log.output_layers[0]].out.clone()
+            x2 = torch.randn(2, 10) + 10
+            log.save_new_outs(model, x2)
+            second_output = log[log.output_layers[0]].out
+            assert not torch.equal(first_output, second_output)
+        finally:
+            log.cleanup()
 
 
 class TestSaveNewActivationsStateReset:
     """Stale state in save_new_outs."""
 
-    def test_timing_reset(self):
+    def test_timing_reset(self) -> None:
         """func_calls_duration should be fresh."""
         model = _SimpleLinear()
         log = trace_fn(model, torch.randn(2, 10), layers_to_save="all")
-        log.save_new_outs(model, torch.randn(2, 10), layers_to_save="all")
-        assert log.func_calls_duration >= 0
+        try:
+            log.save_new_outs(model, torch.randn(2, 10), layers_to_save="all")
+            assert log.func_calls_duration >= 0
+        finally:
+            log.cleanup()
 
-    def test_lookup_keys_clean(self):
+    def test_lookup_keys_clean(self) -> None:
         """Lookup caches should not have stale entries."""
         model = _SimpleLinear()
         log = trace_fn(model, torch.randn(2, 10), layers_to_save="all")
-        labels_pass1 = set(log.layer_labels)
-        log.save_new_outs(model, torch.randn(2, 10), layers_to_save="all")
-        labels_pass2 = set(log.layer_labels)
-        assert labels_pass1 == labels_pass2
-
-    def test_5x_stress(self):
-        """Stress test: 5 sequential save_new_outs calls."""
-        model = _SimpleLinear()
-        log = trace_fn(model, torch.randn(2, 10), layers_to_save="all")
-        for i in range(5):
+        try:
+            labels_pass1 = set(log.layer_labels)
             log.save_new_outs(model, torch.randn(2, 10), layers_to_save="all")
-            assert log.num_saved_ops > 0
+            labels_pass2 = set(log.layer_labels)
+            assert labels_pass1 == labels_pass2
+        finally:
+            log.cleanup()
 
-    def test_different_values(self):
+    @pytest.mark.parametrize(
+        "trace_kwargs",
+        [{}, {"layers_to_save": "all"}],
+        ids=["default_selector", "explicit_all"],
+    )
+    def test_5x_stress(self, trace_kwargs: dict[str, str]) -> None:
+        """Stress test: repeated refreshes stay aligned for default and explicit-all saves."""
+        model = _SimpleLinear()
+        log = trace_fn(model, torch.randn(2, 10), **trace_kwargs)
+        try:
+            for _ in range(5):
+                next_x = torch.randn(2, 10)
+                log.save_new_outs(model, next_x, **trace_kwargs)
+                output = log[log.output_layers[0]].out
+                assert output is not None
+                assert log.num_saved_ops > 0
+                assert torch.allclose(output, model(next_x))
+        finally:
+            log.cleanup()
+
+    def test_different_values(self) -> None:
         """Each pass should reflect new input values."""
         model = _SimpleLinear()
         log = trace_fn(model, torch.ones(2, 10), layers_to_save="all")
-        input_val_1 = log["input_1"].out.clone()
-        log.save_new_outs(model, torch.zeros(2, 10), layers_to_save="all")
-        input_val_2 = log["input_1"].out
-        assert not torch.equal(input_val_1, input_val_2)
+        try:
+            input_val_1 = log["input_1"].out.clone()
+            log.save_new_outs(model, torch.zeros(2, 10), layers_to_save="all")
+            input_val_2 = log["input_1"].out
+            assert not torch.equal(input_val_1, input_val_2)
+        finally:
+            log.cleanup()
 
 
 class TestOutputTensorIndependence:
     """Fast-mode out shared reference."""
 
-    def test_output_independent_of_parent(self):
+    def test_output_independent_of_parent(self) -> None:
         model = _SimpleLinear()
         x = torch.randn(2, 10)
         log = trace_fn(model, x)
-        log.save_new_outs(model, torch.randn(2, 10))
-        for label in log.output_layers:
-            output_entry = log[label]
-            if output_entry.parents and output_entry.out is not None:
-                parent_label = output_entry.parents[0]
-                parent_entry = log[parent_label]
-                if parent_entry.out is not None:
-                    original_parent = parent_entry.out.clone()
-                    output_entry.out.fill_(999)
-                    assert torch.equal(parent_entry.out, original_parent)
-                    break
+        try:
+            log.save_new_outs(model, torch.randn(2, 10))
+            for label in log.output_layers:
+                output_entry = log[label]
+                if output_entry.parents and output_entry.out is not None:
+                    parent_label = output_entry.parents[0]
+                    parent_entry = log[parent_label]
+                    if parent_entry.out is not None:
+                        original_parent = parent_entry.out.clone()
+                        output_entry.out.fill_(999)
+                        assert torch.equal(parent_entry.out, original_parent)
+                        break
+        finally:
+            log.cleanup()
 
 
 class TestFastPathModuleLogs:
     """postprocess_fast should preserve module logs from exhaustive pass."""
 
-    def test_fast_path_preserves_module_logs(self):
+    def test_fast_path_preserves_module_logs(self) -> None:
         model = _SimpleLinear()
         x = torch.randn(2, 10)
         log = trace_fn(model, x)
-        original_module_count = len(log.modules)
-        original_addresses = [m.address for m in log.modules]
-        assert original_module_count > 0
-        log.save_new_outs(model, torch.randn(2, 10))
-        assert len(log.modules) == original_module_count
-        assert [m.address for m in log.modules] == original_addresses
+        try:
+            original_module_count = len(log.modules)
+            original_addresses = [m.address for m in log.modules]
+            assert original_module_count > 0
+            log.save_new_outs(model, torch.randn(2, 10))
+            assert len(log.modules) == original_module_count
+            assert [m.address for m in log.modules] == original_addresses
+        finally:
+            log.cleanup()
 
 
 class TestDescriptiveValueError:

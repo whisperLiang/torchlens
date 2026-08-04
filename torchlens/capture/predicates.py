@@ -13,7 +13,12 @@ import torch
 from ..fastlog.exceptions import PredicateError
 from ..fastlog.types import CaptureSpec, ModuleStackFrame, RecordContext
 from ..intervention.predicates import as_intervention_decision
-from ..intervention.selectors import BaseSelector, CompositeSelector, FollowedBySelector
+from ..intervention.selectors import (
+    BaseSelector,
+    CompositeSelector,
+    FollowedBySelector,
+    _selector_contains_kind,
+)
 from ..intervention.types import InterventionDecision
 from ..ir.predicate import RetroactiveCaptureDecision
 
@@ -103,12 +108,36 @@ def _evaluate_keep_op(
             and ctx.layer_type is not None
             and ctx.type_index is not None
             and not uses_supported_followed_by
+            and _keep_op_needs_alias_retry(options.keep_op)
         ):
             alias_ctx = replace(ctx, label=f"{ctx.layer_type}_{ctx.type_index}")
             result = options.keep_op(alias_ctx)
             if result is not False:
                 ctx = alias_ctx
     return _normalize_capture_decision(result, ctx, options.default_op)
+
+
+def _keep_op_needs_alias_retry(predicate: object | None) -> bool:
+    """Return whether a keep-op predicate still needs the alias compatibility retry.
+
+    Parameters
+    ----------
+    predicate
+        Configured keep-op predicate.
+
+    Returns
+    -------
+    bool
+        ``True`` when the predicate may still rely on the legacy second call
+        with ``ctx.label`` rewritten to ``"{layer_type}_{type_index}"``.
+        Structured selectors already match against the full candidate label set
+        and do not need the retry, except for ``tl.predicate(...)`` trees whose
+        inner callable still observes ``ctx.label`` directly.
+    """
+
+    if not isinstance(predicate, BaseSelector):
+        return True
+    return _selector_contains_kind(predicate, "predicate")
 
 
 def _evaluate_intervene_op(
