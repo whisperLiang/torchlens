@@ -79,6 +79,8 @@ def _safe_shape(t: object) -> Shape | None:
     if t is None:
         return None
     if isinstance(t, tuple):
+        if not all(isinstance(dimension, int) for dimension in t):
+            return None
         return cast(Shape, t)
     try:
         return cast(Shape, tuple(getattr(t, "shape")))
@@ -661,12 +663,23 @@ def _matmul_flops(
     # 1D x 1D: dot product
     if len(a_shape) == 1 and len(b_shape) == 1:
         return 2 * a_shape[0]
-    # General case: M x K @ K x N (with optional batch dims)
-    m = a_shape[-2] if len(a_shape) >= 2 else 1
+    # General case: M x K @ K x N (with optional batch dims). PyTorch
+    # temporarily prepends/appends a unit axis for vector operands, then removes
+    # that axis from the output. Derive vector-case batches from the operand
+    # whose leading dimensions survive instead of the rank-reduced output.
+    a_is_vector = len(a_shape) == 1
+    b_is_vector = len(b_shape) == 1
+    m = 1 if a_is_vector else a_shape[-2]
     k = a_shape[-1]
-    n = b_shape[-1]
-    typed_output_shape = cast(Shape, output_shape)
-    batch = _prod(typed_output_shape[:-2]) if len(typed_output_shape) > 2 else 1
+    n = 1 if b_is_vector else b_shape[-1]
+    if a_is_vector:
+        batch = _prod(b_shape[:-2])
+    elif b_is_vector:
+        batch = _prod(a_shape[:-2])
+    else:
+        if output_shape is None:
+            return None
+        batch = _prod(output_shape[:-2])
     return 2 * batch * m * k * n
 
 
@@ -745,6 +758,47 @@ def _conv_flops(
     kernel_size = _prod(weight_shape[2:])  # product of spatial kernel dims
     flops = 2 * out_numel * channels_per_group * kernel_size
     if len(param_shapes) > 1:  # bias adds 1 FLOP per output element
+        flops += _numel(output_shape)
+    return flops
+
+
+def _conv_transpose_flops(
+    output_shape: Shape | None,
+    param_shapes: ParamShapes,
+    saved_args: CapturedArgs,
+) -> int | None:
+    """Transposed convolution FLOPs on the input-element work basis.
+
+    Transposed-convolution weights use
+    ``[in_channels, out_channels/groups, *kernel_dims]``. Each input element
+    contributes one kernel's worth of multiply-accumulates to every output
+    channel in its group, independent of how stride expands the output grid.
+
+    Parameters
+    ----------
+    output_shape
+        Shape of the output tensor, used only for an optional bias addition.
+    param_shapes
+        Parameter shapes with the transposed-convolution weight first.
+    saved_args
+        Positional call arguments with the input tensor first.
+
+    Returns
+    -------
+    int | None
+        Estimated FLOPs, or ``None`` when the input or weight shape is unavailable.
+    """
+
+    if not param_shapes or not saved_args:
+        return None
+    weight_shape = param_shapes[0]
+    input_shape = _safe_shape(saved_args[0])
+    if len(weight_shape) < 3 or input_shape is None:
+        return None
+    output_channels_per_group = weight_shape[1]
+    kernel_size = _prod(weight_shape[2:])
+    flops = 2 * _numel(input_shape) * output_channels_per_group * kernel_size
+    if len(param_shapes) > 1:
         flops += _numel(output_shape)
     return flops
 
@@ -1116,32 +1170,90 @@ def _einsum_flops(
     param_shapes: ParamShapes,
     saved_args: CapturedArgs,
 ) -> int | None:
-    """Einsum: extract tensor operands (skip subscript string) and compute matmul-like FLOPs.
+    """Compute two-operand einsum FLOPs from its subscript equation.
 
-    For two-operand einsums that look like matrix multiplication, this gives
-    a reasonable estimate. For more exotic subscripts, returns None.
+    Explicit axis labels are classified as output axes, shared batch axes, or
+    contracted axes. Ellipses, repeated axes within one operand, and
+    multi-operand contractions remain unknown rather than being guessed.
+
+    Parameters
+    ----------
+    output_shape
+        Shape of the einsum output.
+    param_shapes
+        Unused parameter shapes.
+    saved_args
+        Captured equation and operands. Both ``einsum(eq, a, b)`` and the
+        internal ``einsum(eq, (a, b))`` spelling are accepted.
+
+    Returns
+    -------
+    int | None
+        Estimated FLOPs, or ``None`` for unsupported equations or missing shapes.
     """
-    if not saved_args:
+
+    del param_shapes
+    if not saved_args or output_shape is None:
         return None
-    # Skip the subscript string argument(s) and collect tensor shapes
-    shapes = []
-    for arg in saved_args:
-        s = _safe_shape(arg)
-        if s is not None and len(s) >= 1:
-            shapes.append(s)
-    if len(shapes) != 2:
-        # Multi-operand or no-operand einsum — too complex to estimate
+    equation = next((arg for arg in saved_args if isinstance(arg, str)), None)
+    if equation is None or "..." in equation:
         return None
-    a_shape, b_shape = shapes[0], shapes[1]
-    if len(a_shape) == 0 or len(b_shape) == 0:
+
+    operand_args = tuple(arg for arg in saved_args if arg is not equation)
+    if len(operand_args) == 1 and isinstance(operand_args[0], (list, tuple)):
+        nested_operands = tuple(operand_args[0])
+        if all(_safe_shape(operand) is not None for operand in nested_operands):
+            operand_args = nested_operands
+    shapes = tuple(_safe_shape(operand) for operand in operand_args)
+    if len(shapes) != 2 or any(shape is None for shape in shapes):
         return None
-    # Treat as matmul: use shared (contracted) dimension
-    # For 2D x 2D: M x K @ K x N = 2*M*K*N
-    m = a_shape[-2] if len(a_shape) >= 2 else 1
-    k = a_shape[-1]
-    n = b_shape[-1]
-    batch = _prod(output_shape[:-2]) if output_shape and len(output_shape) > 2 else 1
-    return 2 * batch * m * k * n
+    a_shape, b_shape = cast(tuple[Shape, Shape], shapes)
+
+    input_equation, separator, explicit_output = equation.replace(" ", "").partition("->")
+    input_terms = input_equation.split(",")
+    if len(input_terms) != 2 or any(not term.isalpha() for term in input_terms):
+        return None
+    if any(len(set(term)) != len(term) for term in input_terms):
+        return None
+    if len(input_terms[0]) != len(a_shape) or len(input_terms[1]) != len(b_shape):
+        return None
+
+    label_counts: dict[str, int] = {}
+    label_sizes: dict[str, int] = {}
+    for term, shape in zip(input_terms, (a_shape, b_shape)):
+        for label, dimension in zip(term, shape):
+            label_counts[label] = label_counts.get(label, 0) + 1
+            prior = label_sizes.get(label)
+            if prior is not None and prior != dimension and prior != 1 and dimension != 1:
+                return None
+            if prior is None or prior == 1:
+                label_sizes[label] = dimension
+
+    output_labels = (
+        explicit_output
+        if separator
+        else "".join(sorted(label for label, count in label_counts.items() if count == 1))
+    )
+    if (
+        not output_labels.isalpha()
+        or len(set(output_labels)) != len(output_labels)
+        or len(output_labels) != len(output_shape)
+        or any(label not in label_sizes for label in output_labels)
+    ):
+        return None
+    output_label_set = set(output_labels)
+    shared_labels = set(input_terms[0]) & set(input_terms[1])
+    batch_labels = shared_labels & output_label_set
+    contracted_labels = set(label_sizes) - output_label_set
+    free_output_labels = output_label_set - batch_labels
+    if batch_labels | free_output_labels != output_label_set:
+        return None
+
+    contraction_size = _prod(tuple(label_sizes[label] for label in contracted_labels))
+    output_numel = _numel(output_shape)
+    if not contracted_labels:
+        return output_numel
+    return 2 * output_numel * contraction_size
 
 
 def _sdpa_flops(
@@ -1205,9 +1317,9 @@ SPECIALTY_HANDLERS: dict[str, _FlopsHandler] = {
     "conv1d": _conv_flops,
     "conv2d": _conv_flops,
     "conv3d": _conv_flops,
-    "conv_transpose1d": _conv_flops,
-    "conv_transpose2d": _conv_flops,
-    "conv_transpose3d": _conv_flops,
+    "conv_transpose1d": _conv_transpose_flops,
+    "conv_transpose2d": _conv_transpose_flops,
+    "conv_transpose3d": _conv_transpose_flops,
     "convolution": _conv_flops,
     "_convolution": _conv_flops,
     "_convolution_mode": _conv_flops,

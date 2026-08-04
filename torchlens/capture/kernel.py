@@ -42,16 +42,15 @@ class OpObservation:
 class CaptureKernel:
     """Run one statically ordered operation pipeline.
 
-    Backend producers supply transient observations and backend-native work
-    targets.  This controller owns whether and when those targets run.  Tier
-    targets are compiled once per operation key and disabled tiers are never
-    called.
+    ``process`` gates backend-native enrichment targets on the compiled demand.
+    ``emit`` is the compatibility entry point for legacy producers, which own
+    their enrichment decisions internally and therefore run exactly once.
     """
 
-    __slots__ = ("_session", "_default_metadata", "_default_payload")
+    __slots__ = ("_session",)
 
     def __init__(self, session: CaptureSession) -> None:
-        """Compile direct enrichment gates for a capture session.
+        """Bind the mutable capture session used by kernel stages.
 
         Parameters
         ----------
@@ -60,9 +59,6 @@ class CaptureKernel:
         """
 
         self._session = session
-        default = session.plan.default_enrichment
-        self._default_metadata = default in {EnrichmentLevel.METADATA, EnrichmentLevel.PAYLOAD}
-        self._default_payload = default is EnrichmentLevel.PAYLOAD
 
     def apply_intervention(
         self,
@@ -97,7 +93,7 @@ class CaptureKernel:
         producer: ProducerTarget,
         *producer_args: Any,
     ) -> None:
-        """Run the fixed post-intervention producer pipeline.
+        """Run one legacy producer that owns its enrichment decisions.
 
         Parameters
         ----------
@@ -109,17 +105,8 @@ class CaptureKernel:
             Existing positional producer inputs, passed through unchanged.
         """
 
-        self._reserve_identity_context(operation_key)
-        metadata_enabled, payload_enabled = self._enrichment_gates(operation_key)
-        if metadata_enabled:
-            self._normalize_metadata()
-        self._select_or_defer()
-        if payload_enabled:
-            self._retain_payload()
+        del operation_key
         producer(*producer_args)
-        self._append_facts_and_sidecars()
-        self._update_indexes_history()
-        self._evaluate_nonfinite_halt()
 
     def process(self, observation: OpObservation) -> None:
         """Process one backend observation in the fixed kernel order.
@@ -152,17 +139,6 @@ class CaptureKernel:
             observation.evaluate_nonfinite_halt(observation)
         self._evaluate_nonfinite_halt()
 
-    def _enrichment_gates(self, operation_key: str) -> tuple[bool, bool]:
-        """Return direct metadata and payload gates for an operation key."""
-
-        override = self._session.plan.enrichment_by_operation.get(operation_key)
-        if override is None:
-            return self._default_metadata, self._default_payload
-        return (
-            override in {EnrichmentLevel.METADATA, EnrichmentLevel.PAYLOAD},
-            override is EnrichmentLevel.PAYLOAD,
-        )
-
     def _reserve_identity_context(self, operation_key: str) -> None:
         """Mark entry into identity/context reservation without allocating sidecars."""
 
@@ -177,9 +153,6 @@ class CaptureKernel:
         self._session.counters["kernel_metadata"] = (
             self._session.counters.get("kernel_metadata", 0) + 1
         )
-
-    def _select_or_defer(self) -> None:
-        """Enter the selection/defer stage."""
 
     def _retain_payload(self) -> None:
         """Enter the demanded payload-retention tier."""

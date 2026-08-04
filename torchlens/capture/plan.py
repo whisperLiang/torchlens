@@ -100,8 +100,6 @@ class CapturePlan:
     projection_target
         Internal projection selected for this run, such as ``"trace"`` or
         ``"recording"``.
-    required_completeness
-        Facts the consumer requires the backend to make observable.
     default_enrichment
         Demand used by operations without a more-specific entry.
     enrichment_by_operation
@@ -122,14 +120,11 @@ class CapturePlan:
         Execution and random-state intent.
     stop_policy
         Compiled halt/non-finite/forward-error policy.
-    required_capabilities
-        Backend capabilities that must be available before capture starts.
     backend_name
         Backend against which the plan was compiled.
     """
 
     projection_target: str
-    required_completeness: frozenset[str] = field(default_factory=frozenset)
     default_enrichment: EnrichmentLevel = EnrichmentLevel.SHELL
     enrichment_by_operation: Mapping[str, EnrichmentLevel] = field(
         default_factory=lambda: MappingProxyType({})
@@ -142,15 +137,12 @@ class CapturePlan:
     backward: Any = None
     execution_context: Any = None
     stop_policy: Any = None
-    required_capabilities: frozenset[str] = field(default_factory=frozenset)
     backend_name: str = "torch"
     retention_profile: RetentionProfile = field(default_factory=RetentionProfile)
 
     def __post_init__(self) -> None:
         """Freeze collection fields so compiled intent cannot change mid-run."""
 
-        object.__setattr__(self, "required_completeness", frozenset(self.required_completeness))
-        object.__setattr__(self, "required_capabilities", frozenset(self.required_capabilities))
         object.__setattr__(self, "deferred_candidates", tuple(self.deferred_candidates))
         object.__setattr__(
             self,
@@ -173,9 +165,6 @@ class CapturePlan:
         cls,
         *,
         projection_target: str,
-        available_capabilities: Iterable[str],
-        required_capabilities: Iterable[str] = (),
-        required_completeness: Iterable[str] = (),
         default_enrichment: EnrichmentLevel = EnrichmentLevel.SHELL,
         enrichment_by_operation: Mapping[str, EnrichmentLevel] | None = None,
         selectors: Any = None,
@@ -189,18 +178,12 @@ class CapturePlan:
         backend_name: str = "torch",
         retention_profile: RetentionProfile | None = None,
     ) -> "CapturePlan":
-        """Compile intent and reject unsupported requirements before capture.
+        """Compile immutable capture intent.
 
         Parameters
         ----------
         projection_target
             Requested internal projection.
-        available_capabilities
-            Capability names supplied by the selected backend.
-        required_capabilities
-            Capability names demanded by the request.
-        required_completeness
-            Facts the product requires the backend to observe.
         default_enrichment
             Default demanded enrichment level.
         enrichment_by_operation
@@ -219,24 +202,10 @@ class CapturePlan:
         CapturePlan
             Frozen compiled request.
 
-        Raises
-        ------
-        ValueError
-            If a requested backend capability is unavailable.
         """
 
-        available = frozenset(available_capabilities)
-        required = frozenset(required_capabilities)
-        unavailable = sorted(required - available)
-        if unavailable:
-            joined = ", ".join(unavailable)
-            raise ValueError(
-                f"CapturePlan for backend {backend_name!r} requires unavailable capabilities: "
-                f"{joined}."
-            )
         return cls(
             projection_target=projection_target,
-            required_completeness=frozenset(required_completeness),
             default_enrichment=default_enrichment,
             enrichment_by_operation=enrichment_by_operation or {},
             selectors=selectors,
@@ -247,7 +216,6 @@ class CapturePlan:
             backward=backward,
             execution_context=execution_context,
             stop_policy=stop_policy,
-            required_capabilities=required,
             backend_name=backend_name,
             retention_profile=retention_profile or RetentionProfile(),
         )

@@ -1154,6 +1154,7 @@ def _build_overview_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str
         f"Saved outs: {human_readable_size(trace.saved_activation_memory)}",
         f"Forward FLOPs: {_human_flops(trace.total_flops_forward)}  "
         f"MACs: {_human_flops(trace.total_macs_forward)}",
+        _unknown_flops_footer(trace),
         "FLOP convention: counts use the captured TorchLens convention; "
         "MACs are reported as FLOPs // 2.",
     ]
@@ -1297,6 +1298,7 @@ def _build_compute_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]
         f"Params: {_int_with_commas(trace.num_params)} unique",
         f"Forward FLOPs: {_human_flops(trace.total_flops_forward)}",
         f"MACs: {_human_flops(trace.total_macs_forward)}",
+        _unknown_flops_footer(trace),
         f"Forward time: {float(trace.forward_duration) * 1000:.2f} ms",
     ]
     return rows, footer_lines
@@ -1885,6 +1887,28 @@ def _human_count(value: int) -> str:
     if value >= 1_000:
         return f"{value / 1_000:.1f} K"
     return str(value)
+
+
+def _unknown_flops_footer(trace: "Trace") -> str:
+    """Return the summary disclosure for operations with unknown FLOPs.
+
+    Parameters
+    ----------
+    trace
+        Finalized trace whose compute operations are summarized.
+
+    Returns
+    -------
+    str
+        Unknown-operation count and, when nonzero, the total-exclusion warning.
+    """
+
+    count = sum(
+        1 for entry in trace.layer_list if entry.is_compute_op and entry.flops_forward is None
+    )
+    if count:
+        return f"Unknown-FLOPs ops: {count} (excluded from FLOP/MAC totals)"
+    return "Unknown-FLOPs ops: 0"
 
 
 def _human_flops(value: int) -> str:

@@ -1,9 +1,8 @@
-"""Fact, decision, payload, and completeness ledgers for capture sessions."""
+"""Fact, decision, and payload ledgers for capture sessions."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -274,78 +273,3 @@ class PayloadLedger:
         """Return a read-only stable-id lookup of payload sidecars."""
 
         return MappingProxyType(self._records)
-
-
-class CompletenessState(str, Enum):
-    """Truthful observability state for one requested capture fact."""
-
-    AVAILABLE = "available"
-    UNAVAILABLE = "unavailable"
-
-
-class CompletenessManifest:
-    """Observability facts where an absent entry is always unavailable.
-
-    This deliberately does not use booleans: a missing observation must never
-    be read as evidence that an event did *not* occur.
-    """
-
-    def __init__(self) -> None:
-        """Initialize an empty manifest with no claimed observations."""
-
-        self._states: dict[str, CompletenessState] = {}
-
-    def mark_available(self, demand: str) -> None:
-        """Mark one requested fact as observed.
-
-        Parameters
-        ----------
-        demand
-            Backend-neutral fact demand that was observable.
-        """
-
-        self._states[demand] = CompletenessState.AVAILABLE
-
-    def mark_unavailable(self, demand: str) -> None:
-        """Explicitly mark one requested fact unavailable.
-
-        Parameters
-        ----------
-        demand
-            Backend-neutral fact demand that was unavailable.
-        """
-
-        self._states[demand] = CompletenessState.UNAVAILABLE
-
-    def clear(self) -> None:
-        """Release all recorded completeness state.
-
-        Returns
-        -------
-        None
-            Clears run-local observability bookkeeping after teardown.
-        """
-
-        self._states.clear()
-
-    def state_for(self, demand: str) -> CompletenessState:
-        """Return observability for one demand, defaulting to unavailable.
-
-        Parameters
-        ----------
-        demand
-            Backend-neutral fact demand to inspect.
-
-        Returns
-        -------
-        CompletenessState
-            ``UNAVAILABLE`` for every missing entry, never a false event fact.
-        """
-
-        return self._states.get(demand, CompletenessState.UNAVAILABLE)
-
-    @property
-    def states(self) -> Mapping[str, CompletenessState]:
-        """Return a read-only snapshot of explicitly recorded observability."""
-
-        return MappingProxyType(self._states)
