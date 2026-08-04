@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import torch
-from pandas.api.types import is_bool_dtype, is_float_dtype
+import pytest
 
 import torchlens as tl
 from torchlens.constants import RAW_LABEL_SUFFIX
+
+pd_types = pytest.importorskip("pandas.api.types")
+is_bool_dtype = pd_types.is_bool_dtype
+is_float_dtype = pd_types.is_float_dtype
 
 
 class RawLabelModel(torch.nn.Module):

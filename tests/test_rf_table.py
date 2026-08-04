@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Iterator
 from fractions import Fraction
 
-import pandas as pd
 import pytest
 import torch
 from torch import nn
@@ -18,6 +17,8 @@ from torchlens.receptive_field._types import (
     ReceptiveFieldAlignment,
     ReceptiveFieldStatus,
 )
+
+pd = pytest.importorskip("pandas")
 
 
 @pytest.fixture(autouse=True)

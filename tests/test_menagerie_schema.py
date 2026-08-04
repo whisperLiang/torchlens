@@ -2,30 +2,30 @@
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 
 import pytest
 import torch
-from pydantic import ValidationError
 
-from menagerie.catalog import SOURCE_JSONL
-from menagerie.recipe import build_input_from_record
-from menagerie.schema import (
-    CallableInput,
-    CatalogRecord,
-    ExecStringRecipe,
-    ExpressionRecipe,
-    ImportCallableRecipe,
-    KwargsInput,
-    MultiInput,
-    NoInput,
-    StatementRecipe,
-    TensorInput,
-    TensorSpec,
-    load_jsonl,
-    recipe_is_quarantined,
-    recipe_uses_code_execution,
-)
+ValidationError = pytest.importorskip("pydantic").ValidationError
+SOURCE_JSONL = importlib.import_module("menagerie.catalog").SOURCE_JSONL
+build_input_from_record = importlib.import_module("menagerie.recipe").build_input_from_record
+schema_module = importlib.import_module("menagerie.schema")
+CallableInput = schema_module.CallableInput
+CatalogRecord = schema_module.CatalogRecord
+ExecStringRecipe = schema_module.ExecStringRecipe
+ExpressionRecipe = schema_module.ExpressionRecipe
+ImportCallableRecipe = schema_module.ImportCallableRecipe
+KwargsInput = schema_module.KwargsInput
+MultiInput = schema_module.MultiInput
+NoInput = schema_module.NoInput
+StatementRecipe = schema_module.StatementRecipe
+TensorInput = schema_module.TensorInput
+TensorSpec = schema_module.TensorSpec
+load_jsonl = schema_module.load_jsonl
+recipe_is_quarantined = schema_module.recipe_is_quarantined
+recipe_uses_code_execution = schema_module.recipe_uses_code_execution
 
 
 def _tensor_input() -> TensorInput:
