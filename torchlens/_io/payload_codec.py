@@ -103,15 +103,36 @@ class TorchPayloadCodec:
         return is_supported_for_save(value, strict=strict)
 
     def to_numpy(self, value: Any) -> EncodedArray:
-        """Convert a PyTorch tensor to a detached CPU NumPy array."""
+        """Refuse: torch payloads never travel through the codec NumPy transport.
 
-        if not isinstance(value, torch.Tensor):
-            raise TypeError(f"torch codec expected torch.Tensor, got {type(value).__name__}.")
-        array = value.detach().cpu().numpy()
-        return EncodedArray(
-            array=array,
-            logical_dtype=str(value.dtype).replace("torch.", ""),
-            logical_device=str(value.device),
+        ``bundle.py::_write_payload_blob`` short-circuits
+        ``logical_backend == "torch" and isinstance(value, torch.Tensor)`` to
+        ``_write_tensor_blob`` BEFORE it consults a codec, and this codec is only ever
+        selected for ``logical_backend == "torch"``. The sole residual call shape --
+        ``logical_backend == "torch"`` carrying a NON-tensor value -- raised ``TypeError``
+        from the old body's own guard too, so refusing here is behavior-preserving on every
+        reachable path.
+
+        Past that guard the old body called ``.numpy()`` with NO bfloat16 handling, so had
+        it ever been reached it would have raised a raw
+        ``TypeError: Got unsupported ScalarType BFloat16`` from deep inside torch -- for a
+        dtype ``tensor_policy._SUPPORTED_DTYPES`` declares SUPPORTED (r6 M5). Rather than
+        invent untested transport semantics for a path that cannot run, the method stays
+        (the ``PayloadCodec`` protocol requires it) and fails CLOSED naming the real
+        routing. bfloat16 payloads round-trip through ``_write_tensor_blob``; that is
+        asserted in ``tests/test_io_runnable_payload_integrity.py``.
+
+        Raises
+        ------
+        TypeError
+            Always.
+        """
+
+        raise TypeError(
+            "The torch payload codec has no NumPy transport: torch tensors are written by "
+            "bundle.py::_write_tensor_blob, which short-circuits before any codec NumPy "
+            "conversion is consulted. Reaching this method means a caller bypassed that "
+            "routing."
         )
 
     def from_numpy(
@@ -123,13 +144,23 @@ class TorchPayloadCodec:
         payload_hints: PayloadLoadHints | Mapping[str, Any] | None = None,
         strict_runtime: bool = True,
     ) -> Any:
-        """Rebuild a PyTorch tensor from a NumPy array."""
+        """Refuse: see :meth:`to_numpy`. Structurally unreachable, fails closed.
 
-        del payload_hints
-        tensor = torch.from_numpy(np.ascontiguousarray(array))
-        if map_location is None:
-            return tensor
-        return tensor.to(map_location)
+        The load side never consults a codec for a torch payload at all: torch blobs are
+        read straight back through ``safetensors.torch.load_file`` in
+        ``bundle.py``. ``PayloadCodec.from_numpy`` has no production caller on any backend.
+
+        Raises
+        ------
+        TypeError
+            Always.
+        """
+
+        raise TypeError(
+            "The torch payload codec has no NumPy transport: torch blobs are read back "
+            "directly through safetensors.torch.load_file in bundle.py, with no codec "
+            "consulted. Reaching this method means a caller bypassed that routing."
+        )
 
     def manifest_fields(self, value: Any, encoded: EncodedArray) -> dict[str, Any]:
         """Return no optional fields so torch manifests stay byte-compatible."""
@@ -270,8 +301,19 @@ class JaxPayloadCodec:
             return value
         try:
             return jax.device_put(value, target_device)
-        except (TypeError, ValueError, RuntimeError):
-            return value
+        except (TypeError, ValueError, RuntimeError) as exc:
+            # r6 L6: this used to swallow the failure and ``return value``, handing back an
+            # array on the WRONG device while silently dropping the caller's explicit
+            # ``map_location``. Every sibling codec raises
+            # ``BackendRuntimeCompatibilityError`` when it cannot honor a requested
+            # placement (see the tinygrad branch above), and a placement the caller ASKED
+            # for is not a detail to lose quietly. Note the two non-failure paths above are
+            # deliberately untouched: no ``map_location`` and an unresolvable device string
+            # both mean "no placement was requested", not "a requested placement failed".
+            raise BackendRuntimeCompatibilityError(
+                f"Portable JAX payload could not be placed on {target_device!r} as "
+                "requested by map_location."
+            ) from exc
 
     def manifest_fields(self, value: Any, encoded: EncodedArray) -> dict[str, Any]:
         """Return v2 manifest vocabulary for a JAX payload."""

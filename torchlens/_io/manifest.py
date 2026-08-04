@@ -622,10 +622,18 @@ def enforce_version_policy(manifest: Manifest) -> None:
         )
     if manifest.tlspec_version < TLSPEC_VERSION:
         warnings.warn(
+            # r6 L7: the old text promised "missing portable fields may default-fill
+            # during load", which is the opposite of what happens -- ``Manifest.from_dict``
+            # REQUIRES every non-provenance field and raises ``TorchLensIOError`` on a
+            # missing one. The warning is advisory only; the load either parses in full or
+            # fails closed.
             "Bundle tlspec_version="
             f"{manifest.tlspec_version} is older than runtime "
-            f"tlspec_version={TLSPEC_VERSION}; missing portable fields may "
-            "default-fill during load.",
+            f"tlspec_version={TLSPEC_VERSION}; it parsed against the current schema, but "
+            "portable fields added after that version are absent. Loading never "
+            "default-fills a missing required field -- an older bundle that lacks one "
+            "fails closed with a TorchLensIOError. Re-save it with this runtime to get "
+            "the current schema.",
             DeprecationWarning,
             stacklevel=2,
         )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 import pickle
@@ -235,6 +236,10 @@ def test_include_activations_persists_exact_save_selected_family_and_digests(
     trace = _capture(model, torch.ones(2, 3), save=tl.func("relu"))
     path = tmp_path / "selected.tlspec"
 
+    # r6 H2: this selective archive now also DISCLOSES that it can never be numerically
+    # attested (visible-not-fatal per the pyproject filterwarnings convention for
+    # option-triggered informational warnings); the disclosure itself is asserted in
+    # tests/test_io_runnable_payload_integrity.py.
     trace.save(path, level="runnable", include_activations=True)
 
     manifest = _manifest(path)
@@ -442,7 +447,17 @@ def test_inplace_internal_activation_attestation_uses_production_snapshot(
 
 
 def test_corrupt_archived_digest_fails_tripwire_and_rolls_back(tmp_path: Path) -> None:
-    """Fail on the first declared byte-digest mismatch without mutating the source Trace."""
+    """Fail on the first declared byte-digest mismatch without mutating the source Trace.
+
+    r6 M4 added an EARLIER, load-time verification of the loaded tensor against its own
+    declared ``byte_digest`` (covered by
+    ``tests/test_io_runnable_payload_integrity.py::test_archived_activation_digest_is_verified_against_the_loaded_tensor``),
+    so a manifest-level digest edit no longer survives to ``.run()``. This test keeps the
+    RUN-time half of the tripwire -- the ``NumericAttestationError`` fields, the source
+    Trace rollback, and the not-poisoned guarantee -- by planting the same corrupt declared
+    digest on the already-loaded descriptor, which is exactly the state the loader used to
+    hand ``.run()``.
+    """
 
     model = ActivationPayloadModel().eval()
     inputs = torch.ones(2, 3)
@@ -453,13 +468,19 @@ def test_corrupt_archived_digest_fails_tripwire_and_rolls_back(tmp_path: Path) -
         include_weights=True,
         include_activations=True,
     )
-    manifest = _manifest(path)
-    first_member = manifest["run"]["payload_layers"]["activations"]["members"][0]
-    first_member["byte_digest"] = "0" * 64
-    with (path / "manifest.json").open("w", encoding="utf-8") as handle:
-        json.dump(manifest, handle, indent=2)
-        handle.write("\n")
     loaded = tl.load(path)
+    descriptor = loaded.runnable_descriptor
+    assert descriptor is not None
+    layer = descriptor.payload_layers.activations
+    first_member = layer.members[0]
+    corrupt_layer = dataclasses.replace(
+        layer,
+        members=(dataclasses.replace(first_member, byte_digest="0" * 64),) + layer.members[1:],
+    )
+    loaded.__dict__["_runnable_descriptor"] = dataclasses.replace(
+        descriptor,
+        payload_layers=dataclasses.replace(descriptor.payload_layers, activations=corrupt_layer),
+    )
     before = _physical_outs(loaded)
 
     with pytest.raises(NumericAttestationError) as caught:
@@ -473,7 +494,7 @@ def test_corrupt_archived_digest_fails_tripwire_and_rolls_back(tmp_path: Path) -
         is NumericAttestationStatus.NUMERIC_ATTESTATION_FAILED
     )
     assert mismatch.code.value == "numeric_attestation_failed"
-    assert details["slot_id"] == first_member["slot_id"]
+    assert details["slot_id"] == first_member.slot_id
     assert details["expected_digest"] == "0" * 64
     assert details["archived_digest"] != details["expected_digest"]
     assert _physical_outs(loaded) == before
