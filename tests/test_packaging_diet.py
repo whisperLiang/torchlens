@@ -136,6 +136,29 @@ def test_precommit_and_conftest_guard_use_python3_safe_predicates() -> None:
     assert 'collect_ignore_glob.append("crawler/*.py")' in conftest_text
 
 
+def test_ci_workflows_pin_torch_and_scope_lint_to_owned_paths() -> None:
+    """Packaging CI keeps torch pins honest and excludes the external menagerie boundary."""
+
+    project_root = Path(__file__).resolve().parent.parent
+    nightly_text = project_root.joinpath(".github", "workflows", "nightly.yml").read_text()
+    weekly_text = project_root.joinpath(".github", "workflows", "weekly.yml").read_text()
+    lint_text = project_root.joinpath(".github", "workflows", "lint.yml").read_text()
+
+    for workflow_text in (nightly_text, weekly_text):
+        assert "torch==2.7.*" in workflow_text
+        assert 'uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt"' in (
+            workflow_text
+        )
+        assert "uv pip check" in workflow_text
+        assert 'assert torch.__version__.startswith("2.7.")' in workflow_text
+
+    assert "ruff format --check torchlens tests scripts" in lint_text
+    assert "ruff check torchlens tests scripts" in lint_text
+    assert "--exclude menagerie" in lint_text
+    assert "--exclude tests/crawler" in lint_text
+    assert "--exclude tests/test_menagerie_*.py" in lint_text
+
+
 @pytest.mark.slow
 def test_built_wheel_includes_tlspec_json_schemas(tmp_path: Path) -> None:
     """Built wheels must ship the public ``torchlens/schemas/*.json`` files."""

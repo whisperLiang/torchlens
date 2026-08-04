@@ -223,7 +223,7 @@ def render_lineplot(
     if values.ndim != 2 or values.shape[1] == 0:
         raise ValueError("render_lineplot expects shape [K] or [S, K] with K > 0.")
     n_series, n_points = values.shape
-    xs = np.arange(n_points, dtype=np.float64)
+    xs: np.ndarray[Any, np.dtype[np.float64]] = np.arange(n_points, dtype=np.float64)
     if x_values is not None:
         xs = np.asarray(_as_numpy(x_values), dtype=np.float64)
         if xs.ndim != 1 or xs.shape[0] != n_points:
