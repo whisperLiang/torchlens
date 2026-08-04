@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
+import textwrap
 import warnings
 from collections.abc import Callable, Iterator
 
@@ -12,6 +15,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens._errors import TorchLensCaptureGapWarning
+from torchlens.backends.torch import completeness_witness as cw
 from torchlens.backends.torch.completeness_witness import (
     AUDITED_COMPLETENESS_BOUNDARIES,
     MAX_AUDITED_COMPLETENESS_BOUNDARIES,
@@ -20,6 +24,102 @@ from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
 
 # (major, minor) of the running torch, dependency-free (e.g. "2.8.0+cpu" -> (2, 8)).
 _TORCH_XY = tuple(int(p) for p in torch.__version__.split("+")[0].split(".")[:2])
+
+
+def _observer_patch_ast() -> ast.FunctionDef:
+    """Return the parsed AST for ``_observe_invisible_host_escapes``.
+
+    Returns
+    -------
+    ast.FunctionDef
+        Parsed function definition for the observer-install context manager.
+    """
+
+    source = textwrap.dedent(inspect.getsource(cw._observe_invisible_host_escapes))
+    function = ast.parse(source).body[0]
+    assert isinstance(function, ast.FunctionDef)
+    return function
+
+
+def _loop_by_iter(function: ast.FunctionDef, iter_expr: str) -> ast.For:
+    """Return the loop matching one iterator expression.
+
+    Parameters
+    ----------
+    function:
+        Parsed observer-install function.
+    iter_expr:
+        ``ast.unparse`` string for the target loop iterator.
+
+    Returns
+    -------
+    ast.For
+        Matching loop node.
+    """
+
+    for statement in ast.walk(function):
+        if isinstance(statement, ast.For) and ast.unparse(statement.iter) == iter_expr:
+            return statement
+    pytest.fail(f"missing observer loop for {iter_expr!r}")
+
+
+def _statement_blocks(node: ast.AST) -> list[list[ast.stmt]]:
+    """Collect nested statement blocks under ``node``.
+
+    Parameters
+    ----------
+    node:
+        AST node to inspect.
+
+    Returns
+    -------
+    list[list[ast.stmt]]
+        Statement lists from bodies, orelse blocks, final blocks, and handlers.
+    """
+
+    blocks: list[list[ast.stmt]] = []
+    for field_name in ("body", "orelse", "finalbody"):
+        field = getattr(node, field_name, None)
+        if isinstance(field, list) and field and all(isinstance(stmt, ast.stmt) for stmt in field):
+            blocks.append(field)
+            for statement in field:
+                blocks.extend(_statement_blocks(statement))
+    handlers = getattr(node, "handlers", None)
+    if isinstance(handlers, list):
+        for handler in handlers:
+            if isinstance(handler, ast.ExceptHandler):
+                blocks.append(handler.body)
+                for statement in handler.body:
+                    blocks.extend(_statement_blocks(statement))
+    return blocks
+
+
+def _is_observer_failed_add(statement: ast.stmt) -> bool:
+    """Return whether ``statement`` records ``_HOST_ESCAPE_OBSERVER_FAILED``.
+
+    Parameters
+    ----------
+    statement:
+        AST statement to classify.
+
+    Returns
+    -------
+    bool
+        ``True`` when the statement is ``_HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)``.
+    """
+
+    if not isinstance(statement, ast.Expr):
+        return False
+    call = statement.value
+    if not isinstance(call, ast.Call):
+        return False
+    func = call.func
+    if not isinstance(func, ast.Attribute) or func.attr != "add":
+        return False
+    owner = func.value
+    if not isinstance(owner, ast.Name) or owner.id != "_HOST_ESCAPE_OBSERVER_FAILED":
+        return False
+    return ast.unparse(call) == "_HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)"
 
 
 @pytest.fixture(autouse=True)
@@ -819,6 +919,157 @@ def test_expected_opaque_boundary_table_is_exact_and_budgeted() -> None:
     }
     assert {row.operator for row in scalar_rows} == {"aten._local_scalar_dense.default"}
     assert all(row.reason for row in AUDITED_COMPLETENESS_BOUNDARIES)
+
+
+def test_observer_install_loops_fail_closed_before_each_continue() -> None:
+    """Every required observer-install loop must flag failure before continuing.
+
+    Returns
+    -------
+    None
+        Asserts that every structural ``continue`` in the required install loops is
+        preceded in-branch by ``_HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)``.
+    """
+
+    function = _observer_patch_ast()
+    install_iters = (
+        "INVISIBLE_HOST_ESCAPE_FUNCS | STORAGE_BRIDGE_ESCAPE_FUNCS",
+        "_MODULE_ESCAPE_TARGETS()",
+        "_STORAGE_RAW_POINTER_TARGETS()",
+        "INVISIBLE_HOST_ESCAPE_PROPERTIES",
+        "INPUT_METADATA_PREDICATE_FUNCS",
+        "INPUT_METADATA_BOOL_METHODS",
+        "INPUT_METADATA_PROPERTY_NAMES",
+    )
+    for iter_expr in install_iters:
+        loop = _loop_by_iter(function, iter_expr)
+        continue_blocks = [
+            block
+            for block in _statement_blocks(loop)
+            if any(isinstance(stmt, ast.Continue) for stmt in block)
+        ]
+        assert continue_blocks, f"{iter_expr} no longer has structural fail-closed coverage"
+        for block in continue_blocks:
+            for index, statement in enumerate(block):
+                if isinstance(statement, ast.Continue):
+                    assert index > 0, f"{iter_expr} has a bare continue with no guard"
+                    assert _is_observer_failed_add(block[index - 1]), (
+                        f"{iter_expr} continue is not fail-closed"
+                    )
+
+
+def test_observer_restore_loops_fail_closed_on_restore_error() -> None:
+    """Every targeted observer-restore loop must downgrade on restore failure.
+
+    Returns
+    -------
+    None
+        Asserts the restore loops no longer swallow ``TypeError``/``AttributeError``
+        with ``pass``.
+    """
+
+    function = _observer_patch_ast()
+    restore_iters = (
+        "originals.items()",
+        "module_originals",
+        "storage_originals",
+        "property_originals.items()",
+        "metadata_originals.items()",
+        "bool_method_originals.items()",
+        "grad_property_restore.items()",
+    )
+    for iter_expr in restore_iters:
+        loop = _loop_by_iter(function, iter_expr)
+        handlers = [node for node in ast.walk(loop) if isinstance(node, ast.ExceptHandler)]
+        assert handlers, f"{iter_expr} restore loop lost its guarded restore path"
+        for handler in handlers:
+            assert not any(isinstance(statement, ast.Pass) for statement in handler.body), (
+                f"{iter_expr} restore handler still swallows failure"
+            )
+            assert any(_is_observer_failed_add(statement) for statement in handler.body), (
+                f"{iter_expr} restore handler is not fail-closed"
+            )
+
+
+def test_invisible_host_escape_property_lookup_uses_tensor_mro() -> None:
+    """The property observer must resolve descriptors through ``torch.Tensor``'s MRO.
+
+    Returns
+    -------
+    None
+        Asserts the property install loop uses ``inspect.getattr_static`` on
+        ``torch.Tensor`` rather than metaclass or ``__dict__`` probing.
+    """
+
+    function = _observer_patch_ast()
+    loop = _loop_by_iter(function, "INVISIBLE_HOST_ESCAPE_PROPERTIES")
+    descriptor_assignments = [
+        statement
+        for statement in loop.body
+        if isinstance(statement, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "descriptor"
+            for target in statement.targets
+        )
+    ]
+    assert descriptor_assignments, "property observer loop no longer binds a descriptor"
+    descriptor_call = descriptor_assignments[0].value
+    assert ast.unparse(descriptor_call) == "inspect.getattr_static(torch.Tensor, name, None)"
+
+
+def test_completeness_witness_functions_have_docstrings() -> None:
+    """The verification module must keep docstrings on every function.
+
+    Returns
+    -------
+    None
+        Fails with the sorted ``lineno:name`` list for any undocumented function in
+        ``completeness_witness.py``.
+    """
+
+    module_ast = ast.parse(inspect.getsource(cw))
+    missing = sorted(
+        f"{node.lineno}:{node.name}"
+        for node in ast.walk(module_ast)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and ast.get_docstring(node) is None
+    )
+    assert not missing, f"missing docstrings: {missing}"
+
+
+def test_writeback_sampling_outer_failures_are_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Outer sampling failures must trip the mutable-writeback ceiling.
+
+    Parameters
+    ----------
+    monkeypatch:
+        Pytest monkeypatch fixture.
+
+    Returns
+    -------
+    None
+        Forces an outer sampling failure and asserts it marks the trace
+        ``_HOST_ESCAPE_MUTABLE_WRITEBACK`` set.
+    """
+
+    class _Trace:
+        """Weakrefable trace stand-in for the fail-closed weak set."""
+
+    trace = _Trace()
+    state = cw._WitnessState(trace=trace, owner_thread_id=0, guard_pass_index=1)
+    state.writeback_watch.append((torch.tensor([1.0]), None, torch.tensor([1], dtype=torch.uint8)))
+    monkeypatch.setattr(
+        cw,
+        "_iter_dispatch_tensors",
+        lambda args, kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    monkeypatch.setattr(cw, "_has_state_toctou_watch", lambda _trace: False)
+
+    assert trace not in cw._HOST_ESCAPE_MUTABLE_WRITEBACK
+    cw._sample_writeback_at_consumption(state, (torch.tensor([2.0]),), None)
+    assert trace in cw._HOST_ESCAPE_MUTABLE_WRITEBACK
 
 
 @pytest.mark.smoke
