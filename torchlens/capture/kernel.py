@@ -39,6 +39,60 @@ class OpObservation:
     facts: dict[str, Any] = field(default_factory=dict)
 
 
+def _run_observation_stages(
+    observation: OpObservation,
+    demanded: EnrichmentLevel,
+    *,
+    mark_metadata: Callable[[], None] | None = None,
+    mark_payload: Callable[[], None] | None = None,
+    mark_append: Callable[[], None] | None = None,
+    mark_update_indexes_history: Callable[[], None] | None = None,
+    mark_nonfinite_halt: Callable[[], None] | None = None,
+) -> None:
+    """Run the fixed post-selection observation stages in kernel order.
+
+    Parameters
+    ----------
+    observation
+        Backend observation whose callbacks implement the current stage hooks.
+    demanded
+        Enrichment tier already selected for ``observation``.
+    mark_metadata
+        Optional bookkeeping callback for the metadata stage.
+    mark_payload
+        Optional bookkeeping callback for the payload stage.
+    mark_append
+        Optional bookkeeping callback for the append stage.
+    mark_update_indexes_history
+        Optional bookkeeping callback for the index/history stage.
+    mark_nonfinite_halt
+        Optional bookkeeping callback for the non-finite/halt stage.
+    """
+
+    metadata_enabled = demanded in {EnrichmentLevel.METADATA, EnrichmentLevel.PAYLOAD}
+    payload_enabled = demanded is EnrichmentLevel.PAYLOAD
+    if metadata_enabled and observation.normalize_metadata is not None:
+        if mark_metadata is not None:
+            mark_metadata()
+        observation.normalize_metadata(observation)
+    if payload_enabled and observation.retain_payload is not None:
+        if mark_payload is not None:
+            mark_payload()
+        observation.retain_payload(observation)
+    if observation.append is not None:
+        observation.append(observation)
+    if mark_append is not None:
+        mark_append()
+    if observation.update_indexes_history is not None:
+        observation.update_indexes_history(observation)
+    if mark_update_indexes_history is not None:
+        mark_update_indexes_history()
+    if observation.evaluate_nonfinite_halt is not None:
+        observation.evaluate_nonfinite_halt(observation)
+    if mark_nonfinite_halt is not None:
+        mark_nonfinite_halt()
+
+
 class CaptureKernel:
     """Run one statically ordered operation pipeline.
 
@@ -121,23 +175,15 @@ class CaptureKernel:
         demanded = self._session.plan.enrichment_for(observation.operation_key)
         if observation.select is not None:
             demanded = observation.select(observation)
-        metadata_enabled = demanded in {EnrichmentLevel.METADATA, EnrichmentLevel.PAYLOAD}
-        payload_enabled = demanded is EnrichmentLevel.PAYLOAD
-        if metadata_enabled and observation.normalize_metadata is not None:
-            self._normalize_metadata()
-            observation.normalize_metadata(observation)
-        if payload_enabled and observation.retain_payload is not None:
-            self._retain_payload()
-            observation.retain_payload(observation)
-        if observation.append is not None:
-            observation.append(observation)
-        self._append_facts_and_sidecars()
-        if observation.update_indexes_history is not None:
-            observation.update_indexes_history(observation)
-        self._update_indexes_history()
-        if observation.evaluate_nonfinite_halt is not None:
-            observation.evaluate_nonfinite_halt(observation)
-        self._evaluate_nonfinite_halt()
+        _run_observation_stages(
+            observation,
+            demanded,
+            mark_metadata=self._normalize_metadata,
+            mark_payload=self._retain_payload,
+            mark_append=self._append_facts_and_sidecars,
+            mark_update_indexes_history=self._update_indexes_history,
+            mark_nonfinite_halt=self._evaluate_nonfinite_halt,
+        )
 
     def _reserve_identity_context(self, operation_key: str) -> None:
         """Mark entry into identity/context reservation without allocating sidecars."""

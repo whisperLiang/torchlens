@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable
+from contextlib import nullcontext
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -227,6 +230,172 @@ def test_trace_save_func_selector_preserves_predicate_event_fields() -> None:
     assert event.output.container_path == ()
     assert event.label_raw == relu_op._label_raw
     assert event.output.tensor.label_raw == relu_op._label_raw
+
+
+def test_predicate_operation_emitter_uses_shared_stage_helper_without_capture_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-session predicate-op path must delegate to the shared stage helper."""
+
+    from torchlens.backends.torch import ops
+
+    class _Trace:
+        """Minimal trace stand-in for the predicate emitter."""
+
+        def __init__(self) -> None:
+            """Initialize the trace counters and event index used by the emitter."""
+
+            self._layer_counter = 0
+            self._raw_layer_type_counter: defaultdict[str, int] = defaultdict(int)
+            self.capture_start_time = 0.0
+            self.capture_events = SimpleNamespace(op_event_by_label_raw={})
+
+    updated_labels: list[str] = []
+    helper_demands: list[EnrichmentLevel] = []
+    real_op_observation = ops.OpObservation
+    state = SimpleNamespace(
+        module_stack=[],
+        op_counts={},
+        step_index=0,
+        event_index=0,
+        pass_index=0,
+        history=[],
+        options=SimpleNamespace(include_source_events=False),
+        sample_id=None,
+        grad_fn_to_context={},
+    )
+
+    def no_capture_session(_owner: object) -> None:
+        """Force the predicate-op path through the legacy no-session branch."""
+
+        return None
+
+    def current_state() -> object:
+        """Return the synthetic active recording state for the unit driver."""
+
+        return state
+
+    def normalize_name(name: str) -> str:
+        """Preserve the provided function name for deterministic labels."""
+
+        return name
+
+    def extract_args(
+        _layer_type: str, _args: tuple[object, ...], _kwargs: dict[str, object]
+    ) -> tuple[list[object], list[object]]:
+        """Return empty tensor/parameter lists for the unit driver."""
+
+        return [], []
+
+    def label_list(_arg_tensors: list[object]) -> list[str]:
+        """Return an empty parent-label list for the unit driver."""
+
+        return []
+
+    def iter_outputs(
+        out_orig: torch.Tensor,
+        _is_bottom_level_func: bool,
+    ) -> list[tuple[torch.Tensor, tuple[()], None]]:
+        """Expose one loggable tensor output for the predicate emitter."""
+
+        return [(out_orig, (), None)]
+
+    def live_output_index(_container_path: tuple[()]) -> None:
+        """Return ``None`` so the emitter falls back to the enumerated output index."""
+
+        return None
+
+    def set_label(_tensor: torch.Tensor, _label: str) -> None:
+        """Skip live tensor labeling for the unit driver."""
+
+        return None
+
+    def timed_phase(_trace: object, _name: str) -> object:
+        """Return a no-op context manager for the timed-phase wrapper."""
+
+        return nullcontext()
+
+    def build_context(**kwargs: object) -> object:
+        """Build a minimal context object with raw and final labels."""
+
+        return SimpleNamespace(raw_label=kwargs["raw_label"], label=kwargs["label"])
+
+    def shell_only(_options: object) -> bool:
+        """Keep the emitter on the non-halt predicate path."""
+
+        return False
+
+    def select_shell(_current: OpObservation) -> EnrichmentLevel:
+        """Demand shell-only enrichment from the shared stage helper."""
+
+        return EnrichmentLevel.SHELL
+
+    def run_shared_stages(observation: OpObservation, demanded: EnrichmentLevel) -> None:
+        """Record the delegated demand and execute the injected update callback."""
+
+        helper_demands.append(demanded)
+        if observation.update_indexes_history is not None:
+            observation.update_indexes_history(observation)
+
+    def append_projected(*args: object, **kwargs: object) -> None:
+        """Skip projected-event append work in the unit driver."""
+
+        del args, kwargs
+
+    def append_context(_ctx: object) -> None:
+        """Skip context buffering in the synthetic recording state."""
+
+        return None
+
+    def build_observation(*args: object, **kwargs: object) -> OpObservation:
+        """Attach a visible update callback to each predicate observation."""
+
+        observation = real_op_observation(*args, **kwargs)
+
+        def record_update(current: OpObservation) -> None:
+            """Record the raw label whose update stage just ran."""
+
+            label = current.facts["ctx"].raw_label or current.facts["ctx"].label
+            updated_labels.append(label)
+
+        observation.update_indexes_history = record_update
+        return observation
+
+    monkeypatch.setattr(ops, "capture_session_for", no_capture_session)
+    monkeypatch.setattr(ops, "get_active_recording_state", current_state)
+    monkeypatch.setattr(ops, "_normalize_func_name", normalize_name)
+    monkeypatch.setattr(ops, "_extract_arg_tensors_and_params", extract_args)
+    monkeypatch.setattr(ops, "get_label_list", label_list)
+    monkeypatch.setattr(ops, "_iter_loggable_live_outputs", iter_outputs)
+    monkeypatch.setattr(ops, "_live_output_index", live_output_index)
+    monkeypatch.setattr(ops, "set_tensor_label", set_label)
+    monkeypatch.setattr(ops, "_timed_phase", timed_phase)
+    monkeypatch.setattr(ops, "build_op_record_context", build_context)
+    monkeypatch.setattr(ops, "_is_halt_only_capture", shell_only)
+    monkeypatch.setattr(ops, "_select_predicate_observation", select_shell)
+    monkeypatch.setattr(ops, "_run_observation_stages", run_shared_stages)
+    monkeypatch.setattr(ops, "append_projected_event", append_projected)
+    monkeypatch.setattr(ops, "OpObservation", build_observation)
+    state.append_context = append_context
+
+    trace = _Trace()
+    output = torch.tensor([1.0])
+    ops._emit_predicate_operation_events(
+        trace,
+        torch.relu,
+        "relu",
+        (torch.tensor([1.0]),),
+        {},
+        (),
+        {},
+        output,
+        object(),
+        True,
+        1,
+    )
+
+    assert helper_demands == [EnrichmentLevel.SHELL]
+    assert updated_labels == ["relu_1_1_raw"]
 
 
 def test_selective_save_keeps_unsaved_non_orphan_op_metadata() -> None:
