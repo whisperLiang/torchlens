@@ -489,9 +489,24 @@ def cka(a: Any, b: Any) -> float:
         Linear CKA value, or NaN for a degenerate zero-variance input.
     """
 
-    accumulator = CKA()
-    accumulator.update(a, b)
-    return accumulator.result()
+    matrix_a = _as_feature_matrix(a)
+    matrix_b = _as_feature_matrix(b)
+    if matrix_a.shape[0] != matrix_b.shape[0]:
+        raise ValueError(
+            f"CKA requires matched row counts; got {matrix_a.shape[0]} and {matrix_b.shape[0]}."
+        )
+
+    centered_a = matrix_a - matrix_a.mean(dim=0, keepdim=True)
+    centered_b = matrix_b - matrix_b.mean(dim=0, keepdim=True)
+    gram_a = centered_a @ centered_a.T
+    gram_b = centered_b @ centered_b.T
+    denominator = torch.linalg.matrix_norm(gram_a, ord="fro") * torch.linalg.matrix_norm(
+        gram_b, ord="fro"
+    )
+    if denominator.item() == 0.0:
+        return math.nan
+    numerator = torch.sum(gram_a * gram_b)
+    return float((numerator / denominator).item())
 
 
 class PCA:
@@ -624,8 +639,8 @@ def _metric_value_from_log(log: Any, metric_name: str) -> Any:
 def _metric_grad_from_log(log: Any, metric_name: str) -> Any:
     """Resolve one gradient metric input value from a Trace."""
 
-    if metric_name == "output" and log.output_layers:
-        return log[log.output_layers[-1]].grad
+    if metric_name == "output":
+        raise KeyError(f"No saved grad matched metric {metric_name!r}.")
     try:
         value = log[metric_name].grad
     except Exception:

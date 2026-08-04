@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 
 import pytest
 import torch
+from torch import nn
 
+import torchlens as tl
 from torchlens.stats import CKA, CrossCovariance, cka
 
 
@@ -96,3 +99,65 @@ def test_cross_covariance_refuses_mismatched_rows() -> None:
     accumulator = CrossCovariance()
     with pytest.raises(ValueError, match="matched row counts.*3 and 4"):
         accumulator.update(torch.randn(3, 2), torch.randn(4, 5))
+
+
+def _legacy_covariance_cka(a: torch.Tensor, b: torch.Tensor) -> float:
+    """Return the pre-hardening covariance-form CKA for equality checks."""
+
+    centered_a = a - a.mean(dim=0, keepdim=True)
+    centered_b = b - b.mean(dim=0, keepdim=True)
+    covariance_a = centered_a.T @ centered_a / (a.shape[0] - 1)
+    covariance_b = centered_b.T @ centered_b / (b.shape[0] - 1)
+    cross = centered_a.T @ centered_b / (a.shape[0] - 1)
+    numerator = torch.linalg.matrix_norm(cross, ord="fro").square()
+    denominator = torch.linalg.matrix_norm(covariance_a, ord="fro") * torch.linalg.matrix_norm(
+        covariance_b, ord="fro"
+    )
+    return float((numerator / denominator).item())
+
+
+def test_cka_matches_legacy_covariance_form_on_high_dimensional_input() -> None:
+    """The Gram rewrite should preserve the legacy covariance-form value."""
+
+    generator = torch.Generator().manual_seed(321)
+    a = torch.randn(32, 32, 14, 14, generator=generator, dtype=torch.float64)
+    b = torch.randn(32, 32, 14, 14, generator=generator, dtype=torch.float64)
+
+    assert cka(a, b) == pytest.approx(
+        _legacy_covariance_cka(a.reshape(32, -1), b.reshape(32, -1)),
+        abs=1e-12,
+    )
+
+
+class _AggregateModel(nn.Module):
+    """Minimal model exposing one hidden activation for aggregate tests."""
+
+    def __init__(self) -> None:
+        """Initialize the linear layer."""
+
+        super().__init__()
+        self.linear = nn.Linear(3, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the model."""
+
+        return self.linear(x).relu()
+
+
+def _single_batch_loader() -> Iterable[torch.Tensor]:
+    """Yield one deterministic batch for aggregate tests."""
+
+    yield torch.ones(2, 3)
+
+
+def test_aggregate_grad_output_metric_raises_clear_key_error() -> None:
+    """`aggregate(..., target="grad")` should fail clearly for unsaved output grads."""
+
+    with pytest.raises(KeyError, match="No saved grad matched metric 'output'"):
+        tl.stats.aggregate(
+            _AggregateModel(),
+            _single_batch_loader(),
+            {"output": tl.stats.Mean()},
+            target="grad",
+            loss_fn=lambda output: output.sum(),
+        )

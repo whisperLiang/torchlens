@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Literal
 
 from safetensors import SafetensorError
-from safetensors.torch import load_file
+from safetensors.torch import load as load_safetensors
 
 from .._io import TorchLensIOError
-from .._io.manifest import Manifest, enforce_version_policy, sha256_of_file
+from .._io.manifest import Manifest, enforce_version_policy
 from .._io.paths import resolve_bundle_blob_path
 from .exceptions import BundleNotFinalizedError, RecoveryError
 from .storage_disk import record_from_json
@@ -103,9 +104,6 @@ def _load_from_index(
     warnings_out = list(recovery_warnings)
     lines = _read_index_lines(bundle_path / "fastlog_index.jsonl")
     for line_number, raw_line in enumerate(lines, start=1):
-        if raw_line == "" and line_number == len(lines):
-            warnings_out.append("truncated tail")
-            continue
         try:
             data = json.loads(raw_line)
         except json.JSONDecodeError:
@@ -118,9 +116,17 @@ def _load_from_index(
             warnings_out.append(f"malformed line {line_number}")
             continue
         record = record_from_json(data)
-        if not _blob_is_recoverable(bundle_path, record, warnings_out):
+        blob_recoverable, validated_payloads = _blob_is_recoverable(
+            bundle_path,
+            record,
+            warnings_out,
+        )
+        if not blob_recoverable:
             continue
-        rehydrated_record = _rehydrate_record_payloads(bundle_path, record, warnings_out)
+        rehydrated_record = _rehydrate_record_payloads(
+            record,
+            validated_payloads,
+        )
         if rehydrated_record is None:
             continue
         records.append(rehydrated_record)
@@ -136,31 +142,29 @@ def _load_from_index(
 
 
 def _read_index_lines(path: Path) -> list[str]:
-    """Read index lines while preserving a missing trailing newline signal."""
+    """Read index lines from a recoverable fastlog index file."""
 
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise RecoveryError("no recoverable index") from exc
-    lines = text.splitlines()
-    if text and not text.endswith("\n"):
-        lines[-1] = ""
-    return lines
+    return text.splitlines()
 
 
 def _blob_is_recoverable(
     bundle_path: Path,
     record: ActivationRecord,
     recovery_warnings: list[str],
-) -> bool:
+) -> tuple[bool, dict[str, Any]]:
     """Return whether a record's blob(s) are present and hash-valid.
 
     Both the raw out blob and the transformed out blob are
     validated when their metadata is present. A missing or hash-mismatched
-    blob disqualifies the record.
+    blob disqualifies the record. Successful validation also returns the
+    materialized payloads so the caller does not have to read the file again.
     """
 
-    raw_recoverable = _validate_blob_metadata(
+    raw_recoverable, raw_payload = _validate_blob_metadata(
         bundle_path,
         record.metadata.get("blob_id"),
         record.metadata.get("relative_path"),
@@ -168,15 +172,20 @@ def _blob_is_recoverable(
         recovery_warnings,
     )
     if not raw_recoverable:
-        return False
-    transformed_recoverable = _validate_blob_metadata(
+        return False, {}
+    transformed_recoverable, transformed_payload = _validate_blob_metadata(
         bundle_path,
         record.metadata.get("transformed_out_blob_id"),
         record.metadata.get("transformed_out_relative_path"),
         record.metadata.get("transformed_out_sha256"),
         recovery_warnings,
     )
-    return transformed_recoverable
+    if not transformed_recoverable:
+        return False, {}
+    return True, {
+        "disk_payload": raw_payload,
+        "transformed_disk_payload": transformed_payload,
+    }
 
 
 def _validate_blob_metadata(
@@ -185,26 +194,41 @@ def _validate_blob_metadata(
     relative_path: Any,
     expected_sha256: Any,
     recovery_warnings: list[str],
-) -> bool:
+) -> tuple[bool, Any | None]:
     """Validate a single blob entry from record metadata."""
 
     if blob_id is None or relative_path is None or expected_sha256 is None:
-        return True
+        return True, None
     try:
         blob_path = resolve_bundle_blob_path(bundle_path, str(relative_path))
     except TorchLensIOError:
         recovery_warnings.append(f"malformed blob path {blob_id}")
-        return False
+        return False, None
     if not blob_path.exists():
         recovery_warnings.append(f"missing blob {blob_id}")
-        return False
-    if sha256_of_file(blob_path) != expected_sha256:
+        return False, None
+    try:
+        payload = _load_verified_blob_tensor(blob_path, str(expected_sha256))
+    except TorchLensIOError:
         recovery_warnings.append(f"hash mismatch {blob_id}")
-        return False
-    return True
+        return False, None
+    return True, payload
 
 
-def _load_blob_tensor(blob_path: Path) -> Any:
+def _load_verified_blob_tensor(blob_path: Path, expected_sha256: str) -> Any:
+    """Read, verify, and materialize one fastlog blob in a single pass."""
+
+    try:
+        payload = blob_path.read_bytes()
+    except OSError as exc:
+        raise TorchLensIOError(f"Failed to read fastlog blob at {blob_path}.") from exc
+    observed_sha256 = hashlib.sha256(payload).hexdigest()
+    if observed_sha256 != expected_sha256:
+        raise TorchLensIOError(f"Checksum mismatch for fastlog blob at {blob_path}.")
+    return _load_blob_tensor_from_bytes(payload, blob_path)
+
+
+def _load_blob_tensor_from_bytes(payload: bytes, blob_path: Path) -> Any:
     """Load the single tensor stored in one fastlog safetensors blob.
 
     Fastlog blobs are always written with exactly one tensor per file (see
@@ -220,7 +244,7 @@ def _load_blob_tensor(blob_path: Path) -> Any:
     """
 
     try:
-        tensor_map = load_file(str(blob_path))
+        tensor_map = load_safetensors(payload)
     except ImportError as exc:
         raise TorchLensIOError(
             "Fastlog bundle payload materialization requires the safetensors "
@@ -234,9 +258,8 @@ def _load_blob_tensor(blob_path: Path) -> Any:
 
 
 def _rehydrate_record_payloads(
-    bundle_path: Path,
     record: ActivationRecord,
-    recovery_warnings: list[str],
+    validated_payloads: dict[str, Any],
 ) -> ActivationRecord | None:
     """Rehydrate a reloaded record's disk-persisted tensor payloads.
 
@@ -256,29 +279,8 @@ def _rehydrate_record_payloads(
         a blob that ``_blob_is_recoverable`` had already validated.
     """
 
-    disk_payload = None
-    relative_path = record.metadata.get("relative_path")
-    blob_id = record.metadata.get("blob_id")
-    if relative_path is not None:
-        try:
-            disk_payload = _load_blob_tensor(
-                resolve_bundle_blob_path(bundle_path, str(relative_path))
-            )
-        except TorchLensIOError:
-            recovery_warnings.append(f"failed to materialize blob {blob_id}")
-            return None
-
-    transformed_disk_payload = None
-    transformed_relative_path = record.metadata.get("transformed_out_relative_path")
-    transformed_blob_id = record.metadata.get("transformed_out_blob_id")
-    if transformed_relative_path is not None:
-        try:
-            transformed_disk_payload = _load_blob_tensor(
-                resolve_bundle_blob_path(bundle_path, str(transformed_relative_path))
-            )
-        except TorchLensIOError:
-            recovery_warnings.append(f"failed to materialize blob {transformed_blob_id}")
-            return None
+    disk_payload = validated_payloads.get("disk_payload")
+    transformed_disk_payload = validated_payloads.get("transformed_disk_payload")
 
     if disk_payload is None and transformed_disk_payload is None:
         return record

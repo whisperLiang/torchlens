@@ -293,6 +293,14 @@ def test_activation_distance_matrix_metrics() -> None:
     assert np.allclose(np.diag(correlation), 0.0)
     assert np.allclose(euclidean, euclidean.T)
 
+    expected_euclidean = np.sqrt(
+        np.sum(
+            (activations.reshape(3, -1)[:, None, :] - activations.reshape(3, -1)[None, :, :]) ** 2,
+            axis=-1,
+        )
+    )
+    assert np.allclose(euclidean, expected_euclidean)
+
 
 def test_rdm_alias_matches_activation_distance_matrix_for_core_metrics() -> None:
     """RDM should be a thin alias over the activation distance helper."""
@@ -390,6 +398,19 @@ def test_mds_evolution_single_pass_layers_annotates_and_round_trips(tmp_path: Pa
         assert torch.equal(loaded._annotation_blobs[key], torch.from_numpy(coords))
 
 
+def test_mds_evolution_returned_coords_do_not_alias_annotations() -> None:
+    """Returned MDS arrays should not share memory with stored trace annotations."""
+
+    trace = _mds_trace(_MDSClassifier(), tl.func("linear"))
+    coords_by_key = repgeom.mds_evolution(trace, save=tl.func("linear"), min_n=8)
+    first_key = next(iter(coords_by_key))
+    before = float(trace._annotation_blobs[first_key][0, 0].item())
+
+    coords_by_key[first_key][0, 0] = 999.0
+
+    assert float(trace._annotation_blobs[first_key][0, 0].item()) == before
+
+
 def test_rdm_evolution_single_pass_layers_annotates_and_round_trips(tmp_path: Path) -> None:
     """RDM evolution should compute, annotate, and persist matrices."""
 
@@ -414,6 +435,19 @@ def test_rdm_evolution_single_pass_layers_annotates_and_round_trips(tmp_path: Pa
         assert torch.equal(loaded._annotation_blobs[f"rdm:{key}"], torch.from_numpy(matrix))
 
 
+def test_rdm_evolution_returned_matrices_do_not_alias_annotations() -> None:
+    """Returned RDM arrays should not share memory with stored trace annotations."""
+
+    trace = _mds_trace(_MDSClassifier(), tl.func("linear"))
+    matrices_by_key = repgeom.rdm_evolution(trace, save=tl.func("linear"), min_n=8)
+    first_key = next(iter(matrices_by_key))
+    before = float(trace._annotation_blobs[f"rdm:{first_key}"][0, 1].item())
+
+    matrices_by_key[first_key][0, 1] = 999.0
+
+    assert float(trace._annotation_blobs[f"rdm:{first_key}"][0, 1].item()) == before
+
+
 def test_scree_and_effective_dimensionality_low_rank_fixture() -> None:
     """Scree helpers should recover a sorted non-negative low-rank spectrum."""
 
@@ -432,6 +466,16 @@ def test_scree_and_effective_dimensionality_low_rank_fixture() -> None:
     assert np.array_equal(info["eigenvalues"], eigenvalues)
     assert np.isclose(np.sum(info["variance_explained"]), 1.0)
     assert np.all(np.diff(info["cumulative_variance"]) >= -1e-12)
+
+
+def test_effective_dimensionality_caps_components_at_spectrum_length() -> None:
+    """Variance-threshold component counts should never exceed the spectrum length."""
+
+    info = repgeom.effective_dimensionality(
+        np.eye(3, dtype=np.float64), min_n=3, variance_threshold=1.0
+    )
+
+    assert info["n_components_for_threshold"] == 3
 
 
 def test_effective_dimensionality_all_zero_fixture_is_safe() -> None:

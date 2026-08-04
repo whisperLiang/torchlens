@@ -6,7 +6,7 @@ import json
 import platform
 import sys
 import warnings
-from dataclasses import asdict
+from dataclasses import fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -316,8 +316,11 @@ def _transformed_entry_to_record_metadata(
 def _ctx_to_json(ctx: Any) -> dict[str, Any]:
     """Convert a RecordContext into JSON data without recursive history."""
 
-    data = asdict(ctx)
-    data["module_stack"] = [asdict(frame) for frame in ctx.module_stack]
+    data = {field.name: getattr(ctx, field.name) for field in fields(ctx)}
+    data["module_stack"] = [
+        {field.name: getattr(frame, field.name) for field in fields(frame)}
+        for frame in ctx.module_stack
+    ]
     data["recent_events"] = []
     data["recent_ops"] = []
     data["dtype"] = None if ctx.dtype is None else str(ctx.dtype)
