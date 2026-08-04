@@ -25,6 +25,7 @@ import re
 import tempfile
 import time
 import warnings
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Sequence, cast
 
@@ -82,7 +83,7 @@ from .intervention.errors import ChunkedForwardConfigError
 from .intervention.predicates import InterventionPredicate
 from .intervention.types import InterventionDecision, InterventionSpec, TargetSpec
 from .intervention.hooks import normalize_hook_plan
-from .intervention.selectors import BaseSelector
+from .intervention.selectors import BaseSelector, _selector_contains_kind
 from .intervention.resolver import _selector_resolution_direction
 from .intervention.resolver import resolve_sites
 from ._chunking import iter_chunked_inputs, normalize_chunk_paths, normalize_chunk_size, plan_chunks
@@ -552,6 +553,59 @@ def _intervention_spec_from_hook_plan(hook_plan: Any) -> InterventionSpec | None
     return spec
 
 
+def _warn_zero_match_capture_selectors(
+    trace: Trace,
+    *,
+    save_selector: Any,
+    intervene_selector: Any,
+    intervene_direction: str | None,
+) -> None:
+    """Warn when a capture-time save or intervention selector matched no sites.
+
+    Parameters
+    ----------
+    trace:
+        Completed trace carrying selector fire counts.
+    save_selector:
+        Capture-time save selector, if configured.
+    intervene_selector:
+        Capture-time intervention selector, if configured.
+    intervene_direction:
+        Intervention direction whose live phase determines warning timing.
+
+    Returns
+    -------
+    None
+        Emits at most one warning for each configured selector slot.
+    """
+
+    try:
+        if (
+            isinstance(save_selector, BaseSelector)
+            and int(getattr(trace, "_tl_save_selector_fire_count", 0)) == 0
+        ):
+            warnings.warn(
+                f"Capture-time save selector {save_selector!r} matched zero sites; "
+                "no activations were selected by it.",
+                UserWarning,
+                stacklevel=3,
+            )
+        if (
+            isinstance(intervene_selector, BaseSelector)
+            and intervene_direction == "forward"
+            and int(getattr(trace, "_tl_intervene_selector_fire_count", 0)) == 0
+        ):
+            warnings.warn(
+                f"Capture-time intervention selector {intervene_selector!r} matched zero sites; "
+                "no intervention fired.",
+                UserWarning,
+                stacklevel=3,
+            )
+    finally:
+        trace.__dict__.pop("_tl_save_selector_fire_count", None)
+        trace.__dict__.pop("_tl_intervene_selector_fire_count", None)
+
+
 def _merge_intervention_spec_hooks(
     destination: InterventionSpec,
     source: InterventionSpec | None,
@@ -868,11 +922,64 @@ def _run_model_and_save_specified_outs(
     weight_fingerprint = _fingerprint_model_weights(model)
     input_object_id = _input_id_for_relationship_evidence(input_args)
     input_signature_hash = _hash_input_signatures(input_args, input_kwargs)
+    module_save_selector = (
+        save_predicate
+        if isinstance(save_predicate, BaseSelector)
+        and _selector_contains_kind(save_predicate, "module")
+        else None
+    )
+    if module_save_selector is not None:
+        if _deferred_retention_selector is None:
+            _deferred_retention_selector = module_save_selector
+        elif isinstance(_deferred_retention_selector, list):
+            _deferred_retention_selector = [
+                *_deferred_retention_selector,
+                module_save_selector,
+            ]
+        else:
+            _deferred_retention_selector = [
+                _deferred_retention_selector,
+                module_save_selector,
+            ]
+        if backward_ready and _deferred_gradient_selector is None:
+            _deferred_gradient_selector = "all"
+        save_predicate = None
+        layers_to_save = "none"
+
+    module_intervene_selector = None
+    module_intervene_entries: list[Any] = []
+    candidate_intervene_selector = getattr(intervene_predicate, "selector", None)
+    candidate_intervene_decision = getattr(intervene_predicate, "decision", None)
+    if (
+        isinstance(candidate_intervene_selector, BaseSelector)
+        and _selector_contains_kind(candidate_intervene_selector, "module")
+        and isinstance(candidate_intervene_decision, InterventionDecision)
+        and candidate_intervene_decision.hook is not None
+        and candidate_intervene_decision.direction in {"forward", "both"}
+    ):
+        module_intervene_selector = candidate_intervene_selector
+        module_intervene_entries = [
+            replace(
+                entry,
+                metadata={
+                    **dict(entry.metadata),
+                    "created_by": "intervene_predicate",
+                    "zero_match_ledger": "intervene_selector",
+                },
+            )
+            for entry in normalize_hook_plan(
+                candidate_intervene_selector,
+                candidate_intervene_decision.hook,
+                direction=candidate_intervene_decision.direction,
+            )
+        ]
+        intervene_predicate = None
     if intervention_spec is None:
         intervention_spec = _backward_intervention_spec_from_predicate(intervene_predicate)
-    hook_plan = normalized_hook_plan if normalized_hook_plan is not None else []
+    hook_plan = list(normalized_hook_plan) if normalized_hook_plan is not None else []
     if hook_plan == [] and hooks:
         hook_plan = normalize_hook_plan(hooks)
+    hook_plan.extend(module_intervene_entries)
     hook_plan_spec = _intervention_spec_from_hook_plan(hook_plan)
     if intervention_spec is None:
         intervention_spec = hook_plan_spec
@@ -1071,6 +1178,19 @@ def _run_model_and_save_specified_outs(
         _state.reset_capture_runtime_context()
         if hasattr(trace, "_capture_container_structure"):
             delattr(trace, "_capture_container_structure")
+    warning_intervene_decision = (
+        candidate_intervene_decision
+        if isinstance(candidate_intervene_decision, InterventionDecision)
+        else getattr(intervene_predicate, "decision", None)
+    )
+    _warn_zero_match_capture_selectors(
+        trace,
+        save_selector=module_save_selector or save_predicate,
+        intervene_selector=(
+            module_intervene_selector or getattr(intervene_predicate, "selector", None)
+        ),
+        intervene_direction=getattr(warning_intervene_decision, "direction", None),
+    )
     return trace
 
 

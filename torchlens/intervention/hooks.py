@@ -27,6 +27,7 @@ from .selectors import (
     GradKindSelector,
     NotSelector,
     _classify_selector_direction,
+    _module_address_matches,
 )
 from .types import HelperSpec, HookSpec, InterventionSpec, TargetSpec, TargetValueSpec
 
@@ -1395,6 +1396,7 @@ def _live_selector_matches_unchecked(selector: BaseSelector, site: Any) -> bool:
             _normalize_live_selector(selector.selector), site
         )
     if kind == "label":
+        _raise_for_finalized_live_label_selector(kind, str(value))
         return _live_label_matches(site, str(value))
     if kind == "func":
         if isinstance(value, dict):
@@ -1403,7 +1405,7 @@ def _live_selector_matches_unchecked(selector: BaseSelector, site: Any) -> bool:
             )
         return bool(getattr(site, "func_name", None) == value)
     if kind == "module":
-        return _live_module_matches(site, str(value))
+        return _live_module_output_matches(site, str(value))
     if kind == "output":
         return _live_output_matches(site, value)
     if kind == "output_at":
@@ -1418,10 +1420,12 @@ def _live_selector_matches_unchecked(selector: BaseSelector, site: Any) -> bool:
 
         return _input_path_matches(site, tuple(value))
     if kind == "contains":
+        _raise_for_finalized_live_label_selector(kind, str(value))
         if bool(getattr(site, "_tl_module_boundary", False)):
             return False
         return str(value).lower() in str(getattr(site, "_layer_label_raw", "")).lower()
     if kind == "regex":
+        _raise_for_finalized_live_label_selector(kind, str(value))
         return re.search(str(value), str(getattr(site, "_layer_label_raw", ""))) is not None
     if kind == "func_transform":
         if value is None:
@@ -1430,7 +1434,7 @@ def _live_selector_matches_unchecked(selector: BaseSelector, site: Any) -> bool:
             getattr(site, "transform_kind", "")
         ) == str(value)
     if kind == "in_module":
-        return _live_module_matches(site, str(value))
+        return _live_module_contains(site, str(value))
     if kind == "predicate":
         predicate = value[0] if isinstance(value, tuple) and callable(value[0]) else value
         if not callable(predicate):
@@ -1468,8 +1472,8 @@ def _live_label_matches(site: Any, label_value: str) -> bool:
     return label_value in candidates
 
 
-def _live_module_matches(site: Any, address: str) -> bool:
-    """Return whether a live site belongs to a module address.
+def _live_module_output_matches(site: Any, address: str) -> bool:
+    """Return whether a live site is a module-output boundary.
 
     Parameters
     ----------
@@ -1481,13 +1485,33 @@ def _live_module_matches(site: Any, address: str) -> bool:
     Returns
     -------
     bool
-        Whether the site is currently inside or exiting the module.
+        Whether the site exits the requested module.
+    """
+
+    candidates = tuple(getattr(site, "output_of_module_calls", ()) or ())
+    return any(_module_address_matches(candidate, address) for candidate in candidates)
+
+
+def _live_module_contains(site: Any, address: str) -> bool:
+    """Return whether a live site is contained in a module.
+
+    Parameters
+    ----------
+    site:
+        Capture-time site proxy.
+    address:
+        Module address or pass label.
+
+    Returns
+    -------
+    bool
+        Whether the site is inside or exits the requested module.
     """
 
     candidates = tuple(getattr(site, "output_of_module_calls", ()) or ()) + tuple(
         getattr(site, "modules", ()) or ()
     )
-    return any(_module_label_matches(str(candidate), address) for candidate in candidates)
+    return any(_module_address_matches(candidate, address) for candidate in candidates)
 
 
 def _live_output_matches(site: Any, value: Any) -> bool:
@@ -1511,28 +1535,6 @@ def _live_output_matches(site: Any, value: Any) -> bool:
     return getattr(site, "multi_output_name", None) == str(value)
 
 
-def _module_label_matches(module_pass: str, address: str) -> bool:
-    """Return whether a module-pass label matches an address.
-
-    Parameters
-    ----------
-    module_pass:
-        Module pass label or ``(address, call_index)`` tuple string.
-    address:
-        Requested module address.
-
-    Returns
-    -------
-    bool
-        Whether the labels refer to the same module.
-    """
-
-    if module_pass.startswith("("):
-        return f"'{address}'" in module_pass or f'"{address}"' in module_pass
-    module_address = module_pass.rsplit(":", 1)[0]
-    return module_pass == address or module_address == address
-
-
 def _looks_like_finalized_label(label_value: str) -> bool:
     """Return whether a label literal looks postprocessed.
 
@@ -1550,7 +1552,27 @@ def _looks_like_finalized_label(label_value: str) -> bool:
     return bool(_FINAL_LABEL_PATTERN.search(label_value)) and not label_value.endswith("_raw")
 
 
-def _live_label_error_message(label_value: str) -> str:
+def _raise_for_finalized_live_label_selector(selector_kind: str, label_value: str) -> None:
+    """Reject finalized-looking label selectors during live capture.
+
+    Parameters
+    ----------
+    selector_kind:
+        Label-oriented selector kind.
+    label_value:
+        Selector literal or pattern.
+
+    Raises
+    ------
+    LiveModeLabelError
+        If the value names a label that exists only after postprocessing.
+    """
+
+    if _looks_like_finalized_label(label_value):
+        raise LiveModeLabelError(_live_label_error_message(label_value, selector_kind))
+
+
+def _live_label_error_message(label_value: str, selector_kind: str = "label") -> str:
     """Build a copy-pasteable finalized-label diagnostic.
 
     Parameters
@@ -1565,8 +1587,9 @@ def _live_label_error_message(label_value: str) -> str:
     """
 
     return (
-        f"tl.label({label_value!r}) looks like a finalized postprocess label, but live hooks "
-        "run during capture before those labels exist. For post-capture selection use "
+        f"tl.{selector_kind}({label_value!r}) looks like a finalized postprocess label, but "
+        "live selectors run during capture before those labels exist. For post-capture "
+        "selection use "
         f'tl.where(lambda p: p.layer_label == "{label_value}"). For live hooks, prefer '
         'a capture-time selector such as tl.func("relu") or tl.module("encoder.layer.4").'
     )
@@ -1608,6 +1631,8 @@ def make_live_site_proxy(
     """
 
     return SimpleNamespace(
+        label=_layer_label_raw,
+        raw_label=_layer_label_raw,
         layer_label=_layer_label_raw,
         _layer_label_raw=_layer_label_raw,
         _label_raw=_layer_label_raw,

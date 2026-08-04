@@ -678,34 +678,6 @@ def splice_module(
     )
 
 
-def _first_tensor_input(
-    args: tuple[Any, ...],
-    kwargs: Mapping[str, Any],
-) -> torch.Tensor | None:
-    """Return the first tensor from captured call inputs.
-
-    Parameters
-    ----------
-    args:
-        Captured positional inputs.
-    kwargs:
-        Captured keyword inputs.
-
-    Returns
-    -------
-    torch.Tensor | None
-        First tensor input, or ``None`` when no tensor was captured.
-    """
-
-    for value in args:
-        if isinstance(value, torch.Tensor):
-            return value
-    for value in kwargs.values():
-        if isinstance(value, torch.Tensor):
-            return value
-    return None
-
-
 def bwd_hook(fn: Callable[..., torch.Tensor]) -> HelperSpec:
     """Create a live/rerun-only backward hook helper.
 

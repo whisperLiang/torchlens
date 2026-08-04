@@ -156,6 +156,7 @@ class RecordContext:
     is_transform: bool = False
     transform_kind: str | None = None
     window_miss: bool = False
+    output_of_module_calls: tuple[str, ...] = ()
 
     def __getattr__(self, name: str) -> Any:
         """Raise a schema-specific error for unknown predicate fields."""

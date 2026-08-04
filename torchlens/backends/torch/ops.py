@@ -2378,6 +2378,9 @@ def _apply_predicate_mode_interventions_to_outputs(
                 call_input_snapshots=call_input_snapshots,
             )
         if fire_results:
+            trace._tl_intervene_selector_fire_count = int(
+                getattr(trace, "_tl_intervene_selector_fire_count", 0)
+            ) + len(fire_results)
             _set_tensor_live_fire_results(hooked, fire_results)
         if hooked is not out:
             replacements[container_path] = hooked
@@ -2522,7 +2525,7 @@ def _apply_predicate_intervention(
         intervention_spec=getattr(trace, "_intervention_spec", None),
         hook_plan=hook_entries,
     ):
-        return _apply_live_hooks(
+        hooked, fire_results = _apply_live_hooks(
             out,
             site=site,
             container_path=container_path,
@@ -2530,6 +2533,11 @@ def _apply_predicate_intervention(
             call_kwargs=kwargs,
             call_input_snapshots=call_input_snapshots,
         )
+    if fire_results:
+        trace._tl_intervene_selector_fire_count = int(
+            getattr(trace, "_tl_intervene_selector_fire_count", 0)
+        ) + len(fire_results)
+    return hooked, fire_results
 
 
 def _iter_loggable_live_outputs(
@@ -5078,6 +5086,12 @@ def _evaluate_trace_save_predicate(
         spec = CaptureSpec(save_out=False, save_metadata=True)
     else:
         spec = decision
+    from ...intervention.selectors import BaseSelector
+
+    if isinstance(options.keep_op, BaseSelector) and (spec.save_out or spec.save_metadata):
+        trace._tl_save_selector_fire_count = (
+            int(getattr(trace, "_tl_save_selector_fire_count", 0)) + 1
+        )
     decisions = getattr(trace, "_predicate_save_decisions", None)
     if decisions is None:
         decisions = {}

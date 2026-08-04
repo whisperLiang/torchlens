@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import time
 import warnings
 from collections import OrderedDict, deque
@@ -1494,23 +1493,6 @@ def _is_namedtuple_instance(value: Any) -> bool:
     """
 
     return isinstance(value, tuple) and hasattr(value, "_fields")
-
-
-def _is_dataclass_instance(value: Any) -> bool:
-    """Return whether a value is a dataclass instance.
-
-    Parameters
-    ----------
-    value:
-        Candidate value.
-
-    Returns
-    -------
-    bool
-        Whether it is a dataclass instance.
-    """
-
-    return dataclasses.is_dataclass(value) and not isinstance(value, type)
 
 
 __all__ = [

@@ -177,6 +177,7 @@ class RecordingState:
     grad_fn_to_context: _GradFnContextMap = field(default_factory=_GradFnContextMap)
     runtime_trace: "Trace | None" = None
     active_save_grads_record_policy: Any | None = None
+    intervene_selector_fire_count: int = 0
 
     def __post_init__(self) -> None:
         """Initialize derived storage policy."""
@@ -438,6 +439,7 @@ def _build_record_context(
         parent_labels_raw=parent_labels,
         is_transform=bool(_read_field(data, "is_transform", False)),
         transform_kind=_read_field(data, "transform_kind"),
+        output_of_module_calls=tuple(_read_field(data, "output_of_module_calls", ()) or ()),
     )
 
 

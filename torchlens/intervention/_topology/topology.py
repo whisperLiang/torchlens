@@ -256,27 +256,6 @@ def _module_type_for_layer(trace: "Trace", layer: "Layer") -> Optional[str]:
     return str(module_type) if module_type else None
 
 
-def _per_trace_fingerprint_to_canonical(
-    canonical_assignments: Dict[Tuple[str, Fingerprint, int], str],
-    trace_name: str,
-    layer: "Layer",
-    fp_seen_count: Dict[Tuple[str, Fingerprint], int],
-) -> str:
-    """Compute the canonical node name for a per-trace Layer.
-
-    Each fingerprint may legitimately repeat (e.g. multiple ``relu`` calls
-    in the same module pass).  We disambiguate by pairing the trace name
-    with the (fingerprint, occurrence-index) tuple.  ``canonical_assignments``
-    persists those decisions across the build pass.
-    """
-
-    fp = _fingerprint(layer)
-    occurrence = fp_seen_count.get((trace_name, fp), 0)
-    fp_seen_count[(trace_name, fp)] = occurrence + 1
-    key = (trace_name, fp, occurrence)
-    return canonical_assignments[key]
-
-
 def build_supergraph(traces: List["Trace"], names: List[str]) -> Supergraph:
     """Build the union supergraph from N Traces.
 

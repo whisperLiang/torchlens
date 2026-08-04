@@ -217,6 +217,8 @@ def _add_output_layers(
         new_output_node.is_output = True
         new_output_node.is_input = False
         new_output_node.is_buffer = False
+        new_output_node._internal_set("interventions", [])
+        new_output_node._internal_set("intervention_replaced", False)
         if i == len(paired_outputs) - 1:
             new_output_node.is_final_output = True
         self._layer_counter += 1
