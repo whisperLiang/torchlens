@@ -1428,11 +1428,13 @@ def _live_selector_matches_unchecked(selector: BaseSelector, site: Any) -> bool:
         _raise_for_finalized_live_label_selector(kind, str(value))
         return re.search(str(value), str(getattr(site, "_layer_label_raw", ""))) is not None
     if kind == "func_transform":
+        from .selectors import _sanitize_transform_kind
+
         if value is None:
             return bool(getattr(site, "is_transform", False))
-        return bool(getattr(site, "is_transform", False)) and str(
+        return bool(getattr(site, "is_transform", False)) and _sanitize_transform_kind(
             getattr(site, "transform_kind", "")
-        ) == str(value)
+        ) == _sanitize_transform_kind(value)
     if kind == "in_module":
         return _live_module_contains(site, str(value))
     if kind == "predicate":

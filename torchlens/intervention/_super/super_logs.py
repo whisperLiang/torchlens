@@ -57,6 +57,27 @@ class SuperModule(Super["Module"]):
 class SuperBuffer(Super["Buffer"], _TensorBearing):
     """Aligned view of a buffer address across bundle members."""
 
+    def _get_tensor(self, member: Any, field: _TENSOR_FIELD_LITERAL) -> torch.Tensor | None:
+        """Return the latest public buffer tensor for ``out`` or ``grad``.
+
+        Parameters
+        ----------
+        member:
+            Buffer member.
+        field:
+            Tensor field to collect.
+
+        Returns
+        -------
+        torch.Tensor | None
+            Latest buffer value or gradient when available.
+        """
+
+        if field == "out":
+            value = getattr(member, "final_value", None)
+            return value if isinstance(value, torch.Tensor) else None
+        return super()._get_tensor(member, field)
+
 
 class SuperParam(Super["Param"], _TensorBearing):
     """Aligned view of a parameter address across bundle members."""
@@ -102,7 +123,9 @@ class SuperParam(Super["Param"], _TensorBearing):
         if field == "grad":
             value = getattr(member, "grad", None) if getattr(member, "has_grad", False) else None
             return value if isinstance(value, torch.Tensor) else None
-        param = getattr(member, "_param_ref", None)
+        param = getattr(member, "handle", None)
+        if not isinstance(param, torch.Tensor):
+            param = getattr(member, "value", None)
         return param.detach() if isinstance(param, torch.Tensor) else None
 
 

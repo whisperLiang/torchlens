@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import namedtuple
+
 import pytest
 import torch
 
@@ -109,6 +111,58 @@ class _ChunkModel(torch.nn.Module):
         """
 
         return torch.chunk(torch.relu(x), 2, dim=1)
+
+
+class _NamedTupleModule(torch.nn.Module):
+    """Module returning a namedtuple of tensor leaves."""
+
+    def __init__(self) -> None:
+        """Initialize the stable namedtuple type."""
+
+        super().__init__()
+        self._pair_type = namedtuple("Pair", ["left", "right"])
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return a namedtuple carrying two tensor leaves.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Namedtuple pair of transformed tensors.
+        """
+
+        return self._pair_type(x + 1, x + 2)
+
+
+class _NamedTupleBoundaryModel(torch.nn.Module):
+    """Model whose submodule boundary returns a namedtuple."""
+
+    def __init__(self) -> None:
+        """Initialize the namedtuple-returning submodule."""
+
+        super().__init__()
+        self.sub = _NamedTupleModule()
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the submodule's namedtuple payload.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Namedtuple payload.
+        """
+
+        return self.sub(x)
 
 
 class _MultiOpBlock(torch.nn.Module):
@@ -270,6 +324,21 @@ def test_module_selector_matches_exact_multi_op_boundary() -> None:
 
     assert len(intervened) == 1
     assert intervened == resolved_boundary
+
+
+def test_module_selector_namedtuple_output_rebuilds_without_crashing() -> None:
+    """Module-boundary hooks rebuild namedtuple outputs after tensor replacement."""
+
+    x = torch.randn(2, 3)
+    trace = tl.trace(
+        _NamedTupleBoundaryModel(),
+        x,
+        intervene=tl.when(tl.module("sub"), tl.zero_ablate()),
+    )
+    outputs = [trace[label].out for label in trace.output_layers]
+
+    assert len(outputs) == 2
+    assert all(torch.equal(out, torch.zeros_like(x)) for out in outputs)
 
 
 def test_module_selector_save_is_exact_for_trace_and_record() -> None:
