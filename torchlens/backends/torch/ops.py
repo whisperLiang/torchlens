@@ -61,6 +61,7 @@ from ...utils.tensor_utils import (
 )
 from ...utils.collections import index_nested, ensure_iterable
 from ...capture.flops import compute_backward_flops, compute_forward_flops
+from ...capture.kernel import _run_observation_stages
 from ...capture.projections import LiveOpView
 from ...data_classes.op import (
     Op,
@@ -3034,12 +3035,7 @@ def _emit_predicate_operation_events(
             capture_session = capture_session_for(self)
             if capture_session is None:
                 demanded = _select_predicate_observation(observation)
-                if demanded in {EnrichmentLevel.METADATA, EnrichmentLevel.PAYLOAD}:
-                    _normalize_predicate_observation(observation)
-                if demanded is EnrichmentLevel.PAYLOAD:
-                    _retain_predicate_observation_payload(observation)
-                _append_predicate_observation(observation)
-                _evaluate_predicate_observation_halt(observation)
+                _run_observation_stages(observation, demanded)
             else:
                 capture_session.kernel.process(observation)
         except HaltSignal:
