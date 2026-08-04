@@ -11,14 +11,12 @@ class a prior round fixed at a *different* site:
   other caller (``_diff_row``/``_diff_matrix``/``most_changed``/``_distance_value``),
   routing multi-element pairs through the default vector metric (cosine).
 
-* BLOCKER-2 -- ``helpers.py::_decode_jsonish`` was a strictly narrower decoder than
-  ``save.py::_serialize_value``'s encoder (it understood only ``__tensor_ref__``),
-  so a builtin helper's callable/opaque argument round-tripped as a raw wrapper
-  dict. This broke ``tl.bwd_hook(fn)`` save/load at the DEFAULT save level and let an
-  audit-level ``tl.splice_module(...)`` spec load a corrupted arg that only crashed
-  later. The fix routes helper args/kwargs through the SAME full codec and returns an
-  explicitly non-executable placeholder (raising ``NonExecutableSpecError`` at fire
-  time) when a decoded arg is a non-executable ``opaque_audit`` placeholder.
+* BLOCKER-2 -- helper deserialization must stay on the full value codec. Builtin
+  helper callable/opaque arguments must never round-trip as raw wrapper dicts:
+  ``tl.bwd_hook(fn)`` must load cleanly at the DEFAULT save level, and an
+  audit-level ``tl.splice_module(...)`` payload must load as an explicitly
+  non-executable placeholder (raising ``NonExecutableSpecError`` at fire time)
+  rather than a silently corrupted helper.
 """
 
 from __future__ import annotations
@@ -32,7 +30,6 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.bundle import _distance_value
-from torchlens.intervention import helpers as _helpers_mod
 from torchlens.intervention._metrics import (
     cosine_distance,
     is_scalar_like,
@@ -277,16 +274,3 @@ def test_helper_from_serialized_uses_full_codec_for_opaque_args() -> None:
         pass
     else:  # pragma: no cover
         raise AssertionError("non-executable placeholder must refuse to fire")
-
-
-def test_decode_gap_would_have_returned_raw_dict() -> None:
-    """BLOCKER-2 characterization: the narrow decoder leaks non-tensor wrappers.
-
-    Pins WHY the full codec is required -- the legacy ``_decode_jsonish`` returns a
-    ``__callable__`` wrapper unchanged (as a raw dict), which is exactly the silent
-    corruption the fix eliminates.
-    """
-
-    wrapper = {"__callable__": {"portability": "import_ref", "import_path": "x:y"}}
-    leaked = _helpers_mod._decode_jsonish(wrapper, lambda tid: torch.zeros(1))
-    assert leaked == wrapper  # raw dict leaks through -- must never reach a constructor

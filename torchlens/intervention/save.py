@@ -416,7 +416,14 @@ def check_spec_compat(spec: InterventionSpec, new_log: Any) -> SpecCompat:
         if saved_hash != graph_hash:
             graph_matches = False
         try:
-            resolved_labels = list(resolve_sites(new_log, selector, strict=True).labels())
+            resolved_labels = list(
+                resolve_sites(
+                    new_log,
+                    selector,
+                    strict=True,
+                    max_fanout=_resolution_fanout_bound(new_log, min_required=len(saved_labels)),
+                ).labels()
+            )
         except SiteResolutionError as exc:
             selector_diffs[selector_key] = {
                 "selector": entry["selector"],
@@ -460,6 +467,27 @@ def check_spec_compat(spec: InterventionSpec, new_log: Any) -> SpecCompat:
             "executable level."
         )
     return SpecCompat(outcome, diff, targets_identical)
+
+
+def _resolution_fanout_bound(log: Any, *, min_required: int = 1) -> int:
+    """Return the strict resolver fanout bound for persistence workflows.
+
+    Parameters
+    ----------
+    log:
+        Trace-like object used for resolution.
+    min_required:
+        Minimum bound required by already-validated saved labels.
+
+    Returns
+    -------
+    int
+        Explicit resolver fanout bound.
+    """
+
+    layer_list = getattr(log, "layer_list", None)
+    layer_count = len(layer_list) if layer_list is not None else len(getattr(log, "layer_logs", {}))
+    return max(1, int(min_required), int(layer_count))
 
 
 def _coerce_save_level(level: str | SaveLevel) -> SaveLevel:
@@ -1608,7 +1636,12 @@ def _build_target_manifest(
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", MultiMatchWarning)
-                resolved = resolve_sites(log, target, strict=True)
+                resolved = resolve_sites(
+                    log,
+                    target,
+                    strict=True,
+                    max_fanout=_resolution_fanout_bound(log),
+                )
         except SiteResolutionError as exc:
             if "Backward selectors require log_backward()" not in str(
                 exc

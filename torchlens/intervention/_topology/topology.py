@@ -26,9 +26,11 @@ clearly.
 
 from __future__ import annotations
 
+from collections import deque
+import heapq
 import warnings
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Deque, Dict, List, Optional, Set, Tuple
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only
     from ...data_classes.layer import Layer
@@ -69,6 +71,233 @@ def _shape_excluding_batch(layer: "Layer") -> Optional[Tuple[int, ...]]:
     if len(shape_t) == 0:
         return ()
     return shape_t[1:]
+
+
+def _ordered_layers(trace: "Trace") -> List["Layer"]:
+    """Return layers in the trace's stored topological order.
+
+    Parameters
+    ----------
+    trace:
+        Trace whose ordered layers should be returned.
+
+    Returns
+    -------
+    list[Layer]
+        Ordered layer list.
+    """
+
+    return list(trace.layer_logs.values())
+
+
+def _matched_parent_labels(
+    layer: "Layer",
+    *,
+    matched_labels: Set[str],
+) -> Set[str]:
+    """Return parent labels that have already been aligned.
+
+    Parameters
+    ----------
+    layer:
+        Layer whose parents should be filtered.
+    matched_labels:
+        Parent labels already aligned earlier in topological order.
+
+    Returns
+    -------
+    set[str]
+        Parent labels that are already aligned.
+    """
+
+    return {
+        str(parent) for parent in getattr(layer, "parents", ()) if str(parent) in matched_labels
+    }
+
+
+def _find_alignment(
+    reference_layers: List["Layer"],
+    candidate_layers: List["Layer"],
+) -> List[Tuple[int, int]]:
+    """Return monotone, parent-compatible layer alignments.
+
+    Parameters
+    ----------
+    reference_layers:
+        Canonical reference-layer sequence.
+    candidate_layers:
+        Candidate layer sequence to align against the reference.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        Matched ``(reference_index, candidate_index)`` pairs.
+    """
+
+    fingerprint_to_candidate_indices: Dict[Fingerprint, Deque[int]] = {}
+    for idx, layer in enumerate(candidate_layers):
+        fingerprint_to_candidate_indices.setdefault(_fingerprint(layer), deque()).append(idx)
+
+    matched_pairs: List[Tuple[int, int]] = []
+    matched_reference_to_candidate: Dict[str, str] = {}
+    matched_candidate_labels: Set[str] = set()
+    last_candidate_index = -1
+
+    for reference_idx, reference_layer in enumerate(reference_layers):
+        candidates = fingerprint_to_candidate_indices.get(_fingerprint(reference_layer))
+        if not candidates:
+            continue
+        while candidates and candidates[0] <= last_candidate_index:
+            candidates.popleft()
+        if not candidates:
+            continue
+
+        mapped_reference_parents = {
+            matched_reference_to_candidate[parent]
+            for parent in _matched_parent_labels(
+                reference_layer,
+                matched_labels=set(matched_reference_to_candidate),
+            )
+        }
+        selected_candidate_index: int | None = None
+        for candidate_index in candidates:
+            candidate_layer = candidate_layers[candidate_index]
+            candidate_parent_labels = _matched_parent_labels(
+                candidate_layer,
+                matched_labels=matched_candidate_labels,
+            )
+            if candidate_parent_labels == mapped_reference_parents:
+                selected_candidate_index = candidate_index
+                break
+        if selected_candidate_index is None:
+            continue
+        while candidates and candidates[0] <= selected_candidate_index:
+            candidates.popleft()
+        last_candidate_index = selected_candidate_index
+        candidate_layer = candidate_layers[selected_candidate_index]
+        matched_pairs.append((reference_idx, selected_candidate_index))
+        matched_reference_to_candidate[str(reference_layer.layer_label)] = str(
+            candidate_layer.layer_label
+        )
+        matched_candidate_labels.add(str(candidate_layer.layer_label))
+    return matched_pairs
+
+
+def _insert_preferred_name(
+    order: List[str],
+    positions: Dict[str, int],
+    name: str,
+    *,
+    insertion_pos: int,
+) -> None:
+    """Insert a node into the preferred-order list and refresh cached positions.
+
+    Parameters
+    ----------
+    order:
+        Mutable preferred-order list.
+    positions:
+        Cached node-position mapping for ``order``.
+    name:
+        Canonical node name to insert.
+    insertion_pos:
+        Target insertion index.
+    """
+
+    order.insert(insertion_pos, name)
+    for index in range(insertion_pos, len(order)):
+        positions[order[index]] = index
+
+
+def _preferential_topological_order(
+    node_names: Set[str],
+    edges: Dict[Tuple[str, str], Set[str]],
+    preferred_order: List[str],
+) -> List[str]:
+    """Return an acyclic topological order nearest to the preferred ordering.
+
+    Parameters
+    ----------
+    node_names:
+        Canonical node names in the supergraph.
+    edges:
+        Supergraph edge map.
+    preferred_order:
+        Stable ordering preference accumulated from the member traces.
+
+    Returns
+    -------
+    list[str]
+        Valid topological ordering.
+
+    Raises
+    ------
+    ValueError
+        If the merged supergraph is cyclic.
+    """
+
+    indegree = {name: 0 for name in node_names}
+    adjacency: Dict[str, Set[str]] = {name: set() for name in node_names}
+    for parent, child in edges:
+        if child not in adjacency[parent]:
+            adjacency[parent].add(child)
+            indegree[child] += 1
+    preferred_positions = {name: idx for idx, name in enumerate(preferred_order)}
+    fallback_start = len(preferred_positions)
+    queue: List[Tuple[int, str]] = []
+    for name in node_names:
+        if indegree[name] == 0:
+            heapq.heappush(queue, (preferred_positions.get(name, fallback_start), name))
+
+    ordered: List[str] = []
+    while queue:
+        _position, name = heapq.heappop(queue)
+        ordered.append(name)
+        for child in adjacency[name]:
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                heapq.heappush(queue, (preferred_positions.get(child, fallback_start), child))
+
+    if len(ordered) != len(node_names):
+        cyclic_edges = sorted(f"{parent}->{child}" for parent, child in edges)
+        raise ValueError(
+            "Merged bundle supergraph is cyclic; refusing to emit a false topological order. "
+            f"Edges: {cyclic_edges}"
+        )
+    return ordered
+
+
+def _unique_canonical_name(
+    base_name: str,
+    *,
+    trace_name: str,
+    existing_names: Set[str],
+) -> str:
+    """Return a unique canonical node name for an unmatched member node.
+
+    Parameters
+    ----------
+    base_name:
+        Original member-layer label.
+    trace_name:
+        Bundle member name supplying the unmatched node.
+    existing_names:
+        Canonical names already claimed in the supergraph.
+
+    Returns
+    -------
+    str
+        Unique canonical name.
+    """
+
+    if base_name not in existing_names:
+        return base_name
+    candidate = f"{base_name}@{trace_name}"
+    suffix = 2
+    while candidate in existing_names:
+        candidate = f"{base_name}@{trace_name}:{suffix}"
+        suffix += 1
+    return candidate
 
 
 @dataclass(frozen=True)
@@ -117,25 +346,12 @@ def compare_topology(a: "Trace", b: "Trace") -> TopologyDiff:
     accessors (``.outs``, not ``.out``).
     """
 
-    a_layers = list(a.layer_logs.values())
-    b_layers = list(b.layer_logs.values())
+    a_layers = _ordered_layers(a)
+    b_layers = _ordered_layers(b)
 
     matched: List[Tuple[str, str]] = []
-    consumed_b: Set[int] = set()
-
-    # For each fingerprint we maintain a queue of available indices in b.
-    fingerprint_to_b_indices: Dict[Fingerprint, List[int]] = {}
-    for idx, layer in enumerate(b_layers):
-        fingerprint_to_b_indices.setdefault(_fingerprint(layer), []).append(idx)
-
-    for a_layer in a_layers:
-        fp = _fingerprint(a_layer)
-        candidates = fingerprint_to_b_indices.get(fp)
-        if not candidates:
-            continue
-        # Take the earliest unconsumed b match.
-        b_idx = candidates.pop(0)
-        consumed_b.add(b_idx)
+    for a_idx, b_idx in _find_alignment(a_layers, b_layers):
+        a_layer = a_layers[a_idx]
         b_layer = b_layers[b_idx]
         a_shape = _shape_excluding_batch(a_layer)
         b_shape = _shape_excluding_batch(b_layer)
@@ -281,77 +497,86 @@ def build_supergraph(traces: List["Trace"], names: List[str]) -> Supergraph:
             f"build_supergraph expected len(traces)==len(names), got {len(traces)} vs {len(names)}"
         )
 
-    # Pass 1a: collect per-trace ordered (layer_label, fingerprint, occurrence)
-    per_trace_layers: List[List[Tuple[str, Fingerprint, int]]] = []
-    fp_occurrence_per_trace: List[Dict[Fingerprint, int]] = []
-    for trace in traces:
-        ordered: List[Tuple[str, Fingerprint, int]] = []
-        seen: Dict[Fingerprint, int] = {}
-        for layer in trace.layer_logs.values():
-            fp = _fingerprint(layer)
-            occ = seen.get(fp, 0)
-            seen[fp] = occ + 1
-            ordered.append((layer.layer_label, fp, occ))
-        per_trace_layers.append(ordered)
-        fp_occurrence_per_trace.append(seen)
-
-    # Pass 1b: deterministic canonical names. For each (fingerprint, occ)
-    # we use the first trace's layer_label that produced it.
-    canonical_name: Dict[Tuple[Fingerprint, int], str] = {}
-    for trace_idx, ordered in enumerate(per_trace_layers):
-        for layer_label, fp, occ in ordered:
-            key = (fp, occ)
-            if key not in canonical_name:
-                canonical_name[key] = layer_label
-
     super_g = Supergraph()
+    ordered_layers_by_trace = [_ordered_layers(trace) for trace in traces]
+    reference_layers = ordered_layers_by_trace[0] if ordered_layers_by_trace else []
+    canonical_by_trace: List[Dict[str, str]] = []
+    preferred_order: List[str] = []
+    preferred_positions: Dict[str, int] = {}
 
-    # Pass 2: node payloads
+    # Pass 1: resolve each trace's layers onto canonical names.
     for trace_idx, trace in enumerate(traces):
         trace_name = names[trace_idx]
-        for layer in trace.layer_logs.values():
-            fp = _fingerprint(layer)
-            # Recompute occurrence in scan order for this trace.
-            # NB: per_trace_layers[trace_idx] preserves the order, so we
-            # zip-match by position.
-            pass  # actual zip below
-        # Walk per_trace_layers[trace_idx] alongside the layer_logs
-        # iteration order (they're constructed from the same iteration).
-        for (_, fp, occ), layer in zip(per_trace_layers[trace_idx], trace.layer_logs.values()):
-            cname = canonical_name[(fp, occ)]
-            node = super_g.nodes.get(cname)
+        layers = ordered_layers_by_trace[trace_idx]
+        canonical_for_layer: Dict[str, str] = {}
+
+        if trace_idx == 0:
+            for layer in layers:
+                canonical_for_layer[str(layer.layer_label)] = str(layer.layer_label)
+        else:
+            matched_pairs = _find_alignment(reference_layers, layers)
+            matched_candidate_indices = {
+                candidate_idx for _reference_idx, candidate_idx in matched_pairs
+            }
+            for reference_idx, candidate_idx in matched_pairs:
+                canonical_for_layer[str(layers[candidate_idx].layer_label)] = str(
+                    reference_layers[reference_idx].layer_label
+                )
+            existing_names = set(super_g.nodes)
+            existing_names.update(canonical_for_layer.values())
+            for layer_idx, layer in enumerate(layers):
+                if layer_idx in matched_candidate_indices:
+                    continue
+                canonical = _unique_canonical_name(
+                    str(layer.layer_label),
+                    trace_name=trace_name,
+                    existing_names=existing_names,
+                )
+                canonical_for_layer[str(layer.layer_label)] = canonical
+                existing_names.add(canonical)
+        canonical_by_trace.append(canonical_for_layer)
+
+        # Pass 2: node payloads + preferred stable ordering.
+        last_preferred_index = -1
+        for layer in layers:
+            canonical = canonical_for_layer[str(layer.layer_label)]
+            node = super_g.nodes.get(canonical)
             if node is None:
                 node = SupergraphNode(
-                    name=cname,
-                    fingerprint=fp,
+                    name=canonical,
+                    fingerprint=_fingerprint(layer),
                     op_type=str(layer.func_name) if layer.func_name is not None else "",
                     module_path=(str(layer.module) if layer.module is not None else None),
                     module_type=_module_type_for_layer(trace, layer),
                 )
-                super_g.nodes[cname] = node
+                super_g.nodes[canonical] = node
             if trace_name not in node.layer_refs:
                 node.layer_refs[trace_name] = layer
                 node.traces.append(trace_name)
 
-    # Pass 3a: edges. We rebuild per-trace edges using each trace's
-    # parents structure, mapped through canonical names.
+            if canonical in preferred_positions:
+                last_preferred_index = preferred_positions[canonical]
+                continue
+            insertion_pos = last_preferred_index + 1
+            _insert_preferred_name(
+                preferred_order,
+                preferred_positions,
+                canonical,
+                insertion_pos=insertion_pos,
+            )
+            last_preferred_index = insertion_pos
+
+    # Pass 3a: edges. Rebuild each trace's adjacency through canonical names.
     for trace_idx, trace in enumerate(traces):
         trace_name = names[trace_idx]
-        # Build trace-local layer_label -> (fingerprint, occurrence) lookup
-        local_lookup: Dict[str, Tuple[Fingerprint, int]] = {
-            label: (fp, occ) for label, fp, occ in per_trace_layers[trace_idx]
-        }
-        for layer in trace.layer_logs.values():
-            child_label = layer.layer_label
-            child_key = local_lookup.get(child_label)
-            if child_key is None:
+        canonical_for_layer = canonical_by_trace[trace_idx]
+        for layer in ordered_layers_by_trace[trace_idx]:
+            child_canonical = canonical_for_layer.get(str(layer.layer_label))
+            if child_canonical is None:
                 continue
-            child_canonical = canonical_name[child_key]
             for parent_label in layer.parents:
                 parent_layer = trace.layer_logs.get(parent_label)
                 if parent_layer is None:
-                    # parents are typically pass-qualified strings; map
-                    # back to no_pass labels via the source Trace index.
                     try:
                         ref = trace[parent_label]
                     except (KeyError, IndexError):
@@ -362,41 +587,15 @@ def build_supergraph(traces: List["Trace"], names: List[str]) -> Supergraph:
                     parent_layer = trace.layer_logs.get(parent_no_pass)
                 if parent_layer is None:
                     continue
-                parent_key = local_lookup.get(parent_layer.layer_label)
-                if parent_key is None:
+                parent_canonical = canonical_for_layer.get(str(parent_layer.layer_label))
+                if parent_canonical is None:
                     continue
-                parent_canonical = canonical_name[parent_key]
-                edge_key = (parent_canonical, child_canonical)
-                edge_traces = super_g.edges.setdefault(edge_key, set())
-                edge_traces.add(trace_name)
+                super_g.edges.setdefault((parent_canonical, child_canonical), set()).add(trace_name)
 
-    # Pass 3b: stable topological order.  Start from the first trace's
-    # canonical-name sequence; for each subsequent trace, insert any
-    # canonical names not yet placed by anchoring on the nearest already-
-    # placed neighbour.
-    placed: List[str] = []
-    placed_set: Set[str] = set()
-    if per_trace_layers:
-        for _, fp, occ in per_trace_layers[0]:
-            cname = canonical_name[(fp, occ)]
-            if cname not in placed_set:
-                placed.append(cname)
-                placed_set.add(cname)
-
-    for trace_idx in range(1, len(traces)):
-        # Walk this trace's canonical names; for each not-yet-placed one,
-        # insert it just after the nearest previously-placed canonical name
-        # that came before it in this trace, or append if none exists.
-        last_placed_idx_in_overall = -1
-        for _, fp, occ in per_trace_layers[trace_idx]:
-            cname = canonical_name[(fp, occ)]
-            if cname in placed_set:
-                last_placed_idx_in_overall = placed.index(cname)
-                continue
-            insertion_pos = last_placed_idx_in_overall + 1
-            placed.insert(insertion_pos, cname)
-            placed_set.add(cname)
-            last_placed_idx_in_overall = insertion_pos
-
-    super_g.topological_order = placed
+    # Pass 3b: derive a valid topological order or fail loudly on cycles.
+    super_g.topological_order = _preferential_topological_order(
+        set(super_g.nodes),
+        super_g.edges,
+        preferred_order,
+    )
     return super_g

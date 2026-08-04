@@ -1063,11 +1063,7 @@ def helper_from_serialized(
         only understands ``__tensor_ref__`` would silently return every other
         wrapper as a raw dict, corrupting callable/opaque helper arguments until the
         corrupted helper crashes several frames downstream at fire time -- the exact
-        failure mode this parameter has no default for. See ``_decode_jsonish``
-        (retained only as the fixture pinning that gap for
-        ``test_decode_gap_would_have_returned_raw_dict``; it is never called from
-        production code) for the narrow decoder this parameter must never fall back
-        to.
+        failure mode this parameter has no default for.
 
     Returns
     -------
@@ -1256,43 +1252,6 @@ def _non_executable_builtin_placeholder(
         batch_independent=bool(data.get("batch_independent", False)),
         compatible_with_append=bool(data.get("compatible_with_append", False)),
     )
-
-
-def _decode_jsonish(value: Any, tensor_loader: Callable[[str], torch.Tensor]) -> Any:
-    """QUARANTINED -- narrow legacy decoder, dead on every maintained code path.
-
-    This only understands the ``__tensor_ref__`` wrapper tag; every other wrapper
-    ``_serialize_value``/``save.py`` can emit (``__callable__``, ``__helper__``,
-    ``__opaque_audit__``, ``__output_path_component__``, ``__dict_items__``) passes
-    through unchanged as a raw dict -- silently corrupting callable/opaque helper
-    arguments. ``helper_from_serialized`` used to fall back to this decoder when
-    its ``value_decoder`` parameter was omitted; that default was removed (cert9)
-    because it re-triggered the exact BLOCKER-2 corruption class the maintained
-    ``save.py`` load path closed. Nothing in production calls this function anymore
-    -- it is retained ONLY so ``test_decode_gap_would_have_returned_raw_dict`` can
-    keep pinning the failure mode ``value_decoder`` exists to prevent. Do not wire
-    this back in as a fallback for any decoder parameter.
-
-    Parameters
-    ----------
-    value:
-        JSON-decoded value.
-    tensor_loader:
-        Callable resolving tensor refs.
-
-    Returns
-    -------
-    Any
-        Runtime value.
-    """
-
-    if isinstance(value, dict) and "__tensor_ref__" in value:
-        return tensor_loader(str(value["__tensor_ref__"]))
-    if isinstance(value, list):
-        return [_decode_jsonish(item, tensor_loader) for item in value]
-    if isinstance(value, dict):
-        return {key: _decode_jsonish(item, tensor_loader) for key, item in value.items()}
-    return value
 
 
 def _make_generator(seed: int | None) -> torch.Generator | None:

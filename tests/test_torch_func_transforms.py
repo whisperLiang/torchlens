@@ -714,6 +714,19 @@ def test_transform_selector_intervention_no_crash() -> None:
     assert [op.transform_kind for op in log.transforms] == ["vmap"]
 
 
+def test_transform_selector_sanitized_spelling_matches_live_hooks() -> None:
+    """Live transform hooks accept the documented sanitized spelling."""
+
+    x = torch.randn(3, 4)
+    log = tl.trace(
+        VmapMaskModel().eval(),
+        x,
+        intervene=tl.when(tl.func_transform("v_map"), tl.zero_ablate()),
+    )
+
+    assert torch.equal(log[log.output_layers[0]].out, x)
+
+
 @pytest.mark.skipif(not _HAS_TORCH_FUNC, reason="torch.func not available")
 def test_loaded_func_transform_hook_spec_executes_after_round_trip(tmp_path: Path) -> None:
     """Loaded transform selector hook specs execute on a fresh trace."""

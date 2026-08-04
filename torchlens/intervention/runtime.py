@@ -650,10 +650,13 @@ def _replace_tensor_outputs(value: Any, replacements: dict[tuple[Any, ...], torc
     if () in replacements:
         return replacements[()]
     if isinstance(value, tuple):
-        return type(value)(
+        rebuilt_items = tuple(
             _replace_tensor_outputs_by_child(item, replacements, (index,))
             for index, item in enumerate(value)
         )
+        if _is_namedtuple_instance(value):
+            return tuple.__new__(type(value), rebuilt_items)
+        return type(value)(rebuilt_items)
     if isinstance(value, list):
         return [
             _replace_tensor_outputs_by_child(item, replacements, (index,))
@@ -695,6 +698,24 @@ def _replace_tensor_outputs_by_child(
     if not child_replacements:
         return value
     return _replace_tensor_outputs(value, child_replacements)
+
+
+def _is_namedtuple_instance(value: Any) -> bool:
+    """Return whether ``value`` is a namedtuple instance.
+
+    Parameters
+    ----------
+    value:
+        Candidate container.
+
+    Returns
+    -------
+    bool
+        Whether ``value`` is a tuple with ``_fields`` metadata.
+    """
+
+    fields = getattr(type(value), "_fields", None)
+    return isinstance(value, tuple) and isinstance(fields, tuple)
 
 
 def _hook_call_inputs_for_site(
@@ -1261,6 +1282,38 @@ def _validate_grad_tuple(
             f"backward helper at {getattr(grad_fn_handle, 'label', '<unknown>')} returned "
             f"{len(result)} gradients; expected {len(reference)}"
         )
+    for index, (candidate, expected) in enumerate(zip(result, reference)):
+        if expected is None:
+            if candidate is not None:
+                raise HookValueError(
+                    "backward helper at "
+                    f"{getattr(grad_fn_handle, 'label', '<unknown>')} returned a tensor for "
+                    f"slot {index}; expected None"
+                )
+            continue
+        if candidate is None:
+            continue
+        if not isinstance(candidate, torch.Tensor):
+            raise HookValueError(
+                f"backward helper at {getattr(grad_fn_handle, 'label', '<unknown>')} returned "
+                f"{type(candidate).__name__} for slot {index}; expected torch.Tensor or None"
+            )
+        if candidate.dtype != expected.dtype:
+            raise HookValueError(
+                f"backward helper at {getattr(grad_fn_handle, 'label', '<unknown>')} returned "
+                f"dtype {candidate.dtype} for slot {index}; expected {expected.dtype}"
+            )
+        if candidate.device != expected.device:
+            raise HookValueError(
+                f"backward helper at {getattr(grad_fn_handle, 'label', '<unknown>')} returned "
+                f"device {candidate.device} for slot {index}; expected {expected.device}"
+            )
+        if tuple(candidate.shape) != tuple(expected.shape):
+            raise HookValueError(
+                f"backward helper at {getattr(grad_fn_handle, 'label', '<unknown>')} returned "
+                f"shape {tuple(candidate.shape)} for slot {index}; expected "
+                f"{tuple(expected.shape)}"
+            )
     return result
 
 

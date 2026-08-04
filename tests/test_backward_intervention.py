@@ -17,7 +17,7 @@ from torchlens.backends.torch.backward import (
     _make_grad_fn_prehook,
 )
 from torchlens.data_classes.grad_fn import GradFn
-from torchlens.intervention.errors import HelperMountError, SelectorCompositionError
+from torchlens.intervention.errors import HookValueError, HelperMountError, SelectorCompositionError
 from torchlens.intervention.helpers import _helper_spec
 from torchlens.intervention.hooks import _selector_from_target_spec, normalize_hook_plan
 from torchlens.intervention.resolver import _selector_from_spec, _selector_resolution_direction
@@ -420,6 +420,46 @@ def test_backward_none_return_helper_records_non_replacing_fire() -> None:
     assert isinstance(record, FireRecord)
     assert record.replaced is False
     assert spec.records == [record]
+
+
+def test_backward_invalid_replacement_tuple_raises_before_recording_success() -> None:
+    """Invalid backward replacement tuples fail before a success record is attached."""
+
+    trace_stub, grad_fn_handle = _hook_trace()
+    spec = InterventionSpec()
+
+    def factory() -> Any:
+        """Return a helper with a shape-invalid replacement tuple."""
+
+        def helper(
+            grad_input: tuple[torch.Tensor | None, ...],
+            *,
+            grad_output: tuple[torch.Tensor | None, ...] | None,
+            grad_fn_handle: GradFn,
+            call_index: int,
+            run_ctx: dict[str, Any],
+        ) -> tuple[torch.Tensor | None, ...]:
+            """Return a same-arity tuple with an invalid tensor shape."""
+
+            del grad_output, grad_fn_handle, call_index, run_ctx
+            return (torch.ones(2),)
+
+        return helper
+
+    _state._active_intervention_spec = spec
+    _state._active_hook_plan = normalize_hook_plan(
+        tl.grad_fn(type="relu"),
+        _helper_spec(
+            "bad_shape", kind="backward", factory=factory, metadata={"mount_shape": "tuple"}
+        ),
+    )
+    hook = _make_grad_fn_hook(trace_stub, 1)
+
+    with pytest.raises(HookValueError, match="shape"):
+        hook((torch.ones(1),), (torch.ones(1),))
+
+    assert grad_fn_handle.calls[0].intervention_fire_ref is None
+    assert spec.records == []
 
 
 def test_backward_in_place_none_return_helper_records_gradient_effect() -> None:
