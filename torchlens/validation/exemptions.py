@@ -347,9 +347,44 @@ def _setitem_destination_slice_is_fully_overwritten(
     Returns
     -------
     bool
-        True when the perturbed tensor is the destination, the replacement is a
-        tensor, ``destination[index]`` has exactly the replacement shape, and
-        the selected region covers the whole destination.
+        True when the replacement is a tensor, the perturbed tensor is the
+        destination, the selected region covers the whole destination without
+        duplicate targets, and the replacement exactly matches the selected
+        shape. A non-tensor replacement is NEVER exempted here: this pre-exec
+        contract is deliberately unchanged, so this path can only ever grow
+        stricter, never wider.
+    """
+
+    if len(args) < 3 or not isinstance(args[2], torch.Tensor):
+        return False
+    return _setitem_destination_coverage_is_total(perturbed_tensor, args)
+
+
+def _setitem_destination_coverage_is_total(
+    perturbed_tensor: torch.Tensor | None,
+    args: tuple[Any, ...],
+) -> bool:
+    """Return whether a ``__setitem__`` write provably covers its whole destination.
+
+    Shared geometry proof behind BOTH the pre-execution
+    ``_setitem_destination_slice_is_fully_overwritten`` gate and the posthoc
+    ``full_destination_overwrite`` / ``scalar_destination_overwrite`` decisions,
+    so a scalar right-hand side is held to the SAME index-coverage and
+    duplicate-target rigor a tensor right-hand side already was.
+
+    Parameters
+    ----------
+    perturbed_tensor:
+        Tensor selected for perturbation.
+    args:
+        Saved ``__setitem__`` positional arguments.
+
+    Returns
+    -------
+    bool
+        True when the perturbed tensor is the destination, ``destination[index]``
+        selects every destination element exactly once, and a tensor replacement
+        (when present) exactly matches the selected shape.
     """
 
     if len(args) < 3:
@@ -357,7 +392,7 @@ def _setitem_destination_slice_is_fully_overwritten(
     destination, index, replacement = args[:3]
     if not isinstance(perturbed_tensor, torch.Tensor):
         return False
-    if not isinstance(destination, torch.Tensor) or not isinstance(replacement, torch.Tensor):
+    if not isinstance(destination, torch.Tensor):
         return False
     if not torch.equal(perturbed_tensor, destination):
         return False
@@ -367,10 +402,11 @@ def _setitem_destination_slice_is_fully_overwritten(
         return False
     if not _setitem_index_targets_are_unique(index):
         return False
-    return (
-        tuple(selected.shape) == tuple(replacement.shape)
-        and selected.numel() == destination.numel()
-    )
+    if selected.numel() != destination.numel():
+        return False
+    if isinstance(replacement, torch.Tensor):
+        return tuple(selected.shape) == tuple(replacement.shape)
+    return True
 
 
 def _setitem_index_targets_are_unique(index: Any) -> bool:
@@ -595,47 +631,83 @@ def _index_put_indices_are_unique(index: tuple[Any, ...]) -> bool:
     return True
 
 
-def _check_lstm_exempt(self: "Trace", layer: Op, layers_to_perturb: List[str]) -> bool:
-    """Exempt lstm when the perturbed layer is a hidden/cell state arg."""
-    perturbed_tensor = self[layers_to_perturb[0]].out
-    args = layer.saved_args
+def _perturbed_parent_occupies_arg_slot(
+    layer: Op,
+    layers_to_perturb: List[str],
+    slot: int,
+) -> bool:
+    """Return whether the perturbed parent sits anywhere inside positional ``slot``.
 
-    if len(args) < 2 or perturbed_tensor is None:
+    ``parent_arg_positions["args"]`` keys a parent that was nested inside a
+    container argument by a TUPLE path -- a real ``lstm(input, (h0, c0))``
+    capture registers ``(1, 0)`` and ``(1, 1)``, never a bare ``1``. Matching
+    only bare integer keys therefore misses every genuinely nested structural
+    argument. This resolves the OWNING positional slot for both flat and nested
+    keys, so an exemption keyed on argument POSITION keeps the reach its
+    content-equality predecessor had without ever consulting tensor VALUES.
+
+    Parameters
+    ----------
+    layer:
+        Captured op whose parent-argument map is inspected.
+    layers_to_perturb:
+        Single perturbed parent label supplied by validation.
+    slot:
+        Positional argument index the exemption is scoped to.
+
+    Returns
+    -------
+    bool
+        True when the perturbed parent occupies ``slot`` or any position nested
+        inside it. Missing or ambiguous metadata returns False (fail closed).
+    """
+
+    if len(layers_to_perturb) != 1:
         return False
-    hidden_arg = args[1]
-    if isinstance(hidden_arg, torch.Tensor):
-        return torch.equal(perturbed_tensor, hidden_arg)
-    if isinstance(hidden_arg, (list, tuple)):
-        return any(
-            isinstance(hidden_tensor, torch.Tensor) and torch.equal(perturbed_tensor, hidden_tensor)
-            for hidden_tensor in hidden_arg
-        )
+    arg_positions = (getattr(layer, "parent_arg_positions", None) or {}).get("args", {})
+    for position, parent_label in arg_positions.items():
+        if parent_label != layers_to_perturb[0]:
+            continue
+        if position == slot:
+            return True
+        if isinstance(position, tuple) and position and position[0] == slot:
+            return True
     return False
+
+
+def _check_lstm_exempt(self: "Trace", layer: Op, layers_to_perturb: List[str]) -> bool:
+    """Exempt lstm when the perturbed layer is a hidden/cell state arg.
+
+    Keyed on ARGUMENT POSITION, never on ``torch.equal`` against the hidden
+    argument: a data input that merely happens to equal a zero-initialized
+    ``h0`` must NOT be excused as structural.
+    """
+    del self
+    return _perturbed_parent_occupies_arg_slot(layer, layers_to_perturb, 1)
 
 
 def _check_interpolate_exempt(self: "Trace", layer: Op, layers_to_perturb: List[str]) -> bool:
-    """Exempt interpolate when the perturbed layer is the scale_factor arg."""
-    perturbed_tensor = self[layers_to_perturb[0]].out
-    kwargs = layer.saved_kwargs
+    """Exempt interpolate when the perturbed layer is the scale_factor arg.
+
+    Keyed on ARGUMENT POSITION, never on ``torch.equal`` against the saved
+    scale factor.
+    """
+    del self
+    if len(layers_to_perturb) != 1:
+        return False
     args = layer.saved_args
-
-    # Path 1: scale_factor as kwarg
+    kwargs = layer.saved_kwargs
     if (
-        "scale_factor" in kwargs
-        and kwargs["scale_factor"] is not None
-        and torch.equal(perturbed_tensor, torch.tensor(kwargs["scale_factor"]))
+        _perturbed_parent_occupies_arg_slot(layer, layers_to_perturb, 2)
+        and len(args) >= 3
+        and args[2] is not None
     ):
         return True
-
-    # Path 2: scale_factor as positional arg 2
-    if (
-        len(args) >= 3
-        and isinstance(args[2], torch.Tensor)
-        and torch.equal(perturbed_tensor, args[2])
-    ):
-        return True
-
-    return False
+    kwarg_positions = (getattr(layer, "parent_arg_positions", None) or {}).get("kwargs", {})
+    return (
+        kwargs.get("scale_factor") is not None
+        and kwarg_positions.get("scale_factor") == layers_to_perturb[0]
+    )
 
 
 def _get_scatter_destination_dim_index(
@@ -696,6 +768,8 @@ def _scatter_index_fully_overwrites_dim(dest: torch.Tensor, dim: int, index: tor
     """
 
     if index.ndim != dest.ndim or index.shape[dim] < dest.shape[dim]:
+        return False
+    if any(index.shape[axis] < dest.shape[axis] for axis in range(dest.ndim) if axis != dim):
         return False
     n_positions = dest.shape[dim]
     if n_positions == 0:
@@ -1382,17 +1456,14 @@ def _posthoc_overwrite_decision(
         and _perturbed_parent_is_arg_position(layer, layers_to_perturb, 0)
         and len(args) > 2
         and isinstance(args[0], torch.Tensor)
-        and isinstance(args[2], torch.Tensor)
-        and args[0].shape == args[2].shape
+        and _setitem_destination_coverage_is_total(args[0], args)
     ):
-        return PosthocPerturbDecision(True, "full_destination_overwrite")
-    if (
-        layer.func_name == "__setitem__"
-        and _perturbed_parent_is_arg_position(layer, layers_to_perturb, 0)
-        and len(args) > 2
-        and not isinstance(args[2], torch.Tensor)
-    ):
-        return PosthocPerturbDecision(True, "scalar_destination_overwrite")
+        reason = (
+            "full_destination_overwrite"
+            if isinstance(args[2], torch.Tensor)
+            else "scalar_destination_overwrite"
+        )
+        return PosthocPerturbDecision(True, reason)
     if layer.func_name in INPLACE_DESTINATION_WRITE_FUNCS and (
         _perturbed_parent_is_uninitialized_setitem_dest(layer, layers_to_perturb)
     ):

@@ -26,6 +26,8 @@ from torchlens.validation.exemptions import (
     _check_getitem_exempt,
     _check_scatter_exempt,
     _check_setitem_exempt,
+    _posthoc_overwrite_decision,
+    _scatter_index_fully_overwrites_dim,
     perturbed_layer_at_structural_position,
 )
 from torchlens.validation.status import ValidationReplayStatus
@@ -217,6 +219,46 @@ def test_setitem_duplicate_advanced_index_destination_is_not_exempt() -> None:
     destination_label = setitem_op.parent_arg_positions["args"][0]
 
     assert not _check_setitem_exempt(trace, setitem_op, [destination_label])
+
+
+def test_posthoc_setitem_duplicate_indices_are_not_full_overwrite() -> None:
+    """Posthoc overwrite logic delegates to the duplicate-index guard."""
+
+    destination = torch.zeros(4)
+    layer = _fake_layer(
+        func_name="__setitem__",
+        parent_arg_positions={"args": {0: "destination"}, "kwargs": {}},
+    )
+    decision = _posthoc_overwrite_decision(
+        layer,
+        ["destination"],
+        (destination, torch.tensor([0, 0, 0, 0]), torch.full((4,), 9.0)),
+    )
+    assert not decision.exempt
+
+
+def test_posthoc_scalar_partial_setitem_is_not_full_overwrite() -> None:
+    """A scalar write to one cell leaves the rest of the destination live."""
+
+    destination = torch.zeros(4, 4)
+    layer = _fake_layer(
+        func_name="__setitem__",
+        parent_arg_positions={"args": {0: "destination"}, "kwargs": {}},
+    )
+    decision = _posthoc_overwrite_decision(
+        layer,
+        ["destination"],
+        (destination, (0, 0), 5.0),
+    )
+    assert not decision.exempt
+
+
+def test_scatter_partial_other_dimensions_are_not_full_overwrite() -> None:
+    """Covering scatter dim columns cannot excuse untouched destination rows."""
+
+    destination = torch.zeros(4, 4)
+    index = torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]])
+    assert not _scatter_index_fully_overwrites_dim(destination, 1, index)
 
 
 def test_scatter_exemption_uses_destination_position_not_equal_value() -> None:
@@ -825,26 +867,55 @@ def test_backward_validation_zero_param_grads_is_not_pass() -> None:
 
     model = DetachedParamModel()
 
-    assert not backward_validation.validate_backward_pass(
-        model,
-        torch.randn(2, 3),
-        random_seed=5,
-        validate_metadata=False,
-    )
+    with pytest.warns(RuntimeWarning, match="zero parameter gradients"):
+        assert not backward_validation.validate_backward_pass(
+            model,
+            torch.randn(2, 3),
+            random_seed=5,
+            validate_metadata=False,
+        )
 
 
-def test_backward_validation_zero_param_grads_still_runs_layer_grad_validation() -> None:
-    """Layer-grad validation should run when parameter grads are empty."""
+def test_backward_validation_zero_param_grads_still_runs_layer_grad_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Layer-grad validation runs when parameter grads are empty -- and still fails.
+
+    The layer-grad oracle IS exercised (asserted directly by counting the
+    comparison call rather than inferring it from the return value), but it
+    cannot turn an unverifiable parameter-gradient census into a pass. This
+    used to assert True, which directly contradicted the sibling
+    ``test_backward_validation_zero_param_grads_is_not_pass`` -- the two tests
+    call the same code path because ``validate_layer_grads`` defaults to True,
+    so one of them was necessarily red.
+    """
 
     model = DetachedParamModel()
+    calls = 0
 
-    assert backward_validation.validate_backward_pass(
-        model,
-        torch.randn(2, 3),
-        random_seed=5,
-        validate_metadata=False,
-        validate_layer_grads=True,
+    from torchlens.validation import _layer_grad_report
+
+    original_comparison = _layer_grad_report._compare_module_output_grads
+
+    def count_original_comparison(*args: Any, **kwargs: Any) -> Any:
+        """Count and delegate without recursing through the monkeypatch."""
+
+        nonlocal calls
+        calls += 1
+        return original_comparison(*args, **kwargs)
+
+    monkeypatch.setattr(
+        _layer_grad_report, "_compare_module_output_grads", count_original_comparison
     )
+    with pytest.warns(RuntimeWarning, match="zero parameter gradients"):
+        assert not backward_validation.validate_backward_pass(
+            model,
+            torch.randn(2, 3),
+            random_seed=5,
+            validate_metadata=False,
+            validate_layer_grads=True,
+        )
+    assert calls == 1
 
 
 def test_one_hot_index_perturbation_uses_valid_alternate_class() -> None:
@@ -1025,8 +1096,8 @@ def test_max_finite_selection_data_parents_perturb_distinctly() -> None:
         assert trace.validation_replay_status.failed_node_count == 0
 
 
-def test_corrupted_swamped_add_replay_fails_without_generic_probe_exemption() -> None:
-    """A constant replay callable must fail even if generic probes match."""
+def test_corrupted_swamped_add_replay_fails_without_reexecuting_diagnostic_probes() -> None:
+    """A constant replay callable fails without extra diagnostic executions."""
 
     trace = tl.trace(
         SwampedAddModel(),
@@ -1047,7 +1118,8 @@ def test_corrupted_swamped_add_replay_fails_without_generic_probe_exemption() ->
     )
     failure = get_validation_failure(trace)
     assert failure is not None
-    assert failure.extra["generic_invariant_probe_matched"] is True
+    assert set(failure.extra) == {"perturbed_parents"}
+    assert "generic_invariant_probe_matched" not in failure.extra
 
 
 def test_multiplicative_zero_annihilator_uses_structural_proof() -> None:

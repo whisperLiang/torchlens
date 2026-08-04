@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import random
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import Any, Callable, cast
 import warnings
 
 import torch
@@ -18,9 +18,6 @@ from ..intervention.errors import AppendStateValidationWarning
 from ..utils.arg_handling import normalize_input_args
 from ..utils.display import warn_parallel
 from ..utils.rng import set_random_seed
-
-if TYPE_CHECKING:
-    from ._layer_grad_report import LayerGradReport
 
 
 def _sum_tensors(value: Any) -> torch.Tensor:
@@ -410,14 +407,17 @@ def validate_backward_pass(
             )
             if not bool(layer_report):
                 return False
-            if not expected_param_grads:
-                warnings.warn(
-                    "validate_backward_pass could not verify parameter gradients because "
-                    "stock autograd produced zero parameter gradients.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                return True
+        # An empty stock parameter-gradient census is UNVERIFIABLE, and that verdict
+        # cannot depend on ``validate_layer_grads``. This block used to be duplicated
+        # inside the branch above with ``return True`` instead of ``return False``, so
+        # the same model, the same input and the same warning text produced OPPOSITE
+        # verdicts depending on a flag that defaults to True -- and the True branch
+        # warned "could not verify parameter gradients" and then reported success.
+        # That contradicted the policy at ``_user_public_impls.py:1300-1310``
+        # ("Returning False rather than reporting unverified success") and left
+        # ``test_backward_validation_zero_param_grads_is_not_pass`` red. Layer-grad
+        # evidence is still collected above; it just cannot launder an unverifiable
+        # parameter census into a pass.
         if not expected_param_grads:
             warnings.warn(
                 "validate_backward_pass could not verify parameter gradients because "
@@ -443,100 +443,3 @@ def validate_backward_pass(
         model.zero_grad(set_to_none=True)
         if trace is not None:
             trace.cleanup()
-
-
-def _validate_layer_grads(
-    model: nn.Module,
-    input_args: Any,
-    input_kwargs: dict[str, Any] | None,
-    loss_fn: Callable[[Any], torch.Tensor],
-    *,
-    atol: float,
-    rtol: float,
-    random_seed: int,
-) -> "LayerGradReport":
-    """Return a PATH E per-module-output gradient validation report.
-
-    Parameters
-    ----------
-    model:
-        Model to validate.
-    input_args:
-        Positional model inputs.
-    input_kwargs:
-        Keyword model inputs.
-    loss_fn:
-        Loss function mapping model output to a scalar tensor.
-    atol:
-        Absolute tolerance for module-output gradient comparison.
-    rtol:
-        Relative tolerance for module-output gradient comparison.
-    random_seed:
-        Fixed RNG seed used for both stock and candidate passes.
-
-    Returns
-    -------
-    LayerGradReport
-        Per-module-output gradient comparison report.
-    """
-
-    from ..user_funcs import trace as trace_fn
-    from ._layer_grad_report import _compare_module_output_grads
-    from ._stock_layer_grads import _stock_layer_grads
-
-    if input_kwargs is None:
-        input_kwargs = {}
-    input_args = normalize_input_args(input_args, model)
-    model_device = next((parameter.device for parameter in model.parameters()), None)
-    state_dict = _clone_state_dict_with_metadata(model)
-    original_training = model.training
-    candidate_trace = None
-
-    try:
-        set_random_seed(random_seed)
-        stock_inputs, stock_kwargs = _prepare_inputs_for_backward(
-            input_args, input_kwargs, model_device
-        )
-        model.zero_grad(set_to_none=True)
-        stock_module_grads, stock_identity_addresses = _stock_layer_grads(
-            model,
-            stock_inputs,
-            stock_kwargs,
-            loss_fn=loss_fn,
-            random_seed=random_seed,
-            state_dict_snapshot=state_dict,
-        )
-
-        model.load_state_dict(state_dict)
-        _restore_training_mode(model, original_training)
-        set_random_seed(random_seed)
-        candidate_inputs, candidate_kwargs = _prepare_inputs_for_backward(
-            input_args, input_kwargs, model_device
-        )
-        model.zero_grad(set_to_none=True)
-        candidate_trace = trace_fn(
-            model,
-            candidate_inputs,
-            input_kwargs=candidate_kwargs,
-            capture=CaptureOptions(
-                layers_to_save="all",
-                save_grads="all",
-                random_seed=random_seed,
-            ),
-        )
-        candidate_output = _reconstruct_candidate_output_for_loss(candidate_trace)
-        candidate_loss = loss_fn(candidate_output)
-        candidate_trace.log_backward(candidate_loss)
-        return _compare_module_output_grads(
-            candidate_trace,
-            stock_module_grads,
-            stock_identity_addresses,
-            atol=atol,
-            rtol=rtol,
-        )
-    finally:
-        model.load_state_dict(state_dict)
-        _restore_training_mode(model, original_training)
-        model.zero_grad(set_to_none=True)
-        if candidate_trace is not None:
-            candidate_trace.cleanup()

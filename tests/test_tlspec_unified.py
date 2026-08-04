@@ -19,7 +19,7 @@ from torchlens._io.tlspec import _TlSpecWriter
 from torchlens.backends import BackendPayloadUnsupportedError
 from torchlens.intervention.types import FireRecord, HelperSpec, InterventionSpec
 from torchlens.options import CaptureOptions
-from torchlens.validation import validate_tlspec
+from torchlens.validation import _SUPPORTED_JSON_SCHEMA_KEYWORDS, validate_tlspec
 
 
 class UnifiedTinyModel(nn.Module):
@@ -189,6 +189,43 @@ def _write_manifest(path: Path, manifest: dict[str, Any]) -> None:
         json.dumps(manifest, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _schema_keywords(schema: dict[str, Any]) -> set[str]:
+    """Return JSON Schema keywords used at schema-fragment positions.
+
+    Parameters
+    ----------
+    schema:
+        Decoded root JSON Schema.
+
+    Returns
+    -------
+    set[str]
+        Keywords found without mistaking property names for keywords.
+    """
+
+    keywords: set[str] = set()
+
+    def visit(fragment: Any) -> None:
+        """Visit one schema fragment recursively."""
+
+        if not isinstance(fragment, dict):
+            return
+        keywords.update(fragment)
+        properties = fragment.get("properties")
+        if isinstance(properties, dict):
+            for property_schema in properties.values():
+                visit(property_schema)
+        for keyword in ("items", "if", "then", "additionalProperties"):
+            visit(fragment.get(keyword))
+        all_of = fragment.get("allOf")
+        if isinstance(all_of, list):
+            for child in all_of:
+                visit(child)
+
+    visit(schema)
+    return keywords
 
 
 def _mlx_schema_v2_manifest(path: Path) -> dict[str, Any]:
@@ -807,6 +844,38 @@ def test_validate_tlspec_enforces_shipped_schema_properties_pattern(tmp_path: Pa
 
     with pytest.raises(ValueError, match="python_version"):
         validate_tlspec(path)
+
+
+@pytest.mark.parametrize("field_name", ("model_fingerprint", "backward_summary"))
+def test_validate_tlspec_rejects_unknown_nested_schema_fields(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
+    """Nested ``additionalProperties: false`` declarations reject bogus keys."""
+
+    path = tmp_path / f"bad_{field_name}_extra.tlspec"
+    _captured_log().save(path)
+    manifest = _read_manifest(path)
+    nested = manifest[field_name]
+    assert isinstance(nested, dict)
+    nested["bogus_round5_field"] = True
+    _write_manifest(path, manifest)
+
+    with pytest.raises(ValueError, match="unsupported fields"):
+        validate_tlspec(path)
+
+
+def test_shipped_tlspec_schema_keywords_are_all_walker_supported() -> None:
+    """A new shipped schema keyword cannot silently bypass the runtime walker."""
+
+    schema_dir = Path(tl.__file__).resolve().parent / "schemas"
+    observed: set[str] = set()
+    for schema_path in sorted(schema_dir.glob("tlspec_manifest_v*.json")):
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        assert isinstance(schema, dict)
+        observed.update(_schema_keywords(schema))
+
+    assert observed <= _SUPPORTED_JSON_SCHEMA_KEYWORDS
 
 
 @pytest.mark.smoke

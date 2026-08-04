@@ -163,44 +163,6 @@ def _check_receptive_field_metadata_invariants(trace: "Trace") -> None:
         raise MetadataInvariantError("receptive_field_metadata", str(exc)) from exc
 
 
-def _check_torch_metadata_invariants(trace: "Trace") -> bool:
-    """Run the unchanged torch metadata invariant sequence.
-
-    Parameters
-    ----------
-    trace:
-        Postprocessed torch trace to validate.
-
-    Returns
-    -------
-    bool
-        ``True`` if all torch invariants pass.
-    """
-
-    for contract in _metadata_invariant_contracts_for_backend("torch"):
-        contract.check(trace)
-    return True
-
-
-def _check_backend_neutral_metadata_invariants(trace: "Trace") -> bool:
-    """Run backend-neutral metadata invariants for non-torch traces.
-
-    Parameters
-    ----------
-    trace:
-        Postprocessed non-torch trace to validate.
-
-    Returns
-    -------
-    bool
-        ``True`` if all backend-neutral invariants pass.
-    """
-
-    for contract in _metadata_invariant_contracts_for_backend("non_torch"):
-        contract.check(trace)
-    return True
-
-
 def _check_backend_neutral_module_mode_invariants(trace: "Trace") -> None:
     """Run module invariants appropriate to the trace's module identity mode.
 
@@ -817,6 +779,19 @@ def _check_backward_grad_fn_handle_records(
             raise MetadataInvariantError(
                 name,
                 f"{grad_fn_handle.label} stored id {grad_fn_handle.grad_fn_object_id!r} under {grad_fn_object_id!r}",
+            )
+        # Domain check for EVERY handle, not only higher-order ones. This used to
+        # live under ``creator_object_id is not None``, which is populated only by
+        # ``create_graph=True`` autograd, so an ordinary ``log_backward`` never
+        # reached it. ``origin_backward_pass`` is declared ``int | None`` and is
+        # legitimately None on handles built outside a backward pass, so None is
+        # explicitly allowed here; the stricter creator-branch form below is
+        # retained unchanged so the higher-order path loses nothing.
+        origin_backward_pass = getattr(grad_fn_handle, "origin_backward_pass", None)
+        if origin_backward_pass is not None and origin_backward_pass not in valid_pass_indices:
+            raise MetadataInvariantError(
+                name,
+                f"{grad_fn_handle.label} has invalid origin backward pass {origin_backward_pass!r}",
             )
         creator_object_id = getattr(grad_fn_handle, "creator_object_id", None)
         if creator_object_id is not None:
@@ -1529,9 +1504,8 @@ def _is_func_call_id_exempt(layer: "Op") -> bool:
         and not getattr(layer, "is_internal_source", False)
     ):
         return True
-    func = getattr(layer, "func", None)
     func_name = str(getattr(layer, "func_name", "")).lower()
-    return func in {"input", "output", "buffer"} or func_name in {
+    return func_name in {
         "input",
         "output",
         "buffer",
@@ -1556,29 +1530,6 @@ def _plain_func_call_group_signature(layer: "Op") -> tuple[object, ...]:
     return (
         getattr(layer, "func_name", None),
         repr(getattr(layer, "container_spec", None)),
-    )
-
-
-def _func_call_group_signature(layer: "Op") -> tuple[object, ...]:
-    """Return comparable same-call metadata for Invariant S.
-
-    Parameters
-    ----------
-    layer:
-        Layer pass to summarize.
-
-    Returns
-    -------
-    tuple[object, ...]
-        Stable comparison tuple.
-    """
-
-    return (
-        layer.func_name,
-        tuple(repr(location) for location in (layer.code_context or ())),
-        repr(layer.args_template),
-        repr(layer.kwargs_template),
-        repr(layer.container_spec),
     )
 
 
@@ -2601,26 +2552,6 @@ def _strip_pass_suffix(layer_label: str) -> str:
     if len(label_parts) == 2 and label_parts[1].isdigit():
         return label_parts[0]
     return layer_label
-
-
-def _get_label_call_index(layer_label: str) -> int:
-    """Extract the pass number encoded in a layer label.
-
-    Parameters
-    ----------
-    layer_label:
-        Layer label that may include a ``:call_index`` suffix.
-
-    Returns
-    -------
-    int
-        Parsed pass number, or ``1`` when no suffix is present.
-    """
-
-    label_parts = layer_label.rsplit(":", 1)
-    if len(label_parts) == 2 and label_parts[1].isdigit():
-        return int(label_parts[1])
-    return 1
 
 
 def _append_unique(values: list[str], value: str) -> None:
@@ -4164,7 +4095,6 @@ def _check_param_xrefs(ml: "Trace") -> None:
     name = "param_xrefs"
     label_set = set(ml.layer_labels)
     op_label_set = set(ml.op_labels)
-    mod_accessor = ml.modules
 
     for param in ml.param_logs:
         for lbl in param.used_by_ops:
@@ -4181,12 +4111,26 @@ def _check_param_xrefs(ml: "Trace") -> None:
                     f"Param '{param.address}' used_by_layers contains '{lbl}' not in layer_labels",
                 )
 
-        # address exists (skip for conditional models where the module
-        # was never called, e.g. MoE routing that skips some experts)
-        try:
-            mod_accessor[param.address]
-        except (KeyError, IndexError):
-            pass  # Module was never invoked during forward pass
+        # The documented "address exists" step used to be ``mod_accessor[param.address]``
+        # inside ``try/except/pass`` with the result discarded -- a literal no-op that
+        # accepted ``param.address = "nonexistent.module.weight"``. What IS provable
+        # here is self-consistency: ``all_addresses`` is seeded with ``address`` at
+        # construction and only ever GROWS (weight tying appends aliases), so every
+        # correct capture satisfies this and a rewritten address is caught.
+        #
+        # Deliberately NOT asserted: that the param's owning MODULE resolves in
+        # ``ml.modules``. A parameter can legitimately be USED while its owning module
+        # is never entered -- ``F.linear(x, self.lin.weight, self.lin.bias)``, and in
+        # stock torch ``nn.MultiheadAttention`` / ``nn.TransformerEncoderLayer`` (whose
+        # ``out_proj`` submodule is bypassed by the fused attention kernel) -- so an
+        # owner-resolution requirement false-fails those correct captures. Measured on
+        # both at base commit e7f036fe.
+        if param.address not in param.all_addresses:
+            raise MetadataInvariantError(
+                name,
+                f"Param address {param.address!r} is absent from its canonical address set "
+                f"{param.all_addresses!r}",
+            )
 
         if param.num_uses_by_ops == 0 and not param.used_by_layers:
             continue
@@ -4953,6 +4897,7 @@ def _check_graph_ordering(ml: "Trace") -> None:
 
     # Topological order: parent.raw_index < child.raw_index
     rt_map = {lpl.layer_label: lpl.raw_index for lpl in ml.layer_list}
+    rt_map.update({lpl.label: lpl.raw_index for lpl in ml.layer_list})
     for lpl in ml.layer_list:
         for p in lpl.parents:
             if rt_map.get(p, -1) >= lpl.raw_index:
@@ -5264,6 +5209,9 @@ def _check_graph_connectivity(ml: "Trace") -> None:
       layer has at least one parent (no dangling computational nodes).
     - _orphan_labels (removed during postprocessing) do NOT appear in the
       active layer_labels (they were pruned from the graph).
+    - No pruned orphan raw label was minted a final label in
+      ``_raw_to_final_op_labels`` (proof the prune actually took).
+    - No retained orphan island label leaked into the active label sets.
     """
     name = "graph_connectivity"
     label_set = set(ml.layer_labels)
@@ -5287,14 +5235,59 @@ def _check_graph_connectivity(ml: "Trace") -> None:
                 f"internally initialized, or output",
             )
 
-    # _orphan_labels is a subset of all known labels (pre-removal)
-    orphan_set = set(ml._orphan_labels)
-    # Orphans should NOT appear in the active layer_list (they were removed)
-    orphan_in_list = orphan_set & label_set
-    if orphan_in_list:
+    raw_orphan_in_list = set(ml._orphan_labels) & label_set
+    if raw_orphan_in_list:
         raise MetadataInvariantError(
             name,
-            f"_orphan_labels contains labels still in layer_labels: {orphan_in_list}",
+            f"_orphan_labels contains labels still in layer_labels: {raw_orphan_in_list}",
+        )
+
+    # The survival check above compares RAW labels against FINAL labels, which are
+    # disjoint domains on a well-formed trace, so on its own it can only catch a
+    # trace whose final labels were corrupted back into raw form. The check with
+    # teeth is on the RAW side, where both operands live in the same domain: a
+    # pruned orphan must never have been minted a final label. Every surviving op
+    # gets exactly one ``_raw_to_final_op_labels`` entry during finalization, so a
+    # pruned orphan raw label appearing as a key in that map is proof the prune
+    # did not take and the node reached the final graph.
+    #
+    # A pruned orphan has NO final label to compare against -- its Op never
+    # reaches labeling, so ``label``/``_label_raw``/``is_orphan`` are unset -- and
+    # final labels are RENUMBERED over the survivors, so a raw label is NOT its
+    # final label with the ``_raw`` suffix stripped. Deriving one that way is
+    # actively unsafe: the survivors of
+    # ``ones(); relu(ones); x + 1; * 2; relu()`` renumber such that the stripped
+    # orphan raw label ``relu_1_3`` is byte-identical to a LIVE op's final label,
+    # so a stripped-suffix comparison hard-fails a correct capture.
+    #
+    # ``keep_orphans=True`` is the ONE case where an orphan raw label legitimately
+    # owns a final-label entry: the island is retained, labeled, and held outside
+    # the active projection. It is excluded by checking what the raw label MAPPED
+    # TO, not by disabling the check -- a retained orphan whose raw label was
+    # mapped onto a LIVE final label still fires. With ``keep_orphans=False`` the
+    # retained set is empty, so the check keeps its full teeth there.
+    retained_orphan_labels = _retained_orphan_op_labels(ml) | _retained_orphan_layer_labels(ml)
+    raw_to_final_op_labels = getattr(ml, "_raw_to_final_op_labels", {}) or {}
+    orphan_raw_labels = {label for label in ml._orphan_labels if isinstance(label, str)}
+    resurrected_orphans = {
+        raw_label
+        for raw_label in orphan_raw_labels & set(raw_to_final_op_labels)
+        if raw_to_final_op_labels[raw_label] not in retained_orphan_labels
+    }
+    if resurrected_orphans:
+        raise MetadataInvariantError(
+            name,
+            f"Pruned orphan raw labels were mapped to final labels: {sorted(resurrected_orphans)}",
+        )
+
+    # Retained orphan islands (``keep_orphans=True``) DO carry final labels and
+    # are outside the active projection by design; one showing up in the active
+    # label sets means a retained island leaked into the live graph.
+    leaked_retained = retained_orphan_labels & (label_set | set(ml.op_labels))
+    if leaked_retained:
+        raise MetadataInvariantError(
+            name,
+            f"Retained orphan labels survive in active labels: {sorted(leaked_retained)}",
         )
 
 

@@ -624,13 +624,17 @@ def _dispatch_op_count_matches_capture(self: "Trace") -> ValidationCheckResult:
     Returns
     -------
     ValidationCheckResult
-        A passing result when no census was supplied or both counts agree;
-        otherwise a hard completeness failure.
+        A passing result when both counts agree over a non-empty census, an
+        ``unverified`` result when no census was supplied or the census is
+        empty (which proves nothing either way), otherwise a hard completeness
+        failure.
     """
 
     dispatch_count = getattr(self, "_validation_dispatch_op_count", None)
     if dispatch_count is None:
-        return ValidationCheckResult.validated("dispatch_op_count_not_collected")
+        if int(getattr(self, "num_ops", 0)) > 0:
+            return ValidationCheckResult.unverified("dispatch_op_count_not_collected")
+        return ValidationCheckResult.validated("no_dispatchable_ops")
     captured_count = int(
         getattr(self, "_validation_captured_dispatchable_op_count", getattr(self, "num_ops", 0))
     )
@@ -642,6 +646,22 @@ def _dispatch_op_count_matches_capture(self: "Trace") -> ValidationCheckResult:
     # ``dispatched > captured + pruned + buffer-writes`` and trips the backstop.
     pruned_count = int(getattr(self, "_validation_pruned_dispatchable_op_count", 0))
     buffer_write_count = int(getattr(self, "_validation_buffer_write_dispatch_op_count", 0))
+    # Liveness floor. ``0 == 0 + 0 + 0`` is arithmetically a match but proves
+    # NOTHING: the arithmetic is identical whether every dispatch was accounted
+    # for or the witness recorded nothing at all. Do NOT claim ``matched`` for it.
+    #
+    # It is NOT reported as a failure either, and that is a measured fact rather
+    # than a concession: a capture whose only ops legitimately dispatch nothing
+    # (a same-shape ``torch.broadcast_tensors``, which returns its inputs) yields
+    # exactly ``(0, 0)`` with EMPTY ``completeness_decompositions`` and EMPTY
+    # ``completeness_diagnostics`` -- witness state byte-identical to a cleared
+    # census. Failing here would false-fail that correct capture, and no signal
+    # the witness currently emits separates the two states; distinguishing them
+    # requires the witness to record every observed wrapped call, not only the
+    # ones that owned a dispatch. ``unverified`` is the honest verdict the check
+    # vocabulary already provides, and it never reads as a pass.
+    if dispatch_count == 0 and captured_count == 0 and int(getattr(self, "num_ops", 0)) > 0:
+        return ValidationCheckResult.unverified("dispatch_op_count_witness_empty")
     if dispatch_count == captured_count + pruned_count + buffer_write_count:
         return ValidationCheckResult.validated("dispatch_op_count_matched")
     return ValidationCheckResult.failed_result("dispatch_op_count_mismatch")
@@ -1126,7 +1146,7 @@ def validate_parents_of_saved_layer(
             )
         return arg_logging_result
 
-    ops_to_replay = _representative_ops_for_replay(self, ops_to_validate)
+    ops_to_replay = _all_ops_for_replay(self, ops_to_validate)
     if not skip_replay_after_arg_logging:
         # Forward replay: re-execute with correct parent values, expect same output.
         for target_op in ops_to_replay:
@@ -1159,8 +1179,8 @@ def validate_parents_of_saved_layer(
         # Perturbation: for each parent, substitute random values and expect
         # the output to change, proving that parent genuinely influences this layer.
 
-        representative_parent_edges = _representative_parent_edges(self, ops_to_replay)
-        for target_op, perturb_layer in representative_parent_edges:
+        all_parent_edges = _all_data_parent_edges_for_replay(self, ops_to_replay)
+        for target_op, perturb_layer in all_parent_edges:
             if _is_intentional_intervention_replacement(target_op):
                 if decision_recorder is not None:
                     decision_recorder.record(
@@ -1431,7 +1451,7 @@ def _op_for_validation_label(self: "Trace", label: str) -> Op:
     return op_list[0]
 
 
-def _representative_ops_for_replay(self: "Trace", ops_to_validate: List[Op]) -> List[Op]:
+def _all_ops_for_replay(self: "Trace", ops_to_validate: List[Op]) -> List[Op]:
     """Return every concrete child op for forward replay validation.
 
     Parameters
@@ -1449,7 +1469,9 @@ def _representative_ops_for_replay(self: "Trace", ops_to_validate: List[Op]) -> 
     return ops_to_validate
 
 
-def _representative_parent_edges(self: "Trace", ops_to_validate: List[Op]) -> List[tuple[Op, str]]:
+def _all_data_parent_edges_for_replay(
+    self: "Trace", ops_to_validate: List[Op]
+) -> List[tuple[Op, str]]:
     """Return every concrete parent edge for perturbation validation.
 
     Parameters
@@ -1535,7 +1557,7 @@ def _check_layer_arguments_logged_correctly(
         target_layer_label,
         _op_for_validation_label(self, target_layer_label),
     )
-    target_ops = _representative_ops_for_replay(self, _validation_ops_for_entry(target_entry))
+    target_ops = _all_ops_for_replay(self, _validation_ops_for_entry(target_entry))
 
     for target_layer in target_ops:
         # Genuine functionless ops have no torch function whose arguments could
@@ -2548,37 +2570,28 @@ def _check_whether_func_on_saved_parents_yields_saved_tensor(
             )
         if _perturbation_delta_below_output_spacing(layer, layers_to_perturb, input_args):
             return ValidationCheckResult.exempted("ulp_swamped_perturbation")
-        generic_probe_matched = _generic_parent_effect_probe(
-            self, layer, layers_to_perturb, verbose
+        # A genuine perturbation-insensitivity failure: the output did not
+        # change when a parent's value was perturbed and no posthoc excuse applied.
+        from .diagnostics import (
+            CHECK_PERTURBATION,
+            ValidationFailure,
+            record_validation_failure,
         )
-        if not posthoc_decision.exempt:
-            # ADD-ONLY: a genuine perturbation-insensitivity failure (the output
-            # did not change when a parent's value was perturbed and no posthoc
-            # excuse applied). Record the structured reason -- this NEVER changes
-            # the decision posthoc_perturb_check already returned.
-            from .diagnostics import (
-                CHECK_PERTURBATION,
-                ValidationFailure,
-                record_validation_failure,
-            )
 
-            record_validation_failure(
-                self,
-                ValidationFailure(
-                    check=CHECK_PERTURBATION,
-                    op_label=layer_to_validate_parents_for_label,
-                    func_name=getattr(layer, "func_name", None),
-                    message=(
-                        "output insensitive to perturbing parent(s) "
-                        f"{layers_to_perturb}; the parent does not influence this op's value"
-                    ),
-                    extra={
-                        "perturbed_parents": list(layers_to_perturb),
-                        "generic_invariant_probe_matched": generic_probe_matched,
-                    },
+        record_validation_failure(
+            self,
+            ValidationFailure(
+                check=CHECK_PERTURBATION,
+                op_label=layer_to_validate_parents_for_label,
+                func_name=getattr(layer, "func_name", None),
+                message=(
+                    "output insensitive to perturbing parent(s) "
+                    f"{layers_to_perturb}; the parent does not influence this op's value"
                 ),
-            )
-            return ValidationCheckResult.failed_result("perturbation_insensitive")
+                extra={"perturbed_parents": list(layers_to_perturb)},
+            ),
+        )
+        return ValidationCheckResult.failed_result("perturbation_insensitive")
 
     return ValidationCheckResult.validated("perturbation_changed" if perturb else "replay_matched")
 
@@ -2795,187 +2808,6 @@ def _delta_is_broadcastable_below_spacing(
     return bool(torch.all(delta_broadcast < spacing_broadcast).item())
 
 
-def _generic_parent_effect_probe(
-    self: "Trace",
-    layer: Op,
-    layers_to_perturb: list[str],
-    verbose: bool,
-) -> bool:
-    """Probe whether a perturbed parent can affect the layer output.
-
-    Parameters
-    ----------
-    self:
-        Trace containing saved parent payloads.
-    layer:
-        Child op whose unchanged perturbation output is being classified.
-    layers_to_perturb:
-        Parent labels selected for perturbation.
-    verbose:
-        Whether replay exceptions should print diagnostics.
-
-    Returns
-    -------
-    bool
-        True only when two distinct rebuilt parent values both replay to the
-        exact saved output, proving the validation perturbation is not a
-        one-sample coincidence under the S1b probe contract.
-    """
-
-    probe_values = _generic_effect_probe_values(self, layer, layers_to_perturb)
-    if probe_values is None:
-        return False
-    for values_by_parent in probe_values:
-        input_args, unverified_reason = _prepare_input_args_for_validating_layer(self, layer, [])
-        if input_args is None:
-            if verbose:
-                print(f"Generic effect probe skipped: {unverified_reason}")
-            return False
-        if not _install_probe_parent_values(layer, layers_to_perturb, values_by_parent, input_args):
-            return False
-        recomputed = _execute_func_with_restored_state(
-            layer,
-            input_args,
-            layers_to_perturb,
-            layer.label,
-            verbose,
-        )
-        if recomputed is None or not tensor_nanequal(recomputed, layer.out, allow_tolerance=False):
-            return False
-    return True
-
-
-def _generic_effect_probe_values(
-    self: "Trace",
-    layer: Op,
-    layers_to_perturb: list[str],
-) -> list[dict[str, torch.Tensor]] | None:
-    """Build two distinct probe values for every perturbed parent.
-
-    Parameters
-    ----------
-    self:
-        Trace containing saved parent payloads.
-    layer:
-        Child op whose output scale informs floating probes.
-    layers_to_perturb:
-        Parent labels selected for perturbation.
-
-    Returns
-    -------
-    list[dict[str, torch.Tensor]] or None
-        Two parent-label-to-probe mappings, or ``None`` if probes cannot be
-        built without silently weakening validation.
-    """
-
-    first: dict[str, torch.Tensor] = {}
-    second: dict[str, torch.Tensor] = {}
-    for parent_label in layers_to_perturb:
-        parent = _op_for_validation_label(self, parent_label)
-        parent_out = getattr(parent, "out", None)
-        if not isinstance(parent_out, torch.Tensor) or parent_out.numel() == 0:
-            return None
-        parent_first, parent_second = _probe_pair_for_tensor(parent_out, layer.out)
-        if parent_first is None or parent_second is None:
-            return None
-        first[parent_label] = parent_first
-        second[parent_label] = parent_second
-    return [first, second]
-
-
-def _probe_pair_for_tensor(
-    parent_out: torch.Tensor,
-    output_out: torch.Tensor,
-) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    """Return two distinct probe tensors for one parent tensor.
-
-    Parameters
-    ----------
-    parent_out:
-        Saved parent tensor.
-    output_out:
-        Saved child output tensor used to choose a visible floating scale.
-
-    Returns
-    -------
-    tuple[torch.Tensor or None, torch.Tensor or None]
-        Two distinct tensors with the parent's dtype/device, or ``(None, None)``
-        when safe probes cannot be produced.
-    """
-
-    if parent_out.dtype == torch.bool:
-        return torch.zeros_like(parent_out), torch.ones_like(parent_out)
-    if parent_out.is_floating_point():
-        finite_output = output_out.detach().float().abs()
-        finite_output = finite_output[torch.isfinite(finite_output)]
-        scale = finite_output.max().item() if finite_output.numel() else 1.0
-        magnitude = max(2.0, float(scale) * 2.0)
-        dtype_info = torch.finfo(parent_out.dtype)
-        magnitude = min(magnitude, dtype_info.max * 0.25)
-        first = torch.zeros_like(parent_out)
-        second = torch.full_like(parent_out, magnitude)
-        if torch.equal(first, second):
-            return None, None
-        return first, second
-    if parent_out.dtype in (
-        torch.int,
-        torch.long,
-        torch.short,
-        torch.uint8,
-        torch.int8,
-        torch.int16,
-        torch.int32,
-        torch.int64,
-    ):
-        info = torch.iinfo(parent_out.dtype)
-        first_value = max(info.min, 0)
-        second_value = min(info.max, first_value + 1)
-        if first_value == second_value:
-            return None, None
-        return (
-            torch.full_like(parent_out, first_value),
-            torch.full_like(parent_out, second_value),
-        )
-    return None, None
-
-
-def _install_probe_parent_values(
-    layer: Op,
-    layers_to_perturb: list[str],
-    values_by_parent: dict[str, torch.Tensor],
-    input_args: dict[str, Any],
-) -> bool:
-    """Install probe tensors into every rebuilt arg occurrence for parents.
-
-    Parameters
-    ----------
-    layer:
-        Child op whose parent-argument map is used.
-    layers_to_perturb:
-        Parent labels selected for perturbation.
-    values_by_parent:
-        Probe tensor by parent label.
-    input_args:
-        Rebuilt replay arguments to mutate.
-
-    Returns
-    -------
-    bool
-        True when every perturbed parent participated in at least one rebuilt
-        positional or keyword argument.
-    """
-
-    seen: set[str] = set()
-    parent_arg_positions = getattr(layer, "parent_arg_positions", {}) or {}
-    for arg_domain in ("args", "kwargs"):
-        for key, parent_label in (parent_arg_positions.get(arg_domain, {}) or {}).items():
-            if parent_label not in values_by_parent:
-                continue
-            _write_replay_arg_value(input_args, arg_domain, key, values_by_parent[parent_label])
-            seen.add(parent_label)
-    return seen == set(layers_to_perturb)
-
-
 def _read_replay_arg_value(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
@@ -3027,36 +2859,6 @@ def _read_nested_value(value: Any, key: Any) -> Any:
     """
 
     return value[key]
-
-
-def _write_replay_arg_value(
-    input_args: dict[str, Any],
-    arg_domain: str,
-    key: Any,
-    value: torch.Tensor,
-) -> None:
-    """Write a replay argument by TorchLens parent-argument position key.
-
-    Parameters
-    ----------
-    input_args:
-        Replay argument dictionary to mutate.
-    arg_domain:
-        Either ``"args"`` or ``"kwargs"``.
-    key:
-        Parent-argument position key, possibly nested as a tuple.
-    value:
-        Probe tensor to write.
-    """
-
-    if not isinstance(key, tuple):
-        input_args[arg_domain][key] = value
-        return
-    input_args[arg_domain][key[0]] = _write_nested_replay_arg_value(
-        input_args[arg_domain][key[0]],
-        key[1:],
-        value,
-    )
 
 
 def _write_nested_replay_arg_value(
