@@ -171,6 +171,9 @@ _NON_CONTAINER_LEAF_TYPES: tuple[type, ...] = (
     torch.UntypedStorage,
 )
 
+INPUT_SEARCH_DEPTH_LIMIT = 64
+"""Maximum input-boundary search depth before callers must fail closed."""
+
 
 def get_vars_of_type_from_obj(
     obj: Any,
@@ -179,6 +182,7 @@ def get_vars_of_type_from_obj(
     search_depth: int = 3,
     return_addresses: bool = False,
     allow_repeats: bool = False,
+    depth_exceeded_paths: list[str] | None = None,
 ) -> list[Any]:
     """Recursively find all instances of ``which_type`` inside a nested object.
 
@@ -201,6 +205,9 @@ def get_vars_of_type_from_obj(
             tuples instead of bare objects.
         allow_repeats: If False, deduplicates by ``id()`` so the same
             tensor object is returned at most once.
+        depth_exceeded_paths: Optional accumulator receiving unresolved frontier
+            paths when ``search_depth`` is exhausted. Callers that use a finite
+            correctness boundary must inspect this list and fail closed.
 
     Returns:
         List of found objects (or tuples if ``return_addresses=True``).
@@ -213,6 +220,7 @@ def get_vars_of_type_from_obj(
     found_addresses: list[Any] = []
     found_addresses_full: list[_AddressPath] = []
     found_ids: set[int] = set()
+    expanded_ids: set[int] | None = set() if depth_exceeded_paths is not None else None
     # BFS: each iteration processes one depth level.
     # Hoist warnings context manager to avoid ~77K per-attribute entries.
     with warnings.catch_warnings():
@@ -228,7 +236,11 @@ def get_vars_of_type_from_obj(
                 subclass_exceptions,
                 allow_repeats,
                 return_addresses,
+                expanded_ids,
             )
+
+    if depth_exceeded_paths is not None and this_stack:
+        depth_exceeded_paths.extend(str(address) for _, address, _ in this_stack)
 
     if return_addresses:
         return list(zip(found_items, found_addresses, found_addresses_full))
@@ -339,6 +351,7 @@ def _search_stack_for_vars_of_type(
     subclass_exceptions: list[type[Any]],
     allow_repeats: bool,
     track_addresses: bool,
+    expanded_ids: set[int] | None,
 ) -> list[_SearchEntry]:
     """Process one BFS depth level: classify items, collect matches, build next level.
 
@@ -359,6 +372,10 @@ def _search_stack_for_vars_of_type(
         found_ids: Set of ``id()`` values for deduplication.
         subclass_exceptions: Subclasses of ``which_type`` to skip.
         allow_repeats: If True, skip ``id()``-based deduplication.
+        track_addresses: Whether hierarchical addresses should be retained.
+        expanded_ids: Identities of non-leaf objects already expanded, or ``None``
+            to retain historical repeat traversal. A set makes traversal cycle-safe
+            independently of tensor-result deduplication.
 
     Returns:
         ``next_stack`` — items to process in the next depth iteration.
@@ -384,6 +401,11 @@ def _search_stack_for_vars_of_type(
         # Leaf types that can't contain tensors — skip.
         if item_class in _NON_CONTAINER_LEAF_TYPES:
             continue
+        if expanded_ids is not None:
+            item_id = id(item)
+            if item_id in expanded_ids:
+                continue
+            expanded_ids.add(item_id)
         # Non-leaf, non-match — expand into next depth level.
         _extend_search_stack_from_item(item, address, address_full, next_stack, track_addresses)
     return next_stack

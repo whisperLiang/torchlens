@@ -44,7 +44,7 @@ from .options import (
     merge_visualization_options,
     visualization_to_render_kwargs,
 )
-from .utils.arg_handling import normalize_input_args, safe_copy_args, safe_copy_kwargs
+from .utils.arg_handling import normalize_input_args, safe_copy_input_tree
 from .utils.display import warn_parallel
 from .utils.introspection import get_vars_of_type_from_obj
 from .utils.rng import set_random_seed
@@ -1173,8 +1173,18 @@ def _validate_forward_pass_torch(
         input_kwargs = {}
     # Deep-copy inputs so the ground-truth forward pass doesn't mutate the
     # originals (some models modify inputs in-place).
-    input_args_copy = safe_copy_args(input_args)
-    input_kwargs_copy = safe_copy_kwargs(input_kwargs)
+    input_args_copy, input_kwargs_copy, input_copy_gaps = safe_copy_input_tree(
+        input_args,
+        input_kwargs,
+    )
+    if input_copy_gaps:
+        warnings.warn(
+            "TorchLens validation cannot reproduce the caller's input topology: "
+            f"{input_copy_gaps!r}. Returning False rather than validating altered semantics.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return False
 
     model_device = next((p.device for p in model.parameters()), None)
     if model_device is not None:
@@ -1309,10 +1319,25 @@ def _validate_forward_pass_torch(
             )
             return False
         validation_state_dict = _clone_state_dict_with_metadata(validation_model)
-        validation_input_args = safe_copy_args(input_args)
-        validation_input_kwargs = safe_copy_kwargs(input_kwargs)
-        reproducibility_input_args = safe_copy_args(input_args)
-        reproducibility_input_kwargs = safe_copy_kwargs(input_kwargs)
+        (
+            validation_input_args,
+            validation_input_kwargs,
+            validation_input_gaps,
+        ) = safe_copy_input_tree(input_args, input_kwargs)
+        (
+            reproducibility_input_args,
+            reproducibility_input_kwargs,
+            reproducibility_input_gaps,
+        ) = safe_copy_input_tree(input_args, input_kwargs)
+        if validation_input_gaps or reproducibility_input_gaps:
+            copy_gaps = validation_input_gaps + reproducibility_input_gaps
+            warnings.warn(
+                "TorchLens validation cannot reproduce the caller's input topology: "
+                f"{copy_gaps!r}. Returning False rather than validating altered semantics.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return False
         if model_device is not None:
             validation_input_args = _move_tensors_to_device(validation_input_args, model_device)
             validation_input_kwargs = _move_tensors_to_device(validation_input_kwargs, model_device)

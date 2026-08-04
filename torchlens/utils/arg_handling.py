@@ -6,6 +6,7 @@ e.g. ESCNN GeometricTensor) and normalizes user-supplied ``input_args`` into
 the ``list`` form expected by ``model(*input_args)``.
 """
 
+import copy
 import inspect
 from collections import defaultdict
 from typing import Any, Optional, cast
@@ -13,7 +14,11 @@ from typing import Any, Optional, cast
 import torch
 from torch import nn
 
-from .tensor_utils import _clone_tensor_payload, _copy_tensor_payload
+from .tensor_utils import (
+    _clone_tensor_payload,
+    _copy_tensor_payload,
+    touched_bytes_relation,
+)
 
 INPUT_WAS_PARAMETER_ATTR = "_torchlens_input_was_parameter"
 
@@ -127,6 +132,240 @@ def safe_copy_kwargs(kwargs: dict[Any, Any]) -> dict[Any, Any]:
     Same semantics as :func:`safe_copy_args` but for ``**kwargs``.
     """
     return {key: copy_arg_tree(val) for key, val in kwargs.items()}
+
+
+def _prepare_input_deepcopy_memo(
+    value: Any,
+    *,
+    path: str,
+    memo: dict[int, Any],
+    visited: set[int],
+    semantic_gaps: list[str],
+    tensor_records: list[tuple[str, torch.Tensor, bool]],
+) -> None:
+    """Prepare a shared ``deepcopy`` memo for one input-tree value.
+
+    Parameters
+    ----------
+    value:
+        Input-tree value to inspect.
+    path:
+        Human-readable location used for fail-closed diagnostics.
+    memo:
+        Shared ``deepcopy`` memo for positional and keyword inputs.
+    visited:
+        Object identities already traversed while preparing the memo.
+    semantic_gaps:
+        Accumulator for tensor kinds that cannot use PyTorch's topology-preserving
+        deepcopy protocol.
+    tensor_records:
+        Tensor paths, originals, and whether storage-preserving deepcopy remains
+        available for cross-tensor alias checks.
+
+    Returns
+    -------
+    None
+        Mutates ``memo``, ``visited``, and ``semantic_gaps`` in place.
+    """
+
+    if isinstance(value, torch.nn.Parameter):
+        value_id = id(value)
+        tensor_records.append((path, value, False))
+        if value_id in visited:
+            return
+        visited.add(value_id)
+        cloned = _clone_input_tensor_payload(value)
+        memo[value_id] = cloned
+        return
+    if isinstance(value, torch.Tensor):
+        value_id = id(value)
+        deepcopy_preserves_contract = (
+            value.is_leaf and not value.requires_grad and type(value) is torch.Tensor
+        )
+        tensor_records.append((path, value, deepcopy_preserves_contract))
+        if value_id in visited:
+            return
+        visited.add(value_id)
+        if not deepcopy_preserves_contract:
+            cloned = _clone_input_tensor_payload(value)
+            memo[value_id] = cloned
+            try:
+                physical_metadata_changed = (
+                    tuple(cloned.shape) != tuple(value.shape)
+                    or tuple(cloned.stride()) != tuple(value.stride())
+                    or cloned.storage_offset() != value.storage_offset()
+                )
+            except (RuntimeError, TypeError, NotImplementedError):
+                physical_metadata_changed = True
+            if physical_metadata_changed:
+                semantic_gaps.append(
+                    f"{path}: grad-preserving tensor clone changed physical view metadata"
+                )
+        return
+    value_id = id(value)
+    if value_id in visited:
+        return
+    visited.add(value_id)
+    if isinstance(value, dict):
+        for index, (key, child) in enumerate(value.items()):
+            _prepare_input_deepcopy_memo(
+                key,
+                path=f"{path}.<key:{index}>",
+                memo=memo,
+                visited=visited,
+                semantic_gaps=semantic_gaps,
+                tensor_records=tensor_records,
+            )
+            _prepare_input_deepcopy_memo(
+                child,
+                path=f"{path}.<value:{index}>",
+                memo=memo,
+                visited=visited,
+                semantic_gaps=semantic_gaps,
+                tensor_records=tensor_records,
+            )
+        return
+    if isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            _prepare_input_deepcopy_memo(
+                child,
+                path=f"{path}.{index}",
+                memo=memo,
+                visited=visited,
+                semantic_gaps=semantic_gaps,
+                tensor_records=tensor_records,
+            )
+        return
+    # Preserve the established contract for custom wrappers: pass them by
+    # reference rather than following arbitrary attributes through deepcopy.
+    memo[value_id] = value
+
+
+def _record_unpreserved_tensor_aliases(
+    tensor_records: list[tuple[str, torch.Tensor, bool]],
+    semantic_gaps: list[str],
+    *,
+    require_distinct_tensor_sites: bool,
+) -> None:
+    """Record aliases involving tensors that require grad-preserving clones.
+
+    Parameters
+    ----------
+    tensor_records:
+        Tensor input paths, original tensors, and storage-deepcopy eligibility.
+    semantic_gaps:
+        Accumulator receiving fail-closed alias-topology diagnostics.
+    require_distinct_tensor_sites:
+        Whether the downstream runnable descriptor requires every model-input
+        site to have distinct identity and storage.
+
+    Returns
+    -------
+    None
+        Appends one diagnostic for every potentially overlapping pair whose
+        topology cannot be preserved without severing autograd linkage.
+    """
+
+    for left_index, (left_path, left, left_transparent) in enumerate(tensor_records):
+        for right_path, right, right_transparent in tensor_records[left_index + 1 :]:
+            if left is right:
+                if require_distinct_tensor_sites:
+                    semantic_gaps.append(
+                        f"{left_path} <-> {right_path}: runnable input sites share "
+                        "one tensor identity, which the sparse descriptor cannot encode"
+                    )
+                continue
+            if left_transparent and right_transparent and not require_distinct_tensor_sites:
+                continue
+            try:
+                relation = touched_bytes_relation(left, right)
+            except (RuntimeError, TypeError, NotImplementedError):
+                relation = "unknown"
+            if relation == "disjoint":
+                continue
+            if require_distinct_tensor_sites:
+                semantic_gaps.append(
+                    f"{left_path} <-> {right_path}: runnable input sites have "
+                    f"{relation} storage, which the sparse descriptor cannot encode"
+                )
+            else:
+                semantic_gaps.append(
+                    f"{left_path} <-> {right_path}: grad-preserving clones cannot prove "
+                    f"the original tensor alias topology ({relation})"
+                )
+
+
+def safe_copy_input_tree(
+    args: list[Any],
+    kwargs: dict[Any, Any],
+    *,
+    require_distinct_tensor_sites: bool = False,
+) -> tuple[list[Any], dict[Any, Any], tuple[str, ...]]:
+    """Copy one complete model-input graph while preserving tensor topology.
+
+    Positional and keyword inputs share one ``deepcopy`` memo. For ordinary leaf
+    tensors without autograd history, PyTorch's deepcopy protocol copies each
+    underlying storage once and rebuilds every view with its original size,
+    stride, and storage offset. Grad-tracked tensors use the historical clone
+    path so gradients still reach the caller's input. Every path shares one memo,
+    so the same tensor repeated at multiple call sites remains one object.
+
+    Parameters
+    ----------
+    args:
+        Normalized positional model inputs.
+    kwargs:
+        Keyword model inputs.
+    require_distinct_tensor_sites:
+        Whether aliases between distinct input sites must fail closed because a
+        downstream sparse runnable descriptor cannot encode them.
+
+    Returns
+    -------
+    tuple[list[Any], dict[Any, Any], tuple[str, ...]]
+        Copied positional inputs, copied keyword inputs, and semantic gaps that
+        require capture verification to fail closed. Distinct overlapping
+        grad-tracked views and unexpected deepcopy failures use the historical
+        clone fallback but are explicitly reported as unverifiable.
+    """
+
+    memo: dict[int, Any] = {}
+    visited: set[int] = set()
+    semantic_gaps: list[str] = []
+    tensor_records: list[tuple[str, torch.Tensor, bool]] = []
+    _prepare_input_deepcopy_memo(
+        args,
+        path="input.args",
+        memo=memo,
+        visited=visited,
+        semantic_gaps=semantic_gaps,
+        tensor_records=tensor_records,
+    )
+    _prepare_input_deepcopy_memo(
+        kwargs,
+        path="input.kwargs",
+        memo=memo,
+        visited=visited,
+        semantic_gaps=semantic_gaps,
+        tensor_records=tensor_records,
+    )
+    _record_unpreserved_tensor_aliases(
+        tensor_records,
+        semantic_gaps,
+        require_distinct_tensor_sites=require_distinct_tensor_sites,
+    )
+    try:
+        from .._state import pause_logging
+
+        with pause_logging():
+            copied_args, copied_kwargs = copy.deepcopy((args, kwargs), memo)
+    except Exception as exc:
+        semantic_gaps.append(
+            f"input: topology-preserving deepcopy failed with {type(exc).__name__}: {exc}"
+        )
+        copied_args = safe_copy_args(args)
+        copied_kwargs = safe_copy_kwargs(kwargs)
+    return copied_args, copied_kwargs, tuple(semantic_gaps)
 
 
 def _model_expects_single_arg(model: nn.Module) -> Optional[bool]:
