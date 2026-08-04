@@ -111,6 +111,31 @@ def test_repr_html_missing_ipython_falls_back_to_text() -> None:
     assert html == repr(log)
 
 
+def test_packaging_metadata_uses_resolvable_gradcam_and_guarded_tinygrad_extra() -> None:
+    """Packaging metadata keeps the corrected grad-cam name and tinygrad marker."""
+
+    pyproject_text = Path(__file__).resolve().parent.parent.joinpath("pyproject.toml").read_text()
+
+    assert 'gradcam = ["grad-cam~=1.5"]' in pyproject_text
+    assert '"grad-cam~=1.5",' in pyproject_text
+    assert "tinygrad = [\"tinygrad>=0.13,<0.14; python_version >= '3.11'\"]" in pyproject_text
+
+
+def test_precommit_and_conftest_guard_use_python3_safe_predicates() -> None:
+    """The hook entrypoints and menagerie guard stay on the hardened conditions."""
+
+    project_root = Path(__file__).resolve().parent.parent
+    precommit_text = project_root.joinpath(".pre-commit-config.yaml").read_text()
+    conftest_text = project_root.joinpath("tests", "conftest.py").read_text()
+
+    assert "entry: python scripts/check_no_breaking_markers.py" not in precommit_text
+    assert "entry: scripts/check_no_breaking_markers.py --commit-msg" in precommit_text
+    assert "entry: scripts/check_no_breaking_markers.py --pre-push" in precommit_text
+    assert "if sys.version_info < (3, 11):" in conftest_text
+    assert 'collect_ignore_glob.append("test_menagerie_*.py")' in conftest_text
+    assert 'collect_ignore_glob.append("crawler/*.py")' in conftest_text
+
+
 @pytest.mark.slow
 def test_built_wheel_includes_tlspec_json_schemas(tmp_path: Path) -> None:
     """Built wheels must ship the public ``torchlens/schemas/*.json`` files."""

@@ -2,8 +2,7 @@
 
 Layer 3 of the version-bump prevention mechanism (after the commit-msg and
 pre-push hooks in ``scripts/check_no_breaking_markers.py``). TorchLens stays
-on the 2.x family per the locked policy in
-``~/.claude/projects/-home-jtaylor-projects-torchlens/memory/feedback_version_bumps.md``.
+on the 2.x family per the locked project release policy.
 The PyPI 1.0.0 and 2.0.0 slots have already been burned by accidental major
 bumps; the 3.0.0 slot was nearly burned a third time on 2026-05-01 (rescued
 only by an unrelated workflow bug).

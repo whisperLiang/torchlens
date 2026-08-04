@@ -4,8 +4,7 @@ Hard-reject commit messages or push payloads that contain semantic-release
 major-bump triggers (Conventional Commits ``!`` markers or ``BREAKING CHANGE:``
 footers).
 
-TorchLens stays on the 2.x family per the locked policy in
-``~/.claude/projects/-home-jtaylor-projects-torchlens/memory/feedback_version_bumps.md``.
+TorchLens stays on the 2.x family per the locked project release policy.
 The PyPI 1.0.0 and 2.0.0 slots have already been burned by accidental major
 bumps; the 3.0.0 slot was nearly burned a third time on 2026-05-01 (rescued
 only by an unrelated workflow bug). This script makes the failure mode
@@ -21,11 +20,11 @@ Override (use ONLY when JMT explicitly authorizes a major bump in this turn):
 Usage::
 
     # commit-msg stage (pre-commit framework passes the message-file path)
-    python scripts/check_no_breaking_markers.py --commit-msg <file>
+    scripts/check_no_breaking_markers.py --commit-msg <file>
 
     # pre-push stage (pre-commit framework passes "<remote> <url>" via argv,
     # then "<local_ref> <local_sha> <remote_ref> <remote_sha>" lines on stdin)
-    python scripts/check_no_breaking_markers.py --pre-push
+    scripts/check_no_breaking_markers.py --pre-push
 
 Exit codes:
     0  -- no major-bump triggers found
@@ -88,7 +87,7 @@ ERROR_BANNER = """
  with the override:
    {override}=1 <your git command>
 
- Background: ~/.claude/projects/-home-jtaylor-projects-torchlens/memory/feedback_version_bumps.md
+ Background: see the project release-policy notes tracked by the maintainer.
 ==============================================================================
 """.rstrip()
 
