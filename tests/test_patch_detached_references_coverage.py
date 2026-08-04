@@ -14,12 +14,34 @@ from torchlens import _state
 import torchlens as tl
 from torchlens.backends.torch._tl import is_decorated_function
 from torchlens.backends.torch.wrappers import (
+    _module_identity_was_crawled,
+    _remember_crawled_module_identity,
+    _remember_positive_module,
     _safe_module_file,
     clear_patch_detached_references_cache,
     patch_detached_references,
     unwrap_torch,
     wrap_torch,
 )
+
+
+def test_clear_patch_detached_references_cache_resets_identity_caches() -> None:
+    """The detached-reference cache clear must invalidate identity caches too."""
+
+    clear_patch_detached_references_cache()
+    mod = types.ModuleType("_tl_detached_identity_cache")
+    _remember_crawled_module_identity(mod)
+    _remember_positive_module(mod)
+
+    assert _module_identity_was_crawled(mod) is True
+    assert id(mod) in _state._detached_positive_module_ids
+    assert _state._detached_positive_modules
+
+    clear_patch_detached_references_cache()
+
+    assert _module_identity_was_crawled(mod) is False
+    assert id(mod) not in _state._detached_positive_module_ids
+    assert _state._detached_positive_modules == []
 
 
 def test_patch_detached_references_rewrites_non_torch_detached_refs() -> None:

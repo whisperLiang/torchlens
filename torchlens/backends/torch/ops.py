@@ -1454,8 +1454,6 @@ def runnable_output_losslessness(
     ):
         used_fallback = _try_build_container_spec(out) is None
     lossless = proved and not duplicate_paths and not used_fallback
-    if lossless and reason == "" and duplicate_paths:
-        reason = "duplicate_output_paths"
     if not lossless and not reason:
         reason = "duplicate_output_paths" if duplicate_paths else "fallback_traversal"
     # r39 corr2_5: an EXPLICIT closed root kind, so the live provider never INFERS a bare
@@ -2732,6 +2730,204 @@ def _record_predicate_output(
     return ram_payload, transformed_ram_payload
 
 
+def _predicate_function_ref(
+    func: Callable[..., Any],
+    func_name: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    func_call_id: int,
+) -> FunctionCallRef:
+    """Build the immutable function-call summary for predicate capture.
+
+    Parameters
+    ----------
+    func:
+        Decorated torch callable being recorded.
+    func_name:
+        Normalized function name recorded for the operation.
+    args:
+        Positional call arguments.
+    kwargs:
+        Keyword call arguments.
+    func_call_id:
+        Stable per-capture function-call identifier.
+
+    Returns
+    -------
+    FunctionCallRef
+        Immutable function summary stored on the projected event.
+    """
+
+    return FunctionCallRef(
+        func=func,
+        func_name=func_name,
+        func_qualname=getattr(func, "__qualname__", None),
+        func_call_id=func_call_id,
+        code_context=(),
+        func_duration=None,
+        flops_forward=None,
+        flops_backward=None,
+        func_rng_states=None,
+        func_autocast_state=None,
+        arg_names=(),
+        num_args_total=len(args) + len(kwargs),
+        num_pos_args=len(args),
+        num_kwargs=len(kwargs),
+        non_tensor_pos_args=(),
+        non_tensor_kwargs=tuple(
+            (key, value) for key, value in kwargs.items() if not isinstance(value, torch.Tensor)
+        ),
+        func_non_tensor_args=(),
+        is_inplace=False,
+        func_config=(),
+    )
+
+
+def _select_predicate_observation(current: OpObservation) -> EnrichmentLevel:
+    """Resolve the predicate into the minimum demanded enrichment tier.
+
+    Parameters
+    ----------
+    current:
+        Predicate-mode observation whose ``facts`` map holds the trace context.
+
+    Returns
+    -------
+    EnrichmentLevel
+        Shell, metadata, or payload demand derived from the keep predicate.
+    """
+
+    ctx = cast(RecordContext, current.facts["ctx"])
+    state = current.facts["state"]
+    spec = _evaluate_keep_op(ctx, state.options)
+    if isinstance(spec, RetroactiveCaptureDecision):
+        raise PredicateError("tl.followed_by(...) retroactive save is only supported by trace")
+    current.facts["spec"] = spec
+    if spec.save_out:
+        return EnrichmentLevel.PAYLOAD
+    if spec.save_metadata:
+        return EnrichmentLevel.METADATA
+    return EnrichmentLevel.SHELL
+
+
+def _normalize_predicate_observation(current: OpObservation) -> None:
+    """Compute backend semantics for a predicate-mode observation on demand.
+
+    Parameters
+    ----------
+    current:
+        Predicate-mode observation whose ``facts`` map holds the trace context.
+    """
+
+    trace = current.facts["trace"]
+    out = current.facts["out"]
+    func = current.facts["func"]
+    func_name = cast(str, current.facts["func_name"])
+    args = cast(tuple[Any, ...], current.facts["args"])
+    kwargs = cast(dict[str, Any], current.facts["kwargs"])
+    out_orig = current.facts["out_orig"]
+    arg_copies = cast(tuple[Any, ...], current.facts["arg_copies"])
+    kwarg_copies = cast(dict[str, Any], current.facts["kwarg_copies"])
+    is_bottom_level_func = cast(bool, current.facts["is_bottom_level_func"])
+    func_call_id = cast(int, current.facts["func_call_id"])
+    expected_output_count = cast(int, current.facts["expected_output_count"])
+    grad_fn_handle = out.grad_fn if isinstance(out, torch.Tensor) else None
+    func_event_input = FunctionEventInput(
+        func=func,
+        func_name=func_name,
+        func_qualname=getattr(func, "__qualname__", None),
+        args=args,
+        kwargs=kwargs,
+        raw_output=out_orig,
+        arg_copies=arg_copies,
+        kwarg_copies=kwarg_copies,
+        module_stack=(),
+        is_bottom_level_func=is_bottom_level_func,
+        func_call_id=func_call_id,
+        expected_output_count=expected_output_count,
+    )
+    detect_backend_semantics = (
+        detect_torch_alias_contract
+        if _should_keep_alias_mutation_contract(trace)
+        else detect_torch_output_alias_contract
+    )
+    # Mutation/alias detection compares input copies via ``tensor_nanequal``
+    # (``torch.equal`` / ``torch.allclose`` -> Python ``bool``); mark it as a
+    # capture-internal read so the completeness witness does not record it as
+    # a user host escape.
+    with internal_scalar_read():
+        current.facts["backend_semantics"] = detect_backend_semantics(
+            func_event_input,
+            backend_grad_handle=grad_fn_handle,
+            grad_fn_class_name=type(grad_fn_handle).__name__
+            if grad_fn_handle is not None
+            else None,
+            autograd_memory=None,
+            num_autograd_tensors=None,
+        )
+
+
+def _retain_predicate_observation_payload(current: OpObservation) -> None:
+    """Retain the selected predicate payload through the active storage policy.
+
+    Parameters
+    ----------
+    current:
+        Predicate-mode observation whose ``facts`` map holds the trace context.
+    """
+
+    ctx = cast(RecordContext, current.facts["ctx"])
+    out = current.facts["out"]
+    spec = cast(CaptureSpec, current.facts["spec"])
+    ram_payload, transformed_ram_payload = _record_predicate_output(ctx, out, spec)
+    current.facts["ram_payload"] = ram_payload
+    current.facts["transformed_ram_payload"] = transformed_ram_payload
+
+
+def _append_predicate_observation(current: OpObservation) -> None:
+    """Append the immutable predicate event and any retained payload sidecars.
+
+    Parameters
+    ----------
+    current:
+        Predicate-mode observation whose ``facts`` map holds the trace context.
+    """
+
+    trace = current.facts["trace"]
+    ctx = cast(RecordContext, current.facts["ctx"])
+    spec = cast(CaptureSpec, current.facts["spec"])
+    out = current.facts["out"]
+    container_path = cast(tuple[OutputPathComponent, ...], current.facts["container_path"])
+    append_projected_event(
+        trace,
+        ctx,
+        spec,
+        tensor=out,
+        ram_payload=current.facts.get("ram_payload"),
+        transformed_ram_payload=current.facts.get("transformed_ram_payload"),
+        predicate_matched=spec.save_out or spec.save_metadata,
+        backend_semantics=current.facts.get("backend_semantics"),
+        function=cast(FunctionCallRef, current.facts["function"]),
+        container_path=container_path,
+    )
+
+
+def _evaluate_predicate_observation_halt(current: OpObservation) -> None:
+    """Evaluate the predicate halt directive after append.
+
+    Parameters
+    ----------
+    current:
+        Predicate-mode observation whose ``facts`` map holds the trace context.
+    """
+
+    trace = current.facts["trace"]
+    ctx = cast(RecordContext, current.facts["ctx"])
+    state = current.facts["state"]
+    out = current.facts["out"]
+    evaluate_halt_stop(trace, ctx, state.options, frontier_output=out)
+
+
 def _emit_predicate_operation_events(
     self: "Trace",
     func: Callable[..., Any],
@@ -2802,158 +2998,48 @@ def _emit_predicate_operation_events(
                 continue
             if out.grad_fn is not None:
                 state.grad_fn_to_context[out.grad_fn] = ctx
-            observation = OpObservation(operation_key=func_name, value=out)
-
-            def select(current: OpObservation) -> EnrichmentLevel:
-                """Resolve the predicate into the minimum demanded tier."""
-
-                spec = _evaluate_keep_op(ctx, state.options)
-                if isinstance(spec, RetroactiveCaptureDecision):
-                    raise PredicateError(
-                        "tl.followed_by(...) retroactive save is only supported by trace"
-                    )
-                current.facts["spec"] = spec
-                if spec.save_out:
-                    return EnrichmentLevel.PAYLOAD
-                if spec.save_metadata:
-                    return EnrichmentLevel.METADATA
-                return EnrichmentLevel.SHELL
-
-            def normalize_metadata(current: OpObservation) -> None:
-                """Compute semantics and immutable function metadata on demand."""
-
-                grad_fn_handle = out.grad_fn if isinstance(out, torch.Tensor) else None
-                func_event_input = FunctionEventInput(
-                    func=func,
-                    func_name=func_name,
-                    func_qualname=getattr(func, "__qualname__", None),
-                    args=args,
-                    kwargs=kwargs,
-                    raw_output=out_orig,
-                    arg_copies=arg_copies,
-                    kwarg_copies=kwarg_copies,
-                    module_stack=(),
-                    is_bottom_level_func=is_bottom_level_func,
-                    func_call_id=func_call_id,
-                    expected_output_count=len(out_iter),
-                )
-                detect_backend_semantics = (
-                    detect_torch_alias_contract
-                    if _should_keep_alias_mutation_contract(self)
-                    else detect_torch_output_alias_contract
-                )
-                # Mutation/alias detection compares input copies via ``tensor_nanequal``
-                # (``torch.equal`` / ``torch.allclose`` -> Python ``bool``); mark it as a
-                # capture-internal read so the completeness witness does not record it as
-                # a user host escape.
-                with internal_scalar_read():
-                    current.facts["backend_semantics"] = detect_backend_semantics(
-                        func_event_input,
-                        backend_grad_handle=grad_fn_handle,
-                        grad_fn_class_name=type(grad_fn_handle).__name__
-                        if grad_fn_handle is not None
-                        else None,
-                        autograd_memory=None,
-                        num_autograd_tensors=None,
-                    )
-                current.facts["function"] = FunctionCallRef(
-                    func=func,
-                    func_name=func_name,
-                    func_qualname=getattr(func, "__qualname__", None),
-                    func_call_id=func_call_id,
-                    code_context=(),
-                    func_duration=None,
-                    flops_forward=None,
-                    flops_backward=None,
-                    func_rng_states=None,
-                    func_autocast_state=None,
-                    arg_names=(),
-                    num_args_total=len(args) + len(kwargs),
-                    num_pos_args=len(args),
-                    num_kwargs=len(kwargs),
-                    non_tensor_pos_args=(),
-                    non_tensor_kwargs=tuple(
-                        (key, value)
-                        for key, value in kwargs.items()
-                        if not isinstance(value, torch.Tensor)
+            observation = OpObservation(
+                operation_key=func_name,
+                value=out,
+                facts={
+                    "trace": self,
+                    "ctx": ctx,
+                    "state": state,
+                    "func": func,
+                    "func_name": func_name,
+                    "args": args,
+                    "kwargs": kwargs,
+                    "out_orig": out_orig,
+                    "arg_copies": arg_copies,
+                    "kwarg_copies": kwarg_copies,
+                    "is_bottom_level_func": is_bottom_level_func,
+                    "func_call_id": func_call_id,
+                    "expected_output_count": len(out_iter),
+                    "out": out,
+                    "container_path": container_path,
+                    "function": _predicate_function_ref(
+                        func,
+                        func_name,
+                        args,
+                        kwargs,
+                        func_call_id,
                     ),
-                    func_non_tensor_args=(),
-                    is_inplace=False,
-                    func_config=(),
-                )
-
-            def retain_payload(current: OpObservation) -> None:
-                """Retain the selected payload through the configured storage lease."""
-
-                spec = cast(CaptureSpec, current.facts["spec"])
-                ram_payload, transformed_ram_payload = _record_predicate_output(ctx, out, spec)
-                current.facts["ram_payload"] = ram_payload
-                current.facts["transformed_ram_payload"] = transformed_ram_payload
-
-            def append(current: OpObservation) -> None:
-                """Freeze and append the immutable event and its sidecars."""
-
-                spec = cast(CaptureSpec, current.facts["spec"])
-                function_ref = current.facts.get("function")
-                if function_ref is None:
-                    function_ref = FunctionCallRef(
-                        func=func,
-                        func_name=func_name,
-                        func_qualname=getattr(func, "__qualname__", None),
-                        func_call_id=func_call_id,
-                        code_context=(),
-                        func_duration=None,
-                        flops_forward=None,
-                        flops_backward=None,
-                        func_rng_states=None,
-                        func_autocast_state=None,
-                        arg_names=(),
-                        num_args_total=len(args) + len(kwargs),
-                        num_pos_args=len(args),
-                        num_kwargs=len(kwargs),
-                        non_tensor_pos_args=(),
-                        non_tensor_kwargs=tuple(
-                            (key, value)
-                            for key, value in kwargs.items()
-                            if not isinstance(value, torch.Tensor)
-                        ),
-                        func_non_tensor_args=(),
-                        is_inplace=False,
-                        func_config=(),
-                    )
-                append_projected_event(
-                    self,
-                    ctx,
-                    spec,
-                    tensor=out,
-                    ram_payload=current.facts.get("ram_payload"),
-                    transformed_ram_payload=current.facts.get("transformed_ram_payload"),
-                    predicate_matched=spec.save_out or spec.save_metadata,
-                    backend_semantics=current.facts.get("backend_semantics"),
-                    function=function_ref,
-                    container_path=container_path,
-                )
-
-            def evaluate_nonfinite_halt(current: OpObservation) -> None:
-                """Evaluate the operation halt directive after durable append."""
-
-                del current
-                evaluate_halt_stop(self, ctx, state.options, frontier_output=out)
-
-            observation.select = select
-            observation.normalize_metadata = normalize_metadata
-            observation.retain_payload = retain_payload
-            observation.append = append
-            observation.evaluate_nonfinite_halt = evaluate_nonfinite_halt
+                },
+            )
+            observation.select = _select_predicate_observation
+            observation.normalize_metadata = _normalize_predicate_observation
+            observation.retain_payload = _retain_predicate_observation_payload
+            observation.append = _append_predicate_observation
+            observation.evaluate_nonfinite_halt = _evaluate_predicate_observation_halt
             capture_session = capture_session_for(self)
             if capture_session is None:
-                demanded = select(observation)
+                demanded = _select_predicate_observation(observation)
                 if demanded in {EnrichmentLevel.METADATA, EnrichmentLevel.PAYLOAD}:
-                    normalize_metadata(observation)
+                    _normalize_predicate_observation(observation)
                 if demanded is EnrichmentLevel.PAYLOAD:
-                    retain_payload(observation)
-                append(observation)
-                evaluate_nonfinite_halt(observation)
+                    _retain_predicate_observation_payload(observation)
+                _append_predicate_observation(observation)
+                _evaluate_predicate_observation_halt(observation)
             else:
                 capture_session.kernel.process(observation)
         except HaltSignal:
@@ -3118,8 +3204,8 @@ def _build_param_fields(
     Unresolved parameters fall through unprovenanced (the honest path: break
     marker via ``_tensor_has_known_provenance``).
     """
-    _param_logs = []
-    resolved_parameters = []
+    _param_logs: list[Any] = []
+    resolved_parameters: list[torch.nn.Parameter] = []
     for param in arg_parameters:
         param_meta = get_param_meta(param)
         addr = None if param_meta is None else param_meta.param_address

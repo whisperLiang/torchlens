@@ -2119,9 +2119,8 @@ def module_forward_decorator(
                 state.handle_predicate_exception(enter_ctx, exc)
             finally:
                 if not halt_only:
-                    if not any(
-                        event.raw_index == enter_ctx.event_index
-                        for event in trace.capture_events.op_events
+                    if not _predicate_event_was_appended(
+                        trace, enter_ctx.raw_label or enter_ctx.label
                     ):
                         append_projected_event(
                             trace,
@@ -2205,9 +2204,8 @@ def module_forward_decorator(
                         state.add_predicate_failure(exit_ctx, exc)
                 finally:
                     if not halt_only:
-                        if not any(
-                            event.raw_index == exit_ctx.event_index
-                            for event in trace.capture_events.op_events
+                        if not _predicate_event_was_appended(
+                            trace, exit_ctx.raw_label or exit_ctx.label
                         ):
                             append_projected_event(
                                 trace,
@@ -2317,6 +2315,30 @@ def _is_bottom_level_submodule_exit(trace: "Trace", t: torch.Tensor, submodule: 
     trace.capture_events.live_index.require_event(tensor_label)
     trace.capture_events.live_index.module_entry_count(id(submodule))
     return False
+
+
+def _predicate_event_was_appended(trace: "Trace", label_raw: str) -> bool:
+    """Return whether predicate capture already appended ``label_raw``.
+
+    Parameters
+    ----------
+    trace:
+        Active trace whose predicate event buffer may already contain the
+        projected event.
+    label_raw:
+        Raw label used when appending the projected event.
+
+    Returns
+    -------
+    bool
+        True when ``trace.capture_events.op_event_by_label_raw`` already owns
+        ``label_raw``.
+    """
+
+    capture_events = getattr(trace, "capture_events", None)
+    if capture_events is None:
+        return False
+    return label_raw in capture_events.op_event_by_label_raw
 
 
 # ---------------------------------------------------------------------------

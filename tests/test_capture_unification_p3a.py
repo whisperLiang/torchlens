@@ -137,7 +137,8 @@ def test_sparse_shell_ops_skip_exhaustive_enrichment_work(
     monkeypatch.setattr(wrappers, "copy_arg_tree", forbidden)
     monkeypatch.setattr(wrappers, "log_current_rng_states", forbidden)
 
-    recording = tl.record(PredicateToy(), torch.randn(2, 4), save=tl.func("never_matches"))
+    with pytest.warns(UserWarning, match="matched zero sites"):
+        recording = tl.record(PredicateToy(), torch.randn(2, 4), save=tl.func("never_matches"))
 
     assert not recording.records
 
@@ -207,6 +208,25 @@ def test_trace_save_func_selector_keeps_only_matching_payloads() -> None:
     unsaved = next(op for op in log.layer_list if op.layer_type == "add")
     with pytest.raises(ValueError, match="not saved"):
         _ = unsaved.out
+
+
+def test_trace_save_func_selector_preserves_predicate_event_fields() -> None:
+    """Selective predicate traces keep the projected event facts after helper hoists."""
+
+    model = PredicateToy()
+    x = torch.randn(2, 4)
+    log = tl.trace(model, x, save=tl.func("relu"), random_seed=17)
+
+    relu_op = next(op for op in log.layer_list if op.func_name == "relu")
+    event = log.event_stream.op_event_by_label_raw[relu_op._label_raw]
+
+    assert event.function.func_name == "relu"
+    assert event.function.func_call_id is not None
+    assert event.function.num_args_total >= 1
+    assert event.backend_semantics is not None
+    assert event.output.container_path == ()
+    assert event.label_raw == relu_op._label_raw
+    assert event.output.tensor.label_raw == relu_op._label_raw
 
 
 def test_selective_save_keeps_unsaved_non_orphan_op_metadata() -> None:
