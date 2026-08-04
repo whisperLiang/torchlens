@@ -1052,6 +1052,7 @@ class Trace(
         "_tf_init_op_labels": FieldPolicy.DROP,
         "_tf_op_captures": FieldPolicy.DROP,
         "_tf_validation_result": FieldPolicy.DROP,
+        "_tl_save_selector_fire_count": FieldPolicy.DROP,
         "_receptive_field_solution": FieldPolicy.DROP,
         "_rf_source_solutions": FieldPolicy.DROP,
         "_rf_target_solutions": FieldPolicy.DROP,

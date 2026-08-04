@@ -376,7 +376,8 @@ def test_followed_by_multiple_successors_are_idempotent() -> None:
 def test_followed_by_never_appears_does_not_save_candidate() -> None:
     """Candidates are dropped unsaved when no matching successor appears."""
 
-    log = _retro_trace(ConvWithoutRelu(), torch.randn(1, 1, 4, 4), tl.func("relu"))
+    with pytest.warns(UserWarning, match="matched zero sites"):
+        log = _retro_trace(ConvWithoutRelu(), torch.randn(1, 1, 4, 4), tl.func("relu"))
     assert _saved_conv_ops(log) == []
 
 
@@ -408,14 +409,17 @@ def test_lookback_payload_window_is_bounded_and_evicts_candidates() -> None:
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        log = tl.trace(
-            CandidateEvictionModel(),
-            torch.randn(1, 1, 4, 4),
-            save=tl.func("conv2d") & tl.followed_by(tl.func("relu")),
-            lookback=1,
-            lookback_payload_policy="detached_raw",
-            random_seed=123,
-        )
+        # The selector deliberately matches zero sites here (every candidate is
+        # evicted before its successor), so the zero-match diagnostic is expected.
+        with pytest.warns(UserWarning, match="matched zero sites"):
+            log = tl.trace(
+                CandidateEvictionModel(),
+                torch.randn(1, 1, 4, 4),
+                save=tl.func("conv2d") & tl.followed_by(tl.func("relu")),
+                lookback=1,
+                lookback_payload_policy="detached_raw",
+                random_seed=123,
+            )
     candidates = getattr(log, "_predicate_lookback_candidates")
     assert len(candidates) <= 1
     assert tuple(candidate.raw_label for candidate in candidates) == (_conv_ops(log)[1]._label_raw,)
