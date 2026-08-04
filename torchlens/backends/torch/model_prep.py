@@ -2176,15 +2176,6 @@ def _is_bottom_level_submodule_exit(trace: "Trace", t: torch.Tensor, submodule: 
 # ---------------------------------------------------------------------------
 
 
-def get_all_submodules(model: nn.Module, is_top_level_model: bool = True) -> list[nn.Module]:
-    """Return all modules reachable from ``model`` (including itself when top-level).
-
-    Uses ``model.modules()`` which handles shared-module deduplication
-    internally via ``id()`` checks.
-    """
-    return list(model.modules())
-
-
 def clear_hooks(hook_handles: list[Any]) -> None:
     """Clears a list of hook handles."""
     for hook_handle in hook_handles:

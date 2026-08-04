@@ -730,12 +730,12 @@ def _live_runtime_input_leaves(input_args: Any, input_kwargs: Any) -> list[torch
 
     Mirrors the capture-side flatten (``backend.fetch_label_move_input_tensors``:
     ``get_vars_of_type_from_obj`` per positional arg, then per kwarg value, at
-    ``search_depth=5``) so leaf ORDER pairs 1:1 with the capture's recorded
+    cycle-safe finite input walk) so leaf ORDER pairs 1:1 with the capture's recorded
     ``input_layers`` ordering. Returns ``None`` on any traversal failure -- the
     caller then skips classification entirely (never masks the native error).
     """
 
-    from .utils.introspection import get_vars_of_type_from_obj
+    from .utils.introspection import INPUT_SEARCH_DEPTH_LIMIT, get_vars_of_type_from_obj
 
     try:
         if isinstance(input_args, (list, tuple)):
@@ -744,10 +744,30 @@ def _live_runtime_input_leaves(input_args: Any, input_kwargs: Any) -> list[torch
             args_list = [input_args]
         leaves: list[torch.Tensor] = []
         for arg in args_list:
-            leaves.extend(get_vars_of_type_from_obj(arg, torch.Tensor, search_depth=5))
+            unresolved: list[str] = []
+            leaves.extend(
+                get_vars_of_type_from_obj(
+                    arg,
+                    torch.Tensor,
+                    search_depth=INPUT_SEARCH_DEPTH_LIMIT,
+                    depth_exceeded_paths=unresolved,
+                )
+            )
+            if unresolved:
+                return None
         if input_kwargs:
             for value in input_kwargs.values():
-                leaves.extend(get_vars_of_type_from_obj(value, torch.Tensor, search_depth=5))
+                unresolved = []
+                leaves.extend(
+                    get_vars_of_type_from_obj(
+                        value,
+                        torch.Tensor,
+                        search_depth=INPUT_SEARCH_DEPTH_LIMIT,
+                        depth_exceeded_paths=unresolved,
+                    )
+                )
+                if unresolved:
+                    return None
         return leaves
     except Exception:
         return None

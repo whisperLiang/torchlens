@@ -34,23 +34,3 @@ class InternalCaptureConfig:
     random_seed: int | None
     postprocess: bool
     stop: StopDirective
-
-
-def capture_config_for_trace(trace: object) -> InternalCaptureConfig | None:
-    """Return the grouped capture config attached to a trace-like object.
-
-    Parameters
-    ----------
-    trace
-        Trace-like capture session.
-
-    Returns
-    -------
-    InternalCaptureConfig | None
-        Attached config, if present.
-    """
-
-    config = getattr(trace, "_capture_config", None)
-    if isinstance(config, InternalCaptureConfig):
-        return config
-    return None

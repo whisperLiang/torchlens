@@ -3688,67 +3688,6 @@ def _get_parent_contents(
     raise ValueError("Parent layer not found in function arguments.")
 
 
-def log_function_output_tensors_predicate(
-    self: "Trace",
-    func: Callable[..., Any],
-    func_name: str,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    arg_copies: tuple[Any, ...],
-    kwarg_copies: dict[str, Any],
-    out_orig: Any,
-    is_bottom_level_func: bool,
-    func_call_id: int,
-) -> None:
-    """Compatibility shim for predicate-mode operation emission."""
-
-    _emit_operation_events(
-        get_capture_producer_policy("predicate"),
-        self,
-        func,
-        func_name,
-        args,
-        kwargs,
-        arg_copies,
-        kwarg_copies,
-        out_orig,
-        FuncExecutionContext(time_elapsed=0.0, rng_states={}, autocast_state={}),
-        is_bottom_level_func,
-        func_call_id,
-    )
-
-
-def log_function_output_tensors_exhaustive(
-    self: "Trace",
-    func: Callable[..., Any],
-    func_name: str,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    arg_copies: tuple[Any, ...],
-    kwarg_copies: dict[str, Any],
-    out_orig: Any,
-    exec_ctx: FuncExecutionContext,
-    is_bottom_level_func: bool,
-    func_call_id: int,
-) -> None:
-    """Compatibility shim for exhaustive-mode operation emission."""
-
-    _emit_operation_events(
-        get_capture_producer_policy("exhaustive"),
-        self,
-        func,
-        func_name,
-        args,
-        kwargs,
-        arg_copies,
-        kwarg_copies,
-        out_orig,
-        exec_ctx,
-        is_bottom_level_func,
-        func_call_id,
-    )
-
-
 def _output_should_be_logged(out: Any, is_bottom_level_func: bool) -> bool:
     """Determine whether an output value should be logged as a new graph node.
 

@@ -669,6 +669,7 @@ def _get_op_nums_from_user_labels(
 
 
 def _fetch_label_move_input_tensors(
+    session: object,
     input_args: list[Any],
     input_arg_names: list[str],
     input_kwargs: dict[Any, Any],
@@ -678,6 +679,8 @@ def _fetch_label_move_input_tensors(
 
     Parameters
     ----------
+    session:
+        Active capture session receiving input-boundary diagnostics.
     input_args:
         Copied positional inputs that may be mutated for internal device moves.
     input_arg_names:
@@ -702,7 +705,7 @@ def _fetch_label_move_input_tensors(
             )
         backend = spec.capture_backend()
     return backend.fetch_label_move_input_tensors(
-        None,
+        session,
         input_args,
         input_arg_names,
         input_kwargs,
@@ -1254,6 +1257,7 @@ def run_and_log_inputs_through_model(
                 input_tensors_any,
                 input_tensor_addresses,
             ) = _fetch_label_move_input_tensors(
+                self,
                 input_args,
                 input_arg_names,
                 input_kwargs,

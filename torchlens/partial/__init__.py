@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from html import escape
 from typing import TYPE_CHECKING, Any, Literal
@@ -12,6 +13,10 @@ if TYPE_CHECKING:
     from torchlens.debug._audit import TraceAudit
     from torchlens.data_classes.op import Op
     from torchlens.data_classes.trace import Trace
+
+
+_FAILED_CAPTURE_REGISTRY_LIMIT = 128
+_FAILED_CAPTURE_REGISTRY: OrderedDict[int, tuple[BaseException, "PartialTrace"]] = OrderedDict()
 
 
 @dataclass(frozen=True)
@@ -236,7 +241,34 @@ def from_failed_capture(exception: BaseException) -> PartialTrace:
     partial_log = getattr(exception, "partial_log", None)
     if isinstance(partial_log, PartialTrace):
         return partial_log
+    registry_entry = _FAILED_CAPTURE_REGISTRY.get(id(exception))
+    if registry_entry is not None and registry_entry[0] is exception:
+        _FAILED_CAPTURE_REGISTRY.move_to_end(id(exception))
+        return registry_entry[1]
     raise ValueError("exception does not contain a TorchLens partial capture")
+
+
+def _register_failed_capture(exception: BaseException, partial_log: PartialTrace) -> None:
+    """Retain partial recovery when an exception rejects attribute assignment.
+
+    Parameters
+    ----------
+    exception:
+        Original user exception that could not accept ``partial_log``.
+    partial_log:
+        Constructed partial capture associated with the exception by identity.
+
+    Returns
+    -------
+    None
+        Stores a bounded strong-reference entry for :func:`from_failed_capture`.
+    """
+
+    exception_id = id(exception)
+    _FAILED_CAPTURE_REGISTRY[exception_id] = (exception, partial_log)
+    _FAILED_CAPTURE_REGISTRY.move_to_end(exception_id)
+    while len(_FAILED_CAPTURE_REGISTRY) > _FAILED_CAPTURE_REGISTRY_LIMIT:
+        _FAILED_CAPTURE_REGISTRY.popitem(last=False)
 
 
 def _materialize_failed_capture_events(trace: Trace) -> None:

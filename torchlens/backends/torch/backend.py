@@ -5,12 +5,14 @@ from __future__ import annotations
 import dataclasses
 import contextlib
 import inspect
+import warnings
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, Iterator, cast
 
 import torch
 
 from ... import _state
+from ..._errors import TorchLensCaptureGapWarning
 from ...data_classes.internal_types import FuncExecutionContext
 from ..._io import BlobRef as PortableBlobRef
 from ...capture.session import capture_session_for
@@ -27,10 +29,13 @@ from ...ir.trace_build_state import TraceBuildState
 from ...utils.arg_handling import (
     INPUT_WAS_PARAMETER_ATTR,
     normalize_input_args,
-    safe_copy_args,
-    safe_copy_kwargs,
+    safe_copy_input_tree,
 )
-from ...utils.introspection import get_vars_of_type_from_obj, nested_assign
+from ...utils.introspection import (
+    INPUT_SEARCH_DEPTH_LIMIT,
+    get_vars_of_type_from_obj,
+    nested_assign,
+)
 from ...utils.rng import log_current_rng_states, set_random_seed
 from ...utils.rng import set_rng_from_saved_states
 from ...utils.tensor_utils import _is_cuda_available, safe_copy
@@ -56,6 +61,51 @@ from .wrappers import unwrap_torch, wrap_torch
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace
+
+
+def _record_input_semantics_gaps(
+    session: object,
+    gaps: list[str] | tuple[str, ...],
+    *,
+    reason: str,
+) -> None:
+    """Record and warn about input-boundary semantics that cannot be verified.
+
+    Parameters
+    ----------
+    session:
+        Active capture session receiving private witness diagnostics.
+    gaps:
+        Human-readable input paths or copy failures.
+    reason:
+        Stable internal reason identifying the failed input-boundary proof.
+
+    Returns
+    -------
+    None
+        Appends fail-closed witness diagnostics and emits one visible warning.
+    """
+
+    if not gaps:
+        return
+    reports = session.__dict__.setdefault("completeness_diagnostics", [])
+    for gap in gaps:
+        reports.append(
+            {
+                "operator": None,
+                "reason": reason,
+                "input_path": gap,
+                "scope": "input_boundary",
+                "enforced": False,
+            }
+        )
+    warnings.warn(
+        "TorchLens cannot verify the captured model-input semantics "
+        f"({reason}); affected path(s): {', '.join(gaps)}. The completeness "
+        "verdict is ceilinged at capture_verified=False.",
+        TorchLensCaptureGapWarning,
+        stacklevel=3,
+    )
 
 
 def _get_input_arg_names(model: torch.nn.Module, input_args: list[Any]) -> list[str]:
@@ -383,7 +433,6 @@ class TorchBackend:
              (in ``fetch_label_move_input_tensors``) don't mutate the caller's data.
           4. Detect model device from first param or buffer (for auto-moving inputs).
         """
-        del session
         torch_model = cast(torch.nn.Module, model)
         if isinstance(torch_model, torch.nn.DataParallel):
             torch_model = torch_model.module
@@ -405,10 +454,19 @@ class TorchBackend:
         else:
             model_device = "cpu"
 
-        # Clone tensors to protect user's originals from in-place device moves.
-        input_args = safe_copy_args(input_args)
+        # Copy args and kwargs as ONE graph so repeated tensor identity, shared
+        # storage, view geometry, strides, and offsets survive caller protection.
+        input_args, input_kwargs, input_copy_gaps = safe_copy_input_tree(
+            input_args,
+            input_kwargs,
+            require_distinct_tensor_sites=bool(getattr(session, "intervention_ready", False)),
+        )
+        _record_input_semantics_gaps(
+            session,
+            input_copy_gaps,
+            reason="input_copy_semantics_unverifiable",
+        )
         input_arg_names = _get_input_arg_names(torch_model, input_args)
-        input_kwargs = safe_copy_kwargs(input_kwargs)
 
         return input_args, input_kwargs, input_arg_names, model_device
 
@@ -442,19 +500,47 @@ class TorchBackend:
 
         Notes
         -----
-        Handles nested structures (lists, tuples, dicts) up to ``search_depth=5``.
+        Handles nested structures (lists, tuples, dicts) up to
+        ``INPUT_SEARCH_DEPTH_LIMIT`` with cycle-safe traversal. Reaching that explicit
+        limit records the unresolved path and fails the completeness witness closed.
         Each tensor gets a hierarchical address string like ``"input.x"`` or
         ``"input.x.0.nested"`` that is stored as its ``io_role``.
         """
-        del session
-        input_arg_tensors = [
-            get_vars_of_type_from_obj(arg, torch.Tensor, search_depth=5, return_addresses=True)
-            for arg in input_args
-        ]
-        input_kwarg_tensors = [
-            get_vars_of_type_from_obj(kwarg, torch.Tensor, search_depth=5, return_addresses=True)
-            for kwarg in input_kwargs.values()
-        ]
+        input_arg_tensors = []
+        input_kwarg_tensors = []
+        traversal_gaps: list[str] = []
+        for arg_index, arg in enumerate(input_args):
+            unresolved: list[str] = []
+            input_arg_tensors.append(
+                get_vars_of_type_from_obj(
+                    arg,
+                    torch.Tensor,
+                    search_depth=INPUT_SEARCH_DEPTH_LIMIT,
+                    return_addresses=True,
+                    depth_exceeded_paths=unresolved,
+                )
+            )
+            arg_name = input_arg_names[arg_index]
+            traversal_gaps.extend(
+                f"input.{arg_name}{f'.{path}' if path else ''}" for path in unresolved
+            )
+        for key, kwarg in input_kwargs.items():
+            unresolved = []
+            input_kwarg_tensors.append(
+                get_vars_of_type_from_obj(
+                    kwarg,
+                    torch.Tensor,
+                    search_depth=INPUT_SEARCH_DEPTH_LIMIT,
+                    return_addresses=True,
+                    depth_exceeded_paths=unresolved,
+                )
+            )
+            traversal_gaps.extend(f"input.{key}{f'.{path}' if path else ''}" for path in unresolved)
+        _record_input_semantics_gaps(
+            session,
+            traversal_gaps,
+            reason="input_traversal_depth_exceeded",
+        )
         # Move each tensor to model device.  Plain tuples must be temporarily
         # converted to lists for item assignment, then converted back to
         # preserve type.  This roundtrip only applies to *exact* ``tuple``
@@ -466,12 +552,16 @@ class TorchBackend:
         # silently discard its identity and break downstream named-field
         # access (``batch.edge_features``); ``_assign_nested_input_value``
         # already knows how to mutate those in place via ``attr`` addressing.
+        moved_tensors_by_id: dict[int, torch.Tensor] = {}
         for arg_idx, arg in enumerate(input_args):
             was_tuple = type(arg) is tuple
             if was_tuple:
                 input_args[arg_idx] = list(arg)
             for tensor_idx, (tensor, addr, addr_full) in enumerate(input_arg_tensors[arg_idx]):
-                moved_tensor = tensor.to(model_device)
+                moved_tensor = moved_tensors_by_id.get(id(tensor))
+                if moved_tensor is None:
+                    moved_tensor = tensor.to(model_device)
+                    moved_tensors_by_id[id(tensor)] = moved_tensor
                 if bool(getattr(tensor, INPUT_WAS_PARAMETER_ATTR, False)):
                     setattr(moved_tensor, INPUT_WAS_PARAMETER_ATTR, True)
                 input_arg_tensors[arg_idx][tensor_idx] = (moved_tensor, addr, addr_full)
@@ -486,7 +576,10 @@ class TorchBackend:
 
         for kwarg_idx, (key, val) in enumerate(input_kwargs.items()):
             for tensor_idx, (tensor, addr, addr_full) in enumerate(input_kwarg_tensors[kwarg_idx]):
-                moved_tensor = tensor.to(model_device)
+                moved_tensor = moved_tensors_by_id.get(id(tensor))
+                if moved_tensor is None:
+                    moved_tensor = tensor.to(model_device)
+                    moved_tensors_by_id[id(tensor)] = moved_tensor
                 if bool(getattr(tensor, INPUT_WAS_PARAMETER_ATTR, False)):
                     setattr(moved_tensor, INPUT_WAS_PARAMETER_ATTR, True)
                 input_kwarg_tensors[kwarg_idx][tensor_idx] = (moved_tensor, addr, addr_full)
@@ -501,8 +594,12 @@ class TorchBackend:
         # Address format: "input.<argname>" or "input.<argname>.<nested_path>"
         input_tensors = []
         input_tensor_addresses = []
+        seen_tensor_ids: set[int] = set()
         for arg_idx, arg_tensors in enumerate(input_arg_tensors):
             for tensor, addr, addr_full in arg_tensors:
+                if id(tensor) in seen_tensor_ids:
+                    continue
+                seen_tensor_ids.add(id(tensor))
                 input_tensors.append(tensor)
                 tensor_addr = f"input.{input_arg_names[arg_idx]}"
                 if addr != "":
@@ -511,6 +608,9 @@ class TorchBackend:
 
         for arg_idx, kwarg_tensors in enumerate(input_kwarg_tensors):
             for tensor, addr, addr_full in kwarg_tensors:
+                if id(tensor) in seen_tensor_ids:
+                    continue
+                seen_tensor_ids.add(id(tensor))
                 input_tensors.append(tensor)
                 tensor_addr = f"input.{list(input_kwargs.keys())[arg_idx]}"
                 if addr != "":
@@ -978,7 +1078,7 @@ class TorchBackend:
         # active_logging's __exit__ already turned off the toggle.
         # Clean up model session state and strip TorchLens metadata from any
         # partially-constructed tensor entries to avoid stale references (#110).
-        from ...partial import PartialTrace
+        from ...partial import PartialTrace, _register_failed_capture
 
         if getattr(session, "capture_mode", None) == "predicate":
             from ...ir import CaptureEvents
@@ -993,12 +1093,40 @@ class TorchBackend:
                 failed_fastlog_events.pre_hook_events.extend(events.pre_hook_events)
                 setattr(session, "_failed_fastlog_capture_events", failed_fastlog_events)
         try:
-            exc.partial_log = PartialTrace.from_trace(  # type: ignore[attr-defined]
-                cast("Trace", session),
-                exc,
+            partial_log = PartialTrace.from_trace(cast("Trace", session), exc)
+        except Exception as construction_error:
+            warnings.warn(
+                "TorchLens could not construct partial-trace recovery after the "
+                f"forward failed: {type(construction_error).__name__}: "
+                f"{construction_error}",
+                RuntimeWarning,
+                stacklevel=2,
             )
-        except Exception:
-            pass
+            with contextlib.suppress(Exception):
+                exc.add_note(
+                    "TorchLens partial-trace construction also failed: "
+                    f"{type(construction_error).__name__}: {construction_error}"
+                )
+        else:
+            try:
+                exc.partial_log = partial_log  # type: ignore[attr-defined]
+            except Exception as attachment_error:
+                _register_failed_capture(exc, partial_log)
+                warnings.warn(
+                    "The forward exception rejected TorchLens partial_log attachment; "
+                    "recovery remains available through "
+                    "torchlens.partial.from_failed_capture(exception). "
+                    f"Attachment error: {type(attachment_error).__name__}: "
+                    f"{attachment_error}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                with contextlib.suppress(Exception):
+                    exc.add_note(
+                        "TorchLens retained partial capture recovery in its bounded "
+                        "exception-identity registry; call "
+                        "torchlens.partial.from_failed_capture(exception)."
+                    )
         self.cleanup_model_session(session, prepared_model)
         raw_layer_dict = getattr(session, "_raw_layer_dict", {})
         for label in list(raw_layer_dict.keys()):

@@ -390,6 +390,7 @@ def test_model_device_selection_params_buffers_and_paramless_fallback(
     seen_devices: list[Any] = []
 
     def spy_fetch_label_move_input_tensors(
+        session: object,
         input_args: list[Any],
         input_arg_names: list[str],
         input_kwargs: dict[Any, Any],
@@ -400,7 +401,7 @@ def test_model_device_selection_params_buffers_and_paramless_fallback(
         seen_devices.append(model_device)
         return cast(
             tuple[list[torch.Tensor], list[str]],
-            original(input_args, input_arg_names, input_kwargs, model_device),
+            original(session, input_args, input_arg_names, input_kwargs, model_device),
         )
 
     monkeypatch.setattr(

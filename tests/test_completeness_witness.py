@@ -45,6 +45,44 @@ class _WrappedOpsModel(nn.Module):
         return torch.sigmoid(torch.relu(x)).add(1)
 
 
+class _AliasedInputMutationModel(nn.Module):
+    """Mutate one input site before reading a second aliased site."""
+
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        """Return a value that proves whether ``a`` and ``b`` stayed identical."""
+
+        a.add_(10.0)
+        return b + 2.0
+
+
+class _StorageOffsetBranchModel(nn.Module):
+    """Branch on physical input-view metadata preserved by capture copying."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return different values for base tensors and nonzero-offset views."""
+
+        adjustment = 100.0 if x.storage_offset() == 0 else -100.0
+        return x + adjustment
+
+
+class _DeepInputModel(nn.Module):
+    """Consume a tensor nested below the historical five-level boundary."""
+
+    def __init__(self, depth: int) -> None:
+        """Store the number of list levels to unwrap."""
+
+        super().__init__()
+        self.depth = depth
+
+    def forward(self, nested: object) -> torch.Tensor:
+        """Unwrap ``nested`` and add one to its tensor leaf."""
+
+        value = nested
+        for _ in range(self.depth):
+            value = value[0]  # type: ignore[index]
+        return value + 1.0  # type: ignore[operator, no-any-return]
+
+
 class _DirectAtenGapModel(nn.Module):
     """Run one deliberately unwrapped aten op before a represented sink."""
 
@@ -343,6 +381,89 @@ def test_wrapped_ops_have_zero_unaccounted_dispatches() -> None:
     assert trace.completeness_diagnostics == []
     assert trace.capture_verified is True
     assert trace.capture_verification_reason == "dispatch_witness_verified"
+
+
+@pytest.mark.smoke
+def test_input_copy_preserves_alias_mutation_semantics_and_validation() -> None:
+    """Caller protection preserves repeated tensor identity across model sites."""
+
+    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    plain_input = torch.tensor([1.0])
+    plain_output = _AliasedInputMutationModel()(plain_input, plain_input)
+    capture_input = torch.tensor([1.0])
+    trace = tl.trace(_AliasedInputMutationModel(), [capture_input, capture_input])
+    captured_output = trace[trace.output_layers[0]].out
+
+    assert plain_output.tolist() == [13.0]
+    assert captured_output.tolist() == [13.0]
+    assert capture_input.tolist() == [1.0]
+    assert len(trace.input_layers) == 1
+    assert trace.capture_verified is True
+    assert trace.completeness_witness_verified is True
+    validation_input = torch.tensor([1.0])
+    assert (
+        tl.validate_forward_pass(
+            _AliasedInputMutationModel(),
+            [validation_input, validation_input],
+        )
+        is True
+    )
+
+
+@pytest.mark.smoke
+def test_input_copy_preserves_nonzero_storage_offset_semantics() -> None:
+    """A copied tensor view retains its physical storage offset."""
+
+    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    plain_input = torch.arange(6.0)[2:5]
+    plain_output = _StorageOffsetBranchModel()(plain_input)
+    capture_input = torch.arange(6.0)[2:5]
+    trace = tl.trace(_StorageOffsetBranchModel(), capture_input)
+
+    assert plain_output.tolist() == [-98.0, -97.0, -96.0]
+    assert trace[trace.output_layers[0]].out.tolist() == [-98.0, -97.0, -96.0]
+    assert trace.capture_verified is True
+    assert trace.completeness_witness_verified is True
+
+
+@pytest.mark.smoke
+def test_deep_input_tensor_is_captured_and_witnessed() -> None:
+    """A seven-level tensor input remains a represented graph source."""
+
+    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    nested: object = torch.tensor([5.0])
+    for _ in range(7):
+        nested = [nested]
+    trace = tl.trace(_DeepInputModel(7), nested)
+
+    assert len(trace.input_layers) == 1
+    assert not any(op.unattributed_tensor_args for op in trace.ops)
+    assert trace.capture_verified is True
+    assert trace.completeness_witness_verified is True
+    assert trace.capture_verification_reason == "dispatch_witness_verified"
+
+
+@pytest.mark.smoke
+def test_input_depth_limit_fails_closed_with_unresolved_path() -> None:
+    """The retained safety ceiling names its frontier and forbids verification."""
+
+    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    nested: object = torch.tensor([5.0])
+    for _ in range(70):
+        nested = [nested]
+    with pytest.warns(TorchLensCaptureGapWarning, match="input_traversal_depth_exceeded"):
+        trace = tl.trace(_DeepInputModel(70), nested)
+
+    assert trace.input_layers == []
+    assert trace.capture_verified is False
+    assert trace.completeness_witness_verified is False
+    assert trace.capture_verification_reason == "input_boundary_unverifiable"
+    input_gap = next(
+        report
+        for report in trace.completeness_diagnostics
+        if report["reason"] == "input_traversal_depth_exceeded"
+    )
+    assert input_gap["input_path"].startswith("input.nested.0.0")
 
 
 @pytest.mark.smoke

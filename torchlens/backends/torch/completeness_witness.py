@@ -5888,7 +5888,9 @@ def _finalize_census(state: _WitnessState) -> None:
     trace.completeness_witness_verified = not reports
     if reports:
         trace.capture_verified = False
-        trace.capture_verification_reason = "dispatch_witness_unaccounted_ops"
+        trace.capture_verification_reason = (
+            "dispatch_witness_unaccounted_ops" if diagnostics else "input_boundary_unverifiable"
+        )
         if diagnostics:
             first = diagnostics[0]
             warnings.warn(
@@ -5914,6 +5916,31 @@ def _finalize_census(state: _WitnessState) -> None:
             if detector_verified is True
             else "dispatch_witness_verified"
         )
+
+
+def _finalize_input_semantics_without_census(trace: Any) -> None:
+    """Apply input-boundary fail-closed state when the dispatch census is off.
+
+    Parameters
+    ----------
+    trace:
+        Trace or Recording runtime trace carrying private input-gap diagnostics.
+
+    Returns
+    -------
+    None
+        Ceilings ``capture_verified`` without claiming that the disabled dispatch
+        witness itself ran.
+    """
+
+    reports = getattr(trace, "completeness_diagnostics", ())
+    if not any(
+        isinstance(report, Mapping) and report.get("scope") == "input_boundary"
+        for report in reports
+    ):
+        return
+    trace.capture_verified = False
+    trace.capture_verification_reason = "input_boundary_unverifiable"
 
 
 @contextmanager
@@ -5952,7 +5979,10 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
     # unchanged. The default (non-runnable) capture path installs nothing.
     record_escapes = bool(getattr(trace, "intervention_ready", False))
     if mode == "off" and not record_escapes:
-        yield
+        try:
+            yield
+        finally:
+            _finalize_input_semantics_without_census(trace)
         return
     guard_passes = getattr(trace, "capture_guard_passes", [])
     guard_pass_index = len(guard_passes) if guard_passes else 1
@@ -5988,6 +6018,8 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
                 finally:
                     if mode == "shadow":
                         _finalize_census(state)
+                    else:
+                        _finalize_input_semantics_without_census(trace)
                     _finalize_runnable_ledger(state)
         finally:
             _ACTIVE_WITNESS_STATE = prior_active_state
@@ -5999,3 +6031,5 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
         finally:
             if mode == "shadow":
                 _finalize_census(state)
+            else:
+                _finalize_input_semantics_without_census(trace)

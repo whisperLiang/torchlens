@@ -82,13 +82,6 @@ def pop_frame(stack: list[ModuleStackFrame], frame: ModuleStackFrame) -> None:
     stack.pop()
 
 
-def current_address(stack: list[ModuleStackFrame]) -> str | None:
-    """Return the address of the topmost frame, or None if stack empty."""
-    if not stack:
-        return None
-    return stack[-1].address
-
-
 def snapshot(stack: list[ModuleStackFrame]) -> tuple[ModuleStackFrame, ...]:
     """Return an immutable snapshot of the stack."""
     return tuple(stack)

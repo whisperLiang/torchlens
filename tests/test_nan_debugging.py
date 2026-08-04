@@ -130,6 +130,39 @@ def test_partial_trace_constructible_from_failed_capture() -> None:
     assert "__truediv__" in partial.first_nonfinite()
 
 
+def test_partial_trace_recoverable_when_exception_rejects_attachment() -> None:
+    """A bounded identity registry preserves partials for frozen exceptions."""
+
+    class RejectingPartialLogError(Exception):
+        """Exception that refuses TorchLens' normal recovery attribute."""
+
+        def __setattr__(self, name: str, value: object) -> None:
+            """Reject ``partial_log`` while allowing ordinary exception state."""
+
+            if name == "partial_log":
+                raise AttributeError("partial_log is frozen")
+            super().__setattr__(name, value)
+
+    class FailingModel(nn.Module):
+        """Capture one operation before raising the frozen exception."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Raise after creating a recoverable captured prefix."""
+
+            _ = x + 1
+            raise RejectingPartialLogError("boom")
+
+    with pytest.warns(RuntimeWarning, match="rejected TorchLens partial_log attachment"):
+        with pytest.raises(RejectingPartialLogError) as exc_info:
+            tl.trace(FailingModel(), torch.ones(1))
+
+    assert not hasattr(exc_info.value, "partial_log")
+    partial = tl.partial.from_failed_capture(exc_info.value)
+    assert isinstance(partial, PartialTrace)
+    assert partial.original_exception is exc_info.value
+    assert len(partial.raw_layers) >= 1
+
+
 def test_partial_trace_attached_to_generic_forward_exception() -> None:
     """Failed non-NaN captures also attach a PartialTrace."""
 
