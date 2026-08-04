@@ -1748,7 +1748,7 @@ def trace(
         and transform is MISSING
         and (capture is None or not capture.is_field_explicit("transform"))
     ):
-        from torchlens import autoroute
+        from . import autoroute
 
         autoroute_kwargs = {
             "input_kwargs": input_kwargs,

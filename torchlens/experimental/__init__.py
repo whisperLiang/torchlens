@@ -181,7 +181,7 @@ class Session:
 
         import torchlens
 
-        bundle_fn = cast(Callable[..., Any], torchlens.bundle)
+        bundle_fn = torchlens.bundle
         return bundle_fn(
             {str(metadata["name"]): log for metadata, log in zip(self.invocations, self.logs)}
         )

@@ -3,8 +3,50 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TypeAlias
 
 from . import TorchLensIOError
+
+ExceptionType: TypeAlias = type[Exception]
+
+
+def reject_symlink_path(
+    path: Path,
+    *,
+    context: str,
+    exc_type: ExceptionType = TorchLensIOError,
+    message_prefix: str = "Refusing symlinked",
+    trailing_period: bool = True,
+) -> None:
+    """Reject symlink paths with a caller-chosen exception policy.
+
+    Parameters
+    ----------
+    path:
+        Path to validate.
+    context:
+        Human-readable path role included in the exception message.
+    exc_type:
+        Exception type raised when ``path`` is a symlink.
+    message_prefix:
+        Prefix text used before the contextual path description.
+    trailing_period:
+        Whether to end the message with ``"."``.
+
+    Returns
+    -------
+    None
+        Returns when ``path`` is not a symlink.
+
+    Raises
+    ------
+    Exception
+        Raised as ``exc_type`` when ``path`` is a symlink.
+    """
+
+    if path.is_symlink():
+        suffix = "." if trailing_period else ""
+        raise exc_type(f"{message_prefix} {context}: {path}{suffix}")
 
 
 def resolve_bundle_blob_path(bundle_root: Path, relative_path: str) -> Path:

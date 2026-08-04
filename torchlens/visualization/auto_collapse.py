@@ -834,43 +834,6 @@ def module_collapse_score(module: "Module") -> float:
     return dict(collapse_order(trace)).get(module.address, 0.0)
 
 
-def _compute_dimless_structural_digests(trace: "Trace") -> dict[str, str]:
-    """Compute module structural digests that ignore dimensions and parameters.
-
-    Parameters
-    ----------
-    trace:
-        Trace whose module hierarchy is being fingerprinted.
-
-    Returns
-    -------
-    dict[str, str]
-        Digest keyed by pass-free module address.
-    """
-
-    signals = _compute_signal_skeleton(trace)
-    digests: dict[str, str] = {}
-    modules = sorted(trace.modules, key=lambda module: module.address_depth, reverse=True)
-    for module in modules:
-        signal = signals[module.address]
-        child_sigs = tuple(
-            digests[child_address]
-            for child_address in getattr(module, "address_children", ()) or ()
-            if child_address in digests
-        )
-        payload = repr(
-            (
-                getattr(module, "class_name", ""),
-                child_sigs,
-                len(signal.subtree_ops),
-                int(getattr(module, "num_layers", 0) or 0),
-                _normalized_internal_topology(trace, signal.subtree_ops),
-            )
-        ).encode("utf-8")
-        digests[module.address] = hashlib.sha1(payload).hexdigest()
-    return digests
-
-
 def _normalized_internal_topology(
     trace: "Trace",
     subtree_ops: tuple[str, ...],

@@ -19,7 +19,7 @@ import subprocess
 import sys
 import warnings
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any, Iterable, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import graphviz
 
@@ -183,17 +183,6 @@ def html_escape(value: str) -> str:
     """
 
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def format_node_html(lines: Iterable[str]) -> str:
-    """Wrap pre-escaped label lines into a Graphviz HTML-like label string.
-
-    The caller is responsible for escaping content (use :func:`html_escape`)
-    -- a deliberate choice so callers can embed ``<B>``/``<I>``/``<FONT>``
-    tags where they want emphasis without us double-escaping them.
-    """
-
-    return "<" + "<BR/>".join(lines) + ">"
 
 
 def make_module_cluster_label(
