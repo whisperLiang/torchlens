@@ -56,6 +56,29 @@ def _snapshot_exhaustive_module_stack(self: "Trace") -> list[tuple[str, int]]:
     ]
 
 
+def _predicate_event_was_appended(trace: "Trace", label_raw: str) -> bool:
+    """Return whether predicate capture already appended ``label_raw``.
+
+    Parameters
+    ----------
+    trace:
+        Active trace whose capture-event index may already contain the source
+        event.
+    label_raw:
+        Raw label used for the source input or buffer event.
+
+    Returns
+    -------
+    bool
+        True when the projected source event is already present.
+    """
+
+    capture_events = getattr(trace, "capture_events", None)
+    if capture_events is None:
+        return False
+    return label_raw in capture_events.op_event_by_label_raw
+
+
 def log_source_tensor(
     self: "Trace", t: torch.Tensor, source: str, extra_address: str | None = None
 ) -> None:
@@ -183,10 +206,7 @@ def log_source_tensor_predicate(
     except Exception as exc:
         state.handle_predicate_exception(ctx, exc)
     finally:
-        if not halt_only and not any(
-            event.raw_index == raw_index
-            for event in getattr(getattr(self, "capture_events", None), "op_events", ())
-        ):
+        if not halt_only and not _predicate_event_was_appended(self, ctx.raw_label or ctx.label):
             append_projected_event(
                 self,
                 ctx,

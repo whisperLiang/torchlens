@@ -190,6 +190,11 @@ def test_halt_from_inside_module_enter_predicate() -> None:
     assert recording.halted is True
     assert recording.halt_reason == "module enter"
     assert any(record.ctx.kind == "module_enter" for record in recording.records)
+    assert [
+        event.label_raw
+        for event in recording._capture_events.op_events
+        if event.label_raw == "linear:enter:1"
+    ] == ["linear:enter:1"]
 
 
 def test_halt_from_inside_module_exit_predicate() -> None:
@@ -215,6 +220,11 @@ def test_halt_from_inside_module_exit_predicate() -> None:
     assert recording.halted is True
     assert recording.halt_reason == "module exit"
     assert any(record.ctx.kind == "module_enter" for record in recording.records)
+    assert [
+        event.label_raw
+        for event in recording._capture_events.op_events
+        if event.label_raw == "linear:exit:1"
+    ] == ["linear:exit:1"]
 
 
 def test_halt_source_predicate() -> None:
@@ -239,6 +249,11 @@ def test_halt_source_predicate() -> None:
     assert recording.halted is True
     assert recording.halt_reason == "input"
     assert recording.records == []
+    assert [
+        event.label_raw
+        for event in recording._capture_events.op_events
+        if event.label_raw == "input_1_raw"
+    ] == ["input_1_raw"]
 
 
 def test_record_halt_predicate_can_stop_on_source_event() -> None:

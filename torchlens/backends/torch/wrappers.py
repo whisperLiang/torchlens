@@ -2689,6 +2689,9 @@ def clear_patch_detached_references_cache() -> None:
     """
 
     _state._crawled_module_keys.clear()
+    _state._crawled_module_identities.clear()
+    _state._detached_positive_module_ids.clear()
+    _state._detached_positive_modules.clear()
     _state._dir_cache.clear()
     _state._detached_source_has_torch.clear()
 
