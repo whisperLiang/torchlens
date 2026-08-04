@@ -35,7 +35,10 @@ from torchlens.fastlog import RecordContext
 from torchlens.options import SaveOptions
 from torchlens.validation import check_metadata_invariants
 from torchlens.intervention.types import DictKey
-from torchlens.validation.invariants import check_func_call_id_invariant
+from torchlens.validation.invariants import (
+    _check_graph_connectivity,
+    check_func_call_id_invariant,
+)
 from torchlens.validation import validate_saved_outs as validate_from_subpkg
 from torchlens.validation.exemptions import (
     SKIP_VALIDATION_ENTIRELY,
@@ -1969,6 +1972,53 @@ def test_completeness_backstop_dispatchless_captured_op_is_benign() -> None:
         )
     )
     assert dispatch == captured
+
+
+def test_completeness_backstop_never_claims_match_on_empty_census() -> None:
+    """An empty census proves nothing and must not report ``matched``."""
+
+    probe = _backstop_trace([_backstop_op(index) for index in range(1, 6)], [], [])
+    dispatch, captured = completeness_backstop_counts(probe)
+    assert (dispatch, captured) == (0, 0)
+
+    result = _dispatch_op_count_matches_capture(
+        SimpleNamespace(
+            _validation_dispatch_op_count=dispatch,
+            _validation_captured_dispatchable_op_count=captured,
+            num_ops=5,
+        )
+    )
+    assert result.decision == "unverified"
+    assert not result.failed
+    assert result.reason == "dispatch_op_count_witness_empty"
+
+
+def test_completeness_backstop_empty_census_does_not_fail_dispatchless_capture() -> None:
+    """A correct capture whose only ops dispatch nothing must still validate.
+
+    ``torch.broadcast_tensors`` on equal shapes returns its inputs and emits ZERO
+    aten dispatches, so a real, correct capture of it produces an EMPTY witness
+    census -- state indistinguishable from cleared records. Hard-failing the
+    empty census therefore false-fails this correct model.
+    """
+
+    class OnlyDispatchlessOps(nn.Module):
+        """Model whose single op legitimately owns no aten dispatch."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return one arm of a same-shape broadcast."""
+
+            broadcast, _ = torch.broadcast_tensors(x, x)
+            return broadcast
+
+    model = OnlyDispatchlessOps()
+    inputs = torch.randn(2, 3)
+    probe = trace_fn(model, inputs, random_seed=42)
+    try:
+        assert probe.num_ops > 0
+    finally:
+        probe.cleanup()
+    assert tl.validate(model, inputs, scope="forward")
 
 
 def test_completeness_backstop_unowned_dispatch_fails_the_gate() -> None:
@@ -5183,6 +5233,20 @@ def test_param_deep_xref_rejects_missing_op_back_reference() -> None:
         log.cleanup()
 
 
+def test_param_xref_rejects_nonexistent_parameter_address() -> None:
+    """A used parameter address must remain one of its canonical addresses."""
+
+    log = _make_clean_log()
+    try:
+        param = next(param for param in log.param_logs if param.used_by_ops)
+        param.address = "nonexistent.module.weight"
+
+        with pytest.raises(MetadataInvariantError, match="param_xrefs"):
+            check_metadata_invariants(log)
+    finally:
+        log.cleanup()
+
+
 def test_param_deep_xref_preconditions_reach_real_trace() -> None:
     """Param deep-xref checks inspect populated reciprocal links on a real trace."""
 
@@ -5566,6 +5630,24 @@ def test_bad_higher_order_creator_chain_order_raises() -> None:
         log.cleanup()
 
 
+def test_ordinary_backward_handle_rejects_invalid_origin_pass() -> None:
+    """First-order GradFn handles validate origin pass without creator metadata."""
+
+    log = _make_backward_log()
+    try:
+        victim = next(
+            grad_fn_handle
+            for grad_fn_handle in log.grad_fn_logs.values()
+            if grad_fn_handle.creator_object_id is None
+        )
+        victim.origin_backward_pass = 999
+
+        with pytest.raises(MetadataInvariantError, match="invalid origin backward pass"):
+            check_metadata_invariants(log)
+    finally:
+        log.cleanup()
+
+
 def test_corruption_parent_child_link():
     """Breaking a parent→child link raises MetadataInvariantError."""
     log = _make_clean_log()
@@ -5776,6 +5858,50 @@ class _RecurrentFF(nn.Module):
         return x
 
 
+class _RecurrentOrderingModel(nn.Module):
+    """Three-pass linear/tanh model for pass-qualified ordering corruption."""
+
+    def __init__(self) -> None:
+        """Initialize the shared recurrent linear layer."""
+
+        super().__init__()
+        self.linear = nn.Linear(5, 5)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the shared linear/tanh pair three times."""
+
+        for _ in range(3):
+            x = torch.tanh(self.linear(x))
+        return x
+
+
+class _PrunedOrphanModel(nn.Module):
+    """Model with a pruned ReLU whose final label must stay inactive."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute one dead ReLU and return an independent live branch."""
+
+        orphan_source = torch.ones(5, 5)
+        _dead = torch.relu(orphan_source + 2.0)
+        return x + 1.0
+
+
+class _RenumberedOrphanCollisionModel(nn.Module):
+    """Model where a pruned orphan's raw stem collides with a live final label.
+
+    The pruned orphan is ``relu_1_3_raw``; renumbering over the survivors gives
+    the LIVE trailing ReLU the final label ``relu_1_3``. Any orphan-survival
+    check that strips ``_raw`` to guess a final label false-fails this model.
+    """
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run a dead ReLU island ahead of a three-op live branch."""
+
+        orphan_source = torch.ones(5, 5)
+        _dead = torch.relu(orphan_source)
+        return torch.relu((x + 1.0) * 2.0)
+
+
 class _NestedModel(nn.Module):
     """Model with nested submodules for module containment tests."""
 
@@ -5865,6 +5991,29 @@ def test_corruption_graph_ordering_topo_violation():
     log.cleanup()
 
 
+def test_corruption_graph_ordering_pass_qualified_back_edge() -> None:
+    """A third-pass linear parent cannot point backward to first-pass tanh."""
+
+    log = trace_fn(_RecurrentOrderingModel(), torch.randn(2, 5), random_seed=42)
+    try:
+        linear_passes = [op for op in log.layer_list if op.func_name == "linear"]
+        tanh_passes = [op for op in log.layer_list if op.func_name == "tanh"]
+        assert [op.pass_index for op in linear_passes] == [1, 2, 3]
+        assert [op.pass_index for op in tanh_passes] == [1, 2, 3]
+        back_edge_parent = linear_passes[2]
+        back_edge_child = tanh_passes[0]
+        assert back_edge_parent.label.endswith(":3")
+        assert back_edge_child.label.endswith(":1")
+
+        back_edge_child.parents.append(back_edge_parent.label)
+        back_edge_parent.children.append(back_edge_child.label)
+
+        with pytest.raises(MetadataInvariantError, match="graph_ordering"):
+            check_metadata_invariants(log)
+    finally:
+        log.cleanup()
+
+
 # -- N. Loop detection corruption --
 
 
@@ -5875,6 +6024,30 @@ def test_corruption_loop_detection_slo_empty():
     with pytest.raises(MetadataInvariantError, match="loop_detection"):
         check_metadata_invariants(log)
     log.cleanup()
+
+
+def test_corruption_loop_detection_self_exclusion_into_seen_group() -> None:
+    """An op pointing at an already-validated group it is not a member of fails.
+
+    The victim's ``recurrent_ops`` names a group whose members all agree with
+    each other, so every group-level check (existence, symmetry, shared
+    ``layer_label``, pass numbering) passes and ONLY the per-op self-inclusion
+    check can catch the corruption. Pins that self-inclusion stays per-op: any
+    future attempt to skip ops whose group key was already validated must keep
+    checking self-inclusion first, or this corruption becomes invisible.
+    """
+
+    log = _make_clean_log()
+    try:
+        donor, victim = log.layer_list[0], log.layer_list[1]
+        assert donor.label != victim.label
+        assert victim.label not in donor.recurrent_ops
+        victim.recurrent_ops = list(donor.recurrent_ops)
+
+        with pytest.raises(MetadataInvariantError, match="not in its own recurrent_ops"):
+            check_metadata_invariants(log)
+    finally:
+        log.cleanup()
 
 
 def test_corruption_loop_detection_slo_asymmetry():
@@ -5989,6 +6162,128 @@ def test_corruption_connectivity_orphan_in_layer_list():
     with pytest.raises(MetadataInvariantError, match="graph_connectivity"):
         check_metadata_invariants(log)
     log.cleanup()
+
+
+def test_corruption_connectivity_pruned_orphan_resurrected_into_final_labels() -> None:
+    """A pruned orphan that was minted a final label is rejected."""
+
+    log = trace_fn(_PrunedOrphanModel(), torch.randn(2, 5), random_seed=42)
+    try:
+        orphan_raw_label = next(label for label in log._orphan_labels if label.startswith("relu"))
+        assert orphan_raw_label not in log._raw_to_final_op_labels
+        # The exact corruption the check exists for: the prune did not take, so
+        # the dead node reached finalization and was minted a final label.
+        log._raw_to_final_op_labels[orphan_raw_label] = log.op_labels[1]
+
+        with pytest.raises(MetadataInvariantError, match="graph_connectivity"):
+            _check_graph_connectivity(log)
+    finally:
+        log.cleanup()
+
+
+def test_connectivity_accepts_renumbered_orphan_raw_label_collision() -> None:
+    """A live final label equal to a stripped orphan raw label is NOT a failure.
+
+    Final labels are renumbered over the survivors, so a raw label minus its
+    ``_raw`` suffix is NOT the orphan's final label. In this model the pruned
+    orphan ``relu_1_3_raw`` strips to ``relu_1_3``, byte-identical to a
+    genuinely LIVE op's final label, so deriving orphan final labels that way
+    hard-fails a correct capture.
+    """
+
+    log = trace_fn(_RenumberedOrphanCollisionModel(), torch.randn(5, 5), random_seed=42)
+    try:
+        stripped = {label.removesuffix("_raw") for label in log._orphan_labels}
+        assert stripped & set(log.layer_labels), "fixture no longer produces the collision"
+        _check_graph_connectivity(log)
+        check_metadata_invariants(log)
+    finally:
+        log.cleanup()
+
+
+def test_connectivity_accepts_retained_orphan_islands_with_final_labels() -> None:
+    """``keep_orphans=True`` islands legitimately own final labels.
+
+    A retained orphan island IS labeled and IS present in
+    ``_raw_to_final_op_labels`` by design, so an orphan-resurrection check that
+    keys only on "raw label has a final-label entry" hard-fails every correct
+    ``keep_orphans=True`` capture.
+    """
+
+    from torchlens.options import CaptureOptions
+
+    log = trace_fn(
+        _PrunedOrphanModel(),
+        torch.randn(5, 5),
+        capture=CaptureOptions(keep_orphans=True),
+        random_seed=42,
+    )
+    try:
+        assert log._orphan_labels, "fixture no longer produces orphans"
+        assert set(log._orphan_labels) & set(log._raw_to_final_op_labels), (
+            "retained orphans are expected to carry final labels"
+        )
+        _check_graph_connectivity(log)
+        check_metadata_invariants(log)
+    finally:
+        log.cleanup()
+
+
+def test_connectivity_retained_orphan_mapped_to_live_final_label_is_rejected() -> None:
+    """Excusing retained islands must not excuse a mapping onto a LIVE label."""
+
+    from torchlens.options import CaptureOptions
+
+    log = trace_fn(
+        _PrunedOrphanModel(),
+        torch.randn(5, 5),
+        capture=CaptureOptions(keep_orphans=True),
+        random_seed=42,
+    )
+    try:
+        orphan_raw_label = next(label for label in log._orphan_labels if label.startswith("relu"))
+        log._raw_to_final_op_labels[orphan_raw_label] = log.op_labels[0]
+
+        with pytest.raises(MetadataInvariantError, match="graph_connectivity"):
+            _check_graph_connectivity(log)
+    finally:
+        log.cleanup()
+
+
+def test_param_xrefs_accept_used_param_whose_owner_module_is_never_entered() -> None:
+    """A USED parameter may legitimately have an uninvoked owning module.
+
+    ``F.linear(x, self.lin.weight, self.lin.bias)`` never enters ``self.lin``,
+    and stock ``nn.MultiheadAttention`` bypasses its ``out_proj`` submodule via
+    the fused attention kernel. Requiring the owner module to resolve in
+    ``Trace.modules`` false-fails both correct captures.
+    """
+
+    class FunctionalParamUse(nn.Module):
+        """Model using a submodule's parameters without calling the submodule."""
+
+        def __init__(self) -> None:
+            """Initialize the never-invoked owning submodule."""
+
+            super().__init__()
+            self.lin = nn.Linear(3, 3)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Apply the submodule's weights functionally."""
+
+            return nn.functional.linear(x, self.lin.weight, self.lin.bias)
+
+    for model, inputs in (
+        (FunctionalParamUse(), torch.randn(2, 3)),
+        (nn.TransformerEncoderLayer(8, 2, 16, batch_first=True), torch.randn(2, 5, 8)),
+    ):
+        log = trace_fn(model, inputs, random_seed=42)
+        try:
+            used = [param for param in log.param_logs if param.num_uses_by_ops]
+            assert used, "fixture no longer records used params"
+            check_metadata_invariants(log)
+        finally:
+            log.cleanup()
 
 
 # -- Q. Module containment logic corruption --

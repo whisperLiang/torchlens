@@ -22,7 +22,7 @@ from torchlens.validation import (
     validate_forward_pass,
 )
 from torchlens.validation.core import _check_arglocs_correct_for_arg
-from torchlens.validation.exemptions import _check_lstm_exempt
+from torchlens.validation.exemptions import _check_interpolate_exempt, _check_lstm_exempt
 from torchlens.visualization.rendering import GRADIENT_ARROW_COLOR
 
 
@@ -423,17 +423,76 @@ def test_validation_arglocs_allow_same_parent_tensor_in_multiple_slots() -> None
 
 
 def test_lstm_exemption_only_treats_hidden_state_as_structural() -> None:
-    """LSTM perturbation exemption handles hidden tuples but not params."""
+    """LSTM exemption uses hidden-state position despite equal data content."""
 
     h = torch.zeros(1, 2, 3)
     c = torch.ones(1, 2, 3)
     weight = torch.randn(12, 3)
-    layer = SimpleNamespace(saved_args=(torch.randn(4, 2, 3), (h, c), [weight]))
-    hidden_log = {"hidden": SimpleNamespace(out=c)}
-    weight_log = {"weight": SimpleNamespace(out=weight)}
+    layer = SimpleNamespace(
+        saved_args=(h.clone(), (h, c), [weight]),
+        parent_arg_positions={
+            "args": {0: "equal_data", 1: "hidden", 2: "weight"},
+            "kwargs": {},
+        },
+    )
+    trace = {
+        "equal_data": SimpleNamespace(out=h.clone()),
+        "hidden": SimpleNamespace(out=h),
+        "weight": SimpleNamespace(out=weight),
+    }
 
-    assert _check_lstm_exempt(hidden_log, layer, ["hidden"])  # type: ignore[arg-type]
-    assert not _check_lstm_exempt(weight_log, layer, ["weight"])  # type: ignore[arg-type]
+    assert _check_lstm_exempt(trace, layer, ["hidden"])  # type: ignore[arg-type]
+    assert not _check_lstm_exempt(trace, layer, ["equal_data"])  # type: ignore[arg-type]
+    assert not _check_lstm_exempt(trace, layer, ["weight"])  # type: ignore[arg-type]
+
+
+def test_lstm_exemption_resolves_real_nested_hidden_state_positions() -> None:
+    """Nested ``(1, i)`` hidden-state keys still resolve to positional slot 1.
+
+    A real ``lstm(input, (h0, c0))`` capture registers its hidden-state parents
+    under TUPLE keys ``(1, 0)`` / ``(1, 1)``, never a bare ``1``; matching only
+    bare integer keys silently makes this exemption unreachable.
+    """
+
+    h = torch.zeros(1, 2, 3)
+    c = torch.ones(1, 2, 3)
+    layer = SimpleNamespace(
+        saved_args=(torch.randn(4, 2, 3), (h, c)),
+        parent_arg_positions={
+            "args": {0: "data", (1, 0): "h0", (1, 1): "c0"},
+            "kwargs": {},
+        },
+    )
+    trace = {
+        "data": SimpleNamespace(out=torch.randn(4, 2, 3)),
+        "h0": SimpleNamespace(out=h),
+        "c0": SimpleNamespace(out=c),
+    }
+
+    assert _check_lstm_exempt(trace, layer, ["h0"])  # type: ignore[arg-type]
+    assert _check_lstm_exempt(trace, layer, ["c0"])  # type: ignore[arg-type]
+    assert not _check_lstm_exempt(trace, layer, ["data"])  # type: ignore[arg-type]
+
+
+def test_interpolate_exemption_uses_scale_factor_position_not_content() -> None:
+    """Equal-valued input and scale tensors are disambiguated structurally."""
+
+    equal_value = torch.tensor(2.0)
+    layer = SimpleNamespace(
+        saved_args=(equal_value, None, equal_value.clone()),
+        saved_kwargs={},
+        parent_arg_positions={
+            "args": {0: "equal_data", 2: "scale_factor"},
+            "kwargs": {},
+        },
+    )
+    trace = {
+        "equal_data": SimpleNamespace(out=equal_value.clone()),
+        "scale_factor": SimpleNamespace(out=equal_value.clone()),
+    }
+
+    assert _check_interpolate_exempt(trace, layer, ["scale_factor"])  # type: ignore[arg-type]
+    assert not _check_interpolate_exempt(trace, layer, ["equal_data"])  # type: ignore[arg-type]
 
 
 @pytest.mark.smoke

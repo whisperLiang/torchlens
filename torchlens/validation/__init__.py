@@ -644,20 +644,32 @@ def _validate_tlspec_version_ceiling(tlspec_version: int) -> None:
         )
 
 
-# JSON Schema keywords enforced by ``_validate_schema_properties``. This is a
-# deliberately narrow subset -- only the keywords the shipped
-# ``schemas/tlspec_manifest_v*.json`` files actually use for scalar/array
-# constraints (``type``, ``enum``, ``const``, ``minimum``, ``minLength``,
-# ``pattern``, ``uniqueItems``, ``items``, ``properties``, ``required``).
-# ``format`` is intentionally NOT enforced: JSON Schema draft 2020-12
-# treats ``format`` as annotation-only unless the format-assertion
-# vocabulary is explicitly enabled, and enforcing it here would exceed what
-# the schema's own ``$schema`` declaration promises. ``additionalProperties``
-# and ``allOf``/``if``/``then`` are also intentionally out of scope: the
-# hand-written field validators above already enforce the conditional
-# ``kind``-dependent rules the one ``allOf`` block encodes, and adding a
-# generic ``additionalProperties: false`` check risks rejecting
-# forward-compatible manifests the hand-written checks currently accept.
+# JSON Schema keywords supported by ``_validate_schema_properties``. Annotation
+# keywords are recognized but intentionally non-asserting; JSON Schema draft
+# 2020-12 treats ``format`` as annotation-only unless the format-assertion
+# vocabulary is explicitly enabled.
+_SUPPORTED_JSON_SCHEMA_KEYWORDS = frozenset(
+    {
+        "$id",
+        "$schema",
+        "additionalProperties",
+        "allOf",
+        "const",
+        "enum",
+        "format",
+        "if",
+        "items",
+        "minLength",
+        "minimum",
+        "pattern",
+        "properties",
+        "required",
+        "then",
+        "title",
+        "type",
+        "uniqueItems",
+    }
+)
 _JSON_SCHEMA_TYPE_MAP: dict[str, type | tuple[type, ...]] = {
     "object": dict,
     "array": list,
@@ -682,9 +694,8 @@ def _validate_schema_properties(value: Any, schema: Any, *, path: str) -> None:
     Raises
     ------
     ValueError
-        If ``value`` violates a ``type``, ``enum``, ``const``, ``minimum``,
-        ``minLength``, ``pattern``, ``uniqueItems``, nested ``properties``,
-        nested ``required``, or ``items`` constraint declared in ``schema``.
+        If ``value`` violates a supported assertion keyword declared in
+        ``schema``.
     """
 
     if not isinstance(schema, dict):
@@ -720,6 +731,17 @@ def _validate_schema_properties(value: Any, schema: Any, *, path: str) -> None:
                 raise ValueError(f"{path} must have unique items; duplicate {item!r}.")
             seen.append(item)
 
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list):
+        for index, sub_schema in enumerate(all_of):
+            _validate_schema_properties(value, sub_schema, path=f"{path}.allOf[{index}]")
+
+    conditional = schema.get("if")
+    if isinstance(conditional, dict) and _schema_fragment_matches(value, conditional, path=path):
+        then_schema = schema.get("then")
+        if isinstance(then_schema, dict):
+            _validate_schema_properties(value, then_schema, path=path)
+
     if isinstance(value, dict):
         properties = schema.get("properties")
         if isinstance(properties, dict):
@@ -731,11 +753,49 @@ def _validate_schema_properties(value: Any, schema: Any, *, path: str) -> None:
             nested_missing = [field for field in nested_required if field not in value]
             if nested_missing:
                 raise ValueError(f"{path} missing required fields: {nested_missing}.")
+        if "additionalProperties" in schema:
+            additional_properties = schema["additionalProperties"]
+            known_properties = set(properties) if isinstance(properties, dict) else set()
+            extra_properties = sorted(set(value) - known_properties)
+            if additional_properties is False and extra_properties:
+                raise ValueError(f"{path} has unsupported fields: {extra_properties}.")
+            if isinstance(additional_properties, dict):
+                for key in extra_properties:
+                    _validate_schema_properties(
+                        value[key],
+                        additional_properties,
+                        path=f"{path}.{key}",
+                    )
     elif isinstance(value, list):
         items_schema = schema.get("items")
         if isinstance(items_schema, dict):
             for index, item in enumerate(value):
                 _validate_schema_properties(item, items_schema, path=f"{path}[{index}]")
+
+
+def _schema_fragment_matches(value: Any, schema: dict[str, Any], *, path: str) -> bool:
+    """Return whether ``value`` satisfies a conditional schema fragment.
+
+    Parameters
+    ----------
+    value:
+        Decoded manifest value under conditional validation.
+    schema:
+        JSON Schema fragment from an ``if`` keyword.
+    path:
+        Manifest path used only for internal validation diagnostics.
+
+    Returns
+    -------
+    bool
+        True when the fragment validates, otherwise False.
+    """
+
+    try:
+        _validate_schema_properties(value, schema, path=path)
+    except ValueError:
+        return False
+    return True
 
 
 def _check_json_schema_type(value: Any, schema_type: Any, *, path: str) -> None:
