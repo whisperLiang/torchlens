@@ -97,11 +97,6 @@ def _get(mapping: SalientArgs, *keys: str, default: Any = None) -> Any:
     return default
 
 
-def _is_default(val: Any, *defaults: Any) -> bool:
-    """Check if val matches any of the given default values."""
-    return val in defaults
-
-
 # ---------------------------------------------------------------------------
 # Extractors
 # ---------------------------------------------------------------------------

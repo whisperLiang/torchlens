@@ -340,34 +340,6 @@ def _layers_to_save_live_subset(layers_to_save: object) -> object | None:
     return None
 
 
-def _layers_to_save_has_integer_selector(layers_to_save: object) -> bool:
-    """Return whether ``layers_to_save`` contains a legacy integer selector.
-
-    Parameters
-    ----------
-    layers_to_save
-        Public ``layers_to_save`` selection.
-
-    Returns
-    -------
-    bool
-        ``True`` when the selection contains an integer layer-list index.
-    """
-
-    if isinstance(layers_to_save, bool):
-        return False
-    if isinstance(layers_to_save, int):
-        return True
-    if isinstance(layers_to_save, collections.abc.Iterable) and not isinstance(
-        layers_to_save,
-        str,
-    ):
-        return any(
-            isinstance(value, int) and not isinstance(value, bool) for value in layers_to_save
-        )
-    return False
-
-
 def _layers_to_save_mentions_identity(layers_to_save: object) -> bool:
     """Return whether ``layers_to_save`` targets pass-through identity layers.
 

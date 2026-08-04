@@ -18,8 +18,20 @@ from safetensors.torch import save_file
 
 from . import TLSPEC_VERSION, TorchLensIOError
 from .manifest import Manifest, TensorEntry, sha256_of_file
+from .paths import reject_symlink_path
 from .. import __version__ as TORCHLENS_VERSION
 from ..backends import get_backend_spec
+
+
+def _reject_symlink_path(path: Path, *, context: str) -> None:
+    """Reject symlink paths before writing a ``.tlspec`` payload."""
+
+    reject_symlink_path(
+        path,
+        context=context,
+        message_prefix="Refusing to write through symlink",
+    )
+
 
 # NOTE: ``TLSPEC_VERSION`` is imported (not redefined) from ``torchlens._io``
 # so there is a single source of truth for the on-disk ``tlspec_version``
@@ -916,26 +928,6 @@ def _utc_timestamp() -> str:
     """
 
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _reject_symlink_path(path: Path, *, context: str) -> None:
-    """Reject symlink paths before writing a ``.tlspec`` payload.
-
-    Parameters
-    ----------
-    path:
-        Path to inspect.
-    context:
-        Human-readable path role.
-
-    Raises
-    ------
-    TorchLensIOError
-        If ``path`` is a symlink.
-    """
-
-    if path.is_symlink():
-        raise TorchLensIOError(f"Refusing to write through symlink {context}: {path}.")
 
 
 __all__ = [

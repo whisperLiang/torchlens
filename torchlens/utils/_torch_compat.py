@@ -683,18 +683,6 @@ def _probe_cached_untyped_storage_wrapper() -> bool:
     return first is second
 
 
-def _probe_dynamo_optimized_module() -> bool:
-    """Return whether torch exposes the private Dynamo OptimizedModule type.
-
-    Returns
-    -------
-    bool
-        True when ``torch._dynamo.eval_frame.OptimizedModule`` is importable.
-    """
-
-    return _import_module_attr_or_none("torch._dynamo.eval_frame", "OptimizedModule") is not None
-
-
 def _probe_dynamo_orig_callable_marker() -> bool:
     """Return whether Dynamo publishes its original-callable marker contract.
 

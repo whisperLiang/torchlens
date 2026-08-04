@@ -921,14 +921,3 @@ def touched_bytes_relation(left: torch.Tensor, right: torch.Tensor) -> AliasRela
         }
         return "overlap" if left_bytes & right_bytes else "disjoint"
     return "unknown"
-
-
-def footprints_overlap_possible(left: torch.Tensor, right: torch.Tensor) -> bool:
-    """Conservative Boolean adapter: ``True`` unless PROVEN disjoint.
-
-    For callers that need a can-touch pre-check (write-back sampling, TOCTOU
-    machinery): ``overlap`` and ``unknown`` both return ``True`` -- an unproven
-    relation must never be treated as disjoint (INV-2).
-    """
-
-    return touched_bytes_relation(left, right) != "disjoint"

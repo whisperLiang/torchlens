@@ -200,9 +200,9 @@ def _resolve_postprocessor(outputs: Any, meta: dict[str, Any]) -> ResolvedPostpr
         Matching postprocessor, if any.
     """
 
-    from torchlens import autoroute
+    from . import output as autoroute_output
 
-    for detector in autoroute.output.iter_by_priority():
+    for detector in autoroute_output.iter_by_priority():
         resolved = detector(outputs, meta)
         if resolved is not None:
             return resolved

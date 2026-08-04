@@ -111,35 +111,6 @@ def _annotations_from_event(event: OpEvent) -> dict[str, object]:
     return dict(raw_annotations) if isinstance(raw_annotations, Mapping) else {}
 
 
-def register_materialized_event(
-    trace: "Trace",
-    event: OpEvent,
-    op_log: "Op",
-) -> None:
-    """Append an event and expose its live log to in-flight hooks.
-
-    Parameters
-    ----------
-    trace
-        Active trace receiving the event.
-    event
-        Operation event emitted for the new log.
-    op_log
-        Ignored legacy parameter retained for call-site compatibility.
-
-    Returns
-    -------
-    None
-        Mutates ``trace.capture_events`` and the raw capture indexes.
-    """
-
-    events = getattr(trace, "capture_events", None)
-    if events is None:
-        events = CaptureEvents()
-        trace.capture_events = events
-    events.append(event)
-
-
 def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
     """Materialize capture events into raw build-state logs.
 

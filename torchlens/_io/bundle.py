@@ -38,7 +38,7 @@ from .payload_codec import (
     get_payload_codec,
     numpy_to_transport_tensor,
 )
-from .paths import resolve_bundle_blob_path
+from .paths import reject_symlink_path as _reject_symlink_path, resolve_bundle_blob_path
 from .rehydrate import rehydrate_trace
 from .scrub import BlobSpec, scrub_for_save
 from .tensor_policy import FailReason, Ok
@@ -3439,21 +3439,6 @@ def _load_safetensors_file(
         ) from exc
     except (OSError, SafetensorError, ValueError) as exc:
         raise TorchLensIOError(f"Failed to read safetensors blob at {blob_path}.") from exc
-
-
-def _reject_symlink_path(path: Path, *, context: str) -> None:
-    """Raise when a bundle path that must stay local is a symlink.
-
-    Parameters
-    ----------
-    path:
-        Path to validate.
-    context:
-        Human-readable context used in the error message.
-    """
-
-    if path.is_symlink():
-        raise TorchLensIOError(f"Refusing symlinked {context}: {path}.")
 
 
 def _make_tmp_bundle_path(bundle_path: Path) -> Path:

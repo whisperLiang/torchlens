@@ -17,6 +17,7 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from .._io.manifest import TensorEntry, sha256_of_file
+from .._io.paths import reject_symlink_path
 from .._io.tensor_policy import Ok, is_supported_for_save
 from .._io.tlspec import _TlSpecWriter
 from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
@@ -49,6 +50,19 @@ from .types import (
     TargetValueSpec,
     TensorSliceSpec,
 )
+
+
+def _reject_symlink_path(path: Path, *, context: str) -> None:
+    """Reject symlink paths using the intervention replay error contract."""
+
+    reject_symlink_path(
+        path,
+        context=context,
+        exc_type=ReplayPreconditionError,
+        message_prefix="Refusing to use symlink",
+        trailing_period=False,
+    )
+
 
 TLSPEC_FORMAT_VERSION = "2"
 SUPPORTED_TLSPEC_FORMAT_VERSIONS = {"1", TLSPEC_FORMAT_VERSION}
@@ -505,21 +519,6 @@ def _coerce_save_level(level: str | SaveLevel) -> SaveLevel:
     """
 
     return level if isinstance(level, SaveLevel) else SaveLevel(level)
-
-
-def _reject_symlink_path(path: Path, *, context: str) -> None:
-    """Reject symlink paths before reading or writing specs.
-
-    Parameters
-    ----------
-    path:
-        Path to inspect.
-    context:
-        Human-readable path role.
-    """
-
-    if path.is_symlink():
-        raise ReplayPreconditionError(f"Refusing to use symlink {context}: {path}")
 
 
 def _resolve_intervention_tensor_path(spec_path: Path, relative_path: str) -> Path:
