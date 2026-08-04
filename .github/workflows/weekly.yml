@@ -29,9 +29,14 @@ jobs:
 
       - name: Install torch and TorchLens
         run: |
-          uv pip install --system "torch==2.7.*" \
+          cat > "${{ runner.temp }}/torch-2.7-constraints.txt" <<'EOF'
+          torch==2.7.*
+          EOF
+          uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt" "torch==2.7.*" \
             --index-url https://download.pytorch.org/whl/cpu
-          uv pip install --system -e ".[dev,test,tabular]"
+          uv pip install --system -c "${{ runner.temp }}/torch-2.7-constraints.txt" -e ".[dev,test,tabular]"
+          uv pip check
+          python -c 'import torch; assert torch.__version__.startswith("2.7."), torch.__version__; print(torch.__version__)'
 
       - name: Run slow tests
         run: |

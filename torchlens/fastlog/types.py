@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, cast
 import torch
 
 from ..captured_run import CapturedRun
-from ..ir.predicate import EventKind, ModuleStackFrame, RecordContext
+from ..ir.predicate import EventKind, ModuleStackFrame, RecordContext, RetroactiveCaptureDecision
 from ..utils.tensor_utils import SaveMode
 
 __all__ = [
@@ -76,6 +76,7 @@ class CaptureSpec:
 
 
 CaptureDecision = bool | CaptureSpec | None
+PredicateDecision = CaptureDecision | RetroactiveCaptureDecision
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,8 +248,8 @@ class RecordingTrace:
 
     def repredicate(
         self,
-        other_keep_op: Callable[[RecordContext], CaptureDecision] | None = None,
-        other_keep_module: Callable[[RecordContext], CaptureDecision] | None = None,
+        other_keep_op: Callable[[RecordContext], PredicateDecision] | None = None,
+        other_keep_module: Callable[[RecordContext], PredicateDecision] | None = None,
     ) -> "RecordingTrace":
         """Return a new trace with decisions from new predicates.
 

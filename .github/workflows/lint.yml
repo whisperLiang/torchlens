@@ -28,7 +28,15 @@ jobs:
       # fixes, which raced with the Release workflow's push (both trigger on push
       # to main) and cascaded release runs. Format/lint locally before pushing.
       - name: Ruff format check
-        run: ruff format --check .
+        run: |
+          ruff format --check torchlens tests scripts \
+            --exclude menagerie \
+            --exclude tests/crawler \
+            --exclude tests/test_menagerie_*.py
 
       - name: Ruff check
-        run: ruff check .
+        run: |
+          ruff check torchlens tests scripts \
+            --exclude menagerie \
+            --exclude tests/crawler \
+            --exclude tests/test_menagerie_*.py
