@@ -130,6 +130,34 @@ class DuplicateBufferOutputModel(nn.Module):
         return self.buf, self.buf
 
 
+class PrefixCollidingBufferOutputModel(nn.Module):
+    """Model whose registered-buffer addresses share a string prefix."""
+
+    def __init__(self) -> None:
+        """Register distinct ``a`` and ``abc`` buffers."""
+
+        super().__init__()
+        self.register_buffer("a", torch.tensor([1.0]))
+        self.register_buffer("abc", torch.tensor([2.0]))
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Touch ``abc`` and return both buffers.
+
+        Parameters
+        ----------
+        x:
+            Input used to force capture of ``abc``.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            The shorter-address buffer followed by the longer-address buffer.
+        """
+
+        _ = x + self.abc
+        return self.a, self.abc
+
+
 class ForeignTensorBetweenOutputsModel(nn.Module):
     """Model returning an unattributed tensor between attributed outputs."""
 
@@ -309,6 +337,26 @@ def test_duplicate_direct_buffer_outputs_share_one_buffer_parent() -> None:
         log.cleanup()
 
     assert tl.validate(DuplicateBufferOutputModel(), torch.rand(3), scope="forward") is True
+
+
+def test_prefix_colliding_buffer_outputs_bind_exact_addresses() -> None:
+    """Buffer output resolution must compare decoded addresses exactly."""
+
+    model = PrefixCollidingBufferOutputModel()
+    log = trace_fn(model, torch.zeros(1), capture=CaptureOptions(layers_to_save="all"))
+    try:
+        output_1 = log["output_1"]
+        output_2 = log["output_2"]
+        parent_1 = log[output_1.parents[0]]
+        parent_2 = log[output_2.parents[0]]
+
+        assert parent_1.address == "a"
+        assert parent_2.address == "abc"
+        assert torch.equal(output_1.out, parent_1.out)
+        assert torch.equal(output_2.out, parent_2.out)
+        assert check_metadata_invariants(log) is True
+    finally:
+        log.cleanup()
 
 
 def test_foreign_tensor_between_attributed_outputs_fails_loudly() -> None:

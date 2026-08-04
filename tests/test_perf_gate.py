@@ -19,7 +19,7 @@ from benchmarks.perf_suite import (
 )
 from torchlens.backends.torch.model_prep import _traverse_model_modules
 from torchlens.postprocess import ast_branches
-from torchlens.postprocess.loop_detection import FrontierNodes, _pop_frontier_node
+from torchlens.postprocess.loop_grouping_adapter import FrontierNodes, _pop_frontier_node
 from torchlens.utils.tensor_utils import get_memory_amount
 
 

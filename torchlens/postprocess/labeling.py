@@ -597,6 +597,7 @@ def _build_lookup_keys_and_finalize_retained_layers(self: "Trace") -> None:
     self.layer_labels = []
     self.op_labels = []
     self.layer_num_calls = {}
+    layer_labels_seen: set[str] = set()
 
     i = 0
     for raw_tensor_label in self._raw_layer_labels_list:
@@ -609,7 +610,8 @@ def _build_lookup_keys_and_finalize_retained_layers(self: "Trace") -> None:
         # Log all information:
         self.layer_list.append(layer_entry)
         self.layer_dict_main_keys[layer_entry.label] = layer_entry
-        if layer_entry.layer_label not in self.layer_labels:
+        if layer_entry.layer_label not in layer_labels_seen:
+            layer_labels_seen.add(layer_entry.layer_label)
             self.layer_labels.append(layer_entry.layer_label)
         self.op_labels.append(layer_entry.label)
         self.layer_num_calls[layer_entry.layer_label] = layer_entry.num_passes
@@ -861,14 +863,6 @@ def _rename_model_history_layer_names(self: "Trace") -> None:
             self._raw_to_final_parent_layer_labels[tensor_label] for tensor_label in values
         ]
     self.layers_with_params = new_param_tensors
-
-    saved_layers = [
-        layer_entry
-        for layer_entry in self.layer_list
-        if getattr(layer_entry, "has_saved_activation", False)
-        and not getattr(layer_entry, "is_orphan", False)
-    ]
-    self.num_saved_layers = len({layer_entry.layer_label for layer_entry in saved_layers})
 
     new_equiv_operations_tensors: dict[Any, set[str]] = {}
     for key, equiv_values in self.op_equivalence_classes.items():

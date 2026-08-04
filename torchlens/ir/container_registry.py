@@ -622,6 +622,35 @@ def _walk_tensor_occurrences(
         yield from _walk_tensor_occurrences(child, path=(*path, component))
 
 
+def _iter_tensor_leaves(value: Any, *, memo: set[int] | None = None) -> Iterator[torch.Tensor]:
+    """Yield tensor leaves from the complete supported container tree.
+
+    Parameters
+    ----------
+    value:
+        Tensor or supported nested container value.
+    memo:
+        Object identities already visited while breaking container cycles.
+
+    Yields
+    ------
+    torch.Tensor
+        Each distinct tensor leaf in first-seen traversal order.
+    """
+
+    if memo is None:
+        memo = set()
+    object_id = id(value)
+    if object_id in memo:
+        return
+    memo.add(object_id)
+    if isinstance(value, torch.Tensor):
+        yield value
+        return
+    for _component, child in _iter_container_children(value):
+        yield from _iter_tensor_leaves(child, memo=memo)
+
+
 def _iter_container_children(value: Any) -> Iterator[tuple[OutputPathComponent, Any]]:
     """Yield supported container children without consuming generators."""
 

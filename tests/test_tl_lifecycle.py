@@ -49,6 +49,26 @@ class _FailingLifecycleModel(_LifecycleModel):
         return y
 
 
+class _NestedSavedArgsModel(nn.Module):
+    """Model passing tensors inside a nested list argument."""
+
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        """Call foreach-add with two references nested below ``saved_args``.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        list[torch.Tensor]
+            Foreach-add outputs.
+        """
+
+        return torch._foreach_add([x, x], 1.0)
+
+
 def _assert_tensor_tree_clean(value: Any) -> None:
     """Assert all tensors reachable from a value have no TorchLens metadata."""
     tensors = get_vars_of_type_from_obj(value, torch.Tensor, search_depth=5)
@@ -89,6 +109,21 @@ def test_successful_capture_cleans_session_tensor_and_param_metadata() -> None:
         _assert_tensor_tree_clean(getattr(layer, "transformed_out", None))
         _assert_tensor_tree_clean(getattr(layer, "saved_args", None))
         _assert_tensor_tree_clean(getattr(layer, "saved_kwargs", None))
+
+
+def test_successful_capture_cleans_deeply_nested_saved_args() -> None:
+    """Step 12 must clear session metadata from every supported tensor-tree leaf."""
+
+    trace = tl.trace(
+        _NestedSavedArgsModel(),
+        torch.ones(2),
+        capture=CaptureOptions(layers_to_save="all", save_arg_values=True),
+    )
+
+    foreach_ops = [op for op in trace.ops if op.func_name == "_foreach_add"]
+    assert foreach_ops
+    for op in foreach_ops:
+        _assert_tensor_tree_clean(op.saved_args)
 
 
 @pytest.mark.smoke

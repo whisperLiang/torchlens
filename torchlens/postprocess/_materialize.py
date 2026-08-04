@@ -879,6 +879,7 @@ def _buffer_addresses_by_label(trace: "Trace", op_events: list[OpEvent]) -> dict
     source_buffer_events = [
         event for event in op_events if event.kind == "source" and event.layer_type == "buffer"
     ]
+    source_buffer_labels = {event.label_raw for event in source_buffer_events}
     op_events_by_label = {event.label_raw: event for event in op_events}
     for event in op_events:
         if event.function.func_name not in {"batch_norm", "batchnorm"}:
@@ -889,7 +890,7 @@ def _buffer_addresses_by_label(trace: "Trace", op_events: list[OpEvent]) -> dict
         args_positions = event.parent_arg_positions.get("args", {})
         for arg_position, buffer_name in ((3, "running_mean"), (4, "running_var")):
             label_raw = args_positions.get(arg_position)
-            if isinstance(label_raw, str):
+            if isinstance(label_raw, str) and label_raw in source_buffer_labels:
                 by_label[label_raw] = f"{module_address}.{buffer_name}"
 
     for write_event in getattr(trace, "_buffer_write_events", []):

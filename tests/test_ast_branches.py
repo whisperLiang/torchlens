@@ -491,6 +491,31 @@ def test_elif_chains_flatten_to_single_conditional_record(tmp_path: Path) -> Non
     assert set(record.branch_test_spans) == {"then", "elif_1", "elif_2"}
 
 
+def test_indented_if_inside_else_is_not_flattened_as_elif(tmp_path: Path) -> None:
+    """Keep an indented nested ``if`` as a child conditional of the outer ``else``."""
+
+    path = _write_source(
+        tmp_path,
+        "nested_if_in_else.py",
+        """
+        def forward():
+            if outer_cond:
+                return "outer"
+            else:
+                if inner_cond:
+                    return "inner"
+        """,
+    )
+    index = get_file_index(str(path))
+    assert index is not None
+
+    assert len(index.conditionals) == 2
+    outer, inner = index.conditionals
+    assert set(outer.branch_ranges) == {"then", "else"}
+    assert inner.parent_conditional_key == outer.key
+    assert inner.parent_branch_kind == "else"
+
+
 def test_scope_resolution_prefers_code_firstlineno_for_same_function_name(tmp_path: Path) -> None:
     """Resolve same-named nested helpers by ``code_firstlineno``."""
 

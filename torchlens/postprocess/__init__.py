@@ -101,7 +101,6 @@ from ..captured_run import remember_event_stream
 
 
 _POSTPROCESS_ASSERT_ENV = "TORCHLENS_POSTPROCESS_ASSERTIONS"
-_materialize_refresh_events = materialize_from_events
 
 
 @dataclass(frozen=True)
@@ -272,8 +271,11 @@ def _assert_postprocess_contract(self: "Trace", step: str) -> None:
 
     if not _postprocess_assertions_enabled():
         return
+    contract = POSTPROCESS_STEP_CONTRACTS.get(step)
+    assert contract is not None, f"Unknown postprocess step contract: {step!r}"
+    step_name = f"Step {contract.step} ({contract.name})"
     if step == "1":
-        assert self.output_layers, "Step 1 must register output layers"
+        assert self.output_layers, f"{step_name} must register output layers"
     elif step == "8":
         assert self._raw_to_final_layer_labels, "Step 8 must build raw-to-final layer labels"
         assert self._raw_to_final_op_labels, "Step 8 must build raw-to-final op labels"
@@ -403,10 +405,10 @@ def _drop_transient_capture_state(self: "Trace") -> None:
 
 
 def _refresh_fast_saved_summary(self: "Trace") -> None:
-    """Refresh saved-output counters after a fast replay pass.
+    """Refresh saved-output counters after retained layers are finalized.
 
     Args:
-        self: Trace whose final layer entries were updated in fast mode.
+        self: Trace whose final retained layer entries were updated.
 
     Returns:
         None. Mutates aggregate saved-output fields on ``self``.
@@ -468,12 +470,7 @@ def postprocess(
         }
         self._capture_events = working_events
         with _vtimed(self, "  Step 0: Materialize capture events"):
-            materializer = (
-                _materialize_refresh_events
-                if getattr(self, "_refresh_projection_capture", False)
-                else materialize_from_events
-            )
-            materializer(self, working_events)
+            materialize_from_events(self, working_events)
         working_events.release_working_projection()
         _assert_postprocess_contract(self, "0")
         delattr(self, "capture_events")
@@ -560,6 +557,7 @@ def postprocess(
     # Step 11: Build lookup keys and finalize retained layer lists
     with _vtimed(self, "  Step 11: Build lookup keys"):
         _build_lookup_keys_and_finalize_retained_layers(self)
+        _refresh_fast_saved_summary(self)
         _warn_unattributed_tensor_args(self)
     _assert_postprocess_contract(self, "11")
 
