@@ -23,6 +23,7 @@ from .selectors import (
     CompositeSelector,
     NotSelector,
     _classify_selector_direction,
+    _module_address_matches,
     in_module,
 )
 from .types import FrozenTargetSpec, FunctionRegistryKey, TargetSpec
@@ -1673,27 +1674,7 @@ def _module_output_matches(site: Any, address: str) -> bool:
     """
 
     module_ops = getattr(site, "output_of_module_calls", ())
-    return any(_module_label_matches(module_pass, address) for module_pass in module_ops)
-
-
-def _module_label_matches(module_pass: str, address: str) -> bool:
-    """Return whether a module pass label matches an address.
-
-    Parameters
-    ----------
-    module_pass:
-        Pass-qualified module label.
-    address:
-        Requested module address or pass label.
-
-    Returns
-    -------
-    bool
-        Whether the labels refer to the same module boundary.
-    """
-
-    module_address = module_pass.rsplit(":", 1)[0]
-    return module_pass == address or module_address == address
+    return any(_module_address_matches(module_pass, address) for module_pass in module_ops)
 
 
 def _predicate_payload(value: Any) -> tuple[Callable[[Any], bool], str | None]:

@@ -92,6 +92,47 @@ def _resolve_save_alias(
     return save
 
 
+def _warn_zero_match_capture_selectors(state: RecordingState) -> None:
+    """Warn when sparse capture selectors matched no sites.
+
+    Parameters
+    ----------
+    state:
+        Completed recording state carrying all retained records and fire counts.
+
+    Returns
+    -------
+    None
+        Emits at most one warning for each configured selector slot.
+    """
+
+    from ..intervention.selectors import BaseSelector
+
+    save_selector = state.options.keep_op
+    if isinstance(save_selector, BaseSelector):
+        save_matched = any(bool(save_selector(record.ctx)) for record in state.recording.records)
+        if not save_matched:
+            warnings.warn(
+                f"Capture-time save selector {save_selector!r} matched zero sites; "
+                "no activations were selected by it.",
+                UserWarning,
+                stacklevel=3,
+            )
+    intervene_selector = getattr(state.options.intervene, "selector", None)
+    intervene_decision = getattr(state.options.intervene, "decision", None)
+    if (
+        isinstance(intervene_selector, BaseSelector)
+        and getattr(intervene_decision, "direction", None) == "forward"
+        and state.intervene_selector_fire_count == 0
+    ):
+        warnings.warn(
+            f"Capture-time intervention selector {intervene_selector!r} matched zero sites; "
+            "no intervention fired.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 def _unwrap_ddp_for_fastlog(
     model: nn.Module,
     streaming: StreamingOptions | None | MissingType,
@@ -332,6 +373,7 @@ class Recorder:
         self._entered = False
         self._exited = True
         if exc_value is None:
+            _warn_zero_match_capture_selectors(self._state)
             self._state.raise_accumulated_predicate_error()
 
     def log(
@@ -474,6 +516,9 @@ class Recorder:
         trace.capture_events = self._capture_events
         trace._capture_events = self._capture_events
         self._state.runtime_trace = trace
+        self._state.intervene_selector_fire_count += int(
+            getattr(trace, "_tl_intervene_selector_fire_count", 0)
+        )
         self._output_tensors = output_tensors
         self._output_tensor_addresses = output_tensor_addresses
         object.__setattr__(

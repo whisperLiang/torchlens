@@ -345,20 +345,46 @@ class CaptureSession:
                 for parent_label in output_op.parents:
                     parent = trace.layer_dict_all_keys[parent_label]
                     live_output_by_raw_index[parent.raw_index] = output_tensor
-            selected = _get_op_nums_from_user_labels(trace, activation_selector)
+            from ..intervention.selectors import BaseSelector, _selector_contains_kind
+
+            selected: list[int] | str
+            if isinstance(activation_selector, BaseSelector):
+                from ..intervention.resolver import _resolve_unchecked
+
+                selected = sorted(
+                    {
+                        raw_index
+                        for site in _resolve_unchecked(
+                            tuple(getattr(trace, "layer_list", ())),
+                            activation_selector,
+                            strict=False,
+                        )
+                        if isinstance((raw_index := getattr(site, "raw_index", None)), int)
+                    }
+                )
+                trace._tl_save_selector_fire_count = len(selected)
+            else:
+                selected = _get_op_nums_from_user_labels(trace, activation_selector)
             requested_nums = set() if selected == "all" else set(selected)
             selected_nums = set(requested_nums)
-            selected_nums.update(
-                op.raw_index
-                for op in trace.layer_list
-                if getattr(op, "layer_type", None) == "output"
+            exact_selector = isinstance(activation_selector, BaseSelector) and (
+                _selector_contains_kind(activation_selector, "module")
             )
-            for op in trace.layer_list:
-                if op.raw_index in selected_nums and getattr(op, "layer_type", None) == "output":
-                    selected_nums.update(
-                        trace.layer_dict_all_keys[parent_label].raw_index
-                        for parent_label in op.parents
-                    )
+            if not exact_selector:
+                selected_nums.update(
+                    op.raw_index
+                    for op in trace.layer_list
+                    if getattr(op, "layer_type", None) == "output"
+                )
+                for op in trace.layer_list:
+                    if (
+                        op.raw_index in selected_nums
+                        and getattr(op, "layer_type", None) == "output"
+                    ):
+                        selected_nums.update(
+                            trace.layer_dict_all_keys[parent_label].raw_index
+                            for parent_label in op.parents
+                        )
             for op in trace.layer_list:
                 if op.raw_index not in selected_nums:
                     continue

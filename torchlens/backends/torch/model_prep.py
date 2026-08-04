@@ -12,6 +12,7 @@ import sys
 import time
 from collections.abc import Callable
 from collections import defaultdict, deque
+from dataclasses import replace
 from functools import wraps
 from types import ModuleType
 from typing import Any, TYPE_CHECKING, cast
@@ -1887,6 +1888,136 @@ def _record_module_exit_metadata(
     return tuple(untraceable_output_boundaries)
 
 
+def _record_predicate_module_boundary_outputs(
+    trace: "Trace",
+    state: Any,
+    out: Any,
+    *,
+    module_address: str,
+    module_call_index: int,
+) -> None:
+    """Retain sparse output-op records selected by ``tl.module`` at module exit.
+
+    Parameters
+    ----------
+    trace:
+        Active predicate-mode trace.
+    state:
+        Active fastlog recording state.
+    out:
+        Module output after live boundary interventions.
+    module_address:
+        Address of the exiting module.
+    module_call_index:
+        One-based call index of the exiting module.
+
+    Returns
+    -------
+    None
+        Matching output ops are added to the sparse recording once.
+    """
+
+    from ...capture.predicates import _evaluate_keep_op
+    from ...capture.projections import _event_from_record
+    from ...fastlog.types import ActivationRecord
+    from ...intervention.selectors import BaseSelector, _selector_contains_kind
+    from ...ir.predicate import RetroactiveCaptureDecision
+    from .ops import _walk_output_tensors_with_paths
+
+    predicate = state.options.keep_op
+    if not isinstance(predicate, BaseSelector) or not _selector_contains_kind(predicate, "module"):
+        return
+    contexts_by_label = {
+        ctx.raw_label: ctx
+        for ctx in state.all_contexts
+        if ctx.kind == "op" and ctx.raw_label is not None
+    }
+    existing = {
+        (record.ctx.raw_label, record.ctx.pass_index)
+        for record in state.recording.records
+        if record.ctx.raw_label is not None
+    }
+    module_call_label = f"{module_address}:{module_call_index}"
+    labeled_outputs: list[tuple[torch.Tensor, tuple[Any, ...], str]] = []
+    for tensor, container_path, _container_spec in _walk_output_tensors_with_paths(out):
+        raw_label = get_tensor_label(tensor)
+        if raw_label is None:
+            parent_labels = tuple(
+                getattr(tensor, "_tl_module_intervention_parent_labels", ()) or ()
+            )
+            raw_label = parent_labels[0] if parent_labels else None
+        if raw_label is not None:
+            labeled_outputs.append((tensor, tuple(container_path), raw_label))
+    trace.capture_events.module_exit_events.append(
+        ModuleExitEvent(
+            address=module_address,
+            call_index=module_call_index,
+            call_label=module_call_label,
+            forward_duration=0.0,
+            output_structure=None,
+            output_tensor_labels_raw=tuple(label for _tensor, _path, label in labeled_outputs),
+            output_paths=tuple(path for _tensor, path, _label in labeled_outputs),
+            per_output_atomic=(),
+            output_names=tuple(None for _tensor, _path, _label in labeled_outputs),
+        )
+    )
+    for tensor, container_path, raw_label in labeled_outputs:
+        ctx = contexts_by_label.get(raw_label)
+        if ctx is None:
+            continue
+        boundary_ctx = replace(
+            ctx,
+            output_of_module_calls=tuple(
+                dict.fromkeys((*ctx.output_of_module_calls, module_call_label))
+            ),
+        )
+        decision = _evaluate_keep_op(boundary_ctx, state.options)
+        if isinstance(decision, RetroactiveCaptureDecision):
+            continue
+        if not decision.save_out and not decision.save_metadata:
+            continue
+        trace._tl_save_selector_fire_count = (
+            int(getattr(trace, "_tl_save_selector_fire_count", 0)) + 1
+        )
+        key = (boundary_ctx.raw_label, boundary_ctx.pass_index)
+        if key in existing:
+            continue
+        existing.add(key)
+        ram_payload, disk_payload, transformed_ram, transformed_disk = state.resolve_storage(
+            tensor,
+            decision,
+            ctx=boundary_ctx,
+        )
+        state.add_record(
+            ActivationRecord(
+                ctx=boundary_ctx,
+                spec=decision,
+                ram_payload=ram_payload,
+                disk_payload=disk_payload,
+                transformed_ram_payload=transformed_ram,
+                transformed_disk_payload=transformed_disk,
+            )
+        )
+        selected_event = _event_from_record(
+            boundary_ctx,
+            decision,
+            tensor=tensor,
+            ram_payload=ram_payload,
+            transformed_ram_payload=transformed_ram,
+            predicate_matched=True,
+            container_path=tuple(container_path),
+        )
+        replace_op_event(
+            trace,
+            boundary_ctx.raw_label or boundary_ctx.label,
+            output=selected_event.output,
+            policy=selected_event.policy,
+            predicate_matched=True,
+            capture_spec=decision,
+            record_context=boundary_ctx,
+        )
+
+
 def module_forward_decorator(
     orig_forward: Callable[..., Any], module: nn.Module
 ) -> Callable[..., Any]:
@@ -2009,6 +2140,23 @@ def module_forward_decorator(
                         out = orig_forward(*args, **kwargs)
                 else:
                     out = orig_forward(*args, **kwargs)
+                from ...intervention.runtime import _apply_module_boundary_live_hooks
+
+                out = _apply_module_boundary_live_hooks(
+                    out,
+                    module_address=frame.address,
+                    module_call_index=frame.pass_index,
+                    module_type=frame.module_type,
+                    call_args=args,
+                    call_kwargs=dict(kwargs),
+                )
+                _record_predicate_module_boundary_outputs(
+                    trace,
+                    state,
+                    out,
+                    module_address=frame.address,
+                    module_call_index=frame.pass_index,
+                )
                 return out
             finally:
                 active_model_exc = sys.exc_info()[1]

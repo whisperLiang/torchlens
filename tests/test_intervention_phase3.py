@@ -1016,11 +1016,12 @@ def test_noninplace_dunder_does_not_take_intervention_input_snapshot(
 
     monkeypatch.setattr(intervention_runtime, "copy_arg_tree", _counting_copy_arg_tree)
 
-    tl.trace(
-        _Model().eval(),
-        torch.tensor([[2.0]]),
-        intervene=tl.when(tl.func("relu_"), tl.splice_module(_Double())),
-    )
+    with pytest.warns(UserWarning, match="intervention selector .* matched zero sites"):
+        tl.trace(
+            _Model().eval(),
+            torch.tensor([[2.0]]),
+            intervene=tl.when(tl.func("relu_"), tl.splice_module(_Double())),
+        )
 
     assert calls == 0
 

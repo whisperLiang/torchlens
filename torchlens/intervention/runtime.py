@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import inspect
 import time
 import warnings
 from collections.abc import Iterator
@@ -151,14 +152,15 @@ def _execute_hook(
     """
 
     try:
-        with HOOK_REENTRANCY_GUARD:
-            with pause_logging():
-                result = hook_callable(out, hook=hook_context)
+        inspect.signature(hook_callable).bind(out, hook=hook_context)
     except TypeError as exc:
         raise HookSignatureError(
             f"hook {hook_context.name!r} could not be called at "
             f"{_site_name(hook_context)} with signature (out, *, hook)"
         ) from exc
+    with HOOK_REENTRANCY_GUARD:
+        with pause_logging():
+            result = hook_callable(out, hook=hook_context)
     return validate_hook_output(
         result,
         out,
@@ -374,6 +376,12 @@ def _apply_live_hooks(
                 fire_record=record,
             )
         )
+        if normalized_entry.metadata.get("zero_match_ledger") == "intervene_selector":
+            trace = _state._active_trace
+            if trace is not None:
+                trace._tl_intervene_selector_fire_count = (
+                    int(getattr(trace, "_tl_intervene_selector_fire_count", 0)) + 1
+                )
         current_out = result
     return current_out, tuple(fire_results)
 
@@ -480,7 +488,20 @@ def _apply_module_boundary_live_hooks(
         Module output with any tensor replacements applied.
     """
 
-    if not _state._active_hook_plan:
+    trace = _state._active_trace
+    predicate_options = getattr(trace, "_predicate_save_options", None)
+    predicate_intervene = getattr(predicate_options, "intervene", None)
+    predicate_selector = getattr(predicate_intervene, "selector", None)
+    if predicate_selector is not None:
+        from .selectors import BaseSelector, _selector_contains_kind
+
+        if not isinstance(predicate_selector, BaseSelector) or not _selector_contains_kind(
+            predicate_selector, "module"
+        ):
+            predicate_intervene = None
+    else:
+        predicate_intervene = None
+    if not _state._active_hook_plan and predicate_intervene is None:
         return out_orig
     module_call = (module_address, module_call_index)
     replacements: dict[tuple[Any, ...], torch.Tensor] = {}
@@ -508,6 +529,38 @@ def _apply_module_boundary_live_hooks(
             call_args=call_args,
             call_kwargs=call_kwargs,
         )
+        all_fire_results = list(fire_results)
+        if predicate_intervene is not None and trace is not None:
+            from ..capture.predicates import _evaluate_intervene_op
+            from ..backends.torch.ops import _record_predicate_intervention_spec
+            from .hooks import normalize_hook_plan
+
+            assert predicate_options is not None
+            decision = _evaluate_intervene_op(site, predicate_options)
+            if decision is not None:
+                _record_predicate_intervention_spec(trace, site, decision)
+                hook_entries = normalize_hook_plan(
+                    decision.hook,
+                    default_site_target=predicate_selector,
+                    direction=decision.direction,
+                )
+                with active_intervention_context(
+                    intervention_spec=getattr(trace, "_intervention_spec", None),
+                    hook_plan=hook_entries,
+                ):
+                    hooked, predicate_fire_results = _apply_live_hooks(
+                        hooked,
+                        site=site,
+                        container_path=container_path,
+                        call_args=call_args,
+                        call_kwargs=call_kwargs,
+                    )
+                all_fire_results.extend(predicate_fire_results)
+                if predicate_fire_results:
+                    trace._tl_intervene_selector_fire_count = int(
+                        getattr(trace, "_tl_intervene_selector_fire_count", 0)
+                    ) + len(predicate_fire_results)
+        fire_results = tuple(all_fire_results)
         if fire_results:
             if hooked is not out:
                 parent_label = get_tensor_label(out)
@@ -874,6 +927,9 @@ def _selector_uses_only_provisional_fields(selector: Any) -> bool:
 
     try:
         normalized = getattr(selector, "selector_kind", None)
+        # A provisional op explicitly carries ``_tl_module_boundary=False`` and
+        # ``output_of_module_calls=()``. Therefore ``tl.module`` is definitively
+        # false here; its eventual true match is evaluated by the module-exit hook.
         if normalized in {"func", "module", "in_module"}:
             return True
         if normalized in {"and", "or"}:

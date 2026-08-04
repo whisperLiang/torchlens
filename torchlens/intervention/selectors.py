@@ -1314,7 +1314,7 @@ def in_module(address_or_layer: Any, address: str | None = None) -> InModuleSele
     modules = getattr(address_or_layer, "modules", ())
     module_ops = getattr(address_or_layer, "output_of_module_calls", ())
     candidates = tuple(modules) + tuple(module_ops)
-    return any(_module_pass_matches(candidate, address) for candidate in candidates)
+    return any(_module_address_matches(candidate, address) for candidate in candidates)
 
 
 def _context_labels(ctx: Any) -> set[str]:
@@ -1392,7 +1392,7 @@ def _module_candidate_strings(candidate: Any) -> str:
     Returns
     -------
     str
-        Address or pass-qualified address suitable for ``_module_pass_matches``.
+        Address or pass-qualified address suitable for ``_module_address_matches``.
     """
 
     if isinstance(candidate, tuple) and candidate and isinstance(candidate[0], str):
@@ -1437,11 +1437,14 @@ def _selector_matches_record_context(selector: BaseSelector, ctx: Any) -> bool:
 
     kind = selector.selector_kind
     if kind == "label":
+        _guard_capture_time_finalized_label(ctx, kind, str(selector.selector_value))
         return str(selector.selector_value) in _context_labels(ctx)
     if kind == "contains":
+        _guard_capture_time_finalized_label(ctx, kind, str(selector.selector_value))
         needle = str(selector.selector_value)
         return any(needle in label for label in _context_labels(ctx))
     if kind == "regex":
+        _guard_capture_time_finalized_label(ctx, kind, str(selector.selector_value))
         pattern = str(selector.selector_value)
         return any(_re.search(pattern, label) is not None for label in _context_labels(ctx))
     if kind == "func":
@@ -1468,13 +1471,17 @@ def _selector_matches_record_context(selector: BaseSelector, ctx: Any) -> bool:
         return _sanitize_transform_kind(transform_kind) == _sanitize_transform_kind(value)
     if kind == "module":
         target = str(selector.selector_value)
-        return any(
-            _module_pass_matches(candidate, target) for candidate in _context_module_candidates(ctx)
-        )
+        module_outputs = tuple(getattr(ctx, "output_of_module_calls", ()) or ())
+        source_trace = getattr(ctx, "source_trace", None)
+        if not module_outputs and getattr(source_trace, "backend", "torch") != "torch":
+            module_candidate = getattr(ctx, "module", None)
+            module_outputs = () if module_candidate is None else (module_candidate,)
+        return any(_module_address_matches(candidate, target) for candidate in module_outputs)
     if kind == "in_module":
         target = str(selector.selector_value)
         return any(
-            _module_pass_matches(candidate, target) for candidate in _context_module_candidates(ctx)
+            _module_address_matches(candidate, target)
+            for candidate in _context_module_candidates(ctx)
         )
     if kind == "output":
         return getattr(ctx, "output_index", None) == selector.selector_value
@@ -1521,27 +1528,62 @@ def _selector_matches_record_context(selector: BaseSelector, ctx: Any) -> bool:
         return bool(left(ctx)) or bool(right(ctx))  # type: ignore[operator]
     if kind == "not" and isinstance(selector, NotSelector):
         return not bool(selector.selector(ctx))  # type: ignore[operator]
-    return False
+    if kind in {"grad_fn", "grad_fn_handle", "grad_kind", "backward_pass", "intervening"}:
+        return False
+    from .errors import SiteResolutionError
+
+    raise SiteResolutionError(f"Unsupported capture-time selector kind {kind!r}.")
 
 
-def _module_pass_matches(module_pass: str, address: str) -> bool:
-    """Return whether a pass-qualified module label belongs to an address.
+def _guard_capture_time_finalized_label(ctx: Any, kind: str, value: str) -> None:
+    """Apply finalized-label diagnostics only to live predicate contexts.
+
+    Parameters
+    ----------
+    ctx:
+        Candidate selector context.
+    kind:
+        Label-oriented selector kind.
+    value:
+        Selector literal or pattern.
+
+    Returns
+    -------
+    None
+        Finalized layer objects remain valid post-capture selector inputs.
+    """
+
+    from ..ir.predicate import RecordContext
+
+    if isinstance(ctx, RecordContext):
+        from .hooks import _raise_for_finalized_live_label_selector
+
+        _raise_for_finalized_live_label_selector(kind, value)
+
+
+def _module_address_matches(module_pass: Any, address: str) -> bool:
+    """Return whether a module candidate belongs to an address.
 
     Parameters
     ----------
     module_pass:
-        Pass-qualified module label such as ``"encoder:1"``.
+        Pass-qualified label, ``(address, call_index)`` tuple, or tuple repr.
     address:
         Module address without pass qualification.
 
     Returns
     -------
     bool
-        Whether the module pass belongs to the requested address.
+        Whether the module candidate belongs to the requested address.
     """
 
-    module_address = module_pass.rsplit(":", 1)[0]
-    return module_pass == address or module_address == address
+    if isinstance(module_pass, tuple) and module_pass and isinstance(module_pass[0], str):
+        return module_pass[0] == address
+    module_label = str(module_pass)
+    if module_label.startswith("("):
+        return f"'{address}'" in module_label or f'"{address}"' in module_label
+    module_address = module_label.rsplit(":", 1)[0]
+    return module_label == address or module_address == address
 
 
 def _output_path_matches(saved_path: tuple[Any, ...], requested_path: tuple[Any, ...]) -> bool:
@@ -1715,6 +1757,33 @@ def _selector_contains_followed_by(selector: SelectorLike) -> bool:
         return _selector_contains_followed_by(left) or _selector_contains_followed_by(right)
     if isinstance(selector, NotSelector):
         return _selector_contains_followed_by(selector.selector)
+    return False
+
+
+def _selector_contains_kind(selector: SelectorLike, kind: str) -> bool:
+    """Return whether a selector tree contains one selector kind.
+
+    Parameters
+    ----------
+    selector:
+        Selector tree to inspect.
+    kind:
+        Selector-kind name to find.
+
+    Returns
+    -------
+    bool
+        Whether the selector or any child has the requested kind.
+    """
+
+    if not isinstance(selector, BaseSelector):
+        return False
+    if selector.selector_kind == kind:
+        return True
+    if isinstance(selector, CompositeSelector):
+        return any(_selector_contains_kind(child, kind) for child in selector.selectors)
+    if isinstance(selector, NotSelector):
+        return _selector_contains_kind(selector.selector, kind)
     return False
 
 
