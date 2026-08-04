@@ -702,9 +702,9 @@ class Recording(CapturedRun):
         ------
         RuntimeError
             If the recording is a failed partial capture, if it does not retain
-            the topology-complete event stream (e.g. disk-recovered), or if it
-            is halted but retained no raw activation payload to bind as the
-            output frontier.
+            the topology-complete event stream (e.g. disk-recovered), if it
+            spans multiple recorded passes, or if it is halted but retained no
+            raw activation payload to bind as the output frontier.
         """
 
         if self.failed:
@@ -717,6 +717,12 @@ class Recording(CapturedRun):
             raise RuntimeError(
                 "Recording.to_trace() requires retained capture events; disk-recovered "
                 "recordings do not contain enough topology metadata."
+            )
+        if self.n_passes > 1:
+            raise RuntimeError(
+                "Recording.to_trace() does not support multi-pass Recordings because "
+                "replaying multiple Recorder.log() passes into one Trace is not yet "
+                "structurally defined."
             )
         from ..data_classes.trace import Trace
         from ..capture.projectors import RecordingProjector

@@ -491,13 +491,14 @@ def test_recording_to_trace_halted_without_payload_rejected() -> None:
     """
 
     x = torch.randn(2, 4)
-    recording = tl.record(
-        _HaltNested().eval(),
-        x,
-        save=tl.func("this_function_name_never_matches"),
-        halt=lambda ctx: getattr(ctx, "func_name", "") == "relu",
-        random_seed=9,
-    )
+    with pytest.warns(UserWarning, match="matched zero sites"):
+        recording = tl.record(
+            _HaltNested().eval(),
+            x,
+            save=tl.func("this_function_name_never_matches"),
+            halt=lambda ctx: getattr(ctx, "func_name", "") == "relu",
+            random_seed=9,
+        )
     assert recording.halted is True
     assert len(recording.records) == 0
     with pytest.raises(RuntimeError, match="halted Recording that retained no raw activation"):
@@ -567,6 +568,27 @@ def test_recording_to_trace_reuse_does_not_corrupt_frozen_recording() -> None:
     rec_records = tl.record(NestedBlocks().eval(), x, save=tl.func("relu"))
     _ = rec_records.to_trace()
     assert rec_records.n_records > 0
+
+
+def test_recording_to_trace_rejects_multi_pass_recordings() -> None:
+    """to_trace() refuses multi-pass Recorder outputs instead of cooking an invalid Trace."""
+
+    class RepeatRelu(nn.Module):
+        """Two-op model used to reproduce the multi-pass projector collision."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Apply one add and one relu."""
+
+            return torch.relu(x + 1)
+
+    with tl.fastlog.Recorder(RepeatRelu(), save=lambda ctx: ctx.kind == "op") as recorder:
+        recorder.log(torch.ones(1, 3))
+        recorder.log(torch.ones(1, 3) * 2)
+
+    recording = recorder.recording
+    assert recording.n_passes == 2
+    with pytest.raises(RuntimeError, match="multi-pass Recordings"):
+        recording.to_trace()
 
 
 def test_recording_to_trace_reuse_survives_output_tensor_label_undecoration() -> None:

@@ -2478,6 +2478,22 @@ def _make_nonowner_ops_call(original: Any) -> Any:
 
     @functools.wraps(original)
     def _patched(self: Any, *args: Any, **kwargs: Any) -> Any:
+        """Observe non-owner ``torch._ops`` calls before delegating.
+
+        Parameters
+        ----------
+        self:
+            ``torch._ops`` receiver.
+        *args:
+            Positional operands passed to ``original``.
+        **kwargs:
+            Keyword operands passed to ``original``.
+
+        Returns
+        -------
+        Any
+            Result from ``original``.
+        """
         if (
             _state._nonowner_belt_armed
             and _state._active_trace is not None
@@ -2557,6 +2573,20 @@ def _make_nonowner_private_c_callable(original: Any) -> Any:
 
     @functools.wraps(original)
     def _patched(*args: Any, **kwargs: Any) -> Any:
+        """Observe non-owner private-C free-function calls before delegating.
+
+        Parameters
+        ----------
+        *args:
+            Positional operands passed to ``original``.
+        **kwargs:
+            Keyword operands passed to ``original``.
+
+        Returns
+        -------
+        Any
+            Result from ``original``.
+        """
         if (
             _state._nonowner_belt_armed
             and _state._active_trace is not None
@@ -2933,9 +2963,22 @@ class _TensorOriginRegistry:
     __slots__ = ("_entries",)
 
     def __init__(self) -> None:
+        """Initialize the weak identity map backing store."""
         self._entries: dict[int, tuple[Any, frozenset[str], frozenset[str]]] = {}
 
     def get(self, tensor: torch.Tensor) -> tuple[frozenset[str], frozenset[str]] | None:
+        """Return the live alias metadata for ``tensor`` when still registered.
+
+        Parameters
+        ----------
+        tensor:
+            Tensor whose registration should be resolved.
+
+        Returns
+        -------
+        tuple[frozenset[str], frozenset[str]] | None
+            Registered display and leaf address sets, or ``None`` when absent or stale.
+        """
         entry = self._entries.get(id(tensor))
         if entry is None:
             return None
@@ -2943,10 +2986,30 @@ class _TensorOriginRegistry:
         return (display, leaf) if ref() is tensor else None
 
     def set(self, tensor: torch.Tensor, display: frozenset[str], leaf: frozenset[str]) -> None:
+        """Register alias metadata for ``tensor`` with weak cleanup.
+
+        Parameters
+        ----------
+        tensor:
+            Tensor to register.
+        display:
+            Display-address set for ``tensor``.
+        leaf:
+            Leaf-address set for ``tensor``.
+        """
         key = id(tensor)
         entries = self._entries
 
         def _cleanup(dead_ref: Any, key: int = key) -> None:
+            """Delete the dead entry when the weakref target is reclaimed.
+
+            Parameters
+            ----------
+            dead_ref:
+                Weak reference whose referent just died.
+            key:
+                Identity-map key to clear when it still points at ``dead_ref``.
+            """
             entry = entries.get(key)
             if entry is not None and entry[0] is dead_ref:
                 del entries[key]
@@ -4436,6 +4499,22 @@ def _make_invisible_escape_wrapper(original: Any, state: _WitnessState, name: st
     records_state_view_geometry = name in {"numpy", "__array__", "__dlpack__"}
 
     def wrapper(self: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
+        """Record one tensor host-export access and then call through.
+
+        Parameters
+        ----------
+        self:
+            Tensor receiver for the export.
+        *args:
+            Positional arguments passed to ``original``.
+        **kwargs:
+            Keyword arguments passed to ``original``.
+
+        Returns
+        -------
+        Any
+            Result from ``original`` or the cached storage bridge result.
+        """
         result_holder: dict[str, Any] = {}
         if isinstance(self, torch.Tensor) and _state._active_trace is state.trace:
             if threading.get_ident() == state.owner_thread_id:
@@ -4713,6 +4792,22 @@ def _make_storage_metadata_wrapper(
     """Wrap one storage-class accessor: call through ONCE, then record the real result."""
 
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        """Record one storage accessor observation before returning the real result.
+
+        Parameters
+        ----------
+        self:
+            Storage-like receiver.
+        *args:
+            Positional arguments passed to ``original``.
+        **kwargs:
+            Keyword arguments passed to ``original``.
+
+        Returns
+        -------
+        Any
+            Result from ``original``.
+        """
         if _state._active_trace is not state.trace:
             return original(self, *args, **kwargs)
         if threading.get_ident() != state.owner_thread_id:
@@ -4781,6 +4876,18 @@ def _make_storage_property_wrapper(
     """Wrap a storage-class PROPERTY row (``filename`` / ``_cdata``) read-through."""
 
     def getter(self: Any) -> Any:
+        """Read one storage property and attribute the host exposure when needed.
+
+        Parameters
+        ----------
+        self:
+            Storage-like receiver.
+
+        Returns
+        -------
+        Any
+            Value returned by ``descriptor``.
+        """
         value = descriptor.__get__(self, type(self))
         if _state._active_trace is state.trace:
             if threading.get_ident() == state.owner_thread_id:
@@ -4819,6 +4926,22 @@ def _make_storage_raw_pointer_wrapper(original: Any, state: _WitnessState) -> An
     """
 
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        """Read one storage raw pointer while enforcing the witness downgrade.
+
+        Parameters
+        ----------
+        self:
+            Storage-like receiver.
+        *args:
+            Positional arguments passed to ``original``.
+        **kwargs:
+            Keyword arguments passed to ``original``.
+
+        Returns
+        -------
+        Any
+            Raw pointer result from ``original``.
+        """
         if _state._active_trace is state.trace:
             if threading.get_ident() == state.owner_thread_id:
                 if _state._logging_enabled and not _internal_read_active():
@@ -4882,6 +5005,22 @@ def _make_host_value_escape_method(original: Any, state: _WitnessState, name: st
     """
 
     def wrapper(self: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
+        """Record one tensor host-value method invocation when the census is blind.
+
+        Parameters
+        ----------
+        self:
+            Tensor receiver.
+        *args:
+            Positional arguments passed to ``original``.
+        **kwargs:
+            Keyword arguments passed to ``original``.
+
+        Returns
+        -------
+        Any
+            Result from ``original``.
+        """
         if isinstance(self, torch.Tensor) and _state._active_trace is state.trace:
             if threading.get_ident() == state.owner_thread_id:
                 if _state._logging_enabled and not _internal_read_active():
@@ -4997,6 +5136,22 @@ def _make_plain_scalar_escape_method(
 
     @functools.wraps(original)
     def wrapper(self: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
+        """Aggregate one plain scalar escape before delegating to ``original``.
+
+        Parameters
+        ----------
+        self:
+            Tensor receiver.
+        *args:
+            Positional arguments passed to ``original``.
+        **kwargs:
+            Keyword arguments passed to ``original``.
+
+        Returns
+        -------
+        Any
+            Result from ``original``.
+        """
         if (
             _state._logging_enabled
             and _state._active_trace is state.trace
@@ -5122,6 +5277,20 @@ def _make_host_value_predicate_module_wrapper(original: Any, state: _WitnessStat
     """
 
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        """Record module-level predicate operands when the census is inactive.
+
+        Parameters
+        ----------
+        *args:
+            Positional arguments passed to ``original``.
+        **kwargs:
+            Keyword arguments passed to ``original``.
+
+        Returns
+        -------
+        Any
+            Result from ``original``.
+        """
         if _state._active_trace is state.trace:
             if threading.get_ident() == state.owner_thread_id:
                 if (
@@ -5152,6 +5321,20 @@ def _make_module_escape_wrapper(original: Any, state: _WitnessState) -> Any:
     """
 
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        """Record module-level tensor exports before delegating.
+
+        Parameters
+        ----------
+        *args:
+            Positional arguments passed to ``original``.
+        **kwargs:
+            Keyword arguments passed to ``original``.
+
+        Returns
+        -------
+        Any
+            Result from ``original``.
+        """
         if _state._active_trace is state.trace:
             if threading.get_ident() == state.owner_thread_id:
                 if _state._logging_enabled:
@@ -5190,6 +5373,18 @@ def _make_invisible_escape_property(descriptor: Any, state: _WitnessState) -> pr
     """
 
     def getter(self: torch.Tensor) -> Any:
+        """Read the wrapped export property while attributing the tensor source.
+
+        Parameters
+        ----------
+        self:
+            Tensor receiver.
+
+        Returns
+        -------
+        Any
+            Value returned by ``descriptor``.
+        """
         if isinstance(self, torch.Tensor) and _state._active_trace is state.trace:
             if threading.get_ident() == state.owner_thread_id:
                 if _state._logging_enabled:
@@ -5230,6 +5425,22 @@ def _make_input_metadata_wrapper(
     """
 
     def wrapper(self: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
+        """Read one input-layout accessor and record any witnessed metadata fact.
+
+        Parameters
+        ----------
+        self:
+            Tensor receiver.
+        *args:
+            Positional arguments passed to ``original``.
+        **kwargs:
+            Keyword arguments passed to ``original``.
+
+        Returns
+        -------
+        Any
+            Result from ``original``.
+        """
         result = original(self, *args, **kwargs)
         if isinstance(self, torch.Tensor) and _state._active_trace is state.trace:
             if threading.get_ident() == state.owner_thread_id:
@@ -5289,7 +5500,31 @@ def _make_input_metadata_bool_method(original: Any, state: _WitnessState, name: 
     is_placement = name in _STATE_METADATA_PLACEMENT_OBSERVED_NAMES
 
     def wrapper(self: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
+        """Read one boolean metadata accessor and record any witnessed fact.
+
+        Parameters
+        ----------
+        self:
+            Tensor receiver.
+        *args:
+            Positional arguments passed to ``original``.
+        **kwargs:
+            Keyword arguments passed to ``original``.
+
+        Returns
+        -------
+        Any
+            Result from ``original``.
+        """
+
         def _owner_observing() -> bool:
+            """Return whether the owner thread is currently recording this accessor.
+
+            Returns
+            -------
+            bool
+                ``True`` when the current call is an owner-thread recording observation.
+            """
             return (
                 isinstance(self, torch.Tensor)
                 and _state._active_trace is state.trace
@@ -5373,6 +5608,18 @@ def _make_input_metadata_grad_property(
     records_int = name in _INPUT_METADATA_INT_PROPERTY_NAMES
 
     def getter(self: torch.Tensor) -> Any:
+        """Read one autograd property and record any witnessed metadata fact.
+
+        Parameters
+        ----------
+        self:
+            Tensor receiver.
+
+        Returns
+        -------
+        Any
+            Value returned by ``descriptor``.
+        """
         value = descriptor.__get__(self, torch.Tensor)
         if isinstance(self, torch.Tensor) and _state._active_trace is state.trace:
             if threading.get_ident() == state.owner_thread_id:
@@ -5402,6 +5649,15 @@ def _make_input_metadata_grad_property(
     has_setter = hasattr(descriptor, "__set__")
 
     def setter(self: torch.Tensor, value: Any) -> None:
+        """Delegate writes to the wrapped descriptor unchanged.
+
+        Parameters
+        ----------
+        self:
+            Tensor receiver.
+        value:
+            Value to write through to ``descriptor``.
+        """
         descriptor.__set__(self, value)
 
     return property(getter, setter if has_setter else None)
