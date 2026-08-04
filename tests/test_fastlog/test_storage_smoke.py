@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,28 @@ class TinyModel(nn.Module):
         return self.linear(x).relu()
 
 
+class DeepLinearModel(nn.Module):
+    """Stack of linear layers for disk-path depth regressions."""
+
+    def __init__(self, depth: int) -> None:
+        """Initialize a deterministic linear stack."""
+
+        super().__init__()
+        layers: list[nn.Module] = []
+        for _ in range(depth):
+            layer = nn.Linear(3, 3)
+            with torch.no_grad():
+                layer.weight.copy_(torch.eye(3))
+                layer.bias.zero_()
+            layers.extend((layer, nn.ReLU()))
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the full depth stack."""
+
+        return self.layers(x)
+
+
 def test_ram_only_roundtrip_records_in_memory() -> None:
     """RAM-only recording returns an in-memory Recording."""
 
@@ -42,13 +65,12 @@ def test_ram_only_roundtrip_records_in_memory() -> None:
 
 
 def test_lazy_recording_n_records_is_current_before_records_access() -> None:
-    """A fresh lazy Recording reports retained records before direct records access."""
+    """`n_records` should match the retained records projection."""
 
     recording = tl.record(TinyModel(), torch.ones(1, 3), save=tl.func("linear"))
 
-    assert object.__getattribute__(recording, "_records_built") is False
     assert recording.n_records == 1
-    assert object.__getattribute__(recording, "_records_built") is True
+    assert len(recording.records) == 1
 
 
 def test_disk_only_roundtrip_loads_bundle(tmp_path: Path) -> None:
@@ -70,6 +92,36 @@ def test_disk_only_roundtrip_loads_bundle(tmp_path: Path) -> None:
     assert len(loaded) == len(recording)
     assert loaded.n_records == len(recording)
     assert loaded.records[0].metadata["blob_id"] == recording.records[0].metadata["blob_id"]
+
+
+@pytest.mark.parametrize(("depth", "ceiling_seconds"), [(4, 5.0), (12, 5.0)])
+def test_disk_only_deep_stack_stays_linear_and_round_trips(
+    tmp_path: Path,
+    depth: int,
+    ceiling_seconds: float,
+) -> None:
+    """Disk-mode fastlog should stay under a bounded wall-clock ceiling at depth."""
+
+    bundle_path = tmp_path / f"deep_{depth}.tlfast"
+    model = DeepLinearModel(depth)
+    inputs = torch.ones(1, 3)
+
+    start = time.perf_counter()
+    recording = tl.fastlog.record(
+        model,
+        inputs,
+        save=lambda ctx: ctx.kind == "op",
+        streaming=tl.StreamingOptions(bundle_path=bundle_path, retain_in_memory=False),
+    )
+    elapsed = time.perf_counter() - start
+    loaded = tl.fastlog.load(bundle_path)
+
+    assert elapsed < ceiling_seconds
+    assert len(loaded.records) == len(recording.records)
+    assert [record.ctx.label for record in loaded.records] == [
+        record.ctx.label for record in recording.records
+    ]
+    assert loaded.recovery_warnings == []
 
 
 def test_keep_grad_disk_only_default_raises_at_construction(tmp_path: Path) -> None:

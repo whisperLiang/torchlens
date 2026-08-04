@@ -362,7 +362,7 @@ class Recording(CapturedRun):
     def __getattribute__(self, name: str) -> Any:
         """Populate lazy record projections when ``records`` is read."""
 
-        if name == "records":
+        if name == "records" and not object.__getattribute__(self, "_records_built"):
             ensure = object.__getattribute__(self, "_ensure_records")
             ensure()
         return object.__getattribute__(self, name)

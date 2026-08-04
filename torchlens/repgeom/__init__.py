@@ -307,8 +307,8 @@ def activation_distance_matrix(
 
     features = array.reshape(array.shape[0], -1)
     if metric == "euclidean":
-        differences = features[:, None, :] - features[None, :, :]
-        distances = np.sqrt(np.sum(differences * differences, axis=-1))
+        feature_tensor = torch.as_tensor(features, dtype=torch.float64)
+        distances = torch.cdist(feature_tensor, feature_tensor, p=2).cpu().numpy()
     elif metric == "cosine":
         distances = _angular_dissimilarity(features, center_rows=False)
     elif metric == "correlation":
@@ -634,7 +634,7 @@ def mds_evolution(
         if align and previous_coords is not None:
             coords = procrustes_align(coords, previous_coords)
         _annotate_mds_coords(trace, key, coords)
-        coords_by_key[key] = coords
+        coords_by_key[key] = coords.copy()
         previous_coords = coords
     return coords_by_key
 
@@ -686,8 +686,9 @@ def rdm_evolution(
                 f"rdm_evolution has too few stimuli for {key!r}: "
                 f"got {matrix.shape[0]}, need at least {min_n}."
             )
-        _store_annotation_tensor(trace, f"rdm:{key}", torch.from_numpy(matrix))
-        matrices_by_key[key] = matrix
+        stored_matrix = matrix.copy()
+        _store_annotation_tensor(trace, f"rdm:{key}", torch.from_numpy(stored_matrix))
+        matrices_by_key[key] = matrix.copy()
     return matrices_by_key
 
 
@@ -1366,7 +1367,10 @@ def _effective_dimensionality_from_eigenvalues(
         participation_ratio = (
             (total_positive * total_positive) / denominator if denominator > 0.0 else 0.0
         )
-        n_components = int(np.searchsorted(cumulative, variance_threshold, side="left") + 1)
+        n_components = min(
+            int(np.searchsorted(cumulative, variance_threshold, side="left") + 1),
+            clipped.size,
+        )
     else:
         variance = np.zeros_like(clipped)
         cumulative = np.zeros_like(clipped)
@@ -1541,7 +1545,7 @@ def _annotate_mds_coords(trace: Any, key: str, coords: np.ndarray) -> None:
         The trace is mutated in place through ``_annotation_blobs``.
     """
 
-    _store_annotation_tensor(trace, key, torch.from_numpy(coords))
+    _store_annotation_tensor(trace, key, torch.from_numpy(coords.copy()))
 
 
 def _store_annotation_tensor(trace: Any, key: str, tensor: torch.Tensor) -> None:

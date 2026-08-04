@@ -70,27 +70,27 @@ def _resolve_recording_option(
 class RecordingOptions:
     """Grouped options for one fastlog predicate recording session."""
 
-    keep_op: PredicateFn | None = None
-    keep_module: PredicateFn | None = None
-    default_op: bool | CaptureSpec = False
-    default_module: bool | CaptureSpec = False
-    history_size: int = 8
-    lookback: int = 0
-    lookback_payload_policy: LookbackPayloadPolicy = "metadata_only"
-    include_source_events: bool = False
-    intervene: InterventionPredicate | None = None
-    halt: HaltPredicateFn | None = None
-    max_predicate_failures: int = 32
-    on_predicate_error: PredicateErrorMode = "auto"
-    on_forward_error: ForwardErrorMode = "raise"
-    streaming: StreamingOptions | None = None
-    random_seed: int | None = None
-    activation_transform: ActivationPostfunc | None = None
-    save_raw_activations: bool = True
-    save_grads: GradPredicateFn | bool | CaptureSpec | None = None
-    default_grad: bool | CaptureSpec = False
-    grad_transform: GradientPostfunc | None = None
-    save_raw_gradients: bool = True
+    keep_op: PredicateFn | None
+    keep_module: PredicateFn | None
+    default_op: bool | CaptureSpec
+    default_module: bool | CaptureSpec
+    history_size: int
+    lookback: int
+    lookback_payload_policy: LookbackPayloadPolicy
+    include_source_events: bool
+    intervene: InterventionPredicate | None
+    halt: HaltPredicateFn | None
+    max_predicate_failures: int
+    on_predicate_error: PredicateErrorMode
+    on_forward_error: ForwardErrorMode
+    streaming: StreamingOptions | None
+    random_seed: int | None
+    activation_transform: ActivationPostfunc | None
+    save_raw_activations: bool
+    save_grads: GradPredicateFn | bool | CaptureSpec | None
+    default_grad: bool | CaptureSpec
+    grad_transform: GradientPostfunc | None
+    save_raw_gradients: bool
     _specified_fields: frozenset[str] = field(
         default_factory=frozenset,
         init=False,
