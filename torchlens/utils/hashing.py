@@ -35,8 +35,8 @@ across intentional schema/policy changes.
 
 import hashlib
 import json
-import re
 import random
+import re
 import string
 from typing import Any, List
 
@@ -149,11 +149,12 @@ def _hashable_path_component(component: Any) -> Any:
         JSON-serializable representation.
     """
 
-    if hasattr(component, "index"):
+    component_type = type(component).__name__
+    if component_type == "TupleIndex" and hasattr(component, "index"):
         return {"type": type(component).__name__, "index": component.index}
-    if hasattr(component, "key"):
+    if component_type in {"DictKey", "HFKey"} and hasattr(component, "key"):
         return {"type": type(component).__name__, "key": repr(component.key)}
-    if hasattr(component, "name"):
+    if component_type in {"NamedField", "DataclassField"} and hasattr(component, "name"):
         return {"type": type(component).__name__, "name": component.name}
     return {"type": type(component).__name__, "value": repr(component)}
 

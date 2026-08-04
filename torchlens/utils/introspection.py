@@ -32,13 +32,13 @@ _ATTR_SKIP_SET = frozenset({"T", "mT", "real", "imag", "H"})
 # 2026-04-27, ``dis.*`` self time ~16.5s on GPT-2). Re-using the parsed
 # offset map per code object reduces repeated work to a single dict lookup.
 #
-# Keys are ``id(code_obj)`` so unloaded code objects (e.g. via
-# ``importlib.reload``) get implicitly evicted: the new module's code
-# objects are fresh objects with new ids, and the old entries become
-# unreachable garbage. To keep the cache from growing without bound on
-# pathological workloads, we apply a soft cap and emit a one-shot warning
-# when crossed (the cap is large enough that real-world models never hit it).
-_COL_OFFSET_CACHE: Dict[int, Dict[int, Optional[int]]] = {}
+# The integer key alone is not sufficient because CPython may re-use object
+# addresses after the original code object dies. We therefore keep the code
+# object itself in the cached value and verify identity on lookup before
+# trusting the offset map. Retaining that strong reference also makes the size
+# cap meaningful because a live entry cannot be silently re-used for a
+# different code object that happens to land at the same address.
+_COL_OFFSET_CACHE: Dict[int, tuple[CodeType, Dict[int, Optional[int]]]] = {}
 _COL_OFFSET_CACHE_SIZE_CAP = 100_000
 _col_offset_cache_warned = False
 _AddressPath = list[tuple[str, Any]]
@@ -79,14 +79,18 @@ def _build_col_offset_map(code: CodeType) -> Dict[int, Optional[int]]:
 def _get_or_build_col_offset_map(code: CodeType) -> Dict[int, Optional[int]]:
     """Return the cached column-offset map for ``code`` (build on miss).
 
-    The cache is keyed by ``id(code)``. Code objects are immutable, so the
-    cached map is valid for the entire lifetime of the code object.
+    The cache is keyed by ``id(code)`` and stores the code object itself in the
+    value. Code objects are immutable, so the cached map is valid for the
+    lifetime of that exact object. The identity check guards against CPython
+    re-using an address for an unrelated code object after eviction.
     """
     global _col_offset_cache_warned
     code_id = id(code)
     cached = _COL_OFFSET_CACHE.get(code_id)
     if cached is not None:
-        return cached
+        cached_code, cached_map = cached
+        if cached_code is code:
+            return cached_map
     if not _col_offset_cache_warned and len(_COL_OFFSET_CACHE) >= _COL_OFFSET_CACHE_SIZE_CAP:
         # Emit a single warning so unbounded growth in pathological workloads
         # is visible without spamming the logs. Real-world models are well
@@ -100,7 +104,7 @@ def _get_or_build_col_offset_map(code: CodeType) -> Dict[int, Optional[int]]:
         )
         _col_offset_cache_warned = True
     offset_map = _build_col_offset_map(code)
-    _COL_OFFSET_CACHE[code_id] = offset_map
+    _COL_OFFSET_CACHE[code_id] = (code, offset_map)
     return offset_map
 
 

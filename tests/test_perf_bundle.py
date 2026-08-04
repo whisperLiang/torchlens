@@ -163,6 +163,32 @@ class TestColOffsetCache:
         result = introspection._get_col_offset(self._make_frame_at_offset(code, 9999))
         assert result is None
 
+    def test_stale_id_cache_entry_is_rebuilt_for_new_code_object(self) -> None:
+        """A reused ``id(code)`` must not serve another code object's offset map."""
+
+        def first() -> int:
+            return 1
+
+        def second() -> int:
+            return 2
+
+        fresh_map = {0: 456}
+        introspection._COL_OFFSET_CACHE[id(second.__code__)] = (first.__code__, {0: 123})
+
+        with mock.patch.object(
+            introspection,
+            "_build_col_offset_map",
+            autospec=True,
+            return_value=fresh_map,
+        ) as wrapped:
+            rebuilt = introspection._get_or_build_col_offset_map(second.__code__)
+
+        assert rebuilt == fresh_map
+        assert wrapped.call_count == 1
+        cached_code, cached_map = introspection._COL_OFFSET_CACHE[id(second.__code__)]
+        assert cached_code is second.__code__
+        assert cached_map == fresh_map
+
 
 # ---------------------------------------------------------------------------
 # Fix 2 -- branch attribution fast-skip
