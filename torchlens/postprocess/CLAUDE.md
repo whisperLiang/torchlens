@@ -10,11 +10,13 @@ eviction plus parameter-reference release. Step order is load-bearing.
 
 | File | Steps | Purpose |
 |------|-------|---------|
-| `__init__.py` | orchestrator | Full `postprocess()` and `postprocess_fast()` |
+| `__init__.py` | orchestrator | Full `postprocess()` pipeline and step contracts |
+| `_materialize.py` | 0 | Project capture events into raw `Op` state |
 | `graph_traversal.py` | 1-4 | Output nodes, output ancestors, orphan removal, distances |
-| `ast_branches.py` | Step 5 support | AST indexing and branch-scope records for conditionals |
+| `ast_branches.py` | 5 support, 11.5 | Conditional AST indexing and source variable names |
 | `control_flow.py` | 5-6 | Conditional attribution and buffer dedup |
-| `loop_detection.py` | 7 | Recurrent/loop grouping and shared-param grouping |
+| `loop_detection.py` | 7 adapter | Adapt Trace state and apply recurrence assignments |
+| `loop_grouping_adapter.py` | 7 implementation | Backend-neutral recurrence grouping |
 | `labeling.py` | 8-11 | Final labels, renaming, lookup keys, retained layer lists, field ordering |
 | `finalization.py` | 12-20 | Undecorate, params, layers, modules, hash, streaming finalization/eviction, ref release |
 | `incremental.py` | fastlog enrichment | Adds module paths and param addresses to sparse recordings |
@@ -24,6 +26,7 @@ eviction plus parameter-reference release. Step order is load-bearing.
 | Step | Function | What |
 |------|----------|------|
 | pre-0 | `_resolve_output_parent_labels` | Pair each output tensor with its graph parent; late-log returned-but-never-traced buffers as source events |
+| 0 | `materialize_from_events` | Rebuild raw `Op` state from sealed capture events |
 | 1 | `_add_output_layers` | Create dedicated output nodes (skips unattributable outputs) |
 | 2 | `_find_output_ancestors` | Mark nodes connected to model output |
 | 3 | `_remove_orphan_nodes` | Drop unconnected raw nodes |
@@ -35,6 +38,7 @@ eviction plus parameter-reference release. Step order is load-bearing.
 | 9 | `_log_final_info_for_layers` | Write final layer/module fields |
 | 10 | `_rename_model_history_layer_names` | Rename global refs (field reorder removed — scrub order is now deterministic) |
 | 11 | `_build_lookup_keys_and_finalize_retained_layers` | Build lookup keys and finalize retained layer lists |
+| 11.5 | `_populate_var_names` | Resolve source assignment names through `ast_branches.py` |
 | 12 | `_undecorate_all_saved_tensors` | Strip TorchLens attrs from saved tensors |
 | 13 | `torch.cuda.empty_cache` | Optional CUDA cache clear |
 | 14 | `_log_time_elapsed` | Capture timing |
@@ -62,11 +66,12 @@ the canonical module path to `equivalence_class`. No postprocess pass infers or
 propagates `modules`.
 
 ## Loop Detection
-Loop detection groups repeated operations by operation equivalence, expands isomorphic
-subgraphs, refines groups by neighbor connectivity, merges adjacent/shared-param groups, and
-rebuilds pass assignments after expansion to clear stale recurrent group references.
+`loop_detection.py` builds a backend-neutral `RecurrenceGroupingGraph` and applies the
+assignments returned by `loop_grouping_adapter.py`. The adapter owns the live frontier,
+adjacency, parameter-free false-positive guard, grouping, and pass assignment behavior.
 
-## Fast Mode
-`postprocess_fast()` is for second-pass selective out saves. It reuses graph structure,
-labels, module data, and loop groupings from the exhaustive pass. It must not call
-`_build_module_logs()` because `_module_build_data` is not repopulated in fast mode.
+## Refresh Projection
+There is no standalone `postprocess_fast()` orchestrator. Refresh captures are projected by
+`CaptureSession`/`TraceProjector`, then run through the full `postprocess()` entry point with
+the established Trace state. Saved-output counters are refreshed after retained layers are
+finalized; module aggregation remains part of the ordered full pipeline.

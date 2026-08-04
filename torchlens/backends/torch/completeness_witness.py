@@ -439,6 +439,9 @@ an unresolved (orphan-pruned) BOOL predicate from the tensor-op INCOMPLETE gate 
 pruned bool predicate is honestly witnessed (or downgraded) by those other nets.
 """
 
+_HOST_ESCAPE_BOOL_CONSUMER_LOCATIONS: "weakref.WeakKeyDictionary[Any, dict[str, list[tuple[str, int]]]]" = weakref.WeakKeyDictionary()
+"""Per-trace user source locations where labelled bool tensors reached ``__bool__``."""
+
 # r37 INV-1 (hon2_2): the former ``_HOST_ESCAPE_UNATTRIBUTABLE_VALUES`` table -- scalar
 # values of unlabelled escapes, discharged by value-equality against sinks/state -- is
 # REMOVED. Scalar value equality is not a provenance proof (a colliding constant sink or
@@ -1963,6 +1966,15 @@ def host_escape_bool_source_labels(trace: Any) -> frozenset[str]:
 
     labels = _HOST_ESCAPE_BOOL_SOURCE_LABELS.get(trace)
     return frozenset(labels) if labels else frozenset()
+
+
+def host_escape_bool_consumer_locations(trace: Any) -> dict[str, tuple[tuple[str, int], ...]]:
+    """Return user source locations that consumed each captured bool tensor."""
+
+    locations = _HOST_ESCAPE_BOOL_CONSUMER_LOCATIONS.get(trace)
+    if not locations:
+        return {}
+    return {label: tuple(entries) for label, entries in locations.items()}
 
 
 _HOST_ESCAPE_LABEL_LEAF_ORIGINS: "weakref.WeakKeyDictionary[Any, dict[str, tuple[frozenset[str], frozenset[str]] | None]]" = weakref.WeakKeyDictionary()
@@ -4869,20 +4881,17 @@ def _make_host_value_escape_method(original: Any, state: _WitnessState, name: st
     double count).
     """
 
-    del name  # recorded uniformly; the operand set determines the source, not the spelling
-
     def wrapper(self: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
         if isinstance(self, torch.Tensor) and _state._active_trace is state.trace:
             if threading.get_ident() == state.owner_thread_id:
-                if (
-                    _state._logging_enabled
-                    and not _internal_read_active()
-                    and not _completeness_census_active()
-                ):
-                    _record_escape_source_tensor(state.trace, self, invisible=True)
-                    for value in (*args, *kwargs.values()):
-                        if isinstance(value, torch.Tensor):
-                            _record_escape_source_tensor(state.trace, value, invisible=True)
+                if _state._logging_enabled and not _internal_read_active():
+                    if name == "__bool__":
+                        _record_bool_consumer_location(state.trace, self)
+                    if not _completeness_census_active():
+                        _record_escape_source_tensor(state.trace, self, invisible=True)
+                        for value in (*args, *kwargs.values()):
+                            if isinstance(value, torch.Tensor):
+                                _record_escape_source_tensor(state.trace, value, invisible=True)
             elif state.belt_armed:
                 # r43: a NON-owner value escape ceilings iff its receiver OR any tensor operand
                 # is a captured tensor (the census is thread-local, so the belt is PRIMARY here).
@@ -4929,9 +4938,45 @@ def _first_scalar_escape_source() -> tuple[str | None, int | None]:
     return None, None
 
 
+def _record_bool_consumer_location(trace: Any, source: torch.Tensor) -> None:
+    """Record where one labelled bool tensor reached Python's ``__bool__`` protocol.
+
+    Parameters
+    ----------
+    trace:
+        Active capture trace.
+    source:
+        Bool tensor consumed by Python control flow or ``bool(...)``.
+    """
+
+    if source.dtype is not torch.bool:
+        return
+    label = get_tensor_label(source)
+    if not isinstance(label, str):
+        return
+    filename, line_number = _first_scalar_escape_source()
+    if filename is None or line_number is None:
+        return
+    locations = _HOST_ESCAPE_BOOL_CONSUMER_LOCATIONS.get(trace)
+    if locations is None:
+        locations = {}
+        _HOST_ESCAPE_BOOL_CONSUMER_LOCATIONS[trace] = locations
+    entries = locations.setdefault(label, [])
+    location = (filename, line_number)
+    if location not in entries:
+        entries.append(location)
+
+    bool_sources = _HOST_ESCAPE_BOOL_SOURCE_LABELS.get(trace)
+    if bool_sources is None:
+        bool_sources = set()
+        _HOST_ESCAPE_BOOL_SOURCE_LABELS[trace] = bool_sources
+    bool_sources.add(label)
+
+
 def _make_plain_scalar_escape_method(
     original: Any,
     state: _PlainScalarEscapeState,
+    name: str,
 ) -> Any:
     """Wrap one tensor scalar protocol method for a plain capture.
 
@@ -4941,6 +4986,8 @@ def _make_plain_scalar_escape_method(
         Exact PyTorch method to call unchanged.
     state:
         Per-capture warning aggregate.
+    name:
+        Tensor scalar-protocol method name.
 
     Returns
     -------
@@ -4960,6 +5007,8 @@ def _make_plain_scalar_escape_method(
             state.count += 1
             if state.first_file is None:
                 state.first_file, state.first_line = _first_scalar_escape_source()
+            if name == "__bool__":
+                _record_bool_consumer_location(state.trace, self)
         return original(self, *args, **kwargs)
 
     return wrapper
@@ -5028,7 +5077,7 @@ def capture_scalar_escape_warning(trace: Any) -> Iterator[None]:
             continue
         shadowed = name in torch.Tensor.__dict__
         try:
-            setattr(torch.Tensor, name, _make_plain_scalar_escape_method(original, state))
+            setattr(torch.Tensor, name, _make_plain_scalar_escape_method(original, state, name))
         except (TypeError, AttributeError):
             continue
         restores[name] = (shadowed, original)

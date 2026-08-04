@@ -43,6 +43,31 @@ class SimpleIfElseModel(nn.Module):
         return y
 
 
+class ReturnedPredicateIfElseModel(nn.Module):
+    """Model returning the same predicate that selects its branch."""
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run one branch and expose its consumed predicate as output metadata.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Branch-selected output and the scalar predicate tensor.
+        """
+
+        predicate = x.mean() > 0
+        if predicate:
+            y = torch.relu(x)
+        else:
+            y = torch.sigmoid(x)
+        return y, predicate
+
+
 class ElifLadderModel(nn.Module):
     """Model with a flattened ``if``/``elif``/``elif``/``else`` ladder."""
 
@@ -369,9 +394,21 @@ def test_simple_if_else_model_step5_pipeline() -> None:
     assert all(
         call_indexs == [1] for call_indexs in negative_log.conditional_edge_call_indices.values()
     )
-
     _assert_derived_views_consistent(positive_log)
     _assert_derived_views_consistent(negative_log)
+
+
+def test_returned_predicate_remains_a_conditional_consumer() -> None:
+    """An output child must not hide a proven tensor-to-host predicate consumer."""
+
+    trace = _log_model(ReturnedPredicateIfElseModel(), torch.ones(2, 2))
+    predicate = next(op for op in trace.ops if op.func_name == "__gt__")
+
+    assert len(trace.conditionals) == 1
+    assert trace.conditional_branch_edges
+    assert predicate.is_terminal_bool is True
+    assert predicate.is_terminal_conditional_bool is True
+    assert predicate.label in trace.internally_terminated_bool_ops
 
 
 @pytest.mark.smoke

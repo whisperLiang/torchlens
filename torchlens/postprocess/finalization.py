@@ -24,6 +24,7 @@ Step 20 (release_param_refs): Drops live parameter references after finalization
 import time
 from collections import defaultdict, deque
 from dataclasses import replace
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any, Dict, List, Literal, NamedTuple, TYPE_CHECKING, Tuple, cast
 
@@ -45,7 +46,7 @@ from ..data_classes._state_adapter import state_items
 from ..data_classes._summary import format_call_arg
 from ..data_classes.module import Module, ModuleCall
 from ..data_classes.prehook import ModuleInputSnapshot, PreHookEffect
-from ..utils.introspection import get_vars_of_type_from_obj
+from ..ir.container_registry import _iter_tensor_leaves
 from ..utils._torch_symbols import torch_attr
 
 if TYPE_CHECKING:
@@ -70,13 +71,9 @@ def _undecorate_all_saved_tensors(self: "Trace") -> None:
             tensors_to_undecorate.append(layer_entry.transformed_out)
 
         if layer_entry.saved_args:
-            tensors_to_undecorate.extend(
-                get_vars_of_type_from_obj(layer_entry.saved_args, torch.Tensor, search_depth=2)
-            )
+            tensors_to_undecorate.extend(_iter_tensor_leaves(layer_entry.saved_args))
         if layer_entry.saved_kwargs:
-            tensors_to_undecorate.extend(
-                get_vars_of_type_from_obj(layer_entry.saved_kwargs, torch.Tensor, search_depth=2)
-            )
+            tensors_to_undecorate.extend(_iter_tensor_leaves(layer_entry.saved_kwargs))
 
     for t in tensors_to_undecorate:
         clear_meta(t)
@@ -119,7 +116,7 @@ def _finalize_param_logs(self: "Trace") -> None:
         for pl in layer_entry._param_logs:
             if layer_entry.label not in pl.used_by_ops:
                 pl.used_by_ops.append(layer_entry.label)
-            layer_label = layer_entry.layer_label or layer_entry.layer_label
+            layer_label = layer_entry.layer_label
             if layer_label not in pl.used_by_layers:
                 pl.used_by_layers.append(layer_label)
             # Link to other params in the same operation
@@ -1018,9 +1015,10 @@ def _build_layer_logs(self: "Trace") -> None:
             if layer_log.io_role is not None and pass_log.io_role is not None:
                 merged = "".join(
                     c if c == s else "*"
-                    for c, s in zip(
+                    for c, s in zip_longest(
                         layer_log.io_role,
                         pass_log.io_role,
+                        fillvalue="",
                     )
                 )
                 if merged.endswith("."):

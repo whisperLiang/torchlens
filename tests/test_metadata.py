@@ -22,6 +22,27 @@ from torchlens.capture.flops import (
 )
 
 
+class _SharedMultiOutputModel(nn.Module):
+    """Small DAG whose shared node reaches two outputs."""
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return two children of one shared operation.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Additive and subtractive branches from one shared value.
+        """
+
+        shared = x * 2
+        return shared + 1, shared - 1
+
+
 # =============================================================================
 # Trace fields
 # =============================================================================
@@ -497,6 +518,42 @@ def test_layer_labels_properties(small_input):
     assert all(isinstance(lbl, str) for lbl in mh.layer_labels)
     assert isinstance(mh.op_labels, list)
     assert all(isinstance(lbl, str) for lbl in mh.op_labels)
+
+
+def test_output_descendants_complete_when_distances_disabled() -> None:
+    """Disabling distance fields must not degrade serialized output ancestry."""
+
+    trace = trace_fn(
+        _SharedMultiOutputModel(),
+        torch.ones(1),
+        compute_input_output_distances=False,
+        layers_to_save="all",
+    )
+    expected_outputs = set(trace.output_layers)
+    shared = next(op for op in trace.ops if op.func_name == "__mul__")
+
+    assert trace.input_ops[0].output_descendants == expected_outputs
+    assert shared.output_descendants == expected_outputs
+
+
+def test_exhaustive_saved_layer_count_uses_finalized_layer_list() -> None:
+    """Exhaustive capture must report its saved unique-layer count after Step 11."""
+
+    trace = trace_fn(
+        nn.Sequential(nn.Linear(2, 2), nn.ReLU()),
+        torch.ones(1, 2),
+        layers_to_save="all",
+    )
+    expected = len(
+        {
+            op.layer_label
+            for op in trace.ops
+            if op.has_saved_activation and not getattr(op, "is_orphan", False)
+        }
+    )
+
+    assert trace.num_saved_layers == expected
+    assert trace.num_saved_layers == trace.num_saved_ops
 
 
 # =============================================================================

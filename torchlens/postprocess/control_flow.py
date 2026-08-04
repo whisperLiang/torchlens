@@ -55,6 +55,7 @@ def _mark_conditional_branches(self: "Trace") -> None:
     against the slow-path defaults via ``tests/test_perf_bundle.py``.
     """
 
+    _seed_proven_bool_consumers(self)
     if _can_fast_skip_step5(self):
         return
 
@@ -78,6 +79,36 @@ def _mark_conditional_branches(self: "Trace") -> None:
     _mark_conditional_branches_if_backward_flood(self, bool_classifications)
     _attribute_branches_forward(self, events_by_key)
     _materialize_derived_views(self)
+
+
+def _seed_proven_bool_consumers(self: "Trace") -> None:
+    """Add captured tensor-to-host bool consumers to Step 5's candidate list.
+
+    Parameters
+    ----------
+    self:
+        Trace being postprocessed.
+
+    Notes
+    -----
+    A predicate returned by the model has a synthetic output child, so it is not
+    an internal graph sink. The capture-time ``__bool__`` observer independently
+    proves that the tensor was consumed on the host; that proof, rather than
+    childlessness, makes it a terminal conditional candidate.
+    """
+
+    from ..backends.torch.completeness_witness import host_escape_bool_source_labels
+
+    proven_labels = host_escape_bool_source_labels(self)
+    for label in self._raw_layer_labels_list:
+        if label not in proven_labels:
+            continue
+        layer = self[label]
+        if not layer.is_scalar_bool or getattr(layer, "is_orphan", False):
+            continue
+        if label not in self.internally_terminated_bool_ops:
+            self.internally_terminated_bool_ops.append(label)
+        layer.is_terminal_bool = True
 
 
 def _can_fast_skip_step5(self: "Trace") -> bool:
@@ -129,9 +160,15 @@ def _build_file_indexes(
         file could not be parsed or loaded.
     """
 
+    from ..backends.torch.completeness_witness import host_escape_bool_consumer_locations
+
     file_indexes: Dict[str, Optional[ast_branches.FileIndex]] = {}
+    consumer_locations = host_escape_bool_consumer_locations(self)
     for bool_label in _iter_terminal_scalar_bool_labels(self):
         bool_layer = self[bool_label]
+        for filename, _line_number in consumer_locations.get(bool_label, ()):
+            if filename not in file_indexes:
+                file_indexes[filename] = ast_branches.get_file_index(filename)
         for frame in bool_layer.code_context:
             if frame.file in file_indexes:
                 continue
@@ -156,22 +193,30 @@ def _classify_bool_layers(
         keyed by raw layer label.
     """
 
+    from ..backends.torch.completeness_witness import host_escape_bool_consumer_locations
+
     bool_classifications: Dict[str, ast_branches.BoolClassification] = {}
     ordered_conditional_keys: Dict[ast_branches.ConditionalKey, None] = {}
+    consumer_locations = host_escape_bool_consumer_locations(self)
 
     for bool_label in _iter_terminal_scalar_bool_labels(self):
         bool_layer = self[bool_label]
         classification = ast_branches.BoolClassification("unknown", None, None, None)
-        for frame in reversed(bool_layer.code_context):
-            frame_classification = ast_branches.classify_bool(
-                frame.file,
-                frame.line_number,
-                frame.col_offset,
-            )
-            if frame_classification.kind == "unknown":
-                continue
-            classification = frame_classification
-            break
+        for filename, line_number in consumer_locations.get(bool_label, ()):
+            classification = ast_branches.classify_bool(filename, line_number, None)
+            if classification.kind != "unknown":
+                break
+        if classification.kind == "unknown":
+            for frame in reversed(bool_layer.code_context):
+                frame_classification = ast_branches.classify_bool(
+                    frame.file,
+                    frame.line_number,
+                    frame.col_offset,
+                )
+                if frame_classification.kind == "unknown":
+                    continue
+                classification = frame_classification
+                break
 
         is_terminal_conditional_bool = (
             classification.kind in _BRANCH_CONTEXT_KINDS

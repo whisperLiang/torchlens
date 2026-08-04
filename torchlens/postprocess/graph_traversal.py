@@ -21,6 +21,7 @@ from ..utils.tensor_utils import safe_copy, safe_to, tensor_nanequal
 from ..utils.introspection import _get_code_context
 from ..data_classes.op import Op
 from ..ir import replace_op_event
+from ._materialize import _recorded_buffer_address
 
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
@@ -166,13 +167,9 @@ def _event_buffer_address_matches(self: "Trace", label_raw: str, buffer_address:
     if capture_events is None:
         return False
     event = capture_events.op_event_by_label_raw.get(label_raw)
-    equivalence_class = getattr(event, "equivalence_class", None) if event is not None else None
-    if not equivalence_class or not equivalence_class.startswith("buffer_"):
+    if event is None or event.kind != "source" or event.layer_type != "buffer":
         return False
-    candidate = equivalence_class.removeprefix("buffer_")
-    # The equivalence class may carry a module-stack suffix appended directly
-    # after the address, so accept a prefix match as well as an exact one.
-    return candidate == buffer_address or candidate.startswith(buffer_address)
+    return _recorded_buffer_address(event) == buffer_address
 
 
 def _add_output_layers(
@@ -374,33 +371,19 @@ def _add_output_layers(
 def _find_output_ancestors(self: "Trace") -> None:
     """Step 2: Mark every node that is an ancestor of an output node.
 
-    Uses a LIFO stack (DFS) starting from output nodes. For each node popped,
-    checks its children — if any child has_output_descendant, this node is too,
-    and it inherits the child's output_descendants. Then pushes all unseen parents
-    onto the stack.
-
-    Note: A node may be pushed onto the stack multiple times if it's shared by
-    sibling paths. The second pop is redundant (nodes_seen prevents re-pushing
-    parents) but harmless — it may beneficially propagate output_descendants
-    from newly-marked children on the second visit.
-
-    The boolean has_output_descendant is always correct after this function; the
-    output_descendants set may be incomplete for multi-output graphs, but Step 4's
-    flood corrects it if distance marking is enabled.
+    Walks the capture DAG in reverse topological order so every child's complete
+    descendant set is finalized before it is propagated to a parent. This keeps
+    ancestry metadata complete even when optional Step 4 distance computation is
+    disabled.
     """
-    node_stack = self.output_layers[:]
-    nodes_seen = set()
-    while len(node_stack) > 0:
-        node_label = node_stack.pop()
-        nodes_seen.add(node_label)
+
+    for node_label in reversed(self._raw_layer_labels_list):
         node = self[node_label]
         for child_node_label in node.children:
-            if self[child_node_label].has_output_descendant:
+            child = self[child_node_label]
+            if child.has_output_descendant:
                 node.has_output_descendant = True
-                node.output_descendants.update(self[child_node_label].output_descendants)
-        for parent_node_label in node.parents:
-            if parent_node_label not in nodes_seen:
-                node_stack.append(parent_node_label)
+                node.output_descendants.update(child.output_descendants)
 
 
 def _remove_orphan_nodes(self: "Trace") -> None:

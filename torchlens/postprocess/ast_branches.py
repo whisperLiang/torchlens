@@ -1470,7 +1470,11 @@ class _ScopeIndexer:
         terminal_else: List[ast.stmt] = []
         current = node
         while current.orelse:
-            if len(current.orelse) == 1 and isinstance(current.orelse[0], ast.If):
+            if (
+                len(current.orelse) == 1
+                and isinstance(current.orelse[0], ast.If)
+                and current.orelse[0].col_offset == current.col_offset
+            ):
                 next_if = current.orelse[0]
                 flattened_elifs.append(next_if)
                 current = next_if
@@ -1609,7 +1613,12 @@ class _ScopeIndexer:
         """
 
         parent = self.parent_map.get(node)
-        return isinstance(parent, ast.If) and len(parent.orelse) == 1 and parent.orelse[0] is node
+        return (
+            isinstance(parent, ast.If)
+            and len(parent.orelse) == 1
+            and parent.orelse[0] is node
+            and parent.col_offset == node.col_offset
+        )
 
 
 __all__ = [
