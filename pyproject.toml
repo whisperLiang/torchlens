@@ -201,6 +201,12 @@ filterwarnings = [
     # fatal -- like the capability-degradation warning above. Fires whenever save_mode=
     # 'reference' is used, so it is not per-test assertable.
     "default:save_mode='reference' stores source tensors by reference.*:UserWarning:torchlens(\\.|$)",
+    # Informational disclosure (r6 H2): an activation archive saved from a `save=` selective
+    # capture records no original-input digests, so numeric attestation can never apply.
+    # Fires for every selective include_activations= save -- a commonly exercised idiom, so
+    # like the save_mode caveat above it is not per-test assertable. Asserted locally in
+    # tests/test_io_runnable_payload_integrity.py, which resets the one-time flag first.
+    "default:This runnable save archives activations but records no original-input.*:UserWarning:torchlens(\\.|$)",
     "default:`.*` is deprecated; use `.*` instead\\..*:DeprecationWarning",
     "default:Bundle tlspec_version=.* is older than runtime tlspec_version=.*:DeprecationWarning",
     # External: torchvision model init deprecations

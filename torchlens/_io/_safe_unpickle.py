@@ -122,6 +122,7 @@ import io
 import os
 import pickle
 import sys
+import warnings
 from dataclasses import dataclass
 from types import ModuleType
 from typing import Any, BinaryIO, Collection, Mapping
@@ -518,6 +519,13 @@ def _is_alloc_constructor_type(obj: Any) -> bool:
     The type OBJECTS stay RESOLVABLE at ``find_class`` (legit metadata references
     ``torch.Tensor`` / ``numpy.ndarray`` as inert values); ONLY their CONSTRUCTION on the
     three belts is refused. Never raises (a non-type ``obj`` returns ``False``).
+
+    ``torch.nn.Module`` subclasses are deliberately NOT listed here even though
+    ``nn.Linear(65536, 65536)`` allocates ~16 GiB of parameters: that construction is only
+    dangerous when the pickle SUPPLIES the sizes, and a real artifact legitimately
+    NEWOBJ-constructs a zero-argument module (``torch.nn.modules.linear.Identity()`` from a
+    ``splice_module`` intervention helper). An arg-blind belt here would refuse that honest
+    artifact, so the module rule lives in the arg-aware ``_alloc_refusal_reason`` instead.
     """
 
     if _is_torch_storage_type(obj):
@@ -540,6 +548,270 @@ def _is_alloc_constructor_type(obj: Any) -> bool:
         except TypeError:  # pragma: no cover - defensive.
             pass
     return False
+
+
+# Resolved IDENTITIES of the numpy array-reconstruction helper admitted by
+# ``_SAFE_EXPLICIT_GLOBALS`` under both the legacy (<2.0) and modern (>=2.0) private
+# module spellings. Matching on IDENTITY -- never on the attacker-supplied pickled
+# ``(module, name)`` -- is the same rule the torch / torchlens branches of
+# ``find_class`` already follow. Both spellings alias the SAME function object on every
+# numpy that ships the compatibility shim; resolving both keeps the set correct if a
+# future numpy splits them.
+def _build_numpy_reconstruct_funcs() -> frozenset[Any]:
+    """Resolve the numpy ``_reconstruct`` helpers admitted by the explicit allowlist.
+
+    Returns
+    -------
+    frozenset[Any]
+        Every resolvable ``numpy(.|._)core.multiarray._reconstruct`` function object.
+        Empty when numpy is absent or the private module layout changed.
+    """
+
+    import importlib
+
+    resolved: list[Any] = []
+    for module_path in ("numpy.core.multiarray", "numpy._core.multiarray"):
+        try:
+            candidate = getattr(importlib.import_module(module_path), "_reconstruct", None)
+        except Exception:  # pragma: no cover - numpy absent / private layout drift.
+            continue
+        if callable(candidate):
+            resolved.append(candidate)
+    return frozenset(resolved)
+
+
+_NUMPY_RECONSTRUCT_FUNCS: frozenset[Any] = _build_numpy_reconstruct_funcs()
+
+
+def _is_vetted_torch_reduce_callable(func: Any) -> bool:
+    """Return whether a torch-owned callable may legitimately be INVOKED by a REDUCE.
+
+    The ONLY torch-owned callables a legitimate ``.tlspec`` stream ever CALLS are the
+    ``torch._utils._rebuild*`` reconstructors, which ``find_class`` already gates
+    (undotted name + torch-owned non-type callable). Every other torch-owned callable
+    reaches the stack as an inert VALUE -- a function-registry reference resolved through
+    ``_safe_getattr`` -- and is never called by an honest stream.
+
+    Parameters
+    ----------
+    func:
+        Callable sitting on the pickle stack as a REDUCE target.
+
+    Returns
+    -------
+    bool
+        ``True`` only for the vetted ``torch._utils._rebuild*`` reconstructor family.
+    """
+
+    return str(getattr(func, "__module__", "") or "") == "torch._utils" and str(
+        getattr(func, "__name__", "") or ""
+    ).startswith("_rebuild")
+
+
+def _is_torch_reachable_callable(func: Any) -> bool:
+    """Return whether a REDUCE target is a torch callable reachable by this unpickler.
+
+    Covers BOTH routes a torch callable can take onto the pickle stack:
+
+    * ``find_class`` -- a torch-owned function (real ``__module__`` inside the torch
+      package), e.g. the ``torch._utils._rebuild*`` reconstructors; and
+    * ``_safe_getattr`` -- a method/function DESCRIPTOR fetched off one of the admitted
+      torch C holder classes. Those descriptors carry ``__module__ is None``, so a
+      ``__module__``-only test MISSES them, and they are the second half of the mediation
+      class: ``getattr(torch._C.TensorBase, "new_empty")`` applied to a small tensor
+      rebuilt from an embedded blob amplifies a ~1.7 KiB pickle into an arbitrarily large
+      UNINITIALIZED tensor. Ownership is therefore read from ``__objclass__`` /
+      ``__self__`` -- the descriptor's real owner -- as well as ``__module__``.
+
+    Parameters
+    ----------
+    func:
+        Callable sitting on the pickle stack as a REDUCE target.
+
+    Returns
+    -------
+    bool
+        ``True`` when the callable belongs to torch by module, owning class, or binding.
+    """
+
+    if _is_torch_owned(func):
+        return True
+    for owner in (getattr(func, "__objclass__", None), getattr(func, "__self__", None)):
+        if owner is None:
+            continue
+        # IDENTITY, never ``in``: ``owner`` is attacker-reachable, and a value that is
+        # UNHASHABLE (an ``ndarray``) or carries a broadcasting ``__eq__`` makes a
+        # frozenset membership test RAISE instead of decide -- a security belt that
+        # crashes is a belt that did not answer. Same rule the numpy/bytes branch of
+        # ``_alloc_refusal_reason`` follows.
+        if any(owner is allowed for allowed in _ALLOWED_GETATTR_OBJECTS):
+            return True
+        if _is_torch_owned(owner):
+            return True
+        if isinstance(owner, type) and _is_torch_owned(owner):
+            return True
+        if _is_torch_owned(type(owner)):
+            return True
+    return False
+
+
+def _requests_integer_sized_buffer(args: Any) -> bool:
+    """Return whether ``args`` asks a ``bytes``/``bytearray`` ctor for a SIZE, not data.
+
+    ``bytes(b"...")`` / ``bytearray(b"...")`` copy a buffer already present in the stream
+    (proportional, harmless). ``bytes(N)`` / ``bytearray(N)`` allocate N zero bytes from a
+    handful of pickle bytes -- an out-of-memory DoS with no buffer to pay for it.
+
+    Parameters
+    ----------
+    args:
+        Argument tuple popped for the REDUCE / NEWOBJ opcode.
+
+    Returns
+    -------
+    bool
+        ``True`` when the sole argument is an integer size.
+    """
+
+    if not isinstance(args, tuple) or len(args) != 1:
+        return False
+    return isinstance(args[0], int) and not isinstance(args[0], bool)
+
+
+def _is_sized_module_construction(func: Any, args: Any, kwargs: Any) -> bool:
+    """Return whether a ``torch.nn.Module`` is being constructed WITH pickle-supplied sizes.
+
+    Constructing a module runs its ``__init__``, which allocates PARAMETERS on the belt's
+    behalf -- ``torch.nn.modules.linear.Linear(65536, 65536)`` is ~16 GiB from a 48-byte
+    REDUCE, and the module class itself is an ordinary torch-owned data type that
+    ``find_class`` admits as an inert ``module_type`` reference.
+
+    The rule is ARGUMENT-BEARING construction only, and that boundary is load-bearing in
+    both directions. A pickled module INSTANCE always arrives as ``cls.__new__(cls)`` with
+    an EMPTY argument tuple followed by a BUILD (protocol >= 2 ``copyreg.__newobj__``), and
+    real artifacts do exactly that -- a ``splice_module`` intervention helper round-trips
+    ``torch.nn.modules.linear.Identity()``. A zero-argument construction also cannot be
+    SCALED by the attacker: whatever it allocates is fixed by the class. Every amplifying
+    construction, by contrast, must pass the sizes through the pickle.
+
+    Parameters
+    ----------
+    func:
+        Class the opcode is about to construct.
+    args:
+        Positional argument tuple popped for it.
+    kwargs:
+        Keyword argument mapping popped for it (NEWOBJ_EX only), or ``None``.
+
+    Returns
+    -------
+    bool
+        ``True`` for an argument-bearing ``nn.Module`` construction.
+    """
+
+    if not isinstance(func, type):
+        return False
+    try:
+        if not issubclass(func, torch.nn.Module):
+            return False
+    except TypeError:  # pragma: no cover - defensive; issubclass on odd metaclasses.
+        return False
+    has_positional = bool(args) if isinstance(args, (tuple, list)) else args is not None
+    has_keyword = bool(kwargs) if isinstance(kwargs, dict) else kwargs is not None
+    return has_positional or has_keyword
+
+
+def _alloc_refusal_reason(func: Any, args: Any, kwargs: Any = None) -> str | None:
+    """Return why calling ``func(*args)`` would MEDIATE an attacker-sized allocation.
+
+    ``_is_alloc_constructor_type`` inspects the TYPE BEING CONSTRUCTED, so it is blind to
+    any admitted callable that constructs on that type's behalf: at REDUCE time the stack
+    holds the MEDIATOR, not the allocating type. This closes that indirection CLASS.
+
+    Enumerated mediators (r6; every ``_SAFE_EXPLICIT_GLOBALS`` entry and every other
+    surface ``find_class`` admits was assessed -- see the audit ledger):
+
+    * numpy ``_reconstruct`` -- ``_reconstruct(numpy.ndarray, (N,), b"b")`` runs
+      ``ndarray.__new__`` and returns an N-element UNINITIALIZED array; the bare
+      ``numpy.ndarray`` REDUCE the belt already refuses is reached through a plain
+      allowlisted FUNCTION. An 88-byte pickle yielded a 2,000,000-element array; at
+      N=2e9 roughly 16 GiB of uninitialized heap, allocated before any structural check.
+      The mediated TYPE (``args[0]``) is run through the existing belt policy.
+    * torch-owned callables reached as REDUCE targets -- ``_safe_getattr`` admits
+      ``getattr(torch._C._VariableFunctionsClass, "empty")`` because a legit stream stores
+      that reference as a VALUE, but a following REDUCE CALLS it:
+      ``torch.empty(N)`` / ``empty_strided`` / ``zeros`` / ``rand`` allocate an
+      attacker-sized tensor (``empty`` uninitialized) from a 73-byte pickle. The same
+      surface reaches tensor-constructor METHOD DESCRIPTORS: a small tensor legitimately
+      rebuilt from an embedded blob, fed to ``getattr(TensorBase, "new_empty")``, turned a
+      1,681-byte pickle into a 16,000,000-byte uninitialized tensor. Only the vetted
+      ``torch._utils._rebuild*`` reconstructors may be invoked.
+    * ``bytes`` / ``bytearray`` given an integer SIZE rather than a buffer -- a direct
+      zero-fill allocator the type-keyed belt never covered.
+    * an ARGUMENT-BEARING ``torch.nn.Module`` construction, whose ``__init__`` allocates
+      attacker-sized parameters (``_is_sized_module_construction``).
+
+    Parameters
+    ----------
+    func:
+        Callable / class the opcode is about to invoke.
+    args:
+        Argument tuple the opcode popped for it.
+    kwargs:
+        Keyword argument mapping the opcode popped (NEWOBJ_EX only), or ``None``.
+
+    Returns
+    -------
+    str | None
+        A refusal reason, or ``None`` when the call is not an allocation mediator.
+    """
+
+    if _NUMPY_RECONSTRUCT_FUNCS and any(func is helper for helper in _NUMPY_RECONSTRUCT_FUNCS):
+        # Fail CLOSED on a malformed arg tuple: a security belt never admits a call it
+        # cannot inspect.
+        if not isinstance(args, tuple) or not args or _is_alloc_constructor_type(args[0]):
+            mediated_type = args[0] if isinstance(args, tuple) and args else None
+            return (
+                "numpy _reconstruct mediating an allocation-constructor "
+                f"({getattr(mediated_type, '__module__', '?')}."
+                f"{getattr(mediated_type, '__qualname__', mediated_type)}) "
+                "-- _reconstruct runs ndarray.__new__ on a pickle-supplied shape and "
+                "returns attacker-sized, uninitialized-heap memory, reaching the same "
+                "allocation the bare numpy.ndarray REDUCE is refused for"
+            )
+        return None
+    if callable(func) and not isinstance(func, type) and _is_torch_reachable_callable(func):
+        if not _is_vetted_torch_reduce_callable(func):
+            return (
+                "a torch callable "
+                f"{getattr(func, '__module__', '') or getattr(func, '__objclass__', '')}."
+                f"{getattr(func, '__name__', func)!r} invoked by a REDUCE -- torch tensor "
+                "factories (empty / empty_strided / zeros / rand / ...) and tensor "
+                "constructor METHODS (new_empty / new_zeros / ...) allocate attacker-sized "
+                "tensors on the belt's behalf. A legit stream resolves torch callables as "
+                "inert VALUES and only ever CALLS the vetted torch._utils._rebuild* "
+                "reconstructors"
+            )
+        return None
+    # IDENTITY, never ``in``/``==``: ``func`` is attacker-controlled and a resolved value
+    # with a broadcasting ``__eq__`` (an ``ndarray``) would make a membership test raise
+    # instead of decide.
+    if (func is bytes or func is bytearray) and _requests_integer_sized_buffer(args):
+        return (
+            f"{getattr(func, '__name__', func)}(N) with an integer SIZE -- it allocates N "
+            "zero bytes from a handful of pickle bytes (an out-of-memory DoS); a legit "
+            "stream only ever copies a buffer already present in the stream"
+        )
+    if _is_sized_module_construction(func, args, kwargs):
+        return (
+            "an argument-bearing torch.nn.Module construction "
+            f"{getattr(func, '__module__', '')}.{getattr(func, '__qualname__', func)} -- "
+            "its __init__ allocates attacker-sized PARAMETERS on the belt's behalf "
+            "(nn.Linear(65536, 65536) is ~16 GiB from a 48-byte pickle). A pickled module "
+            "INSTANCE always arrives as a zero-argument cls.__new__(cls) plus a BUILD, so "
+            "this refuses nothing a real artifact does"
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -996,10 +1268,130 @@ def _safe_load_from_bytes(data: bytes) -> Any:
             "storages."
         )
     try:
-        return torch.load(io.BytesIO(data), weights_only=True)
+        loaded = torch.load(io.BytesIO(data), weights_only=True)
     except Exception as exc:  # noqa: BLE001 -- fail closed, never re-exec unsafely
         raise pickle.UnpicklingError(
             "Blocked unsafe embedded-tensor load during bundle metadata unpickle."
+        ) from exc
+    return _freeze_embedded_storage(loaded)
+
+
+def _frozen_untyped_storage(storage: Any) -> Any:
+    """Return a NON-resizable ``UntypedStorage`` holding the same bytes as ``storage``.
+
+    ``torch.frombuffer`` over a host ``bytearray`` produces a storage whose allocator
+    cannot reallocate, so ``resizable()`` is ``False`` and torch's own ``set_`` refuses to
+    grow it. The copy is bounded by ``storage`` -- itself bounded by the embedded blob
+    already present in the pickle stream -- so it is strictly proportional.
+
+    Parameters
+    ----------
+    storage:
+        Host (CPU) untyped storage to copy.
+
+    Returns
+    -------
+    Any
+        A non-resizable untyped storage with identical bytes.
+    """
+
+    return torch.frombuffer(bytearray(bytes(storage)), dtype=torch.uint8).untyped_storage()
+
+
+def _freeze_embedded_storage(loaded: Any) -> Any:
+    """Make an embedded-blob result NON-RESIZABLE so it cannot be amplified (r6).
+
+    The nested ``weights_only`` load bounds the embedded payload by the bytes present in
+    the stream, but it does not bound what a LATER opcode may grow that payload into. When
+    the embedded blob uses the LEGACY (non-zipfile) ``torch.save`` format the reconstructed
+    storage is RESIZABLE, and the vetted ``torch._utils._rebuild*`` reconstructors -- which
+    must stay REDUCE-invocable, they are the legitimate tensor path -- accept a
+    pickle-supplied ``size``/``stride`` and call ``set_``, which RESIZES the storage
+    upward. Measured: a 354-byte pickle chaining
+    ``_rebuild_tensor_v2(_load_from_bytes(<4-byte legacy blob>), 0, (100_000_000,), (1,),
+    False, None)`` yielded a 100 MB tensor -- roughly 282,000x amplification, unbounded in
+    the requested size, and reached through a callable the belt deliberately allows.
+
+    Bounding this at the CONSUMER would mean re-deriving the byte extent for every
+    ``_rebuild*`` signature and keeping that in step with torch. Bounding it at the SOURCE
+    is signature-independent and enforced by torch itself: a non-resizable storage makes
+    ``set_`` raise ``RuntimeError("Trying to resize storage that is not resizable")`` for
+    EVERY present and future consumer, while an exact-fit view -- the only thing an honest
+    stream asks for -- still succeeds unchanged.
+
+    A resizable storage on a non-CPU device cannot be frozen (torch exposes no
+    same-device non-resizable allocation), so it fails closed. That refuses nothing real:
+    a genuine torchlens bundle never emits ``_load_from_bytes`` at all (asserted by
+    ``tests/test_r4_metadata_unpickle_rce.py``), and the modern zipfile ``torch.save``
+    format -- what every current writer produces -- already yields a non-resizable storage
+    and is returned untouched.
+
+    Parameters
+    ----------
+    loaded:
+        Object returned by the nested weights-only load.
+
+    Returns
+    -------
+    Any
+        ``loaded`` itself when already non-resizable, else a frozen equivalent.
+
+    Raises
+    ------
+    pickle.UnpicklingError
+        If a resizable storage cannot be frozen (non-CPU device, or a failed copy).
+    """
+
+    typed_storage_type = getattr(torch.storage, "TypedStorage", ())
+    storage: Any
+    if isinstance(loaded, torch.Tensor):
+        storage = loaded.untyped_storage()
+    elif isinstance(loaded, torch.UntypedStorage):
+        storage = loaded
+    elif typed_storage_type and isinstance(loaded, typed_storage_type):
+        # ``TypedStorage.untyped()`` emits torch's TypedStorage-removal ``UserWarning``;
+        # the private attribute it delegates to is the same object and stays quiet, so a
+        # security load never spends a warning the caller cannot act on.
+        storage = getattr(loaded, "_untyped_storage", None)
+        if storage is None:  # pragma: no cover - torch layout drift.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                storage = loaded.untyped()
+    else:
+        # Not a storage-backed result; nothing a ``_rebuild*`` can grow.
+        return loaded
+
+    try:
+        if not storage.resizable():
+            return loaded
+    except Exception:  # pragma: no cover - defensive; exotic storage without the predicate.
+        pass
+
+    if str(getattr(storage, "device", "cpu")) != "cpu":
+        raise pickle.UnpicklingError(
+            "Blocked a RESIZABLE non-CPU embedded tensor storage during bundle metadata "
+            "unpickle: it can be grown by a following _rebuild* REDUCE into an "
+            "attacker-sized allocation, and torch exposes no same-device non-resizable "
+            "allocation to bound it. Re-save the artifact with the modern (zipfile) "
+            "torch.save format, which yields a non-resizable storage."
+        )
+
+    try:
+        frozen = _frozen_untyped_storage(storage)
+        if isinstance(loaded, torch.Tensor):
+            rebuilt = torch.empty(0, dtype=loaded.dtype, device=loaded.device)
+            rebuilt.set_(frozen, loaded.storage_offset(), loaded.size(), loaded.stride())
+            if loaded.requires_grad:
+                rebuilt.requires_grad_(True)
+            return rebuilt
+        if isinstance(loaded, torch.UntypedStorage):
+            return frozen
+        return torch.storage.TypedStorage(wrap_storage=frozen, dtype=loaded.dtype, _internal=True)
+    except Exception as exc:  # noqa: BLE001 -- fail closed, never hand back a growable storage
+        raise pickle.UnpicklingError(
+            "Blocked an embedded tensor storage during bundle metadata unpickle: it is "
+            "RESIZABLE (legacy torch.save format) and could not be frozen, so a following "
+            "_rebuild* REDUCE could grow it into an attacker-sized allocation."
         ) from exc
 
 
@@ -1602,10 +1994,23 @@ class SafeBundleUnpickler(pickle._Unpickler):
     #     REDUCE result, a memoized object, a resolved inert type reference, ...).
     #     ``torch.Tensor(N)`` / ``torch.FloatTensor(N)`` / ``numpy.ndarray((N,))`` each
     #     allocate an attacker-sized, uninitialized-heap buffer (``_is_alloc_constructor_type``).
+    #   * MEDIATED allocation (r6). The belt above keys on the TYPE being constructed, so
+    #     it is BLIND to an admitted callable that constructs on that type's behalf: at
+    #     REDUCE time the stack holds ``numpy._core.multiarray._reconstruct`` (an
+    #     allowlisted plain FUNCTION), not ``numpy.ndarray``, so an 88-byte pickle
+    #     allocated a 2,000,000-element uninitialized array end-to-end through
+    #     ``tl.load()``. ``_alloc_refusal_reason`` closes that indirection CLASS -- numpy
+    #     ``_reconstruct``, torch tensor factories reached as REDUCE targets via
+    #     ``_safe_getattr`` (``torch.empty(N)``), tensor-constructor METHOD DESCRIPTORS off
+    #     ``TensorBase`` applied to a tensor rebuilt from an embedded blob
+    #     (``new_empty``: 1.7 KiB -> 16 MB uninitialized, and invisible to a
+    #     ``__module__``-only ownership test), ``bytes``/``bytearray`` handed an integer
+    #     SIZE, and an ARGUMENT-BEARING ``nn.Module`` construction (whose ``__init__``
+    #     allocates attacker-sized parameters). The module rule is arg-aware ON PURPOSE:
+    #     a real artifact NEWOBJ-constructs a zero-argument ``nn.Identity()``.
     # Legit ``.tlspec`` metadata never BUILDs a torch tensor/storage/parameter and never
     # bare-constructs a storage/tensor/ndarray in the outer stream (payloads travel as
-    # BlobRefs and reconstruct through the wrapped ``_rebuild_*`` / ``_frombuffer`` /
-    # ``_reconstruct`` helpers, which are FUNCTIONS, not alloc TYPES), so these gates
+    # BlobRefs and reconstruct through the wrapped ``_rebuild_*`` helpers), so these gates
     # refuse nothing legit.
 
     def load_build(self) -> None:
@@ -1626,11 +2031,19 @@ class SafeBundleUnpickler(pickle._Unpickler):
         return _BASE_LOAD_BUILD(self)  # type: ignore[arg-type]
 
     def load_reduce(self) -> None:
-        """Refuse a REDUCE that would construct an alloc type (storage/tensor/ndarray)."""
+        """Refuse a REDUCE that constructs -- or MEDIATES -- an attacker-sized allocation."""
 
         # Base ``load_reduce`` is ``args = stack.pop(); func = stack[-1]; ...`` -- so
         # before it runs, ``func`` is ``stack[-2]`` (``args`` is ``stack[-1]``).
         func = self.stack[-2]  # type: ignore[attr-defined]
+        mediated = _alloc_refusal_reason(func, self.stack[-1])  # type: ignore[attr-defined]
+        if mediated is not None:
+            raise pickle.UnpicklingError(
+                "Blocked mediated allocation via REDUCE during bundle metadata "
+                f"unpickle: {mediated}. The allocation-constructor belt inspects the TYPE "
+                "being constructed, so an admitted callable that constructs on its behalf "
+                "must be refused here; .tlspec payloads travel as BlobRefs."
+            )
         if _is_alloc_constructor_type(func):
             raise pickle.UnpicklingError(
                 "Blocked allocation-constructor (torch storage/tensor or numpy ndarray) "
@@ -1650,6 +2063,11 @@ class SafeBundleUnpickler(pickle._Unpickler):
         # Base ``load_newobj`` is ``args = stack.pop(); cls = stack.pop(); ...`` -- so
         # ``cls`` is ``stack[-2]`` (``args`` is ``stack[-1]``).
         cls = self.stack[-2]  # type: ignore[attr-defined]
+        mediated = _alloc_refusal_reason(cls, self.stack[-1])  # type: ignore[attr-defined]
+        if mediated is not None:
+            raise pickle.UnpicklingError(
+                f"Blocked mediated allocation via NEWOBJ during bundle metadata unpickle: {mediated}."
+            )
         if _is_alloc_constructor_type(cls):
             raise pickle.UnpicklingError(
                 "Blocked allocation-constructor (torch storage/tensor or numpy ndarray) "
@@ -1665,6 +2083,16 @@ class SafeBundleUnpickler(pickle._Unpickler):
         # Base ``load_newobj_ex`` is ``kwargs = stack.pop(); args = stack.pop();
         # cls = stack.pop()`` -- so ``cls`` is ``stack[-3]``.
         cls = self.stack[-3]  # type: ignore[attr-defined]
+        mediated = _alloc_refusal_reason(
+            cls,
+            self.stack[-2],  # type: ignore[attr-defined]
+            self.stack[-1],  # type: ignore[attr-defined]
+        )
+        if mediated is not None:
+            raise pickle.UnpicklingError(
+                "Blocked mediated allocation via NEWOBJ_EX during bundle metadata "
+                f"unpickle: {mediated}."
+            )
         if _is_alloc_constructor_type(cls):
             raise pickle.UnpicklingError(
                 "Blocked allocation-constructor (torch storage/tensor or numpy ndarray) "

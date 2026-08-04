@@ -479,6 +479,35 @@ def _validate_runnable_payload_entries(manifest: dict[str, Any]) -> None:
         if label in labels:
             raise ValueError(f"Runnable weight payload repeats canonical state name {label!r}.")
         labels.add(label)
+    # r6 M3: the weights branch used to be ONE-DIRECTIONAL -- it rejected blobs without the
+    # flag but ACCEPTED ``weights.present=true`` with a MISSING or WRONG blob set, and never
+    # cross-checked weight LABELS against the descriptor's own declared state names. Deleting
+    # both ``runnable_weight`` entries (plus their body_index rows, blobs and
+    # ``n_auxiliary_blobs``) left ``present=true`` and ``validate_tlspec()`` returned clean,
+    # while ``.run()`` then failed with ``StateBindingError`` -- the gate users are told to run
+    # CERTIFIED an artifact the strict binder cannot bind. Close it with the same bidirectional
+    # cross-check the non-persistent-buffer branch below already performs.
+    #
+    # The buffer branch's literal shape (``present == bool(names)``) is NOT the right mirror
+    # here, and adopting it would over-block honest artifacts. Non-persistent buffers are a
+    # REQUIRED family, so their ``present`` tracks EXISTENCE; the weights layer is gated on the
+    # optional ``include_weights=`` save flag, so its ``present`` tracks the FLAG. Two honest
+    # shapes prove the difference: a params-bearing model saved at the DEFAULT
+    # ``include_weights=False`` has ``present=false`` with a NON-empty declared state, and a
+    # no-state model saved with ``include_weights=True`` has ``present=true`` with an EMPTY
+    # one. The invariant that holds on every honest shape -- and still refuses the repro -- is
+    # SET EQUALITY of the shipped labels against the declared persistent state whenever the
+    # layer is present (the flagless direction is already covered above).
+    persistent_names = {
+        binding.get("state_dict_name")
+        for slot in run.get("tensor_slots", [])
+        if isinstance(slot, dict)
+        and isinstance((binding := slot.get("state_binding")), dict)
+        and binding.get("persistent") is True
+        and isinstance(binding.get("state_dict_name"), str)
+    }
+    if weights_present and labels != persistent_names:
+        raise ValueError("Runnable weight entries disagree with tensor slots.")
     nonpersistent_buffer_entries = [
         entry
         for entry in tensors

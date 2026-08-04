@@ -308,6 +308,8 @@ def save(
                 capture_state_digests,
                 input_fingerprints,
             ) = _capture_activation_blob_specs(trace, sparse_run_descriptor)
+            if activation_members and not original_input_digests:
+                _warn_unattestable_activation_archive_once()
             sparse_run_descriptor = with_activation_payload(
                 sparse_run_descriptor,
                 members=activation_members,
@@ -1154,6 +1156,9 @@ def _load_trace_payload(
 _NONPERSISTENT_DISCLOSURE_WARNED = False
 """One-time process flag for the non-persistent buffer save disclosure."""
 
+_UNATTESTABLE_ACTIVATION_DISCLOSURE_WARNED = False
+"""One-time process flag for the unattestable-activation-archive save disclosure (r6 H2)."""
+
 
 def _warn_nonpersistent_buffer_disclosure_once() -> None:
     """Emit the one-time REQUIRED-family privacy disclosure (contract section 5).
@@ -1175,6 +1180,37 @@ def _warn_nonpersistent_buffer_disclosure_once() -> None:
         "declared state the artifact cannot replay without, and they are written "
         "even with include_weights/include_activations false. Review the buffers "
         "before sharing the artifact if they may hold sensitive data.",
+        UserWarning,
+        stacklevel=3,
+    )
+
+
+def _warn_unattestable_activation_archive_once() -> None:
+    """Disclose an activation archive saved without any original-input eligibility (r6 H2).
+
+    ``_capture_activation_blob_specs`` can only record ``original_input_digests`` /
+    ``input_fingerprints`` for a model input that the capture actually SELECTED. With a
+    ``save=`` selector -- the recommended idiom -- the input op is usually unselected, so
+    the archive ships blobs and digests but ZERO input eligibility, and numeric attestation
+    is permanently ``NOT_APPLICABLE`` no matter what the caller later passes to ``.run()``.
+    Left silent that is indistinguishable from "you changed the input", so disclose it at
+    SAVE time. The run report carries the matching named
+    ``numeric_attestation:not_applicable:no_recorded_original_input_eligibility`` entry.
+
+    This is the behavior-preserving half only: the status itself is deliberately NOT
+    promoted to ``ATTESTED``.
+    """
+
+    global _UNATTESTABLE_ACTIVATION_DISCLOSURE_WARNED
+    if _UNATTESTABLE_ACTIVATION_DISCLOSURE_WARNED:
+        return
+    _UNATTESTABLE_ACTIVATION_DISCLOSURE_WARNED = True
+    warnings.warn(
+        "This runnable save archives activations but records no original-input "
+        "digests/fingerprints, because the capture selection did not include the model "
+        "input. Numeric attestation on a later .run() will report not_applicable for that "
+        "reason -- not because the inputs changed. Capture the model input alongside the "
+        "selected activations if byte-exact attestation is wanted.",
         UserWarning,
         stacklevel=3,
     )
@@ -1392,6 +1428,7 @@ def _bind_archived_activation_payload(
         If descriptor membership, blob entries, or file checksums disagree.
     """
 
+    from .._runnable_state import runnable_tensor_byte_digest
     from ..runnable import ActivationPayloadLayerDescriptor, ArchivedActivation
 
     descriptor = trace.runnable_descriptor
@@ -1443,6 +1480,21 @@ def _bind_archived_activation_payload(
         if tensor is None:
             raise TorchLensIOError(
                 f"Archived activation blob {blob_path} lacks {_BLOB_TENSOR_KEY!r}."
+            )
+        # r6 M4: the file ``sha256`` above attests the BLOB against the MANIFEST, but the
+        # member's ``byte_digest`` -- the value republished on the public
+        # ``ArchivedActivation.byte_digest`` beside ``.value`` -- was never checked
+        # against what actually loaded. Editing one member digest (blobs untouched) loaded
+        # silently and produced a record that CONTRADICTED ITSELF on the inspection
+        # surface. Verify the loaded tensor against its own declared digest so the
+        # published pair is always internally consistent.
+        observed_byte_digest = runnable_tensor_byte_digest(tensor)
+        if observed_byte_digest != member.byte_digest:
+            raise TorchLensIOError(
+                "Archived activation byte-digest mismatch for "
+                f"blob_id={entry.blob_id} (slot_id={member.slot_id!r}, field={member.field!r}): "
+                f"declared {member.byte_digest!r} but the loaded tensor digests to "
+                f"{observed_byte_digest!r}."
             )
         archive_key = f"{member.slot_id}:{member.field}"
         if archive_key in archived:

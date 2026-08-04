@@ -5121,6 +5121,19 @@ def _numeric_attestation_check(
         # not a reproducible result, so attesting it would create a false
         # divergence on an otherwise faithful original-input replay.
         return NumericAttestationStatus.NOT_APPLICABLE, None
+    if raw_members and _lacks_recorded_original_input_eligibility(descriptor, layer):
+        # r6 H2 (disclosure half only -- the status stays NOT_APPLICABLE by design).
+        # A ``save=`` selective capture that did not select the model input records ZERO
+        # ``original_input_digests`` / ``input_fingerprints``, so attestation can never
+        # apply no matter what the caller passes to ``.run()``. Left unnamed that is
+        # INDISTINGUISHABLE from "you changed the input". Surface the real reason -- a
+        # SAVE-time eligibility gap -- as a named, non-verdict-changing report entry. The
+        # save side emits the matching one-time disclosure warning.
+        return NumericAttestationStatus.NOT_APPLICABLE, ContractCheck(
+            name="numeric_attestation:not_applicable:no_recorded_original_input_eligibility",
+            passed=True,
+            diagnostic=None,
+        )
     if not raw_members or not _attestation_inputs_match(
         descriptor, layer, input_byte_digests, input_fingerprints
     ):
@@ -6023,6 +6036,44 @@ def _named_literal_values(call: RunnableCallDescriptor) -> dict[str, Any]:
         elif root == "kwargs":
             values[str(key)] = _decode_literal(literal_argument.value)
     return values
+
+
+def _lacks_recorded_original_input_eligibility(
+    descriptor: SparseRunDescriptor,
+    layer: Any,
+) -> bool:
+    """Return whether the ARCHIVE ITSELF can never support numeric attestation.
+
+    Distinguishes a SAVE-time eligibility gap from a run-time input change. With a
+    ``save=`` selector that does not select the model input, ``_capture_activation_blob_specs``
+    records no ``original_input_digests`` and no ``input_fingerprints`` at all, so
+    ``_attestation_inputs_match`` can never be satisfied by ANY caller input. Naming that
+    case keeps ``NOT_APPLICABLE`` honest instead of implicitly blaming the caller.
+
+    Parameters
+    ----------
+    descriptor:
+        Runnable descriptor whose model-input slots define what must be recorded.
+    layer:
+        Present activation payload layer descriptor.
+
+    Returns
+    -------
+    bool
+        ``True`` when the descriptor declares model-input slots but the archive records
+        no original-input digests or no input fingerprints for them.
+    """
+
+    expected_slot_ids = {
+        slot.slot_id for slot in descriptor.tensor_slots if slot.role is TensorSlotRole.MODEL_INPUT
+    }
+    if not expected_slot_ids:
+        return False
+    recorded_digests = {digest.slot_id for digest in layer.original_input_digests}
+    recorded_fingerprints = {
+        fingerprint.slot_id for fingerprint in (getattr(layer, "input_fingerprints", ()) or ())
+    }
+    return not recorded_digests or not recorded_fingerprints
 
 
 def _attestation_inputs_match(
