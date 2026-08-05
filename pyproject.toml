@@ -73,7 +73,13 @@ lit = ["lit-nlp~=1.3"]
 depyf = ["depyf~=0.18"]
 compat-shims = ["torchextractor>=0.3,<2", "sentence-transformers>=2.5,<5"]
 vision-shims = ["torchvision>=0.18,<1"]
-all = []
+# `all` installs the curated, mutually-compatible union of optional integration
+# extras. It aliases `all-stretch` (the vetted satisfiable set) so the two never
+# drift: a literal "everything" is unsatisfiable because the framework-backend
+# extras (jax/tf/tensorflow/paddle/mlx/tinygrad) impose conflicting pins, so they
+# are deliberately excluded from the meta-rollup. `pip install torchlens[all]`
+# therefore installs exactly the same packages as `torchlens[all-stretch]`.
+all = ["torchlens[all-stretch]"]
 all-stretch = [
     "grad-cam~=1.5",
     "shap~=0.46",
