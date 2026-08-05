@@ -142,12 +142,87 @@ def rebuild_container_from_spec(spec: ContainerSpec, leaves: list[Any] | tuple[A
         If the number of leaves does not match the container specification.
     """
 
+    _validate_container_spec(spec)
     leaf_iter = iter(leaves)
     rebuilt = _rebuild_container_from_spec(spec, leaf_iter)
     sentinel = object()
     if next(leaf_iter, sentinel) is not sentinel:
         raise ValueError("Too many leaves supplied for ContainerSpec.")
     return rebuilt
+
+
+def _validate_container_spec(spec: ContainerSpec) -> None:
+    """Reject a structurally malformed spec BEFORE any leaf is consumed (fail-closed).
+
+    ``rebuild_container_from_spec`` previously NORMALIZED corrupt facts instead of rejecting
+    them: a negative ``length`` became an empty container (``range(-4 or 0)``), a
+    ``length``/``keys`` disagreement was silently ignored, and an out-of-range child
+    component was dropped without error. Reconstruction is a validation tripwire, so a spec
+    whose declared shape cannot be honored is a typed refusal, never a coerced "valid" value.
+
+    Tighten-only: every check holds for every spec :func:`_build_container_spec` produces, so
+    no faithful capture is newly rejected -- only tampered / corrupt specs are refused. The
+    walk is recursive so nested corruption is caught up front.
+
+    Raises
+    ------
+    ContainerReconstructionError
+        If ``spec`` (or any nested child spec) declares a structure that cannot be rebuilt.
+    """
+
+    kind = spec.kind
+    length = spec.length
+    if length is not None and length < 0:
+        raise ContainerReconstructionError(
+            f"ContainerSpec.length must be non-negative, got {length}."
+        )
+    components = [component for component, _child in spec.child_specs]
+    if len(components) != len(set(components)):
+        raise ContainerReconstructionError(
+            "ContainerSpec has duplicate child path components; the spec is corrupt."
+        )
+    # Only the structural facts each reconstruction path actually consumes are validated
+    # here (kept strictly tighten-only: every spec ``_build_container_spec`` emits passes).
+    # Redundant/unused fields on a spec are left untouched -- the goal is to refuse a spec
+    # whose declared shape ``_rebuild_container_from_spec`` would silently normalize, not to
+    # police cosmetic field hygiene.
+    if kind in {"tuple", "list", "registered"}:
+        if length is not None:
+            for component in components:
+                if not isinstance(component, TupleIndex) or not 0 <= component.index < length:
+                    raise ContainerReconstructionError(
+                        f"ContainerSpec kind {kind!r} child component {component!r} is out of "
+                        f"domain for length {length}."
+                    )
+    elif kind in {"dict", "hf_model_output"}:
+        if length is not None and length != len(spec.keys):
+            raise ContainerReconstructionError(
+                f"ContainerSpec kind {kind!r} length {length} disagrees with {len(spec.keys)} keys."
+            )
+        key_component = DictKey if kind == "dict" else HFKey
+        for component in components:
+            if not isinstance(component, key_component) or component.key not in spec.keys:
+                raise ContainerReconstructionError(
+                    f"ContainerSpec kind {kind!r} child component {component!r} is not among "
+                    "the declared keys."
+                )
+    elif kind in {"namedtuple", "dataclass"}:
+        if length is not None and length != len(spec.fields):
+            raise ContainerReconstructionError(
+                f"ContainerSpec kind {kind!r} length {length} disagrees with "
+                f"{len(spec.fields)} fields."
+            )
+        field_component = NamedField if kind == "namedtuple" else DataclassField
+        for component in components:
+            if not isinstance(component, field_component) or component.name not in spec.fields:
+                raise ContainerReconstructionError(
+                    f"ContainerSpec kind {kind!r} child component {component!r} is not among "
+                    "the declared fields."
+                )
+    elif kind not in {"literal", "opaque"}:
+        raise ContainerReconstructionError(f"Unsupported ContainerSpec kind {kind!r}.")
+    for _component, child in spec.child_specs:
+        _validate_container_spec(child)
 
 
 def _rebuild_container_from_spec(spec: ContainerSpec, leaf_iter: Any) -> Any:

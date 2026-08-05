@@ -12,6 +12,9 @@ import pytest
 import torch
 
 from torchlens.ir.container import (
+    ContainerReconstructionError,
+    ContainerSpec,
+    TupleIndex,
     rebuild_container_from_spec,
 )
 from torchlens.ir.container_registry import (
@@ -80,3 +83,70 @@ def test_n4_nested_opaque_child_makes_parent_unreconstructable() -> None:
     assert result.spec.kind == "list"
     assert any(child.kind == "opaque" for _c, child in result.spec.child_specs)
     assert result.reconstructable is False
+
+
+# ---------------------------------------------------------------------------
+# N5 -- rebuild must REJECT malformed specs, never normalize garbage
+# ---------------------------------------------------------------------------
+
+
+def test_n5_negative_length_is_rejected() -> None:
+    """A negative ``length`` was coerced to an empty container; now it is refused."""
+
+    spec = ContainerSpec(kind="tuple", length=-4)
+    with pytest.raises(ContainerReconstructionError, match="non-negative"):
+        rebuild_container_from_spec(spec, [])
+
+
+def test_n5_length_keys_disagreement_is_rejected() -> None:
+    """A ``dict`` whose ``length`` disagrees with ``keys`` was silently normalized to ``{}``."""
+
+    spec = ContainerSpec(kind="dict", length=9, keys=())
+    with pytest.raises(ContainerReconstructionError, match="disagrees"):
+        rebuild_container_from_spec(spec, [])
+
+
+def test_n5_out_of_range_child_component_is_rejected() -> None:
+    """An out-of-range ``TupleIndex`` child was dropped without error; now it is refused."""
+
+    spec = ContainerSpec(
+        kind="tuple",
+        length=2,
+        child_specs=((TupleIndex(4), ContainerSpec(kind="literal", literal_value="X")),),
+    )
+    with pytest.raises(ContainerReconstructionError, match="out of "):
+        rebuild_container_from_spec(spec, [10, 20])
+
+
+def test_n5_duplicate_child_component_is_rejected() -> None:
+    """Duplicate child path components silently collapsed via ``dict()``; now refused."""
+
+    spec = ContainerSpec(
+        kind="tuple",
+        length=3,
+        child_specs=(
+            (TupleIndex(0), ContainerSpec(kind="literal", literal_value=1)),
+            (TupleIndex(0), ContainerSpec(kind="literal", literal_value=2)),
+        ),
+    )
+    with pytest.raises(ContainerReconstructionError, match="duplicate"):
+        rebuild_container_from_spec(spec, [])
+
+
+def test_n5_valid_specs_still_rebuild() -> None:
+    """Tighten-only: real nested/tuple/dict/namedtuple specs must NOT be rejected."""
+
+    import collections
+
+    point_t = collections.namedtuple("Point", ["x", "y"])
+    payloads = [
+        (torch.tensor([1.0]), [torch.tensor([2.0]), 3], {"k": torch.tensor([4.0])}),
+        point_t(torch.tensor([5.0]), 6),
+        {"nested": {"deep": (torch.tensor([7.0]),)}},
+    ]
+    for payload in payloads:
+        result = walk_container(payload, role=Role.MODEL_OUTPUT, capability="full_spec")
+        assert result is not None and result.reconstructable
+        leaves = [torch.zeros(1) for _ in result.leaf_occurrences]
+        # Must not raise -- a faithful capture spec always validates.
+        rebuild_container_from_spec(result.spec, leaves)
