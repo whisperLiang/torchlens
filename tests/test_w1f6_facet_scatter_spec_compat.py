@@ -4,13 +4,18 @@ Sol-1 (CRITICAL): a sticky facet-slice hook (``tl.head(0, "q")`` + ``tl.zero_abl
 must fire through the slice-scatter wrapper on rerun; losing the wrapper silently
 applied the helper to the WHOLE home tensor (zeroing every head).
 
-Sol-2 (HIGH): ``check_spec_compat`` must refuse an EXECUTABLE spec whose saved
-``graph_shape_hash`` does not match the target log, instead of returning
-``COMPATIBLE_WITH_CONFIRMATION``.
+Sol-2 (HIGH, REWORKED): ``check_spec_compat`` returns ``COMPATIBLE_WITH_CONFIRMATION``
+for an EXECUTABLE spec whose saved ``graph_shape_hash`` mismatches but whose targets
+still resolve -- the honest coarse-preview verdict, since a hash mismatch cannot be told
+apart from cross-version hash drift on the SAME graph (the shipped v2.16 backcompat
+fixtures). The narrow version-stable refusal (unresolvable targets on a mismatched
+graph) stays. Promoting the confirmation verdict to a hard refusal is an owner decision
+(see W1_F6_REPORT.md).
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -174,8 +179,22 @@ def test_save_facet_hook_refuses_at_executable_levels(tmp_path: Any, level: str)
 
 
 # ---------------------------------------------------------------------------
-# Sol-2: executable spec compat must refuse on graph_shape_hash mismatch.
+# Sol-2: executable spec compat verdict on graph_shape_hash mismatch.
+#
+# REWORK NOTE: the original W1_F6 change hard-raised GraphShapeMismatchError at
+# compat-preview time for ANY executable spec whose saved graph_shape_hash did not
+# match the target log. That was over-broad: a hash mismatch cannot distinguish a
+# genuinely different target graph from cross-version hash drift on the SAME graph
+# (identical resolved labels; only the version-unstable hash differs -- exactly what
+# the shipped v2.16 backcompat fixtures encode). check_spec_compat is a coarse PREVIEW
+# and COMPATIBLE_WITH_CONFIRMATION is its honest "graph shape differs, confirm before
+# applying" verdict. These tests lock that contract; the fixture regression below
+# proves cross-version reuse still loads-and-matches. Whether that confirmation verdict
+# should be promoted to a hard refusal for executable specs (a shipped-contract change)
+# is escalated to the owner in W1_F6_REPORT.md.
 # ---------------------------------------------------------------------------
+
+FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "tlspec_v2_16"
 
 
 def _saved_relu_scale_spec(tmp_path: Any, *, level: str = "executable_with_callables") -> Any:
@@ -190,12 +209,13 @@ def _saved_relu_scale_spec(tmp_path: Any, *, level: str = "executable_with_calla
     return load_intervention_spec(path)
 
 
-def test_check_spec_compat_executable_hash_mismatch_raises(tmp_path: Any) -> None:
-    """An executable spec checked against a different graph refuses, even when
-    every saved selector still resolves identically on the new log.
+def test_check_spec_compat_executable_hash_mismatch_returns_confirmation(tmp_path: Any) -> None:
+    """Contract: an executable spec whose targets resolve identically on a
+    hash-mismatched graph returns COMPATIBLE_WITH_CONFIRMATION (NOT a raise).
 
-    BEHAVIOR CHANGE (authorized false-compatibility fix): this previously
-    returned ``COMPATIBLE_WITH_CONFIRMATION``.
+    A hash mismatch alone is indistinguishable from cross-version drift; the
+    confirmation verdict flags the shape difference without breaking legitimate
+    cross-version executable-spec reuse.
     """
 
     spec = _saved_relu_scale_spec(tmp_path)
@@ -205,23 +225,21 @@ def test_check_spec_compat_executable_hash_mismatch_raises(tmp_path: Any) -> Non
     log_b = tl.trace(
         SigmoidReluModel(), torch.randn(2, 3), layers_to_save="all", save_arg_values=True
     )
-    with pytest.raises(GraphShapeMismatchError):
-        check_spec_compat(spec, log_b)
+    compat = check_spec_compat(spec, log_b)
+    assert compat.outcome == "COMPATIBLE_WITH_CONFIRMATION"
+    assert compat.targets_resolve_identically is True
 
 
-def test_check_spec_compat_tampered_hash_refuses(tmp_path: Any) -> None:
-    """Mutation proof: tampering the saved graph_shape_hash must refuse against
-    the very model the spec was captured on."""
+def test_check_spec_compat_executable_unresolvable_mismatch_still_raises(tmp_path: Any) -> None:
+    """The narrow, version-stable refusal stays: an executable spec whose saved
+    target CANNOT resolve on a mismatched graph raises GraphShapeMismatchError."""
 
     spec = _saved_relu_scale_spec(tmp_path)
     torch.manual_seed(0)
-    same_log = tl.trace(ReluModel(), torch.randn(2, 3), layers_to_save="all", save_arg_values=True)
-
-    for entry in spec.metadata["target_manifest"]:
-        entry["graph_shape_hash"] = "0" * 64
-
+    # A model with no relu op: the saved 'relu' target cannot resolve -> FAIL + mismatch.
+    other = tl.trace(nn.Sigmoid(), torch.randn(2, 3), layers_to_save="all", save_arg_values=True)
     with pytest.raises(GraphShapeMismatchError):
-        check_spec_compat(spec, same_log)
+        check_spec_compat(spec, other)
 
 
 def test_check_spec_compat_same_graph_stays_exact(tmp_path: Any) -> None:
@@ -249,3 +267,52 @@ def test_check_spec_compat_nonexecutable_mismatch_still_confirmation(tmp_path: A
     )
     compat = check_spec_compat(spec, log_b)
     assert compat.outcome == "COMPATIBLE_WITH_CONFIRMATION"
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "F1_intervention_default.tlspec",
+        "F5_intervention_executable_with_callables.tlspec",
+        "F6_intervention_portable.tlspec",
+    ],
+)
+def test_v2_16_executable_fixtures_compat_is_confirmation_not_refusal(fixture_name: str) -> None:
+    """Regression: the shipped v2.16 executable fixtures load and their loaded
+    spec compat-checks against a fresh same-recipe counterpart WITHOUT raising.
+
+    These fixtures carry a v2.16-era graph_shape_hash that differs from the
+    current-algorithm hash for the identical CNN graph; the over-broad W1_F6
+    compat raise made all three FAIL at the gate. This pins that cross-version
+    executable-spec reuse stays load-and-matchable.
+    """
+
+    fixture_path = FIXTURE_ROOT / fixture_name
+    spec = tl.load(fixture_path, trust_custom_callables=True)
+    assert spec.metadata.get("executable") is True
+    # Cross-version drift: saved hash differs from the current-algo hash for the
+    # same graph, yet targets resolve identically.
+    saved_hashes = {e.get("graph_shape_hash") for e in spec.metadata["target_manifest"]}
+
+    log = _capture_cnn_relu_ablation()
+    assert log.graph_shape_hash not in saved_hashes  # confirm the mismatch is real
+    compat = check_spec_compat(spec, log)
+    assert compat.outcome in {"EXACT", "COMPATIBLE_WITH_CONFIRMATION"}
+    assert compat.targets_resolve_identically is True
+
+
+def _capture_cnn_relu_ablation() -> Any:
+    """Fresh in-memory counterpart matching the v2.16 intervention fixtures."""
+
+    class _CNN(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.conv = nn.Conv2d(3, 4, 3, padding=1)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.relu(self.conv(x))
+
+    torch.manual_seed(1101)
+    log = tl.trace(_CNN(), torch.randn(1, 3, 8, 8), layers_to_save="all", save_arg_values=True)
+    log.set(tl.func("relu"), tl.zero_ablate(), confirm_mutation=True)
+    return log
