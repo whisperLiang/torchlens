@@ -167,6 +167,8 @@ def _resolve_op(trace: Trace, op_or_label: Any) -> tuple[Op | None, str | None]:
     # pass-qualified graph edges (a Layer exposes bare-label edges instead).
     if type(candidate).__name__ == "Layer":
         ops = getattr(candidate, "ops", None)
+        if ops is None:
+            return None, f"unavailable: {op_or_label!r} did not resolve to an op"
         try:
             first_op = next(iter(ops.values())) if hasattr(ops, "values") else next(iter(ops))
         except (AttributeError, TypeError, StopIteration):
