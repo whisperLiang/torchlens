@@ -978,6 +978,15 @@ IGNORED_FUNCS = [
     ("torch", "rand"),
     ("torch", "randn"),
     ("torch", "randint"),
+    # r18cg: the random ``*_like`` factories are in torch's get_ignored_functions() (not
+    # overridable via __torch_function__), exactly like their non-``_like`` siblings above, so
+    # they must be re-added here to be decorated. Without them a forward using
+    # ``torch.rand_like`` / ``randn_like`` / ``randint_like`` records the freshly-allocated
+    # output as an unattributed literal (the r45 ``.mH`` capture-gap class); their arg-specs
+    # already exist in capture/arg_positions.py (_FACTORY_SOURCE_SPEC / randintlike).
+    ("torch", "rand_like"),
+    ("torch", "randn_like"),
+    ("torch", "randint_like"),
     ("torch", "randperm"),
     ("torch", "range"),
     ("torch", "scalar_tensor"),

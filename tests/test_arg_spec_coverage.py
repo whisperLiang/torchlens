@@ -21,7 +21,10 @@ _HIGH_CONFIDENCE_STATIC_NAMES = frozenset(
         "adaptivemaxpool3dwithindices",
         "addr",
         "airyai",
-        "alignas",
+        # NOTE: "alignas" (torch Tensor.align_as) was removed in torch 2.13 and is therefore
+        # version-varying (decorated on torch<=2.12, absent on 2.13). It is intentionally NOT
+        # in this high-confidence set (which must be a subset of the decorated set on every
+        # torch leg); its static spec is retained in arg_positions.py for the older legs.
         "aminmax",
         "argwhere",
         "besselj0",
@@ -112,6 +115,11 @@ _HIGH_CONFIDENCE_STATIC_NAMES = frozenset(
         "quantizeperchannel",
         "quantizepertensor",
         "quantizepertensordynamic",
+        # ``randintlike`` (and its siblings ``rand_like`` / ``randn_like``) are real public torch
+        # factories in torch's get_ignored_functions(); r18cg added them to
+        # torchlens.constants.IGNORED_FUNCS so they are now decorated + captured (their arg-specs
+        # already existed). Keep this entry: it guards that the wrap is not regressed -- do NOT
+        # relax the set to work around a future un-wrap, root-cause it (validation-integrity).
         "randintlike",
         "renorm",
         "resize",
