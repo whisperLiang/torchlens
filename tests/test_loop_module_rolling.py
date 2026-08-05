@@ -1002,10 +1002,16 @@ def test_render_loop_module_rolling_demos() -> None:
         ("nested_loop", NestedLoopBlock(), {"vis_call_depth": 1}, "init+forward"),
         ("parallel_fanout", ParallelFanout(), {"vis_call_depth": 1}, "init+forward"),
     ]
+    # Magic-byte / markup signatures so a no-op renderer (no file, or an empty
+    # one) cannot pass: PDF starts with %PDF, PNG with the 8-byte PNG header,
+    # and SVG payloads contain an <svg element.
+    _format_signature = {"pdf": b"%PDF", "png": b"\x89PNG\r\n\x1a\n"}
     for name, model, kwargs, code_panel in demos:
         trace = _trace(model)
         for file_format in ("svg", "pdf", "png"):
-            trace.draw(
+            artifact = OUTPUT_DIR / f"{name}.{file_format}"
+            artifact.unlink(missing_ok=True)
+            dot = trace.draw(
                 vis_mode="rolled",
                 vis_save_only=True,
                 vis_fileformat=file_format,
@@ -1013,3 +1019,15 @@ def test_render_loop_module_rolling_demos() -> None:
                 code_panel=code_panel,
                 **kwargs,
             )
+            assert isinstance(dot, str) and "digraph" in dot, (
+                f"expected non-empty DOT source for {name} ({file_format})"
+            )
+            assert artifact.exists(), f"expected render artifact at {artifact}"
+            blob = artifact.read_bytes()
+            assert blob, f"expected non-empty artifact at {artifact}"
+            if file_format in _format_signature:
+                assert blob.startswith(_format_signature[file_format]), (
+                    f"expected {artifact} to be a valid {file_format} artifact"
+                )
+            else:  # svg
+                assert b"<svg" in blob, f"expected {artifact} to contain SVG markup"
