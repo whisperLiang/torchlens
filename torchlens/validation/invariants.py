@@ -2749,6 +2749,7 @@ def _check_conditional_invariants(ml: "Trace") -> None:
     _check_conditional_branch_entry_edges(ml, name, layer_label_set)
     _check_conditional_arm_edges_match_graph(ml, name)
     _check_conditional_branch_membership_records(ml, name)
+    _check_conditional_public_accessor_summary(ml, name)
 
 
 def _check_conditional_arm_entry_child_symmetry(
@@ -3509,6 +3510,60 @@ def _check_conditional_branch_membership_records(
                     f"arm_kind={role.arm_kind!r} but conditional_branch_stack="
                     f"{layer.conditional_branch_stack}; expected entry {expected_stack_entry}",
                 )
+
+
+def _check_conditional_public_accessor_summary(
+    ml: "Trace",
+    name: str,
+) -> None:
+    """Check public conditional ids and fired-arm summaries are honest.
+
+    Parameters
+    ----------
+    ml:
+        Trace containing finalized public conditional metadata.
+    name:
+        Invariant check name for raised errors.
+    """
+
+    conditionals = list(getattr(ml, "conditionals", []) or [])
+    conditional_ids = [conditional.id for conditional in conditionals]
+    if len(conditional_ids) != len(set(conditional_ids)):
+        _fail_conditional_invariant(
+            name,
+            16,
+            f"Trace.conditionals contains duplicate ids: {conditional_ids}",
+        )
+
+    for conditional in conditionals:
+        fired_arm_indices = [index for index, arm in enumerate(conditional.arms) if arm.fired]
+        if len(fired_arm_indices) == 1:
+            fired_arm_index = fired_arm_indices[0]
+            expected_kind = conditional.arms[fired_arm_index].kind
+            if conditional.fired_arm_index != fired_arm_index:
+                _fail_conditional_invariant(
+                    name,
+                    16,
+                    f"{conditional.id} has fired_arm_index={conditional.fired_arm_index} but "
+                    f"the only fired arm is index {fired_arm_index}",
+                )
+            if conditional.fired_arm_kind != expected_kind:
+                _fail_conditional_invariant(
+                    name,
+                    16,
+                    f"{conditional.id} has fired_arm_kind={conditional.fired_arm_kind!r} but "
+                    f"the only fired arm kind is {expected_kind!r}",
+                )
+            continue
+
+        if conditional.fired_arm_index is not None or conditional.fired_arm_kind is not None:
+            _fail_conditional_invariant(
+                name,
+                16,
+                f"{conditional.id} has fired_arm_index={conditional.fired_arm_index} and "
+                f"fired_arm_kind={conditional.fired_arm_kind!r} despite "
+                f"{len(fired_arm_indices)} fired arms",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -4805,6 +4860,8 @@ def _check_equivalence_symmetry(ml: "Trace") -> None:
     Validates:
     - Each equivalence set value is actually a set.
     - All labels in equivalence sets exist in op_labels.
+    - Per-Op and per-Layer equivalent_ops views match the trace-level groups
+      and stay in the final op-label namespace.
     """
     name = "equivalence_symmetry"
     label_set = set(ml.op_labels) | _retained_orphan_op_labels(ml)
@@ -4834,6 +4891,61 @@ def _check_equivalence_symmetry(ml: "Trace") -> None:
             name,
             f"op_equivalence_classes contains labels not in op_labels: {extra}",
         )
+
+    for op in ml.layer_list:
+        equivalent_ops = getattr(op, "equivalent_ops", None)
+        if not isinstance(equivalent_ops, set):
+            raise MetadataInvariantError(
+                name,
+                f"{op.label}.equivalent_ops is not a set",
+            )
+        for label in equivalent_ops:
+            if label not in label_set:
+                raise MetadataInvariantError(
+                    name,
+                    f"{op.label}.equivalent_ops contains '{label}' not in op_labels",
+                )
+        equivalence_class = getattr(op, "equivalence_class", None)
+        expected_group = (
+            ml.op_equivalence_classes.get(equivalence_class)
+            if isinstance(equivalence_class, str)
+            else None
+        )
+        if expected_group is not None and equivalent_ops != expected_group:
+            raise MetadataInvariantError(
+                name,
+                f"{op.label}.equivalent_ops={sorted(equivalent_ops)} != expected "
+                f"{sorted(expected_group)}",
+            )
+
+    for layer in ml.layer_logs.values():
+        equivalent_ops = getattr(layer, "equivalent_ops", None)
+        if not isinstance(equivalent_ops, set):
+            raise MetadataInvariantError(
+                name,
+                f"Layer {layer.layer_label}.equivalent_ops is not a set",
+            )
+        for label in equivalent_ops:
+            if label not in label_set:
+                raise MetadataInvariantError(
+                    name,
+                    f"Layer {layer.layer_label}.equivalent_ops contains '{label}' not in op_labels",
+                )
+        pass_equivalent_ops = {
+            frozenset(getattr(op, "equivalent_ops", set())) for op in layer.ops.values()
+        }
+        if len(pass_equivalent_ops) > 1:
+            raise MetadataInvariantError(
+                name,
+                f"Layer {layer.layer_label} ops disagree on equivalent_ops: "
+                f"{sorted(sorted(group) for group in pass_equivalent_ops)}",
+            )
+        if pass_equivalent_ops and equivalent_ops != set(next(iter(pass_equivalent_ops))):
+            raise MetadataInvariantError(
+                name,
+                f"Layer {layer.layer_label}.equivalent_ops={sorted(equivalent_ops)} != "
+                f"pass equivalent_ops={sorted(next(iter(pass_equivalent_ops)))}",
+            )
 
 
 # ---------------------------------------------------------------------------

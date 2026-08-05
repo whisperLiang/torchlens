@@ -1091,10 +1091,11 @@ def _build_conditional_records(self: "Trace") -> None:
 
     conditionals: list[Conditional] = []
     event_by_id = {event.id: event for event in self.conditional_records}
-    role_labels_by_cond_arm: dict[tuple[str, int, str], list[str]] = {}
+    conditional_id_by_event_id = _make_public_conditional_ids(self.conditional_records)
+    role_labels_by_cond_arm: dict[tuple[str, int, str], list[str]] = defaultdict(list)
     for event in self.conditional_records:
         terminal_bool_label = event.bool_layers[0] if event.bool_layers else str(event.id)
-        conditional_id = f"cond_{terminal_bool_label}"
+        conditional_id = conditional_id_by_event_id[event.id]
         # Use AST-derived branch_ranges so every static arm is materialized,
         # regardless of which arm fired at runtime. fired-vs-not is captured
         # per-arm via ConditionalArm.fired below.
@@ -1133,11 +1134,20 @@ def _build_conditional_records(self: "Trace") -> None:
                 execution_entry_edge=edge_list[0] if edge_list else None,
             )
             arm_index = len(arms)
-            role_labels_by_cond_arm[(conditional_id, arm_index, "evaluation")] = evaluation_labels
-            role_labels_by_cond_arm[(conditional_id, arm_index, "body")] = execution_labels
+            _merge_conditional_role_labels(
+                role_labels_by_cond_arm,
+                (conditional_id, arm_index, "evaluation"),
+                evaluation_labels,
+            )
+            _merge_conditional_role_labels(
+                role_labels_by_cond_arm,
+                (conditional_id, arm_index, "body"),
+                execution_labels,
+            )
             arms.append(arm)
 
-        fired_arm_index = next((index for index, arm in enumerate(arms) if arm.fired), None)
+        fired_arm_indices = [index for index, arm in enumerate(arms) if arm.fired]
+        fired_arm_index = fired_arm_indices[0] if len(fired_arm_indices) == 1 else None
         fired_arm_kind = arms[fired_arm_index].kind if fired_arm_index is not None else None
         conditional = Conditional(
             id=conditional_id,
@@ -1170,15 +1180,68 @@ def _build_conditional_records(self: "Trace") -> None:
             layer.terminal_conditional_id is not None
             and layer.terminal_conditional_id in event_by_id
         ):
-            event = event_by_id[layer.terminal_conditional_id]
-            event_index = [conditional.id for conditional in conditionals].index(
-                f"cond_{event.bool_layers[0] if event.bool_layers else event.id}"
+            layer.terminal_bool_for = (
+                conditional_id_by_event_id[layer.terminal_conditional_id],
+                0,
             )
-            layer.terminal_bool_for = (conditionals[event_index].id, 0)
         else:
             layer.terminal_bool_for = None
 
     self.conditionals = ConditionalAccessor(conditionals)
+
+
+def _make_public_conditional_ids(condition_events: list[Any]) -> dict[int, str]:
+    """Build unique public ids for conditional records.
+
+    Parameters
+    ----------
+    condition_events:
+        Conditional events in trace order.
+
+    Returns
+    -------
+    dict[int, str]
+        Mapping from dense ``ConditionalEvent.id`` to the public conditional id
+        exposed through ``Trace.conditionals`` and role refs.
+    """
+
+    id_counts: dict[str, int] = defaultdict(int)
+    base_ids_by_event_id: dict[int, str] = {}
+    for event in condition_events:
+        terminal_bool_label = event.bool_layers[0] if event.bool_layers else str(event.id)
+        base_id = f"cond_{terminal_bool_label}"
+        base_ids_by_event_id[event.id] = base_id
+        id_counts[base_id] += 1
+
+    return {
+        event.id: (
+            base_ids_by_event_id[event.id]
+            if id_counts[base_ids_by_event_id[event.id]] == 1
+            else f"{base_ids_by_event_id[event.id]}__event_{event.id}"
+        )
+        for event in condition_events
+    }
+
+
+def _merge_conditional_role_labels(
+    role_labels_by_cond_arm: dict[tuple[str, int, str], list[str]],
+    role_key: tuple[str, int, str],
+    labels: list[str],
+) -> None:
+    """Merge one conditional-role label list without dropping prior members.
+
+    Parameters
+    ----------
+    role_labels_by_cond_arm:
+        Mapping from ``(conditional_id, arm_index, role)`` to layer labels.
+    role_key:
+        Key naming the arm-role bucket to update.
+    labels:
+        Labels to merge into the bucket.
+    """
+
+    merged = dict.fromkeys([*role_labels_by_cond_arm.get(role_key, []), *labels])
+    role_labels_by_cond_arm[role_key] = list(merged)
 
 
 def _find_conditional_evaluation_entry_edge(

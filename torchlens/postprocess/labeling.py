@@ -293,7 +293,7 @@ _LIST_FIELDS_TO_RENAME = [
     "internal_source_parents",
     "internal_source_ancestors",
     "conditional_entry_children",
-    "op_equivalence_classes",
+    "equivalent_ops",
     "recurrent_ops",
 ]
 
@@ -370,7 +370,7 @@ def _replace_layer_names_for_layer_entry(self: "Trace", layer_entry: Op) -> None
             continue
         if field.startswith("conditional_"):
             field_mapping = layer_mapping
-        elif field in {"recurrent_ops", "op_equivalence_classes"}:
+        elif field in {"equivalent_ops", "recurrent_ops"}:
             field_mapping = op_mapping
         else:
             field_mapping = mapping

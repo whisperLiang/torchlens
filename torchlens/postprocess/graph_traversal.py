@@ -317,6 +317,7 @@ def _add_output_layers(
         # Fix layer equivalence information:
         new_output_node.pass_index = 1
         new_output_node.num_passes = 1
+        new_output_node.equivalent_ops = {new_output_node._label_raw}
         new_output_node.recurrent_ops = []
         equiv_type = (
             f"output_{i + 1}_{'_'.join(tuple(str(s) for s in new_output_node.shape))}_"
