@@ -76,7 +76,14 @@ def _update_content_digest(digest: Any, value: Any) -> None:
             _update_content_digest(digest, tensor.int_repr())
             digest.update(repr(tensor.qscheme()).encode("ascii") + b"\0")
             return
-        raw = tensor.contiguous().view(torch.uint8).numpy().tobytes()
+        # Flatten to 1-D before the uint8 reinterpret: ``view(torch.uint8)``
+        # refuses a 0-dim (scalar) tensor ("self.dim() cannot be 0 to view Float
+        # as Byte"), which otherwise crashes ``content()`` on a scalar and, via a
+        # bare-except in the runnable-bundle path, silently drops the manifest
+        # ``input_hash`` for scalar inputs (an attestation gap). ``reshape(-1)`` on
+        # a contiguous tensor is a contiguous view and is byte-identical to the
+        # prior expression for every >=1-D tensor, so pinned hashes are unchanged.
+        raw = tensor.contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
         digest.update(len(raw).to_bytes(8, "big"))
         digest.update(raw)
         return
