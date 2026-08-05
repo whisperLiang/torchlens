@@ -1199,6 +1199,7 @@ def _entry_adoption_pairs(
     workspace: _GroupingWorkspace,
     iso_nodes: list[str],
     param_contexts: Dict[str, frozenset[_ParamCallIdentity]],
+    context_carriers: Dict[tuple[str, frozenset[_ParamCallIdentity]], int],
 ) -> set[tuple[str, str]]:
     """Return the loop-entry pairs exempt from the unequal-context veto.
 
@@ -1218,10 +1219,23 @@ def _entry_adoption_pairs(
     * ``context(entry)`` is a STRICT SUBSET of ``context(target)`` -- entry
       saturation only ever grows the context. Disjoint or crosswise-different
       contexts (two loops with different site-specific halves) never qualify.
-    * The entry call is the UNIQUE carrier of its context among the iso group's
-      veto-governed candidates. A multi-call context class is a recurrent site
-      of its own (a 3-pass loop upstream of a 2-pass loop), never a dangling
-      entry, so it must stay a separate layer.
+    * The entry call is the GLOBALLY unique carrier of its context: no other
+      veto-governed candidate anywhere in the workspace with the SAME
+      equivalence key (the population of calls that could be passes of the
+      same layer) carries the same context. A multi-call context class is a
+      recurrent site of its own (a 3-pass loop upstream of a 2-pass loop),
+      never a dangling entry, so it must stay a separate layer. The census
+      must be workspace-wide, NOT per iso group: a SATURATED interior class
+      can fragment across iso groups -- in a 2-iteration param-free-headed
+      loop, pass 1's parent is the pre-loop op while pass 2's parent is the
+      in-loop feedback op, so the two passes land in different iso groups and
+      a per-group count misreads the saturated pass 2 as a dangling singleton
+      entry, adopting it across the next loop's boundary (the r24 defect:
+      ``emb -> for 2: tanh(h+enc(h)) -> for 2: tanh(h+dec(h))`` grouped
+      ``add`` as [1, 3] beside ``tanh`` [2, 2]). Same-key scoping is equally
+      load-bearing in the other direction: two DIFFERENT-typed honest entries
+      sharing one context (a ``tanh`` and a ``sigmoid`` both reading the same
+      pre-loop state) must not disqualify each other.
     * The entry call reaches the target through a PARAM-FREE data path
       (:func:`_param_free_flow_reachable`), certifying the subset relation came
       from context flow along the feedback wire -- not from a second loop
@@ -1241,6 +1255,9 @@ def _entry_adoption_pairs(
         Iso-group member labels sorted by raw capture order.
     param_contexts:
         Nearest-parameterized-ancestor contexts keyed by node label.
+    context_carriers:
+        Workspace-wide carrier counts keyed by ``(equivalence_key, context)``
+        over every veto-governed candidate (:func:`_context_carrier_counts`).
 
     Returns
     -------
@@ -1263,6 +1280,14 @@ def _entry_adoption_pairs(
         if len(members) != 1:
             continue
         entry = members[0]
+        entry_key = workspace.nodes[entry].equivalence_key
+        if context_carriers.get((entry_key, context), 0) != 1:
+            # The context is carried by another same-key candidate elsewhere in
+            # the workspace (typically the sibling pass of a saturated 2-iteration
+            # loop that fragmented into a different iso group), so this call is an
+            # interior pass of an already-realized class -- never a dangling
+            # loop entry eligible for cross-boundary adoption.
+            continue
         entry_order = workspace.nodes[entry].raw_order
         candidates = [
             member
@@ -1281,6 +1306,51 @@ def _entry_adoption_pairs(
         target = min(reachable_candidates, key=lambda member: workspace.nodes[member].raw_order)
         pairs.add((entry, target))
     return pairs
+
+
+def _context_carrier_counts(
+    workspace: _GroupingWorkspace,
+    param_contexts: Dict[str, frozenset[_ParamCallIdentity]],
+) -> Dict[tuple[str, frozenset[_ParamCallIdentity]], int]:
+    """Return workspace-wide carrier counts of each (equivalence key, context) pair.
+
+    Counts every veto-governed candidate -- param-free, non-anchored, with a
+    nonempty nearest-parameterized-ancestor context -- across the WHOLE
+    workspace, keyed by its equivalence key and context. This is the global
+    census behind the unique-carrier condition of
+    :func:`_entry_adoption_pairs`: only calls sharing an equivalence key can
+    ever be passes of one layer, so a same-key second carrier of a context
+    proves the context class is an already-saturated recurrent site rather
+    than a dangling loop entry -- even when iso-grouping fragments that class
+    across groups (a 2-iteration loop's two interior passes have structurally
+    different parents and always fragment). Scoping the census to the iso
+    group instead is exactly the r24 defect: the fragment looks like a
+    singleton and gets adopted across the next loop's boundary.
+
+    The census is computed per merge invocation, after any equivalence-key
+    canonicalization by earlier expansion rounds, so counts always reflect the
+    same keys the current round groups by.
+
+    Parameters
+    ----------
+    workspace:
+        Mutable grouping workspace.
+    param_contexts:
+        Nearest-parameterized-ancestor contexts keyed by node label.
+
+    Returns
+    -------
+    dict[tuple[str, frozenset[_ParamCallIdentity]], int]
+        Carrier counts keyed by ``(equivalence_key, context)``.
+    """
+    counts: Dict[tuple[str, frozenset[_ParamCallIdentity]], int] = defaultdict(int)
+    for label, node in workspace.nodes.items():
+        if node.uses_params or node.recurrence_anchored:
+            continue
+        context = param_contexts.get(label, frozenset())
+        if context:
+            counts[(node.equivalence_key, context)] += 1
+    return dict(counts)
 
 
 def _merge_iso_groups_to_layers(
@@ -1341,13 +1411,16 @@ def _merge_iso_groups_to_layers(
                 )
 
     param_contexts = workspace.param_contexts()
+    context_carriers = _context_carrier_counts(workspace, param_contexts)
     reach_memo: dict[tuple[str, str], bool] = {}
 
     for iso_group_label, iso_nodes_orig in iso_node_groups.items():
         iso_nodes = sorted(
             iso_nodes_orig, key=lambda node_label: workspace.nodes[node_label].raw_order
         )
-        entry_adoptions = _entry_adoption_pairs(workspace, iso_nodes, param_contexts)
+        entry_adoptions = _entry_adoption_pairs(
+            workspace, iso_nodes, param_contexts, context_carriers
+        )
         # Consecutive pairs first: in a genuine loop they carry the unions, so the
         # full pairwise sweep afterwards short-circuits on shared union-find roots
         # instead of re-deriving (and re-checking reachability for) distant pairs.
