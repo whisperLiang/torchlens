@@ -1622,12 +1622,17 @@ def test_validate_forward_pass_deepcopy_fallback_restores_plain_attrs(
 
     original_deepcopy = user_funcs.copy.deepcopy
 
-    def fail_module_deepcopy(value: object) -> object:
+    def fail_module_deepcopy(
+        value: object,
+        memo: dict[int, object] | None = None,
+    ) -> object:
         """Fail only model deepcopy so the validation fallback path is exercised."""
 
         if isinstance(value, nn.Module):
             raise TypeError("forced module deepcopy failure")
-        return original_deepcopy(value)
+        if memo is None:
+            return original_deepcopy(value)
+        return original_deepcopy(value, memo)
 
     class StepCounterModel(nn.Module):
         """Model whose output depends on a plain Python step counter."""
@@ -1657,12 +1662,17 @@ def test_validate_forward_pass_deepcopy_fallback_tracks_function_attrs_by_identi
 
     original_deepcopy = user_funcs.copy.deepcopy
 
-    def fail_module_deepcopy(value: object) -> object:
+    def fail_module_deepcopy(
+        value: object,
+        memo: dict[int, object] | None = None,
+    ) -> object:
         """Fail only model deepcopy so the validation fallback path is exercised."""
 
         if isinstance(value, nn.Module):
             raise TypeError("forced module deepcopy failure")
-        return original_deepcopy(value)
+        if memo is None:
+            return original_deepcopy(value)
+        return original_deepcopy(value, memo)
 
     def identity_forward(module: nn.Module, x: torch.Tensor) -> torch.Tensor:
         """Return the module output for a function-typed plain attribute."""
@@ -2654,12 +2664,17 @@ def test_validate_forward_pass_deepcopy_fallback_tripwire_still_fails(
     original_deepcopy = user_funcs.copy.deepcopy
     original_run = user_funcs._run_model_and_save_specified_outs
 
-    def fail_module_deepcopy(value: object) -> object:
+    def fail_module_deepcopy(
+        value: object,
+        memo: dict[int, object] | None = None,
+    ) -> object:
         """Fail only model deepcopy so the validation fallback path is exercised."""
 
         if isinstance(value, nn.Module):
             raise TypeError("forced module deepcopy failure")
-        return original_deepcopy(value)
+        if memo is None:
+            return original_deepcopy(value)
+        return original_deepcopy(value, memo)
 
     def corrupt_logged_output(*args: object, **kwargs: object) -> Trace:
         """Corrupt the captured output to simulate a real capture break."""
@@ -2698,12 +2713,17 @@ def test_validate_forward_pass_deepcopy_fallback_restore_failure_raises(
 
     original_deepcopy = user_funcs.copy.deepcopy
 
-    def fail_module_deepcopy(value: object) -> object:
+    def fail_module_deepcopy(
+        value: object,
+        memo: dict[int, object] | None = None,
+    ) -> object:
         """Fail only model deepcopy so the validation fallback path is exercised."""
 
         if isinstance(value, nn.Module):
             raise TypeError("forced module deepcopy failure")
-        return original_deepcopy(value)
+        if memo is None:
+            return original_deepcopy(value)
+        return original_deepcopy(value, memo)
 
     class RestoreBlockedModel(nn.Module):
         """Model that refuses normal assignment during the restore step."""

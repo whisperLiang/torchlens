@@ -1368,17 +1368,29 @@ def test_generate_pdf_report():
 # ---------------------------------------------------------------------------
 
 
+def _assert_generated_pdf(path: Path) -> None:
+    """Assert that a visualization run created a fresh non-empty PDF artifact."""
+
+    assert path.exists(), f"expected visualization artifact at {path}"
+    pdf_bytes = path.read_bytes()
+    assert pdf_bytes.startswith(b"%PDF"), f"expected {path} to be a PDF artifact"
+    assert len(pdf_bytes) > 0, f"expected non-empty PDF artifact at {path}"
+
+
 def _vis(
-    model,
-    x,
-    filename,
-    vis_mode="unrolled",
-    depth=1000,
-    direction="bottomup",
-    buffer_layers=False,
-    code_panel=False,
-):
-    """Generate a single visualization PDF."""
+    model: nn.Module,
+    x: torch.Tensor,
+    filename: str,
+    vis_mode: str = "unrolled",
+    depth: int = 1000,
+    direction: str = "bottomup",
+    buffer_layers: bool = False,
+    code_panel: bool = False,
+) -> None:
+    """Generate one visualization PDF and assert that it was freshly written."""
+
+    pdf_path = Path(VIS_DIR) / f"{filename}.pdf"
+    pdf_path.unlink(missing_ok=True)
     show_model_graph(
         model,
         x,
@@ -1392,14 +1404,24 @@ def _vis(
         code_panel=code_panel,
         random_seed=42,
     )
+    _assert_generated_pdf(pdf_path)
 
 
-def _vis_grad(model, x, filename, vis_mode="unrolled", depth=1000, direction="bottomup"):
+def _vis_grad(
+    model: nn.Module,
+    x: torch.Tensor,
+    filename: str,
+    vis_mode: str = "unrolled",
+    depth: int = 1000,
+    direction: str = "bottomup",
+) -> None:
     """Generate a visualization PDF with grad backward arrows.
 
     Uses trace_fn(save_grads=True) + backward() + draw()
     since show_model_graph() hardcodes save_grads=False.
     """
+    pdf_path = Path(VIS_DIR) / f"{filename}.pdf"
+    pdf_path.unlink(missing_ok=True)
     log = trace_fn(model, x, save_grads=True, random_seed=42)
     output = log[log.output_layers[0]].out
     output.sum().backward()
@@ -1411,6 +1433,7 @@ def _vis_grad(model, x, filename, vis_mode="unrolled", depth=1000, direction="bo
         vis_fileformat="pdf",
         direction=direction,
     )
+    _assert_generated_pdf(pdf_path)
 
 
 # ---------------------------------------------------------------------------

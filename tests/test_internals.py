@@ -665,7 +665,7 @@ class TestDisplayLargeTensor:
 
 
 class TestDisplayUsesLoggedShape:
-    def test_shape_matches_capture_time(self):
+    def test_shape_matches_capture_time(self) -> None:
         """shape should reflect capture-time shape."""
         model = _SimpleLinear()
         x = torch.randn(2, 10)
@@ -673,4 +673,4 @@ class TestDisplayUsesLoggedShape:
         for label in log.layer_labels:
             entry = log[label]
             if entry.out is not None:
-                assert entry.shape is not None
+                assert tuple(entry.out.shape) == tuple(entry.shape)

@@ -894,13 +894,13 @@ def test_flops_coverage_on_model():
 # =============================================================================
 
 
-def test_module_training_modes_populated(small_input):
+def test_module_training_modes_populated(small_input: torch.Tensor) -> None:
     """Module.training should capture the training flag."""
     model = example_models.SimpleFF()
     model.train()
     mh = trace_fn(model, small_input)
-    # SimpleFF has no submodules beyond root
-    assert isinstance(mh.modules, object)
+    assert mh.root_module.training is True
+    assert mh.modules["self"].training is True
 
 
 def test_module_training_modes_train_vs_eval():

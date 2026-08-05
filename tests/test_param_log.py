@@ -1,6 +1,7 @@
 """Tests for Param, ParamAccessor, and param-related visualization."""
 
 from os.path import join as opj
+from pathlib import Path
 
 import pytest
 import torch
@@ -98,6 +99,15 @@ def _make_all_frozen():
 
 def _simple_input():
     return torch.randn(1, 10)
+
+
+def _assert_generated_pdf(path: Path) -> None:
+    """Assert that a visualization run created a fresh non-empty PDF artifact."""
+
+    assert path.exists(), f"expected visualization artifact at {path}"
+    pdf_bytes = path.read_bytes()
+    assert pdf_bytes.startswith(b"%PDF"), f"expected {path} to be a PDF artifact"
+    assert len(pdf_bytes) > 0, f"expected non-empty PDF artifact at {path}"
 
 
 # ---------------------------------------------------------------------------
@@ -700,60 +710,77 @@ class TestIntegration:
         for entry in mh:
             assert entry.parent_params == []
 
-    def test_vis_renders_without_error(self):
-        """Basic smoke test that visualization renders for each param scenario."""
-        outdir = opj(VIS_OUTPUT_DIR, "toy-networks")
+    def test_vis_renders_without_error(self, tmp_path: Path) -> None:
+        """Visualization should emit fresh PDFs for each parameter scenario."""
 
         # All trainable
+        all_trainable = tmp_path / "_param_all_trainable.pdf"
         model = _make_simple_model()
         show_model_graph(
             model,
             _simple_input(),
             vis_save_only=True,
-            vis_outpath=opj(outdir, "_param_all_trainable"),
+            vis_outpath=str(all_trainable.with_suffix("")),
         )
+        _assert_generated_pdf(all_trainable)
 
         # Mixed
+        mixed = tmp_path / "_param_mixed.pdf"
         model = _make_frozen_first_layer()
         show_model_graph(
-            model, _simple_input(), vis_save_only=True, vis_outpath=opj(outdir, "_param_mixed")
+            model,
+            _simple_input(),
+            vis_save_only=True,
+            vis_outpath=str(mixed.with_suffix("")),
         )
+        _assert_generated_pdf(mixed)
 
         # All frozen
+        all_frozen = tmp_path / "_param_all_frozen.pdf"
         model = _make_all_frozen()
         show_model_graph(
-            model, _simple_input(), vis_save_only=True, vis_outpath=opj(outdir, "_param_all_frozen")
+            model,
+            _simple_input(),
+            vis_save_only=True,
+            vis_outpath=str(all_frozen.with_suffix("")),
         )
+        _assert_generated_pdf(all_frozen)
 
-    def test_vis_collapsed_renders_without_error(self):
-        outdir = opj(VIS_OUTPUT_DIR, "toy-networks")
+    def test_vis_collapsed_renders_without_error(self, tmp_path: Path) -> None:
+        """Collapsed visualization should emit fresh PDFs for each parameter scenario."""
 
+        collapsed_trainable = tmp_path / "_param_collapsed_trainable.pdf"
         model = _make_simple_model()
         show_model_graph(
             model,
             _simple_input(),
             vis_save_only=True,
             vis_call_depth=1,
-            vis_outpath=opj(outdir, "_param_collapsed_trainable"),
+            vis_outpath=str(collapsed_trainable.with_suffix("")),
         )
+        _assert_generated_pdf(collapsed_trainable)
 
+        collapsed_mixed = tmp_path / "_param_collapsed_mixed.pdf"
         model = _make_frozen_first_layer()
         show_model_graph(
             model,
             _simple_input(),
             vis_save_only=True,
             vis_call_depth=1,
-            vis_outpath=opj(outdir, "_param_collapsed_mixed"),
+            vis_outpath=str(collapsed_mixed.with_suffix("")),
         )
+        _assert_generated_pdf(collapsed_mixed)
 
+        collapsed_frozen = tmp_path / "_param_collapsed_frozen.pdf"
         model = _make_all_frozen()
         show_model_graph(
             model,
             _simple_input(),
             vis_save_only=True,
             vis_call_depth=1,
-            vis_outpath=opj(outdir, "_param_collapsed_frozen"),
+            vis_outpath=str(collapsed_frozen.with_suffix("")),
         )
+        _assert_generated_pdf(collapsed_frozen)
 
 
 # ---------------------------------------------------------------------------

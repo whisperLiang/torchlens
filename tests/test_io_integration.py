@@ -267,8 +267,9 @@ def test_streaming_keep_outs_in_memory_true_keeps_tensor_and_ref(tmp_path: Path)
         assert layer.out_ref is not None
 
 
+@pytest.mark.rare
 def test_data_parallel_and_ddp_streaming_case_is_explicitly_skipped() -> None:
-    """TorchLens streaming coverage intentionally skips parallel-process wrappers."""
+    """Placeholder documenting that parallel-process streaming coverage is absent."""
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
