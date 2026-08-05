@@ -16,6 +16,10 @@ Covers:
 - F12  ``render_lineplot`` drew out-of-range points over the chart furniture.
 """
 
+import os
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 import torch
@@ -177,3 +181,48 @@ def test_m5_feature_map_evolution_recurrent_error_vocabulary():
     assert "feature_map_evolution" in message
     # The pass-selection guidance must survive the recast.
     assert "select a pass" in message
+
+
+# ---------------------------------------------------------------------------
+# M4 — rank _compute_topological_layout order is PYTHONHASHSEED-independent
+# ---------------------------------------------------------------------------
+_M4_SNIPPET = (
+    "from torchlens.visualization._rank_layout_internal.layout import "
+    "_compute_topological_layout\n"
+    "labels=['alpha','beta','gamma','delta','epsilon','zeta']\n"
+    "nd={n:{'node_label':n,'attrs':{}} for n in labels}\n"
+    "sz={n:(20.,10.) for n in labels}\n"
+    "pos,_,_=_compute_topological_layout(nd,[],sz,{},{})\n"
+    "order=[n for n,_ in sorted(pos.items(),key=lambda kv:kv[1][0])]\n"
+    "print(','.join(order))\n"
+)
+
+
+def _rank_order_for_seed(seed: str) -> str:
+    env = dict(os.environ)
+    env["PYTHONHASHSEED"] = seed
+    # Point the subprocess at this worktree so it imports the patched module.
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+    out = subprocess.check_output([sys.executable, "-c", _M4_SNIPPET], env=env, text=True)
+    return out.strip()
+
+
+def test_m4_rank_order_deterministic_across_hashseed():
+    orders = {seed: _rank_order_for_seed(seed) for seed in ("0", "1", "2", "3", "7")}
+    assert len(set(orders.values())) == 1, orders
+
+
+def test_m4_within_rank_sort_is_total_order():
+    # Multi-root graph, no edges: every node is its own rank-0 root; positions
+    # must follow the (module, node_label) total order deterministically.
+    from torchlens.visualization._rank_layout_internal.layout import (
+        _compute_topological_layout,
+    )
+
+    labels = ["zeta", "alpha", "mu", "beta"]
+    nd = {n: {"node_label": n, "attrs": {}} for n in labels}
+    sz = {n: (20.0, 10.0) for n in labels}
+    pos, _, _ = _compute_topological_layout(nd, [], sz, {}, {})
+    order = [n for n, _ in sorted(pos.items(), key=lambda kv: kv[1][0])]
+    assert order == sorted(labels)

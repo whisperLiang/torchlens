@@ -134,9 +134,12 @@ def _compute_topological_layout(
             in_degree[tgt_eid] += 1
 
     # Kahn's algorithm for topological depth assignment.
+    # Seed the queue in a deterministic (sorted) order: ``all_node_labels`` is a
+    # set, so iterating it directly made the BFS order -- and hence the eventual
+    # sibling layout -- depend on PYTHONHASHSEED for multi-root graphs.
     depth: dict[str, int] = {}
     queue: deque[str] = deque()
-    for nid in all_node_labels:
+    for nid in sorted(all_node_labels):
         if in_degree[nid] == 0:
             depth[nid] = 0
             queue.append(nid)
@@ -169,8 +172,12 @@ def _compute_topological_layout(
             if node_info:
                 node_label_module[node_info["node_label"]] = mod_key
 
+    # Sort by module membership for visual grouping, tie-broken by the node
+    # label so the ordering is a TOTAL order. Keying on module alone left ties
+    # in the (hash-dependent) input order, so equal-module siblings landed in
+    # nondeterministic x-positions across PYTHONHASHSEED.
     for d in ranks:
-        ranks[d].sort(key=lambda nid: node_label_module.get(nid, ""))
+        ranks[d].sort(key=lambda nid: (node_label_module.get(nid, ""), nid))
 
     # Compute positions.  Y = depth rank, X = position within rank.
     spacing_y = 120  # points between ranks
