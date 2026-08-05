@@ -235,6 +235,22 @@ class ReceptiveFieldView:
 
         return self._descriptor().layout
 
+    def _center_unit(self, descriptor: ReceptiveField) -> tuple[int, ...]:
+        """Return windowed-axis midpoint coordinates for the ``"center"`` selector.
+
+        The midpoint is taken in this view operation's own output grid, which is
+        the coordinate space that ``unit`` addresses for both receptive and
+        projective queries. Shared by both directions so ``"center"`` is honored
+        identically wherever ``at`` accepts it.
+        """
+
+        if descriptor.axes is None:
+            raise ReceptiveFieldError("Geometric axes are unavailable; use .gradient() instead.")
+        output_axes = tuple(
+            cast(int, axis.output_axis) for axis in descriptor.axes if axis.kind == "windowed"
+        )
+        return tuple(int(self._op.shape[axis]) // 2 for axis in output_axes)
+
     def at(
         self,
         unit: tuple[int, ...] | Literal["center"],
@@ -271,12 +287,24 @@ class ReceptiveFieldView:
         if resolved_direction is ReceptiveFieldDirection.PROJECTIVE:
             if input is not None or source is not None:
                 raise TypeError("Projective queries select their far endpoint with target=.")
-            from ._forward_query import box_for_source_unit
+            from ._forward_query import _select_target_descriptor, box_for_source_unit
 
+            projective_solution = self._projective_solution(target)
+            source_unit: Sequence[int]
+            if unit == "center":
+                descriptors = projective_solution.per_op.get(self._op.label)
+                if not descriptors:
+                    raise ReceptiveFieldError(
+                        f"No projective-field solution is available from source {self._op.label!r}."
+                    )
+                descriptor = _select_target_descriptor(descriptors, cast("Op | str | None", target))
+                source_unit = self._center_unit(descriptor)
+            else:
+                source_unit = cast(Sequence[int], unit)
             return box_for_source_unit(
-                self._projective_solution(target),
+                projective_solution,
                 self._op,
-                cast(Sequence[int], unit),
+                source_unit,
                 target=cast("Op | str | None", target),
                 clip=clip,
             )
@@ -321,14 +349,7 @@ class ReceptiveFieldView:
                 raise ReceptiveFieldError(
                     f"Source {source_op.label!r} is not reachable from target {self._op.label!r}."
                 )
-            if descriptor.axes is None:
-                raise ReceptiveFieldError(
-                    "Geometric axes are unavailable; use .gradient() instead."
-                )
-            output_axes = tuple(
-                cast(int, axis.output_axis) for axis in descriptor.axes if axis.kind == "windowed"
-            )
-            selected = tuple(int(self._op.shape[axis]) // 2 for axis in output_axes)
+            selected = self._center_unit(descriptor)
         else:
             selected = unit
         return box_for_unit(
