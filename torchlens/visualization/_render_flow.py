@@ -1932,8 +1932,16 @@ def _get_max_call_depth(
 
     while len(module_depth_stack) > 0:
         module, module_depth = module_depth_stack.pop()
-        module_edges = module_edge_dict[module]["edges"]
-        module_submodules = module_submodule_dict[module]
+        # Multi-pass (recurrent) hierarchies expose per-pass call keys (e.g.
+        # ``fc:3``) through ``top_modules``/``module_submodule_dict`` even when
+        # the combined-graph edge payloads only carry the first-pass key
+        # (``fc:1``). Treat any key with no recorded edge payload as edge-empty
+        # rather than indexing blindly, so the depth crawl stays robust instead
+        # of raising ``KeyError`` on a phantom per-pass key. Keys that DO have a
+        # payload resolve byte-identically to the historical direct lookup.
+        module_payload = module_edge_dict.get(module)
+        module_edges = module_payload.get("edges", ()) if module_payload else ()
+        module_submodules = module_submodule_dict.get(module, [])
 
         if (len(module_edges) == 0) and (
             len(module_submodules) == 0
