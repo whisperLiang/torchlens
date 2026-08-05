@@ -9,7 +9,7 @@ import torch
 
 from ...ir.intervention import FunctionEventInput
 from ...ir.semantics import BackendSemantics
-from ...utils.collections import ensure_iterable, index_nested
+from ...utils.collections import index_nested
 from ...utils.tensor_utils import tensor_nanequal
 
 
@@ -312,13 +312,8 @@ def _iter_output_tensors(raw_output: object) -> Iterable[torch.Tensor]:
         Tensor outputs.
     """
 
-    for value in ensure_iterable(raw_output):
-        if isinstance(value, torch.Tensor):
-            yield value
-        elif isinstance(value, (tuple, list)):
-            for item in value:
-                if isinstance(item, torch.Tensor):
-                    yield item
+    for _, tensor in _iter_tensor_positions((), raw_output):
+        yield tensor
 
 
 def _tensors_alias(left: torch.Tensor, right: torch.Tensor) -> bool:
