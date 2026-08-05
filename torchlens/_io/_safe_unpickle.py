@@ -1978,7 +1978,7 @@ class SafeBundleUnpickler(pickle._Unpickler):
 
     # --- Layer 2: opcode-level policy (r49, secA_1) -------------------------------
     #
-    # ``find_class`` gates which globals resolve, but three opcodes act on objects
+    # ``find_class`` gates which globals resolve, but several opcodes act on objects
     # ALREADY on the stack, INVISIBLE to ``find_class``:
     #   * BUILD applies a ``__setstate__`` / ``__dict__`` update to ``stack[-1]``. On a
     #     torch Tensor / Storage / Parameter this reaches ``Tensor.__setstate__`` /
@@ -2008,10 +2008,23 @@ class SafeBundleUnpickler(pickle._Unpickler):
     #     SIZE, and an ARGUMENT-BEARING ``nn.Module`` construction (whose ``__init__``
     #     allocates attacker-sized parameters). The module rule is arg-aware ON PURPOSE:
     #     a real artifact NEWOBJ-constructs a zero-argument ``nn.Identity()``.
-    # Legit ``.tlspec`` metadata never BUILDs a torch tensor/storage/parameter and never
+    #   * INST / OBJ (SEC-H1) are the LEGACY protocol-0/1 constructing opcodes. Unlike
+    #     REDUCE/NEWOBJ they CALL ``klass(*args)`` through the shared ``_instantiate``
+    #     primitive rather than an inline dispatch handler, so they bypassed the four
+    #     dispatch overrides entirely: a ~30-byte ``INST numpy.ndarray`` / ``OBJ
+    #     numpy.ndarray`` / ``INST torch.FloatTensor`` stream allocated an attacker-sized
+    #     uninitialized buffer BEFORE any structural check. The ``_instantiate`` override
+    #     below runs the SAME belt (``_alloc_refusal_reason`` + ``_is_alloc_constructor_type``)
+    #     and, because ``load_inst`` / ``load_obj`` reach it via ``self._instantiate``
+    #     (normal MRO), it closes BOTH opcodes in one place -- CONSTRUCTION-scoped, not
+    #     opcode-scoped. With it the FULL constructing-opcode set (REDUCE, NEWOBJ,
+    #     NEWOBJ_EX, INST, OBJ) is belt-gated and BUILD is state-gated; no construction
+    #     opcode reaches an unbounded allocation.
+    # Legit ``.tlspec`` metadata never BUILDs a torch tensor/storage/parameter, never
     # bare-constructs a storage/tensor/ndarray in the outer stream (payloads travel as
-    # BlobRefs and reconstruct through the wrapped ``_rebuild_*`` helpers), so these gates
-    # refuse nothing legit.
+    # BlobRefs and reconstruct through the wrapped ``_rebuild_*`` helpers), and -- written
+    # at pickle protocol >= 2 -- never emits the legacy INST/OBJ opcodes at all, so these
+    # gates refuse nothing legit.
 
     def load_build(self) -> None:
         """Refuse a BUILD (``__setstate__`` / storage-rebind) on a torch tensor/storage."""
@@ -2101,6 +2114,60 @@ class SafeBundleUnpickler(pickle._Unpickler):
                 f"{getattr(cls, '__qualname__', cls)!r}."
             )
         return _BASE_LOAD_NEWOBJ_EX(self)  # type: ignore[arg-type]
+
+    def _instantiate(self, klass: Any, args: Any) -> None:
+        """Refuse an INST / OBJ construction that would allocate attacker-sized memory.
+
+        CLOSES THE LAST CONSTRUCTION OPCODES (SEC-H1). The dispatch overrides above cover
+        only REDUCE / NEWOBJ / NEWOBJ_EX, but the pure-Python VM has TWO more constructing
+        opcodes -- the legacy protocol-0/1 ``INST`` (``b'i'``, ``load_inst``) and ``OBJ``
+        (``b'o'``, ``load_obj``) -- and BOTH funnel through this single ``_instantiate``
+        primitive, which calls ``klass(*args)`` directly. Because ``load_inst`` /
+        ``load_obj`` invoke ``self._instantiate(...)`` (normal MRO, not the dispatch
+        table), overriding this ONE method here makes the allocation check fire regardless
+        of which of those opcodes reached construction -- CONSTRUCTION-scoped, not
+        opcode-scoped, so a future opcode routed through the shared primitive is covered
+        for free. Without it a ~30-byte ``metadata.pkl`` using INST/OBJ constructs
+        ``numpy.ndarray(N)`` / ``torch.FloatTensor(N)`` -- an attacker-sized, uninitialized
+        heap buffer (OOM DoS + uninitialized-heap read on a public object) -- at plain
+        ``tl.load()`` time, sidestepping the belt the four dispatch overrides enforce.
+
+        The refusal reuses the EXACT belt helpers the REDUCE / NEWOBJ overrides use
+        (``_alloc_refusal_reason`` + ``_is_alloc_constructor_type``) -- ONE source of
+        truth, so the INST/OBJ path can never drift from the rest of the belt. Legit
+        ``.tlspec`` metadata is written with pickle protocol >= 2 (``DEFAULT_PROTOCOL``
+        >= 4), which NEVER emits INST/OBJ (they are protocol-0/1 opcodes), and never
+        bare-constructs a storage/tensor/ndarray in the outer stream anyway (payloads are
+        BlobRefs), so this refuses nothing a real bundle does; a benign small object still
+        instantiates unchanged.
+        """
+
+        # ``load_inst`` / ``load_obj`` hand ``args`` as a LIST (from ``pop_mark()``); the
+        # belt helpers gate on a TUPLE (``_requests_integer_sized_buffer`` /
+        # ``_alloc_refusal_reason`` test ``isinstance(args, tuple)``). Normalize so a
+        # security belt never silently no-ops on a container-type mismatch. A non-list/
+        # non-tuple ``args`` is passed through verbatim for the helpers to reject/ignore.
+        arg_tuple = tuple(args) if isinstance(args, (list, tuple)) else args
+        mediated = _alloc_refusal_reason(klass, arg_tuple)
+        if mediated is not None:
+            raise pickle.UnpicklingError(
+                "Blocked mediated allocation via INST/OBJ during bundle metadata "
+                f"unpickle: {mediated}. The legacy INST/OBJ construction opcodes route "
+                "through the same allocation belt as REDUCE/NEWOBJ; .tlspec payloads "
+                "travel as BlobRefs."
+            )
+        if _is_alloc_constructor_type(klass):
+            raise pickle.UnpicklingError(
+                "Blocked allocation-constructor (torch storage/tensor or numpy ndarray) "
+                "via INST/OBJ during bundle metadata unpickle: "
+                f"{getattr(klass, '__module__', '')}."
+                f"{getattr(klass, '__qualname__', klass)!r} (constructing it from "
+                "pickle-supplied args allocates attacker-sized, uninitialized-heap "
+                "memory -- an out-of-memory DoS and the source of an uninitialized-heap "
+                "tensor. .tlspec metadata is protocol >= 2 and never emits the legacy "
+                "INST/OBJ opcodes; payloads travel as BlobRefs)."
+            )
+        return super()._instantiate(klass, args)  # type: ignore[misc]
 
     # REBUILD the pure-Python opcode dispatch table so the overrides above are actually
     # invoked (proven: ``def load_build`` alone is INERT -- ``pickle._Unpickler.load``
