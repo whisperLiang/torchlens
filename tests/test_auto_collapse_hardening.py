@@ -113,6 +113,28 @@ class CollidingSegments(nn.Module):
         return self.a(x)
 
 
+class LoopedFunctionalAroundBlock(nn.Module):
+    """Loop of shared functional ops around a boxable block.
+
+    Every iteration re-executes the same functional layer labels, so the max
+    plan contains several op segments whose BASE label runs are identical and
+    only the pass identity distinguishes them.
+    """
+
+    def __init__(self, width: int = 8) -> None:
+        super().__init__()
+        layers = []
+        for _ in range(5):
+            layers += [nn.Linear(width, width), nn.ReLU()]
+        self.blk = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for _ in range(3):
+            x = torch.tanh(torch.sigmoid(torch.relu(x)))
+            x = self.blk(x)
+        return x
+
+
 class UnevenRecurrent(nn.Module):
     """Two sibling blocks called three and five times per forward."""
 
@@ -193,16 +215,27 @@ def test_segment_collision_render_parity(tmp_path):
     assert _svg_node_group_count(str(out) + ".svg") == plan.total
 
 
-def test_multipass_op_segments_render_distinct(tmp_path):
-    """Per-pass op segments must not silently merge into one rendered node."""
+@pytest.mark.parametrize(
+    "builder",
+    [lambda: DoubleCall(2), lambda: LoopedFunctionalAroundBlock()],
+    ids=["double_call", "looped_functional"],
+)
+def test_multipass_op_segments_render_distinct(builder, tmp_path):
+    """Per-pass op segments must not silently merge into one rendered node.
 
-    model = DoubleCall(2).eval()
+    ``looped_functional`` produces several op segments whose BASE label runs
+    are byte-identical (only the pass differs), so any pass-free segment
+    identity collides and silently drops rendered structure.
+    """
+
+    model = builder().eval()
     trace = tl.trace(model, torch.randn(2, 8))
     plan = trace.collapse_plan(mode="max")
     result = select_collapse_plan(trace, RenderContext(), mode="max")
     descriptors = result.segments or {}
     assert len(descriptors) == _plan_segment_node_count(result.plan)
-    out = tmp_path / "dc2max"
+    assert len(set(descriptors)) == len(descriptors)
+    out = tmp_path / "multipass_max"
     trace.draw(
         vis_save_only=True,
         vis_fileformat="svg",
