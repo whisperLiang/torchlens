@@ -132,3 +132,26 @@ def test_cache_hit_preserved_for_identical_capability(tmp_path):
     second = tl.trace(model, x, cache=True, cache_dir=cache_dir, intervention_ready=True)
     assert second.capture_cache_hit is True
     assert second.intervention_ready is True
+
+
+# ------------------------------------------------------------------------- DOC1
+@pytest.mark.smoke
+def test_trace_docstring_has_no_self_referential_aliases():
+    """trace() docstring must not brand a live canonical kwarg its own 'alias'.
+
+    Fail-before: three stale rename-cruft lines said e.g. ``grad_transform:
+    Alias for ``grad_transform``.`` -- each named ITSELF; no second spelling
+    exists in the signature.
+    """
+    import inspect
+
+    doc = tl.trace.__doc__ or ""
+    signature_params = set(inspect.signature(tl.trace).parameters)
+
+    for name in ("activation_transform", "grad_transform", "recurrence_detection"):
+        # No second spelling exists, so any "alias for <itself>" line is a lie.
+        assert f"{name}: Alias for ``{name}``" not in doc
+        assert f"{name}: Deprecated alias for ``{name}``" not in doc
+        # The real canonical parameter still exists and stays documented.
+        assert name in signature_params
+        assert doc.count(f"        {name}:") == 1

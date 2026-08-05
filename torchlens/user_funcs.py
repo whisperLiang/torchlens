@@ -1572,8 +1572,6 @@ def trace(
         grad_transform: Optional function applied to each grad before saving. The raw
             grad remains in ``layer.grad`` by default, and the transform result is stored
             in ``layer.transformed_grad``.
-        grad_transform: Alias for ``grad_transform``. Passing both names is an error.
-        activation_transform: Deprecated alias for ``activation_transform``.
         save_raw_activations: When ``False`` and ``activation_transform`` is set, do not retain
             raw out tensors in memory; raw out metadata is still populated.
         save_raw_gradients: When ``False`` and ``grad_transform`` is set, do not retain raw
@@ -1612,7 +1610,6 @@ def trace(
         random_seed: Fixed RNG seed for reproducibility with stochastic models.
         num_context_lines: Deprecated alias for ``source_context_lines``.
         optimizer: Optional optimizer to annotate which params are being optimized.
-        recurrence_detection: Deprecated alias for ``recurrence_detection``.
         save_outs_to: Deprecated alias for ``streaming.bundle_path``.
         keep_outs_in_memory: Deprecated alias for
             ``streaming.retain_in_memory``.
