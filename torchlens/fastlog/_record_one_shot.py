@@ -10,6 +10,7 @@ from torch import nn
 from .._deprecations import MISSING, MissingType
 from .._input_coerce import _coerce_input_args
 from .._capture_state_helpers import unwrap_compiled_model
+from .._robustness import check_model_and_input_variants
 from ..backends import BackendName, BackendUnsupportedError
 from ..intervention.predicates import InterventionPredicate
 from ..options import StreamingOptions
@@ -154,6 +155,11 @@ def record(
             stacklevel=2,
         )
     input_args = _coerce_input_args(model, input_args)
+    # Fail fast on tensor variants the logging pipeline cannot handle (meta tensors have no
+    # storage, sparse layouts break copy/print/FLOPs paths, symbolic shapes break metadata).
+    # record() shares trace()'s decorated hot path, so it must enforce the SAME up-front guard
+    # instead of crashing deep in capture with an opaque torch error.
+    check_model_and_input_variants(model, input_args, input_kwargs)
     with Recorder(
         model,
         save=resolved_keep_op,
