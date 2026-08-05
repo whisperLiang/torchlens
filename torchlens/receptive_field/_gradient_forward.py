@@ -246,7 +246,7 @@ def _build_projective_result(
     key = _target_key(target)
     descriptor = solution.per_op.get(source.label, {}).get(key)
     state = solution.states.get((source.label, key))
-    batch_support, cross_batch = _batch_semantics(support, state, unit)
+    batch_support, cross_batch = _batch_semantics(support, state, unit, projective=True)
     return _GradientReceptiveFieldResult(
         op_label=source.label,
         io_role=key,
