@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 import torch
 
+from ..utils._multipass_access import get_multipass_attr
 from ..utils.display import format_flops, human_readable_size
 
 OverlayScores = Mapping[str, Any]
@@ -104,23 +105,43 @@ def builtin_overlay_value(node: Any, overlay: str) -> Any:
         Computed overlay value.
     """
 
+    # Overlays render one scalar per node. On a rolled recurrent node ``node`` is an
+    # aggregate multi-pass Layer, so a per-pass read (out/func_duration/grad/
+    # interventions) trips the multi-pass ValueError tripwire -- historically
+    # crashing draw() with any of these overlays. Route every read through the
+    # shared helper with ``multipass=None`` so an ambiguous aggregate degrades to an
+    # honest "n/a" (format_overlay_value maps None -> "n/a") instead of crashing or
+    # fabricating a per-pass value. Aggregate-stable fields (flops_forward,
+    # activation_memory) resolve normally and are unaffected.
     name = normalize_overlay_name(overlay)
     if name == "flops":
-        return int(getattr(node, "flops_forward", 0) or 0)
+        value = get_multipass_attr(node, "flops_forward", 0, multipass=None)
+        return None if value is None else int(value or 0)
     if name == "time":
-        return float(getattr(node, "func_duration", 0.0) or 0.0)
+        value = get_multipass_attr(node, "func_duration", 0.0, multipass=None)
+        return None if value is None else float(value or 0.0)
     if name == "bytes":
-        return int(getattr(node, "activation_memory", 0) or 0)
+        value = get_multipass_attr(node, "activation_memory", 0, multipass=None)
+        return None if value is None else int(value or 0)
     if name == "magnitude":
-        return _tensor_magnitude(getattr(node, "out", None))
+        return _tensor_magnitude(get_multipass_attr(node, "out", None, multipass=None))
     if name == "grad_norm":
-        return _tensor_norm(getattr(node, "grad", None))
+        return _tensor_norm(get_multipass_attr(node, "grad", None, multipass=None))
     if name == "nan":
-        return _has_nonfinite(getattr(node, "out", None))
+        tensor = get_multipass_attr(node, "out", None, multipass=None)
+        # F15: distinguish "nothing was checked" (no available tensor -- missing,
+        # None, or an ambiguous aggregate) -> None -> "nan: n/a" from "checked,
+        # none found" -> False -> "nan: no". The old code returned _has_nonfinite
+        # of a missing/None tensor, i.e. False, and so asserted "nan: no" on nodes
+        # whose output was never inspected -- a false all-clear.
+        if not isinstance(tensor, torch.Tensor):
+            return None
+        return _has_nonfinite(tensor)
     if name == "intervention":
-        return len(getattr(node, "interventions", ()) or ())
+        value = get_multipass_attr(node, "interventions", (), multipass=None)
+        return None if value is None else len(value or ())
     if name == "bundle_delta":
-        return getattr(node, "bundle_delta", None)
+        return get_multipass_attr(node, "bundle_delta", None, multipass=None)
     return None
 
 

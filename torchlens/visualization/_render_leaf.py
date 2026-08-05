@@ -4,6 +4,7 @@
 
 from collections import deque
 
+from ..utils._multipass_access import get_multipass_attr, is_multipass_layer
 from ._render_common import *
 
 # Bound the forward walk that maps a branch-entry edge to its condition bool, so a
@@ -344,13 +345,51 @@ def _add_combined_correspondence_edges(
             cluster_name = f"cluster_{module_key.replace(':', '_pass')}"
             edge_attrs["ltail"] = cluster_name
             edge_attrs["lhead"] = cluster_name
-        op = grad_fn_handle.op
-        if op is not None:
+        forward_node_name = _forward_correspondence_node_name(grad_fn_handle.op)
+        if forward_node_name is not None:
             graphviz_graph.edge(
-                op.layer_label,
+                forward_node_name,
                 _backward_dot_node_name(grad_fn_handle),
                 **edge_attrs,
             )
+
+
+def _forward_correspondence_node_name(op: "Layer | None") -> str | None:
+    """Return the forward endpoint for a combined correspondence edge.
+
+    Scoped to the MULTI-PASS case only (r18j gate rework): for a recurrent
+    aggregate ``Layer`` the specific forward *pass* a grad_fn maps to is not
+    recoverable from current metadata (all passes share ``op_label`` and
+    ``backward_pass_index``), so historically every grad_fn attached to ONE
+    aggregate node -- return ``None`` and let the caller SKIP the edge rather than
+    emit that ambiguous aggregate endpoint. Omitting an unprovable correspondence
+    is honest.
+
+    For a NON-recurrent op the historical aggregate ``layer_label`` emission is
+    preserved verbatim, so the locked render-identity oracle (which covers the
+    feedforward combined case) stays byte-identical. NOTE: that emission still
+    yields a bare ``layer_label`` vs the declared ``...pass1`` forward node, so
+    Graphviz auto-creates a phantom duplicate; killing that feedforward
+    phantom-correspondence cosmetic (finding F3) is a rendering change that
+    REQUIRES a captain-approved oracle-golden regeneration -- DEFERRED, see report.
+
+    Parameters
+    ----------
+    op:
+        Forward ``Op`` or aggregate ``Layer`` paired with a grad_fn, or ``None``.
+
+    Returns
+    -------
+    str | None
+        Forward endpoint dot name, or ``None`` to skip the edge (recurrent aggregate).
+    """
+
+    if op is None:
+        return None
+    if is_multipass_layer(op):
+        return None
+    layer_label = getattr(op, "layer_label", None)
+    return layer_label if isinstance(layer_label, str) else None
 
 
 def _module_key_for_grad_fn(
@@ -393,6 +432,38 @@ def _module_key_for_grad_fn(
     raise ValueError("intervening_cluster must be 'upstream', 'outside', 'downstream', or 'own'.")
 
 
+def _forward_op_is_module_output(op: "Layer") -> bool:
+    """Resolve ``is_module_output`` for a forward op, aggregate-safe on recurrent Layers.
+
+    ``is_module_output`` is a per-pass field whose access raises the multi-pass
+    ``ValueError`` tripwire on a recurrent aggregate ``Layer`` (this is what
+    detonated ``draw_combined`` on any recurrent model). Module-output status is a
+    static containment property, so -- matching how the sibling module fields
+    ``output_of_modules`` / ``modules`` are already stored aggregate-as-first-pass
+    on the Layer -- resolve it explicitly from the first captured pass instead of
+    leaking the tripwire out of the public combined renderer.
+
+    Parameters
+    ----------
+    op:
+        Forward ``Op`` or aggregate ``Layer`` paired with a grad_fn.
+
+    Returns
+    -------
+    bool
+        Whether the forward op is a module output.
+    """
+
+    if is_multipass_layer(op):
+        ops = getattr(op, "ops", None)
+        if ops is not None:
+            first_pass = next(iter(ops.values()), None)
+            if first_pass is not None:
+                return bool(getattr(first_pass, "is_module_output", False))
+        return False
+    return bool(get_multipass_attr(op, "is_module_output", False, multipass=False))
+
+
 def _module_key_for_forward_op(op: "Layer") -> str | None:
     """Return the unrolled module cluster key for a forward op.
 
@@ -408,7 +479,7 @@ def _module_key_for_forward_op(op: "Layer") -> str | None:
     """
 
     output_modules = list(getattr(op, "output_of_modules", []) or [])
-    if getattr(op, "is_module_output", False) and output_modules:
+    if _forward_op_is_module_output(op) and output_modules:
         output_module = str(output_modules[0])
         output_calls = list(getattr(op, "output_of_module_calls", []) or [])
         for output_call in output_calls:
