@@ -659,6 +659,217 @@ def test_entry_adoption_never_fuses_parallel_vetoed_branches() -> None:
     assert check_metadata_invariants(traced)
 
 
+# ---------------------------------------------------------------------------
+# Round 24: the entry-adoption unique-carrier census must be GLOBAL, not per
+# iso group. A SATURATED interior class fragments across iso groups when its
+# loop runs exactly 2 iterations (pass 1's parent is the pre-loop op, pass 2's
+# is the in-loop feedback op), so a per-group count misread the saturated
+# pass 2 as a dangling singleton entry and adopted it across the next loop's
+# boundary -- an internally inconsistent partition (add [1, 3] beside tanh
+# [2, 2] for the SAME two loops, executing in lockstep). The census now counts
+# carriers of each (equivalence key, context) pair across the whole workspace.
+# ---------------------------------------------------------------------------
+
+
+class _PfHeadedLoopChain(nn.Module):
+    """Chained param-free-headed residual loops sharing one prelude.
+
+    ``h = emb(x)`` then, per loop ``i``, ``n_i`` iterations of
+    ``h = tanh(h + site_i(h))``. Each iteration runs exactly one bare ``add``
+    and one bare ``tanh`` in lockstep, so a correct grouping must partition
+    the two op types identically -- per loop, matching the parameterized
+    flank pass counts.
+    """
+
+    def __init__(self, *iteration_counts: int) -> None:
+        super().__init__()
+        self.emb = nn.Linear(4, 4)
+        self.sites = nn.ModuleList(nn.Linear(4, 4) for _ in iteration_counts)
+        self.iteration_counts = iteration_counts
+
+    def forward(self, x):
+        h = self.emb(x)
+        for site, iterations in zip(self.sites, self.iteration_counts):
+            for _ in range(iterations):
+                h = torch.tanh(h + site(h))
+        return h
+
+
+@pytest.mark.parametrize(
+    "iteration_counts",
+    [(2, 2), (2, 3), (3, 2), (2, 4), (4, 2), (3, 3)],
+    ids=lambda counts: "x".join(str(count) for count in counts),
+)
+def test_two_loop_chain_partitions_add_and_tanh_in_lockstep(iteration_counts) -> None:
+    """Chained pf-headed loops split add AND tanh per loop for EVERY length mix.
+
+    The r24 trigger is a 2-ITERATION param-free-headed loop feeding a second
+    pf-headed loop: loop 1's saturated 2nd ``add`` (context ``{emb, enc}``,
+    globally shared with pass 1 but iso-fragmented away from it) was misread
+    as a not-yet-saturated loop entry and adopted across the enc->dec boundary,
+    grouping ``add`` [1, 3] beside ``tanh`` [2, 2]. One add and one tanh run
+    per iteration in LOCKSTEP, so the two partitions must be identical:
+    ``[n1, n2]``. n1 >= 3 rows are the no-regression controls (the interior
+    class keeps >= 2 members in one iso group and never looked like an entry).
+    """
+    torch.manual_seed(0)
+    traced = trace_fn(_PfHeadedLoopChain(*iteration_counts), torch.randn(1, 4))
+    expected = list(iteration_counts)
+    assert _pass_counts(traced, "add") == expected, _layer_passes(traced)
+    assert _pass_counts(traced, "tanh") == expected, _layer_passes(traced)
+    assert _pass_counts(traced, "linear") == [1, *expected], _layer_passes(traced)
+    assert check_metadata_invariants(traced)
+
+
+@pytest.mark.parametrize(
+    "iteration_counts",
+    [(2, 2, 2), (2, 3, 2), (3, 2, 2)],
+    ids=lambda counts: "x".join(str(count) for count in counts),
+)
+def test_three_chained_pf_headed_loops_partition_per_loop(iteration_counts) -> None:
+    """Three chained pf-headed loops: every boundary holds, add mirrors tanh.
+
+    With three loops the defect compounded: a leading 2-iteration loop leaked
+    its saturated 2nd pass into loop 2 (add [1, 3, 2] beside tanh [2, 2, 2]).
+    All three per-loop classes must survive with identical add/tanh partitions.
+    """
+    torch.manual_seed(0)
+    traced = trace_fn(_PfHeadedLoopChain(*iteration_counts), torch.randn(1, 4))
+    expected = list(iteration_counts)
+    assert _pass_counts(traced, "add") == expected, _layer_passes(traced)
+    assert _pass_counts(traced, "tanh") == expected, _layer_passes(traced)
+    assert check_metadata_invariants(traced)
+
+
+def test_two_iteration_loop_bridging_into_non_loop_site() -> None:
+    """A 2-iter pf-headed loop feeding a single NON-loop site: no false 2-pass.
+
+    ``for 2: h = tanh(h + enc(h))`` then one ``h = tanh(h + post(h))``: the
+    same fragment-misread adopted the loop's saturated 2nd ``add`` into the
+    post-loop add (add [1, 2] beside tanh [2, 1]). The loop's adds must group
+    [2] and the post-site add stay a 1-pass layer, in lockstep with tanh.
+    """
+
+    class LoopThenSite(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.emb = nn.Linear(4, 4)
+            self.enc = nn.Linear(4, 4)
+            self.post = nn.Linear(4, 4)
+
+        def forward(self, x):
+            h = self.emb(x)
+            for _ in range(2):
+                h = torch.tanh(h + self.enc(h))
+            h = torch.tanh(h + self.post(h))
+            return h
+
+    torch.manual_seed(0)
+    traced = trace_fn(LoopThenSite(), torch.randn(1, 4))
+    assert _pass_counts(traced, "add") == [2, 1], _layer_passes(traced)
+    assert _pass_counts(traced, "tanh") == [2, 1], _layer_passes(traced)
+    assert check_metadata_invariants(traced)
+
+
+def test_residual_prelude_loop_then_two_iteration_chain() -> None:
+    """A saturating residual loop ahead of the 2+2 chain keeps all three classes.
+
+    ``h = emb(x); for 3: h = h + attn(h); h = h + mlp(h)`` (honest entry
+    adoption keeps add [6]) followed by two 2-iteration pf-headed loops: on
+    the unfixed adapter the first chained loop's saturated pass leaked into
+    the second (add [6, 1, 3]). Expected: add [6, 2, 2] with tanh [2, 2] --
+    the legitimate n>=3 entry adoption and the r24 refusal coexist in ONE
+    model.
+    """
+
+    class ResidualThenChain(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.emb = nn.Linear(4, 4)
+            self.attn = nn.Linear(4, 4)
+            self.mlp = nn.Linear(4, 4)
+            self.enc = nn.Linear(4, 4)
+            self.dec = nn.Linear(4, 4)
+
+        def forward(self, x):
+            h = self.emb(x)
+            for _ in range(3):
+                h = h + self.attn(h)
+                h = h + self.mlp(h)
+            for _ in range(2):
+                h = torch.tanh(h + self.enc(h))
+            for _ in range(2):
+                h = torch.tanh(h + self.dec(h))
+            return h
+
+    torch.manual_seed(0)
+    traced = trace_fn(ResidualThenChain(), torch.randn(1, 4))
+    assert _pass_counts(traced, "add") == [6, 2, 2], _layer_passes(traced)
+    assert _pass_counts(traced, "tanh") == [2, 2], _layer_passes(traced)
+    assert check_metadata_invariants(traced)
+
+
+def test_nested_loops_shared_and_site_interiors_stay_coherent() -> None:
+    """Nested-loop control: 2x3 nested iterations keep 6-pass layers throughout.
+
+    ``for 2: for 3: x = tanh(shared(x) + inner(x))``: all six iterations share
+    saturated contexts, so no entry adoption is involved and the global census
+    must not disturb the coherent 6-pass grouping of both linears, the add,
+    and the tanh.
+    """
+
+    class NestedSharedSite(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.shared = nn.Linear(4, 4)
+            self.inner = nn.Linear(4, 4)
+
+        def forward(self, x):
+            for _ in range(2):
+                for _ in range(3):
+                    x = torch.tanh(self.shared(x) + self.inner(x))
+            return x
+
+    torch.manual_seed(0)
+    traced = trace_fn(NestedSharedSite(), torch.randn(1, 4))
+    assert _pass_counts(traced, "linear") == [6, 6], _layer_passes(traced)
+    assert _pass_counts(traced, "add") == [6], _layer_passes(traced)
+    assert _pass_counts(traced, "tanh") == [6], _layer_passes(traced)
+    assert check_metadata_invariants(traced)
+
+
+def test_different_typed_entries_sharing_one_context_both_adopt() -> None:
+    """Same-key census scoping: different-typed honest entries do not collide.
+
+    ``h = emb(x); for 3: h = tanh(h) * sigmoid(h) + body(h)``: on pass 1 BOTH
+    the bare ``tanh`` and the bare ``sigmoid`` carry the identical unsaturated
+    context ``{emb}``. Each is the unique carrier among its OWN equivalence
+    key, so both entry adoptions must still be granted -- a key-agnostic
+    census would let the two different-typed entries disqualify each other and
+    shear pass 1 off both 3-pass layers.
+    """
+
+    class TwoTypedEntries(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.emb = nn.Linear(4, 4)
+            self.body = nn.Linear(4, 4)
+
+        def forward(self, x):
+            h = self.emb(x)
+            for _ in range(3):
+                h = torch.tanh(h) * torch.sigmoid(h) + self.body(h)
+            return h
+
+    torch.manual_seed(0)
+    traced = trace_fn(TwoTypedEntries(), torch.randn(1, 4))
+    assert _pass_counts(traced, "tanh") == [3], _layer_passes(traced)
+    assert _pass_counts(traced, "sigmoid") == [3], _layer_passes(traced)
+    assert _pass_counts(traced, "mul") == [3], _layer_passes(traced)
+    assert _pass_counts(traced, "add") == [3], _layer_passes(traced)
+    assert check_metadata_invariants(traced)
+
+
 def test_conditional_in_loop_alternating_arms_stay_per_arm() -> None:
     """Conditional-in-loop control: per-arm interiors keep per-arm pass counts."""
 
