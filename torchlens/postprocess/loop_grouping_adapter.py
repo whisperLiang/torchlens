@@ -155,6 +155,15 @@ class RecurrenceAssignment:
     equivalence_key: str
 
 
+_ParamCallIdentity = Tuple[
+    str,
+    Tuple[str, ...],
+    Optional[int],
+    Optional[Tuple[str, ...]],
+    Optional[str],
+]
+
+
 @dataclass
 class _MutableRecurrenceNode:
     """Mutable working copy of a neutral recurrence node."""
@@ -219,7 +228,7 @@ class _GroupingWorkspace:
     raw_labels: tuple[str, ...]
     source_labels: tuple[str, ...]
     eligible_labels: set[str]
-    _param_contexts: Optional[dict[str, frozenset[str]]] = None
+    _param_contexts: Optional[dict[str, frozenset[_ParamCallIdentity]]] = None
 
     @classmethod
     def from_graph(
@@ -283,16 +292,30 @@ class _GroupingWorkspace:
         node = self.nodes[label]
         return tuple(equiv for equiv in node.equivalent_labels if equiv in self.nodes)
 
-    def param_contexts(self) -> dict[str, frozenset[str]]:
-        """Return each node's nearest-parameter-ancestor barcode context.
+    def param_contexts(self) -> dict[str, frozenset[_ParamCallIdentity]]:
+        """Return each node's nearest-parameter-ancestor call-identity context.
 
         A node's parametric context is the union, over its data parents, of the
-        parent's own parameter barcodes when the parent is parameterized, else the
-        parent's context. It identifies WHICH parametric loop a parameter-free op
-        sits inside: a ``tanh`` fed by weight-tied layer A carries context ``{A}``,
-        one fed by layer B carries ``{B}``. Two bare functional ops whose contexts
-        are nonempty and disjoint provably belong to different parametric loops and
-        must never be merged as recurrent passes of one layer.
+        parent's own SITE-QUALIFIED call identity (:func:`_param_call_identity`:
+        function, parameter barcodes, output slot, module site, and non-tensor arg
+        signature) when the parent is parameterized, else the parent's context. It
+        identifies WHICH parametric loop a parameter-free op sits inside: a
+        ``tanh`` fed by parameterized site A carries context ``{A}``, one fed by
+        site B carries ``{B}``. Two bare functional ops whose contexts are nonempty
+        and disjoint provably belong to different parametric loops and must never
+        be merged as recurrent passes of one layer.
+
+        The context element must be the full call identity, never the bare
+        parameter barcodes: two DISTINCT weight-tied modules (a tied
+        ``encoder``/``decoder`` pair) and one kernel applied under different
+        non-tensor args share barcodes yet are different semantic sites, so a bare
+        functional interior (``torch.tanh``) between their loops would otherwise
+        inherit one indistinguishable context and merge ACROSS the loop boundary --
+        yielding a 5-pass layer bridging the 3-pass and 2-pass parameterized
+        layers that the disjoint-context veto exists to keep apart. A genuinely
+        reused module (ALBERT-style, one ``nn.Module`` called in both loops) keeps
+        ONE identity across calls, so its interiors still share a context and still
+        merge.
 
         The computation is a single pass over capture order (parents precede
         children in a captured DAG) and depends only on set-valued inputs, so it is
@@ -300,21 +323,22 @@ class _GroupingWorkspace:
 
         Returns
         -------
-        dict[str, frozenset[str]]
-            Barcode context keyed by node label. Cached after the first call.
+        dict[str, frozenset[_ParamCallIdentity]]
+            Parameterized-ancestor call-identity context keyed by node label.
+            Cached after the first call.
         """
         if self._param_contexts is not None:
             return self._param_contexts
-        contexts: dict[str, frozenset[str]] = {}
+        contexts: dict[str, frozenset[_ParamCallIdentity]] = {}
         for label in self.raw_labels:
             node = self.nodes[label]
-            accumulated: set[str] = set()
+            accumulated: set[_ParamCallIdentity] = set()
             for parent in node.data_parents:
                 parent_node = self.nodes.get(parent)
                 if parent_node is None:
                     continue
                 if parent_node.uses_params and parent_node.param_barcodes:
-                    accumulated.update(parent_node.param_barcodes)
+                    accumulated.add(_param_call_identity(parent_node))
                 else:
                     accumulated.update(contexts.get(parent, frozenset()))
             contexts[label] = frozenset(accumulated)
@@ -1077,15 +1101,6 @@ def _seed_reaches(
             stack.append(child)
     memo[key] = found
     return found
-
-
-_ParamCallIdentity = Tuple[
-    str,
-    Tuple[str, ...],
-    Optional[int],
-    Optional[Tuple[str, ...]],
-    Optional[str],
-]
 
 
 def _param_call_identity(node: _MutableRecurrenceNode) -> _ParamCallIdentity:
