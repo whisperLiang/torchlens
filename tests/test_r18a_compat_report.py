@@ -432,3 +432,95 @@ def test_functorch_row_detects_torch_func_submodule_reference() -> None:
     row = report(RealTorchFuncModel(), torch.randn(3)).row("vmap_functorch")
 
     assert row.detected is True
+
+
+# ---------------------------------------------------------------------------
+# A3-09 / A3-10 — Accelerate offload detection must key on real offload flags,
+# not on the truthiness of execution_device (which is present for plain
+# single-device dispatch and falsy for device index 0).
+# ---------------------------------------------------------------------------
+
+
+class _StubAlignDevicesHook:
+    """Minimal stand-in for accelerate's ``AlignDevicesHook`` (not installed)."""
+
+    def __init__(
+        self,
+        offload: bool = False,
+        offload_buffers: bool = False,
+        execution_device: object = None,
+    ) -> None:
+        """Store the hook flags under inspection.
+
+        Parameters
+        ----------
+        offload:
+            Whether weights are offloaded.
+        offload_buffers:
+            Whether buffers are offloaded.
+        execution_device:
+            Device the module executes on (not an offload signal).
+        """
+
+        self.offload = offload
+        self.offload_buffers = offload_buffers
+        self.execution_device = execution_device
+
+
+def _offload_row_for(hook: _StubAlignDevicesHook) -> object:
+    """Attach a hook to a module and return its offload row.
+
+    Parameters
+    ----------
+    hook:
+        Stub accelerate hook to attach as ``_hf_hook``.
+
+    Returns
+    -------
+    CompatRow
+        The ``accelerate_cpu_disk_offload`` row.
+    """
+
+    module = nn.Linear(2, 2)
+    module._hf_hook = hook  # type: ignore[assignment]
+    return report(module, torch.randn(1, 2)).row("accelerate_cpu_disk_offload")
+
+
+def test_offload_row_ignores_plain_dispatch_hook_with_execution_device() -> None:
+    """A hook with offload=False but an execution_device must not read as offload."""
+
+    row = _offload_row_for(
+        _StubAlignDevicesHook(offload=False, execution_device=torch.device("cpu"))
+    )
+
+    assert row.detected is False
+    assert row.status == "pass"
+
+
+def test_offload_row_detection_is_independent_of_device_id_truthiness() -> None:
+    """Device index 0 and 1 must give the same (non-offload) verdict for offload=False."""
+
+    row_zero = _offload_row_for(_StubAlignDevicesHook(offload=False, execution_device=0))
+    row_one = _offload_row_for(_StubAlignDevicesHook(offload=False, execution_device=1))
+
+    assert row_zero.detected is False
+    assert row_one.detected is False
+    assert row_zero.detected == row_one.detected
+
+
+def test_offload_row_detects_real_weight_offload() -> None:
+    """A hook with offload=True stays detected even on device index 0."""
+
+    row = _offload_row_for(_StubAlignDevicesHook(offload=True, execution_device=0))
+
+    assert row.detected is True
+    assert row.status == "known_broken"
+    assert row.severity == "error"
+
+
+def test_offload_row_detects_buffer_offload() -> None:
+    """Buffer offload (offload_buffers=True) is also detected."""
+
+    row = _offload_row_for(_StubAlignDevicesHook(offload=False, offload_buffers=True))
+
+    assert row.detected is True

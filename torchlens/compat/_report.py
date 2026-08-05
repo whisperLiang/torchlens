@@ -443,9 +443,13 @@ def _accelerate_offload_row(model: nn.Module) -> CompatRow:
     detected = False
     for module in _iter_modules(model):
         hook = getattr(module, "_hf_hook", None)
-        if hook is not None and (
-            bool(getattr(hook, "offload", False)) or getattr(hook, "execution_device", None)
-        ):
+        if hook is None:
+            continue
+        # Offload is signalled by the hook's own offload flags. execution_device is
+        # present for plain single-device dispatch too, and using its truthiness
+        # both false-positives (offload=False + a device) and false-negatives
+        # (device index 0 is falsy), so it is not an offload signal.
+        if bool(getattr(hook, "offload", False)) or bool(getattr(hook, "offload_buffers", False)):
             detected = True
             break
     status: Status = "known_broken" if detected else "pass"
