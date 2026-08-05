@@ -17,12 +17,16 @@ import torch
 from torch import nn
 
 # Attributes to skip when crawling an object's namespace looking for tensors.
-# These are all tensor properties that either:
-#   - trigger deprecation warnings (.T, .H, .mT on non-2D tensors), or
-#   - return views that would create duplicate tensor entries (.real, .imag).
-# "grad" is also excluded (via substring check) to avoid pulling in grad
-# tensors, which are tracked separately.
-_ATTR_SKIP_SET = frozenset({"T", "mT", "real", "imag", "H"})
+# Two groups, matched by EXACT name:
+#   - View/deprecation properties: .T/.H/.mT (deprecation warnings on non-2D
+#     tensors) and .real/.imag (duplicate tensor views).
+#   - Gradient attributes: .grad/._grad hold the gradient tensor (tracked
+#     separately) and .grad_fn/._grad_fn lead into the autograd graph (which
+#     would pull in saved backward tensors).
+# The grad names are matched EXACTLY. An earlier ``"grad" in name`` substring
+# test over-matched and silently dropped unrelated attributes such as
+# ``upgrade``, ``gradient``, or ``degrade`` -- suppressing legitimate tensors.
+_ATTR_SKIP_SET = frozenset({"T", "mT", "real", "imag", "H", "grad", "_grad", "grad_fn", "_grad_fn"})
 
 # Cached instruction-offset -> column-offset maps, keyed by ``id(code_obj)``.
 #
@@ -415,6 +419,69 @@ def _search_stack_for_vars_of_type(
     return next_stack
 
 
+def _passes_attr_filter(name: str) -> bool:
+    """Return whether an attribute name should be crawled for tensors.
+
+    Skips dunder machinery and the view/deprecation/grad names in
+    :data:`_ATTR_SKIP_SET`.
+    """
+    return not name.startswith("__") and name not in _ATTR_SKIP_SET
+
+
+def _crawl_attr_names(item: Any, obj_type: type) -> list[str] | None:
+    """Return the filtered attribute names to crawl on ``item``.
+
+    ``dir()`` walks the full MRO and is expensive, so the *class-level*
+    attribute names are cached by type. Per-INSTANCE attributes vary between
+    objects of the same type and must NOT be cached by type: doing so silently
+    omits tensors stored on a second, differently populated object of that type
+    (an order-dependent capture gap -- the first instance seeds the cache and
+    later instances reuse its stale name list).
+
+    * Objects with the default ``__dir__`` (the common case) expose exactly
+      ``class attributes + instance __dict__ keys``. The class portion is cached
+      by type; the varying ``__dict__`` keys are unioned in on every visit.
+    * Objects with a customized ``__dir__`` (e.g. ``nn.Module`` surfacing its
+      registered parameters/buffers) have authoritative per-instance names that
+      cannot be reconstructed from ``__dict__``; ``dir(item)`` is consulted every
+      visit for them and is never cached by type.
+
+    Returns ``None`` when the object refuses introspection (opaque leaf).
+    """
+    from .. import _state
+
+    if getattr(obj_type, "__dir__", None) is not object.__dir__:
+        # Customized __dir__: per-instance and not type-cacheable.
+        try:
+            names = dir(item)
+        except Exception:
+            # Third-party proxy that refuses introspection -> opaque leaf, so
+            # tensor discovery can continue for the real tensor arguments.
+            return None
+        return [name for name in names if _passes_attr_filter(name)]
+
+    # Default __dir__: cache the stable class-level names by type.
+    class_names = _state._dir_cache.get(obj_type)
+    if class_names is None:
+        try:
+            attrs = dir(obj_type)
+        except Exception:
+            attrs = []
+        class_names = [name for name in attrs if _passes_attr_filter(name)]
+        _state._dir_cache[obj_type] = class_names
+
+    # Union in the per-instance __dict__ keys (which the class cache cannot
+    # cover). This is what fixes the second-same-typed-object capture gap.
+    inst_dict = getattr(item, "__dict__", None)
+    if not inst_dict:
+        return class_names
+    seen = set(class_names)
+    extra = [name for name in inst_dict if name not in seen and _passes_attr_filter(name)]
+    if not extra:
+        return class_names
+    return class_names + extra
+
+
 def _extend_search_stack_from_item(
     item: Any,
     address: Any,
@@ -438,8 +505,6 @@ def _extend_search_stack_from_item(
         address_full: List of ``(kind, key)`` tuples for programmatic re-indexing.
         next_stack: List to append children onto.
     """
-    from .. import _state
-
     # --- Sequence containers (list, tuple, set) ---
     if type(item) in [list, tuple, set]:
         if not track_addresses:
@@ -470,28 +535,14 @@ def _extend_search_stack_from_item(
             )
 
     # --- Object attribute crawl ---
-    # Cache dir() results per type — dir() walks the full MRO and is expensive.
-    # Same types (e.g. every nn.Conv2d) have identical dir() output.
-    obj_type = type(item)
-    if obj_type not in _state._dir_cache:
-        # Filter rules:
-        #   - Skip dunders (__*) — internal Python machinery
-        #   - Skip _ATTR_SKIP_SET (.T, .mT, .H, .real, .imag) — trigger
-        #     deprecation warnings or create duplicate tensor views
-        #   - Skip anything containing "grad" — grad tensors tracked separately
-        try:
-            attrs = dir(item)
-        except Exception:
-            # Some third-party expression/proxy objects intentionally refuse
-            # Python introspection. Treat them as opaque leaves so tensor
-            # discovery can continue for the real tensor arguments.
-            return
-        _state._dir_cache[obj_type] = [
-            a
-            for a in attrs
-            if not a.startswith("__") and a not in _ATTR_SKIP_SET and "grad" not in a
-        ]
-    filtered_attrs = _state._dir_cache[obj_type]
+    # Class-level attribute names are cached per type (dir() walks the full MRO
+    # and is expensive), but per-instance attributes are recomputed every visit
+    # -- see ``_crawl_attr_names`` for why type-caching the full dir() silently
+    # drops tensors held on a second, differently populated same-typed object.
+    filtered_attrs = _crawl_attr_names(item, type(item))
+    if filtered_attrs is None:
+        # Opaque object that refuses introspection -> treat as a leaf.
+        return
 
     # warnings.catch_warnings() is hoisted to get_vars_of_type_from_obj
     for attr_name in filtered_attrs:
@@ -636,9 +687,14 @@ def iter_accessible_attributes(
         # Attribute access can fail for any number of reasons, especially when
         # working with objects that we don't know anything about.  This
         # function makes a best-effort attempt to access every attribute, but
-        # gracefully skips any that cause problems.
+        # gracefully skips any that cause problems. Warnings raised *during
+        # access* (deprecated properties, etc.) are suppressed as promised; the
+        # suppression is scoped narrowly to the getattr so it never leaks into
+        # the consumer's code between yields.
         try:
-            attr = getattr(obj, attr_name)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                attr = getattr(obj, attr_name)
         except Exception:
             continue
 

@@ -86,21 +86,34 @@ def make_short_barcode_from_input(things_to_hash: List[Any], barcode_len: int = 
 
     Used to create content-based barcodes for parameters and buffers so
     that loop detection can identify operations that share the same weights.
-    The inputs are stringified, joined with a null-byte separator (to avoid
-    accidental collisions from concatenation), and hashed with SHA-256.  This
-    avoids Python's process-randomized ``hash()`` and the collision-prone decimal
-    truncation used by older TorchLens releases.
+    Each value is encoded as a ``[type_name, repr]`` pair inside a JSON list and
+    hashed with SHA-256.  The type tag distinguishes values whose ``str()``
+    coincides (``1`` vs ``"1"``), and the JSON list structure -- with its escaped
+    string quoting -- prevents both concatenation collisions and adversarial
+    forging of the element separator (a value containing the raw separator byte
+    can no longer masquerade as two elements, e.g. ``["a\\x00b"]`` vs
+    ``["a", "b"]``).  This avoids Python's process-randomized ``hash()`` and the
+    collision-prone decimal truncation used by older TorchLens releases.
 
     Args:
-        things_to_hash: Values to hash (must be stringifiable).
+        things_to_hash: Values to hash. Each must be ``repr``-able (the common
+            case: shape/dtype/scalar tokens; Parameters and tensor values are
+            excluded upstream).
         barcode_len: Maximum length of the returned barcode.
 
     Returns:
         A deterministic hexadecimal SHA-256 prefix of ``barcode_len`` characters.
     """
-    # Null-byte separator prevents "ab" + "c" from colliding with "a" + "bc".
-    joined = "\x00".join([str(x) for x in things_to_hash])
-    digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()
+    # Type-tagged, structurally-delimited encoding: the enclosing JSON list makes
+    # element boundaries unforgeable and the type name disambiguates values whose
+    # ``str()`` collides. ``ensure_ascii`` keeps the digest byte-stable regardless
+    # of locale/encoding.
+    payload = json.dumps(
+        [[type(x).__name__, repr(x)] for x in things_to_hash],
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     return digest[:barcode_len]
 
 
@@ -229,11 +242,17 @@ def compute_graph_shape_hash(trace: Any, *, include_module_address: bool = True)
     for index, layer in enumerate(trace.layer_list):
         address = normalize_address_for_hash(getattr(layer, "module", None))
         hash_address = address if include_module_address else None
-        parent_indices = sorted(
+        # Preserve parent EDGE ORDER: ``layer.parents`` is an ordered list whose
+        # position encodes operand routing. Sorting would make a noncommutative
+        # op's ``(a, b)`` and ``(b, a)`` parents hash identically, silently
+        # accepting operand-order drift. This mirrors the operand-order-sensitive
+        # refresh graph signature (commit 74898ada); the shape hash must not be
+        # blind to a distinction the refresh tripwire enforces.
+        parent_indices = [
             order_by_label[parent_label]
             for parent_label in getattr(layer, "parents", ())
             if parent_label in order_by_label
-        )
+        ]
         records.append(
             {
                 "index": index,
@@ -280,11 +299,14 @@ def compute_raw_event_shape_hash(capture_events: Any) -> str:
         function = event.function
         output = event.output
         tensor = output.tensor
-        parent_indices = sorted(
+        # Preserve parent EDGE ORDER (see ``compute_graph_shape_hash``):
+        # ``event.parents`` is ordered by operand position, so sorting would
+        # discard the very order this hash claims to include.
+        parent_indices = [
             order_by_raw_label[parent.parent_label_raw]
             for parent in event.parents
             if parent.parent_label_raw in order_by_raw_label
-        )
+        ]
         module_addresses = [
             normalize_address_for_hash(address)
             for address, _call_index in getattr(event, "modules", ()) or ()
