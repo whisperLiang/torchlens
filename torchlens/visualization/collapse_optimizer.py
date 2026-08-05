@@ -1072,6 +1072,7 @@ def _condense_plan_with_child_segments(
     segments: dict[str, SegmentDescriptor] = {}
     hidden_raw_ops: set[str] = set()
     concrete_raw_labels, concrete_segment_ops = _concrete_plan_op_labels(trace, plan.nodes)
+    box_owned_labels = _plan_box_owned_surfaced_labels(trace, context, plan.nodes)
     index = 0
     while index < len(plan.nodes):
         node = plan.nodes[index]
@@ -1104,6 +1105,7 @@ def _condense_plan_with_child_segments(
             total_ops,
             dominance_limit=dominance_limit,
             concrete_labels=concrete_raw_labels,
+            box_owned_labels=box_owned_labels,
         )
         if op_run:
             concrete_run = tuple(
@@ -1284,6 +1286,7 @@ def _legal_plan_op_segment_run(
     *,
     dominance_limit: float,
     concrete_labels: Mapping[int, str],
+    box_owned_labels: frozenset[str] = frozenset(),
 ) -> tuple[str, ...] | None:
     """Return a legal consecutive raw-op segment run at ``start``.
 
@@ -1304,6 +1307,10 @@ def _legal_plan_op_segment_run(
         Maximum segment dominance.
     concrete_labels:
         Pass-qualified op labels for string ``RawOp`` nodes by plan index.
+    box_owned_labels:
+        Pass-free labels of surfaced own-output ops that plan module boxes
+        already account for in their remainder labels; a run never absorbs
+        them.
 
     Returns
     -------
@@ -1318,6 +1325,15 @@ def _legal_plan_op_segment_run(
     seen_stacks: dict[tuple[str, ...], tuple[str, ...]] = {}
     for offset, node in enumerate(nodes[start:]):
         if not isinstance(node, RawOp) or not isinstance(node.op, str):
+            break
+        # Label honesty (round-25): a collapsed atomic module's surfaced
+        # own-output op is the box's separate sibling node, and the box
+        # remainder label accounts for it. Absorbing it into a segment
+        # double-represents the op -- counted by the box content label AND
+        # claimed by the segment range label -- and renders structurally
+        # identical sibling blocks inconsistently. Keep it a standalone raw
+        # node exactly like its siblings' exit ops.
+        if node.op in box_owned_labels:
             break
         concrete = concrete_labels.get(start + offset)
         if concrete is None:
@@ -1355,6 +1371,53 @@ def _legal_plan_op_segment_run(
         max_len = max(3, int(total_ops * dominance_limit))
         labels = labels[:max_len]
     return tuple(labels) if len(labels) >= 3 else None
+
+
+def _plan_box_owned_surfaced_labels(
+    trace: "Trace",
+    context: RenderContext,
+    nodes: Sequence[PlanNode],
+) -> frozenset[str]:
+    """Return surfaced own-output labels owned by module boxes in a plan.
+
+    A collapsed atomic module keeps its own output op visible while its
+    innermost box is dropped, so the op renders as the box's separate sibling
+    node and the box remainder label subtracts it. Operation-segment runs must
+    never absorb such an op: the segment range label would claim it while the
+    box content label still counts it, double-representing one op and
+    rendering structurally identical sibling blocks inconsistently
+    (round-25).
+
+    Parameters
+    ----------
+    trace:
+        Trace being optimized.
+    context:
+        Render context for the plan.
+    nodes:
+        Plan-node sequence being condensed.
+
+    Returns
+    -------
+    frozenset[str]
+        Pass-free render labels of surfaced own-output ops whose owning
+        module renders as a collapsed box (or repeat-fold representative) in
+        ``nodes``.
+    """
+
+    addresses = {node.call.rsplit(":", 1)[0] for node in nodes if isinstance(node, ModuleBox)}
+    addresses.update(
+        node.rep.call.rsplit(":", 1)[0] for node in nodes if isinstance(node, RepeatFold)
+    )
+    if not addresses:
+        return frozenset()
+    units = _module_render_box_units(trace, context)
+    labels: set[str] = set()
+    for address in addresses:
+        unit = units.get(address)
+        if unit is not None:
+            labels.update(unit[1])
+    return frozenset(labels)
 
 
 def _legal_plan_child_segment_run(

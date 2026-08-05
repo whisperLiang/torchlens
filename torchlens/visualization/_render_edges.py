@@ -5,6 +5,7 @@
 from ._render_common import *
 from ._render_leaf import *
 from ._render_utils import html_escape
+from .collapse_plan import OpSegment
 
 
 def _buffer_name_segment(address: str | None) -> str:
@@ -545,9 +546,40 @@ def _collapsed_module_should_show_remainder(
         return False
     plan = getattr(collapse_fn, "_torchlens_v2_plan", None)
     if isinstance(plan, CollapsePlan):
-        visible_raw_ops = {_raw_op_label(node) for node in plan.nodes if isinstance(node, RawOp)}
-        return any(op.layer_label in visible_raw_ops for op in surfaced)
+        visible_ops = _plan_separately_rendered_op_labels(plan)
+        return any(op.layer_label in visible_ops for op in surfaced)
     return getattr(collapse_fn, "_torchlens_v2_mode", None) == "max"
+
+
+def _plan_separately_rendered_op_labels(plan: CollapsePlan) -> frozenset[str]:
+    """Return pass-free labels of every op the plan renders outside module boxes.
+
+    Standalone raw nodes and condensed operation-segment members both render
+    (and are counted) separately from any collapsed module box, so the
+    remainder accounting must treat them identically. Checking only ``RawOp``
+    membership double-represented a surfaced atomic-exit op absorbed into an
+    adjacent operation segment: the box content label kept counting it while
+    the segment range label claimed it too (round-25).
+
+    Parameters
+    ----------
+    plan:
+        Resolved renderer-faithful collapse plan.
+
+    Returns
+    -------
+    frozenset[str]
+        Pass-free operation labels rendered as raw nodes or claimed by
+        operation-segment range labels.
+    """
+
+    labels: set[str] = set()
+    for node in plan.nodes:
+        if isinstance(node, RawOp):
+            labels.add(_raw_op_label(node))
+        elif isinstance(node, OpSegment):
+            labels.update(str(label).rsplit(":", 1)[0] for label in node.ops)
+    return frozenset(labels)
 
 
 def _raw_op_label(node: RawOp) -> str:
@@ -2064,6 +2096,7 @@ __all__ = [
     "_occurrence_matches_op",
     "_op_is_model_input_container_leaf",
     "_op_is_model_output_container_leaf",
+    "_plan_separately_rendered_op_labels",
     "_projected_antiparallel_edge_attrs",
     "_queue_run_fold_ellipsis_node",
     "_raw_op_label",
