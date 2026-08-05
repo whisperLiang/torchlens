@@ -152,3 +152,28 @@ def test_m6_channel_grid_uses_first_batch_element():
     changed_head = base.clone()
     changed_head[0] = torch.tensor([[[9.0, -9.0], [3.0, -3.0]]])
     assert cg(base).tobytes() != cg(changed_head).tobytes()
+
+
+# ---------------------------------------------------------------------------
+# M5 — feature_map_evolution does not leak the mds_evolution/MDS error vocabulary
+# ---------------------------------------------------------------------------
+def test_m5_feature_map_evolution_recurrent_error_vocabulary():
+    class RecurConv(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.conv = nn.Conv2d(2, 2, 1, bias=False)
+
+        def forward(self, x):
+            for _ in range(3):
+                x = self.conv(x)
+            return x
+
+    trace = tl.trace(RecurConv(), torch.ones(2, 2, 4, 4))
+    with pytest.raises(ValueError) as excinfo:
+        tl.viz.feature_map_evolution(trace)
+    message = str(excinfo.value)
+    assert "mds_evolution" not in message
+    assert "MDS" not in message
+    assert "feature_map_evolution" in message
+    # The pass-selection guidance must survive the recast.
+    assert "select a pass" in message
