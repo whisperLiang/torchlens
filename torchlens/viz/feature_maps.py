@@ -88,7 +88,28 @@ def feature_map_evolution(
 
     from ..repgeom import _selected_mds_sites, _store_annotation_tensor
 
-    selected = _selected_mds_sites(trace, save)
+    # ``_selected_mds_sites`` is shared with ``mds_evolution`` and raises
+    # diagnostics phrased for that feature (they name ``mds_evolution`` and
+    # "MDS"). Re-cast those into this function's own vocabulary so the public
+    # error names the API the caller actually invoked, preserving the guidance.
+    try:
+        selected = _selected_mds_sites(trace, save)
+    except ValueError as exc:
+        recast = (
+            str(exc)
+            .replace(
+                "mds_evolution cannot compute aggregate MDS for recurrent layer",
+                "feature_map_evolution cannot visualize an aggregate recurrent layer",
+            )
+            .replace(
+                "covering the MDS layers before calling mds_evolution",
+                "covering the feature-map layers before calling feature_map_evolution",
+            )
+            .replace("mds_evolution", "feature_map_evolution")
+        )
+        if recast != str(exc):
+            raise ValueError(recast) from exc
+        raise
     maps_by_key: FeatureMapEvolution = OrderedDict()
     non_spatial_shapes: list[str] = []
     for key, _site, activations in selected:

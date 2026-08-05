@@ -505,15 +505,19 @@ def draw(
             f"{self.total_param_memory})"
         )
 
-    graph_caption = (
-        f"<<FONT COLOR='{theme.default_font}'><B>{html_escape(self.model_class_name)}</B>"
+    # Build the caption body first, then wrap it in the single FONT element.
+    # The optional direct-writes line must go INSIDE the FONT element, before
+    # the closing tags. Splicing it in by trimming the finished string (the old
+    # ``graph_caption[:-2]``) removed only ``>>`` and left ``</FONT`` unterminated,
+    # producing invalid DOT and a GraphvizRenderError on every direct-writes trace.
+    caption_body = (
+        f"<B>{html_escape(self.model_class_name)}</B>"
         f"<br align='left'/>{self.num_tensors} tensors total ({self.total_activation_memory})"
-        f"<br align='left'/>{params_detail}<br align='left'/></FONT>>"
+        f"<br align='left'/>{params_detail}<br align='left'/>"
     )
     if getattr(self, "_has_direct_writes", False):
-        graph_caption = graph_caption[:-2] + (
-            "Direct writes detected - recipe propagation will overlay<br align='left'/>>"
-        )
+        caption_body += "Direct writes detected - recipe propagation will overlay<br align='left'/>"
+    graph_caption = f"<<FONT COLOR='{theme.default_font}'>{caption_body}</FONT>>"
 
     dot = graphviz.Digraph(
         name=self.model_class_name,
@@ -726,6 +730,13 @@ def draw(
     if engine == "rank":
         from ._rank_layout_internal.layout import render_rank_layout
 
+        # Resolve graph overrides to plain strings here (callables need the
+        # Trace, which the raw-DOT rank renderer does not receive) so the rank
+        # path honors vis_graph_overrides / dpi / show_legend like the dot path.
+        resolved_graph_overrides = {
+            key: str(val(self)) if callable(val) else str(val)
+            for key, val in overrides.graph.items()  # type: ignore[union-attr]
+        }
         with _timed_phase(self, "render:graphviz:forward"):
             result = render_rank_layout(
                 forward_render_ir,
@@ -736,6 +747,10 @@ def draw(
                 graph_caption,
                 rankdir,
                 source_text,
+                show_legend=show_legend,
+                theme=theme,
+                dpi=dpi,
+                graph_overrides=resolved_graph_overrides,
             )
         _vprint(self, f"Graph saved to {vis_outpath}.{vis_fileformat}")
         return result
