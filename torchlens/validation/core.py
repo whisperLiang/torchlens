@@ -805,6 +805,9 @@ def validate_saved_outs(
     )
 
     reset_validation_failure(self)
+    # Per-run cache for the orphan-arg sweep; stale entries from a previous
+    # validation of a since-mutated trace must never leak into this run.
+    self.__dict__.pop("_validation_orphan_candidate_index", None)
     decision_recorder = ValidationDecisionRecorder()
 
     dispatch_count_result = _dispatch_op_count_matches_capture(self)
@@ -844,6 +847,49 @@ def validate_saved_outs(
         status = decision_recorder.as_status(backend=str(getattr(self, "backend", "torch")))
         setattr(self, "_validation_replay_status", status)
         return status
+    if dispatch_count_result.decision == "validated":
+        # Positive census coverage is part of the verdict record: a passed
+        # status now carries auditable evidence the dispatch census matched.
+        decision_recorder.record(
+            op_label=None,
+            func_name=None,
+            phase="metadata",
+            decision="validated",
+            reason=dispatch_count_result.reason,
+        )
+    elif dispatch_count_result.decision == "unverified":
+        # Round-26 W3-4a: an UNVERIFIED census result used to be silently
+        # DISCARDED, so nothing in the trace recorded that the completeness
+        # backstop never ran. It is now recorded on the add-only diagnostics
+        # side-channel so the fact is auditable per-trace. It deliberately
+        # does NOT flip the aggregate verdict: (1) ``dispatch_op_count_
+        # witness_empty`` is the documented correct-by-design carve-out for
+        # captures whose only ops legitimately dispatch nothing (see
+        # ``_dispatch_op_count_matches_capture``; hard-failing it false-fails
+        # a correct model with a locked regression test), and (2)
+        # ``dispatch_op_count_not_collected`` is every Trace-method validation
+        # of a capture that ran without the shadow witness -- flipping those
+        # to non-passed would break the method's bool contract on every
+        # correct model. The silent-drop class the census exists to catch is
+        # instead caught structurally on this path by the orphan-arg sweep
+        # (``_check_unattributed_arg_slots``) and the hardened
+        # ``graph_connectivity`` invariant; the census stays the authoritative
+        # backstop on the public ``tl.validate_forward_pass(model, x)`` path,
+        # which always collects it.
+        from .diagnostics import ValidationDiagnostic, record_validation_diagnostic
+
+        record_validation_diagnostic(
+            self,
+            ValidationDiagnostic(
+                check="completeness_census_unverified",
+                message=(
+                    "The aten dispatch census did not run for this validation "
+                    f"({dispatch_count_result.reason}); completeness is backstopped "
+                    "structurally, not by dispatch counting."
+                ),
+                extra={"reason": dispatch_count_result.reason},
+            ),
+        )
 
     # Initial check: logged outputs must match a fresh forward pass. Halted traces
     # deliberately stop at an internal frontier, so no full-model output exists.
@@ -1273,6 +1319,14 @@ def validate_parents_of_saved_layer(
 def _is_intentional_intervention_replacement(layer: "Op") -> bool:
     """Return whether a layer's out was intentionally replaced by a hook.
 
+    Round-26 W3-2 hardening: the per-op ``intervention_replaced`` /
+    ``is_internal_source`` attributes are written by the same capture machinery
+    whose failure this exemption must not mask, so they are no longer trusted
+    alone. The claim must be corroborated by the trace-level replacement-event
+    ledger (populated only at capture sites that directly observed a genuine
+    replacement); a self-claimed replacement op in a PLAIN capture now fails
+    replay instead of being exempted (2026-06-02 lesson).
+
     Parameters
     ----------
     layer:
@@ -1284,10 +1338,14 @@ def _is_intentional_intervention_replacement(layer: "Op") -> bool:
         Whether validation should treat the op as an intervention boundary.
     """
 
-    return bool(
+    if not (
         getattr(layer, "intervention_replaced", False)
         and not getattr(layer, "is_internal_source", False)
-    )
+    ):
+        return False
+    from .invariants import op_has_genuine_replacement_evidence
+
+    return op_has_genuine_replacement_evidence(layer)
 
 
 def _classify_user_excluded_replay_surface(
@@ -1638,6 +1696,19 @@ def _check_layer_arguments_logged_correctly(
                     )
                     if validation_result_for_arg_and_layer.decision != "validated":
                         return validation_result_for_arg_and_layer
+
+        # Round-26 W3-1: inverse orphan-arg check. Everything above starts
+        # from RECORDED parents, so a capture bug that drops a parent edge
+        # (removing it from BOTH ``parents`` and ``parent_arg_positions`` --
+        # the r22 argpos bug class) corrupts both sides of the set-equality
+        # check together and leaves the dropped parent's saved arg value
+        # sitting UNATTRIBUTED and uninspected. This sweep works from the
+        # saved args instead: every unattributed non-trivial tensor arg slot
+        # whose value provably matches a recorded producer in this trace is a
+        # dropped-edge failure.
+        orphan_result = _check_unattributed_arg_slots(self, target_layer)
+        if orphan_result.failed:
+            return orphan_result
     return ValidationCheckResult.validated("arg_logging_matched")
 
 
@@ -1896,6 +1967,270 @@ def _check_arglocs_correct_for_arg(
     return ValidationCheckResult.validated("arg_logging_matched")
 
 
+def _tensor_arg_value_is_trivial(value: torch.Tensor) -> bool:
+    """Return whether a saved arg tensor value is too generic to attribute.
+
+    Mirrors the triviality exemptions of Case 1 in
+    ``_check_arglocs_correct_for_arg`` exactly: empty, bool, all-NaN, all-zero,
+    and all-abs-one tensors match producers coincidentally all the time, so a
+    value-identity match on them proves nothing.
+
+    Parameters
+    ----------
+    value:
+        Saved argument tensor leaf.
+
+    Returns
+    -------
+    bool
+        True when value-identity evidence on this tensor is not probative.
+    """
+
+    return bool(
+        value.numel() == 0
+        or value.dtype == torch.bool
+        or tensor_all_nan(value)
+        or torch.all(value == 0)
+        or torch.all(torch.abs(value) == 1)
+    )
+
+
+def _matches_own_parameter(target_layer: Op, value: torch.Tensor) -> bool:
+    """Return whether a saved arg value is one of the op's own parameters.
+
+    Parameters passed positionally (``F.linear(x, self.weight, self.bias)``)
+    are captured in ``saved_args`` but are deliberately NOT graph parents, so
+    their slots are legitimately unattributed.
+
+    Parameters
+    ----------
+    target_layer:
+        Operation whose arg slot is being classified.
+    value:
+        Saved argument tensor leaf at an unattributed slot.
+
+    Returns
+    -------
+    bool
+        True when the value matches one of the op's recorded parameters.
+    """
+
+    for param_log in getattr(target_layer, "_param_logs", ()) or ():
+        param_value = getattr(param_log, "value", None)
+        if (
+            isinstance(param_value, torch.Tensor)
+            and param_value.shape == value.shape
+            and param_value.dtype == value.dtype
+            and torch.equal(param_value, value)
+        ):
+            return True
+    return False
+
+
+def _orphan_candidate_index(self: "Trace") -> Dict[tuple[Any, Any], List[Op]]:
+    """Return a (shape, dtype)-keyed index of candidate producer ops.
+
+    Built lazily once per validation run (``validate_saved_outs`` clears it at
+    entry) so the orphan-arg sweep costs nothing on the overwhelmingly common
+    zero-orphan-slot path and stays near-linear when a sweep is needed.
+
+    Parameters
+    ----------
+    self:
+        Trace being validated.
+
+    Returns
+    -------
+    dict
+        Mapping from ``(shape, dtype)`` to candidate producer ops.
+    """
+
+    cached = self.__dict__.get("_validation_orphan_candidate_index")
+    if cached is not None:
+        return cast(Dict[tuple[Any, Any], List[Op]], cached)
+    index: Dict[tuple[Any, Any], List[Op]] = {}
+    for candidate in self.layer_list:
+        if getattr(candidate, "is_output", False):
+            # Output boundary ops duplicate their producer's value; the
+            # producer itself is the meaningful candidate.
+            continue
+        payload = _saved_out_payload(candidate)
+        if payload is None:
+            continue
+        index.setdefault((tuple(payload.shape), payload.dtype), []).append(candidate)
+    self.__dict__["_validation_orphan_candidate_index"] = index
+    return index
+
+
+def _candidate_payload_for_target(candidate: Op, target_layer: Op) -> torch.Tensor | None:
+    """Return the candidate's out as the target would have consumed it.
+
+    Parameters
+    ----------
+    candidate:
+        Potential producer op.
+    target_layer:
+        Consuming op whose arg slot is being attributed.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Child-versioned snapshot when one exists, else the saved out.
+    """
+
+    versions = getattr(candidate, "out_versions_by_child", None) or {}
+    for key in (getattr(target_layer, "label", None), target_layer.layer_label):
+        if key is not None and key in versions:
+            return cast(torch.Tensor, versions[key])
+    return _saved_out_payload(candidate)
+
+
+def _check_unattributed_arg_slots(self: "Trace", target_layer: Op) -> ValidationCheckResult:
+    """Fail when an unattributed saved tensor arg matches a recorded producer.
+
+    This is the INVERSE of Case 1 in ``_check_arglocs_correct_for_arg``:
+    Case 1 only inspects ops already recorded in ``parents``, so a dropped
+    parent edge (gone from ``parents`` AND ``parent_arg_positions`` together,
+    exactly what a capture-side attribution bug leaves behind) is never
+    examined even though its value still sits in ``saved_args``. Here every
+    unattributed tensor arg slot is checked against ALL recorded producers.
+
+    Exemptions are the exact mirror of Case 1 (trivial values, value ambiguity
+    with an attributed parent, candidate attributed at another slot) plus two
+    slot classes that are unattributed by design: the op's own parameters
+    passed positionally, and non-data-operand (size/shape/metadata) slots per
+    the ATen schema classifier. A legitimately outside tensor (module
+    attribute, closure constant) matches no recorded producer and passes.
+
+    Parameters
+    ----------
+    self:
+        Trace being validated.
+    target_layer:
+        Operation whose saved arg slots are being swept.
+
+    Returns
+    -------
+    ValidationCheckResult
+        Failed result for a provably-dropped parent edge, otherwise validated.
+    """
+
+    argtype_sources = (
+        ("args", getattr(target_layer, "saved_args", None)),
+        ("kwargs", getattr(target_layer, "saved_kwargs", None)),
+    )
+    parent_arg_positions = getattr(target_layer, "parent_arg_positions", None) or {}
+    attributed_labels = {
+        logged_parent
+        for arg_domain in ("args", "kwargs")
+        for logged_parent in (parent_arg_positions.get(arg_domain, {}) or {}).values()
+    }
+
+    def leaf_slots(arg_type: str, container: Any) -> list[tuple[Any, str, torch.Tensor]]:
+        """Return (argloc_key, witness_path, tensor) leaf slots for a container."""
+
+        if container is None:
+            return []
+        items = enumerate(container) if arg_type == "args" else container.items()
+        prefix = "arg" if arg_type == "args" else "kw:"
+        slots: list[tuple[Any, str, torch.Tensor]] = []
+        for key, val in items:
+            if isinstance(val, torch.Tensor):
+                slots.append((key, f"{prefix}{key}", val))
+            elif type(val) in (list, tuple):
+                for sub_index, sub_val in enumerate(val):
+                    if isinstance(sub_val, torch.Tensor):
+                        slots.append(((key, sub_index), f"{prefix}{key}.{sub_index}", sub_val))
+            elif isinstance(val, dict):
+                for sub_key, sub_val in val.items():
+                    if isinstance(sub_val, torch.Tensor):
+                        slots.append(((key, sub_key), f"{prefix}{key}.{sub_key}", sub_val))
+        return slots
+
+    target_labels = {
+        getattr(target_layer, "label", None),
+        target_layer.layer_label,
+        getattr(target_layer, "_label_raw", None),
+    }
+    func_name = str(getattr(target_layer, "func_name", ""))
+    for arg_type, container in argtype_sources:
+        positions_map = parent_arg_positions.get(arg_type, {}) or {}
+        for argloc_key, witness_path, value in leaf_slots(arg_type, container):
+            if argloc_key in positions_map:
+                continue
+            if _tensor_arg_value_is_trivial(value):
+                continue
+            if _matches_own_parameter(target_layer, value):
+                continue
+            # Size/shape/metadata slots (factory dims, view sizes) are
+            # deliberately never graph parents; only DATA operand slots must
+            # be attributed. Authority is the ATen schema classifier already
+            # used by the capture-side witness (fails toward "operand").
+            from ..backends.torch.ops import _arg_position_is_tensor_operand
+
+            if not _arg_position_is_tensor_operand(func_name, witness_path):
+                continue
+            candidates = _orphan_candidate_index(self).get((tuple(value.shape), value.dtype), [])
+            for candidate in candidates:
+                candidate_labels = {
+                    getattr(candidate, "label", None),
+                    candidate.layer_label,
+                    getattr(candidate, "_label_raw", None),
+                }
+                candidate_labels.discard(None)
+                if candidate_labels & target_labels:
+                    continue
+                # Mirror of ``_parent_logged_for_any_arg_alias``: a producer
+                # attributed at ANY slot of this op is not a dropped edge.
+                if candidate_labels & attributed_labels:
+                    continue
+                payload = _candidate_payload_for_target(candidate, target_layer)
+                if payload is None or not tensor_nanequal(value, payload, allow_tolerance=False):
+                    continue
+                # Ambiguity mirror of Case 1: if an ATTRIBUTED parent carries
+                # identical values, the slot value plausibly came from it.
+                ambiguous = False
+                for attributed_label in attributed_labels:
+                    try:
+                        attributed_op = _op_for_validation_label(self, attributed_label)
+                    except (KeyError, ValueError):
+                        continue
+                    attributed_payload = _candidate_payload_for_target(attributed_op, target_layer)
+                    if attributed_payload is not None and tensor_nanequal(
+                        value, attributed_payload, allow_tolerance=False
+                    ):
+                        ambiguous = True
+                        break
+                if ambiguous:
+                    continue
+                print(
+                    f"Saved {arg_type} {argloc_key!r} of {target_layer.layer_label} matches "
+                    f"the out of {candidate.layer_label}, but no parent is attributed at "
+                    f"that position -- a parent edge was dropped."
+                )
+                from .diagnostics import (
+                    CHECK_ARG_LOGGING,
+                    ValidationFailure,
+                    record_validation_failure,
+                )
+
+                record_validation_failure(
+                    self,
+                    ValidationFailure(
+                        check=CHECK_ARG_LOGGING,
+                        op_label=getattr(target_layer, "label", target_layer.layer_label),
+                        func_name=func_name or None,
+                        message=(
+                            f"unattributed tensor arg at {arg_type} {argloc_key!r} matches "
+                            f"recorded producer {candidate.layer_label}"
+                        ),
+                        extra={"matched_producer": candidate.layer_label},
+                    ),
+                )
+                return ValidationCheckResult.failed_result("unattributed_tensor_arg")
+    return ValidationCheckResult.validated("arg_logging_matched")
+
+
 def _check_perturbation_exemptions(
     self: "Trace",
     layer: Op,
@@ -1967,8 +2302,18 @@ def _perturbed_parents_only_occupy_out_kwarg(layer: Op, layers_to_perturb: List[
         True when each perturbed parent's only recorded position on ``layer``
         is the ``out`` keyword argument (a write-only storage target under the
         torch ``out=`` convention). A parent that also occupies a positional or
-        non-``out`` keyword slot feeds real values and is NOT exempt.
+        non-``out`` keyword slot feeds real values and is NOT exempt. TUPLE
+        ``out=`` destinations (``torch.sort(x, out=(values, indices))``) record
+        each member at a nested ``("out", index)`` key; those slots are the
+        same write-only destination contract and are accepted identically.
     """
+
+    def _is_out_destination_key(key: Any) -> bool:
+        """Return whether an arg-map key addresses the ``out=`` destination."""
+
+        if key == "out":
+            return True
+        return isinstance(key, tuple) and len(key) == 2 and key[0] == "out"
 
     if not layers_to_perturb:
         return False
@@ -1981,7 +2326,9 @@ def _perturbed_parents_only_occupy_out_kwarg(layer: Op, layers_to_perturb: List[
         occupied_kwargs = {
             key for key, label in kwarg_positions.items() if label == perturbed_label
         }
-        if occupied_kwargs != {"out"}:
+        if not occupied_kwargs:
+            return False
+        if not all(_is_out_destination_key(key) for key in occupied_kwargs):
             return False
     return True
 

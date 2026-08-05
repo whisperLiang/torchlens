@@ -1471,6 +1471,113 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
         )
 
 
+def _intervention_spec_is_armed(spec: object | None) -> bool:
+    """Return whether an intervention spec carries actual user intent.
+
+    Plain captures can own an EMPTY ``InterventionSpec`` object (the lazy
+    ``_ensure_intervention_spec`` default), so ``is not None`` alone is not
+    evidence of an intervened trace. Armed means the user registered at least
+    one target, hook, value spec, or helper.
+
+    Parameters
+    ----------
+    spec:
+        ``Trace._intervention_spec`` value.
+
+    Returns
+    -------
+    bool
+        True when the spec carries at least one registered intervention.
+    """
+
+    if spec is None:
+        return False
+    if any(
+        getattr(spec, field_name, None)
+        for field_name in ("targets", "target_value_specs", "hook_specs")
+    ):
+        return True
+    return any(
+        getattr(spec, field_name, None) is not None for field_name in ("hook", "helper", "value")
+    )
+
+
+def op_has_genuine_replacement_evidence(layer: "Op", trace: "Trace | None" = None) -> bool:
+    """Return whether trace-level evidence corroborates a replacement stamp.
+
+    Every ``intervention_replacement`` exemption used to trust per-op
+    attributes (``func_name``/``intervention_replaced``/``is_internal_source``)
+    that the placeholder synthesizer ITSELF writes, so a placeholder minted or
+    forged during PLAIN capture passed validation -- defeating the 2026-06-02
+    lesson that a placeholder op appearing during plain capture must STILL
+    fail. This helper is the cross-check: the op must appear in the
+    trace-level replacement-event ledger populated ONLY at the capture sites
+    that directly observed the replacement (``wrapped_hook`` seeing a raw
+    forward hook return a new object; a live-fire hook reporting
+    ``replaced=True`` while intervention machinery is armed; an explicit
+    ``push()`` intervention), or the trace must carry no ledger authority at
+    all (loaded bundles, backend-neutral traces) in which case the legacy
+    per-op behavior is preserved.
+
+    Parameters
+    ----------
+    layer:
+        Operation pass claiming to be an intervention replacement.
+    trace:
+        Trace being validated. Falls back to ``layer.source_trace``.
+
+    Returns
+    -------
+    bool
+        True when the claim is corroborated (or no ledger authority exists).
+    """
+
+    if trace is None:
+        trace = getattr(layer, "source_trace", None)
+    if trace is None:
+        # No trace-level authority reachable (detached op) -- preserve the
+        # legacy per-op behavior rather than failing structures we cannot
+        # cross-check.
+        return True
+    if bool(getattr(trace, "_loaded_from_bundle", False)):
+        # The ledger is a live-capture runtime attribute (never serialized);
+        # loaded artifacts keep the legacy per-op behavior. Functionless
+        # replacement ops in bundles are independently refused by
+        # ``_raise_if_portable_bundle_log`` on the replay path.
+        return True
+    ledger = getattr(trace, "_replacement_event_labels", None)
+    if ledger:
+        candidate_labels = {
+            getattr(layer, "_label_raw", None),
+            getattr(layer, "label", None),
+            getattr(layer, "layer_label", None),
+        }
+        candidate_labels.discard(None)
+        if candidate_labels & set(ledger):
+            return True
+    # Push/rerun fallback: the ledger is a plain runtime attribute on the
+    # capture-time trace object, and the intervention rerun engine rebuilds a
+    # fresh trace off to the side then swaps its FIELD-ORDER state into the
+    # original object -- the ledger does not survive the swap, and push()
+    # stamps sites without a capture at all. Both are explicit user
+    # interventions, so accept the conjunction of two signals a plain-capture
+    # placeholder can never carry together: (1) this op holds a hook-minted
+    # FireRecord with ``replaced=True`` (only hook EXECUTION creates these;
+    # the placeholder synthesizer writes ``interventions=[]``), AND (2) the
+    # trace itself owns an ARMED intervention spec -- one with actual
+    # targets/hooks/values, populated only by ``trace(intervene=...)`` /
+    # ``attach_hooks`` / ``set``. Plain captures carry an EMPTY spec object,
+    # so a stale ``_tl_live_fire_results`` leak into a plain capture carries
+    # records but no armed spec and stays refused.
+    if _intervention_spec_is_armed(getattr(trace, "_intervention_spec", None)):
+        for record in getattr(layer, "interventions", ()) or ():
+            if getattr(record, "replaced", False):
+                return True
+    # A live capture with NO corroborating replacement evidence: any op
+    # claiming to be a replacement is a plain-capture gap or a forged stamp.
+    return False
+
+
 def _is_func_call_id_exempt(layer: "Op") -> bool:
     """Return whether a layer is exempt from Invariant S.
 
@@ -1491,17 +1598,18 @@ def _is_func_call_id_exempt(layer: "Op") -> bool:
     # (the user substituted an opaque tensor for a module's output, so there is
     # no torch function -- hence no ``func_call_id`` -- to validate). Mirror the
     # deliberately NARROW predicate the ``op_log_fields`` invariant already uses
-    # (func_name + intervention_replaced + NOT internal_source): it is scoped to
-    # ONLY genuine user interventions. This is safe to exempt here ONLY because
-    # ``_record_module_exit_metadata`` no longer mislabels plain-capture gaps as
-    # ``intervention_replacement`` (it logs them as ``internal_source``), so an
-    # auto-synthesized functionless placeholder can never carry this shape during
-    # plain capture. Widening this to a blanket ``func_name`` check would disarm
-    # the plain-capture tripwire (see project CLAUDE.md "Validation Integrity").
+    # (func_name + intervention_replaced + NOT internal_source), AND require the
+    # trace-level replacement-event ledger to corroborate it
+    # (``op_has_genuine_replacement_evidence``): the per-op attributes alone are
+    # written by the placeholder synthesizer itself, so trusting them let a
+    # plain-capture placeholder pass (round-26 W3-2). Widening this to a blanket
+    # ``func_name`` check would disarm the plain-capture tripwire (see project
+    # CLAUDE.md "Validation Integrity").
     if (
         getattr(layer, "func_name", "") == "intervention_replacement"
         and getattr(layer, "intervention_replaced", False)
         and not getattr(layer, "is_internal_source", False)
+        and op_has_genuine_replacement_evidence(layer)
     ):
         return True
     func_name = str(getattr(layer, "func_name", "")).lower()
@@ -1808,15 +1916,28 @@ def _check_special_layer_lists(ml: "Trace") -> None:
 
 
 def _check_graph_topology(ml: "Trace") -> None:
-    """Check C: parent-child edge bidirectionality and boolean flag consistency.
+    """Check C: parent-child edge bidirectionality and stored-flag consistency.
 
     Validates:
     - Every parent edge has a corresponding child edge (and vice versa).
-    - has_children/has_parents/has_siblings/has_co_parents flags match actual counts.
+    - The stored has_children flag matches the actual child list.
       Note: has_children excludes output layers (added during postprocessing,
       not during capture when the flag was set).
+    - Every parent_arg_positions entry references an op that is actually in
+      ``parents`` (the arg map may not invent edges the graph does not have).
     - Input layers have no parents.
     - out_versions_by_child keys are a subset of children.
+
+    Round-26 W3-3 note: this check previously also "compared"
+    ``has_parents``/``has_siblings``/``has_co_parents`` against
+    ``len(parents)``/``len(siblings)``/``len(co_parents)``. Those three are
+    read-only ``Op`` PROPERTIES defined as exactly those length tests
+    (op.py), so the comparisons were tautologies that could never fail on any
+    trace -- security theater, not a tripwire. They were removed rather than
+    kept; ``has_children`` is the only stored capture-time flag with
+    independent information, and the ``parent_arg_positions`` cross-check
+    below is a real two-independent-structures consistency test that replaces
+    them.
     """
     name = "graph_topology"
     label_set = set(ml.layer_labels) | set(ml.op_labels)
@@ -1850,10 +1971,13 @@ def _check_graph_topology(ml: "Trace") -> None:
                     f"Layer {label} lists {c} as child, but {c} does not list {label} as parent",
                 )
 
-        # Boolean flag consistency
-        # Note: has_children/has_parents/has_siblings/has_co_parents are set during
-        # capture and don't account for output layers added during postprocessing.
-        # So we exclude output layers from the child count for this check.
+        # Stored-flag consistency. has_children is set during capture and does
+        # not account for output layers added during postprocessing, so output
+        # layers are excluded from the child count for this check. (This is the
+        # ONLY stored flag with independent information; the derived
+        # has_parents/has_siblings/has_co_parents properties recompute from the
+        # very lists a comparison would use, so checking them is vacuous -- see
+        # the round-26 W3-3 note in the docstring.)
         non_output_children = [
             c for c in lpl.children if c not in output_set and ml[c].layer_label not in output_set
         ]
@@ -1863,23 +1987,44 @@ def _check_graph_topology(ml: "Trace") -> None:
                 f"Layer {label}: has_children={lpl.has_children} but "
                 f"non-output children={non_output_children}",
             )
-        if not lpl.is_output and lpl.has_parents != (len(lpl.parents) > 0):
-            raise MetadataInvariantError(
-                name,
-                f"Layer {label}: has_parents={lpl.has_parents} but len(parents)={len(lpl.parents)}",
-            )
-        if lpl.has_siblings != (len(lpl.siblings) > 0):
-            raise MetadataInvariantError(
-                name,
-                f"Layer {label}: has_siblings={lpl.has_siblings} but "
-                f"len(siblings)={len(lpl.siblings)}",
-            )
-        if lpl.has_co_parents != (len(lpl.co_parents) > 0):
-            raise MetadataInvariantError(
-                name,
-                f"Layer {label}: has_co_parents={lpl.has_co_parents} but "
-                f"len(co_parents)={len(lpl.co_parents)}",
-            )
+
+        # Arg-map/graph cross-consistency: parent_arg_positions and parents are
+        # two INDEPENDENTLY stored structures, so this comparison has real
+        # teeth (unlike the removed property tautologies). Every op the arg map
+        # attributes an argument slot to must actually be a recorded parent;
+        # an arg-map entry naming a non-parent is graph corruption. The
+        # reverse direction (a data parent missing from the arg map) is
+        # replay-validation's job (``_check_layer_arguments_logged_correctly``),
+        # which also has value evidence for it.
+        parent_alias_set = set(lpl.parents)
+        for parent_label in lpl.parents:
+            parent_entry = ml[parent_label]
+            parent_alias_set.add(parent_entry.layer_label)
+            parent_alias_set.add(getattr(parent_entry, "label", parent_label))
+        for arg_domain in ("args", "kwargs"):
+            for position, attributed_label in lpl.parent_arg_positions.get(arg_domain, {}).items():
+                try:
+                    attributed_entry = ml[attributed_label]
+                except (KeyError, ValueError):
+                    # A label that does not resolve at all is the
+                    # ``edge_use_parent_arg`` invariant's finding ("references
+                    # missing parent"); this check owns only the
+                    # resolvable-but-not-a-parent inconsistency.
+                    continue
+                attributed_aliases = {
+                    attributed_label,
+                    getattr(attributed_entry, "layer_label", None),
+                    getattr(attributed_entry, "label", None),
+                }
+                attributed_aliases.discard(None)
+                if attributed_aliases & parent_alias_set:
+                    continue
+                raise MetadataInvariantError(
+                    name,
+                    f"Layer {label}: parent_arg_positions[{arg_domain!r}][{position!r}] "
+                    f"names {attributed_label!r}, which is not a recorded parent "
+                    f"(parents={lpl.parents})",
+                )
 
         # Input layers have no parents
         if lpl.is_input and len(lpl.parents) > 0:
@@ -2091,11 +2236,17 @@ def _check_op_log_fields(ml: "Trace") -> None:
         # output, so there is no torch function to validate. This exemption is
         # deliberately narrow -- it must NOT cover auto-synthesized placeholders
         # during plain capture (a previous band-aid widened it to silence the
-        # vmap-built attention mask, disarming this tripwire).
+        # vmap-built attention mask, disarming this tripwire). Round-26 W3-2
+        # hardening: the per-op attributes below are written by the placeholder
+        # synthesizer itself, so the exemption additionally requires the
+        # trace-level replacement-event ledger to corroborate the claim; a
+        # placeholder stamped during PLAIN capture (no recorded replacement
+        # event) now fails this invariant, per the 2026-06-02 lesson.
         is_functionless_replacement = (
             lpl.func_name == "intervention_replacement"
             and getattr(lpl, "intervention_replaced", False)
             and not getattr(lpl, "is_internal_source", False)
+            and op_has_genuine_replacement_evidence(lpl, ml)
         )
 
         # An internally generated *source* tensor whose construction TorchLens
@@ -5313,6 +5464,71 @@ def _check_distance_invariants(ml: "Trace") -> None:
 # ---------------------------------------------------------------------------
 
 
+def _op_follows_recorded_backward_trigger(ml: "Trace", layer: "Op") -> bool:
+    """Return whether an op ran after a RECORDED mid-forward backward trigger.
+
+    ``torch.autograd.grad`` / ``loss.backward()`` fired mid-forward produce
+    gradient tensors whose construction is legitimately untraceable, and a
+    downstream op consuming one is a genuine parentless consumer of an
+    unattributed tensor (e.g. MAML-style ``weight_grad.mean()``) -- NOT a
+    silent capture drop. The trigger itself is positively recorded in the
+    capture's backward events, so the exemption is anchored to trace-level
+    evidence, not the op's self-claims: a plain capture with no recorded
+    backward trigger can never use it.
+
+    Parameters
+    ----------
+    ml:
+        Trace being validated.
+    layer:
+        Parentless op under the connectivity check.
+
+    Returns
+    -------
+    bool
+        True when a backward trigger was recorded at a forward-op position
+        before this op ran.
+    """
+
+    capture_events = getattr(ml, "_capture_events", None) or getattr(ml, "capture_events", None)
+    backward_events = getattr(capture_events, "backward_events", None) or ()
+    trigger_positions = [
+        event.forward_op_count_at_trigger
+        for event in backward_events
+        if type(event).__name__ == "BackwardPassStart"
+        and getattr(event, "forward_op_count_at_trigger", None) is not None
+    ]
+    if not trigger_positions:
+        return False
+    step_index = getattr(layer, "step_index", None)
+    return step_index is not None and step_index > min(trigger_positions)
+
+
+def _consumed_unattributed_data_operand(layer: "Op") -> bool:
+    """Return whether the capture witness flagged a DATA-operand consumption.
+
+    Parameters
+    ----------
+    layer:
+        Layer pass whose ``unattributed_tensor_args`` witness is inspected.
+
+    Returns
+    -------
+    bool
+        True when at least one witness position is a data-operand slot per the
+        ATen schema classifier (fails toward "operand" on uncertainty, keeping
+        the tripwire armed; size/shape/metadata slots are excluded).
+    """
+
+    positions = tuple(getattr(layer, "unattributed_tensor_args", ()) or ())
+    if not positions:
+        return False
+    func_name = str(getattr(layer, "func_name", ""))
+    from ..backends.torch.ops import _arg_position_is_tensor_operand
+
+    return any(_arg_position_is_tensor_operand(func_name, position) for position in positions)
+
+
 def _check_graph_connectivity(ml: "Trace") -> None:
     """Check P: graph connectivity invariants.
 
@@ -5345,6 +5561,47 @@ def _check_graph_connectivity(ml: "Trace") -> None:
                 name,
                 f"Layer '{label}' has no parents but is not input, buffer, "
                 f"internally initialized, or output",
+            )
+
+        # Round-26 W3-4c: the ``is_internal_source`` exemption above is only
+        # legitimate for GENUINE graph sources (factories such as
+        # ``torch.ones``, vmap-built masks, buffers). Capture stamps
+        # ``is_internal_source = (len(parents) == 0)``, so a parentless op
+        # that in fact CONSUMED an unaccounted tensor at a data-operand slot
+        # (the capture-side witness recorded it in ``unattributed_tensor_args``,
+        # e.g. the consumer of a silently-dropped ``torch.ops.aten.*`` call)
+        # was blessed as a "source" and dodged the dangling-node check
+        # entirely -- letting a silent op drop validate as ``passed``. A
+        # demonstrated tensor CONSUMER is not a source; fail it. Genuine
+        # sources have no tensor-data args and keep the exemption, and an op
+        # consuming a known-provenance outside tensor (module attribute,
+        # input, param, buffer) is never flagged by the witness in the first
+        # place. Non-data (size/shape/metadata) positions are excluded via the
+        # same ATen-schema classifier the capture witness uses.
+        if (
+            lpl.is_internal_source
+            and len(lpl.parents) == 0
+            and callable(getattr(lpl, "func", None))
+            and label not in input_set
+            and label not in buffer_set
+            and not lpl.is_output
+            and _consumed_unattributed_data_operand(lpl)
+            # Mid-forward autograd products (torch.autograd.grad /
+            # loss.backward fired inside forward) are legitimately
+            # untraceable tensors, and their consumers are genuine parentless
+            # sources-of-record. The exemption keys on the trace-level
+            # RECORDED backward trigger (never op self-claims), so a plain
+            # capture cannot use it.
+            and not _op_follows_recorded_backward_trigger(ml, lpl)
+        ):
+            raise MetadataInvariantError(
+                name,
+                f"Layer '{label}' is marked is_internal_source but consumed "
+                f"unattributed tensor data "
+                f"(unattributed_tensor_args="
+                f"{tuple(getattr(lpl, 'unattributed_tensor_args', ()) or ())}); "
+                f"a tensor consumer with no recorded parents is a dangling "
+                f"computational node (silent capture drop), not a graph source",
             )
 
     raw_orphan_in_list = set(ml._orphan_labels) & label_set

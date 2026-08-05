@@ -1493,7 +1493,7 @@ def _posthoc_value_proof_decision(
         Exempt decision for narrow proved cases, otherwise non-exempt.
     """
 
-    if layer.func_name in {"__mul__", "mul"} and len(args) > 1:
+    if layer.func_name in _MULTIPLICATIVE_ANNIHILATOR_FUNC_NAMES and len(args) > 1:
         decision = _multiplicative_zero_annihilator_decision(layer, layers_to_perturb, args)
         if decision.exempt:
             return decision
@@ -1543,6 +1543,29 @@ def _posthoc_value_proof_decision(
             "non-floating max output is a discrete value result",
         )
     return PosthocPerturbDecision(False, "not_value_proved")
+
+
+# Every elementwise-multiplication spelling whose output is provably zero when
+# either operand is zero: dunder, functional, reverse-dunder, and the in-place
+# family. The annihilator proof itself is spelling-independent (``x * 0 == 0``
+# holds for all of them, including in-place ``mul_``/``__imul__`` where the
+# saved receiver snapshot is the pre-call value), so listing a spelling here
+# NEVER weakens the perturbation net: the exemption still requires the
+# NON-perturbed co-operand to be provably all-zero. Omitting a spelling was
+# the round-26 W3-5/F2 false-positive bug (``x + 0.0 * x.sum()`` via
+# ``__rmul__`` and ``view.mul_(0.0)`` wrongly failed ``perturbation_insensitive``
+# while the zero-TENSOR twin passed).
+_MULTIPLICATIVE_ANNIHILATOR_FUNC_NAMES = frozenset(
+    {
+        "__mul__",
+        "mul",
+        "__rmul__",
+        "__imul__",
+        "mul_",
+        "multiply",
+        "multiply_",
+    }
+)
 
 
 def _multiplicative_zero_annihilator_decision(
