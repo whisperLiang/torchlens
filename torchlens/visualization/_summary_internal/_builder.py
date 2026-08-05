@@ -1358,7 +1358,7 @@ def _build_waterfall_rows(
     peak_memory = 0
     rows: List[Dict[str, str]] = []
     for entry in _iter_operation_entries(trace, mode=mode):
-        duration = float(getattr(entry, "func_duration", 0.0) or 0.0)
+        duration = _entry_func_duration(entry)
         memory = int(getattr(entry, "activation_memory", 0) or 0)
         peak_memory = max(peak_memory, memory)
         rows.append(
@@ -1416,7 +1416,7 @@ def _build_operation_rows(
                 "running_mb": _mb_str(running_total),
                 "flops": _human_flops(int(getattr(entry, "flops_forward", 0) or 0)),
                 "macs": _human_flops(int(getattr(entry, "macs_forward", 0) or 0)),
-                "time_ms": f"{float(getattr(entry, 'func_duration', 0.0) or 0.0) * 1000:.2f}",
+                "time_ms": f"{_entry_func_duration(entry) * 1000:.2f}",
             }
         )
     footer_lines = [
@@ -1612,6 +1612,25 @@ def _module_time_ms(trace: "Trace", module: "Module") -> float:
             duration = getattr(layer, "func_duration", 0.0)
         total += float(duration or 0.0)
     return total * 1000.0
+
+
+def _entry_func_duration(entry: Any) -> float:
+    """Return an entry's forward duration in seconds without tripping the tripwire.
+
+    In ``rolled`` mode ``_iter_operation_entries`` yields aggregate ``Layer``
+    objects; a recurrent (multi-pass) ``Layer`` deliberately RAISES ``ValueError``
+    on the per-pass ``func_duration`` accessor (the locked multi-pass tripwire) and
+    exposes the documented aggregate ``total_func_duration`` (sum over passes)
+    instead. In ``unrolled`` mode the entries are per-pass ``Op`` objects, which
+    expose their own ``func_duration`` and do not define ``total_func_duration``.
+    Prefer the aggregate accessor when present, else the per-pass value; this is
+    the same safe idiom already used by ``_module_time_ms`` and never lets the
+    tripwire ``ValueError`` leak nor silently substitutes a wrong default.
+    """
+    duration = getattr(entry, "total_func_duration", None)
+    if duration is None:
+        duration = getattr(entry, "func_duration", 0.0)
+    return float(duration or 0.0)
 
 
 def _iter_operation_entries(
