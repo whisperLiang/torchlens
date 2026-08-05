@@ -47,14 +47,22 @@ def _builtin_rules_when_registry_empty() -> Iterator[None]:
         yield
         return
     original_epoch = _rules._RF_RULES_EPOCH
-    module = importlib.import_module(f"{__package__}.rules")
-    if not _rules._RF_RULES:
-        for name in module.__all__:
-            importlib.reload(getattr(module, name))
+    original_rules = dict(_rules._RF_RULES)
     try:
+        # Installing the built-in pack (import plus per-module reload) mutates the
+        # shared rule registry and epoch through decorator side effects. Keep that
+        # work inside the try so a mid-loop reload failure cannot leak a partially
+        # populated registry or a half-advanced epoch: the finally always restores
+        # the exact pre-entry mapping and epoch, whether install, the reload loop,
+        # or the guarded body raised.
+        module = importlib.import_module(f"{__package__}.rules")
+        if not _rules._RF_RULES:
+            for name in module.__all__:
+                importlib.reload(getattr(module, name))
         yield
     finally:
         _rules._RF_RULES.clear()
+        _rules._RF_RULES.update(original_rules)
         _rules._RF_RULES_EPOCH = original_epoch
 
 
@@ -271,6 +279,17 @@ def _normalize_unit(unit: Sequence[int], shape: tuple[int, ...], op_label: str) 
     ------
     ReceptiveFieldError
         If rank, types, or bounds do not identify exactly one output element.
+
+    Notes
+    -----
+    This is the complete-index contract shared by the gradient probes
+    (``gradient``/``check`` and their projective counterparts). A negative index
+    on any axis is wrapped with Python semantics (``index + extent``) before the
+    bounds check, so ``-1`` selects the last element of that axis and any value
+    still outside ``[-extent, extent)`` raises. This negative-wrap policy is
+    intentionally distinct from the windowed ``ReceptiveFieldView.at`` coordinate
+    contract, which rejects negative coordinates outright; the two entry points
+    keep separate, individually documented negative-index policies.
     """
 
     raw = tuple(unit)
@@ -534,34 +553,79 @@ def _batch_semantics(
     mask: torch.Tensor,
     state: _InputState | None,
     unit: tuple[int, ...],
+    *,
+    projective: bool = False,
 ) -> tuple[tuple[int, ...] | None, bool]:
     """Derive supported samples and cross-sample influence from engine layout state.
+
+    The support ``mask`` and the seeded ``unit`` live in different coordinate
+    spaces, and a batch-moving transform (for example a ``permute``) can place
+    the batch axis at a different position in each. ``state.batch_axis`` is the
+    batch axis in the space the engine solved from -- the model-input space for a
+    receptive probe (``mask`` space) and the source space for a projective probe
+    (``unit`` space) -- and ``state.axes[batch_axis].output_axis`` gives its
+    counterpart in the opposite space. Because a batch coordinate is preserved
+    across pure repositioning, the supported samples are counted along the batch
+    axis of ``mask`` while the seeded element's batch coordinate is read from the
+    batch axis of ``unit``; conflating the two positions is what produced a false
+    ``cross_batch_influence`` after a batch-moving transform.
 
     Parameters
     ----------
     mask:
-        Full input support mask.
+        Full support mask in the probe's own coordinate space (model-input space
+        for a receptive probe, target space for a projective probe).
     state:
-        Reachable engine state carrying the derived batch-like input axis.
+        Reachable engine state carrying the derived batch-like axis and its
+        input/output axis correspondence.
     unit:
-        Complete normalized target output index.
+        Complete normalized seeded index (target space for a receptive probe,
+        source space for a projective probe).
+    projective:
+        Whether ``mask`` is in target space and ``unit`` in source space (the
+        projective probe). The default receptive orientation is the mirror image.
 
     Returns
     -------
     tuple[tuple[int, ...] or None, bool]
-        Supported batch indices and whether any differs from the seeded sample.
+        Supported batch indices and whether influence reaches a sample other than
+        the seeded one. When the batch axis is fully coupled in the seed space
+        (no 1:1 counterpart, as with batch-statistic normalization) support
+        spanning more than one sample is reported as cross-batch; a batch axis
+        with no support axis at all reports no samples and no cross-batch.
     """
 
-    if state is None or state.batch_axis is None:
+    if state is None or state.batch_axis is None or state.axes is None:
         return None, False
     batch_axis = state.batch_axis
-    reduce_axes = tuple(axis for axis in range(mask.ndim) if axis != batch_axis)
+    if not 0 <= batch_axis < len(state.axes):
+        return None, False
+    mapped_axis = state.axes[batch_axis].output_axis
+    if projective:
+        # ``mask`` is target space; ``unit`` is source space.
+        mask_batch_axis = mapped_axis
+        seed_axis: int | None = batch_axis
+    else:
+        # ``mask`` is model-input space; ``unit`` is target space.
+        mask_batch_axis = batch_axis
+        seed_axis = mapped_axis
+    if mask_batch_axis is None or not 0 <= mask_batch_axis < mask.ndim:
+        return None, False
+    reduce_axes = tuple(axis for axis in range(mask.ndim) if axis != mask_batch_axis)
     per_batch = mask if not reduce_axes else mask.any(dim=reduce_axes)
     batch_support = tuple(int(index) for index in torch.nonzero(per_batch).reshape(-1).tolist())
-    seeded_batch = unit[batch_axis] if batch_axis < len(unit) else None
-    return batch_support, seeded_batch is not None and any(
-        index != seeded_batch for index in batch_support
-    )
+    if seed_axis is not None and 0 <= seed_axis < len(unit):
+        seeded_batch = unit[seed_axis]
+        cross_batch = any(index != seeded_batch for index in batch_support)
+    else:
+        # The batch axis is fully coupled in the seed space (no 1:1 counterpart,
+        # e.g. batch-statistic normalization), so the seeded sample cannot be
+        # pinned to one coordinate. Empirical support that spans more than one
+        # sample is then itself cross-batch influence; a single-sample support is
+        # not. This keeps the ``undeclared_batch`` tripwire armed for coupling
+        # rather than silently reporting ``False``.
+        cross_batch = len(batch_support) > 1
+    return batch_support, cross_batch
 
 
 def _build_result(

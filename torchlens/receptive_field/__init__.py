@@ -204,7 +204,7 @@ def _empirical_adjoint_checks(
                         source_label=source.label,
                         target_label=target.label,
                         source_unit=source_unit,
-                        target_unit=validation.unit,
+                        target_unit=target_unit,
                         passed=None,
                         receptive_value=None,
                         projective_value=None,
@@ -220,7 +220,7 @@ def _empirical_adjoint_checks(
                         source_label=source.label,
                         target_label=target.label,
                         source_unit=source_unit,
-                        target_unit=validation.unit,
+                        target_unit=target_unit,
                         passed=None,
                         receptive_value=None,
                         projective_value=None,
@@ -235,7 +235,7 @@ def _empirical_adjoint_checks(
                     source_label=source.label,
                     target_label=target.label,
                     source_unit=source_unit,
-                    target_unit=validation.unit,
+                    target_unit=target_unit,
                     passed=bool(
                         torch.allclose(receptive_value, projective_value, atol=atol, rtol=rtol)
                     ),
