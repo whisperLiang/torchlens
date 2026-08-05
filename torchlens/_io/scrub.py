@@ -226,6 +226,59 @@ def detach_conditional_trace_backrefs(value: Any) -> None:
     value["conditionals"] = ConditionalAccessor(detached)
 
 
+def _mapping_key_payload_reason(key: Any, options: _ScrubOptions) -> str | None:
+    """Return why ``key`` embeds a tensor payload, or ``None`` if it is safe.
+
+    Mapping VALUES are recursively scrubbed and blobified, so any tensor they
+    contain is lifted into a manifest-indexed :class:`BlobRef` blob file. Mapping
+    KEYS, by contrast, are copied verbatim and pickled straight into
+    ``metadata.pkl``. A tensor hidden in a key therefore never crosses the
+    tensor-policy decision, never gets a ``tensors`` / ``body_index`` manifest
+    row, and never produces a blob file. That yields either a bundle whose
+    manifest silently disagrees with its metadata payload (a dense tensor key that
+    still loads) or a bundle that :func:`~torchlens.validation.validate_tlspec`
+    accepts yet the restricted loader refuses (a policy-rejected tensor key the
+    safe unpickler will not reconstruct). Because the validator cannot discover a
+    pickle payload hidden inside a key from the manifest relations, the producer
+    must refuse it up front so ``validate_tlspec`` and ``tl.load`` always agree.
+
+    ``payload_codec.can_encode`` is the same predicate the value path
+    (:func:`_blobify_recursive_value`, line ~1041) uses to decide what becomes a
+    blob, so it is exactly the set of keys that would otherwise bypass the blob
+    belt; hashable composite keys (``tuple`` / ``frozenset``) are walked so a
+    tensor nested inside a composite key is caught too.
+    """
+
+    stack: list[Any] = [key]
+    while stack:
+        item = stack.pop()
+        if options.payload_codec.can_encode(item):
+            return f"a {type(item).__name__} payload"
+        if isinstance(item, (tuple, frozenset, list, set)):
+            stack.extend(item)
+    return None
+
+
+def _reject_payload_mapping_keys(mapping: Mapping[Any, Any], options: _ScrubOptions) -> None:
+    """Refuse a mapping whose keys embed tensor payloads.
+
+    See :func:`_mapping_key_payload_reason` for why key-embedded tensors are a
+    save/validate/load asymmetry and must be rejected producer-side.
+    """
+
+    for key in mapping:
+        reason = _mapping_key_payload_reason(key, options)
+        if reason is not None:
+            raise TorchLensIOError(
+                f"Cannot save a mapping that uses {reason} as (or inside) a key. "
+                "Tensor payloads are portable only as mapping VALUES, which are "
+                "indexed into the bundle blob manifest; a tensor embedded in a key "
+                "bypasses the tensor policy and blob inventory, producing a bundle "
+                "that validates but cannot be loaded. Move the tensor into the "
+                "mapping value."
+            )
+
+
 def _scrub_value(
     value: Any,
     options: _ScrubOptions,
@@ -278,6 +331,11 @@ def _scrub_value(
             )
             for item in value
         }
+    if isinstance(value, dict):
+        # ``dict`` covers ``OrderedDict`` / ``defaultdict``; refuse tensor-payload
+        # keys before the type-specific branches rebuild the mapping so a payload
+        # cannot slip into ``metadata.pkl`` unscrubbed and un-inventoried.
+        _reject_payload_mapping_keys(value, options)
     if isinstance(value, OrderedDict):
         return OrderedDict(
             (
@@ -1066,6 +1124,11 @@ def _blobify_recursive_value(
             )
             for item in value
         )
+    if isinstance(value, dict):
+        # ``dict`` covers ``OrderedDict`` / ``defaultdict``; refuse tensor-payload
+        # keys here (the value path below blobifies tensor VALUES, so a tensor KEY
+        # would otherwise bypass the blob manifest and body index entirely).
+        _reject_payload_mapping_keys(value, options)
     if isinstance(value, OrderedDict):
         return OrderedDict(
             (
