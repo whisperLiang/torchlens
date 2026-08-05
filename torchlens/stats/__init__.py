@@ -7,9 +7,12 @@ import math
 import random
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Protocol
+import warnings
 
 import torch
 from torch import nn
+
+from ..intervention.errors import MultiMatchWarning
 
 
 class StreamingStat(Protocol):
@@ -96,7 +99,13 @@ class Mean:
 
 
 class Norm:
-    """Running mean of per-update tensor norms."""
+    """Running mean of per-update tensor norms.
+
+    Each ``update()`` reduces the provided batch to one scalar norm before the
+    running mean is updated. This is intentionally different from a global norm
+    over all elements seen across all updates, so regrouping the same values
+    into different update batches can change the reported result.
+    """
 
     def __init__(self, p: float = 2.0, name: str | None = None) -> None:
         """Initialize the norm accumulator.
@@ -265,6 +274,8 @@ class Covariance:
         if tensor.ndim == 1:
             tensor = tensor.unsqueeze(0)
         tensor = tensor.reshape(tensor.shape[0], -1)
+        if self._mean is not None and tensor.shape[1] != self._mean.numel():
+            raise ValueError("Covariance feature dimensions cannot change across updates.")
         for row in tensor:
             self._count += 1
             if self._mean is None:
@@ -626,13 +637,14 @@ def _metric_value_from_log(log: Any, metric_name: str) -> Any:
     try:
         return log[metric_name].out
     except Exception:
-        matches = [
-            layer
-            for layer in log.layer_list
-            if metric_name in str(layer.layer_label) and layer.has_saved_activation
-        ]
+        matches = _matching_layers(
+            log,
+            metric_name,
+            require_grad=False,
+        )
         if not matches:
             raise KeyError(f"No saved out matched metric {metric_name!r}.")
+        _warn_on_ambiguous_metric_match(metric_name, matches)
         return matches[0].out
 
 
@@ -644,17 +656,73 @@ def _metric_grad_from_log(log: Any, metric_name: str) -> Any:
     try:
         value = log[metric_name].grad
     except Exception:
-        matches = [
-            layer
-            for layer in log.layer_list
-            if metric_name in str(layer.layer_label) and layer.has_grad
-        ]
+        matches = _matching_layers(
+            log,
+            metric_name,
+            require_grad=True,
+        )
         if not matches:
             raise KeyError(f"No saved grad matched metric {metric_name!r}.")
+        _warn_on_ambiguous_metric_match(metric_name, matches)
         value = matches[0].grad
     if value is None:
         raise KeyError(f"No saved grad matched metric {metric_name!r}.")
     return value
+
+
+def _matching_layers(log: Any, metric_name: str, *, require_grad: bool) -> list[Any]:
+    """Return saved layers whose labels contain ``metric_name``.
+
+    Parameters
+    ----------
+    log:
+        Captured model trace.
+    metric_name:
+        User-provided selector substring.
+    require_grad:
+        Whether to require gradient availability instead of saved activations.
+
+    Returns
+    -------
+    list[Any]
+        Matching saved layers in trace order.
+    """
+
+    attribute = "has_grad" if require_grad else "has_saved_activation"
+    return [
+        layer
+        for layer in log.layer_list
+        if metric_name in str(layer.layer_label) and bool(getattr(layer, attribute, False))
+    ]
+
+
+def _warn_on_ambiguous_metric_match(metric_name: str, matches: list[Any]) -> None:
+    """Warn when a metric substring selector matches multiple saved sites.
+
+    Parameters
+    ----------
+    metric_name:
+        User-provided selector substring.
+    matches:
+        Matching saved sites in trace order.
+
+    Returns
+    -------
+    None
+        Emits a warning when multiple sites match.
+    """
+
+    if len(matches) < 2:
+        return
+    first_label = str(getattr(matches[0], "layer_label", metric_name))
+    warnings.warn(
+        (
+            f"metric selector {metric_name!r} matched {len(matches)} sites; "
+            f"using the first saved site {first_label!r}."
+        ),
+        MultiMatchWarning,
+        stacklevel=3,
+    )
 
 
 def _split_batch_for_loss(batch: Any) -> tuple[Any, tuple[Any, ...]]:

@@ -424,6 +424,21 @@ def classical_mds(
     array = _as_numpy_array(data)
     _validate_finite(array, "data")
     input_is_distances = _looks_like_distance_matrix(array)
+    if input_is_distances and not np.allclose(
+        activation_distance_matrix(array, metric="euclidean"),
+        array,
+        atol=_SYMMETRY_TOLERANCE,
+        rtol=0.0,
+    ):
+        warnings.warn(
+            (
+                "classical_mds received an ambiguous square input with symmetric zero diagonal; "
+                "treating it as a precomputed distance matrix. Square activation matrices must "
+                "be converted explicitly to distances to avoid ambiguous square input handling."
+            ),
+            UserWarning,
+            stacklevel=2,
+        )
     distances = _as_distance_matrix_or_activations(data, metric="euclidean")
     n_stimuli = distances.shape[0]
     _check_stimulus_count(n_stimuli, min_n)
@@ -1450,7 +1465,9 @@ def _default_saved_mds_sites(trace: Any) -> list[tuple[str, Any, Any]]:
     selected: list[tuple[str, Any, Any]] = []
     for layer in trace.layers:
         if int(getattr(layer, "num_passes", 1)) > 1:
-            saved_ops = [op for op in layer.ops if bool(getattr(op, "has_saved_activation", False))]
+            saved_ops = [
+                op for op in layer.ops.values() if bool(getattr(op, "has_saved_activation", False))
+            ]
             if saved_ops:
                 _raise_recurrent_layer_requires_pass(layer)
             continue
