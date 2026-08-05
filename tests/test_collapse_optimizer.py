@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 import multiprocessing
 import os
 from pathlib import Path
@@ -863,6 +863,25 @@ def test_float_collapse_level_is_deterministic() -> None:
         trace.cleanup()
 
 
+@pytest.fixture
+def _restore_torch_num_threads() -> Iterator[None]:
+    """Snapshot and restore torch's process-global thread count around a test.
+
+    This test pins ``torch.set_num_threads(4)``; without restoration that value leaks
+    into torch's global state for the rest of the pytest process (observed leak:
+    baseline 10 -> 4), making later tests order-dependent. The fixture captures the
+    count before the test and restores it in ``finally``. (The subprocess-scoped
+    ``set_num_threads(2)`` elsewhere in this file is process-contained and needs no
+    restoration.)
+    """
+
+    original = torch.get_num_threads()
+    try:
+        yield
+    finally:
+        torch.set_num_threads(original)
+
+
 @pytest.mark.heavy
 @pytest.mark.parametrize(
     ("name", "builder", "x"),
@@ -878,6 +897,7 @@ def test_float_collapse_schedule_monotone_and_nested(
     name: str,
     builder: Callable[[], torch.nn.Module],
     x: torch.Tensor,
+    _restore_torch_num_threads: None,
 ) -> None:
     """Float collapse schedule is monotone and nesting-coherent on requested models."""
 

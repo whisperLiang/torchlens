@@ -6,7 +6,7 @@ import os
 import re
 import time
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -2488,8 +2488,27 @@ def test_auto_plan_remainder_honesty_does_not_require_max_level() -> None:
         trace.cleanup()
 
 
+@pytest.fixture
+def _restore_torch_num_threads() -> Iterator[None]:
+    """Snapshot and restore torch's process-global thread count around a test.
+
+    This test pins ``torch.set_num_threads(4)``; without restoration that value leaks
+    into torch's global state for the rest of the pytest process (observed leak:
+    baseline 10 -> 4), making later tests order-dependent. The fixture captures the
+    count before the test and restores it in ``finally``.
+    """
+
+    original = torch.get_num_threads()
+    try:
+        yield
+    finally:
+        torch.set_num_threads(original)
+
+
 @pytest.mark.heavy
-def test_equivalent_max_plans_render_same_collapsed_box_layer_labels(tmp_path: Path) -> None:
+def test_equivalent_max_plans_render_same_collapsed_box_layer_labels(
+    tmp_path: Path, _restore_torch_num_threads: None
+) -> None:
     """Equivalent max endpoint plans render identical collapsed-box layer labels."""
 
     torch.set_num_threads(4)
