@@ -86,21 +86,34 @@ def make_short_barcode_from_input(things_to_hash: List[Any], barcode_len: int = 
 
     Used to create content-based barcodes for parameters and buffers so
     that loop detection can identify operations that share the same weights.
-    The inputs are stringified, joined with a null-byte separator (to avoid
-    accidental collisions from concatenation), and hashed with SHA-256.  This
-    avoids Python's process-randomized ``hash()`` and the collision-prone decimal
-    truncation used by older TorchLens releases.
+    Each value is encoded as a ``[type_name, repr]`` pair inside a JSON list and
+    hashed with SHA-256.  The type tag distinguishes values whose ``str()``
+    coincides (``1`` vs ``"1"``), and the JSON list structure -- with its escaped
+    string quoting -- prevents both concatenation collisions and adversarial
+    forging of the element separator (a value containing the raw separator byte
+    can no longer masquerade as two elements, e.g. ``["a\\x00b"]`` vs
+    ``["a", "b"]``).  This avoids Python's process-randomized ``hash()`` and the
+    collision-prone decimal truncation used by older TorchLens releases.
 
     Args:
-        things_to_hash: Values to hash (must be stringifiable).
+        things_to_hash: Values to hash. Each must be ``repr``-able (the common
+            case: shape/dtype/scalar tokens; Parameters and tensor values are
+            excluded upstream).
         barcode_len: Maximum length of the returned barcode.
 
     Returns:
         A deterministic hexadecimal SHA-256 prefix of ``barcode_len`` characters.
     """
-    # Null-byte separator prevents "ab" + "c" from colliding with "a" + "bc".
-    joined = "\x00".join([str(x) for x in things_to_hash])
-    digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()
+    # Type-tagged, structurally-delimited encoding: the enclosing JSON list makes
+    # element boundaries unforgeable and the type name disambiguates values whose
+    # ``str()`` collides. ``ensure_ascii`` keeps the digest byte-stable regardless
+    # of locale/encoding.
+    payload = json.dumps(
+        [[type(x).__name__, repr(x)] for x in things_to_hash],
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     return digest[:barcode_len]
 
 
