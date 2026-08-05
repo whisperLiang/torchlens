@@ -634,6 +634,136 @@ def test_multi_target_projective_raises_target_error() -> None:
         _ = add.receptive_field.status
 
 
+# ---------------------------------------------------------------------------
+# verify() verdict tri-state, remediation arming, and the adjoint tripwire
+# ---------------------------------------------------------------------------
+
+
+class _PlainCNN(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = nn.Conv2d(1, 2, 3, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+def test_verify_verdict_tri_state() -> None:
+    """Unarmed is INDETERMINATE, armed honest is PASS, a violation is FAIL."""
+
+    from torchlens.receptive_field import _rules
+
+    plain = tl.trace(_PlainCNN(), torch.randn(1, 1, 6, 6))
+    unarmed = tl.receptive_field.verify(plain, units="center")
+    assert unarmed.verdict is ReceptiveFieldValidationStatus.INDETERMINATE
+    assert unarmed.passed is False
+
+    armed = capture(_PlainCNN(), torch.randn(1, 1, 6, 6))
+    verified = tl.receptive_field.verify(armed, units="center")
+    assert verified.verdict is ReceptiveFieldValidationStatus.PASS
+    assert verified.passed is True
+
+    original_rules = dict(_rules._RF_RULES)
+    original_epoch = _rules._RF_RULES_EPOCH
+    try:
+
+        @_rules.register_rf_rule("conv2d", replace=True)
+        def undersized(context):  # type: ignore[no-untyped-def]
+            """Deliberately claim a 1x1 window for a real 3x3 convolution."""
+
+            return context.window(kernel=(1, 1), stride=(1, 1), padding=(0, 0), dilation=(1, 1))
+
+        model = nn.Conv2d(1, 1, 3, padding=1, bias=False)
+        with torch.no_grad():
+            model.weight.fill_(1.0)
+        trace = capture(model, torch.ones(1, 1, 7, 7))
+        violated = tl.receptive_field.verify(trace, units="center")
+        assert violated.verdict is ReceptiveFieldValidationStatus.FAIL
+        assert violated.passed is False
+        assert violated.verdict is not unarmed.verdict, "FAIL must be distinct from INDETERMINATE"
+    finally:
+        _rules._RF_RULES.clear()
+        _rules._RF_RULES.update(original_rules)
+        _rules._RF_RULES_EPOCH = original_epoch
+
+
+def test_verify_remediation_message_arms_tripwire() -> None:
+    """Executing the indeterminate message's own recipe must arm verification."""
+
+    model = _PlainCNN()
+    x = torch.randn(1, 1, 6, 6)
+    plain = tl.trace(model, x)
+    unarmed = tl.receptive_field.verify(plain, units="center")
+    assert unarmed.verdict is ReceptiveFieldValidationStatus.INDETERMINATE
+    message = next(
+        result.message
+        for result in unarmed.containment
+        if result.status is ReceptiveFieldValidationStatus.INDETERMINATE
+    )
+    assert 'save_mode="reference"' in message, message
+    marker = "Recapture with "
+    assert marker in message, message
+    recipe = message.split(marker, 1)[1].strip()
+    recipe = recipe[: recipe.rfind(")") + 1]
+    rearmed_trace = eval(recipe, {"tl": tl, "model": model, "x": x, "torch": torch})
+    rearmed = tl.receptive_field.verify(rearmed_trace, units="center")
+    assert rearmed.verdict is not ReceptiveFieldValidationStatus.INDETERMINATE
+    assert rearmed.verdict is ReceptiveFieldValidationStatus.PASS
+
+
+def test_verify_fails_on_inconsistent_forward_claim() -> None:
+    """A forward accelerator contradicting its backward oracle must FAIL verify().
+
+    This exercises the exact-box corner cross-check: the bogus rule claims
+    every source influences output ``s + 1`` while its authoritative backward
+    relation is the identity, i.e. a spurious-nonempty exact projective claim.
+    Containment alone can never see it (an empty true support is contained in
+    any box); the opposite-direction membership check fails it without
+    gradients.
+    """
+
+    from fractions import Fraction
+
+    from torchlens.receptive_field import _rules
+    from torchlens.receptive_field._query import _IndexSet
+
+    original_rules = dict(_rules._RF_RULES)
+    original_epoch = _rules._RF_RULES_EPOCH
+    try:
+
+        @_rules.register_rf_rule("softplus", replace=True)
+        def inconsistent(context):  # type: ignore[no-untyped-def]
+            """Identity backward relation with a shifted (lying) forward claim."""
+
+            extent = int(context.out_shape[-1])
+
+            def backward(axis: int, output_set):  # type: ignore[no-untyped-def]
+                return output_set, True
+
+            def forward(axis: int, source_set):  # type: ignore[no-untyped-def]
+                shifted = [value + 1 for value in source_set.values() if value + 1 < extent]
+                return _IndexSet.from_values(shifted, exact=True), True
+
+            edges = (((Fraction(1), Fraction(0)), (Fraction(1), Fraction(0))),)
+            return context.window_edges(
+                edges, exact=True, map_index_set=backward, map_index_set_forward=forward
+            )
+
+        model = nn.Sequential(nn.Softplus())
+        trace = capture(model, torch.randn(1, 1, 8))
+        verification = tl.receptive_field.verify(trace, units="center")
+        assert verification.verdict is ReceptiveFieldValidationStatus.FAIL
+        assert any(
+            "opposite-direction membership" in violation.reason
+            for result in verification.containment
+            for violation in result.violations
+        )
+    finally:
+        _rules._RF_RULES.clear()
+        _rules._RF_RULES.update(original_rules)
+        _rules._RF_RULES_EPOCH = original_epoch
+
+
 def test_non_antialiased_interpolate_regression() -> None:
     """The AA branch must not disturb ordinary interpolation geometry."""
 

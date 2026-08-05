@@ -321,6 +321,146 @@ def _merge_diagnostic_rows(
     return tuple(reducer(values) for values in zip(*rows, strict=True))
 
 
+_ADJOINT_PROBE_RADIUS = 2
+
+
+def _adjoint_probe_units(
+    owner: Op,
+    descriptors: Mapping[str, ReceptiveField],
+    complete_unit: tuple[int, ...],
+) -> tuple[tuple[int, ...], ...]:
+    """Return the sampled unit plus a small windowed-axis neighborhood.
+
+    Exact-box corners of an HONEST box are always true influence members, so
+    the corner cross-check on the sampled unit alone can never expose a
+    spurious-nonempty claim: the lie lives at units OFF the true lattice
+    (for example the odd sources of a step-2 slice). Probing each windowed
+    output axis at ±1 and ±2 around the sampled unit covers the residue
+    classes of the common stride-2/3 lattices at bounded rational-query cost.
+    """
+
+    axes: list[int] = []
+    for descriptor in descriptors.values():
+        for axis in descriptor.axes or ():
+            if axis.kind == "windowed" and axis.output_axis is not None:
+                axes.append(axis.output_axis)
+    units: dict[tuple[int, ...], None] = {complete_unit: None}
+    for output_axis in dict.fromkeys(axes):
+        if output_axis >= len(complete_unit):
+            continue
+        extent = int(owner.shape[output_axis])
+        for offset in range(-_ADJOINT_PROBE_RADIUS, _ADJOINT_PROBE_RADIUS + 1):
+            coordinate = complete_unit[output_axis] + offset
+            if 0 <= coordinate < extent:
+                probe = list(complete_unit)
+                probe[output_axis] = coordinate
+                units[tuple(probe)] = None
+    return tuple(units)
+
+
+def _box_membership_contains(box: ReceptiveFieldBox, unit: tuple[int, ...]) -> bool:
+    """Return whether a reverse-direction box contains one complete unit.
+
+    Windowed axes with concrete clipped bounds must contain the coordinate;
+    pointwise, full, and unbounded axes are treated as containing, so an
+    upper-bound or partially-unbounded reverse box can never produce a false
+    violation.
+    """
+
+    if box.empty:
+        return False
+    for axis in box.axes:
+        if axis.kind != "windowed":
+            continue
+        if axis.clipped_start is None or axis.clipped_stop is None:
+            continue
+        coordinate = unit[axis.input_axis]
+        if not axis.clipped_start <= coordinate < axis.clipped_stop:
+            return False
+    return True
+
+
+def _exact_box_adjoint_violations(
+    owner: Op,
+    complete_unit: tuple[int, ...],
+    descriptor: ReceptiveField,
+    box: ReceptiveFieldBox,
+    direction: ReceptiveFieldDirection,
+) -> tuple[ReceptiveFieldViolation, ...]:
+    """Cross-check an exact nonempty box's corners through the opposite engine.
+
+    An exact hull's per-axis endpoints are true members of the claimed
+    influence set, and influence is symmetric: a source element is in the
+    receptive field of a target unit exactly when the target unit is in the
+    source's projective field. Every corner of an exact claimed-nonempty box
+    must therefore land in a SOUND opposite-direction box of that corner.
+    A violated corner proves the two directions inconsistent — at least one
+    claim is wrong — and fails validation without needing autograd. This
+    catches spurious-nonempty exact claims that pure gradient containment is
+    structurally unable to see (an empty true support is contained in any
+    box). Reverse queries that refuse with a typed error are skipped: the
+    check only ever adds failure power.
+    """
+
+    if not box.exact or box.empty:
+        return ()
+    windowed_bounds: list[tuple[int, int]] = []
+    for axis in box.axes:
+        if (
+            axis.kind == "windowed"
+            and axis.clipped_start is not None
+            and axis.clipped_stop is not None
+            and axis.clipped_stop > axis.clipped_start
+        ):
+            windowed_bounds.append((axis.clipped_start, axis.clipped_stop))
+    if not windowed_bounds or len(windowed_bounds) > 3:
+        return ()
+    trace = owner.source_trace
+    far = next((op for op in trace.layer_list if op.label == descriptor.input_op_label), None)
+    if far is None:
+        return ()
+    corner_choices = tuple(
+        (start, stop - 1) if stop - 1 != start else (start,) for start, stop in windowed_bounds
+    )
+    violations: list[ReceptiveFieldViolation] = []
+    for raw_corner in product(*corner_choices):
+        corner = tuple(int(value) for value in raw_corner)
+        reverse_solution: Any
+        try:
+            if direction is ReceptiveFieldDirection.RECEPTIVE:
+                reverse_solution = solve_projective(trace, (owner,))
+                reverse = box_for_source_unit(
+                    reverse_solution, far, corner, target=owner, clip=True
+                )
+            else:
+                if bool(getattr(owner, "is_input", False)):
+                    reverse_solution = _engine.solve(trace)
+                    reverse = box_for_unit(
+                        cast(Any, reverse_solution), far, corner, input=owner, clip=True
+                    )
+                else:
+                    reverse_solution = _engine.solve_from(trace, owner)
+                    reverse = box_for_unit(
+                        cast(Any, reverse_solution), far, corner, source=owner, clip=True
+                    )
+        except (ReceptiveFieldError, ValueError):
+            continue
+        if not _box_membership_contains(reverse, complete_unit):
+            violations.append(
+                ReceptiveFieldViolation(
+                    io_role=descriptor.io_role,
+                    index=corner,
+                    magnitude=0.0,
+                    box=box,
+                    reason=(
+                        "exact box corner fails opposite-direction membership: the "
+                        "claimed influence is not confirmed by the reverse engine"
+                    ),
+                )
+            )
+    return tuple(violations)
+
+
 def _validation_result(
     *,
     target: Op,
@@ -330,6 +470,7 @@ def _validation_result(
     gradients: Mapping[str, GradientReceptiveField],
     gradient_error: str | None,
     direction: ReceptiveFieldDirection,
+    adjoint_violations: tuple[ReceptiveFieldViolation, ...] = (),
 ) -> ReceptiveFieldValidation:
     """Assemble the tri-state result and its exact diagnostics.
 
@@ -352,8 +493,8 @@ def _validation_result(
         Immutable tri-state validation result.
     """
 
-    listed: list[ReceptiveFieldViolation] = []
-    n_violations = 0
+    listed: list[ReceptiveFieldViolation] = list(adjoint_violations[:_MAX_LISTED_VIOLATIONS])
+    n_violations = len(adjoint_violations)
     excess_rows: list[tuple[int, ...]] = []
     slack_rows: list[tuple[int, ...]] = []
     indeterminate_roles: list[str] = []
@@ -396,6 +537,13 @@ def _validation_result(
             f"Receptive-field validation failed for {target.label!r} at {unit}: "
             f"{n_violations} gradient-support indices lie outside geometric bounds."
         )
+        if adjoint_violations:
+            message = (
+                f"Receptive-field validation failed for {target.label!r} at {unit}: "
+                f"{len(adjoint_violations)} exact-box corner(s) failed opposite-direction "
+                f"membership and {n_violations - len(adjoint_violations)} gradient-support "
+                "indices lie outside geometric bounds."
+            )
         if undeclared_batch:
             message += " Cross-batch influence was not declared geometrically."
         if listed:
@@ -522,6 +670,32 @@ def _check_for_unit(
                 direction=normalized_direction,
                 endpoint=endpoint,
             )
+    adjoint_violations: list[ReceptiveFieldViolation] = []
+    for probe_unit in _adjoint_probe_units(target, descriptors, complete_unit):
+        for role, descriptor in descriptors.items():
+            if descriptor.status in _TAINTED_STATUSES or descriptor.axes is None:
+                continue
+            if probe_unit == complete_unit:
+                probe_box = geometric.get(role)
+                if probe_box is None:
+                    continue
+            else:
+                try:
+                    probe_box = _box_for_descriptor(
+                        solution,
+                        target,
+                        descriptor,
+                        probe_unit,
+                        direction=normalized_direction,
+                        endpoint=endpoint,
+                    )
+                except (ReceptiveFieldError, ValueError):
+                    continue
+            adjoint_violations.extend(
+                _exact_box_adjoint_violations(
+                    target, probe_unit, descriptor, probe_box, normalized_direction
+                )
+            )
     gradient_error: str | None = None
     gradients: Mapping[str, GradientReceptiveField]
     try:
@@ -559,6 +733,7 @@ def _check_for_unit(
         gradients=gradients,
         gradient_error=gradient_error,
         direction=normalized_direction,
+        adjoint_violations=tuple(adjoint_violations),
     )
 
 

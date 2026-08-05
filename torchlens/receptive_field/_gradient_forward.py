@@ -32,7 +32,8 @@ if TYPE_CHECKING:
 
 
 _RECAPTURE_RECIPE = (
-    "tl.trace(model, x, capture=tl.options.CaptureOptions(backward_ready=True), save=...)"
+    "tl.trace(model, x.requires_grad_(True), "
+    'capture=tl.options.CaptureOptions(backward_ready=True), save_mode="reference")'
 )
 
 
@@ -113,7 +114,11 @@ def _projective_recapture_recipe(source: Op, targets: Sequence[Op]) -> str:
 
     labels = (source.layer_label_short, *(target.layer_label_short for target in targets))
     selectors = " | ".join(f"tl.label({label!r})" for label in labels)
-    return f"tl.trace(model, x, backward_ready=True, save={selectors})"
+    return (
+        "tl.trace(model, x.requires_grad_(True), "
+        "capture=tl.options.CaptureOptions(backward_ready=True), "
+        f'save_mode="reference", save={selectors})'
+    )
 
 
 def _source_tensor(source: Op, targets: Sequence[Op]) -> torch.Tensor:
@@ -351,7 +356,7 @@ def projective_gradient_for_unit(
                 raise ReceptiveFieldUnavailableError(
                     f"Source {source.label!r} is structurally reachable from the selected "
                     "targets, but autograd returned no VJP. The saved tensor identity may be "
-                    "stale or the path may have been detached."
+                    'stale or the trace used a detaching save mode; use save_mode="reference".'
                 )
             columns = torch.autograd.grad(
                 vjp,

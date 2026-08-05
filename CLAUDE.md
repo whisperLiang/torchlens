@@ -90,8 +90,13 @@ projective = op.projective_field.at((10, 10))
 layer_to_layer = op.receptive_field.at((10, 10), source=log.input_ops[0])
 table = log.receptive_fields(level="layer")
 outgoing = log.projective_fields(level="layer")
-validated = tl.receptive_field.verify(log, units="center")
-# tl.validate(model, x, scope="receptive_field") samples the same RF tripwire.
+# Arming the gradient tripwire needs requires_grad inputs, backward_ready=True,
+# and save_mode="reference"; verify().verdict is PASS / FAIL / INDETERMINATE.
+armed = tl.trace(model, x.requires_grad_(True),
+                 capture=tl.options.CaptureOptions(backward_ready=True),
+                 save_mode="reference")
+validated = tl.receptive_field.verify(armed, units="center")
+# tl.validate(model, x, scope="receptive_field") captures an armed trace itself.
 ```
 
 Use the unified predicate surface for selective capture, windowed saves, interventions, and

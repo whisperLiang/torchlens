@@ -94,8 +94,13 @@ outgoing_box = op.projective_field.at((10, 10))
 layer_to_layer = op.receptive_field.at((10, 10), source=torch_trace.input_ops[0])
 rf_table = torch_trace.receptive_fields(level="layer")
 pf_table = torch_trace.projective_fields(level="layer")
-rf_results = tl.receptive_field.verify(torch_trace, units="center")
-# tl.validate(model, x, scope="receptive_field") runs the sampled RF scope.
+# Gradient verification needs requires_grad inputs, backward_ready=True, and
+# save_mode="reference"; verify().verdict is PASS / FAIL / INDETERMINATE.
+armed_trace = tl.trace(model, x.requires_grad_(True),
+                       capture=tl.options.CaptureOptions(backward_ready=True),
+                       save_mode="reference")
+rf_results = tl.receptive_field.verify(armed_trace, units="center")
+# tl.validate(model, x, scope="receptive_field") captures an armed trace itself.
 ```
 
 ## Conventions
