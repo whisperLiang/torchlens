@@ -207,3 +207,56 @@ def test_trace_text_explicit_tokenizer_end_to_end(monkeypatch: Any) -> None:
 
     assert record.verified is False
     assert record.identifier == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# A3-05 -- detection heuristic must be offline-safe (cache-only)
+# ---------------------------------------------------------------------------
+
+
+def test_processor_gate_probes_cache_only(monkeypatch: Any) -> None:
+    """The multimodal gate must resolve AutoProcessor with local_files_only=True.
+
+    The fake AutoProcessor simulates an offline box: any non-cache-only call
+    raises (as a real Hub retry loop eventually would). If the gate is
+    cache-only it resolves; the recorded kwargs prove local_files_only was set.
+    """
+
+    import sys
+
+    recorded: list[dict[str, Any]] = []
+
+    class FakeAutoProcessor:
+        @classmethod
+        def from_pretrained(cls, name_or_path: str, **kwargs: Any) -> Any:
+            recorded.append(kwargs)
+            if not kwargs.get("local_files_only"):
+                raise RuntimeError("network access attempted in a detection heuristic")
+            return object()
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", SimpleNamespace(AutoProcessor=FakeAutoProcessor)
+    )
+
+    model = SimpleNamespace(name_or_path="fixture/model")
+    assert hf._can_resolve_hf_processor(model) is True
+    assert recorded == [{"local_files_only": True}]
+
+
+def test_processor_gate_declines_when_uncached(monkeypatch: Any) -> None:
+    """An uncached model declines the route (no network) instead of downloading."""
+
+    import sys
+
+    class FakeAutoProcessor:
+        @classmethod
+        def from_pretrained(cls, name_or_path: str, **kwargs: Any) -> Any:
+            # Simulate a cache miss under local_files_only=True.
+            raise OSError("not found in local cache")
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", SimpleNamespace(AutoProcessor=FakeAutoProcessor)
+    )
+
+    model = SimpleNamespace(name_or_path="fixture/uncached")
+    assert hf._can_resolve_hf_processor(model) is False

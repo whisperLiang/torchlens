@@ -208,7 +208,11 @@ def _can_resolve_hf_processor(model: Any) -> bool:
     try:
         from transformers import AutoProcessor
 
-        AutoProcessor.from_pretrained(name_or_path)
+        # Detection must never trigger live Hub network I/O (a plain offline
+        # trace would otherwise block through a multi-retry download loop inside
+        # routing). Probe the local cache only; an uncached model simply declines
+        # the auto-route, matching compat's offline-first stance.
+        AutoProcessor.from_pretrained(name_or_path, local_files_only=True)
     except Exception:
         return False
     return True
