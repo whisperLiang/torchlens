@@ -172,7 +172,7 @@ def test_live_intervention_retention_contract(entrypoint: str) -> None:
             tl.fastlog.record(
                 LinearRelu(),
                 torch.ones(1, 4),
-                keep_op=tl.func("linear"),
+                save=tl.func("linear"),
                 intervene=tl.when(tl.func("linear"), tl.zero_ablate()),
                 return_output=True,
             ),

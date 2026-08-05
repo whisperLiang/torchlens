@@ -46,23 +46,19 @@ so a newly-added sibling is covered automatically.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any, Callable
 
 import pytest
 import torch
 from torch.overrides import get_overridable_functions, get_testing_overrides
 
-from torchlens.backends.torch.wrappers import wrap_torch
 from torchlens.intervention.errors import UntrustedCallableError
 from torchlens.intervention.resolver import resolve_import_ref
 from torchlens.utils._callable_safety import (
     _unwrap_capture_wrapper,  # mechanical capture-unwrap only; NOT the gate decision
     is_pure_forward_callable,
 )
-
-# Install the torch wrappers so resolved callables mirror the live (wrapped) state: the
-# gate -- and this immunizer's independent recognizer -- must unwrap before deciding.
-wrap_torch()
 
 
 # --------------------------------------------------------------------------- #
@@ -84,6 +80,7 @@ _WRAPPER_NAMES = frozenset({"to_sparse_coo"})
 _PROPERTY_NAMES = frozenset({"T", "mT", "H", "mH", "real", "imag"})
 
 
+@lru_cache(maxsize=1)
 def _indep_overridable_ids() -> frozenset[int]:
     """Return torch's overridable / testing-override identities (raw AND unwrapped).
 
@@ -91,6 +88,10 @@ def _indep_overridable_ids() -> frozenset[int]:
     ``wrap_torch()`` has run, so both ids are recorded to make membership robust.
     """
 
+    from torchlens.backends.torch.wrappers import wrap_torch
+
+    # Force the wrapped state only when this immunizer actually runs, not at collection time.
+    wrap_torch()
     ids: set[int] = set()
     for funcs in get_overridable_functions().values():
         for func in funcs:
@@ -100,9 +101,6 @@ def _indep_overridable_ids() -> frozenset[int]:
         ids.add(id(func))
         ids.add(id(_unwrap_capture_wrapper(func)))
     return frozenset(ids)
-
-
-_OVERRIDABLE_IDS = _indep_overridable_ids()
 
 
 def _indep_has_aten_schema(name: str) -> bool:
@@ -137,7 +135,7 @@ def _indep_is_recognized_operator(real: Callable[..., Any]) -> bool:
 
     name = _terminal_name(real)
     return (
-        id(real) in _OVERRIDABLE_IDS
+        id(real) in _indep_overridable_ids()
         or _indep_has_aten_schema(name)
         or name in _FACTORY_NAMES
         or name in _WRAPPER_NAMES
@@ -463,7 +461,7 @@ def test_to_sparse_coo_wrapper_rescue_admitted() -> None:
 
     real = _unwrap_capture_wrapper(torch.Tensor.to_sparse_coo)
     # It genuinely needs the wrapper rescue (not caught by the operator authorities).
-    assert id(real) not in _OVERRIDABLE_IDS
+    assert id(real) not in _indep_overridable_ids()
     assert not _indep_has_aten_schema("to_sparse_coo")
     assert is_pure_forward_callable(torch.Tensor.to_sparse_coo)
 
@@ -493,7 +491,7 @@ def test_safe_tensor_property_getters_admitted() -> None:
         real = _unwrap_capture_wrapper(getter)
         # A synthetic getter can never be admitted on identity; the class needs the
         # property-name rung (``T`` also has no aten schema).
-        assert id(real) not in _OVERRIDABLE_IDS
+        assert id(real) not in _indep_overridable_ids()
         assert is_pure_forward_callable(getter), f"safe tensor property WRONGLY DENIED: {name}"
     assert not _indep_has_aten_schema("T")
     # A property-shaped key OUTSIDE the audited surface gets NO synthetic getter (the

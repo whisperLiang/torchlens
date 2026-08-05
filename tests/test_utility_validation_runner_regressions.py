@@ -228,19 +228,20 @@ def test_short_barcode_deterministic_across_calls() -> None:
     """Repeated calls with identical input return identical barcodes."""
 
     payload = ["layer_type", 7, (1, 2, 3), "kw_stride_2"]
-    assert make_short_barcode_from_input(payload) == make_short_barcode_from_input(payload)
+    assert make_short_barcode_from_input(payload) == make_short_barcode_from_input(list(payload))
 
 
 def test_graph_shape_hashes_deterministic_across_calls() -> None:
-    """Repeated graph-hash calls return identical address-sensitive and address-free hashes."""
+    """Independently traced equivalent graphs return identical hashes."""
 
-    model = nn.Sequential(nn.Linear(3, 3), nn.ReLU())
-    trace = tl.trace(model, torch.randn(2, 3))
+    x = torch.randn(2, 3)
+    trace = tl.trace(nn.Sequential(nn.Linear(3, 3), nn.ReLU()), x.clone())
+    twin = tl.trace(nn.Sequential(nn.Linear(3, 3), nn.ReLU()), x.clone())
 
-    assert compute_graph_shape_hash(trace) == compute_graph_shape_hash(trace)
+    assert compute_graph_shape_hash(trace) == compute_graph_shape_hash(twin)
     assert compute_graph_shape_hash(
         trace, include_module_address=False
-    ) == compute_graph_shape_hash(trace, include_module_address=False)
+    ) == compute_graph_shape_hash(twin, include_module_address=False)
 
 
 def test_short_barcode_deterministic_across_processes() -> None:

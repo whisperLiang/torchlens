@@ -414,6 +414,37 @@ def test_jax_codec_runtime_missing_loads_audit_only(
         loaded_op.out_ref.materialize()
 
 
+def test_jax_payload_codec_map_location_failure_raises_typed() -> None:
+    """Explicit JAX placement failures must fail closed, not silently return CPU arrays."""
+
+    codec = get_payload_codec("jax")
+    value = jnp.arange(6, dtype=jnp.float32).reshape(2, 3)
+    encoded = codec.to_numpy(value)
+    fields = codec.manifest_fields(value, encoded)
+    original_device_put = jax.device_put
+
+    def _device_put_boom(array: Any, device: Any) -> Any:
+        """Raise the placement failure that used to be swallowed."""
+
+        del array, device
+        raise RuntimeError("placement boom")
+
+    try:
+        jax.device_put = _device_put_boom  # type: ignore[assignment]
+        with pytest.raises(
+            BackendRuntimeCompatibilityError,
+            match="requested by map_location",
+        ):
+            codec.from_numpy(
+                encoded.array,
+                fields,
+                map_location="cpu",
+                strict_runtime=True,
+            )
+    finally:
+        jax.device_put = original_device_put  # type: ignore[assignment]
+
+
 def test_jax_payload_codec_rejects_unknown_prng_key_dtype_tag() -> None:
     """JAX typed PRNG key reconstruction should fail closed for unknown tags."""
 

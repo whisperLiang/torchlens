@@ -195,7 +195,7 @@ def test_submodules_have_all() -> None:
             warnings.simplefilter("error", DeprecationWarning)
             submodule = importlib.import_module(module_name)
         assert hasattr(submodule, "__all__"), module_name
-        assert len(submodule.__all__) >= 0
+        assert all(isinstance(name, str) and name for name in submodule.__all__), module_name
 
 
 def test_attribution_submodule_namespace_is_exposed_without_top_level_pollution() -> None:

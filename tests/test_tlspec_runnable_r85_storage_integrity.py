@@ -109,15 +109,20 @@ def _assert_storage_rebind_closed(
     try:
         trace.save(path, level="runnable", include_weights=True)
     except RunnablePreflightError:
+        assert not path.exists()
         return  # save refusal -- the strongest fail-closed form; no input can run
     loaded = tl.load(path)
+    exercised = 0
     for run_input in run_inputs:
         oracle = model_factory()(run_input.clone())
         try:
             result = loaded.run(inputs=run_input.clone())
         except (RunnablePreflightError, PathDivergenceError):
+            exercised += 1
             continue  # run-side fail-closed is equally acceptable
+        exercised += 1
         _assert_not_falsely_verified(result, oracle)
+    assert exercised == len(run_inputs)
 
 
 def _verified(model: nn.Module, capture_input: torch.Tensor, tmp_path: Path) -> Any:

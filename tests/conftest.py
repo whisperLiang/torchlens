@@ -77,14 +77,14 @@ for sub_dir in sub_dirs:
 # ---------------------------------------------------------------------------
 
 
-def pytest_configure(config):
+def pytest_configure(config: pytest.Config) -> None:
     """Enable usage stats collection for ArgSpec coverage analysis."""
     _state._collect_usage_stats = True
     _state._function_call_counts.clear()
     _state._function_call_models.clear()
 
 
-def pytest_collection_modifyitems(config, items):
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Move ArgSpec coverage test to run last so it sees all accumulated stats."""
     coverage_tests = []
     other_tests = []
@@ -96,9 +96,40 @@ def pytest_collection_modifyitems(config, items):
     items[:] = other_tests + coverage_tests
 
 
-def pytest_sessionfinish(session, exitstatus):
-    """Write a coverage text report to generated_outputs/ if coverage data exists."""
+def _coverage_requested(config: pytest.Config) -> bool:
+    """Return whether this session explicitly requested pytest-cov collection.
+
+    Parameters
+    ----------
+    config:
+        Active pytest configuration.
+
+    Returns
+    -------
+    bool
+        ``True`` when pytest-cov is active for this session.
+    """
+
+    cov_source = getattr(config.option, "cov_source", None)
+    return bool(cov_source)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Write coverage artifacts only for real coverage runs.
+
+    Parameters
+    ----------
+    session:
+        Active pytest session.
+    exitstatus:
+        Final pytest exit status.
+    """
+
+    del exitstatus
     _state._collect_usage_stats = False
+    config = session.config
+    if config.option.collectonly or not _coverage_requested(config):
+        return
     try:
         from coverage import Coverage
         from coverage.exceptions import NoDataError

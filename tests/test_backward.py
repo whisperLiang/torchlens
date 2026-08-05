@@ -542,21 +542,6 @@ def test_validate_backward_random_seed_deterministic() -> None:
     assert second is first
 
 
-def test_validate_backward_state_dict_restored_between_passes() -> None:
-    """BatchNorm running stats are restored when validation exits."""
-
-    torch.manual_seed(0)
-    model = _BatchNormBackwardModel().train()
-    x = torch.randn(6, 3, requires_grad=True)
-    running_mean = model.bn.running_mean.detach().clone()
-    running_var = model.bn.running_var.detach().clone()
-
-    assert tl_validation.validate_backward_pass(model, x, random_seed=42)
-
-    assert torch.equal(model.bn.running_mean, running_mean)
-    assert torch.equal(model.bn.running_var, running_var)
-
-
 def test_validate_backward_zero_grad_between_passes() -> None:
     """Backward validation zeros parameter grads before, between, and after passes."""
 

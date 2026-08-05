@@ -388,6 +388,9 @@ def test_resize_grow_branch_never_false_verified(tmp_path: Path) -> None:
         assert report is not None
         assert report.path_faithfulness is not PathFaithfulness.VERIFIED
         assert report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
+    else:
+        assert disposition == "refused"
+        assert report is None
 
 
 def test_resize_shrink_declares_no_uninit_source(tmp_path: Path) -> None:
@@ -400,6 +403,9 @@ def test_resize_shrink_declares_no_uninit_source(tmp_path: Path) -> None:
     if disposition == "ran":
         assert report is not None
         assert "uninitialized_alloc" not in report.nondeterministic_sources
+    else:
+        assert disposition == "refused"
+        assert report is None
 
 
 def test_uninit_family_table_matches_live_aten_registry() -> None:

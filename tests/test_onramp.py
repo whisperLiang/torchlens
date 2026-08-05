@@ -115,11 +115,11 @@ def _metadata_log(model: nn.Module, x: torch.Tensor) -> tl.Trace:
 
 
 def test_peek_on_three_architectures(architecture: tuple[nn.Module, torch.Tensor]) -> None:
-    """``tl.peek`` returns one out across representative architectures."""
+    """``tl.pluck`` returns one out across representative architectures."""
 
     model, x = architecture
     label = _first_saved_label(model, x)
-    out = tl.peek(model, x, label)
+    out = tl.pluck(model, x, label)
     assert isinstance(out, torch.Tensor)
     assert out.shape[0] == x.shape[0]
 
@@ -196,7 +196,7 @@ def test_find_layers_and_suggest_on_three_architectures(
     assert base_label in log.find_layers(prefix)
     assert log.find_layers(prefix)
     with pytest.raises(ValueError, match="Did you mean"):
-        tl.peek(model, x, "definitely_missing_layer")
+        tl.pluck(model, x, "definitely_missing_layer")
 
 
 def test_layer_accessor_queries_and_completion(

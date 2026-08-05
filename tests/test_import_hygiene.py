@@ -138,6 +138,34 @@ def test_bare_import_defers_lazified_feature_modules() -> None:
     )
 
 
+def test_bare_import_leaves_torch_functions_undecorated() -> None:
+    """Bare TorchLens import must not eagerly wrap torch operators."""
+
+    _run_import_script(
+        "import torch; "
+        "import torchlens; "
+        "from torchlens import _state; "
+        "from torchlens.backends.torch._tl import is_decorated_function; "
+        "assert _state._is_decorated is False; "
+        "assert not is_decorated_function(torch.cos)"
+    )
+
+
+def test_first_trace_lazily_wraps_torch_functions() -> None:
+    """The first torch capture should install the persistent wrappers."""
+
+    _run_import_script(
+        "import torch; "
+        "import torchlens as tl; "
+        "from torchlens import _state; "
+        "from torchlens.backends.torch._tl import is_decorated_function; "
+        "model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.ReLU()); "
+        "tl.trace(model, torch.ones(1, 2)); "
+        "assert _state._is_decorated is True; "
+        "assert is_decorated_function(torch.cos)"
+    )
+
+
 def test_import_torchlens_does_not_import_torchvision_when_installed() -> None:
     """Bare TorchLens import should not import torchvision even when installed."""
 
