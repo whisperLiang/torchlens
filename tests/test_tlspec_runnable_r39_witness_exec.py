@@ -35,6 +35,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens.errors import RunnablePreflightError
 from torchlens.options import CaptureOptions
 from torchlens.runnable import (
     NumericAttestationStatus,
@@ -961,8 +962,10 @@ def test_sparse_refuses_opaque_output_save(tmp_path: Path) -> None:
         trace = _capture(_SetOut(), x)
     path = tmp_path / "opaque.tlspec"
     shutil.rmtree(path, ignore_errors=True)
-    with pytest.raises(Exception):
+    with pytest.raises(RunnablePreflightError) as excinfo:
         trace.save(path, level="runnable", include_weights=True)
+    codes = {diag.code for diag in excinfo.value.fields["diagnostics"]}
+    assert RunnableErrorCode.MISSING_OUTPUT_CONTAINER_CONTRACT in codes, codes
 
 
 # ---- corr2_3: descriptorless payload degradation -------------------------------------
@@ -1110,8 +1113,10 @@ def test_namedtuple_subclass_refused_at_save(tmp_path: Path) -> None:
     trace = _capture(_NamedtupleSubclassOut(), x)
     path = tmp_path / "nt.tlspec"
     shutil.rmtree(path, ignore_errors=True)
-    with pytest.raises(Exception):
+    with pytest.raises(RunnablePreflightError) as excinfo:
         trace.save(path, level="runnable", include_weights=True)
+    codes = {diag.code for diag in excinfo.value.fields["diagnostics"]}
+    assert RunnableErrorCode.MISSING_OUTPUT_CONTAINER_CONTRACT in codes, codes
 
 
 class _PlainNamedtupleOut(nn.Module):
