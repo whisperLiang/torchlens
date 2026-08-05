@@ -151,6 +151,57 @@ class UnevenRecurrent(nn.Module):
         return x
 
 
+class MultiPassBlock(nn.Module):
+    """Three-op leaf block (linear, relu, mul) reused by multi-pass fixtures."""
+
+    def __init__(self, width: int = 8) -> None:
+        super().__init__()
+        self.lin = nn.Linear(width, width)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.mul(torch.relu(self.lin(x)), 1.0)
+
+
+class SharedMultiCall(nn.Module):
+    """One shared n-child module called ``calls`` times plus a linear tail.
+
+    Reconstructs the round-22 collapse-seal H1 fixture: functional
+    relu/sigmoid/tanh before every shared call, a seven-child shared body,
+    and a ten-leaf tail. Under max/1.0 the selected plan contains multi-pass
+    module boxes and a fold whose representative is called ``calls`` times,
+    which the pre-fix optimizer counted once per ADDRESS while the renderer
+    emits one box per CALL.
+    """
+
+    class Shared(nn.Module):
+        def __init__(self, width: int, children: int) -> None:
+            super().__init__()
+            self.body = nn.Sequential(*[MultiPassBlock(width) for _ in range(children)])
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.body(x)
+
+    def __init__(
+        self,
+        width: int = 8,
+        children: int = 7,
+        calls: int = 4,
+        tail: int = 10,
+    ) -> None:
+        super().__init__()
+        self.calls = calls
+        self.shared = self.Shared(width, children)
+        self.tail = nn.Sequential(*[nn.Linear(width, width) for _ in range(tail)])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for _ in range(self.calls):
+            x = torch.relu(x)
+            x = torch.sigmoid(x)
+            x = torch.tanh(x)
+            x = self.shared(x)
+        return self.tail(x)
+
+
 def _svg_node_group_count(path: str) -> int:
     with open(path, encoding="utf-8") as handle:
         return len(re.findall(r'class="node', handle.read()))
@@ -310,6 +361,169 @@ def test_no_silent_node_drop(mode):
         assert not unaccounted, (
             f"{type(model).__name__} mode={mode}: ops silently dropped: {sorted(unaccounted)[:8]}"
         )
+
+
+def _occurrence_witness_partition(trace, result):
+    """Partition concrete PASS-QUALIFIED op occurrences into visible/hidden.
+
+    Unlike :func:`_plan_hidden_and_visible_ops`, which witnesses whole
+    addresses, this attributes every concrete pass-qualified occurrence:
+
+    - visible: raw plan nodes, with the ``k``-th plan occurrence of a
+      pass-free base label attributed to pass ``k`` (render order);
+    - hidden: occurrences whose renderer-effective module stack (innermost
+      dropped for atomic exits) contains an exact plan box CALL, any call of
+      a fold's hidden members, or a segment member address, plus the exact
+      pass-qualified ops of op-segment descriptors.
+
+    An occurrence with no witness at all is a silently dropped node.
+    """
+
+    concrete = {str(op.label) for op in trace.ops}
+    visible: set[str] = set()
+    occurrence: dict[str, int] = {}
+    box_calls: set[str] = set()
+    fold_hidden_addresses: set[str] = set()
+    child_members: set[str] = set()
+    op_segment_ops: set[str] = set()
+    for node in result.plan.nodes:
+        if isinstance(node, RawOp):
+            text = str(node.op)
+            if text in concrete:
+                visible.add(text)
+                continue
+            occurrence[text] = occurrence.get(text, 0) + 1
+            qualified = f"{text}:{occurrence[text]}"
+            if qualified in concrete:
+                visible.add(qualified)
+        elif isinstance(node, ModuleBox):
+            box_calls.add(node.call)
+        elif isinstance(node, RepeatFold):
+            box_calls.add(node.rep.call)
+            fold_hidden_addresses.update(node.members[1:])
+        elif isinstance(node, ChildSegment):
+            child_members.update(node.members)
+    for descriptor in (result.segments or {}).values():
+        if descriptor.kind == "op":
+            op_segment_ops.update(str(op) for op in descriptor.ops)
+        else:
+            child_members.update(descriptor.members)
+    hidden: set[str] = set()
+    for op in trace.ops:
+        label = str(op.label)
+        modules = [str(call) for call in (getattr(op, "modules", ()) or ())]
+        # Segment and fold absorption match the op's ORIGINAL module stack
+        # (mirroring ``_segment_for_node`` / ``_run_fold_ancestor_for_node``);
+        # box hiding matches the renderer-EFFECTIVE stack, where the innermost
+        # module of an atomic exit op is dropped and the op stays visible.
+        original_bases = {call.rsplit(":", 1)[0] for call in modules}
+        effective = modules
+        if getattr(op, "is_atomic_module", False) and effective:
+            effective = effective[:-1]
+        if (
+            any(call in box_calls for call in effective)
+            or original_bases & fold_hidden_addresses
+            or original_bases & child_members
+            or label in op_segment_ops
+        ):
+            hidden.add(label)
+    return concrete, visible, hidden
+
+
+def _multi_call_plan_boxes(trace, plan):
+    """Return plan boxes and fold representatives of multi-call addresses."""
+
+    boxes = []
+    folds = []
+    for node in plan.nodes:
+        if isinstance(node, ModuleBox):
+            address = node.call.rsplit(":", 1)[0]
+        elif isinstance(node, RepeatFold):
+            address = node.rep.call.rsplit(":", 1)[0]
+        else:
+            continue
+        if address not in trace.modules:
+            continue
+        if int(getattr(trace.modules[address], "num_calls", 1) or 1) > 1:
+            (folds if isinstance(node, RepeatFold) else boxes).append(node)
+    return boxes, folds
+
+
+@pytest.mark.parametrize(
+    "builder, require_fold",
+    [
+        (lambda: SharedMultiCall(children=7, calls=4, tail=10), False),
+        (lambda: SharedMultiCall(children=7, calls=2, tail=4), True),
+    ],
+    ids=["shared_four_calls", "folded_two_calls"],
+)
+def test_multipass_pass_occurrence_conservation_and_render_parity(builder, require_fold, tmp_path):
+    """Multi-pass plans must count rendered CALLS and witness every occurrence.
+
+    Round-22 seal finding H1: ``_module_box_plan_nodes`` and the folded
+    instantiation emitted ``address:1`` once while the renderer collapses
+    every call of a multi-pass address, so ``plan.total``, the max count
+    gate, and ``collapse_schedule().steps[-1].visible_count`` under-counted
+    the rendered graph and pass-2+ occurrences had no plan witness. For every
+    public mode this pins:
+
+    - ``plan.total`` equals the rendered SVG node count, and
+    - the full concrete pass-qualified occurrence set equals the union of
+      visible plan nodes and hidden-with-witness occurrences.
+    """
+
+    torch.manual_seed(0)
+    model = builder().eval()
+    trace = tl.trace(model, torch.randn(2, 8))
+    context = RenderContext()
+
+    max_result = select_collapse_plan(trace, context, mode="max")
+    assert not max_result.declined
+    multi_boxes, multi_folds = _multi_call_plan_boxes(trace, max_result.plan)
+    assert multi_boxes, "fixture must exercise multi-call module boxes at max"
+    if require_fold:
+        assert multi_folds, "fixture must exercise a multi-call fold representative at max"
+        rep_call = multi_folds[0].rep.call
+        rep_address = rep_call.rsplit(":", 1)[0]
+        later_pass_boxes = [
+            node
+            for node in max_result.plan.nodes
+            if isinstance(node, ModuleBox)
+            and node.call.rsplit(":", 1)[0] == rep_address
+            and node.call != rep_call
+        ]
+        assert later_pass_boxes, "multi-call fold representative must render later passes"
+
+    schedule = trace.collapse_schedule()
+    assert schedule.steps[-1].visible_count == max_result.plan.total
+
+    for mode in ("auto", "max", 0.5, 1.0):
+        if isinstance(mode, float):
+            result = select_collapse_level(trace, context, mode)
+        else:
+            result = select_collapse_plan(trace, context, mode=mode)
+        if result.declined:
+            continue
+        out = tmp_path / f"multipass_{str(mode).replace('.', '_')}"
+        trace.draw(
+            vis_save_only=True,
+            vis_fileformat="svg",
+            collapse=mode,
+            vis_outpath=str(out),
+        )
+        rendered = _svg_node_group_count(str(out) + ".svg")
+        assert result.plan.total == rendered, (
+            f"mode={mode}: plan.total={result.plan.total} but the renderer emitted {rendered} nodes"
+        )
+        assert result.visible_count == result.plan.total
+        concrete, visible, hidden = _occurrence_witness_partition(trace, result)
+        orphaned = concrete - visible - hidden
+        assert not orphaned, (
+            f"mode={mode}: {len(orphaned)} of {len(concrete)} concrete "
+            f"pass-qualified occurrences have no visible or hidden plan "
+            f"witness: {sorted(orphaned)[:8]}"
+        )
+        assert concrete == visible | hidden
 
 
 def test_schedule_collapsed_addresses_not_empty_when_hiding():
