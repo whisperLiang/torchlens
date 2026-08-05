@@ -210,7 +210,11 @@ _KNOWN_UNSUPPORTED_ARG_SPEC_REASONS = {
     "mh": "demoted fragment: no operator schema available",
     "mkldnnreshape": "internal/private helper left on dynamic fallback until independently validated",
     "mkldnntranspose": "internal/private helper left on dynamic fallback until independently validated",
-    "mod": "internal/private helper left on dynamic fallback until independently validated",
+    # NOTE: "mod" was WRONGLY listed here as an internal/private helper. The only
+    # decorated callable normalizing to "mod" is Tensor.__mod__, the fully PUBLIC
+    # ``%`` operator; leaving it on the poisonable dynamic fallback dropped tensor-RHS
+    # parents after any scalar-RHS observation (round-22 F3). It now has a static
+    # binary spec in arg_positions.py.
     "mt": "internal/private helper left on dynamic fallback until independently validated",
     "mtia": "demoted fragment: no operator schema available",
     "nonlinearitytype": "internal/private helper left on dynamic fallback until independently validated",
