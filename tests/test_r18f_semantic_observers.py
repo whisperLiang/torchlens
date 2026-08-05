@@ -222,3 +222,27 @@ def test_forward_record_span_direction_enforced() -> None:
     assert record.direction == "forward"
     assert "bwd_only" not in record.span_names
     assert "fwd_ok" in record.span_names
+
+
+# --------------------------------------------------------------------------------------
+# M7 - forward tap site_label resolves to the public trace label
+# --------------------------------------------------------------------------------------
+
+
+def test_forward_tap_site_label_is_public_not_raw() -> None:
+    """A forward tap's site_label is the public label, indexing the public trace."""
+
+    torch.manual_seed(0)
+    model = _LinearRelu()
+    x = torch.randn(2, 3)
+    tap = tl.tap(tl.func("relu"))
+
+    log = tl.trace(model, x, intervention_ready=True, hooks=tap)
+
+    assert tap.records
+    site_label = tap.records[0].site_label
+    assert site_label is not None
+    assert not site_label.endswith("_raw")
+    # The public label actually indexes the finalized trace.
+    assert site_label in log.layer_labels
+    assert log[site_label] is not None

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import time
+import weakref
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Literal
+from typing import Any, Callable, Iterator, Literal
 
 import torch
 
@@ -16,12 +18,17 @@ from . import _state
 class TapRecord:
     """One observed tensor value.
 
+    ``site_label`` is a resolved property, not a stored field: the tap fires
+    during capture when only the internal raw label (``relu_1_3_raw``) exists,
+    but users index the trace by the public label (``relu_1_2``). The record
+    keeps the raw label plus a weak reference to the capturing trace and resolves
+    the public label lazily through the trace's raw-to-final label map, so
+    ``record.site_label`` returns a label that actually indexes the public trace.
+
     Parameters
     ----------
     value:
         Detached tensor snapshot.
-    site_label:
-        Capture-time site label.
     span_names:
         Active span names when the tap fired.
     timestamp:
@@ -35,12 +42,32 @@ class TapRecord:
     """
 
     value: torch.Tensor
-    site_label: str | None
     span_names: tuple[str, ...]
     timestamp: float
     direction: Literal["forward", "backward"]
     grad_kind: Literal["grad_input", "grad_output"] | None = None
     backward_call_index: int | None = None
+    _raw_site_label: str | None = None
+    _trace_ref: "Callable[[], Any] | None" = field(default=None, compare=False, repr=False)
+
+    @property
+    def site_label(self) -> str | None:
+        """Return the public capture-site label resolved from the raw label.
+
+        Falls back to the raw label when the capturing trace is unavailable
+        (e.g. never bound, or already garbage collected) or exposes no raw-to-
+        final label map (which is the case for backward grad_fn labels).
+        """
+
+        raw = self._raw_site_label
+        if raw is None:
+            return None
+        resolver = self._trace_ref
+        trace = resolver() if resolver is not None else None
+        mapping = getattr(trace, "_raw_to_final_layer_labels", None)
+        if isinstance(mapping, Mapping):
+            return mapping.get(raw, raw)
+        return raw
 
 
 @dataclass
@@ -81,10 +108,11 @@ class TapObserver:
         self.records.append(
             TapRecord(
                 value=value,
-                site_label=_hook_layer_label(hook.layer_log),
                 span_names=span_names,
                 timestamp=time.monotonic(),
                 direction="forward",
+                _raw_site_label=_hook_layer_label(hook.layer_log),
+                _trace_ref=_active_trace_ref(),
             )
         )
         return out
@@ -131,12 +159,13 @@ class TapObserver:
         self.records.append(
             TapRecord(
                 value=value,
-                site_label=getattr(grad_fn_handle, "label", None),
                 span_names=span_names,
                 timestamp=time.monotonic(),
                 direction="backward",
                 grad_kind=grad_kind,
                 backward_call_index=call_index,
+                _raw_site_label=getattr(grad_fn_handle, "label", None),
+                _trace_ref=_active_trace_ref(),
             )
         )
 
@@ -188,6 +217,23 @@ def _first_tensor_grad(
         if isinstance(grad, torch.Tensor):
             return grad, grad_kind
     return None, None
+
+
+def _active_trace_ref() -> Callable[[], Any] | None:
+    """Return a weak reference to the currently capturing trace, if any.
+
+    A weak reference avoids keeping the whole trace graph alive through observer
+    records; the record's ``site_label`` property falls back to the raw label if
+    the trace has since been collected.
+    """
+
+    trace = _state._active_trace
+    if trace is None:
+        return None
+    try:
+        return weakref.ref(trace)
+    except TypeError:
+        return None
 
 
 def _active_span_names(direction: Literal["forward", "backward"]) -> tuple[str, ...]:
