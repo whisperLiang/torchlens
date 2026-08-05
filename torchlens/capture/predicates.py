@@ -117,6 +117,14 @@ def _evaluate_keep_op(
     return _normalize_capture_decision(result, ctx, options.default_op)
 
 
+#: Capture-time selector kinds whose short/friendly ``{layer_type}_{type_index}``
+#: label is only visible through the :func:`_evaluate_keep_op` alias retry. ``label``,
+#: ``contains``, and ``regex`` all resolve through ``_context_labels`` (which on the base
+#: context exposes only the raw label such as ``"conv2d_2_4_raw"``); ``predicate`` trees
+#: read ``ctx.label`` directly.
+_ALIAS_RETRY_SELECTOR_KINDS: tuple[str, ...] = ("predicate", "label", "contains", "regex")
+
+
 def _keep_op_needs_alias_retry(predicate: object | None) -> bool:
     """Return whether a keep-op predicate still needs the alias compatibility retry.
 
@@ -128,16 +136,28 @@ def _keep_op_needs_alias_retry(predicate: object | None) -> bool:
     Returns
     -------
     bool
-        ``True`` when the predicate may still rely on the legacy second call
-        with ``ctx.label`` rewritten to ``"{layer_type}_{type_index}"``.
-        Structured selectors already match against the full candidate label set
-        and do not need the retry, except for ``tl.predicate(...)`` trees whose
-        inner callable still observes ``ctx.label`` directly.
+        ``True`` when the predicate may still rely on the second evaluation with
+        ``ctx.label`` rewritten to the short/friendly ``"{layer_type}_{type_index}"``
+        label (e.g. ``"conv2d_2"``).
+
+    Notes
+    -----
+    The base capture-time ``RecordContext`` only carries the RAW label (such as
+    ``"conv2d_2_4_raw"``); the short/friendly label is synthesized ONLY by the alias
+    retry in :func:`_evaluate_keep_op`. Every selector that resolves through
+    ``_context_labels`` (``label``, ``contains``, ``regex``) can therefore target a
+    short label that is invisible on the first evaluation, so those kinds need the
+    retry too -- not just ``tl.predicate(...)`` trees whose inner callable observes
+    ``ctx.label`` directly. Structured selectors that match non-label fields
+    (``func``, ``module``, ``in_module``, ``output``, ...) already see everything they
+    need on the base context and are intentionally excluded. The retry fires only after
+    a first-call miss, so widening the set is purely additive: it can add a match for a
+    short-label target, never remove an existing match.
     """
 
     if not isinstance(predicate, BaseSelector):
         return True
-    return _selector_contains_kind(predicate, "predicate")
+    return any(_selector_contains_kind(predicate, kind) for kind in _ALIAS_RETRY_SELECTOR_KINDS)
 
 
 def _evaluate_intervene_op(
