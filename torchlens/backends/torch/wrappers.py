@@ -1368,7 +1368,6 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
         # matching barcode => this is the bottom-level (leaf) function.
         func_call_barcode = make_random_barcode()
         trace._current_func_barcode = func_call_barcode
-        capture_start_time = time.time()
         _save_rng = getattr(trace, "save_rng_states", False)
         rng_states = log_current_rng_states(torch_only=True) if _save_rng else {}
         autocast_state = log_current_autocast_state()
@@ -1395,6 +1394,12 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
             else False
         )
         expected_token = None
+        # W3 F8: per-op duration must measure the USER op, not TorchLens
+        # bookkeeping. The clock starts here -- after RNG/autocast snapshots
+        # and container/intervention-site registration -- and stops right
+        # after the call returns, so ``func_duration`` no longer
+        # systematically overstates cheap ops in instrumented captures.
+        func_exec_start = time.time()
         try:
             if _diagnostic_edge_armed():
                 with expected_original_call(
@@ -1409,11 +1414,12 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
                 out_orig = func(*args, **kwargs)
         finally:
             _nvtx_range_pop(nvtx_pushed)
+        func_exec_duration = time.time() - func_exec_start
         if mutates_data_alias:
             record_data_alias_mutation(trace)
         return_value = out_orig
         exec_ctx = FuncExecutionContext(
-            time_elapsed=time.time() - capture_start_time,
+            time_elapsed=func_exec_duration,
             rng_states=rng_states,
             autocast_state=autocast_state,
         )
