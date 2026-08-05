@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 import weakref
 
 from .events import (
@@ -30,6 +30,37 @@ if TYPE_CHECKING:
     import torch
 
     from .intervention import FireResult
+
+
+def _clone_op_event_for_replay(event: OpEvent) -> OpEvent:
+    """Return a projection copy of ``event`` with independent mutable state.
+
+    ``OpEvent`` is a frozen dataclass, but two of its fields are live dicts:
+    ``transform_config`` and ``parent_arg_positions``. A ``copy_for_replay``
+    projection must not be able to mutate those dicts on the sealed source
+    stream, so they are duplicated here. Every other field is immutable (or an
+    intentionally shared tensor payload / opaque handle), so the clone stays
+    cheap and never copies activations.
+
+    Parameters
+    ----------
+    event
+        Sealed source operation event.
+
+    Returns
+    -------
+    OpEvent
+        Event with fresh, independent ``transform_config`` and
+        ``parent_arg_positions`` containers.
+    """
+
+    return replace(
+        event,
+        parent_arg_positions={
+            domain: dict(positions) for domain, positions in event.parent_arg_positions.items()
+        },
+        transform_config=dict(event.transform_config),
+    )
 
 
 @dataclass(slots=False)
@@ -77,10 +108,15 @@ class CaptureEvents:
         stream.
 
         Every mutable container is duplicated into a fresh object (nested list
-        values included where they are rebuilt in place); the frozen ``OpEvent``
-        objects and any tensor payloads are shared by reference, so the copy is
-        cheap and does not clone activations. Scalars and the opaque
-        ``backend_session`` are copied by value / reference.
+        values included where they are rebuilt in place). The ``OpEvent`` objects
+        are re-created with independent copies of their mutable dict fields
+        (``transform_config`` and ``parent_arg_positions``) so a projection can
+        never mutate those dicts on the sealed source stream; the same cloned
+        events back ``op_events``, ``op_event_by_label_raw``, and the projected
+        ``live_index`` so the projection stays internally consistent. Tensor
+        payloads and every other (immutable) event field are shared by
+        reference, so the copy is cheap and does not clone activations. Scalars
+        and the opaque ``backend_session`` are copied by value / reference.
 
         Returns
         -------
@@ -88,8 +124,16 @@ class CaptureEvents:
             Independent event buffer over the same underlying events.
         """
 
+        cloned_op_events = [_clone_op_event_for_replay(event) for event in self.op_events]
+        cloned_by_label = {event.label_raw: event for event in cloned_op_events}
+        projected_index = self.live_index.copy()
+        projected_index.by_raw_label = {
+            label: cloned_by_label.get(label, event)
+            for label, event in projected_index.by_raw_label.items()
+        }
+
         return CaptureEvents(
-            op_events=list(self.op_events),
+            op_events=cloned_op_events,
             module_events=list(self.module_events),
             module_prep_events=list(self.module_prep_events),
             module_enter_events=list(self.module_enter_events),
@@ -105,9 +149,12 @@ class CaptureEvents:
             recent_events=deque(self.recent_events),
             backend_session=self.backend_session,
             live_by_raw_label=dict(self.live_by_raw_label),
-            op_event_by_label_raw=dict(self.op_event_by_label_raw),
+            op_event_by_label_raw={
+                label: cloned_by_label.get(label, _clone_op_event_for_replay(event))
+                for label, event in self.op_event_by_label_raw.items()
+            },
             op_event_index_by_label_raw=dict(self.op_event_index_by_label_raw),
-            live_index=self.live_index.copy(),
+            live_index=projected_index,
             parent_op_label_raws={
                 key: list(value) for key, value in self.parent_op_label_raws.items()
             },
@@ -152,10 +199,20 @@ class CaptureEvents:
     def release_runtime_sidecars(self) -> None:
         """Detach payload and runtime handles while retaining structural facts.
 
+        Operation entries are rebuilt as payload-free immutable facts, and every
+        runtime-handle sidecar the buffer holds is dropped so the advertised
+        release boundary really frees backend / autograd / runtime-context object
+        graphs: the backend session (``backend_session``), the per-label autograd
+        ``grad_fn`` handles (``grad_fn_handles_by_label_raw``, also cleared by the
+        sibling :meth:`release_working_projection`), and the runtime record-context
+        deque (``recent_events``). Structural event facts (op/module/prep/enter/
+        exit/output-version lanes with payloads stripped) are retained.
+
         Returns
         -------
         None
-            Replaces operation entries with payload-free immutable facts.
+            Replaces operation entries with payload-free immutable facts and
+            detaches all runtime-handle sidecars.
         """
 
         structural_events: list[OpEvent] = []
@@ -233,6 +290,9 @@ class CaptureEvents:
         ]
         self.live_by_raw_label.clear()
         self.live_index.clear()
+        self.backend_session = None
+        self.grad_fn_handles_by_label_raw.clear()
+        self.recent_events.clear()
 
     def next_backward_seq(self) -> int:
         """Return the next monotonic backward event sequence number."""
@@ -333,7 +393,12 @@ class LiveOpRecord:
 
 
 def register_live_event(trace: Any, event: OpEvent, live_record: LiveOpRecord) -> None:
-    """Register an event and its live projection on a trace.
+    """Register an emitted operation event on a trace.
+
+    Appends ``event`` to ``trace.capture_events`` (allocating the buffer on
+    first use) and records its grad-fn handle when present. This function has no
+    callers in the tree; the live hot path appends events directly through
+    :meth:`CaptureEvents.append`.
 
     Parameters
     ----------
@@ -342,7 +407,10 @@ def register_live_event(trace: Any, event: OpEvent, live_record: LiveOpRecord) -
     event
         Operation event emitted for the new raw label.
     live_record
-        Mutable live projection for capture-time consumers.
+        Accepted only for historical signature compatibility and intentionally
+        ignored: the mutable live-record projection lane is retired, so no
+        ``LiveOpRecord`` is stored. Dropping this parameter is an owner-reserved
+        signature change.
 
     Returns
     -------
@@ -408,20 +476,28 @@ def replace_op_event(trace: Any, label_raw: str, **updates: Any) -> OpEvent | No
     return updated_event
 
 
-def live_record_for_label(trace: Any, label_raw: str) -> LiveOpRecord:
-    """Return the live capture projection for a raw label.
+def live_record_for_label(trace: Any, label_raw: str) -> NoReturn:
+    """Always raise: the mutable per-label live-record lane is retired.
+
+    Capture no longer materializes a mutable :class:`LiveOpRecord` per raw
+    label; capture-time consumers read the event-backed
+    :class:`~torchlens.ir.live_index.LiveIndex` instead. This function is a
+    retained compatibility stub with no callers in the tree and never returns a
+    record. It is intentionally kept off the mutable-live-record hot path (see
+    ``tests/test_capture_unification_p2.py``); removing it or its
+    ``torchlens.ir`` export is an owner-reserved public-surface change.
 
     Parameters
     ----------
     trace
-        Active trace.
+        Active trace (unused).
     label_raw
-        Raw operation label.
+        Raw operation label included in the raised message.
 
-    Returns
-    -------
-    LiveOpRecord
-        Live projection for ``label_raw``.
+    Raises
+    ------
+    KeyError
+        Always, because no mutable live record exists for any label.
     """
 
     raise KeyError(

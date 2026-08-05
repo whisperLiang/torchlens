@@ -30,6 +30,14 @@ class LiveIndex:
     def append(self, event: OpEvent) -> None:
         """Index one emitted operation event.
 
+        A raw label re-seen at this boundary (for example when a failed-partial
+        fastlog recording concatenates op-event streams) is treated as an atomic
+        in-place replacement rather than a second insertion: the label is not
+        double-listed and parent edges are recomputed so no stale
+        parent->child edge from the prior event survives. This keeps the index
+        self-consistent without requiring an unrelated ``rebuild_edges()`` and is
+        identical to :meth:`replace` for a re-seen label.
+
         Parameters
         ----------
         event
@@ -40,6 +48,12 @@ class LiveIndex:
         None
             Mutates the live index in place.
         """
+
+        if event.label_raw in self.by_raw_label:
+            # Re-seen label: replace last-wins and drop any now-stale edges.
+            self.by_raw_label[event.label_raw] = event
+            self.rebuild_edges()
+            return
 
         self.by_raw_label[event.label_raw] = event
         self.labels.append(event.label_raw)
