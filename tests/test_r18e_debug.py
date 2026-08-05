@@ -318,3 +318,51 @@ def test_infer_input_shape_failed_result_strategy_is_not_probe_success() -> None
     assert result.found is False
     assert result.strategy != "probe_success"
     assert result.strategy == "none"
+
+
+# ---------------------------------------------------------------------------
+# M6 -- live find_nan exposes public labels, not the internal _raw namespace
+# ---------------------------------------------------------------------------
+
+
+def test_find_nan_live_label_has_no_raw_namespace_leak() -> None:
+    """Live find_nan does not leak the internal ``_raw`` label suffix (M6).
+
+    MUTATION PROOF: dropping the ``removesuffix(RAW_LABEL_SUFFIX)`` strip makes
+    the label end with ``_raw`` and this assertion fails.
+    """
+
+    class _NanMid(nn.Module):
+        def __init__(self) -> None:
+            """Build two linears around a NaN-producing log."""
+
+            super().__init__()
+            self.a = nn.Linear(2, 2)
+            self.b = nn.Linear(2, 2)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Produce a NaN in a hidden op via ``log(h - h)``.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Output built on a non-finite hidden activation.
+            """
+
+            h = self.a(x)
+            h = torch.log(h - h)
+            return self.b(h)
+
+    result = tl.debug.find_nan(_NanMid(), torch.ones(1, 2))
+
+    assert result.found
+    assert result.label is not None
+    assert not result.label.endswith("_raw")  # no internal namespace leak
+    # The public-namespace label resolves against a completed trace.
+    completed = tl.trace(_NanMid(), torch.ones(1, 2), save=tl.where(lambda record: True))
+    assert completed[result.label] is not None
