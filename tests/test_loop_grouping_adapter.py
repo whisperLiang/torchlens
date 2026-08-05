@@ -69,6 +69,10 @@ def _neutral_graph_from_torch_recurrent_fixture(trace: Any) -> RecurrenceGroupin
     nodes: dict[str, RecurrenceNode] = {}
     raw_labels: list[str] = []
     raw_label_set = {op._label_raw for op in trace.ops}
+    # ``equivalent_ops`` holds finalized OP labels (pass-qualified), which are keyed
+    # differently from the final LAYER labels in ``_final_to_raw_layer_labels`` --
+    # map them back to raw labels through the ops themselves.
+    op_label_to_raw = {op.label: op._label_raw for op in trace.ops}
 
     for op in trace.ops:
         raw_label = op._label_raw
@@ -77,7 +81,11 @@ def _neutral_graph_from_torch_recurrent_fixture(trace: Any) -> RecurrenceGroupin
             label=raw_label,
             raw_order=op.raw_index,
             equivalence_key=op.equivalence_class,
-            equivalent_labels=tuple(op.equivalent_ops),
+            equivalent_labels=tuple(
+                op_label_to_raw[equiv_label]
+                for equiv_label in op.equivalent_ops
+                if equiv_label in op_label_to_raw
+            ),
             data_parents=tuple(
                 _raw_label(trace, parent)
                 for parent in op.parents
