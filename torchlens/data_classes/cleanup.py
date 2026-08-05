@@ -364,6 +364,8 @@ def _scrub_layer_log_conditional_fields(self: "Trace", labels_to_remove_no_pass:
         labels_to_remove_no_pass: Pass-stripped labels that were removed.
     """
     for layer_log in getattr(self, "layer_logs", {}).values():
+        if "conditional_entry_children" not in getattr(layer_log, "__dict__", {}):
+            continue
         layer_log.conditional_entry_children = [
             child_label
             for child_label in layer_log.conditional_entry_children
@@ -459,13 +461,41 @@ def _scrub_intervention_fields_after_removal(
         for record in getattr(self, "state_history", [])
         if not _record_mentions_removed_label(record, labels_to_remove)
     ]
+    _scrub_intervention_spec_after_removal(self, labels_to_remove)
+
+
+def _scrub_intervention_spec_after_removal(self: Any, labels_to_remove: Set[str]) -> None:
+    """Remove deleted-label entries from mutable intervention-spec collections.
+
+    Parameters
+    ----------
+    self:
+        Trace-like owner of the mutable intervention spec.
+    labels_to_remove:
+        Removed labels in the active label namespace.
+    """
+
     intervention_spec = getattr(self, "_intervention_spec", None)
-    if intervention_spec is not None:
-        intervention_spec.records = [
+    if intervention_spec is None:
+        return
+
+    spec_mutated = False
+    for spec_field in fields(intervention_spec):
+        field_value = getattr(intervention_spec, spec_field.name)
+        if not isinstance(field_value, list):
+            continue
+        filtered_value = [
             record
-            for record in getattr(intervention_spec, "records", [])
+            for record in field_value
             if not _record_mentions_removed_label(record, labels_to_remove)
         ]
+        if len(filtered_value) == len(field_value):
+            continue
+        setattr(intervention_spec, spec_field.name, filtered_value)
+        spec_mutated = True
+
+    if spec_mutated and hasattr(self, "_mark_intervention_spec_mutated"):
+        self._mark_intervention_spec_mutated()
 
 
 def _replace_removed_parent_refs(value: Any, labels_to_remove: Set[str]) -> Any:
@@ -513,6 +543,10 @@ def _record_mentions_removed_label(record: Any, labels_to_remove: Set[str]) -> b
     label_fields = {"parent_label", "child_label", "target_label", "call_label", "site_label"}
     if isinstance(record, str):
         return record in labels_to_remove
+    selector_kind = getattr(record, "selector_kind", None)
+    selector_value = getattr(record, "selector_value", None)
+    if selector_kind == "label" and isinstance(selector_value, str):
+        return selector_value in labels_to_remove
     if isinstance(record, (list, tuple)):
         return any(_record_mentions_removed_label(item, labels_to_remove) for item in record)
     if isinstance(record, dict):

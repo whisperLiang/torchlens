@@ -90,6 +90,26 @@ class _TinyModel(nn.Module):
         return torch.relu(x + 1)
 
 
+class _ReluThenAdd(nn.Module):
+    """Small model with a stable single-pass ``relu`` layer label."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run a relu followed by an add.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            ReLU out plus one.
+        """
+
+        return torch.relu(x) + 1
+
+
 def _make_conditional_event(bool_layers: List[str]) -> ConditionalEvent:
     """Build a small ``ConditionalEvent`` fixture.
 
@@ -300,6 +320,17 @@ def test_conditional_cleanup_scrubs_removed_labels() -> None:
     assert parent_layer.conditional_else_children == []
     assert parent_layer.conditional_arm_children == {0: {"then": ["kept_child"]}}
     assert parent_layer.conditional_branch_stack_ops == {((0, "then"),): [1, 2]}
+
+
+def test_batch_remove_log_entries_accepts_finished_layer_objects() -> None:
+    """Batch removal scrubs before clearing a finished trace's aggregate layer."""
+
+    trace = tl.trace(_ReluThenAdd(), torch.tensor([-1.0, 2.0]))
+    relu_layer = trace["relu_1_1"]
+
+    trace._batch_remove_log_entries([relu_layer], remove_references=True)
+
+    assert not hasattr(relu_layer, "conditional_entry_children")
 
 
 def test_to_pandas_exports_conditional_columns() -> None:

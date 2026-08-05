@@ -8,9 +8,11 @@ import pytest
 import torch
 
 import torchlens as tl
+from torchlens.data_classes.cleanup import _scrub_intervention_fields_after_removal
 from torchlens.io import TraceState
 from torchlens.intervention.errors import SpecMutationError
 from torchlens.intervention.handles import HookHandle
+from torchlens.intervention.types import FireRecord, TargetSpec
 from torchlens.options import CaptureOptions
 
 
@@ -68,6 +70,26 @@ def _capture() -> Any:
         torch.randn(2, 3),
         capture=CaptureOptions(intervention_ready=True),
     )
+
+
+def _first_internal_label(log: Any) -> str:
+    """Return the first non-input/non-output/non-buffer layer label.
+
+    Parameters
+    ----------
+    log:
+        Trace-like object with ``layer_list`` entries.
+
+    Returns
+    -------
+    str
+        First internal layer label.
+    """
+
+    for layer in log.layer_list:
+        if not (layer.is_input or layer.is_output or layer.is_buffer):
+            return layer.layer_label
+    raise AssertionError("expected at least one internal layer")
 
 
 def test_set_tensor_marks_spec_stale_and_returns_self() -> None:
@@ -203,6 +225,58 @@ def test_intervention_spec_cached_property_invalidates_after_mutators() -> None:
     after_do = log.intervention_spec
     assert after_do is not after_clear
     assert len(after_do.target_value_specs) == 2
+
+
+def test_cleanup_scrubs_all_label_bearing_intervention_spec_fields() -> None:
+    """Cleanup removes deleted-label entries from every list-backed spec field."""
+
+    log = _capture()
+    target = _first_internal_label(log)
+    log.set(target, torch.zeros_like(log[target].out), confirm_mutation=True)
+    log.attach_hooks(tl.label(target), _identity_hook, confirm_mutation=True)
+    log._intervention_spec.targets.append(TargetSpec("label", target))
+    log._intervention_spec.records.append(
+        FireRecord(target_label=target, site_label=target, call_label=log[target].label)
+    )
+    log.state_history.append({"op": "manual", "site": target})
+
+    _scrub_intervention_fields_after_removal(
+        log,
+        {target},
+        [layer for layer in log.layer_list if layer.layer_label != target],
+    )
+
+    assert log._intervention_spec.targets == []
+    assert log._intervention_spec.target_value_specs == []
+    assert log._intervention_spec.hook_specs == []
+    assert log._intervention_spec.records == []
+    assert all(
+        record.get("site") != target for record in log.state_history if isinstance(record, dict)
+    )
+
+
+def test_cleanup_invalidates_cached_intervention_spec_snapshot() -> None:
+    """Cleanup refreshes the cached frozen intervention-spec view after spec mutation."""
+
+    log = _capture()
+    target = _first_internal_label(log)
+    log._intervention_spec.records.append(
+        FireRecord(target_label=target, site_label=target, call_label=log[target].label)
+    )
+
+    frozen_before = log.intervention_spec
+    assert len(frozen_before.records) == 1
+
+    _scrub_intervention_fields_after_removal(
+        log,
+        {target},
+        [layer for layer in log.layer_list if layer.layer_label != target],
+    )
+
+    frozen_after = log.intervention_spec
+    assert frozen_after is not frozen_before
+    assert len(log._intervention_spec.records) == 0
+    assert frozen_after.records == ()
 
 
 def test_detach_hooks_no_site_is_noop_unless_strict() -> None:
