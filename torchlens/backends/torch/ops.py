@@ -1876,6 +1876,7 @@ def _unattributed_tensor_arg_positions(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
     func_name: str,
+    parent_arg_positions: dict[str, dict[Any, str]],
 ) -> tuple[str, ...]:
     """Find tensor arguments that will not become graph parents or known sources.
 
@@ -1889,6 +1890,8 @@ def _unattributed_tensor_arg_positions(
         Keyword function arguments.
     func_name:
         Wrapped callable name used to identify receiver mutations.
+    parent_arg_positions:
+        Recorded parent-edge locations for the current call.
 
     Returns
     -------
@@ -1904,6 +1907,48 @@ def _unattributed_tensor_arg_positions(
     )
     capture_events = getattr(trace, "capture_events", None)
     live_events = capture_events.live_index.by_raw_label if capture_events is not None else {}
+    recorded_parent_labels = {
+        *parent_arg_positions["args"].values(),
+        *parent_arg_positions["kwargs"].values(),
+    }
+
+    def tensor_session_parent_labels(value: torch.Tensor) -> tuple[str, ...]:
+        """Return current-session non-parameter provenance labels for ``value``.
+
+        Parameters
+        ----------
+        value:
+            Tensor argument to inspect.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Live current-session op or buffer-source labels that should appear
+            in ``parents`` when the tensor is consumed as an input edge.
+        """
+
+        if isinstance(value, torch.nn.Parameter):
+            return ()
+        meta = get_tensor_meta(value)
+        if meta is None:
+            return ()
+        labels: list[str] = []
+        label_anchored = session_meta_is_anchored(meta)
+        label_storage_intact = label_anchored and session_label_storage_intact(meta, value)
+        if (
+            label_storage_intact
+            and isinstance(meta.label_raw, str)
+            and meta.label_raw in live_events
+        ):
+            labels.append(meta.label_raw)
+        if (
+            label_storage_intact
+            and isinstance(meta.buffer_source, str)
+            and meta.buffer_source in live_events
+            and meta.buffer_source not in labels
+        ):
+            labels.append(meta.buffer_source)
+        return tuple(labels)
 
     def has_input_rooted_tensor(value: Any) -> bool:
         """Return whether ``value`` contains a tensor derived from a model input."""
@@ -1941,6 +1986,10 @@ def _unattributed_tensor_arg_positions(
             # represented, while the independent data-alias witness ceilings replay.
             unsafe_data_alias_receiver = path == "arg0" and unsafe_receiver_with_graph_rhs
             if unsafe_data_alias_receiver or not _tensor_has_known_provenance(trace, value):
+                positions.append(path)
+                return
+            provenance_labels = tensor_session_parent_labels(value)
+            if provenance_labels and recorded_parent_labels.isdisjoint(provenance_labels):
                 positions.append(path)
             return
         if isinstance(value, (list, tuple)):
@@ -3399,6 +3448,7 @@ def _build_shared_fields_dict(
         args,
         kwargs,
         func_name,
+        fields_dict["parent_arg_positions"],
     )
 
     # Function config — lightweight hyperparameter extraction, always on.
