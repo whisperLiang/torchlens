@@ -217,7 +217,9 @@ class CollapseScheduleStep:
     visible_count:
         Renderer-faithful visible-node count for ``plan``.
     collapsed_addresses:
-        Module addresses that remain collapsed at this and all later steps.
+        Hidden-unit witnesses that remain collapsed at this and all later
+        steps: module addresses for boxes, run folds, and child segments,
+        plus pass-qualified op labels for ops hidden by operation segments.
     plan:
         Renderer-faithful collapse plan for this step.
     """
@@ -252,7 +254,10 @@ class CollapseSchedule:
         Returns
         -------
         CollapseScheduleStep
-            The deterministic schedule step selected for ``t``.
+            The deterministic schedule step selected for ``t``. ``t == 0.0``
+            always selects the first, fully expanded step, matching the
+            public contract that ``0.0`` preserves the full graph even when
+            later steps share ``t == 0.0`` after rounding.
 
         Raises
         ------
@@ -262,6 +267,8 @@ class CollapseSchedule:
 
         if not 0.0 <= t <= 1.0:
             raise ValueError("collapse float level must be in [0.0, 1.0].")
+        if t == 0.0:
+            return self.steps[0]
         for step in reversed(self.steps):
             if t >= step.t:
                 return step
