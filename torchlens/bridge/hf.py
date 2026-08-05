@@ -14,6 +14,61 @@ from torchlens.data_classes.trace import ResolvedPreprocessing, Trace
 _MODALITY_KEYS = frozenset({"text", "image", "images", "audio", "videos"})
 
 
+def _is_hf_chat_message(item: Any) -> bool:
+    """Return whether ``item`` is a plausible Hugging Face chat-message dict.
+
+    A conservative shape check: a chat message must be a dict whose ``role`` is a
+    string and whose ``content`` is a string or a list (the two shapes real chat
+    templates accept). Presence of the keys alone is not sufficient -- values
+    such as ``None`` or arbitrary objects must decline the text auto-route.
+
+    Parameters
+    ----------
+    item:
+        Candidate chat-message record.
+
+    Returns
+    -------
+    bool
+        True only for a dict with a string ``role`` and a str/list ``content``.
+    """
+
+    return (
+        isinstance(item, dict)
+        and isinstance(item.get("role"), str)
+        and isinstance(item.get("content"), (str, list))
+    )
+
+
+def _is_plausible_media_value(value: Any) -> bool:
+    """Return whether ``value`` is a plausible audio/video modality payload.
+
+    Conservative acceptance so ``None`` and arbitrary objects decline the
+    multimodal auto-route. Accepts tensors, raw bytes, non-empty sequences (raw
+    waveforms, frame lists), and array-like objects (e.g. NumPy arrays exposing
+    ``__array__``); everything else -- ``None``, bare objects, empty containers,
+    scalars -- is rejected.
+
+    Parameters
+    ----------
+    value:
+        Candidate value for an ``audio`` or ``videos`` modality key.
+
+    Returns
+    -------
+    bool
+        True only for a plausibly media-bearing value.
+    """
+
+    if isinstance(value, torch.Tensor):
+        return True
+    if isinstance(value, (bytes, bytearray)):
+        return True
+    if isinstance(value, (list, tuple)):
+        return bool(value)
+    return hasattr(value, "__array__")
+
+
 def _is_hf_text_input(value: Any) -> bool:
     """Return whether ``value`` is a supported Hugging Face text payload.
 
@@ -26,7 +81,8 @@ def _is_hf_text_input(value: Any) -> bool:
     -------
     bool
         True for a string, a non-empty list of strings, or a non-empty
-        chat-message list with ``role`` and ``content`` keys.
+        chat-message list whose entries have a string ``role`` and str/list
+        ``content``.
     """
 
     if isinstance(value, str):
@@ -36,9 +92,7 @@ def _is_hf_text_input(value: Any) -> bool:
         if isinstance(first, str):
             return all(isinstance(item, str) for item in value)
         if isinstance(first, dict):
-            return all(
-                isinstance(item, dict) and "role" in item and "content" in item for item in value
-            )
+            return all(_is_hf_chat_message(item) for item in value)
     return False
 
 
@@ -128,7 +182,7 @@ def _is_hf_multimodal_input(value: Any) -> bool:
                 return True
         if key == "text" and isinstance(item, str):
             return True
-        if key in {"audio", "videos"}:
+        if key in {"audio", "videos"} and _is_plausible_media_value(item):
             return True
     return False
 
@@ -154,7 +208,11 @@ def _can_resolve_hf_processor(model: Any) -> bool:
     try:
         from transformers import AutoProcessor
 
-        AutoProcessor.from_pretrained(name_or_path)
+        # Detection must never trigger live Hub network I/O (a plain offline
+        # trace would otherwise block through a multi-retry download loop inside
+        # routing). Probe the local cache only; an uncached model simply declines
+        # the auto-route, matching compat's offline-first stance.
+        AutoProcessor.from_pretrained(name_or_path, local_files_only=True)
     except Exception:
         return False
     return True
@@ -218,8 +276,9 @@ def trace_text(
 
     import torchlens as tl
 
+    tokenizer_was_explicit = tokenizer is not None
     tok = tokenizer or _resolve_tokenizer(model)
-    transform = _make_text_transform(tok, chat_template=chat_template)
+    transform, transform_state = _make_text_transform(tok, chat_template=chat_template)
     kwargs.setdefault("output_style", "hf_text")
     had_tokenizer = hasattr(model, "_torchlens_output_tokenizer")
     previous_tokenizer = getattr(model, "_torchlens_output_tokenizer", None)
@@ -231,7 +290,12 @@ def trace_text(
             model._torchlens_output_tokenizer = previous_tokenizer
         else:
             delattr(model, "_torchlens_output_tokenizer")
-    log.input_preprocessor = _tokenizer_preprocessing_record(tok, model)
+    log.input_preprocessor = _tokenizer_preprocessing_record(
+        tok,
+        model,
+        explicit=tokenizer_was_explicit,
+        padding=bool(transform_state["padding"]),
+    )
     return log
 
 
@@ -354,7 +418,9 @@ def _resolve_tokenizer(model: Any) -> Any:
     return AutoTokenizer.from_pretrained(name_or_path)
 
 
-def _make_text_transform(tokenizer: Any, *, chat_template: bool = False) -> Callable[[Any], Any]:
+def _make_text_transform(
+    tokenizer: Any, *, chat_template: bool = False
+) -> tuple[Callable[[Any], Any], dict[str, Any]]:
     """Build a tokenizer transform for ``torchlens.trace``.
 
     Parameters
@@ -367,9 +433,14 @@ def _make_text_transform(tokenizer: Any, *, chat_template: bool = False) -> Call
 
     Returns
     -------
-    Callable[[Any], Any]
-        Transform that maps raw text inputs to model-ready tokenized inputs.
+    tuple[Callable[[Any], Any], dict[str, Any]]
+        The transform that maps raw text inputs to model-ready tokenized inputs,
+        and a mutable ``state`` dict the transform updates with the ``padding``
+        actually applied (``True`` normally, ``False`` on the no-pad-token
+        fallback) so provenance can be reported honestly.
     """
+
+    state: dict[str, Any] = {"padding": True}
 
     def transform(text: Any) -> Any:
         """Tokenize one raw text payload.
@@ -389,13 +460,16 @@ def _make_text_transform(tokenizer: Any, *, chat_template: bool = False) -> Call
         if chat_template and isinstance(text, list) and text and isinstance(text[0], dict):
             text = tokenizer.apply_chat_template(text, tokenize=False, add_generation_prompt=True)
         try:
-            return tokenizer(text, return_tensors="pt", padding=True)
+            result = tokenizer(text, return_tensors="pt", padding=True)
+            state["padding"] = True
+            return result
         except ValueError as exc:
             if isinstance(original_text, str) and "padding token" in str(exc):
+                state["padding"] = False
                 return tokenizer(text, return_tensors="pt", padding=False)
             raise
 
-    return transform
+    return transform, state
 
 
 def _model_name_or_path(model: Any) -> str | None:
@@ -420,7 +494,9 @@ def _model_name_or_path(model: Any) -> str | None:
     return None
 
 
-def _tokenizer_preprocessing_record(tokenizer: Any, model: Any) -> ResolvedPreprocessing:
+def _tokenizer_preprocessing_record(
+    tokenizer: Any, model: Any, *, explicit: bool = False, padding: bool = True
+) -> ResolvedPreprocessing:
     """Build a preprocessing provenance record for a tokenizer.
 
     Parameters
@@ -429,24 +505,37 @@ def _tokenizer_preprocessing_record(tokenizer: Any, model: Any) -> ResolvedPrepr
         Hugging Face tokenizer-like object.
     model:
         Model used to resolve fallback identifier metadata.
+    explicit:
+        Whether the tokenizer was supplied explicitly by the caller rather than
+        auto-resolved from the model's own metadata.
+    padding:
+        The padding actually applied by the transform (``False`` when the
+        no-pad-token fallback fired).
 
     Returns
     -------
     ResolvedPreprocessing
-        Structured tokenizer provenance.
+        Structured tokenizer provenance. ``verified`` is True only when the
+        tokenizer was auto-resolved from model metadata AND an identifier was
+        actually recovered; ``config['padding']`` reflects the padding used.
     """
 
-    identifier = getattr(tokenizer, "name_or_path", None) or _model_name_or_path(model) or "unknown"
+    resolved = getattr(tokenizer, "name_or_path", None) or _model_name_or_path(model)
+    identifier = resolved or "unknown"
+    # ``verified`` means the preprocessing came from model-specific metadata: it
+    # cannot be true for an explicit user tokenizer or when no identifier could
+    # be resolved at all.
+    verified = (not explicit) and resolved is not None
     config = {
         "tokenizer_name": identifier,
         "model_max_length": getattr(tokenizer, "model_max_length", None),
-        "padding": True,
+        "padding": padding,
         "truncation": False,
     }
     return ResolvedPreprocessing(
         source="hf_auto_tokenizer",
         identifier=str(identifier),
-        verified=True,
+        verified=verified,
         config=config,
         description=f"AutoTokenizer: {identifier}",
     )
@@ -500,6 +589,9 @@ def _try_hf_image_processor(
         """
 
         return processor(images=image, return_tensors="pt")
+
+    # HF image processors batch a list of images internally in a single call.
+    transform._tl_batch_input = True  # type: ignore[attr-defined]
 
     return (
         transform,
@@ -690,11 +782,21 @@ def _make_image_transform(transform: Callable[[Any], Any]) -> Callable[[Any], An
         """
 
         if isinstance(image, list):
-            transformed_items = [transform(item) for item in image]
-            if transformed_items and all(
-                isinstance(item, torch.Tensor) for item in transformed_items
-            ):
-                return torch.stack(cast(list[torch.Tensor], transformed_items), dim=0)
+            if not image:
+                return transform(image)
+            # Batch-native processors (HF image processors) accept the whole list
+            # in one call and return a mapping; invoke them exactly once.
+            if getattr(transform, "_tl_batch_input", False):
+                return transform(image)
+            # Otherwise discriminate with a SINGLE probe on the first item rather
+            # than transforming every item speculatively and discarding the
+            # results. A tensor result means a per-item transform (reuse the probe
+            # and transform the rest); a non-tensor result means a batch-native
+            # processor, so call it once on the whole list.
+            first = transform(image[0])
+            if isinstance(first, torch.Tensor):
+                rest = [transform(item) for item in image[1:]]
+                return torch.stack(cast(list[torch.Tensor], [first, *rest]), dim=0)
             return transform(image)
         transformed = transform(image)
         if isinstance(transformed, torch.Tensor) and transformed.ndim == 3:
