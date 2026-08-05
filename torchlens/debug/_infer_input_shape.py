@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 import re
 from collections.abc import Sequence
@@ -1396,7 +1397,7 @@ def _failure_result(
         constraining_op=None,
         source_line=None,
         example_input=None,
-        strategy="probe_success",
+        strategy="none",
         reason=reason,
         attempts=tuple(attempts),
         trace=None,
@@ -1419,7 +1420,7 @@ def _maybe_raise(result: InferInputShapeResult, on_failure: Literal["return", "r
         raise ShapeInferenceError(result.message)
 
 
-def infer_input_shape(
+def _infer_input_shape_impl(
     model: nn.Module,
     *,
     batch_size: int = 1,
@@ -1747,3 +1748,31 @@ def infer_input_shape(
     )
     _maybe_raise(result, on_failure)
     return result
+
+
+@functools.wraps(_infer_input_shape_impl)
+def infer_input_shape(model: nn.Module, **kwargs: Any) -> InferInputShapeResult:
+    """Infer a synthetic input shape while leaving the caller's global RNG untouched.
+
+    ``infer_input_shape`` synthesizes probe tensors (``torch.rand``/``randn``/
+    ``randint``) and seeds the probe with ``torch.manual_seed(seed)``. Both mutate
+    the process-global torch RNG, so a bare call permanently advanced the caller's
+    RNG stream. Snapshot the CPU (and CUDA) RNG state on entry and restore it on
+    exit so this diagnostic is RNG-neutral. All keyword-only arguments and the full
+    signature/docstring of :func:`_infer_input_shape_impl` are preserved via
+    :func:`functools.wraps`.
+    """
+
+    cpu_rng_state = torch.get_rng_state()
+    cuda_rng_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    try:
+        return _infer_input_shape_impl(model, **kwargs)
+    finally:
+        torch.set_rng_state(cpu_rng_state)
+        if cuda_rng_state is not None:
+            torch.cuda.set_rng_state_all(cuda_rng_state)
+
+
+# Preserve the honest public identity that ``functools.wraps`` copies from the impl.
+infer_input_shape.__name__ = "infer_input_shape"
+infer_input_shape.__qualname__ = "infer_input_shape"

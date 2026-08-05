@@ -263,3 +263,58 @@ def test_graph_breaks_does_not_mutate_stateful_model() -> None:
     # (the odd/IF branch: add then mul), not the else branch (relu/sub).
     matched = {label for graph_break in report.breaks for label in graph_break.matched_op_labels}
     assert not any(label.startswith(("relu", "sub")) for label in matched)
+
+
+# ---------------------------------------------------------------------------
+# M4 / M5 -- infer_input_shape is RNG-neutral and labels failures honestly
+# ---------------------------------------------------------------------------
+
+
+def test_infer_input_shape_preserves_global_rng() -> None:
+    """infer_input_shape does not advance the caller's global RNG (M4).
+
+    The model is constructed BEFORE seeding so only infer_input_shape's own RNG
+    use is measured (a synthesized probe tensor + torch.manual_seed(seed)).
+
+    MUTATION PROOF: dropping the wrapper's torch.set_rng_state restore leaves the
+    RNG advanced by the probe and this equality fails.
+    """
+
+    model = nn.Linear(4, 4)  # constructed first: its weight init is not under test
+
+    torch.manual_seed(0)
+    before = torch.randn(3).tolist()
+
+    torch.manual_seed(0)
+    result = tl.debug.infer_input_shape(model, seed=1234)
+    after = torch.randn(3).tolist()
+
+    assert result.found  # inference still works
+    assert before == after  # global RNG stream untouched by the diagnostic
+
+
+def test_infer_input_shape_failed_result_strategy_is_not_probe_success() -> None:
+    """A failed inference must not claim ``strategy='probe_success'`` (M5)."""
+
+    class _DictModel(nn.Module):
+        def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+            """Return a value from a dict input the inferrer cannot synthesize.
+
+            Parameters
+            ----------
+            x:
+                Mapping input.
+
+            Returns
+            -------
+            torch.Tensor
+                The ``tokens`` entry.
+            """
+
+            return x["tokens"]
+
+    result = tl.debug.infer_input_shape(_DictModel())
+
+    assert result.found is False
+    assert result.strategy != "probe_success"
+    assert result.strategy == "none"
