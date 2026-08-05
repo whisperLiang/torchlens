@@ -475,6 +475,19 @@ def check_spec_compat(spec: InterventionSpec, new_log: Any) -> SpecCompat:
     else:
         outcome = "FAIL"
 
+    # A graph_shape_hash mismatch alone cannot distinguish a genuinely different
+    # target graph from mere cross-version hash drift on the SAME graph (an older
+    # torchlens computes a different hash for identical topology; the v2.16 backcompat
+    # fixtures encode exactly this and resolve to identical labels). Refusing at
+    # compat-preview time on any mismatch would break every cross-version executable
+    # spec reuse. ``COMPATIBLE_WITH_CONFIRMATION`` is the honest preview verdict here --
+    # it flags the shape difference and defers to explicit confirmation. The genuine
+    # "wrong graph" tripwire lives at REPLAY time (see torchlens/intervention/replay.py
+    # _warn_if_unexpected_parent / _check_edge_expectations), which compares actual
+    # parent/edge topology and raises ControlFlowDivergenceError under strict replay --
+    # a version-stable structural check, not a coarse hash string. The narrow existing
+    # refusal below stays: an executable spec whose targets cannot even resolve on a
+    # mismatched graph is a hard GraphShapeMismatchError.
     if outcome == "FAIL" and bool(spec.metadata.get("executable", False)) and not graph_matches:
         raise GraphShapeMismatchError(
             "Saved spec's graph_shape_hash doesn't match target log; refusing to apply at "
@@ -868,6 +881,20 @@ def _serialize_hook_spec(
         JSON-safe payload.
     """
 
+    if hook_spec.metadata.get("facet_write") and save_level is not SaveLevel.AUDIT:
+        # A facet-slice hook fires through a capture-bound scatter wrapper that closes
+        # over the resolved FacetSpec; only the raw helper would survive serialization,
+        # and a loaded spec would then apply that helper to the WHOLE home tensor
+        # instead of the selected facet slice. Refuse rather than persist a spec whose
+        # replay semantics silently differ from what was attached.
+        facet_name = hook_spec.metadata.get("facet_name", "<unknown>")
+        raise OpaqueCallableInExecutableSaveError(
+            f"Cannot save a facet-slice hook (facet {facet_name!r}) at "
+            f"save_level={save_level.value!r}: the slice-scatter wrapper is bound to the "
+            "captured trace and cannot round-trip through a spec file. Save at "
+            "level='audit' for inspection, or re-attach the facet intervention on the "
+            "loaded trace."
+        )
     helper = hook_spec.helper if hook_spec.helper is not None else None
     hook_value = helper if helper is not None else hook_spec.hook
     return {

@@ -17,6 +17,7 @@ from .errors import (
     HookSignatureError,
     HookSiteCoverageError,
     LiveModeLabelError,
+    ReplayPreconditionError,
     SiteResolutionError,
 )
 from .selectors import (
@@ -653,6 +654,34 @@ def _normalize_sticky_hook_specs(hook_specs: Sequence[HookSpec]) -> list[Normali
 
     entries: list[NormalizedHookEntry] = []
     for hook_spec in hook_specs:
+        if hook_spec.metadata.get("facet_write"):
+            # Facet-slice hooks fire through the scatter wrapper built at attach time
+            # (_facet_scatter_hook); it closes over the resolved FacetSpec and CANNOT
+            # be rebuilt from the raw helper. Rebuilding from the helper here (the
+            # generic path below) would silently apply the helper to the WHOLE home
+            # tensor -- e.g. tl.head(0, "q") + tl.zero_ablate() zeroing every head.
+            # Fail closed when the wrapper is absent (e.g. a spec loaded from disk).
+            stored_hook = hook_spec.hook
+            if not getattr(stored_hook, "_tl_facet_scatter", False):
+                facet_name = hook_spec.metadata.get("facet_name", "<unknown>")
+                home_label = hook_spec.metadata.get("facet_home_label", "<unknown>")
+                raise ReplayPreconditionError(
+                    "Sticky facet-slice hook lost its scatter wrapper: the stored hook "
+                    f"for facet {facet_name!r} on home {home_label!r} is not the live "
+                    "facet scatter wrapper, so firing it would write the whole home "
+                    "tensor instead of the selected facet slice. Facet hooks cannot be "
+                    "rebuilt from a serialized helper; re-attach the facet intervention "
+                    "on a live trace (e.g. trace.attach_hooks(tl.head(...), helper))."
+                )
+            entries.append(
+                NormalizedHookEntry(
+                    site_target=hook_spec.site_target,
+                    normalized_callable=cast(HookCallable, stored_hook),
+                    helper_spec=hook_spec.helper,
+                    metadata=MappingProxyType(dict(hook_spec.metadata)),
+                )
+            )
+            continue
         hook_like = hook_spec.helper if hook_spec.helper is not None else hook_spec.hook
         metadata_direction = hook_spec.metadata.get("direction")
         requested_direction = (
@@ -1334,6 +1363,10 @@ def _facet_scatter_hook(
         return spec.scatter_update(out, checked_slice, mode="replace")
 
     _hook.__name__ = f"facet_{facet_name}_scatter_hook"
+    # Marker consumed by _normalize_sticky_hook_specs: a facet_write hook spec whose
+    # stored hook lacks this marker has LOST the slice-scatter wrapper and would write
+    # the whole home tensor, so replay must refuse instead of firing it.
+    _hook._tl_facet_scatter = True  # type: ignore[attr-defined]
     return _hook
 
 
