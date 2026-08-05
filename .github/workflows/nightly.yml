@@ -107,7 +107,12 @@ jobs:
 
       - name: Run fast tests
         run: |
-          pytest tests/ -m "not slow" --tb=short
+          # A command-line -m REPLACES (does not intersect) the pyproject
+          # addopts "-m 'not rare'", so a bare -m "not slow" would silently
+          # re-select rare-but-not-slow tests that the `rare` marker documents as
+          # "always excluded unless explicitly requested". Conjoin `not rare` to
+          # preserve that contract.
+          pytest tests/ -m "not slow and not rare" --tb=short
 
   preview-backends:
     name: Preview backend tests
