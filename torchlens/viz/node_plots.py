@@ -88,7 +88,8 @@ def render_heatmap(
     Raises
     ------
     ValueError
-        If inputs have invalid shape, size, cap, or colormap.
+        If inputs have invalid shape, size, cap, or colormap, or if explicit
+        ``vmin``/``vmax`` bounds are non-finite or reversed (``vmax < vmin``).
     """
 
     _validate_size(width, height)
@@ -229,12 +230,19 @@ def render_lineplot(
         if xs.ndim != 1 or xs.shape[0] != n_points:
             raise ValueError("x_values must have shape [K].")
 
-    finite_y = values[np.isfinite(values)]
-    finite_x = xs[np.isfinite(xs)]
-    if finite_y.size == 0 or finite_x.size == 0:
-        raise ValueError("render_lineplot requires at least one finite point.")
-    low_y = float(np.min(finite_y)) if y_min is None else float(y_min)
-    high_y = float(np.max(finite_y)) if y_max is None else float(y_max)
+    # A point is drawable only when BOTH its x and y are finite. Checking the
+    # two axes independently accepted inputs with finite y's and finite x's at
+    # DISJOINT indices -- zero drawable pairs -- and then rendered a blank plot.
+    finite_x_mask = np.isfinite(xs)
+    finite_x = xs[finite_x_mask]
+    finite_pairs = np.isfinite(values) & finite_x_mask[np.newaxis, :]
+    if not np.any(finite_pairs):
+        raise ValueError("render_lineplot requires at least one finite (x, y) point.")
+    # The auto y-range must reflect only points that will actually be drawn, so
+    # a y-value sitting at a non-finite x column does not stretch the axis.
+    plotted_y = values[finite_pairs]
+    low_y = float(np.min(plotted_y)) if y_min is None else float(y_min)
+    high_y = float(np.max(plotted_y)) if y_max is None else float(y_max)
     if not np.isfinite(low_y) or not np.isfinite(high_y):
         raise ValueError("y_min and y_max must be finite when provided.")
     if high_y < low_y:
@@ -482,7 +490,9 @@ def _normalize_finite(array: np.ndarray, vmin: float | None, vmax: float | None)
     Raises
     ------
     ValueError
-        If explicit bounds are not finite or are reversed.
+        If explicit bounds are not finite, or are reversed (``vmax < vmin``).
+        Degenerate equal explicit bounds (``vmax == vmin``) are not an error and
+        yield an all-zero (uniform) array, matching an empty value range.
     """
 
     finite = np.isfinite(array)
@@ -493,7 +503,13 @@ def _normalize_finite(array: np.ndarray, vmin: float | None, vmax: float | None)
     high = float(np.max(array[finite])) if vmax is None else float(vmax)
     if not np.isfinite(low) or not np.isfinite(high):
         raise ValueError("vmin and vmax must be finite when provided.")
-    if high <= low:
+    # Reversed explicit bounds are a caller error and were silently swallowed
+    # here (returning a uniform array), contradicting this function's documented
+    # contract. Surface it. Data-derived bounds (vmin/vmax=None) are always
+    # ordered, so this can only trip on explicit reversed vmin/vmax.
+    if high < low:
+        raise ValueError("vmax must be greater than or equal to vmin.")
+    if high == low:
         return normalized
     normalized[finite] = np.clip((array[finite] - low) / (high - low), 0.0, 1.0)
     return normalized
@@ -1218,6 +1234,12 @@ def _lineplot_point(
     y_frac = (y_value - low_y) / (high_y - low_y)
     x = plot_left + x_frac * (plot_right - plot_left)
     y = plot_bottom - y_frac * (plot_bottom - plot_top)
+    # Clamp to the plot rectangle. Values outside the (possibly caller-set)
+    # y_min/y_max or x range would otherwise be drawn on top of the axes,
+    # labels, and title. The rectangle is convex, so clamping both endpoints
+    # keeps every drawn segment inside the plot area.
+    x = min(max(x, float(plot_left)), float(plot_right))
+    y = min(max(y, float(plot_top)), float(plot_bottom))
     return x, y
 
 

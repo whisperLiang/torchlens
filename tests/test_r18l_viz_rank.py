@@ -16,11 +16,18 @@ Covers:
 - F12  ``render_lineplot`` drew out-of-range points over the chart furniture.
 """
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 
 import torchlens as tl
+from torchlens.viz.node_plots import (
+    _lineplot_point,
+    _normalize_finite,
+    render_heatmap,
+    render_lineplot,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -46,3 +53,85 @@ def test_h10_caption_no_direct_writes_still_closes_font(tmp_path):
     src = trace.draw(vis_save_only=True, vis_fileformat="svg", vis_outpath=out)
     assert "</FONT>" in src
     assert "Direct writes detected" not in src
+
+
+# ---------------------------------------------------------------------------
+# M9 — _normalize_finite raises on reversed bounds (per its documented contract)
+# ---------------------------------------------------------------------------
+def test_m9_reversed_bounds_raise():
+    arr = np.asarray([[0.0, 1.0], [2.0, 3.0]])
+    with pytest.raises(ValueError, match="vmax must be greater than or equal to vmin"):
+        _normalize_finite(arr, 3.0, 0.0)
+    with pytest.raises(ValueError, match="vmax must be greater than or equal to vmin"):
+        render_heatmap(arr, vmin=3.0, vmax=0.0)
+
+
+def test_m9_equal_bounds_still_uniform():
+    arr = np.asarray([[0.0, 1.0], [2.0, 3.0]])
+    out = _normalize_finite(arr, 2.0, 2.0)
+    assert np.all(out == 0.0)
+
+
+def test_m9_ordered_bounds_normalize():
+    arr = np.asarray([[0.0, 1.0], [2.0, 4.0]])
+    out = _normalize_finite(arr, 0.0, 4.0)
+    assert out.max() == pytest.approx(1.0)
+    assert out.min() == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# M8 — render_lineplot requires at least one finite (x, y) PAIR
+# ---------------------------------------------------------------------------
+def test_m8_no_finite_pair_raises():
+    xs = np.asarray([np.nan, 0.0])
+    ys = np.asarray([1.0, np.nan])  # finite y and finite x at disjoint indices
+    with pytest.raises(ValueError, match=r"finite \(x, y\) point"):
+        render_lineplot(ys, x_values=xs)
+
+
+def test_m8_one_finite_pair_ok():
+    xs = np.asarray([0.0, np.nan])
+    ys = np.asarray([1.0, 5.0])  # one drawable pair at index 0
+    img = render_lineplot(ys, x_values=xs)
+    assert img.size[0] > 0 and img.size[1] > 0
+
+
+# ---------------------------------------------------------------------------
+# F12 — out-of-range lineplot points are clamped into the plot rectangle
+# ---------------------------------------------------------------------------
+def test_f12_out_of_range_point_clamped():
+    pt = _lineplot_point(
+        0.0,
+        100.0,  # far above y-axis high of 1.0
+        low_x=0.0,
+        high_x=2.0,
+        low_y=0.0,
+        high_y=1.0,
+        plot_left=10,
+        plot_right=100,
+        plot_top=5,
+        plot_bottom=80,
+    )
+    assert pt is not None
+    x, y = pt
+    assert 10.0 <= x <= 100.0
+    assert 5.0 <= y <= 80.0
+
+
+def test_f12_in_range_point_unchanged():
+    pt = _lineplot_point(
+        1.0,
+        0.5,
+        low_x=0.0,
+        high_x=2.0,
+        low_y=0.0,
+        high_y=1.0,
+        plot_left=10,
+        plot_right=100,
+        plot_top=5,
+        plot_bottom=80,
+    )
+    assert pt is not None
+    x, y = pt
+    assert x == pytest.approx(55.0)
+    assert y == pytest.approx(42.5)
