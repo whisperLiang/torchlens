@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 import weakref
 
 from .events import (
@@ -333,7 +333,12 @@ class LiveOpRecord:
 
 
 def register_live_event(trace: Any, event: OpEvent, live_record: LiveOpRecord) -> None:
-    """Register an event and its live projection on a trace.
+    """Register an emitted operation event on a trace.
+
+    Appends ``event`` to ``trace.capture_events`` (allocating the buffer on
+    first use) and records its grad-fn handle when present. This function has no
+    callers in the tree; the live hot path appends events directly through
+    :meth:`CaptureEvents.append`.
 
     Parameters
     ----------
@@ -342,7 +347,10 @@ def register_live_event(trace: Any, event: OpEvent, live_record: LiveOpRecord) -
     event
         Operation event emitted for the new raw label.
     live_record
-        Mutable live projection for capture-time consumers.
+        Accepted only for historical signature compatibility and intentionally
+        ignored: the mutable live-record projection lane is retired, so no
+        ``LiveOpRecord`` is stored. Dropping this parameter is an owner-reserved
+        signature change.
 
     Returns
     -------
@@ -408,20 +416,28 @@ def replace_op_event(trace: Any, label_raw: str, **updates: Any) -> OpEvent | No
     return updated_event
 
 
-def live_record_for_label(trace: Any, label_raw: str) -> LiveOpRecord:
-    """Return the live capture projection for a raw label.
+def live_record_for_label(trace: Any, label_raw: str) -> NoReturn:
+    """Always raise: the mutable per-label live-record lane is retired.
+
+    Capture no longer materializes a mutable :class:`LiveOpRecord` per raw
+    label; capture-time consumers read the event-backed
+    :class:`~torchlens.ir.live_index.LiveIndex` instead. This function is a
+    retained compatibility stub with no callers in the tree and never returns a
+    record. It is intentionally kept off the mutable-live-record hot path (see
+    ``tests/test_capture_unification_p2.py``); removing it or its
+    ``torchlens.ir`` export is an owner-reserved public-surface change.
 
     Parameters
     ----------
     trace
-        Active trace.
+        Active trace (unused).
     label_raw
-        Raw operation label.
+        Raw operation label included in the raised message.
 
-    Returns
-    -------
-    LiveOpRecord
-        Live projection for ``label_raw``.
+    Raises
+    ------
+    KeyError
+        Always, because no mutable live record exists for any label.
     """
 
     raise KeyError(
