@@ -90,7 +90,6 @@ class BundleStreamWriter:
         self.tmp_path = self.final_path.parent / f"{self.final_path.name}.tmp.{uuid.uuid4().hex}"
         self.blobs_path = self.tmp_path / "blobs"
         self._blob_counter = 0
-        self._saw_first_payload = False
         self._closed = False
         self._finalized = False
         self._tensor_entries: list[TensorEntry] = []
@@ -159,7 +158,6 @@ class BundleStreamWriter:
             self.abort(reason)
             raise TorchLensIOError(reason)
 
-        self._saw_first_payload = True
         decision = is_supported_for_save(tensor, strict=True)
         if not isinstance(decision, Ok):
             if isinstance(decision, (SkipReason, FailReason)):
