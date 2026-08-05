@@ -2237,6 +2237,26 @@ def _trace_torch_model(
             "save_predicate": _predicate_cache_key(save_predicate),
             "intervene": _predicate_cache_key(intervene),
             "halt": _predicate_cache_key(halt),
+            # Capability / payload-policy options that change WHAT is captured or
+            # stored in the returned trace. Omitting any of these let a second
+            # trace() with a different capability silently return an earlier cached
+            # trace built with the wrong capability (e.g. asked intervention_ready=True,
+            # got a cached False). Include them so a capability change misses the cache;
+            # callables are repr-keyed (conservative -- a distinct object misses rather
+            # than risking a false hit), matching how output_transform is keyed above.
+            "intervention_ready": intervention_ready,
+            "save_raw_input": repr(save_raw_input_policy),
+            "save_raw_output": repr(save_raw_output_policy),
+            "save_raw_activations": save_raw_activations,
+            "save_raw_gradients": save_raw_gradients,
+            "activation_transform": repr(activation_transform),
+            "grad_transform": repr(grad_transform),
+            "random_seed": random_seed,
+            "module_filter": repr(module_filter_value),
+            "layer_visualizers": repr(layer_visualizers_value),
+            "save_visualizations": repr(save_visualizations_value),
+            "optimizer": repr(optimizer),
+            "hooks": repr(hooks),
             "lookback": lookback,
             "lookback_payload_policy": lookback_payload_policy,
             "jax_control_flow": capture_options.jax_control_flow,

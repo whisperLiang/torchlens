@@ -79,3 +79,56 @@ def test_cache_with_grad_transform_roundtrips(tmp_path):
         backward_ready=True,
     )
     assert second.capture_cache_hit is True
+
+
+# --------------------------------------------------------------------------- F3
+@pytest.mark.smoke
+def test_cache_key_distinguishes_intervention_ready(tmp_path):
+    """A capability change must MISS the cache -- never silently return a stale trace.
+
+    Fail-before: the cache key omitted intervention_ready, so the second call
+    (intervention_ready=True) returned the earlier cached trace whose
+    intervention_ready was False -- silent wrongness with no warning.
+    """
+    model = _tiny_model()
+    x = torch.randn(2, 4)
+    cache_dir = str(tmp_path / "cache")
+
+    first = tl.trace(model, x, cache=True, cache_dir=cache_dir, intervention_ready=False)
+    assert first.capture_cache_hit is False
+    assert first.intervention_ready is False
+
+    second = tl.trace(model, x, cache=True, cache_dir=cache_dir, intervention_ready=True)
+    # Different capability => must not reuse the intervention_ready=False trace.
+    assert second.capture_cache_hit is False
+    assert second.intervention_ready is True
+
+
+@pytest.mark.smoke
+def test_cache_key_distinguishes_save_raw_input(tmp_path):
+    """Sibling payload-policy option: save_raw_input must also key the cache."""
+    model = _tiny_model()
+    x = torch.randn(2, 4)
+    cache_dir = str(tmp_path / "cache")
+
+    first = tl.trace(model, x, cache=True, cache_dir=cache_dir, save_raw_input=False)
+    assert first.capture_cache_hit is False
+
+    second = tl.trace(model, x, cache=True, cache_dir=cache_dir, save_raw_input=True)
+    assert second.capture_cache_hit is False
+
+
+@pytest.mark.smoke
+def test_cache_hit_preserved_for_identical_capability(tmp_path):
+    """Fix must not break caching: identical options still cache-hit."""
+    model = _tiny_model()
+    x = torch.randn(2, 4)
+    cache_dir = str(tmp_path / "cache")
+
+    first = tl.trace(model, x, cache=True, cache_dir=cache_dir, intervention_ready=True)
+    assert first.capture_cache_hit is False
+    assert first.intervention_ready is True
+
+    second = tl.trace(model, x, cache=True, cache_dir=cache_dir, intervention_ready=True)
+    assert second.capture_cache_hit is True
+    assert second.intervention_ready is True
