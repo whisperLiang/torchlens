@@ -272,8 +272,9 @@ def trace_text(
 
     import torchlens as tl
 
+    tokenizer_was_explicit = tokenizer is not None
     tok = tokenizer or _resolve_tokenizer(model)
-    transform = _make_text_transform(tok, chat_template=chat_template)
+    transform, transform_state = _make_text_transform(tok, chat_template=chat_template)
     kwargs.setdefault("output_style", "hf_text")
     had_tokenizer = hasattr(model, "_torchlens_output_tokenizer")
     previous_tokenizer = getattr(model, "_torchlens_output_tokenizer", None)
@@ -285,7 +286,12 @@ def trace_text(
             model._torchlens_output_tokenizer = previous_tokenizer
         else:
             delattr(model, "_torchlens_output_tokenizer")
-    log.input_preprocessor = _tokenizer_preprocessing_record(tok, model)
+    log.input_preprocessor = _tokenizer_preprocessing_record(
+        tok,
+        model,
+        explicit=tokenizer_was_explicit,
+        padding=bool(transform_state["padding"]),
+    )
     return log
 
 
@@ -408,7 +414,9 @@ def _resolve_tokenizer(model: Any) -> Any:
     return AutoTokenizer.from_pretrained(name_or_path)
 
 
-def _make_text_transform(tokenizer: Any, *, chat_template: bool = False) -> Callable[[Any], Any]:
+def _make_text_transform(
+    tokenizer: Any, *, chat_template: bool = False
+) -> tuple[Callable[[Any], Any], dict[str, Any]]:
     """Build a tokenizer transform for ``torchlens.trace``.
 
     Parameters
@@ -421,9 +429,14 @@ def _make_text_transform(tokenizer: Any, *, chat_template: bool = False) -> Call
 
     Returns
     -------
-    Callable[[Any], Any]
-        Transform that maps raw text inputs to model-ready tokenized inputs.
+    tuple[Callable[[Any], Any], dict[str, Any]]
+        The transform that maps raw text inputs to model-ready tokenized inputs,
+        and a mutable ``state`` dict the transform updates with the ``padding``
+        actually applied (``True`` normally, ``False`` on the no-pad-token
+        fallback) so provenance can be reported honestly.
     """
+
+    state: dict[str, Any] = {"padding": True}
 
     def transform(text: Any) -> Any:
         """Tokenize one raw text payload.
@@ -443,13 +456,16 @@ def _make_text_transform(tokenizer: Any, *, chat_template: bool = False) -> Call
         if chat_template and isinstance(text, list) and text and isinstance(text[0], dict):
             text = tokenizer.apply_chat_template(text, tokenize=False, add_generation_prompt=True)
         try:
-            return tokenizer(text, return_tensors="pt", padding=True)
+            result = tokenizer(text, return_tensors="pt", padding=True)
+            state["padding"] = True
+            return result
         except ValueError as exc:
             if isinstance(original_text, str) and "padding token" in str(exc):
+                state["padding"] = False
                 return tokenizer(text, return_tensors="pt", padding=False)
             raise
 
-    return transform
+    return transform, state
 
 
 def _model_name_or_path(model: Any) -> str | None:
@@ -474,7 +490,9 @@ def _model_name_or_path(model: Any) -> str | None:
     return None
 
 
-def _tokenizer_preprocessing_record(tokenizer: Any, model: Any) -> ResolvedPreprocessing:
+def _tokenizer_preprocessing_record(
+    tokenizer: Any, model: Any, *, explicit: bool = False, padding: bool = True
+) -> ResolvedPreprocessing:
     """Build a preprocessing provenance record for a tokenizer.
 
     Parameters
@@ -483,24 +501,37 @@ def _tokenizer_preprocessing_record(tokenizer: Any, model: Any) -> ResolvedPrepr
         Hugging Face tokenizer-like object.
     model:
         Model used to resolve fallback identifier metadata.
+    explicit:
+        Whether the tokenizer was supplied explicitly by the caller rather than
+        auto-resolved from the model's own metadata.
+    padding:
+        The padding actually applied by the transform (``False`` when the
+        no-pad-token fallback fired).
 
     Returns
     -------
     ResolvedPreprocessing
-        Structured tokenizer provenance.
+        Structured tokenizer provenance. ``verified`` is True only when the
+        tokenizer was auto-resolved from model metadata AND an identifier was
+        actually recovered; ``config['padding']`` reflects the padding used.
     """
 
-    identifier = getattr(tokenizer, "name_or_path", None) or _model_name_or_path(model) or "unknown"
+    resolved = getattr(tokenizer, "name_or_path", None) or _model_name_or_path(model)
+    identifier = resolved or "unknown"
+    # ``verified`` means the preprocessing came from model-specific metadata: it
+    # cannot be true for an explicit user tokenizer or when no identifier could
+    # be resolved at all.
+    verified = (not explicit) and resolved is not None
     config = {
         "tokenizer_name": identifier,
         "model_max_length": getattr(tokenizer, "model_max_length", None),
-        "padding": True,
+        "padding": padding,
         "truncation": False,
     }
     return ResolvedPreprocessing(
         source="hf_auto_tokenizer",
         identifier=str(identifier),
-        verified=True,
+        verified=verified,
         config=config,
         description=f"AutoTokenizer: {identifier}",
     )

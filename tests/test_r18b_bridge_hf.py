@@ -10,10 +10,13 @@ Covers four A3 findings on ``torchlens/bridge/hf.py``:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import torch
+from torch import nn
 
+import torchlens as tl
 import torchlens.bridge.hf as hf
 
 
@@ -128,3 +131,79 @@ def test_image_transform_single_image_unsqueezes() -> None:
 
     assert isinstance(result, torch.Tensor)
     assert result.shape == (1, 3, 2, 2)
+
+
+# ---------------------------------------------------------------------------
+# A3-13 -- tokenizer provenance honesty (false-VERIFIED class)
+# ---------------------------------------------------------------------------
+
+
+def test_record_explicit_tokenizer_is_not_verified() -> None:
+    """An explicit user tokenizer must not be recorded as model-verified."""
+
+    tokenizer = SimpleNamespace(name_or_path="my/custom", model_max_length=128)
+    record = hf._tokenizer_preprocessing_record(tokenizer, nn.Linear(1, 1), explicit=True)
+
+    assert record.verified is False
+
+
+def test_record_unknown_identifier_is_not_verified() -> None:
+    """When no identifier can be resolved, verified must be False (not True)."""
+
+    tokenizer = SimpleNamespace(model_max_length=128)  # no name_or_path
+    record = hf._tokenizer_preprocessing_record(tokenizer, nn.Linear(1, 1), explicit=False)
+
+    assert record.identifier == "unknown"
+    assert record.verified is False
+
+
+def test_record_auto_resolved_identifier_stays_verified() -> None:
+    """Auto-resolved tokenizers with a real identifier remain verified."""
+
+    tokenizer = SimpleNamespace(name_or_path="bert-base-uncased", model_max_length=512)
+    record = hf._tokenizer_preprocessing_record(tokenizer, nn.Linear(1, 1), explicit=False)
+
+    assert record.identifier == "bert-base-uncased"
+    assert record.verified is True
+
+
+def test_record_reports_actual_padding_fallback() -> None:
+    """A no-pad-token fallback must be recorded as padding=False, not True."""
+
+    class NoPadTokenizer:
+        name_or_path = "gpt2"
+        model_max_length = 1024
+
+        def __call__(self, text: Any, return_tensors: Any = None, padding: Any = None) -> Any:
+            if padding:
+                raise ValueError("Asking to pad but the tokenizer does not have a padding token.")
+            return {"input_ids": [[1, 2, 3]]}
+
+    tok = NoPadTokenizer()
+    transform, state = hf._make_text_transform(tok)
+    transform("hello")  # single string -> triggers the padding=False fallback
+
+    assert state["padding"] is False
+    record = hf._tokenizer_preprocessing_record(
+        tok, nn.Linear(1, 1), explicit=False, padding=state["padding"]
+    )
+    assert record.config["padding"] is False
+
+
+def test_trace_text_explicit_tokenizer_end_to_end(monkeypatch: Any) -> None:
+    """Full trace_text with an explicit custom tokenizer reports honest provenance."""
+
+    class Model(nn.Module):
+        def forward(self, x: Any) -> Any:
+            return x
+
+    class ExplicitCustomTokenizer:
+        def __call__(self, text: Any, **kwargs: Any) -> Any:
+            return {"input_ids": text}
+
+    monkeypatch.setattr(tl, "trace", lambda *a, **k: SimpleNamespace(input_preprocessor=None))
+    log = hf.trace_text(Model(), "hello", tokenizer=ExplicitCustomTokenizer())
+    record = log.input_preprocessor
+
+    assert record.verified is False
+    assert record.identifier == "unknown"
