@@ -654,6 +654,7 @@ class TestDotThresholdBenchmark:
 
         import time
 
+        failures: list[str] = []
         for target in [500, 1000, 2000, 3000, 3500, 4000]:
             model = RandomGraphModel(target_nodes=target, seed=42)
             x = torch.randn(2, 64)
@@ -671,8 +672,10 @@ class TestDotThresholdBenchmark:
                 print(f"  {target} target ({actual_nodes} actual): {elapsed:.1f}s")
             except Exception as exc:
                 elapsed = time.time() - start
+                failures.append(f"{target} target ({actual_nodes} actual): {exc}")
                 print(
                     f"  {target} target ({actual_nodes} actual): FAILED "
                     f"after {elapsed:.1f}s - {exc}"
                 )
             trace.cleanup()
+        assert failures == [], f"dot benchmark render failures: {failures}"
