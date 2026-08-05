@@ -2894,15 +2894,28 @@ class host_nondeterminism_monitor:
 
         snapshots: list[tuple[Any, str]] = []
         model = self._model
-        modules = getattr(model, "modules", None)
-        if not callable(modules):
-            return snapshots
+        # Enumerate the registered module tree through the AUTHORITATIVE base
+        # implementation, bypassing any user override of ``modules()``. An
+        # nn.Module subclass that overrides ``modules()`` to return an empty (or
+        # otherwise lying) iterable would otherwise hide every submodule -- and
+        # any model-held RNG -- from this sweep, producing a clean false VERIFIED
+        # (``channels=[] uncertain=False``). Reading through the base method is
+        # the same posture as the class-surface reads below that go through base
+        # ``type`` getsets so a hostile override never fires. Materialize once;
+        # the module set is consumed twice below.
+        if isinstance(model, torch.nn.Module):
+            registered_modules = list(torch.nn.Module.modules(model))
+        else:
+            modules = getattr(model, "modules", None)
+            if not callable(modules):
+                return snapshots
+            registered_modules = list(modules())
         try:
             # r55 C6: shared-namespace exclusion set for the gc-referent fallback,
             # computed ONCE per sweep (bounded by loaded-module count).
             shared_namespace_ids = self._shared_namespace_dict_ids()
             pending: list[Any] = []
-            for module in modules():
+            for module in registered_modules:
                 # r59 hon_1: seed BOTH the instance ``__dict__`` values AND the
                 # ``__slots__`` slot values of every REGISTERED module through
                 # ``_custom_holder_children`` (slot reads go through the slot member
@@ -2930,7 +2943,7 @@ class host_nondeterminism_monitor:
             # ``__dict__`` / ``__slots__`` values -- r59 hon_1 -- before the module OBJECT is ever
             # reached) that kills the ~2x double-walk. UNREGISTERED
             # submodules are absent from ``modules()`` and stay un-premarked, so they ARE descended.
-            seen_container_ids: set[int] = {id(module) for module in modules()}
+            seen_container_ids: set[int] = {id(module) for module in registered_modules}
             visited_nodes = 0
             while pending:
                 value = pending.pop()

@@ -16,6 +16,7 @@ import numpy as np
 from torchlens.utils.rng import (
     AutocastRestore,
     execute_with_restored_rng_autocast,
+    host_nondeterminism_monitor,
     log_current_autocast_state,
 )
 from torchlens.utils.tensor_utils import (
@@ -190,3 +191,38 @@ def test_m4_partial_restore_failure_rolls_back_caller_rng():
     # Caller engines must be exactly as before the failed call.
     assert random.getstate() == py_before
     assert np.array_equal(np.random.get_state()[1], np_before[1])
+
+
+# ---------------------------------------------------------------------------
+# H6 -- the model-generator sweep must not trust an overridable modules() that
+# could hide a model-held RNG (clean false VERIFIED).
+# ---------------------------------------------------------------------------
+class _LyingModel(torch.nn.Module):
+    """Overrides modules() to claim it has no submodules, hiding self.rng."""
+
+    def __init__(self):
+        super().__init__()
+        self.rng = np.random.default_rng(0)
+
+    def modules(self):  # type: ignore[override]
+        return iter(())
+
+
+def test_h6_lying_modules_override_cannot_hide_model_rng():
+    monitor = host_nondeterminism_monitor(_LyingModel())
+    snapshots = monitor._sweep_model_generators()
+    holders = [holder for holder, _digest in snapshots]
+    assert any(isinstance(h, np.random.Generator) for h in holders), (
+        "model-held numpy Generator was hidden by a lying modules() override"
+    )
+
+
+def test_h6_honest_model_generator_still_found():
+    class HonestModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.rng = np.random.default_rng(0)
+
+    monitor = host_nondeterminism_monitor(HonestModel())
+    holders = [h for h, _ in monitor._sweep_model_generators()]
+    assert any(isinstance(h, np.random.Generator) for h in holders)
