@@ -11,6 +11,7 @@ from ..capture.predicates import _normalize_capture_decision
 from ..capture.projections import _build_record_context
 from ..fastlog.exceptions import RecordContextFieldError
 from ..fastlog.types import CaptureDecision, CaptureSpec, ModuleStackFrame, RecordContext
+from ..utils._multipass_access import get_multipass_attr, is_multipass_layer
 from .node_spec import NodeSpec
 
 
@@ -100,7 +101,10 @@ def _context_from_layer(
     return _build_record_context(
         kind=_kind_from_layer(op_log),  # type: ignore[arg-type]
         op_log_or_op_data={
-            "label": getattr(op_log, "layer_label", raw_label),
+            # H5: use the pass-qualified label (op.label, e.g. relu_1_1:2) so each
+            # recurrent pass keeps a distinct identity; the aggregate layer_label is
+            # shared by all passes.
+            "label": get_multipass_attr(op_log, "label", raw_label, multipass=raw_label),
             "raw_label": raw_label,
             "_label_raw": raw_label,
             "raw_index": getattr(op_log, "raw_index", None),
@@ -120,7 +124,11 @@ def _context_from_layer(
         module_stack=module_stack,
         history=history,
         op_counts=op_counts,
-        pass_index=max(int(getattr(op_log, "call_index", 1)) - 1, 0),
+        # H5: derive the 0-based recurrent pass from the op's real 1-based
+        # pass_index. The old ``call_index`` field does not exist on Ops, so every
+        # recurrent pass defaulted to pass_index 0 -- silently breaking
+        # pass-dependent predicates (e.g. ``ctx.pass_index == 1``).
+        pass_index=max(int(get_multipass_attr(op_log, "pass_index", 1, multipass=1)) - 1, 0),
         event_index=event_index,
         step_index=int(getattr(op_log, "step_index", event_index)),
         time_since_pass_start=0.0,
@@ -179,10 +187,24 @@ def _build_preview_nodes(trace: Any, predicate: Predicate | None) -> dict[str, P
             op_counts=op_counts,
         )
         preview_node = _evaluate_preview_node(op_log, ctx, predicate)
-        preview_nodes[getattr(op_log, "layer_label", ctx.label)] = preview_node
-        short_label = getattr(op_log, "layer_label_short", None)
-        if isinstance(short_label, str):
-            preview_nodes[short_label] = preview_node
+        # H5: key by the pass-qualified label (op.label, e.g. relu_1_1:2). The old
+        # aggregate layer_label / layer_label_short keys are shared by every
+        # recurrent pass, so each later pass OVERWROTE the previous pass's decision
+        # and the render painted all passes with the last pass's result. Store the
+        # aggregate keys too, but only for single-pass ops where they cannot collide.
+        pass_label = get_multipass_attr(op_log, "label", None, multipass=None)
+        if isinstance(pass_label, str):
+            preview_nodes[pass_label] = preview_node
+        # An Op proxies its parent Layer's ``num_passes``; gate the aggregate-label
+        # fallback keys on the op's own pass count so recurrent ops (which share one
+        # layer_label / layer_label_short across passes) never collide here.
+        if int(getattr(op_log, "num_passes", 1) or 1) <= 1:
+            layer_label = getattr(op_log, "layer_label", None)
+            if isinstance(layer_label, str):
+                preview_nodes.setdefault(layer_label, preview_node)
+            short_label = getattr(op_log, "layer_label_short", None)
+            if isinstance(short_label, str):
+                preview_nodes.setdefault(short_label, preview_node)
         history.append(ctx)
     return preview_nodes
 
@@ -204,6 +226,42 @@ def _append_module_event_lines(lines: list[str], layer_log: Any) -> None:
         lines.append("module_enter: " + ", ".join(str(item) for item in entered))
     if exited:
         lines.append("module_exit: " + ", ".join(str(item) for item in exited))
+
+
+def _lookup_preview_node(
+    preview_nodes: dict[str, PreviewNode], layer_log: Any
+) -> PreviewNode | None:
+    """Find the cached preview decision for a rendered node, recurrence-aware.
+
+    The pass-qualified ``label`` (e.g. ``relu_1_1:2``) is the canonical key.
+    ``get_multipass_attr`` keeps a rolled aggregate ``Layer`` from leaking the
+    multi-pass ``ValueError`` tripwire (the H5 render crash). A rolled aggregate
+    node surfaces the shared decision only when every pass agrees; otherwise it
+    stays uncolored, because one rolled node cannot honestly claim a single pass's
+    decision.
+    """
+
+    pass_label = get_multipass_attr(layer_log, "label", None, multipass=None)
+    if isinstance(pass_label, str) and pass_label in preview_nodes:
+        return preview_nodes[pass_label]
+    if is_multipass_layer(layer_log):
+        ops = getattr(layer_log, "ops", None)
+        pass_nodes: list[PreviewNode] = []
+        if ops is not None:
+            for op in ops.values():
+                node = preview_nodes.get(getattr(op, "label", None))
+                if node is not None:
+                    pass_nodes.append(node)
+        if pass_nodes and all(n.decision is pass_nodes[0].decision for n in pass_nodes):
+            return pass_nodes[0]
+        return None
+    for key in (
+        getattr(layer_log, "layer_label", None),
+        getattr(layer_log, "layer_label_short", None),
+    ):
+        if isinstance(key, str) and key in preview_nodes:
+            return preview_nodes[key]
+    return None
 
 
 def _make_node_spec_fn(
@@ -228,18 +286,7 @@ def _make_node_spec_fn(
     def node_spec_fn(layer_log: Any, default_spec: NodeSpec) -> NodeSpec:
         """Paint one node from cached preview state."""
 
-        preview_node = next(
-            (
-                preview_nodes[label]
-                for label in (
-                    getattr(layer_log, "layer_label", None),
-                    getattr(layer_log, "layer_label_short", None),
-                    getattr(layer_log, "label", None),
-                )
-                if isinstance(label, str) and label in preview_nodes
-            ),
-            None,
-        )
+        preview_node = _lookup_preview_node(preview_nodes, layer_log)
         lines = list(default_spec.lines)
         if preview_node is None:
             return default_spec
