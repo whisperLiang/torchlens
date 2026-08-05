@@ -337,6 +337,42 @@ def _model_class_contains(model: nn.Module, needles: Sequence[str]) -> bool:
     return any(needle in identity for needle in needles)
 
 
+def _class_in_namespace(value: Any, module_prefixes: Sequence[str]) -> bool:
+    """Return whether ``value``'s type or a base lives in a listed module namespace.
+
+    Detection anchors on real ``__module__`` provenance across the full MRO rather
+    than on a substring of a single class name. A class merely *named* like a
+    framework wrapper but defined in a user module does not match, while a genuine
+    subclass of a framework base class does. This mirrors the module-path anchoring
+    used by :func:`_is_quantized_module`.
+
+    Parameters
+    ----------
+    value:
+        Object whose type MRO is inspected.
+    module_prefixes:
+        Module-path namespaces (for example ``"transformers"``). A prefix matches a
+        module that equals it or is a dotted descendant of it, so ``"transformers"``
+        matches ``transformers.modeling_utils`` but not ``transformersx``.
+
+    Returns
+    -------
+    bool
+        True if any MRO base is defined under a listed namespace.
+    """
+
+    prefixes = tuple(prefix.lower() for prefix in module_prefixes)
+    try:
+        mro = type(value).__mro__
+    except Exception:
+        return False
+    for klass in mro:
+        module = (getattr(klass, "__module__", "") or "").lower()
+        if any(module == prefix or module.startswith(f"{prefix}.") for prefix in prefixes):
+            return True
+    return False
+
+
 def _hf_transformers_row(model: nn.Module) -> CompatRow:
     """Build the Hugging Face Transformers wrapper row.
 
@@ -351,9 +387,7 @@ def _hf_transformers_row(model: nn.Module) -> CompatRow:
         Report row.
     """
 
-    detected = _model_class_contains(model, ("transformers.", "pretrainedmodel")) or hasattr(
-        model, "config"
-    )
+    detected = _class_in_namespace(model, ("transformers",))
     details = (
         "Hugging Face-style module detected; eager forward capture is supported when the "
         "model is not compiled, offloaded, or sharded."
