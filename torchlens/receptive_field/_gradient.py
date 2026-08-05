@@ -279,6 +279,17 @@ def _normalize_unit(unit: Sequence[int], shape: tuple[int, ...], op_label: str) 
     ------
     ReceptiveFieldError
         If rank, types, or bounds do not identify exactly one output element.
+
+    Notes
+    -----
+    This is the complete-index contract shared by the gradient probes
+    (``gradient``/``check`` and their projective counterparts). A negative index
+    on any axis is wrapped with Python semantics (``index + extent``) before the
+    bounds check, so ``-1`` selects the last element of that axis and any value
+    still outside ``[-extent, extent)`` raises. This negative-wrap policy is
+    intentionally distinct from the windowed ``ReceptiveFieldView.at`` coordinate
+    contract, which rejects negative coordinates outright; the two entry points
+    keep separate, individually documented negative-index policies.
     """
 
     raw = tuple(unit)
