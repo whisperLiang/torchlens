@@ -6,15 +6,17 @@ fixer report) by a mutation proof: reverting the fix makes the paired assertion
 fail. These tests are deterministic and CPU-only.
 """
 
+import dis
+import random
+import sys
+
+import numpy as np
 import pytest
 import torch
 
-import random
-
-import numpy as np
-
 from torchlens.utils.rng import (
     AutocastRestore,
+    _call_site_argcount,
     execute_with_restored_rng_autocast,
     host_nondeterminism_monitor,
     log_current_autocast_state,
@@ -226,3 +228,44 @@ def test_h6_honest_model_generator_still_found():
     monitor = host_nondeterminism_monitor(HonestModel())
     holders = [h for h, _ in monitor._sweep_model_generators()]
     assert any(isinstance(h, np.random.Generator) for h in holders)
+
+
+# ---------------------------------------------------------------------------
+# F4 -- _call_site_argcount must decode CALL_METHOD (py3.10 attribute call), not
+# fail-closed-mark it as undecodable.
+# ---------------------------------------------------------------------------
+def _decode_method_call_site():
+    """Return (opname, decoded_argcount) at a real CALL_METHOD c_call site."""
+    captured: dict = {}
+
+    def prof(frame, event, arg):
+        if (
+            event == "c_call"
+            and getattr(arg, "__name__", None) == "append"
+            and "argcount" not in captured
+        ):
+            captured["opname"] = next(
+                (i.opname for i in dis.get_instructions(frame.f_code) if i.offset == frame.f_lasti),
+                None,
+            )
+            captured["argcount"] = _call_site_argcount(frame)
+
+    def target():
+        holder = []
+        holder.append(7)  # attribute-style call -> CALL_METHOD on py3.10
+
+    sys.setprofile(prof)
+    try:
+        target()
+    finally:
+        sys.setprofile(None)
+    return captured.get("opname"), captured.get("argcount")
+
+
+def test_f4_call_method_argcount_decoded():
+    opname, argcount = _decode_method_call_site()
+    if opname != "CALL_METHOD":
+        # Python 3.11+ compiles method calls to CALL; CALL_METHOD does not exist.
+        # The regression is py3.10-specific; nothing to assert on newer opcodes.
+        pytest.skip(f"method-call opcode is {opname}, not CALL_METHOD (py>=3.11)")
+    assert argcount == 1
