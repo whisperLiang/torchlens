@@ -8,7 +8,12 @@ from typing import Any, cast
 
 
 def execution_trace(log: Any, trace_path: str | Path) -> dict[str, Any]:
-    """Export a lightweight PyTorch ExecutionTraceObserver-compatible trace.
+    """Export a lightweight TorchLens execution-trace JSON file.
+
+    This writes TorchLens' own ``torchlens.execution_trace.v1`` schema (per-layer
+    ``id``/``name``/``op``/``inputs``/``bytes`` nodes). It is NOT the PyTorch
+    ExecutionTraceObserver / Chakra execution-trace schema (``1.1.1-chakra`` with
+    ``attrs``/``ctrl_deps``/``outputs``), so Chakra/HTA consumers cannot parse it.
 
     Parameters
     ----------
@@ -116,7 +121,11 @@ def _trace_events(trace: dict[str, Any]) -> list[dict[str, Any]]:
         Event dictionaries.
     """
 
-    events = trace.get("traceEvents", trace.get("events", []))
+    events = trace.get("traceEvents")
+    if events is None:
+        events = trace.get("events")
+    if events is None:
+        events = []
     return [event for event in events if isinstance(event, dict)]
 
 
@@ -141,7 +150,14 @@ def _event_matches_layer(event: dict[str, Any], *, label: str, func_name: str) -
     event_name = str(event.get("name", ""))
     if not event_name:
         return False
-    return label in event_name or (func_name != "none" and func_name in event_name)
+    # A blank label/func_name would substring-match EVERY event ("" in anything is
+    # True), so a layer record missing layer_label/func_name would silently absorb
+    # the entire trace. Refuse blank matches. The substring/many-to-many matching
+    # of NON-blank labels/funcs is the owner-reserved join contract and is left
+    # unchanged here.
+    label_match = bool(label.strip()) and label in event_name
+    func_match = bool(func_name.strip()) and func_name != "none" and func_name in event_name
+    return label_match or func_match
 
 
 def _metadata(trace: dict[str, Any]) -> dict[str, Any]:

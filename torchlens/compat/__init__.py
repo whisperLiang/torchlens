@@ -12,6 +12,35 @@ from .torchextractor import Extractor
 _COMPAT_MODULES = {"lovely", "torchshow"}
 
 
+def _unwrap_wrapped_model(model: Any, marker_attrs: tuple[str, ...]) -> Any:
+    """Return a wrapper's inner ``.model`` only when it truly looks like the adapter.
+
+    ``getattr(model, "model", model)`` fires on any module with an ordinary child
+    named ``model`` (a ubiquitous wrapper pattern, e.g. HF ``*ForSequenceClassification``),
+    silently swapping in the child even when the caller passed an explicit layer
+    spec relative to the wrapper. Unwrap only when the object also carries one of the
+    adapter's marker attributes, so a plain model with a ``.model`` child is left
+    intact.
+
+    Parameters
+    ----------
+    model:
+        Candidate model or adapter wrapper.
+    marker_attrs:
+        Attribute names that identify the genuine adapter wrapper.
+
+    Returns
+    -------
+    Any
+        The inner ``.model`` when the object is adapter-shaped, else ``model``.
+    """
+
+    inner = getattr(model, "model", None)
+    if inner is not None and any(hasattr(model, attr) for attr in marker_attrs):
+        return inner
+    return model
+
+
 def __getattr__(name: str) -> ModuleType:
     """Import compat submodules lazily.
 
@@ -139,7 +168,7 @@ def from_torchextractor(model: Any, layers: Any | None = None) -> Extractor:
             "install torchlens[compat-shims]."
         ) from exc
 
-    source_model = getattr(model, "model", model)
+    source_model = _unwrap_wrapped_model(model, ("layers", "layer_names"))
     resolved_layers = layers
     if resolved_layers is None:
         resolved_layers = getattr(model, "layers", None)
@@ -207,7 +236,7 @@ def from_ilg(model: Any, return_layers: dict[str, str] | None = None) -> Extract
             "from_ilg requires torchvision: install torchlens[vision-shims]."
         ) from exc
 
-    source_model = getattr(model, "model", model)
+    source_model = _unwrap_wrapped_model(model, ("return_layers",))
     resolved_layers = return_layers
     if resolved_layers is None:
         resolved_layers = getattr(model, "return_layers", None)
