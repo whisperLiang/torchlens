@@ -167,41 +167,21 @@ def test_h1_module_key_for_forward_op_no_multipass_leak():
 
 
 @pytest.mark.smoke
-def test_h7_forward_correspondence_node_name():
+def test_h7_forward_correspondence_node_name_scoped_to_multipass():
     from torchlens.visualization._render_leaf import _forward_correspondence_node_name
 
     log = _recurrent_trace()
     single = tl.trace(FeedForward(), torch.randn(2, 8))
-    # Single-pass op: declared forward-node name (colon -> 'pass'), never a phantom.
-    name = _forward_correspondence_node_name(single["linear_1_1"])
-    assert isinstance(name, str) and ":" not in name and "pass" in name
-    # Recurrent aggregate: pass unrecoverable -> None so the caller SKIPS the edge.
+    # Scoped to the multi-pass case ONLY (gate rework): a recurrent aggregate Layer
+    # has an unrecoverable forward pass -> None so the caller SKIPS the edge rather
+    # than emit an ambiguous aggregate endpoint.
     assert _forward_correspondence_node_name(log["tanh_1_2"]) is None
     assert _forward_correspondence_node_name(None) is None
-
-
-@pytest.mark.smoke
-def test_h7_combined_render_has_no_phantom_correspondence_nodes(tmp_path):
-    import re
-
-    log = tl.trace(FeedForward(), torch.randn(2, 8))
-    log.log_backward(log["output_1"].out.sum())
-    log.draw_combined(
-        vis_save_only=True,
-        vis_fileformat="svg",
-        vis_outpath=str(tmp_path / "ff_combined"),
-    )
-    svg = (tmp_path / "ff_combined.svg").read_text().replace("&#45;", "-").replace("&gt;", ">")
-    titles = re.findall(r"<title>([^<]+)</title>", svg)
-    declared = {t for t in titles if "->" not in t}
-    dashed_tails = {
-        t.split("->")[0]
-        for t in titles
-        if "->" in t and "grad_fn" in t and not t.split("->")[0].startswith("grad_fn")
-    }
-    assert dashed_tails, "expected forward->grad_fn correspondence edges"
-    # Every correspondence-edge tail must be a REAL declared forward node.
-    assert dashed_tails <= declared, f"phantom correspondence tails: {dashed_tails - declared}"
+    # A NON-recurrent op preserves the historical aggregate layer_label emission
+    # verbatim (locked render-identity oracle stays byte-identical; the feedforward
+    # phantom-correspondence cosmetic fix is DEFERRED pending an approved golden).
+    name = _forward_correspondence_node_name(single["linear_1_1"])
+    assert name == single["linear_1_1"].layer_label
 
 
 # --------------------------------------------------------------------------- #

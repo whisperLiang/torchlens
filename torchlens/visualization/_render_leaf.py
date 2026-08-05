@@ -355,20 +355,23 @@ def _add_combined_correspondence_edges(
 
 
 def _forward_correspondence_node_name(op: "Layer | None") -> str | None:
-    """Return the DECLARED forward dot-node name a combined correspondence edge targets.
+    """Return the forward endpoint for a combined correspondence edge.
 
-    Combined graphs render forward nodes unrolled, so their dot names are
-    ``op.label.replace(':', 'pass')`` (e.g. ``linear_1_1pass1``). The correspondence
-    edge historically emitted the bare aggregate ``op.layer_label`` (``linear_1_1``),
-    which is NOT a declared node -- Graphviz then auto-created a PHANTOM duplicate
-    node for every dashed edge, so the forward/backward correspondence was wrong in
-    every combined render (feedforward included). Emit the real declared name.
+    Scoped to the MULTI-PASS case only (r18j gate rework): for a recurrent
+    aggregate ``Layer`` the specific forward *pass* a grad_fn maps to is not
+    recoverable from current metadata (all passes share ``op_label`` and
+    ``backward_pass_index``), so historically every grad_fn attached to ONE
+    aggregate node -- return ``None`` and let the caller SKIP the edge rather than
+    emit that ambiguous aggregate endpoint. Omitting an unprovable correspondence
+    is honest.
 
-    For a recurrent aggregate ``Layer`` the specific forward *pass* a grad_fn maps to
-    is not recoverable from current metadata (all passes share ``op_label`` and
-    ``backward_pass_index``), so return ``None`` and let the caller SKIP the edge
-    rather than fabricate a phantom or attach to an arbitrary pass. Omitting an
-    unprovable correspondence is honest; drawing a wrong one is not.
+    For a NON-recurrent op the historical aggregate ``layer_label`` emission is
+    preserved verbatim, so the locked render-identity oracle (which covers the
+    feedforward combined case) stays byte-identical. NOTE: that emission still
+    yields a bare ``layer_label`` vs the declared ``...pass1`` forward node, so
+    Graphviz auto-creates a phantom duplicate; killing that feedforward
+    phantom-correspondence cosmetic (finding F3) is a rendering change that
+    REQUIRES a captain-approved oracle-golden regeneration -- DEFERRED, see report.
 
     Parameters
     ----------
@@ -378,13 +381,15 @@ def _forward_correspondence_node_name(op: "Layer | None") -> str | None:
     Returns
     -------
     str | None
-        Declared forward dot-node name, or ``None`` to skip the edge.
+        Forward endpoint dot name, or ``None`` to skip the edge (recurrent aggregate).
     """
 
-    label = get_multipass_attr(op, "label", None, multipass=None)
-    if not isinstance(label, str):
+    if op is None:
         return None
-    return label.replace(":", "pass")
+    if is_multipass_layer(op):
+        return None
+    layer_label = getattr(op, "layer_label", None)
+    return layer_label if isinstance(layer_label, str) else None
 
 
 def _module_key_for_grad_fn(
