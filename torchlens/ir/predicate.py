@@ -203,6 +203,10 @@ class RecordContext:
         Backend-neutral transform name when ``is_transform`` is true.
     window_miss
         Whether a history-dependent selector exceeded the retained lookback window.
+    output_of_module_calls
+        Labels of the module calls whose output this event is. Empty for events
+        that are not a module-call output; a provisional op carries ``()`` until
+        the module-exit hook resolves its membership.
     """
 
     kind: EventKind | str
