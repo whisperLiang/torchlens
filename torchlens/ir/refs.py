@@ -11,7 +11,20 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class DtypeRef:
-    """Backend-neutral dtype reference."""
+    """Backend-neutral dtype reference.
+
+    Attributes
+    ----------
+    backend
+        Framework namespace the dtype belongs to: the prefix before the first
+        ``"."`` in ``name`` (for example ``"torch"`` for ``"torch.float32"``), or
+        ``"unknown"`` when the value carries no namespace. NOTE: this names the
+        *framework*, which is NOT what the same-named :attr:`DeviceRef.backend`
+        carries -- that one is the hardware device class (``"cpu"``/``"cuda"``).
+        The two ``backend`` fields share a name but not a meaning.
+    name
+        Canonical dtype string (for example ``"torch.float32"``).
+    """
 
     backend: str
     name: str
@@ -45,7 +58,20 @@ class DtypeRef:
 
 @dataclass(frozen=True, slots=True)
 class DeviceRef:
-    """Backend-neutral device reference."""
+    """Backend-neutral device reference.
+
+    Attributes
+    ----------
+    backend
+        Hardware device class: the prefix before the first ``":"`` in ``name``
+        (for example ``"cpu"`` for ``"cpu"``, or ``"cuda"`` for ``"cuda:0"``).
+        NOTE: despite the shared field name, this is the hardware device class,
+        NOT the framework namespace that :attr:`DtypeRef.backend` carries
+        (``"torch"``). A consumer that reads ``DeviceRef.backend`` expecting the
+        framework would incorrectly get ``"cuda"``.
+    name
+        Canonical device string (for example ``"cpu"`` or ``"cuda:0"``).
+    """
 
     backend: str
     name: str
