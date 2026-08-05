@@ -354,7 +354,11 @@ def _probe_torch_capabilities() -> DoctorCheck:
     detail = _format_capability_snapshot(snapshot)
     if missing:
         detail += "; missing=" + ",".join(missing)
-    return DoctorCheck("runtime capabilities", "PASS", detail)
+    # Report the true state: a missing private-integration capability is a
+    # degraded (WARN) row, not a "PASS". These flags are feature-detected and may
+    # be legitimately absent across torch versions, so WARN (not FAIL) is honest.
+    status: Literal["PASS", "WARN"] = "PASS" if not missing else "WARN"
+    return DoctorCheck("runtime capabilities", status, detail)
 
 
 def _probe_torch_wrapper_bindings() -> DoctorCheck:
@@ -538,7 +542,11 @@ def _log_ops_for_mode(
     from torchlens import trace as trace_fn
     from torchlens.options import CaptureOptions
 
-    original_mode = model.training
+    # Snapshot every submodule's training flag, not just the root's. A recursive
+    # ``model.train(root_mode)`` restore would clobber mixed child states (e.g. a
+    # frozen ``bn.eval()`` under a training root). For ``mode="current"`` no mode
+    # change is applied at all, so the model is left byte-for-byte as found.
+    original_modes = {submodule: submodule.training for submodule in model.modules()}
     if mode == "eval":
         model.eval()
     elif mode == "train":
@@ -550,7 +558,8 @@ def _log_ops_for_mode(
             capture=CaptureOptions(layers_to_save=None),
         )
     finally:
-        model.train(original_mode)
+        for submodule, was_training in original_modes.items():
+            submodule.training = was_training
     return _ops_from_log(trace)
 
 
@@ -753,6 +762,20 @@ def synthetic_input(model: nn.Module) -> torch.Tensor | tuple[torch.Tensor, ...]
             inspect.Parameter.VAR_KEYWORD,
         }:
             continue
+        if parameter.kind is inspect.Parameter.KEYWORD_ONLY:
+            # The public return is positional-only, so a keyword-only argument
+            # can never be delivered through it. An optional keyword-only param
+            # is safely omitted (forward uses its default); a *required* one
+            # cannot be represented and must fail loudly here rather than emit a
+            # positional tuple that raises a confusing TypeError at forward call.
+            if parameter.default is not inspect.Signature.empty:
+                continue
+            raise ValueError(
+                "Cannot build a positional synthetic input for required "
+                f"keyword-only forward parameter {parameter.name!r}. "
+                "synthetic_input only returns positional tensors; pass this "
+                "input explicitly."
+            )
         if parameter.default is not inspect.Signature.empty and not isinstance(
             parameter.default, (torch.Tensor, tuple, list)
         ):
