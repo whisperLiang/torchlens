@@ -47,6 +47,30 @@ def _keep_no_ops(ctx: RecordContext) -> bool:
     return False
 
 
+def _assert_unique_label_lookups(recording: tl.fastlog.Recording) -> None:
+    """Assert each retained record is indexed exactly once per distinct label."""
+
+    for record in recording.records:
+        label_matches = recording[record.ctx.label]
+        assert label_matches == [record]
+        raw_label = record.ctx.raw_label
+        if raw_label is not None:
+            raw_matches = recording[raw_label]
+            assert raw_matches == [record]
+
+
+def _force_legacy_capture_event_projection(recording: tl.fastlog.Recording) -> None:
+    """Reset a lazy Recording to rebuild records from legacy ``_capture_events`` only."""
+
+    assert object.__getattribute__(recording, "_capture_events") is not None
+    object.__setattr__(recording, "_captured_run_cores", ())
+    object.__getattribute__(recording, "records").clear()
+    recording.by_pass.clear()
+    recording.by_label.clear()
+    recording.by_address.clear()
+    object.__setattr__(recording, "_records_built", False)
+
+
 def test_record_keep_op_true_and_false() -> None:
     """One-shot record honors constant true and false operation predicates."""
 
@@ -79,6 +103,24 @@ def test_record_single_tensor_input_shorthand() -> None:
     recording = tl.fastlog.record(SimpleMlp(), torch.ones(1, 3), keep_op=_keep_all_ops)
 
     assert len(recording.records) > 0
+
+
+def test_record_label_lookup_returns_each_record_once() -> None:
+    """Public Recording label lookup must not duplicate retained records."""
+
+    recording = tl.record(SimpleMlp(), torch.ones(1, 3), save=_keep_all_ops)
+
+    _assert_unique_label_lookups(recording)
+
+
+def test_record_label_lookup_legacy_capture_events_returns_each_record_once() -> None:
+    """Legacy ``_capture_events`` rebuild must not duplicate retained records."""
+
+    recording = tl.record(SimpleMlp(), torch.ones(1, 3), save=_keep_all_ops)
+
+    _force_legacy_capture_event_projection(recording)
+
+    _assert_unique_label_lookups(recording)
 
 
 def test_recorder_context_records_multiple_forwards() -> None:

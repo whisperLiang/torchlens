@@ -31,6 +31,27 @@ if TYPE_CHECKING:
     from ..data_classes.trace import Trace
 
 
+def _distinct_label_index_keys(label: str, raw_label: str | None) -> tuple[str, ...]:
+    """Return the distinct label keys that should index one activation record.
+
+    Parameters
+    ----------
+    label
+        Primary public label for the retained record.
+    raw_label
+        Optional raw label alias for the same retained record.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Unique label keys that should reference the record exactly once.
+    """
+
+    if raw_label is None or raw_label == label:
+        return (label,)
+    return (label, raw_label)
+
+
 def _public_fastlog_layer_label(ctx: RecordContext) -> str:
     """Return a compact public label for a predicate-mode operation context."""
 
@@ -445,13 +466,8 @@ class Recording(CapturedRun):
                 index = len(records)
                 records.append(record)
                 self.by_pass.setdefault(record.ctx.pass_index, []).append(index)
-                self.by_label.setdefault(record.ctx.label, []).append(
-                    (record.ctx.pass_index, index)
-                )
-                if record.ctx.raw_label is not None:
-                    self.by_label.setdefault(record.ctx.raw_label, []).append(
-                        (record.ctx.pass_index, index)
-                    )
+                for label_key in _distinct_label_index_keys(record.ctx.label, record.ctx.raw_label):
+                    self.by_label.setdefault(label_key, []).append((record.ctx.pass_index, index))
                 if record.ctx.address is not None:
                     self.by_address.setdefault(record.ctx.address, []).append(index)
         object.__setattr__(self, "_records_built", True)

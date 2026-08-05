@@ -17,6 +17,97 @@ if TYPE_CHECKING:
 _REFRESH_SOURCES: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
 
 
+def _distinct_label_index_keys(label: str, raw_label: str | None) -> tuple[str, ...]:
+    """Return the distinct label keys that should index one activation record.
+
+    Parameters
+    ----------
+    label
+        Primary public label for the retained record.
+    raw_label
+        Optional raw label alias for the same retained record.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Unique label keys that should reference the record exactly once.
+    """
+
+    if raw_label is None or raw_label == label:
+        return (label,)
+    return (label, raw_label)
+
+
+def _signature_sort_key(value: Any) -> tuple[str, str]:
+    """Return a stable comparable token for graph-signature sort keys.
+
+    Parameters
+    ----------
+    value
+        Parent-position key to normalize for signature comparison.
+
+    Returns
+    -------
+    tuple[str, str]
+        Type-qualified token that keeps incomparable key types sortable.
+    """
+
+    return (f"{type(value).__module__}.{type(value).__qualname__}", repr(value))
+
+
+def _normalized_parent_arg_positions(
+    parent_arg_positions: dict[str, dict[Any, str]] | None,
+) -> tuple[tuple[str, tuple[tuple[Any, str], ...]], ...]:
+    """Return a deterministic signature view of parent argument positions.
+
+    Parameters
+    ----------
+    parent_arg_positions
+        Layer parent routing metadata keyed by argument domain.
+
+    Returns
+    -------
+    tuple[tuple[str, tuple[tuple[Any, str], ...]], ...]
+        Stable, comparable representation of argument and keyword parent routing.
+    """
+
+    positions = parent_arg_positions or {}
+    return tuple(
+        (
+            arg_domain,
+            tuple(
+                sorted(
+                    (positions.get(arg_domain, {}) or {}).items(),
+                    key=lambda item: _signature_sort_key(item[0]),
+                )
+            ),
+        )
+        for arg_domain in ("args", "kwargs")
+    )
+
+
+def _format_parent_arg_positions(
+    parent_arg_positions: tuple[tuple[str, tuple[tuple[Any, str], ...]], ...],
+) -> str:
+    """Format normalized parent routing for graph-drift error details.
+
+    Parameters
+    ----------
+    parent_arg_positions
+        Normalized parent routing metadata from ``_normalized_parent_arg_positions``.
+
+    Returns
+    -------
+    str
+        Compact human-readable routing summary.
+    """
+
+    rendered_parts: list[str] = []
+    for arg_domain, entries in parent_arg_positions:
+        rendered_parts.append(f"{arg_domain}={list(entries)!r}")
+    return ", ".join(rendered_parts)
+
+
 def _event_from_core(core: CapturedRunCore, fact_index: int) -> OpEvent:
     """Resolve one event fact with its authoritative stable-id sidecars.
 
@@ -146,12 +237,18 @@ class RefreshProjector:
         target_signature = self._graph_signature(self.target)
         refreshed_signature = self._graph_signature(refreshed)
         if target_signature != refreshed_signature:
-            raise self._graph_change_error(refreshed)
+            raise self._graph_change_error(
+                refreshed,
+                self._graph_signature_mismatch_detail(refreshed),
+            )
         if any(
             self.target.layer_dict_all_keys[label].layer_type == "buffer"
             for label in getattr(self.target, "internal_sink_ops", ())
         ):
-            raise self._graph_change_error(refreshed)
+            raise self._graph_change_error(
+                refreshed,
+                "refresh target contains buffer sink ops whose live routing can change across reruns",
+            )
         refreshed_by_raw = {layer._layer_label_raw: layer for layer in refreshed.layer_list}
         for layer in self.target.layer_list:
             new_shape = refreshed_by_raw[layer._layer_label_raw].shape
@@ -165,7 +262,10 @@ class RefreshProjector:
 
         preserved_states = [dict(state_items(layer)) for layer in self.target.layer_list]
         if not self.target._refresh_matching_rerun_state_from(refreshed):
-            raise self._graph_change_error(refreshed)
+            raise self._graph_change_error(
+                refreshed,
+                "raw/final layer labels no longer align during refresh projection",
+            )
         for layer, preserved in zip(self.target.layer_list, preserved_states):
             for field_name, value in preserved.items():
                 if field_name not in self._DYNAMIC_OP_FIELDS:
@@ -189,21 +289,79 @@ class RefreshProjector:
                     self._clear_payload(layer)
 
     @staticmethod
-    def _graph_change_error(refreshed: Any) -> ValueError:
+    def _graph_change_error(refreshed: Any, detail: str | None = None) -> ValueError:
         """Build the legacy graph-change exception with partial-capture metadata."""
 
         from ..partial import PartialTrace
 
+        detail_suffix = "" if detail is None else f" Detail: {detail}."
         error = ValueError(
             "The computational graph changed for this forward pass compared to the original "
             "call to trace (either due to different inputs or a different "
             "random seed). Live-model state mutation across run() calls (for example "
             "BatchNorm running stats, caches, or counters) is another likely cause; use "
             "run(..., pristine=True) to isolate re-execution. save_new_outs failed. Please "
-            "re-run trace with the desired inputs."
+            f"re-run trace with the desired inputs.{detail_suffix}"
         )
         error.partial_log = PartialTrace(refreshed, error)  # type: ignore[attr-defined]
         return error
+
+    def _graph_signature_mismatch_detail(self, refreshed: Any) -> str:
+        """Describe the first graph-signature fact that changed across reruns.
+
+        Parameters
+        ----------
+        refreshed
+            Fully postprocessed rerun candidate that failed the graph signature.
+
+        Returns
+        -------
+        str
+            Human-readable reason that names the changed graph fact.
+        """
+
+        target_layers = self.target.layer_list
+        refreshed_layers = refreshed.layer_list
+        if len(target_layers) != len(refreshed_layers):
+            return (
+                f"layer count changed: expected {len(target_layers)}, got {len(refreshed_layers)}"
+            )
+        for target_layer, refreshed_layer in zip(target_layers, refreshed_layers):
+            if target_layer._layer_label_raw != refreshed_layer._layer_label_raw:
+                return (
+                    "raw label order changed: "
+                    f"expected {target_layer._layer_label_raw!r}, "
+                    f"got {refreshed_layer._layer_label_raw!r}"
+                )
+            if target_layer.layer_type != refreshed_layer.layer_type:
+                return (
+                    f"layer_type changed for {target_layer._layer_label_raw!r}: "
+                    f"expected {target_layer.layer_type!r}, "
+                    f"got {refreshed_layer.layer_type!r}"
+                )
+            expected_parents = tuple(target_layer.parents)
+            actual_parents = tuple(refreshed_layer.parents)
+            expected_positions = _normalized_parent_arg_positions(target_layer.parent_arg_positions)
+            actual_positions = _normalized_parent_arg_positions(
+                refreshed_layer.parent_arg_positions
+            )
+            if expected_parents != actual_parents or expected_positions != actual_positions:
+                changed_fields: list[str] = []
+                if expected_parents != actual_parents:
+                    changed_fields.append(
+                        f"parents expected {expected_parents!r}, got {actual_parents!r}"
+                    )
+                if expected_positions != actual_positions:
+                    changed_fields.append(
+                        "parent_arg_positions expected "
+                        f"{_format_parent_arg_positions(expected_positions)}, got "
+                        f"{_format_parent_arg_positions(actual_positions)}"
+                    )
+                return (
+                    f"operand routing changed for {target_layer._layer_label_raw!r}: "
+                    + "; ".join(changed_fields)
+                )
+        return "graph signature changed"
 
     def _rebind_backward_hooks(self) -> None:
         """Bind refreshed live tensors and grad-fn registry entries to the target Trace."""
@@ -276,7 +434,8 @@ class RefreshProjector:
             (
                 layer._layer_label_raw,
                 layer.layer_type,
-                tuple(sorted(layer.parents)),
+                tuple(layer.parents),
+                _normalized_parent_arg_positions(layer.parent_arg_positions),
             )
             for layer in trace.layer_list
         )
@@ -383,11 +542,8 @@ class RecordingProjector:
                 index = len(records)
                 records.append(record)
                 by_pass.setdefault(record.ctx.pass_index, []).append(index)
-                by_label.setdefault(record.ctx.label, []).append((record.ctx.pass_index, index))
-                if record.ctx.raw_label is not None:
-                    by_label.setdefault(record.ctx.raw_label, []).append(
-                        (record.ctx.pass_index, index)
-                    )
+                for label_key in _distinct_label_index_keys(record.ctx.label, record.ctx.raw_label):
+                    by_label.setdefault(label_key, []).append((record.ctx.pass_index, index))
                 if record.ctx.address is not None:
                     by_address.setdefault(record.ctx.address, []).append(index)
         last_facts = captured_cores[-1].projection_facts if captured_cores else {}

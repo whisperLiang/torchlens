@@ -267,6 +267,25 @@ class _SharedBufferModel(nn.Module):
         return x
 
 
+class _OperandOrderSwapModel(nn.Module):
+    """Model whose subtraction operand order can drift across reruns."""
+
+    def __init__(self) -> None:
+        """Initialize the operand-order toggle."""
+
+        super().__init__()
+        self.reverse = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Subtract the two branches in the configured operand order."""
+
+        add_branch = x + 1
+        mul_branch = x * 2
+        if self.reverse:
+            return mul_branch - add_branch
+        return add_branch - mul_branch
+
+
 class TestSaveNewActivationsRegression:
     """Zombie OpLogs on repeated calls."""
 
@@ -458,3 +477,40 @@ class TestGraphConsistencyValidation:
             log.save_new_outs(model, torch.randn(4, 10))
             shape_warnings = [x for x in w if "shape changed" in str(x.message)]
             assert len(shape_warnings) > 0
+
+    def test_save_new_outs_rejects_operand_order_drift(self) -> None:
+        """save_new_outs must refuse reruns whose operand routing changed."""
+
+        model = _OperandOrderSwapModel()
+        x = torch.randn(2, 3)
+        log = trace_fn(model, x, save_arg_values=True)
+        try:
+            model.reverse = True
+            with pytest.raises(ValueError, match="computational graph changed") as exc_info:
+                log.save_new_outs(model, x)
+            assert "parent_arg_positions" in str(exc_info.value)
+        finally:
+            log.cleanup()
+
+    def test_save_new_outs_accepts_same_graph_operand_model(self) -> None:
+        """save_new_outs must still refresh same-graph reruns for the same model."""
+
+        model = _OperandOrderSwapModel()
+        x1 = torch.randn(2, 3)
+        x2 = torch.randn(2, 3)
+        log = trace_fn(model, x1, save_arg_values=True)
+        fresh_log = None
+        try:
+            log.save_new_outs(model, x2)
+            fresh_log = trace_fn(model, x2, save_arg_values=True)
+            refreshed_sub = next(op for op in log.layer_list if op.layer_type == "sub")
+            fresh_sub = next(op for op in fresh_log.layer_list if op.layer_type == "sub")
+            assert refreshed_sub.parents == fresh_sub.parents
+            assert refreshed_sub.parent_arg_positions == fresh_sub.parent_arg_positions
+            assert refreshed_sub.out is not None
+            assert fresh_sub.out is not None
+            assert torch.allclose(refreshed_sub.out, fresh_sub.out)
+        finally:
+            log.cleanup()
+            if fresh_log is not None:
+                fresh_log.cleanup()
