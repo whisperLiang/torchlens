@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens._io import TorchLensIOError
 from torchlens.fastlog import RecoveryError
 
 
@@ -212,3 +214,70 @@ def test_recover_skips_hash_mismatch_record(tmp_path: Path) -> None:
 
     assert any("hash mismatch" in warning for warning in recovered.recovery_warnings)
     assert list(recovered.records)
+
+
+def test_load_rejects_hash_mismatch_in_finalized_bundle(tmp_path: Path) -> None:
+    """``load()`` fails closed on a finalized bundle with a corrupt blob."""
+
+    bundle_path = _copy_bundle(
+        _write_bundle(tmp_path / "source.tlfast").bundle_path,
+        tmp_path / "corrupt_finalized",
+    )
+    _first_blob(bundle_path).write_bytes(b"corrupt")
+
+    with pytest.raises(TorchLensIOError, match="failed integrity validation"):
+        tl.fastlog.load(bundle_path)
+
+    recovered = tl.fastlog.recover(bundle_path)
+
+    assert recovered.recovered is True
+    assert recovered.status == "recovered"
+    assert any("hash mismatch" in warning for warning in recovered.recovery_warnings)
+    assert list(recovered.records)
+
+
+def test_load_rejects_incomplete_blob_metadata_in_finalized_bundle(tmp_path: Path) -> None:
+    """``load()`` rejects finalized records whose blob checksum metadata is missing."""
+
+    bundle_path = _copy_bundle(
+        _write_bundle(tmp_path / "source.tlfast").bundle_path,
+        tmp_path / "missing_sha",
+    )
+    index_path = bundle_path / "fastlog_index.jsonl"
+    lines = index_path.read_text(encoding="utf-8").splitlines()
+    first = json.loads(lines[0])
+    first["metadata"].pop("sha256", None)
+    lines[0] = json.dumps(first)
+    index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(TorchLensIOError, match="failed integrity validation"):
+        tl.fastlog.load(bundle_path)
+
+    recovered = tl.fastlog.recover(bundle_path)
+
+    assert recovered.recovered is True
+    assert recovered.status == "recovered"
+    assert any("incomplete blob metadata" in warning for warning in recovered.recovery_warnings)
+    assert list(recovered.records)
+
+
+def test_disk_roundtrip_label_index_deduplicates_same_raw_label(tmp_path: Path) -> None:
+    """Disk label indexes persist one entry when ``label == raw_label``."""
+
+    bundle_path = tmp_path / "dedup.tlfast"
+    recording = tl.fastlog.record(
+        PersistenceModel(),
+        torch.ones(1, 3),
+        save=tl.func("relu"),
+        streaming=tl.StreamingOptions(bundle_path=bundle_path, retain_in_memory=False),
+    )
+
+    label = recording.records[0].ctx.label
+    label_index = json.loads((bundle_path / "label_index.json").read_text(encoding="utf-8"))
+
+    assert label_index[label] == [{"blob_id": "0000000001", "pass_index": 1, "record_index": 0}]
+
+    loaded = tl.fastlog.load(bundle_path)
+
+    assert loaded.by_label[label] == [(1, 0)]
+    assert len(loaded[label]) == 1
