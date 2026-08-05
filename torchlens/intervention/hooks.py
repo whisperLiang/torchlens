@@ -218,6 +218,16 @@ def normalize_hook_plan(
     entries: list[NormalizedHookEntry] = []
     for order, (site_target, hook_like) in enumerate(pairs):
         helper_spec = hook_like if isinstance(hook_like, HelperSpec) else None
+        # The escape hatch is requested either by the caller's parameter or by the
+        # helper's own force_shape_change kwarg (e.g. tl.replace_with(t,
+        # force_shape_change=True)). OR them so a helper-requested shape change
+        # reaches validate_hook_output; this mirrors the append-safety check in
+        # rerun.py. Without the helper side, the flag dies here: no production
+        # caller passes the parameter, and execution reads only entry metadata.
+        entry_force_shape_change = bool(force_shape_change) or (
+            helper_spec is not None
+            and bool(dict(helper_spec.kwargs).get("force_shape_change", False))
+        )
         _validate_live_site_target(site_target)
         for concrete_direction in _hook_directions(
             hook_like,
@@ -238,7 +248,7 @@ def normalize_hook_plan(
                         {
                             "attach_order": order,
                             "composition": "left_to_right",
-                            "force_shape_change": force_shape_change,
+                            "force_shape_change": entry_force_shape_change,
                             "direction": concrete_direction,
                             "timing": "post",
                         }
