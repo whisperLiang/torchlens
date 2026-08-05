@@ -16,6 +16,9 @@ not reach from its options.py lease:
 
 from __future__ import annotations
 
+from typing import Annotated
+
+import pytest
 import torch
 from torch import nn
 
@@ -84,3 +87,61 @@ def test_m12_both_mode_restores_mixed_states() -> None:
     result = tl_utils.list_ops(model, x, mode="both")
     assert set(result) == {"eval", "train"}
     assert _mode_map(model) == before, "both-mode capture failed to restore mixed states"
+
+
+# --------------------------------------------------------------------------- #
+# M13 -- synthetic_input keyword-only parameter handling
+# --------------------------------------------------------------------------- #
+class _RequiredKwOnly(nn.Module):
+    def forward(
+        self,
+        x: Annotated[torch.Tensor, (2, 3)],
+        *,
+        y: Annotated[torch.Tensor, (2, 3)],
+    ) -> torch.Tensor:
+        return x + y
+
+
+class _OptionalKwOnly(nn.Module):
+    def forward(
+        self,
+        x: Annotated[torch.Tensor, (2, 3)],
+        *,
+        y: torch.Tensor = torch.zeros(2, 3),
+    ) -> torch.Tensor:
+        return x + y
+
+
+class _AllPositional(nn.Module):
+    def forward(
+        self,
+        x: Annotated[torch.Tensor, (2, 3)],
+        z: Annotated[torch.Tensor, (2, 3)],
+    ) -> torch.Tensor:
+        return x + z
+
+
+def test_m13_required_keyword_only_raises_clear_error() -> None:
+    """A required keyword-only tensor param cannot ride in the positional tuple."""
+
+    model = _RequiredKwOnly()
+    with pytest.raises(ValueError, match=r"keyword-only forward parameter 'y'"):
+        tl_utils.synthetic_input(model)
+
+
+def test_m13_optional_keyword_only_is_omitted_and_forward_runs() -> None:
+    """An optional keyword-only param is dropped; forward uses its default."""
+
+    model = _OptionalKwOnly()
+    si = tl_utils.synthetic_input(model)
+    # Only the single positional param survives -> a bare tensor, not a tuple.
+    assert isinstance(si, torch.Tensor)
+    # The generated input must be usable positionally without a TypeError.
+    model.forward(si)
+
+
+def test_m13_positional_params_still_form_a_tuple() -> None:
+    model = _AllPositional()
+    si = tl_utils.synthetic_input(model)
+    assert isinstance(si, tuple) and len(si) == 2
+    model.forward(*si)

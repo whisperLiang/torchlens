@@ -758,6 +758,20 @@ def synthetic_input(model: nn.Module) -> torch.Tensor | tuple[torch.Tensor, ...]
             inspect.Parameter.VAR_KEYWORD,
         }:
             continue
+        if parameter.kind is inspect.Parameter.KEYWORD_ONLY:
+            # The public return is positional-only, so a keyword-only argument
+            # can never be delivered through it. An optional keyword-only param
+            # is safely omitted (forward uses its default); a *required* one
+            # cannot be represented and must fail loudly here rather than emit a
+            # positional tuple that raises a confusing TypeError at forward call.
+            if parameter.default is not inspect.Signature.empty:
+                continue
+            raise ValueError(
+                "Cannot build a positional synthetic input for required "
+                f"keyword-only forward parameter {parameter.name!r}. "
+                "synthetic_input only returns positional tensors; pass this "
+                "input explicitly."
+            )
         if parameter.default is not inspect.Signature.empty and not isinstance(
             parameter.default, (torch.Tensor, tuple, list)
         ):
