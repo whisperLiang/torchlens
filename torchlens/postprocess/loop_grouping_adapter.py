@@ -7,7 +7,7 @@ passing only data-flow edges in ``data_parents`` and ``data_children``.
 
 import heapq
 import itertools as it
-from collections import OrderedDict, defaultdict, deque
+from collections import Counter, OrderedDict, defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Dict, Mapping, Optional, Set, Tuple
 
@@ -70,6 +70,14 @@ class RecurrenceNode:
     param_barcodes: tuple[str, ...]
     retain: bool = True
     pruned: bool = False
+    output_slot: Optional[int] = None
+    """Zero-based output slot for multi-output operations, ``None`` for single-output.
+
+    Co-outputs of ONE call (``h, c = lstm_cell(...)``) occupy distinct output slots.
+    Distinct slots of the same call are distinct layers, never sequential passes of
+    each other: an N-step ``nn.LSTMCell`` loop is one N-pass h-layer plus one N-pass
+    c-layer, mirroring how ``torch.max`` values/indices already split. Same-function,
+    same-parameter merging must therefore never fuse nodes across output slots."""
     recurrence_anchored: bool = False
     """Whether this op has a reused persistent identity that anchors genuine recurrence.
 
@@ -144,6 +152,7 @@ class _MutableRecurrenceNode:
     uses_params: bool
     func_name: str
     param_barcodes: tuple[str, ...]
+    output_slot: Optional[int] = None
     recurrence_anchored: bool = False
 
 
@@ -190,6 +199,7 @@ class _GroupingWorkspace:
     raw_labels: tuple[str, ...]
     source_labels: tuple[str, ...]
     eligible_labels: set[str]
+    _param_contexts: Optional[dict[str, frozenset[str]]] = None
 
     @classmethod
     def from_graph(
@@ -222,6 +232,7 @@ class _GroupingWorkspace:
                 uses_params=node.uses_params,
                 func_name=node.func_name,
                 param_barcodes=tuple(node.param_barcodes),
+                output_slot=node.output_slot,
                 recurrence_anchored=node.recurrence_anchored,
             )
             for label, node in graph.nodes.items()
@@ -249,6 +260,44 @@ class _GroupingWorkspace:
         """
         node = self.nodes[label]
         return tuple(equiv for equiv in node.equivalent_labels if equiv in self.nodes)
+
+    def param_contexts(self) -> dict[str, frozenset[str]]:
+        """Return each node's nearest-parameter-ancestor barcode context.
+
+        A node's parametric context is the union, over its data parents, of the
+        parent's own parameter barcodes when the parent is parameterized, else the
+        parent's context. It identifies WHICH parametric loop a parameter-free op
+        sits inside: a ``tanh`` fed by weight-tied layer A carries context ``{A}``,
+        one fed by layer B carries ``{B}``. Two bare functional ops whose contexts
+        are nonempty and disjoint provably belong to different parametric loops and
+        must never be merged as recurrent passes of one layer.
+
+        The computation is a single pass over capture order (parents precede
+        children in a captured DAG) and depends only on set-valued inputs, so it is
+        invariant to sibling capture order.
+
+        Returns
+        -------
+        dict[str, frozenset[str]]
+            Barcode context keyed by node label. Cached after the first call.
+        """
+        if self._param_contexts is not None:
+            return self._param_contexts
+        contexts: dict[str, frozenset[str]] = {}
+        for label in self.raw_labels:
+            node = self.nodes[label]
+            accumulated: set[str] = set()
+            for parent in node.data_parents:
+                parent_node = self.nodes.get(parent)
+                if parent_node is None:
+                    continue
+                if parent_node.uses_params and parent_node.param_barcodes:
+                    accumulated.update(parent_node.param_barcodes)
+                else:
+                    accumulated.update(contexts.get(parent, frozenset()))
+            contexts[label] = frozenset(accumulated)
+        self._param_contexts = contexts
+        return contexts
 
     def assignments(self) -> dict[str, RecurrenceAssignment]:
         """Return computed assignments for every eligible node.
@@ -476,6 +525,26 @@ def _refine_iso_groups(
                 for other in members_with_key[1:]:
                     union(first, other)
 
+        # Directly chained ANCHORED members are consecutive passes of one reused
+        # persistent identity (one ``nn.ReLU`` module applied to its own output) and
+        # must survive refinement together. Without this, a group of exactly two has
+        # asymmetric endpoint signatures (one member only feeds the group, the other
+        # is only fed by it), gets split into singletons here, and the singletons
+        # produce zero merge candidates downstream -- so the documented
+        # ``recurrence_anchored`` bypass never ran for its canonical two-call case.
+        # Groups of three or more survive because middle members carry both
+        # directional signatures. Bare functional chains (``tanh(tanh(x))``) are not
+        # anchored and still split, preserving the straight-chain false-positive
+        # guard.
+        member_set = set(members)
+        for member_label in members:
+            member_node = workspace.nodes[member_label]
+            if not member_node.recurrence_anchored:
+                continue
+            for neighbor in member_node.data_children:
+                if neighbor in member_set and workspace.nodes[neighbor].recurrence_anchored:
+                    union(member_label, neighbor)
+
         components: dict[str, list[str]] = defaultdict(list)
         for member in members:
             components[find(member)].append(member)
@@ -531,6 +600,19 @@ def _advance_bfs_frontier(
         ) = _pop_frontier_node(frontier_nodes)
         if candidate_node_label is None:
             break
+
+        if candidate_node_label in state.node_to_subgraph:
+            # The candidate was absorbed into another subgraph after this frontier
+            # was collected (a loop-carried value: child of body ``i``, parent of
+            # body ``i + 1``). It cannot be matched again, but its presence on this
+            # subgraph's frontier is exactly the evidence that consecutive
+            # iterations are directly adjacent -- record that instead.
+            _record_frontier_adjacency(
+                candidate_node_subgraph,  # type: ignore[arg-type]
+                candidate_node_label,
+                state,
+            )
+            continue
 
         new_equivalent_nodes = _find_isomorphic_matches(
             workspace,
@@ -593,7 +675,57 @@ def _collect_frontier_and_detect_adjacency(
                     added_neighbors.add(neighbor_label)
         frontier_nodes[node_subgraph_label] = subgraph_successor_nodes
 
+    _canonicalize_frontier(workspace, frontier_nodes)
     return frontier_nodes
+
+
+def _canonicalize_frontier(
+    workspace: _GroupingWorkspace,
+    frontier_nodes: FrontierNodes,
+) -> None:
+    """Make frontier contents a canonical function of the graph, not capture order.
+
+    Grouping must be a well-defined function of the captured DAG: two mathematically
+    identical models differing only in independent-sibling statement order (or a
+    cross-backend feed ordering children differently) must produce the SAME layer
+    partition. Two canonicalizations enforce this:
+
+    * Every frontier deque is sorted by ``raw_order``, so which same-key neighbor an
+      isomorphic match absorbs no longer depends on the incidental order of a node's
+      ``data_children`` tuple.
+    * A label appearing in the SAME direction of MORE THAN ONE subgraph's frontier is
+      a single node shared between candidate loop bodies at the same relative
+      position. One node cannot be a per-iteration isomorphic copy in two bodies at
+      once, so such labels are dropped from that direction instead of being greedily
+      absorbed by whichever subgraph popped first (the previous behavior, which let
+      sibling capture order fabricate or miss loops and inflate the body-size
+      guard). A label shared across OPPOSITE directions is kept: a loop-carried
+      value is simultaneously a child of body ``i`` and a parent of body ``i + 1``,
+      and dropping it would sever the chain that makes consecutive iterations
+      adjacent (the pop path records that adjacency instead).
+
+    Parameters
+    ----------
+    workspace:
+        Mutable grouping workspace.
+    frontier_nodes:
+        Candidate frontier nodes by subgraph and neighbor direction.
+
+    Returns
+    -------
+    None
+        Mutates ``frontier_nodes`` in place.
+    """
+    for direction in ("children", "parents"):
+        label_counts: Counter[str] = Counter()
+        for direction_buckets in frontier_nodes.values():
+            label_counts.update(direction_buckets[direction])
+        shared_labels = {label for label, count in label_counts.items() if count > 1}
+        for direction_buckets in frontier_nodes.values():
+            bucket = direction_buckets[direction]
+            kept = [label for label in bucket if label not in shared_labels]
+            kept.sort(key=lambda label: workspace.nodes[label].raw_order)
+            direction_buckets[direction] = deque(kept)
 
 
 def _record_subgraph_adjacency(
@@ -601,7 +733,14 @@ def _record_subgraph_adjacency(
     neighbor_label: str,
     state: IsomorphicExpansionState,
 ) -> None:
-    """Mark two subgraphs as adjacent in the expansion state.
+    """Mark two subgraphs as DIRECTLY adjacent in the expansion state.
+
+    Adjacency is pairwise, never transitive. Consecutive iterations of one loop are
+    directly adjacent and still chain into a single layer through union-find in
+    :func:`_merge_iso_groups_to_layers`; recording transitively merged adjacency
+    SETS (the previous behavior) instead let two subgraphs many hops apart -- e.g.
+    the first ``tanh`` of loop A and the last ``tanh`` of a chained but distinct
+    loop B -- count as "adjacent" and merge into one incoherent recurrent layer.
 
     Parameters
     ----------
@@ -617,10 +756,35 @@ def _record_subgraph_adjacency(
     None
         Mutates ``state.adjacent_subgraphs``.
     """
-    node_subgraph = state.node_to_subgraph[node_label]
-    node_subgraph_label = node_subgraph.starting_node
-    neighbor_subgraph = state.node_to_subgraph[neighbor_label]
-    neighbor_subgraph_label = neighbor_subgraph.starting_node
+    node_subgraph_label = state.node_to_subgraph[node_label].starting_node
+    _record_frontier_adjacency(node_subgraph_label, neighbor_label, state)
+
+
+def _record_frontier_adjacency(
+    subgraph_label: str,
+    neighbor_label: str,
+    state: IsomorphicExpansionState,
+) -> None:
+    """Record direct adjacency between a subgraph and a neighbor's subgraph.
+
+    Parameters
+    ----------
+    subgraph_label:
+        Starting-node label of the subgraph whose frontier met the neighbor.
+    neighbor_label:
+        Neighbor label already assigned to a subgraph.
+    state:
+        Mutable isomorphic expansion state.
+
+    Returns
+    -------
+    None
+        Mutates ``state.adjacent_subgraphs``.
+    """
+    node_subgraph = state.subgraph_info[subgraph_label]
+    neighbor_subgraph_label = state.node_to_subgraph[neighbor_label].starting_node
+    if neighbor_subgraph_label == subgraph_label:
+        return
 
     neighbor_iso_group = state.node_to_iso_leader[neighbor_label]
     nodes_isomorphic_to_neighbor_node = state.iso_node_groups[neighbor_iso_group]
@@ -628,22 +792,8 @@ def _record_subgraph_adjacency(
         return
 
     adj = state.adjacent_subgraphs
-    if (node_subgraph_label in adj) and (neighbor_subgraph_label in adj):
-        if adj[node_subgraph_label] is not adj[neighbor_subgraph_label]:
-            merged = adj[node_subgraph_label] | adj[neighbor_subgraph_label]
-            for subgraph_key in merged:
-                adj[subgraph_key] = merged
-        return
-    if (node_subgraph_label in adj) and (neighbor_subgraph_label not in adj):
-        adj[node_subgraph_label].add(neighbor_subgraph_label)
-        adj[neighbor_subgraph_label] = adj[node_subgraph_label]
-    elif (node_subgraph_label not in adj) and (neighbor_subgraph_label in adj):
-        adj[neighbor_subgraph_label].add(node_subgraph_label)
-        adj[node_subgraph_label] = adj[neighbor_subgraph_label]
-    else:
-        new_adj_set = {node_subgraph_label, neighbor_subgraph_label}
-        adj[node_subgraph_label] = new_adj_set
-        adj[neighbor_subgraph_label] = new_adj_set
+    adj.setdefault(subgraph_label, set()).add(neighbor_subgraph_label)
+    adj.setdefault(neighbor_subgraph_label, set()).add(subgraph_label)
 
 
 def _pop_frontier_node(
@@ -660,8 +810,15 @@ def _pop_frontier_node(
     -------
     tuple[str | None, str | None, str | None]
         Candidate label, neighbor type, and subgraph label, or all ``None``.
+
+    Notes
+    -----
+    Iteration is direction-major (every subgraph's children before any parents) so
+    that a loop-carried value shared between a child frontier and a parent frontier
+    is deterministically absorbed through its child position first; its parent-side
+    appearance then records iteration adjacency at pop time.
     """
-    for subgraph_label, neighbor_type in it.product(frontier_nodes, ["children", "parents"]):
+    for neighbor_type, subgraph_label in it.product(["children", "parents"], frontier_nodes):
         subgraph_neighbors = frontier_nodes[subgraph_label][neighbor_type]
         if len(subgraph_neighbors) > 0:
             candidate_node_label = subgraph_neighbors.popleft()
@@ -903,21 +1060,48 @@ def _merge_iso_groups_to_layers(
                     workspace.nodes[pnode].equivalence_key for pnode in sg.param_nodes
                 )
 
+    param_contexts = workspace.param_contexts()
+
     for iso_group_label, iso_nodes_orig in iso_node_groups.items():
         iso_nodes = sorted(iso_nodes_orig)
         for node1_label, node2_label in it.combinations(iso_nodes, 2):
             node1_subgraph_label = node_to_subgraph[node1_label].starting_node
             node2_subgraph_label = node_to_subgraph[node2_label].starting_node
-            overlapping_param_types = (
-                sg_param_types[node1_subgraph_label] & sg_param_types[node2_subgraph_label]
-            )
+            # Adjacency is required for BOTH merge paths and is DIRECT (pairwise).
+            # Structural body similarity alone -- including a shared-weight param op
+            # captured inside two structurally-disjoint bodies -- is not evidence of
+            # recurrence between the seeds: without a data connection the two
+            # "iterations" never feed each other (independent terminal reductions on
+            # parallel streams must stay single-pass). Genuine loops chain through
+            # consecutive directly-adjacent iterations via union-find. Parameterized
+            # seeds are unaffected: same-key param seeds share barcodes by
+            # construction and merge through the barcode groups below.
             subgraphs_are_adjacent = (
                 node1_subgraph_label in adjacent_subgraphs
                 and node2_subgraph_label in adjacent_subgraphs[node1_subgraph_label]
             )
+            if not subgraphs_are_adjacent:
+                continue
+            node1 = workspace.nodes[node1_label]
+            node2 = workspace.nodes[node2_label]
+            pair_anchored = node1.recurrence_anchored or node2.recurrence_anchored
+            if not (node1.uses_params or node2.uses_params or pair_anchored):
+                # Two bare functional ops sitting inside DIFFERENT parametric loops
+                # (nonempty, disjoint nearest-param-ancestor contexts) are passes of
+                # different loops; merging them straddles the loop boundary and
+                # yields incoherent pass counts (a 3-pass and a 2-pass layer cannot
+                # share a 5-pass neighbor). Anchored ops are exempt: a reused module
+                # identity is real recurrence wherever its calls sit.
+                context1 = param_contexts.get(node1_label, frozenset())
+                context2 = param_contexts.get(node2_label, frozenset())
+                if context1 and context2 and context1.isdisjoint(context2):
+                    continue
+            overlapping_param_types = (
+                sg_param_types[node1_subgraph_label] & sg_param_types[node2_subgraph_label]
+            )
             if overlapping_param_types:
                 union(node1_label, node2_label)
-            elif subgraphs_are_adjacent and _param_free_adjacency_merge_allowed(
+            elif _param_free_adjacency_merge_allowed(
                 workspace,
                 node1_label,
                 node2_label,
@@ -926,11 +1110,21 @@ def _merge_iso_groups_to_layers(
             ):
                 union(node1_label, node2_label)
 
-    param_barcode_groups: dict[tuple[str, tuple[str, ...]], list[str]] = defaultdict(list)
+    param_barcode_groups: dict[tuple[str, tuple[str, ...], Optional[int]], list[str]] = defaultdict(
+        list
+    )
     for node_label in all_iso_nodes:
         node = workspace.nodes[node_label]
         if node.uses_params and node.param_barcodes:
-            barcode_key = (node.func_name, tuple(sorted(node.param_barcodes)))
+            # The output slot is part of the identity: co-outputs of one call (h and
+            # c of an LSTMCell) share function name and parameters but are DISTINCT
+            # layers, not sequential passes of each other. Omitting the slot doubled
+            # ``num_passes`` for every multi-output recurrent cell.
+            barcode_key = (
+                node.func_name,
+                tuple(sorted(node.param_barcodes)),
+                node.output_slot,
+            )
             param_barcode_groups[barcode_key].append(node_label)
 
     for barcode_key, nodes_with_same_params in param_barcode_groups.items():
