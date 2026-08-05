@@ -82,20 +82,32 @@ def _require_pandas() -> Any:
 
 
 def _op_label(op: Op) -> str:
-    """Return the stable pass-qualified label for an op.
+    """Return the stable pass-qualified label for an op or aggregate Layer.
+
+    Reading the per-pass ``label`` on an aggregate recurrent ``Layer`` trips the
+    deliberate ``ValueError`` multi-pass tripwire, so route through the shared
+    :func:`~torchlens.utils._multipass_access.get_multipass_attr` helper (the one
+    documented pattern for the whole sprint) and fall back to the aggregate
+    ``layer_label``, which is the honest identifier for a multi-pass Layer.
 
     Parameters
     ----------
     op:
-        TorchLens op.
+        TorchLens op or aggregate Layer.
 
     Returns
     -------
     str
-        Op label.
+        Op label, or the aggregate ``layer_label`` for a multi-pass Layer.
     """
 
-    return str(getattr(op, "label", None) or getattr(op, "layer_label", ""))
+    from ..utils._multipass_access import get_multipass_attr
+
+    label = get_multipass_attr(op, "label", None, multipass=None)
+    if isinstance(label, str) and label:
+        return label
+    layer_label = get_multipass_attr(op, "layer_label", "", multipass=None)
+    return str(layer_label or "")
 
 
 def _compute_ops(trace: Trace) -> list[Op]:
@@ -131,21 +143,39 @@ def _resolve_op(trace: Trace, op_or_label: Any) -> tuple[Op | None, str | None]:
         Resolved op and error message.
     """
 
-    if hasattr(op_or_label, "parents") and hasattr(op_or_label, "children"):
-        return op_or_label, None
-    try:
-        resolved = trace[op_or_label]
-    except Exception as exc:  # noqa: BLE001 - debug helpers report odd inputs instead of raising.
-        return None, f"unavailable: {exc}"
-    if hasattr(resolved, "parents") and hasattr(resolved, "children"):
-        return resolved, None
-    ops = getattr(resolved, "ops", None)
-    if ops is not None:
+    from ..utils._multipass_access import is_multipass_layer
+
+    candidate = op_or_label
+    if not (hasattr(candidate, "parents") and hasattr(candidate, "children")):
         try:
-            first_op = next(iter(ops.values()))
-        except (AttributeError, StopIteration):
+            candidate = trace[op_or_label]
+        except Exception as exc:  # noqa: BLE001 - debug helpers report odd inputs instead of raising.
+            return None, f"unavailable: {exc}"
+    # An aggregate recurrent Layer is per-pass ambiguous: its graph edges are
+    # bare labels that re-resolve to aggregates and its per-pass fields trip the
+    # multi-pass ValueError tripwire. Refuse it honestly (non-raising, per the
+    # lineage contract) and direct the caller to a specific pass instead of
+    # leaking a bare ValueError or walking a bare-label graph.
+    if is_multipass_layer(candidate):
+        base = str(getattr(candidate, "layer_label", op_or_label))
+        num_passes = int(getattr(candidate, "num_passes", 0) or 0)
+        return None, (
+            f"unavailable: {base!r} is recurrent ({num_passes} passes); "
+            f"select a pass, e.g. {base}:1"
+        )
+    # A single-pass Layer -> drill to its one Op so traversal follows the
+    # pass-qualified graph edges (a Layer exposes bare-label edges instead).
+    if type(candidate).__name__ == "Layer":
+        ops = getattr(candidate, "ops", None)
+        if ops is None:
+            return None, f"unavailable: {op_or_label!r} did not resolve to an op"
+        try:
+            first_op = next(iter(ops.values())) if hasattr(ops, "values") else next(iter(ops))
+        except (AttributeError, TypeError, StopIteration):
             return None, f"unavailable: {op_or_label!r} did not resolve to an op"
         return first_op, None
+    if hasattr(candidate, "parents") and hasattr(candidate, "children"):
+        return candidate, None
     return None, f"unavailable: {op_or_label!r} did not resolve to an op"
 
 
