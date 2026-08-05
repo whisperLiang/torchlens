@@ -116,7 +116,11 @@ def _trace_events(trace: dict[str, Any]) -> list[dict[str, Any]]:
         Event dictionaries.
     """
 
-    events = trace.get("traceEvents", trace.get("events", []))
+    events = trace.get("traceEvents")
+    if events is None:
+        events = trace.get("events")
+    if events is None:
+        events = []
     return [event for event in events if isinstance(event, dict)]
 
 
