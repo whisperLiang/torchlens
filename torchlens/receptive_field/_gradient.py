@@ -47,14 +47,22 @@ def _builtin_rules_when_registry_empty() -> Iterator[None]:
         yield
         return
     original_epoch = _rules._RF_RULES_EPOCH
-    module = importlib.import_module(f"{__package__}.rules")
-    if not _rules._RF_RULES:
-        for name in module.__all__:
-            importlib.reload(getattr(module, name))
+    original_rules = dict(_rules._RF_RULES)
     try:
+        # Installing the built-in pack (import plus per-module reload) mutates the
+        # shared rule registry and epoch through decorator side effects. Keep that
+        # work inside the try so a mid-loop reload failure cannot leak a partially
+        # populated registry or a half-advanced epoch: the finally always restores
+        # the exact pre-entry mapping and epoch, whether install, the reload loop,
+        # or the guarded body raised.
+        module = importlib.import_module(f"{__package__}.rules")
+        if not _rules._RF_RULES:
+            for name in module.__all__:
+                importlib.reload(getattr(module, name))
         yield
     finally:
         _rules._RF_RULES.clear()
+        _rules._RF_RULES.update(original_rules)
         _rules._RF_RULES_EPOCH = original_epoch
 
 
