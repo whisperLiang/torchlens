@@ -1231,6 +1231,13 @@ FUNC_ARG_SPECS["indexput"] = ArgSpec(
 # linear: F.linear(input, weight, bias) — weight/bias can be keyword args
 FUNC_ARG_SPECS["linear"] = ArgSpec(positions=(0, 1, 2), tensor_kwargs=("input", "weight", "bias"))
 
+# linear_cross_entropy: F.linear_cross_entropy(input, linear_weight, target, *, linear_bias=None,
+# weight=None, ...) — three positional tensors, optional tensor kwargs linear_bias/weight
+FUNC_ARG_SPECS["linearcrossentropy"] = ArgSpec(
+    positions=(0, 1, 2),
+    tensor_kwargs=("input", "linear_weight", "target", "linear_bias", "weight"),
+)
+
 # conv: F.conv2d(input, weight, bias, stride, ...) — bias at position 2
 _CONV_SPEC = ArgSpec(positions=(0, 1, 2), tensor_kwargs=("input", "weight", "bias"))
 for _name in [
@@ -1757,6 +1764,7 @@ _PHASE5B_VALIDATED_ARG_SPECS = {
     "foreachceil": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachclampmax": ArgSpec(sequence_positions=(0, 1), tensor_kwargs=("self", "other")),
     "foreachclampmin": ArgSpec(sequence_positions=(0, 1), tensor_kwargs=("self", "other")),
+    "foreachclone": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachcopy": ArgSpec(sequence_positions=(0, 1), tensor_kwargs=("self", "src")),
     "foreachcos": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachcosh": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
@@ -1780,12 +1788,14 @@ _PHASE5B_VALIDATED_ARG_SPECS = {
     "foreachmax": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachmaximum": ArgSpec(sequence_positions=(0, 1), tensor_kwargs=("self", "other")),
     "foreachminimum": ArgSpec(sequence_positions=(0, 1), tensor_kwargs=("self", "other")),
+    "foreachmm": ArgSpec(sequence_positions=(0, 1), tensor_kwargs=("self", "mat2")),
     "foreachmul": ArgSpec(
         positions=(1,), sequence_positions=(0, 1), tensor_kwargs=("self", "other")
     ),
     "foreachneg": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachnorm": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachpow": ArgSpec(sequence_positions=(0, 1), tensor_kwargs=("self", "exponent")),
+    "foreachpowsum": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachreciprocal": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachround": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
     "foreachrsqrt": ArgSpec(sequence_positions=(0,), tensor_kwargs=("self",)),
@@ -1894,6 +1904,7 @@ _PHASE5B_VALIDATED_ARG_SPECS = {
         positions=(0, 1, 2, 3, 4, 5), tensor_kwargs=("input", "hx", "w_ih", "w_hh", "b_ih", "b_hh")
     ),
     "hascompatibleshallowcopytype": ArgSpec(positions=(0, 1), tensor_kwargs=("self", "from")),
+    "hashtensor": ArgSpec(positions=(0,), tensor_kwargs=("self", "input")),
     "histogramddbinedges": ArgSpec(positions=(0,), tensor_kwargs=("self", "weight")),
     "histogramddfrombincts": ArgSpec(positions=(0,), tensor_kwargs=("self", "weight")),
     "histogramddfrombintensors": ArgSpec(

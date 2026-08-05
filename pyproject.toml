@@ -205,6 +205,13 @@ filterwarnings = [
     # like the save_mode caveat above it is not per-test assertable. Asserted locally in
     # tests/test_io_runnable_payload_integrity.py, which resets the one-time flag first.
     "default:This runnable save archives activations but records no original-input.*:UserWarning:torchlens(\\.|$)",
+    # Torch-originated TORCH_WARN_ONCE caveats (torch>=2.13) attributed to torchlens only
+    # because the wrapped __float__/item()/tensor-factory frame sits at the warning's
+    # stacklevel. These are third-party (torch's own) warnings, not TorchLens-originated, so
+    # the message-narrow exemptions below stop the broad error::UserWarning:torchlens rule
+    # from mis-promoting them; genuine TorchLens-originated UserWarnings still error.
+    "default:Converting a tensor with requires_grad=True to a scalar.*:UserWarning:torchlens(\\.|$)",
+    "default:Sparse invariant checks are implicitly disabled.*:UserWarning:torchlens(\\.|$)",
     "default:`.*` is deprecated; use `.*` instead\\..*:DeprecationWarning",
     "default:Bundle tlspec_version=.* is older than runtime tlspec_version=.*:DeprecationWarning",
     # External: torchvision model init deprecations

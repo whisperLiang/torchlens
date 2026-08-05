@@ -150,7 +150,6 @@ _KNOWN_UNSUPPORTED_ARG_SPEC_REASONS = {
     "addmmactivation": "internal/private helper left on dynamic fallback until independently validated",
     "addrelu": "internal/private helper left on dynamic fallback until independently validated",
     "apply": "demoted fragment: no operator schema available",
-    "array": "Python/operator protocol helper with nonstandard callable metadata",
     "arraywrap": "Python/operator protocol helper with nonstandard callable metadata",
     "asarray": "C-level tensor factory with non-introspectable signature (wrapped for capture coverage)",
     "emptypermuted": "C-level tensor factory with non-introspectable signature (wrapped for capture coverage)",
@@ -237,6 +236,31 @@ _KNOWN_UNSUPPORTED_ARG_SPEC_REASONS = {
     "wrappedlinearprepack": "internal/private helper left on dynamic fallback until independently validated",
     "wrappedquantizedlinearprepacked": "demoted fragment: schema mismatch: missing_positions=[], extra_positions=[4, 5], missing_names=[]",
     "xpu": "demoted fragment: no operator schema available",
+    # torch>=2.13 additions: decorated on this runtime but absent on the pinned
+    # torch-2.1.2 / 2.8 CI legs, so every name below also joins
+    # _TORCH_VERSION_VARYING_UNSUPPORTED. Private ATen ops that need CUDA/ROCm/FP8
+    # hardware to exercise (scaled_mm_v2, philox RNG, flash-attention, miopen ctc, the
+    # linalg powsum) are left on dynamic fallback until they can be independently
+    # validated; the trailing entries are C-level factories or pure Python helpers with
+    # no validated tensor-input schema.
+    "scaledmmv2": "internal/private helper left on dynamic fallback until independently validated",
+    "scaledgroupedmmv2": "internal/private helper left on dynamic fallback until independently validated",
+    "philoxkeyfoldin": "internal/private helper left on dynamic fallback until independently validated",
+    "philoxkeysplit": "internal/private helper left on dynamic fallback until independently validated",
+    "philoxnormal": "internal/private helper left on dynamic fallback until independently validated",
+    "philoxuniform": "internal/private helper left on dynamic fallback until independently validated",
+    "flashattentionforwardnodropoutinplace": (
+        "internal/private helper left on dynamic fallback until independently validated"
+    ),
+    "usemiopenctcloss": "internal/private helper left on dynamic fallback until independently validated",
+    "powsum": "internal/private helper left on dynamic fallback until independently validated",
+    "fromblob": "C-level tensor factory with non-introspectable signature (wrapped for capture coverage)",
+    "constdataptr": "metadata/control helper with no validated tensor-input schema",
+    "checkunpooloutputsize": "metadata/control helper with no validated tensor-input schema",
+    "enumlistasintlist": "metadata/control helper with no validated tensor-input schema",
+    "expandsinglevalue": "metadata/control helper with no validated tensor-input schema",
+    "jitunused": "metadata/control helper with no validated tensor-input schema",
+    "listorempty": "metadata/control helper with no validated tensor-input schema",
 }
 
 _KNOWN_UNSUPPORTED_ARG_SPECS = frozenset(_KNOWN_UNSUPPORTED_ARG_SPEC_REASONS)
@@ -245,7 +269,33 @@ _KNOWN_UNSUPPORTED_ARG_SPECS = frozenset(_KNOWN_UNSUPPORTED_ARG_SPEC_REASONS)
 # names are decorated on some torch versions and absent on others (e.g. "op" is absent on
 # torch 2.8). These are torch-version differences, not stale entries; keep them out of the
 # strict "every known entry is decorated on THIS torch" guard below.
-_TORCH_VERSION_VARYING_UNSUPPORTED = frozenset({"op"})
+_TORCH_VERSION_VARYING_UNSUPPORTED = frozenset(
+    {
+        "op",
+        # "optional" (typing/operator protocol helper) is decorated on some torch
+        # versions but absent on torch 2.13; version-varying, not a stale entry.
+        "optional",
+        # torch>=2.13-only names: decorated here, absent on the pinned torch-2.1.2 / 2.8 CI
+        # legs. Their static-spec siblings (hashtensor, foreachclone/mm/powsum,
+        # linearcrossentropy) are covered by static specs, not this ledger.
+        "scaledmmv2",
+        "scaledgroupedmmv2",
+        "philoxkeyfoldin",
+        "philoxkeysplit",
+        "philoxnormal",
+        "philoxuniform",
+        "flashattentionforwardnodropoutinplace",
+        "usemiopenctcloss",
+        "powsum",
+        "fromblob",
+        "constdataptr",
+        "checkunpooloutputsize",
+        "enumlistasintlist",
+        "expandsinglevalue",
+        "jitunused",
+        "listorempty",
+    }
+)
 
 _EXPECTED_KWARGS = {
     "addr": ("input", "vec1", "vec2"),
