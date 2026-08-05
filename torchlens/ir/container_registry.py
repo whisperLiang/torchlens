@@ -428,8 +428,25 @@ def walk_container(value: Any, *, role: Role, capability: str) -> WalkResult | N
     return WalkResult(
         spec=spec,
         leaf_occurrences=occurrences,
-        reconstructable=spec.kind != "opaque",
+        reconstructable=_spec_is_reconstructable(spec),
     )
+
+
+def _spec_is_reconstructable(spec: ContainerSpec) -> bool:
+    """Return whether every node of ``spec`` can be rebuilt from the flat leaf stream.
+
+    ``walk_container`` must report ``reconstructable`` HONESTLY: an ``opaque`` node ANYWHERE
+    in the tree (a generator, an iterator, or a tensor-keyed dict that
+    :func:`_build_container_spec` degrades) makes ``rebuild_container_from_spec`` raise, so
+    the persisted witness must be ``False`` for it. The prior shallow
+    ``spec.kind != "opaque"`` blessed a top-level container even when a nested child was
+    opaque -- a LYING witness (``reconstructable=True`` on a spec that cannot rebuild). This
+    recursive check makes the flag true only when reconstruction actually works.
+    """
+
+    if spec.kind == "opaque":
+        return False
+    return all(_spec_is_reconstructable(child) for _component, child in spec.child_specs)
 
 
 def _snapshots_dedup_equivalent(left: ContainerSnapshot, right: ContainerSnapshot) -> bool:
@@ -585,6 +602,15 @@ def _build_container_spec(value: Any) -> ContainerSpec | None:
             child_specs=tuple(child_specs),
         )
     if isinstance(value, Mapping):
+        # A dict with a TENSOR KEY cannot be rebuilt from the flat leaf stream: a tensor key
+        # has no slot in the captured leaves and ``_iter_container_children`` skips the whole
+        # entry, so ``keys``/``length`` (which count the tensor key) can NEVER agree with the
+        # children/occurrences. Recording it ``dict`` produced a LYING witness --
+        # ``reconstructable=True`` on a spec that ``rebuild_container_from_spec`` rejects with
+        # "Not enough leaves". Degrade to ``opaque`` so the witness stays honest.
+        if any(isinstance(key, torch.Tensor) for key in value.keys()):
+            module, qualname = _container_type_ref(value)
+            return ContainerSpec(kind="opaque", type_module=module, type_qualname=qualname)
         # A boundary INPUT that is any Mapping subclass (custom Mapping, OrderedDict,
         # defaultdict, ...) is bound by leaf path like a plain dict; the user supplies
         # the concrete object at run time, so no subtype reconstruction is needed.
