@@ -249,18 +249,41 @@ def _classify_bool_layers(
                 observed.append(location_classification)
 
         branch_classifications = _dedup_branch_classifications(observed)
+
+        frame_classification: Optional[ast_branches.BoolClassification] = None
+        for frame in reversed(bool_layer.code_context):
+            frame_candidate = ast_branches.classify_bool(
+                frame.file,
+                frame.line_number,
+                frame.col_offset,
+            )
+            if frame_candidate.kind == "unknown":
+                continue
+            frame_classification = frame_candidate
+            break
+
         if not branch_classifications:
-            for frame in reversed(bool_layer.code_context):
-                frame_classification = ast_branches.classify_bool(
-                    frame.file,
-                    frame.line_number,
-                    frame.col_offset,
-                )
-                if frame_classification.kind == "unknown":
-                    continue
+            if frame_classification is not None:
                 observed.append(frame_classification)
                 branch_classifications = _dedup_branch_classifications([frame_classification])
-                break
+        elif (
+            frame_classification is not None
+            and frame_classification.kind in _BRANCH_CONTEXT_KINDS
+            and frame_classification.conditional_key is not None
+            and frame_classification.conditional_key
+            not in {c.conditional_key for c in branch_classifications}
+        ):
+            # Creation-site conflict: the bool op was created inside the test
+            # span of one conditional while the witnessed consumer line
+            # attributes it to a DIFFERENT conditional. Line-only runtime
+            # attribution is misreporting one of the two (e.g. a formatter-
+            # wrapped multi-line nested ternary, where the interpreter
+            # reports the inner ternary's line for the outer test's
+            # ``__bool__``). Linking either key could cross-wire a foreign
+            # bool into a conditional's public record, so fail closed for
+            # this bool instead of guessing.
+            observed = []
+            branch_classifications = []
 
         if branch_classifications:
             primary = branch_classifications[0]

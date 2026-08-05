@@ -293,6 +293,15 @@ class SameLineNestedTernaryModel(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run the one-line nested ternary."""
+        y = (torch.relu(x) if (x > 0).all() else torch.sigmoid(x)) if (x < 10).all() else torch.tanh(x)  # fmt: skip  # noqa: E501
+        return y * 2
+
+
+class MultiLineNestedTernaryModel(nn.Module):
+    """Formatter-wrapped nested ternary: outer test on its OWN line."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the multi-line nested ternary."""
         y = (
             (torch.relu(x) if (x > 0).all() else torch.sigmoid(x))
             if (x < 10).all()
@@ -324,6 +333,43 @@ def test_same_line_nested_ternary_does_not_cross_wire_bools() -> None:
             assert getattr(layer, "is_terminal_conditional_bool", False) is False
 
     # relu executed; tanh/sigmoid did not — no arm may claim they fired.
+    _assert_no_false_fired(trace, {"relu", "all", "__gt__", "__lt__", "mul"}, {"sigmoid", "tanh"})
+    _assert_bool_value_never_contradicts_fired(trace)
+
+
+def test_multi_line_nested_ternary_does_not_cross_wire_bools() -> None:
+    """A formatter-wrapped nested ternary must not absorb the outer test's
+    bool into the inner conditional when the runtime misattributes the
+    consumption line (py3.10 reports the inner ternary's line for both)."""
+
+    trace = _log_model(MultiLineNestedTernaryModel(), torch.ones(2, 2))
+
+    bool_layers = [
+        layer
+        for layer in trace.layer_list
+        if getattr(layer, "is_scalar_bool", False) and not layer.is_output
+    ]
+    assert len(bool_layers) == 2
+    creation_lines = {
+        layer.layer_label: next(
+            frame.line_number for frame in layer.code_context if frame.file == __file__
+        )
+        for layer in bool_layers
+    }
+
+    events = trace.conditional_records
+    assert len(events) in (1, 2), f"cross-wire signature: {len(events)} event(s)"
+    for event in events:
+        # Every bool attached to an event must have been CREATED on the
+        # event's own test line (both tests here are inline single-line
+        # expressions) — a foreign bool on the record is the cross-wire.
+        test_line = event.test_span[0]
+        for bool_label in event.bool_layers:
+            assert creation_lines[bool_label] == test_line, (
+                f"event at test line {test_line} owns foreign bool "
+                f"{bool_label} created at line {creation_lines[bool_label]}"
+            )
+
     _assert_no_false_fired(trace, {"relu", "all", "__gt__", "__lt__", "mul"}, {"sigmoid", "tanh"})
     _assert_bool_value_never_contradicts_fired(trace)
 
