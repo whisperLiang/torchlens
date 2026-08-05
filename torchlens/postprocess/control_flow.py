@@ -327,13 +327,15 @@ def _materialize_conditional_records(
     branch-participating classification links its bool to the matching event.
     The scalar ``terminal_conditional_id`` keeps its historical 1:1 shape by
     pointing at the FIRST linked event; the complete 1:N linkage lives on each
-    event's ``bool_layers``. Two postprocess-internal annotations are stashed
+    event's ``bool_layers``. Three postprocess-internal annotations are stashed
     on each event for finalization's public record builder:
     ``_arm_bool_indices`` (branch kind -> indices into ``bool_layers`` whose
     runtime consumption evaluated THAT arm's test; indices survive the
-    raw-to-final label rename that rewrites ``bool_layers`` in place) and
+    raw-to-final label rename that rewrites ``bool_layers`` in place),
     ``_arm_test_structures`` (branch kind -> ``"bare"``/``"negated"``/
-    ``"compound"`` bool-value semantics of the arm's test expression).
+    ``"compound"`` bool-value semantics of the arm's test expression), and
+    ``_bool_layers_raw`` (index-aligned RAW labels so finalization resolves
+    the exact per-pass evaluating op of rolled multi-pass bools).
 
     Parameters
     ----------
@@ -381,8 +383,16 @@ def _materialize_conditional_records(
         # Postprocess-internal annotations consumed by finalization's
         # ``_build_conditional_records``; instance attributes (not dataclass
         # fields) so the portable/public ConditionalEvent schema is unchanged.
+        # ``_bool_layers_raw`` mirrors ``bool_layers`` with RAW labels: raw
+        # labels are unique per pass and stay valid ``layer_dict_all_keys``
+        # lookup keys, so finalization can resolve the EXACT evaluating op of
+        # a rolled multi-pass bool layer. The renamed public ``bool_layers``
+        # collapses rolled passes onto one base label, and an unqualified
+        # lookup resolves last-writer-wins to an arbitrary pass (round-24
+        # condbranch seal, S3).
         setattr(event, "_arm_bool_indices", {})
         setattr(event, "_arm_test_structures", dict(record.branch_test_structures))
+        setattr(event, "_bool_layers_raw", [])
         events_by_key[conditional_key] = event
         self.conditional_records.append(event)
 
@@ -407,6 +417,7 @@ def _materialize_conditional_records(
                 bool_layer.terminal_conditional_id = event.id
             if bool_label not in event.bool_layers:
                 event.bool_layers.append(bool_label)
+                getattr(event, "_bool_layers_raw").append(bool_label)
             bool_index = event.bool_layers.index(bool_label)
             arm_kind = classification.branch_test_kind or "then"
             arm_bool_indices: Dict[str, List[int]] = getattr(event, "_arm_bool_indices")

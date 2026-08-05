@@ -186,6 +186,11 @@ class ScopeEntry:
         Conditional records defined inside the scope.
     branch_intervals:
         Branch-arm intervals used for operation attribution.
+    test_spans_by_key:
+        Mapping from conditional key to every test-expression source range of
+        that conditional (the top ``if`` test plus each flattened ``elif``
+        test). Used by degraded line-only interval matching to fail closed
+        when an arm-body interval shares a source line with its own test.
     """
 
     code_firstlineno: int
@@ -196,6 +201,7 @@ class ScopeEntry:
     decorated_firstlineno: Optional[int] = None
     conditionals: List[ConditionalRecord] = field(default_factory=list)
     branch_intervals: List[BranchInterval] = field(default_factory=list)
+    test_spans_by_key: Dict[ConditionalKey, List[SourceRange]] = field(default_factory=dict)
 
     def query_intervals(
         self, line: int, col: Optional[int]
@@ -233,8 +239,21 @@ class ScopeEntry:
 
             filtered: List[BranchInterval] = []
             for intervals in grouped.values():
-                if len(intervals) == 1:
-                    filtered.extend(intervals)
+                if len(intervals) != 1:
+                    continue
+                interval = intervals[0]
+                # NO-FALSE-FIRED guard: when a test expression of the SAME
+                # conditional shares the query line (single-line ``if t: body``
+                # or ``elif t: body``), line-only matching cannot tell a TEST
+                # op from an arm-BODY op. Attributing a test op into the arm
+                # records the arm as fired even though its body never ran
+                # (round-24 condbranch seal, S1). The AST separates the test
+                # from the body by column, so column-carrying runtimes still
+                # attribute precisely; degraded mode must fail closed.
+                test_spans = self.test_spans_by_key.get(interval.conditional_key, [])
+                if any(_range_contains_line(test_span, line) for test_span in test_spans):
+                    continue
+                filtered.append(interval)
             matches = filtered
 
         matches.sort(key=lambda item: item.call_depth)
@@ -1660,6 +1679,11 @@ class _ScopeIndexer:
 
         self.scope.conditionals.append(record)
         self.all_conditionals.append(record)
+        test_spans = [record.test_span]
+        for test_span in record.branch_test_spans.values():
+            if test_span not in test_spans:
+                test_spans.append(test_span)
+        self.scope.test_spans_by_key[record.key] = test_spans
         for branch_kind, span in record.branch_ranges.items():
             self.scope.branch_intervals.append(
                 BranchInterval(

@@ -60,21 +60,38 @@ _CodeContextQualnames: TypeAlias = dict[int, Optional[str]]
 def _build_col_offset_map(code: CodeType) -> Dict[int, Optional[int]]:
     """Return ``instruction_offset -> column_offset`` for every instruction.
 
-    The map covers all bytecode instructions in ``code``. Instructions whose
-    ``positions`` are missing or whose ``col_offset`` is ``None`` are stored
-    with ``None`` so callers can distinguish "not in map" (unknown offset)
-    from "no column information available" (positions absent).
+    The map covers all bytecode instructions in ``code``, INCLUDING each
+    instruction's trailing inline-cache region. On Python 3.11+ adaptive
+    instructions (``CALL``, ``LOAD_METHOD``/``LOAD_ATTR``, ``BINARY_OP``, ...)
+    are followed by hidden ``CACHE`` slots that ``dis.get_instructions`` does
+    not list, and a caller frame's ``f_lasti`` during a METHOD call points
+    INSIDE that cache region. Without spreading each instruction's column
+    across its cache slots, every ``x.sum()``-style call site resolved to a
+    missing key -- silently degrading branch attribution to line-only mode
+    for method-produced bools (round-24 condbranch seal, S2). Each column is
+    therefore assigned to every code unit from the instruction's offset up to
+    the next listed instruction (or the end of ``co_code``).
+
+    Instructions whose ``positions`` are missing or whose ``col_offset`` is
+    ``None`` are stored with ``None`` so callers can distinguish "not in map"
+    (unknown offset) from "no column information available" (positions absent).
     """
     if sys.version_info < (3, 11):
         return {}
     offset_map: Dict[int, Optional[int]] = {}
     try:
-        for instruction in dis.get_instructions(code):
+        instructions = list(dis.get_instructions(code))
+        code_end = len(code.co_code)
+        for index, instruction in enumerate(instructions):
             positions = instruction.positions
-            if positions is None:
-                offset_map[instruction.offset] = None
-            else:
-                offset_map[instruction.offset] = positions.col_offset
+            col_offset = None if positions is None else positions.col_offset
+            next_offset = (
+                instructions[index + 1].offset if index + 1 < len(instructions) else code_end
+            )
+            # Bytecode units are 2 bytes; the half-open gap up to the next
+            # listed instruction is exactly this instruction's cache region.
+            for offset in range(instruction.offset, max(next_offset, instruction.offset + 2), 2):
+                offset_map[offset] = col_offset
     except (TypeError, ValueError):
         return {}
     return offset_map
