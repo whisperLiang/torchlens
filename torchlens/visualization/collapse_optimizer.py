@@ -2425,7 +2425,11 @@ def _module_box_plan_nodes(
         return tuple(nodes)
     module = trace.modules[address]
     for label in getattr(module, "layer_labels", ()) or ():
-        op = trace.ops[label]
+        # ``layer_labels`` entries are pass-free and become ambiguous for the
+        # public fuzzy accessor when the module is called more than once, so
+        # resolve through the pass-qualified helper. Every pass of an op layer
+        # shares the structural fields read below.
+        op = _trace_op_for_render_label(trace, label)
         if getattr(op, "is_buffer", False):
             continue
         if not getattr(op, "is_atomic_module", False):
