@@ -1,4 +1,4 @@
-"""Hardening regressions for the intelligent auto-collapse subsystem (round 21).
+"""Hardening regressions for the intelligent auto-collapse subsystem (round 21+).
 
 Covers the round-20 adversarial-audit defect classes:
 
@@ -9,6 +9,12 @@ Covers the round-20 adversarial-audit defect classes:
 - weighted optimizer results must not be cache-order dependent;
 - ``CollapseSchedule.at(0.0)`` must agree with ``select_collapse_level(0.0)``;
 - plans, schedules, and orders must be deterministic across hash seeds.
+
+Round-23 seal finding C1: when auto's band-pressure branch returns an
+op-segment-condensed plan, the max ladder re-condenses it, so pre-existing
+segment nodes must keep their descriptors (pass-through) and the L3 auto
+fallback must carry ``auto.segments`` instead of stripping them; every
+max/float/schedule/draw/order surface must return honestly for that class.
 """
 
 import re
@@ -27,7 +33,10 @@ from torchlens.visualization.collapse_optimizer import (
     _RESULT_CACHE,
     _child_segment_covered_ops,
     _child_segment_label,
+    _condense_plan_with_child_segments,
     _make_child_segment_descriptor,
+    _optimizer_total_units,
+    _rendered_module_hidden_counts,
     select_collapse_level,
     select_collapse_plan,
 )
@@ -723,3 +732,199 @@ def test_collapse_determinism_across_hashseed():
         )
         digests.add(proc.stdout.strip())
     assert len(digests) == 1, f"hash-seed dependent collapse output: {digests}"
+
+
+class PureFunctionalLoops(nn.Module):
+    """Zero-submodule functional loop: tanh; sigmoid; relu(x + 0.01) per pass.
+
+    At ten or more loops the full graph exceeds the readable band with no
+    DP-selectable module, so auto's band-pressure branch returns an
+    op-segment-condensed plan (round-23 seal C1 model class).
+    """
+
+    def __init__(self, loops: int) -> None:
+        super().__init__()
+        self.loops = loops
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for _ in range(self.loops):
+            x = torch.tanh(x)
+            x = torch.sigmoid(x)
+            x = torch.relu(x + 0.01)
+        return x
+
+
+class AtomicWrapper(nn.Module):
+    """Bare-linear wrapper whose single op renders as an atomic raw op."""
+
+    def __init__(self, width: int = 8) -> None:
+        super().__init__()
+        self.lin = nn.Linear(width, width)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.lin(x)
+
+
+class SharedChildFunctionalLoops(nn.Module):
+    """Real submodule called once per functional loop iteration.
+
+    The child's ops join the surrounding functional run, so auto's op
+    segments span multi-pass module ops rather than pure functional labels.
+    """
+
+    def __init__(self, loops: int, width: int = 8) -> None:
+        super().__init__()
+        self.child = AtomicWrapper(width)
+        self.loops = loops
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for _ in range(self.loops):
+            x = torch.tanh(x)
+            x = self.child(x)
+            x = torch.sigmoid(x)
+            x = torch.relu(x + 0.01)
+        return x
+
+
+def _op_segment_condensed_trace(kind: str, loops: int):
+    torch.manual_seed(0)
+    model = (
+        PureFunctionalLoops(loops) if kind == "functional" else SharedChildFunctionalLoops(loops)
+    ).eval()
+    return tl.trace(model, torch.randn(1, 8))
+
+
+_SEGMENTED_AUTO_CASES = [
+    ("functional", 9),
+    ("functional", 10),
+    ("functional", 11),
+    ("functional", 12),
+    ("functional", 20),
+    ("shared_child", 8),
+    ("shared_child", 12),
+    ("shared_child", 16),
+]
+_SEGMENTED_AUTO_IDS = [f"{kind}_{loops}" for kind, loops in _SEGMENTED_AUTO_CASES]
+
+
+@pytest.mark.parametrize("kind, loops", _SEGMENTED_AUTO_CASES, ids=_SEGMENTED_AUTO_IDS)
+def test_op_segment_condensed_auto_max_ladder_surfaces(kind, loops, tmp_path):
+    """Round-23 C1: every max/float/schedule/draw/order surface must be honest.
+
+    The size range spans the segmentation boundary (nine functional loops
+    keep auto un-segmented; ten push it into the band-pressure branch) and
+    both the zero-submodule and the real-submodule-in-functional-runs
+    variants. The pre-fix max ladder re-condensed auto's already-segmented
+    plan, dropped the pre-existing ``OpSegment`` descriptors, and crashed the
+    r21 parity tripwire (``AssertionError``) on all six public surfaces.
+    """
+
+    trace = _op_segment_condensed_trace(kind, loops)
+    context = RenderContext()
+
+    auto_result = select_collapse_plan(trace, context, mode="auto")
+    max_result = select_collapse_plan(trace, context, mode="max")
+    results = {"auto": auto_result, "max": max_result}
+    for t in (0.25, 0.5, 0.75, 1.0):
+        results[f"t={t}"] = select_collapse_level(trace, context, t)
+    for label, result in results.items():
+        assert not result.declined, f"{label}: unexpectedly declined"
+        assert result.visible_count == result.plan.total, (
+            f"{label}: visible_count {result.visible_count} != plan.total {result.plan.total}"
+        )
+        descriptors = result.segments or {}
+        plan_segments = _plan_segment_node_count(result.plan)
+        assert len(descriptors) == plan_segments, (
+            f"{label}: descriptor cardinality {len(descriptors)} != "
+            f"plan segment nodes {plan_segments}"
+        )
+        assert len(set(descriptors)) == len(descriptors)
+    assert results["t=1.0"].plan == max_result.plan
+
+    schedule = trace.collapse_schedule()
+    assert schedule.steps[-1].visible_count == max_result.plan.total
+    for step in schedule.steps:
+        assert step.visible_count == step.plan.total
+
+    order = trace.collapse_order(mode="max")
+    assert isinstance(order, list)
+
+    concrete, visible, hidden = _occurrence_witness_partition(trace, max_result)
+    assert concrete == visible | hidden, (
+        f"max: {len(concrete - visible - hidden)} occurrences have no plan witness"
+    )
+
+    for mode in ("max", 0.5):
+        out = tmp_path / f"segauto_{kind}_{loops}_{str(mode).replace('.', '_')}"
+        trace.draw(
+            vis_save_only=True,
+            vis_fileformat="svg",
+            collapse=mode,
+            vis_outpath=str(out),
+        )
+        plan = trace.collapse_plan(mode)
+        rendered = _svg_node_group_count(str(out) + ".svg")
+        assert plan.total == rendered, (
+            f"draw({mode}): plan.total {plan.total} != rendered SVG nodes {rendered}"
+        )
+
+
+def test_max_ladder_carries_auto_op_segment_descriptors():
+    """A pass-through max plan must keep auto's descriptors byte-identical.
+
+    For the op-segment-condensed auto class nothing further condenses, so the
+    max ladder falls back to auto; the fallback must carry auto's plan AND
+    auto's segment descriptors (the pre-r21 L3 fallback stripped
+    ``segments={}``, a silent plan/render parity lie). The op segments must
+    span multi-pass op labels, pinning the multi-pass absorption variant.
+    """
+
+    trace = _op_segment_condensed_trace("shared_child", 12)
+    context = RenderContext()
+    auto_result = select_collapse_plan(trace, context, mode="auto")
+    max_result = select_collapse_plan(trace, context, mode="max")
+    assert _plan_segment_node_count(auto_result.plan) > 0, (
+        "fixture must produce an op-segment-condensed auto plan"
+    )
+    assert max_result.plan == auto_result.plan
+    assert dict(max_result.segments or {}) == dict(auto_result.segments or {})
+    assert max_result.segments, "max fallback stripped auto's segment descriptors"
+    multi_pass = any(
+        ":" in op and op.rsplit(":", 1)[1] not in ("", "1")
+        for descriptor in max_result.segments.values()
+        for op in descriptor.ops
+    )
+    assert multi_pass, "op segments must span multi-pass op labels"
+
+
+def test_condense_pass_through_preserves_segment_descriptors():
+    """Re-condensing an already-segmented plan must rebuild its descriptors.
+
+    Feeds a max plan that carries ``ChildSegment`` nodes back through
+    ``_condense_plan_with_child_segments``: pre-existing segment nodes must
+    pass through verbatim with descriptors equal to the originals (the
+    pre-fix loop appended them descriptor-less, firing the parity tripwire).
+    """
+
+    model = CollidingSegments().eval()
+    trace = tl.trace(model, torch.randn(2, 8))
+    context = RenderContext()
+    max_result = select_collapse_plan(trace, context, mode="max")
+    child_segments = sum(isinstance(node, ChildSegment) for node in max_result.plan.nodes)
+    assert child_segments > 0, "fixture must produce child segments at max"
+    analysis = analyze_collapse(trace)
+    hidden_counts = _rendered_module_hidden_counts(trace, context)
+    total_units = _optimizer_total_units(trace, context)
+    replan, redescriptors = _condense_plan_with_child_segments(
+        trace,
+        context,
+        analysis,
+        max_result.plan,
+        hidden_counts,
+        total_units,
+        dominance_limit=0.75,
+        k_hi=20,
+    )
+    assert replan.nodes == max_result.plan.nodes
+    assert len(redescriptors) == _plan_segment_node_count(replan)
+    assert dict(redescriptors) == dict(max_result.segments or {})

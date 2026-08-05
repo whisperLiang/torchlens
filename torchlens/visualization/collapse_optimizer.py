@@ -172,6 +172,25 @@ class OptimizerResult:
     segments: Mapping[str, SegmentDescriptor] | None = None
     level: str | None = None
 
+    def __post_init__(self) -> None:
+        """Refuse construction when segment descriptors were dropped.
+
+        The renderer materializes segment boxes from ``segments``, not from
+        the plan nodes, so a segmented ``plan`` published with a smaller
+        descriptor mapping silently renders more nodes than ``visible_count``
+        claims. Every construction site (including ``dataclasses.replace``)
+        must therefore keep descriptor cardinality equal to the number of
+        segment nodes in the plan.
+        """
+
+        segment_nodes = sum(isinstance(node, (ChildSegment, OpSegment)) for node in self.plan.nodes)
+        descriptor_count = len(self.segments or {})
+        assert descriptor_count == segment_nodes, (
+            f"OptimizerResult segment descriptor cardinality {descriptor_count} != "
+            f"plan segment nodes {segment_nodes}; publishing this result would "
+            "silently render hidden structure"
+        )
+
 
 @dataclass(frozen=True)
 class _FrontierPoint:
@@ -882,9 +901,12 @@ def _select_max_plan(
                 level=level,
                 reason=None,
             )
+    # The auto fallback must keep auto's own segment descriptors: auto's
+    # band-pressure branch can legitimately return a segmented plan, and
+    # stripping ``segments`` here would publish segment plan nodes the
+    # renderer cannot materialize (descriptor-loss honesty gap).
     return replace(
         auto,
-        segments={},
         level="L3",
         reason=f"fallback_to_auto: no legal max plan in [3,{min(20, auto_count)}]",
     )
@@ -1049,11 +1071,29 @@ def _condense_plan_with_child_segments(
     nodes: list[PlanNode] = []
     segments: dict[str, SegmentDescriptor] = {}
     hidden_raw_ops: set[str] = set()
-    concrete_raw_labels, _ = _concrete_plan_op_labels(trace, plan.nodes)
+    concrete_raw_labels, concrete_segment_ops = _concrete_plan_op_labels(trace, plan.nodes)
     index = 0
     while index < len(plan.nodes):
         node = plan.nodes[index]
         if isinstance(node, RawOp) and isinstance(node.op, str) and node.op in hidden_raw_ops:
+            index += 1
+            continue
+        if isinstance(node, (OpSegment, ChildSegment)):
+            # The input plan may already be segmented (auto's band-pressure
+            # branch re-condensed by the max ladder). Pass such nodes through
+            # verbatim and rebuild their descriptors so the published mapping
+            # stays in lockstep with the plan; dropping them here is exactly
+            # the descriptor-loss class the parity tripwire guards against.
+            if isinstance(node, OpSegment):
+                concrete = concrete_segment_ops.get(index, tuple(node.ops))
+                descriptor = _make_op_segment_descriptor(trace, context, node.ops, concrete)
+            else:
+                covered_ops = _child_segment_covered_ops(analysis, node.members)
+                descriptor = _make_child_segment_descriptor(
+                    trace, context, node.members, covered_ops
+                )
+            segments[descriptor.name] = descriptor
+            nodes.append(node)
             index += 1
             continue
         op_run = _legal_plan_op_segment_run(
