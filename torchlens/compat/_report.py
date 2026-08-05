@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 import inspect
 import multiprocessing
+import textwrap
 import threading
 from typing import Any, Literal
 
@@ -140,7 +142,7 @@ class CompatReport:
             Text table suitable for terminals and notebook display.
         """
 
-        headers = ("Row", "Status", "Severity", "Detected", "Details")
+        headers = ("Row", "Status", "Severity", "Detected", "Details", "Suggestion")
         body = [
             (
                 row.label,
@@ -148,6 +150,7 @@ class CompatReport:
                 row.severity,
                 "yes" if row.detected else "no",
                 row.details,
+                row.suggestion,
             )
             for row in self.rows
         ]
@@ -317,24 +320,40 @@ def _class_identity(value: Any) -> str:
     return f"{value_type.__module__}.{value_type.__qualname__}".lower()
 
 
-def _model_class_contains(model: nn.Module, needles: Sequence[str]) -> bool:
-    """Return whether a model class identity contains any needle.
+def _class_in_namespace(value: Any, module_prefixes: Sequence[str]) -> bool:
+    """Return whether ``value``'s type or a base lives in a listed module namespace.
+
+    Detection anchors on real ``__module__`` provenance across the full MRO rather
+    than on a substring of a single class name. A class merely *named* like a
+    framework wrapper but defined in a user module does not match, while a genuine
+    subclass of a framework base class does. This mirrors the module-path anchoring
+    used by :func:`_is_quantized_module`.
 
     Parameters
     ----------
-    model:
-        Model to inspect.
-    needles:
-        Lowercase substrings to search for.
+    value:
+        Object whose type MRO is inspected.
+    module_prefixes:
+        Module-path namespaces (for example ``"transformers"``). A prefix matches a
+        module that equals it or is a dotted descendant of it, so ``"transformers"``
+        matches ``transformers.modeling_utils`` but not ``transformersx``.
 
     Returns
     -------
     bool
-        True if any needle matches.
+        True if any MRO base is defined under a listed namespace.
     """
 
-    identity = _class_identity(model)
-    return any(needle in identity for needle in needles)
+    prefixes = tuple(prefix.lower() for prefix in module_prefixes)
+    try:
+        mro = type(value).__mro__
+    except Exception:
+        return False
+    for klass in mro:
+        module = (getattr(klass, "__module__", "") or "").lower()
+        if any(module == prefix or module.startswith(f"{prefix}.") for prefix in prefixes):
+            return True
+    return False
 
 
 def _hf_transformers_row(model: nn.Module) -> CompatRow:
@@ -351,9 +370,7 @@ def _hf_transformers_row(model: nn.Module) -> CompatRow:
         Report row.
     """
 
-    detected = _model_class_contains(model, ("transformers.", "pretrainedmodel")) or hasattr(
-        model, "config"
-    )
+    detected = _class_in_namespace(model, ("transformers",))
     details = (
         "Hugging Face-style module detected; eager forward capture is supported when the "
         "model is not compiled, offloaded, or sharded."
@@ -427,9 +444,13 @@ def _accelerate_offload_row(model: nn.Module) -> CompatRow:
     detected = False
     for module in _iter_modules(model):
         hook = getattr(module, "_hf_hook", None)
-        if hook is not None and (
-            bool(getattr(hook, "offload", False)) or getattr(hook, "execution_device", None)
-        ):
+        if hook is None:
+            continue
+        # Offload is signalled by the hook's own offload flags. execution_device is
+        # present for plain single-device dispatch too, and using its truthiness
+        # both false-positives (offload=False + a device) and false-negatives
+        # (device index 0 is falsy), so it is not an offload signal.
+        if bool(getattr(hook, "offload", False)) or bool(getattr(hook, "offload_buffers", False)):
             detected = True
             break
     status: Status = "known_broken" if detected else "pass"
@@ -505,25 +526,26 @@ def _tied_parameters_row(model: nn.Module) -> CompatRow:
 
     seen: dict[int, str] = {}
     duplicates: list[str] = []
+    inspected = True
     try:
-        named_parameters = tuple(model.named_parameters(remove_duplicate=False))
-    except TypeError:
-        named_parameters = tuple(model.named_parameters())
+        for name, parameter in _iter_named_parameters_no_dedup(model):
+            param_id = id(parameter)
+            if param_id in seen:
+                duplicates.append(f"{seen[param_id]}={name}")
+            else:
+                seen[param_id] = name
     except Exception:
-        named_parameters = ()
-    for name, parameter in named_parameters:
-        param_id = id(parameter)
-        if param_id in seen:
-            duplicates.append(f"{seen[param_id]}={name}")
-        else:
-            seen[param_id] = name
+        inspected = False
     detected = bool(duplicates)
-    details = (
-        "Shared parameter objects detected; TorchLens tracks parameter identity and should "
-        f"preserve tied-edge metadata ({', '.join(duplicates[:3])})."
-        if detected
-        else "No tied/shared parameter objects detected."
-    )
+    if not inspected:
+        details = "Parameter enumeration failed; tied/shared parameters could not be inspected."
+    elif detected:
+        details = (
+            "Shared parameter objects detected; TorchLens tracks parameter identity and should "
+            f"preserve tied-edge metadata ({', '.join(duplicates[:3])})."
+        )
+    else:
+        details = "No tied/shared parameter objects detected."
     return CompatRow(
         "tied_parameters",
         "Tied/shared parameters",
@@ -533,6 +555,43 @@ def _tied_parameters_row(model: nn.Module) -> CompatRow:
         details,
         "",
     )
+
+
+def _iter_named_parameters_no_dedup(model: nn.Module) -> Iterable[tuple[str, nn.Parameter]]:
+    """Yield ``(name, parameter)`` pairs preserving shared-object duplicates.
+
+    ``named_parameters(remove_duplicate=False)`` is the primary source. If the model
+    overrides ``named_parameters`` with a signature that rejects that keyword
+    (older or custom signatures), fall back to a non-deduplicating walk over
+    registered parameter slots so tied objects stay visible instead of silently
+    collapsing into one entry (which would make ties invisible and the row a false
+    ``pass``).
+
+    Parameters
+    ----------
+    model:
+        Model whose parameters are enumerated.
+
+    Yields
+    ------
+    tuple[str, torch.nn.Parameter]
+        Qualified parameter name and parameter object, duplicates preserved.
+    """
+
+    try:
+        yield from model.named_parameters(remove_duplicate=False)
+        return
+    except TypeError:
+        pass
+    try:
+        modules = tuple(model.named_modules(remove_duplicate=False))
+    except TypeError:
+        modules = tuple(model.named_modules())
+    for module_name, module in modules:
+        for param_name, parameter in getattr(module, "_parameters", {}).items():
+            if parameter is None:
+                continue
+            yield (f"{module_name}.{param_name}" if module_name else param_name), parameter
 
 
 def _multi_gpu_rng_row() -> CompatRow:
@@ -615,7 +674,7 @@ def _ddp_row(model: nn.Module) -> CompatRow:
         Report row.
     """
 
-    detected = _model_class_contains(model, ("distributeddataparallel",))
+    detected = _class_in_namespace(model, ("torch.nn.parallel.distributed",))
     details = (
         "DistributedDataParallel detected; TorchLens unwraps the rank-local .module and "
         "captures that eager module."
@@ -647,7 +706,9 @@ def _fsdp_row(model: nn.Module) -> CompatRow:
         Report row.
     """
 
-    detected = _model_class_contains(model, ("fullyshardeddataparallel", "fsdp"))
+    detected = _class_in_namespace(
+        model, ("torch.distributed.fsdp", "torch.distributed._composable.fsdp")
+    )
     status: Status = "scope" if detected else "pass"
     details = (
         "FSDP detected; sharded parameter materialization is outside TorchLens' launch scope."
@@ -679,7 +740,7 @@ def _deepspeed_row(model: nn.Module) -> CompatRow:
         Report row.
     """
 
-    detected = _model_class_contains(model, ("deepspeed", "deepspeedengine"))
+    detected = _class_in_namespace(model, ("deepspeed",))
     status: Status = "scope" if detected else "pass"
     details = (
         "DeepSpeed engine detected; ZeRO/offload execution is outside TorchLens' launch scope."
@@ -783,24 +844,26 @@ def _lightning_row(model: nn.Module) -> CompatRow:
         Report row.
     """
 
-    detected = callable(getattr(model, "training_step", None))
+    has_training_step = callable(getattr(model, "training_step", None))
+    is_lightning = _class_in_namespace(model, ("pytorch_lightning", "lightning.pytorch"))
     is_train_mode = bool(getattr(model, "training", False))
-    status: Status = "known_broken" if detected and is_train_mode else "pass"
+    detected = has_training_step and is_lightning and is_train_mode
+    status: Status = "known_broken" if detected else "pass"
     details = (
         "LightningModule training_step detected while the module is in training mode; mid-loop "
         "trainer capture is not a supported TorchLens entry point."
-        if detected and is_train_mode
-        else "Lightning training_step not detected in an active training-mode model."
+        if detected
+        else "Lightning training_step not detected in an active training-mode LightningModule."
     )
     return CompatRow(
         "lightning_training_step",
         "Lightning training_step mid-loop",
         status,
-        "error" if detected and is_train_mode else "ok",
-        detected and is_train_mode,
+        "error" if detected else "ok",
+        detected,
         details,
         "Use torchlens.callbacks.lightning.LayerProfilerCallback or log a plain forward."
-        if detected and is_train_mode
+        if detected
         else "",
     )
 
@@ -819,7 +882,7 @@ def _functorch_row(model: nn.Module) -> CompatRow:
         Report row.
     """
 
-    detected = _forward_source_contains(model, ("vmap", "functorch", "torch.func"))
+    detected = _forward_references_functorch(model)
     status: Status = "known_broken" if detected else "pass"
     details = (
         "forward source references vmap/functorch; TorchLens skips logging inside active "
@@ -840,28 +903,46 @@ def _functorch_row(model: nn.Module) -> CompatRow:
     )
 
 
-def _forward_source_contains(model: nn.Module, needles: Sequence[str]) -> bool:
-    """Return whether ``model.forward`` source contains any marker.
+def _forward_references_functorch(model: nn.Module) -> bool:
+    """Return whether ``model.forward`` references vmap/functorch in executable code.
+
+    The forward source is parsed into an AST and searched for real name/attribute
+    references (``vmap``, ``functorch``, or the ``torch.func`` submodule). Comments
+    and docstrings are ignored, so prose that merely mentions vmap (for example a
+    docstring saying the model does *not* use vmap) does not trip detection.
 
     Parameters
     ----------
     model:
-        Model to inspect.
-    needles:
-        Source substrings to search for.
+        Model whose ``forward`` source is inspected.
 
     Returns
     -------
     bool
-        True if source was available and a marker matched.
+        True only when forward code references a functorch/vmap marker.
     """
 
     try:
         source = inspect.getsource(model.forward)
     except (OSError, TypeError):
         return False
-    source_lower = source.lower()
-    return any(needle in source_lower for needle in needles)
+    try:
+        tree = ast.parse(textwrap.dedent(source))
+    except (SyntaxError, ValueError):
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in ("vmap", "functorch"):
+            return True
+        if isinstance(node, ast.Attribute):
+            if node.attr == "vmap":
+                return True
+            if (
+                node.attr == "func"
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "torch"
+            ):
+                return True
+    return False
 
 
 def _quantized_row(model: nn.Module, input_value: Any) -> CompatRow:
