@@ -616,6 +616,17 @@ def _pattern_lines(log: Any, *, audience: Audience) -> list[str]:
 def _shared_parameter_line(log: Any) -> str:
     """Return a shared-parameter pattern line.
 
+    A parameter is *shared* (weight-tied across modules, or reused across
+    recurrent passes) exactly when the same parameter object participates in
+    more than one operation. The ground-truth signal is therefore the parameter's
+    usage count -- ``num_calls`` / distinct ``used_by_ops`` -- NOT
+    ``co_parent_params``, which lists the sibling params of the SAME op
+    (weight+bias of one Linear) and so is both a false positive for every plain
+    multi-param op and a false negative for genuine weight tying (a tied weight is
+    the sole param of each op, so ``co_parent_params`` is empty). ``used_by_layers``
+    also cannot detect tying: two tied modules roll into one equivalent layer
+    label, so only the op-level usage count separates sharing from independence.
+
     Parameters
     ----------
     log:
@@ -629,12 +640,17 @@ def _shared_parameter_line(log: Any) -> str:
 
     shared = 0
     for param_log in getattr(log, "param_logs", []) or []:
-        linked = getattr(param_log, "co_parent_params", ()) or ()
-        if linked:
+        used_by_ops = set(getattr(param_log, "used_by_ops", ()) or ())
+        try:
+            num_calls = int(getattr(param_log, "num_calls", 0) or 0)
+        except (TypeError, ValueError):
+            num_calls = 0
+        if len(used_by_ops) > 1 or num_calls > 1:
             shared += 1
     if shared:
         return (
-            f"- Shared parameters: {_format_count(shared)} parameter entries report linked params."
+            f"- Shared parameters: {_format_count(shared)} parameter object(s) "
+            "are used by more than one operation (weight tying or recurrent reuse)."
         )
     return "- Shared parameters: none reported."
 
