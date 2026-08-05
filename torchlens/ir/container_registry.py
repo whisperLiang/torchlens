@@ -113,6 +113,7 @@ class ContainerSnapshot:
         "leaf_occurrences": FieldPolicy.BLOB_RECURSIVE,
         "reconstructable": FieldPolicy.KEEP,
         "site_aliases": FieldPolicy.BLOB_RECURSIVE,
+        "site_alias_event_indices": FieldPolicy.KEEP,
     }
 
     site: Site
@@ -123,6 +124,43 @@ class ContainerSnapshot:
     leaf_occurrences: tuple[ContainerLeafOccurrence, ...]
     reconstructable: bool
     site_aliases: tuple[Site, ...] = ()
+    # Positionally parallel to ``site_aliases``: the observation event index each alias site
+    # was seen at. Dedup merges structurally-identical observations at multiple sites into one
+    # snapshot body; without this the LATER observation's event index was silently discarded
+    # (only the first site's index survived in ``observed_at_event_index``).
+    site_alias_event_indices: tuple[int, ...] = ()
+
+    def observed_index_for_site(self, site: Site) -> int:
+        """Return the observation event index recorded for ``site``.
+
+        ``observed_at_event_index`` is the PRIMARY site's index. After dedup folds a
+        structurally-identical observation seen at another site into this snapshot, that
+        site becomes an alias and its own event index is kept in
+        ``site_alias_event_indices`` (parallel to ``site_aliases``), so the per-site
+        observation chronology is recoverable rather than collapsed onto the first index.
+
+        Parameters
+        ----------
+        site:
+            Primary or alias site to look up.
+
+        Returns
+        -------
+        int
+            The event index at which ``site`` observed this container.
+
+        Raises
+        ------
+        ValueError
+            If this snapshot was not observed at ``site`` (nor an alias carrying an index).
+        """
+
+        if site == self.site:
+            return self.observed_at_event_index
+        for alias, index in zip(self.site_aliases, self.site_alias_event_indices):
+            if alias == site:
+                return index
+        raise ValueError(f"Snapshot was not observed at site {site!r}.")
 
 
 @dataclass(slots=True)
@@ -319,6 +357,10 @@ class ContainerRegistry:
                 leaf_occurrences=previous.leaf_occurrences,
                 reconstructable=previous.reconstructable,
                 site_aliases=(*previous.site_aliases, site),
+                site_alias_event_indices=(
+                    *previous.site_alias_event_indices,
+                    observed_at_event_index,
+                ),
             )
         else:
             record.snapshots.append(snapshot)
@@ -428,8 +470,25 @@ def walk_container(value: Any, *, role: Role, capability: str) -> WalkResult | N
     return WalkResult(
         spec=spec,
         leaf_occurrences=occurrences,
-        reconstructable=spec.kind != "opaque",
+        reconstructable=_spec_is_reconstructable(spec),
     )
+
+
+def _spec_is_reconstructable(spec: ContainerSpec) -> bool:
+    """Return whether every node of ``spec`` can be rebuilt from the flat leaf stream.
+
+    ``walk_container`` must report ``reconstructable`` HONESTLY: an ``opaque`` node ANYWHERE
+    in the tree (a generator, an iterator, or a tensor-keyed dict that
+    :func:`_build_container_spec` degrades) makes ``rebuild_container_from_spec`` raise, so
+    the persisted witness must be ``False`` for it. The prior shallow
+    ``spec.kind != "opaque"`` blessed a top-level container even when a nested child was
+    opaque -- a LYING witness (``reconstructable=True`` on a spec that cannot rebuild). This
+    recursive check makes the flag true only when reconstruction actually works.
+    """
+
+    if spec.kind == "opaque":
+        return False
+    return all(_spec_is_reconstructable(child) for _component, child in spec.child_specs)
 
 
 def _snapshots_dedup_equivalent(left: ContainerSnapshot, right: ContainerSnapshot) -> bool:
@@ -585,6 +644,15 @@ def _build_container_spec(value: Any) -> ContainerSpec | None:
             child_specs=tuple(child_specs),
         )
     if isinstance(value, Mapping):
+        # A dict with a TENSOR KEY cannot be rebuilt from the flat leaf stream: a tensor key
+        # has no slot in the captured leaves and ``_iter_container_children`` skips the whole
+        # entry, so ``keys``/``length`` (which count the tensor key) can NEVER agree with the
+        # children/occurrences. Recording it ``dict`` produced a LYING witness --
+        # ``reconstructable=True`` on a spec that ``rebuild_container_from_spec`` rejects with
+        # "Not enough leaves". Degrade to ``opaque`` so the witness stays honest.
+        if any(isinstance(key, torch.Tensor) for key in value.keys()):
+            module, qualname = _container_type_ref(value)
+            return ContainerSpec(kind="opaque", type_module=module, type_qualname=qualname)
         # A boundary INPUT that is any Mapping subclass (custom Mapping, OrderedDict,
         # defaultdict, ...) is bound by leaf path like a plain dict; the user supplies
         # the concrete object at run time, so no subtype reconstruction is needed.
