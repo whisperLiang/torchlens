@@ -15,12 +15,22 @@ op-segment-condensed plan, the max ladder re-condenses it, so pre-existing
 segment nodes must keep their descriptors (pass-through) and the L3 auto
 fallback must carry ``auto.segments`` instead of stripping them; every
 max/float/schedule/draw/order surface must return honestly for that class.
+
+Round-24 seal finding C1: a max op segment spanning several CALLS of one
+reused module declared ``owner=core:1`` and rendered physically inside the
+first call's cluster while the other call clusters stayed empty -- counts
+and cardinality remained exact, so only module-call containment could catch
+it. Op-segment runs must split at module-call reuse boundaries, descriptor
+owners must be the exact call-qualified LCA of their members' rendered
+stacks, and runs across distinct single-call sibling modules must stay
+merged at the honest top-level LCA.
 """
 
 import re
 import subprocess
 import sys
 import textwrap
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -35,7 +45,9 @@ from torchlens.visualization.collapse_optimizer import (
     _child_segment_label,
     _condense_plan_with_child_segments,
     _make_child_segment_descriptor,
+    _op_segment_owner_key,
     _optimizer_total_units,
+    _own_ops_segment_is_legal,
     _rendered_module_hidden_counts,
     select_collapse_level,
     select_collapse_plan,
@@ -928,3 +940,426 @@ def test_condense_pass_through_preserves_segment_descriptors():
     assert replan.nodes == max_result.plan.nodes
     assert len(redescriptors) == _plan_segment_node_count(replan)
     assert dict(redescriptors) == dict(max_result.segments or {})
+
+
+class ReusedFunctionalCore(nn.Module):
+    """Parameter-free seven-op block designed for multi-call reuse."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = torch.tanh(x)
+        x = torch.sigmoid(x)
+        x = torch.relu(x + 0.01)
+        x = torch.sin(x)
+        x = torch.cos(x)
+        return torch.abs(x)
+
+
+class FunctionalCoreReuse(nn.Module):
+    """Calls one parameter-free functional module ``calls`` times."""
+
+    def __init__(self, calls: int) -> None:
+        super().__init__()
+        self.core = ReusedFunctionalCore()
+        self.calls = calls
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for _ in range(self.calls):
+            x = self.core(x)
+        return x
+
+
+class ReusedResidualCell(nn.Module):
+    """Real parameterized residual cell (Linear -> ReLU -> Linear -> add)."""
+
+    def __init__(self, width: int = 8) -> None:
+        super().__init__()
+        self.fc1 = nn.Linear(width, width)
+        self.fc2 = nn.Linear(width, width)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc2(torch.relu(self.fc1(x))) + x
+
+
+class ResidualCellReuse(nn.Module):
+    """Calls one real residual cell ``calls`` times."""
+
+    def __init__(self, calls: int) -> None:
+        super().__init__()
+        self.cell = ReusedResidualCell()
+        self.calls = calls
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for _ in range(self.calls):
+            x = self.cell(x)
+        return x
+
+
+class NestedCoreReuse(nn.Module):
+    """Nested reuse: outer called twice, the inner core twice per outer call."""
+
+    class Outer(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.core = ReusedFunctionalCore()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            x = self.core(x)
+            x = self.core(x)
+            return torch.log1p(torch.abs(x))
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.outer = self.Outer()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.outer(x)
+        x = self.outer(x)
+        return x
+
+
+class SiblingBlockChain(nn.Module):
+    """Five DISTINCT single-call sibling blocks (the honest-LCA merge shape)."""
+
+    def __init__(self, width: int = 8) -> None:
+        super().__init__()
+        self.blocks = nn.ModuleList(
+            nn.Sequential(nn.Linear(width, width), nn.ReLU()) for _ in range(5)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+
+def _effective_stack(op) -> tuple[str, ...]:
+    """Independently recompute the renderer's effective cluster stack."""
+
+    modules = [str(module) for module in (getattr(op, "modules", ()) or ())]
+    if getattr(op, "is_atomic_module", False) and modules:
+        modules = modules[:-1]
+    return tuple(modules)
+
+
+def _exact_call_lca(stacks) -> str | None:
+    """Return the deepest call-qualified entry shared by every stack."""
+
+    if not stacks or any(not stack for stack in stacks):
+        return None
+    common = None
+    for values in zip(*stacks):
+        if len(set(values)) != 1:
+            break
+        common = values[0]
+    return common
+
+
+def _dot_node_clusters(source: str):
+    """Map DOT node names to innermost clusters and clusters to member sets.
+
+    Same-named reopened subgraph blocks (the BFS hierarchy walk reopens a
+    parent cluster once per child branch) are merged by name, matching
+    Graphviz semantics.
+    """
+
+    stack: list[str] = []
+    node_cluster: dict[str, str | None] = {}
+    members: dict[str, set[str]] = {}
+    for raw_line in source.splitlines():
+        line = raw_line.strip()
+        opened = re.match(r'subgraph "?(cluster_[\w.]+)"?', line)
+        if opened:
+            stack.append(opened.group(1))
+            members.setdefault(opened.group(1), set())
+            continue
+        if line.startswith("}"):
+            if stack:
+                stack.pop()
+            continue
+        node = re.match(r'"?([\w.:]+)"? \[', line)
+        if node and "->" not in line and node.group(1) not in ("graph", "node", "edge"):
+            node_cluster[node.group(1)] = stack[-1] if stack else None
+            if stack:
+                members[stack[-1]].add(node.group(1))
+    return node_cluster, members
+
+
+def _owner_cluster_name(owner: str | None) -> str | None:
+    """Return the Graphviz cluster name for a call-qualified owner key."""
+
+    if owner is None:
+        return None
+    return f"cluster_{owner.replace(':', '_pass')}"
+
+
+_CONTAINMENT_CASES = [
+    ("functional", 2),
+    ("functional", 4),
+    ("functional", 6),
+    ("functional", 12),
+    ("residual", 2),
+    ("residual", 4),
+    ("residual", 6),
+    ("residual", 12),
+    ("nested", 0),
+    ("shared_multicall", 0),
+    ("colliding", 0),
+]
+_CONTAINMENT_IDS = [f"{kind}_{calls}" if calls else kind for kind, calls in _CONTAINMENT_CASES]
+
+
+def _containment_trace(kind: str, calls: int):
+    torch.manual_seed(0)
+    if kind == "functional":
+        model = FunctionalCoreReuse(calls)
+    elif kind == "residual":
+        model = ResidualCellReuse(calls)
+    elif kind == "nested":
+        model = NestedCoreReuse()
+    elif kind == "shared_multicall":
+        model = SharedMultiCall(children=7, calls=4, tail=10)
+    else:
+        model = CollidingSegments()
+    return tl.trace(model.eval(), torch.randn(1, 8))
+
+
+@pytest.mark.parametrize("kind, calls", _CONTAINMENT_CASES, ids=_CONTAINMENT_IDS)
+def test_op_segment_module_call_containment(kind, calls, tmp_path):
+    """Round-24 C1: op segments must respect module-CALL containment.
+
+    Pre-fix, a max op segment absorbed ops from several calls of one reused
+    module and rendered inside only the FIRST call's cluster (owner=core:1,
+    19/26 represented ops outside the owner, sibling call clusters empty)
+    while counts and cardinality stayed exact. For every public surface this
+    pins, per op-segment descriptor:
+
+    - the owner equals the exact call-qualified LCA of its members' rendered
+      module stacks (never a call the segment does not fully represent);
+    - every member op's stack contains the owner when one is declared;
+    - no two members sit in DIFFERENT CALLS of one module at a shared stack
+      level (reuse absorption is the round-24 lie);
+    - the max DOT places each segment node physically inside its owner's
+      cluster (or at top level for owner ``None``);
+    - counts/cardinality stay exact: plan == visible == rendered SVG and
+      descriptor cardinality == plan segment nodes, with zero orphaned
+      pass-qualified occurrences.
+    """
+
+    trace = _containment_trace(kind, calls)
+    context = RenderContext()
+    results = {
+        "auto": select_collapse_plan(trace, context, mode="auto"),
+        "max": select_collapse_plan(trace, context, mode="max"),
+    }
+    for level in (0.5, 1.0):
+        results[f"t={level}"] = select_collapse_level(trace, context, level)
+
+    for label, result in results.items():
+        if result.declined:
+            continue
+        descriptors = result.segments or {}
+        assert len(descriptors) == _plan_segment_node_count(result.plan), (
+            f"{label}: descriptor cardinality != plan segment nodes"
+        )
+        assert result.visible_count == result.plan.total
+        for name, segment in descriptors.items():
+            if segment.kind != "op":
+                continue
+            stacks = [_effective_stack(trace.ops[str(op)]) for op in segment.ops]
+            lca = _exact_call_lca(stacks)
+            assert segment.owner == lca, (
+                f"{label}/{name}: owner {segment.owner!r} is not the exact "
+                f"call-qualified LCA {lca!r} of its members"
+            )
+            if segment.owner is not None:
+                outside = [
+                    op for op, stack in zip(segment.ops, stacks) if segment.owner not in stack
+                ]
+                assert not outside, (
+                    f"{label}/{name}: {len(outside)} represented ops render "
+                    f"outside declared owner {segment.owner!r}: {outside[:4]}"
+                )
+            for index, first in enumerate(stacks):
+                for second in stacks[index + 1 :]:
+                    for left, right in zip(first, second):
+                        if left == right:
+                            continue
+                        assert left.rsplit(":", 1)[0] != right.rsplit(":", 1)[0], (
+                            f"{label}/{name}: segment absorbs two calls of one "
+                            f"module ({left} and {right})"
+                        )
+                        break
+
+    max_result = results["max"]
+    out = tmp_path / f"containment_{kind}_{calls}"
+    source = trace.draw(
+        vis_save_only=True,
+        vis_fileformat="svg",
+        collapse="max",
+        vis_outpath=str(out),
+    )
+    assert _svg_node_group_count(str(out) + ".svg") == max_result.plan.total
+    node_cluster, _ = _dot_node_clusters(source)
+    for name, segment in (max_result.segments or {}).items():
+        if segment.kind != "op":
+            continue
+        assert node_cluster.get(segment.name) == _owner_cluster_name(segment.owner), (
+            f"max/{name}: DOT places segment in "
+            f"{node_cluster.get(segment.name)!r}, owner requires "
+            f"{_owner_cluster_name(segment.owner)!r}"
+        )
+    concrete, visible, hidden = _occurrence_witness_partition(trace, max_result)
+    assert concrete == visible | hidden, "max: orphaned pass-qualified occurrences"
+
+
+@pytest.mark.parametrize(
+    "builder, address, calls",
+    [
+        (lambda: FunctionalCoreReuse(6), "core", 6),
+        (lambda: ResidualCellReuse(12), "cell", 12),
+    ],
+    ids=["functional_6", "residual_12"],
+)
+def test_op_segment_per_call_containment_pin(builder, address, calls, tmp_path):
+    """Round-24 C1 exact pin: one segment per call, inside that call's cluster.
+
+    The executed seal repro: six calls of a parameter-free functional module
+    (and twelve of a real residual cell) produced TWO max segments declared
+    ``owner=<addr>:1`` / ``owner=<addr>:4`` with most represented ops outside
+    the owner and the other call clusters empty. Post-fix, max must produce
+    exactly one op segment per call, owned by and rendered inside THAT call's
+    cluster, and every call cluster must be non-empty in the DOT.
+    """
+
+    torch.manual_seed(0)
+    trace = tl.trace(builder().eval(), torch.randn(1, 8))
+    context = RenderContext()
+    result = select_collapse_plan(trace, context, mode="max")
+    assert not result.declined
+    descriptors = {
+        name: segment for name, segment in (result.segments or {}).items() if segment.kind == "op"
+    }
+    assert len(descriptors) == calls, (
+        f"expected one per-call op segment per call, got {len(descriptors)}"
+    )
+    assert sorted(segment.owner for segment in descriptors.values()) == sorted(
+        f"{address}:{index}" for index in range(1, calls + 1)
+    )
+    for name, segment in descriptors.items():
+        represented_calls = {_effective_stack(trace.ops[str(op)])[-1] for op in segment.ops}
+        assert represented_calls == {segment.owner}, (
+            f"{name}: represents calls {sorted(represented_calls)} but claims "
+            f"sole ownership of {segment.owner}"
+        )
+
+    out = tmp_path / f"per_call_{address}"
+    source = trace.draw(
+        vis_save_only=True,
+        vis_fileformat="svg",
+        collapse="max",
+        vis_outpath=str(out),
+    )
+    node_cluster, members = _dot_node_clusters(source)
+    for segment in descriptors.values():
+        assert node_cluster.get(segment.name) == _owner_cluster_name(segment.owner)
+    for index in range(1, calls + 1):
+        cluster = f"cluster_{address}_pass{index}"
+        assert members.get(cluster), (
+            f"call cluster {cluster} owns represented ops but contains no node"
+        )
+    assert _svg_node_group_count(str(out) + ".svg") == result.plan.total
+
+
+def test_op_segment_sibling_merge_keeps_honest_top_level_lca(tmp_path):
+    """Distinct single-call sibling modules may still merge into one segment.
+
+    The containment boundary is module-call REUSE, not any stack change: a
+    consecutive raw run across five different single-call blocks has no call
+    boundary to cross, so it must stay merged with owner ``None`` (the exact
+    call-qualified LCA) and render at top level. Splitting it would regress
+    max-mode compression pinned by the render-identity oracle.
+    """
+
+    torch.manual_seed(0)
+    trace = tl.trace(SiblingBlockChain().eval(), torch.randn(1, 8))
+    context = RenderContext()
+    result = select_collapse_plan(trace, context, mode="max")
+    assert not result.declined
+    descriptors = {
+        name: segment for name, segment in (result.segments or {}).items() if segment.kind == "op"
+    }
+    assert descriptors, "fixture must produce op segments at max"
+    spanning = [
+        segment
+        for segment in descriptors.values()
+        if len({_effective_stack(trace.ops[str(op)])[:1] for op in segment.ops}) > 1
+    ]
+    assert spanning, "fixture must produce a segment spanning sibling modules"
+    for segment in spanning:
+        assert segment.owner is None, (
+            f"sibling-spanning segment claims module owner {segment.owner!r}"
+        )
+    out = tmp_path / "sibling_merge"
+    source = trace.draw(
+        vis_save_only=True,
+        vis_fileformat="svg",
+        collapse="max",
+        vis_outpath=str(out),
+    )
+    node_cluster, _ = _dot_node_clusters(source)
+    for segment in spanning:
+        assert node_cluster.get(segment.name) is None, (
+            "owner-less sibling segment must render at top level"
+        )
+    assert _svg_node_group_count(str(out) + ".svg") == result.plan.total
+
+
+def test_op_segment_owner_key_is_call_exact():
+    """The owner key compares CALLS exactly, never pass-free commonality.
+
+    Pre-fix ``_op_segment_owner_key`` stripped pass suffixes before testing
+    commonality and then returned ``values[0]``, so a tuple spanning
+    ``core:1..core:2`` was blessed with owner ``core:1`` -- the round-24
+    false-containment root. Cross-call tuples must resolve to the honest LCA
+    (``None`` here) and single-call tuples to that exact call.
+    """
+
+    torch.manual_seed(0)
+    trace = tl.trace(FunctionalCoreReuse(6).eval(), torch.randn(1, 8))
+    by_call: dict[str, list[str]] = {}
+    for op in trace.ops:
+        stack = _effective_stack(op)
+        if stack:
+            by_call.setdefault(stack[-1], []).append(str(op.label))
+    assert set(by_call) == {f"core:{index}" for index in range(1, 7)}
+    within = tuple(by_call["core:1"])
+    assert _op_segment_owner_key(trace, within) == "core:1"
+    assert _op_segment_owner_key(trace, within, "unrolled") == "core:1"
+    cross = tuple(by_call["core:1"] + by_call["core:2"])
+    assert _op_segment_owner_key(trace, cross) is None, (
+        "cross-call tuple must own the honest LCA, not the first call"
+    )
+
+
+def test_own_ops_segment_refuses_module_call_reuse():
+    """The DP own-ops segment producer must refuse reuse-crossing sequences.
+
+    ``_instantiate_module`` replaces a module's own ops with ONE segment
+    node when legal; for a multi-call module those ops span several rendered
+    call clusters, so accepting them reproduces the round-24 containment lie
+    through a second producer. Single-call sequences stay legal.
+    """
+
+    torch.manual_seed(0)
+    trace = tl.trace(FunctionalCoreReuse(6).eval(), torch.randn(1, 8))
+    by_call: dict[str, list[str]] = {}
+    for op in trace.ops:
+        stack = _effective_stack(op)
+        if stack:
+            by_call.setdefault(stack[-1], []).append(str(op.label))
+    state = SimpleNamespace(trace=trace, context=RenderContext(), total_ops=10_000)
+    assert _own_ops_segment_is_legal(state, tuple(by_call["core:1"]))
+    cross = tuple(by_call["core:1"] + by_call["core:2"])
+    assert not _own_ops_segment_is_legal(state, cross), (
+        "own-ops producer accepted a sequence spanning two calls of one module"
+    )
