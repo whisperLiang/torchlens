@@ -155,7 +155,7 @@ def _intervention_report(
     verbose: bool,
     validate_metadata: bool,
 ) -> InterventionValidationReport:
-    """Build a lightweight five-axis intervention validation report.
+    """Build an honesty-preserving intervention validation report.
 
     Parameters
     ----------
@@ -175,7 +175,8 @@ def _intervention_report(
     Returns
     -------
     InterventionValidationReport
-        Structured intervention validation result.
+        Structured intervention validation result whose non-baseline axes stay
+        false until real intervention-specific checks exist.
     """
 
     from ..user_funcs import validate_forward_pass
@@ -190,18 +191,23 @@ def _intervention_report(
     )
     return InterventionValidationReport(
         invariance=forward_ok,
-        specificity=True,
-        completeness=True,
-        consistency=forward_ok,
-        locality=True,
+        specificity=False,
+        completeness=False,
+        consistency=False,
+        locality=False,
         details={
             "invariance": "forward validation passed"
             if forward_ok
             else "forward validation failed",
-            "specificity": "no ambiguous intervention selectors supplied",
-            "completeness": "all five intervention validation axes evaluated",
-            "consistency": "single-run consistency mirrors invariance",
-            "locality": "validation stayed within supplied model/input",
+            "specificity": (
+                "not evaluated: intervention validation did not inspect selector "
+                "specificity on this path"
+            ),
+            "completeness": ("not evaluated: only baseline forward validation ran on this path"),
+            "consistency": (
+                "not evaluated: intervention cross-run consistency is not implemented here"
+            ),
+            "locality": ("not evaluated: intervention-locality checks did not run on this path"),
         },
     )
 

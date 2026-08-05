@@ -241,7 +241,8 @@ def _warn_and_skip_appended_trace_validation(trace: Any) -> bool:
     Returns
     -------
     bool
-        Always True because saved stacked activations are treated as authoritative.
+        Always False because a skipped backward re-derivation is not a passing
+        validation result.
     """
 
     warnings.warn(
@@ -251,7 +252,7 @@ def _warn_and_skip_appended_trace_validation(trace: Any) -> bool:
         AppendStateValidationWarning,
         stacklevel=2,
     )
-    return True
+    return False
 
 
 def validate_backward_pass(

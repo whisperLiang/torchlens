@@ -1002,7 +1002,7 @@ def _warn_if_validation_trace_not_reproducible(
     input_args: torch.Tensor | list[Any] | tuple[Any, ...],
     input_kwargs: dict[Any, Any],
     random_seed: int,
-) -> None:
+) -> Literal["matched", "mismatch", "unavailable"]:
     """Warn when a validation trace changes after one fresh re-trace.
 
     Parameters
@@ -1017,6 +1017,13 @@ def _warn_if_validation_trace_not_reproducible(
         Keyword inputs for the second capture.
     random_seed:
         Seed reused for the second capture to avoid RNG-only graph drift.
+
+    Returns
+    -------
+    Literal["matched", "mismatch", "unavailable"]
+        ``"matched"`` when the fresh re-trace is structurally identical,
+        ``"mismatch"`` when the graphs diverge, and ``"unavailable"`` when the
+        fresh re-trace check itself cannot be completed.
     """
 
     second_trace: Trace | None = None
@@ -1040,7 +1047,7 @@ def _warn_if_validation_trace_not_reproducible(
         first_hash = compute_graph_shape_hash(first_trace, include_module_address=False)
         second_hash = compute_graph_shape_hash(second_trace, include_module_address=False)
         if first_hash == second_hash:
-            return
+            return "matched"
         hint = _first_reproducibility_divergence(first_trace, second_trace)
         hint_suffix = f" ({hint})" if hint is not None else ""
         message = (
@@ -1076,6 +1083,7 @@ def _warn_if_validation_trace_not_reproducible(
             ),
             stacklevel=2,
         )
+        return "mismatch"
     except Exception as exc:
         message = (
             "TorchLens validation could not run the fresh re-trace reproducibility "
@@ -1096,9 +1104,51 @@ def _warn_if_validation_trace_not_reproducible(
             RuntimeWarning,
             stacklevel=2,
         )
+        return "unavailable"
     finally:
         if second_trace is not None:
             second_trace.cleanup()
+
+
+def _downgrade_retrace_mismatch_to_unverified(trace: Trace) -> None:
+    """Convert a replay pass into an honest unverified status after retrace drift.
+
+    Parameters
+    ----------
+    trace:
+        Validation trace whose pristine re-trace diverged structurally.
+    """
+
+    from .validation.status import ValidationReplayStatus
+
+    current_status = trace.validation_replay_status
+    unverified_reason_counts = dict(current_status.unverified_reason_counts)
+    unverified_reason_counts["trace_retrace_structure_mismatch"] = (
+        unverified_reason_counts.get("trace_retrace_structure_mismatch", 0) + 1
+    )
+    setattr(
+        trace,
+        "_validation_replay_status",
+        ValidationReplayStatus.unverified(
+            backend=current_status.backend,
+            source=current_status.source,
+            reason="trace_retrace_structure_mismatch",
+            message=(
+                "Replay validation matched the captured trace, but the pristine "
+                "re-trace diverged structurally, so the overall validation "
+                "result is unverified."
+            ),
+            replayed_node_count=current_status.replayed_node_count,
+            unverified_node_count=max(1, current_status.unverified_node_count),
+            payload_load_status=current_status.payload_load_status,
+            pure_unverified_node_count=current_status.pure_unverified_node_count,
+            effect_region_node_count=current_status.effect_region_node_count,
+            failed_node_count=current_status.failed_node_count,
+            unverified_reason_counts=unverified_reason_counts,
+            exempted_reason_counts=current_status.exempted_reason_counts,
+            decisions=current_status.decisions,
+        ),
+    )
 
 
 def _validate_forward_pass_torch(
@@ -1377,8 +1427,9 @@ def _validate_forward_pass_torch(
             trace._validation_dispatch_op_count,
             trace._validation_captured_dispatchable_op_count,
         ) = completeness_backstop_counts(trace)
+        retrace_outcome: Literal["matched", "mismatch", "unavailable"] = "unavailable"
         if validation_model_copied:
-            _warn_if_validation_trace_not_reproducible(
+            retrace_outcome = _warn_if_validation_trace_not_reproducible(
                 trace,
                 validation_model,
                 reproducibility_input_args,
@@ -1408,7 +1459,10 @@ def _validate_forward_pass_torch(
         validation_result = trace.validate_forward_pass(
             ground_truth_output_tensors, verbose, validate_metadata=validate_metadata
         )
-        if isinstance(validation_result, bool):
+        if retrace_outcome == "mismatch":
+            _downgrade_retrace_mismatch_to_unverified(trace)
+            outs_are_valid = False
+        elif isinstance(validation_result, bool):
             outs_are_valid = validation_result
         else:
             outs_are_valid = bool(getattr(validation_result, "passed", False))
