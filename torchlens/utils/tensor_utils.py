@@ -205,10 +205,22 @@ def tensor_nanequal(
         if not torch.equal(tensor_a.isinf(), tensor_b.isinf()):
             return False
 
+        # NaN positions must match exactly BEFORE the sentinel substitution
+        # below.  ``nan_to_num`` rewrites every NaN to the finite sentinel
+        # 0.7234691827346; without this mask check a real finite value that
+        # happens to equal the sentinel would read EQUAL to a NaN (in either
+        # direction), silently defeating the validation tripwire.  ``isnan`` on
+        # a complex tensor is True whenever either component is NaN, matching the
+        # ``view_as_real`` substitution used for the complex branch below.
+        if not torch.equal(tensor_a.isnan(), tensor_b.isnan()):
+            return False
+
         # Replace NaNs with a sentinel value so torch.equal treats NaN positions
-        # as equal.  The sentinel (0.7234691827346) is arbitrary but unlikely to
-        # appear in real data.  Complex tensors need view_as_real/view_as_complex
-        # because torch.nan_to_num doesn't support complex dtypes directly.
+        # as equal.  The NaN masks are already confirmed identical above, so the
+        # sentinel (0.7234691827346) never collides with a real finite value on
+        # one side against a NaN on the other.  Complex tensors need
+        # view_as_real/view_as_complex because torch.nan_to_num doesn't support
+        # complex dtypes directly.
         if tensor_a.is_complex():
             tensor_a_nonan = torch.view_as_complex(
                 torch.nan_to_num(torch.view_as_real(tensor_a.resolve_conj()), 0.7234691827346)
@@ -225,13 +237,15 @@ def tensor_nanequal(
 
         # Tolerance path: allow small floating-point differences (e.g. from
         # convolution replay order, non-deterministic GPU reductions, or
-        # mixed-precision rounding).
-        if (
-            allow_tolerance
-            and (tensor_a_nonan.dtype != torch.bool)
-            and (tensor_b_nonan.dtype != torch.bool)
-        ):
-            rtol, atol = _tolerances_for_dtype(tensor_a_nonan.dtype)
+        # mixed-precision rounding).  It applies ONLY to inexact (floating-point
+        # / complex) dtypes.  Integer and boolean tensors are exact and are
+        # handled entirely by the torch.equal check above; applying a float
+        # allclose tolerance to integers would let genuinely different values
+        # (e.g. 1_000_000 vs 1_000_001) read EQUAL, defeating the tripwire.
+        # (dtypes are already confirmed identical above, so one side suffices.)
+        payload_dtype = tensor_a_nonan.dtype
+        if allow_tolerance and (payload_dtype.is_floating_point or payload_dtype.is_complex):
+            rtol, atol = _tolerances_for_dtype(payload_dtype)
             if torch.allclose(tensor_a_nonan, tensor_b_nonan, rtol=rtol, atol=atol):
                 return True
 
@@ -474,8 +488,21 @@ def _copy_tensor_payload(
         except Exception:
             try:
                 return x.data.cpu().clone()
-            except Exception:
-                return torch.zeros(x.shape, dtype=torch.float32)
+            except Exception as exc:
+                # Fail loud rather than fabricate a payload. The former
+                # ``torch.zeros(x.shape, dtype=torch.float32)`` last resort
+                # silently returned a WRONG value AND a WRONG dtype (float32
+                # regardless of the source) with no marker, corrupting the
+                # captured activation invisibly. A tensor that survives none of
+                # the three clone strategies cannot be copied; surfacing that is
+                # the only honest outcome, and it mirrors the non-detached path
+                # above, which already propagates a clone failure.
+                raise RuntimeError(
+                    "torchlens could not copy a tensor payload: every clone "
+                    "strategy failed. Refusing to fabricate a placeholder tensor "
+                    "(which would silently corrupt the captured activation). "
+                    f"Source tensor: shape={tuple(x.shape)}, dtype={x.dtype}."
+                ) from exc
 
 
 def _clone_tensor_payload(
@@ -517,7 +544,11 @@ def _clone_tensor_payload(
         if label is not None:
             set_tensor_label(vals_tensor, label)
         if isinstance(x, torch.nn.Parameter):
-            return torch.nn.Parameter(vals_tensor)
+            # Preserve the source parameter's requires_grad. torch.nn.Parameter
+            # defaults requires_grad=True, so a frozen (requires_grad=False)
+            # parameter would otherwise yield a copy that falsely claims grad --
+            # misrepresenting the captured parameter in every save mode.
+            return torch.nn.Parameter(vals_tensor, requires_grad=x.requires_grad)
         return vals_tensor
 
 

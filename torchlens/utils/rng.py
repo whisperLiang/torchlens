@@ -465,9 +465,14 @@ def execute_with_restored_rng_autocast(
     """
 
     current_rng_states = log_current_rng_states()
-    if rng_states:
-        set_rng_from_saved_states(rng_states)
+    # Apply the target RNG state INSIDE the try so the finally always restores
+    # the caller's state -- even if the restore itself partially applies and then
+    # raises (e.g. a malformed rng_states dict sets the Python/NumPy engines then
+    # KeyErrors on the torch key). Doing the set before the try left the caller's
+    # engines corrupted with no rollback.
     try:
+        if rng_states:
+            set_rng_from_saved_states(rng_states)
         with AutocastRestore(autocast_state or {}):
             return func(*args, **kwargs)
     finally:
@@ -673,11 +678,18 @@ class AutocastRestore:
                 # Reserved non-device entries (e.g. ``__execution__`` grad/inference
                 # mode) are not autocast device records and open no context here.
                 continue
-            if state["enabled"]:
-                autocast = cast(Any, getattr(torch.amp, "autocast"))
-                ctx = autocast(device, dtype=state["dtype"])
-                ctx.__enter__()
-                self._contexts.append(ctx)
+            # Open an autocast context for EVERY captured device -- including
+            # devices that were DISABLED at capture time. Previously a saved
+            # ``enabled=False`` device opened NO context, so if the replay caller
+            # had live autocast enabled for that device the replayed op silently
+            # ran under the caller's autocast (wrong dtype / arithmetic, returned
+            # normally). Opening an explicit ``enabled=False`` context shields the
+            # replay against the caller's live state, reproducing the captured
+            # autocast posture exactly.
+            autocast = cast(Any, getattr(torch.amp, "autocast"))
+            ctx = autocast(device, dtype=state["dtype"], enabled=bool(state["enabled"]))
+            ctx.__enter__()
+            self._contexts.append(ctx)
         return self
 
     def __exit__(
@@ -1651,9 +1663,14 @@ def _call_site_argcount(frame: Any) -> int | None:
     """Decode the positional argument count of a profile-observed ``c_call`` site.
 
     Reads the caller frame's bytecode at ``f_lasti``. A plain ``CALL`` instruction
-    on Python 3.11+ and ``CALL_FUNCTION`` on Python 3.10 carry the exact positional
-    argument count in their oparg. The monitored implicit-now converters reject
-    keywords, so these opcodes fully determine arity for every valid call.
+    on Python 3.11+ and ``CALL_FUNCTION`` (plain call) or ``CALL_METHOD``
+    (attribute-style ``obj.method(...)`` call) on Python 3.10 carry the exact
+    positional argument count in their oparg. The monitored implicit-now
+    converters reject keywords, so these opcodes fully determine arity for every
+    valid call. Omitting ``CALL_METHOD`` previously left a py3.10 held-ref alias
+    invoked as a method (e.g. a captured ``datetime`` reader) undecodable, so a
+    call passing the explicit-time argument still fail-closed-MARKED, falsely
+    ceilinging an otherwise-verifiable capture.
 
     Parameters
     ----------
@@ -1672,7 +1689,10 @@ def _call_site_argcount(frame: Any) -> int | None:
         lasti = frame.f_lasti
         for instruction in _dis_module.get_instructions(frame.f_code):
             if instruction.offset == lasti:
-                if instruction.opname in {"CALL", "CALL_FUNCTION"} and instruction.arg is not None:
+                if (
+                    instruction.opname in {"CALL", "CALL_FUNCTION", "CALL_METHOD"}
+                    and instruction.arg is not None
+                ):
                     return int(instruction.arg)
                 return None
         return None
@@ -1832,7 +1852,15 @@ class host_nondeterminism_monitor:
         # frame or one inert holder edge below them and compares them at return,
         # preserving the no-method-name invariant.
         self._numpy_frame_rng_states: dict[int, list[tuple[Any, str]]] = {}
-        self._numpy_global_name_cache: dict[tuple[int, int], tuple[str, ...]] = {}
+        # Value RETAINS the code object and globals mapping strongly (like the
+        # sibling ``_numpy_frame_digest_scope_cache`` below) so their ``id()``
+        # cannot be reused by a different frame within the monitoring window. A
+        # bare ``tuple[str, ...]`` value (the former shape) retained neither, so
+        # an id collision after GC returned STALE ``co_names`` and snapshotted
+        # the wrong RNG receivers -- an under-witness.
+        self._numpy_global_name_cache: dict[
+            tuple[int, int], tuple[CodeType, Dict[str, Any], tuple[str, ...]]
+        ] = {}
         # Code objects compare structurally and ignore ``co_filename``. Key by identity
         # and retain the code object strongly in the value so an id cannot be reused
         # during the monitoring window and an internal structural twin cannot suppress
@@ -2165,10 +2193,19 @@ class host_nondeterminism_monitor:
         if not self._numpy_frame_needs_rng_snapshot(frame.f_code):
             return
         cache_key = (id(frame.f_code), id(frame.f_globals))
-        global_names = self._numpy_global_name_cache.get(cache_key)
-        if global_names is None:
+        cached = self._numpy_global_name_cache.get(cache_key)
+        if cached is None:
             global_names = tuple(frame.f_code.co_names)
-            self._numpy_global_name_cache[cache_key] = global_names
+            # Retain the code object AND globals mapping in the value so their
+            # id()s cannot be reused mid-window (see the field comment); an id
+            # collision would otherwise return stale co_names -> under-witness.
+            self._numpy_global_name_cache[cache_key] = (
+                frame.f_code,
+                frame.f_globals,
+                global_names,
+            )
+        else:
+            global_names = cached[2]
         global_candidates = [
             frame.f_globals[name] for name in global_names if name in frame.f_globals
         ]
@@ -2882,15 +2919,28 @@ class host_nondeterminism_monitor:
 
         snapshots: list[tuple[Any, str]] = []
         model = self._model
-        modules = getattr(model, "modules", None)
-        if not callable(modules):
-            return snapshots
+        # Enumerate the registered module tree through the AUTHORITATIVE base
+        # implementation, bypassing any user override of ``modules()``. An
+        # nn.Module subclass that overrides ``modules()`` to return an empty (or
+        # otherwise lying) iterable would otherwise hide every submodule -- and
+        # any model-held RNG -- from this sweep, producing a clean false VERIFIED
+        # (``channels=[] uncertain=False``). Reading through the base method is
+        # the same posture as the class-surface reads below that go through base
+        # ``type`` getsets so a hostile override never fires. Materialize once;
+        # the module set is consumed twice below.
+        if isinstance(model, torch.nn.Module):
+            registered_modules = list(torch.nn.Module.modules(model))
+        else:
+            modules = getattr(model, "modules", None)
+            if not callable(modules):
+                return snapshots
+            registered_modules = list(modules())
         try:
             # r55 C6: shared-namespace exclusion set for the gc-referent fallback,
             # computed ONCE per sweep (bounded by loaded-module count).
             shared_namespace_ids = self._shared_namespace_dict_ids()
             pending: list[Any] = []
-            for module in modules():
+            for module in registered_modules:
                 # r59 hon_1: seed BOTH the instance ``__dict__`` values AND the
                 # ``__slots__`` slot values of every REGISTERED module through
                 # ``_custom_holder_children`` (slot reads go through the slot member
@@ -2918,7 +2968,7 @@ class host_nondeterminism_monitor:
             # ``__dict__`` / ``__slots__`` values -- r59 hon_1 -- before the module OBJECT is ever
             # reached) that kills the ~2x double-walk. UNREGISTERED
             # submodules are absent from ``modules()`` and stay un-premarked, so they ARE descended.
-            seen_container_ids: set[int] = {id(module) for module in modules()}
+            seen_container_ids: set[int] = {id(module) for module in registered_modules}
             visited_nodes = 0
             while pending:
                 value = pending.pop()
