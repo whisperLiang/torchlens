@@ -996,136 +996,149 @@ def _run_model_and_save_specified_outs(
         input_object_id=input_object_id,
         input_signature_hash=input_signature_hash,
     )
-    from .semantic import facets as facets_mod
+    try:
+        from .semantic import facets as facets_mod
 
-    trace = Trace(
-        model_class_name=model_class_name,
-        output_device=output_device,
-        activation_transform=activation_transform,
-        grad_transform=grad_transform,
-        save_raw_activations=save_raw_activations,
-        save_raw_gradients=save_raw_gradients,
-        save_mode=save_mode,
-        capture_tensor_grad_hooks=capture_tensor_grad_hooks,
-        keep_orphans=keep_orphans,
-        save_arg_values=save_arg_values,
-        save_grads=grads_to_save if save_grads else None,
-        detach_saved_activations=detach_saved_activations,
-        mark_layer_depths=mark_layer_depths,
-        num_context_lines=num_context_lines,
-        optimizer=optimizer,
-        save_code_context=save_code_context,
-        save_rng_states=save_rng_states,
-        recurrence_detection=recurrence_detection,
-        verbose=verbose,
-        backward_ready=backward_ready,
-        inference_only=inference_only,
-        module_filter=module_filter,
-        emit_nvtx=emit_nvtx,
-        transform=transform,
-        raw_input=raw_input,
-        save_raw_input=save_raw_input,
-        batch_render=batch_render,
-        output_transform=output_transform,
-        save_raw_output=save_raw_output,
-        layer_visualizers=layer_visualizers,
-        save_visualizations=save_visualizations,
-        facet_registry_snapshot=facets_mod.snapshot(recipes),
-    )
-    if _resolved_layer_nums_to_save is not None:
-        trace._refresh_resolved_layer_nums_to_save = list(_resolved_layer_nums_to_save)
-    if _resolved_grad_layer_nums_to_save is not None:
-        trace._refresh_resolved_grad_layer_nums_to_save = _resolved_grad_layer_nums_to_save
-    if _deferred_retention_selector is not None:
-        trace._deferred_retention_selector = _deferred_retention_selector
-    if _deferred_gradient_selector is not None:
-        trace._deferred_gradient_selector = _deferred_gradient_selector
-    if _refresh_projection_capture:
-        trace._refresh_projection_capture = True
-    _capture_output_metadata_from_model_config(trace, model)
-    trace._output_style = output_style
-    trace._output_head = output_head
-    trace._output_tokenizer = getattr(model, "_torchlens_output_tokenizer", None)
-    trace._semantic_output_metadata = semantic_output_cache_key(
-        model,
-        output_style=output_style,
-        output_head=output_head,
-    )
-    if intervention_spec is not None:
-        trace._intervention_spec = intervention_spec
-    trace.trace_label = name
-    trace.code_context = _get_code_context(
-        num_context_lines,
-        source_loading_enabled=save_code_context,
-    )
-    trace._module_containment_engine = module_containment_engine
-    forward_code = getattr(model.forward, "__code__", None)
-    trace.forward_source_line = getattr(forward_code, "co_firstlineno", None)
-    trace.intervention_ready = intervention_ready
-    trace._capture_container_structure = capture_container_structure
-    if hook_plan:
-        trace.state = TraceState.LIVE_CAPTURED
-    trace.model_object_id = model_object_id
-    trace.model_class_qualname = model_class_qualname
-    trace.param_hash_quick = weight_fingerprint
-    trace.param_hash_full = weight_fingerprint
-    trace.input_object_id = input_object_id
-    trace.input_signature_hash = input_signature_hash
-    trace._source_code_blob = capture_model_source_code(model)
-    trace._source_model_ref = make_weak_model_ref(model)
-    trace._out_sink = out_sink
-    trace._keep_outs_in_memory = keep_outs_in_memory
-    trace._grad_stream_retain_in_memory = retain_grads_in_memory
-    trace._defer_streaming_bundle_finalization = grad_storage_path is not None
-    trace._in_exhaustive_pass = True
-    trace.raise_on_nan = raise_on_nan
-    trace._stop_directive = StopDirective(
-        halt_options=getattr(trace, "_predicate_save_options", None),
-        raise_on_nan=raise_on_nan,
-        forward_error_mode="raise",
-        inference_only=inference_only,
-    )
-    if retain_output_parents_for_layers_to_save:
-        trace._retain_layers_to_save_output_parents = True
-    if save_predicate is not None or intervene_predicate is not None or halt_predicate is not None:
-        predicate_history_size = lookback if lookback > 0 else 8
-        default_save = save_predicate is None and layers_to_save == "all"
-        default_op: bool | CaptureSpec = default_save
-        if backward_ready:
-            default_op = CaptureSpec(
-                save_out=default_save,
-                save_metadata=default_save,
-                keep_grad=True,
-            )
-        trace._predicate_save_options = RecordingOptions(
-            keep_op=save_predicate,
-            intervene=intervene_predicate,
-            halt=halt_predicate,
-            default_op=default_op,
-            streaming=StreamingOptions(
-                bundle_path=save_outs_to,
-                retain_in_memory=keep_outs_in_memory,
-            )
-            if save_outs_to is not None
-            else None,
-            history_size=predicate_history_size,
-            lookback=lookback,
-            lookback_payload_policy=lookback_payload_policy,  # type: ignore[arg-type]
-            on_predicate_error="fail-fast",
+        trace = Trace(
+            model_class_name=model_class_name,
+            output_device=output_device,
+            activation_transform=activation_transform,
+            grad_transform=grad_transform,
+            save_raw_activations=save_raw_activations,
+            save_raw_gradients=save_raw_gradients,
+            save_mode=save_mode,
+            capture_tensor_grad_hooks=capture_tensor_grad_hooks,
+            keep_orphans=keep_orphans,
+            save_arg_values=save_arg_values,
+            save_grads=grads_to_save if save_grads else None,
+            detach_saved_activations=detach_saved_activations,
+            mark_layer_depths=mark_layer_depths,
+            num_context_lines=num_context_lines,
+            optimizer=optimizer,
+            save_code_context=save_code_context,
+            save_rng_states=save_rng_states,
+            recurrence_detection=recurrence_detection,
+            verbose=verbose,
+            backward_ready=backward_ready,
+            inference_only=inference_only,
+            module_filter=module_filter,
+            emit_nvtx=emit_nvtx,
+            transform=transform,
+            raw_input=raw_input,
+            save_raw_input=save_raw_input,
+            batch_render=batch_render,
+            output_transform=output_transform,
+            save_raw_output=save_raw_output,
+            layer_visualizers=layer_visualizers,
+            save_visualizations=save_visualizations,
+            facet_registry_snapshot=facets_mod.snapshot(recipes),
         )
-        trace._halt_returns_partial_trace = halt_predicate is not None
+        if _resolved_layer_nums_to_save is not None:
+            trace._refresh_resolved_layer_nums_to_save = list(_resolved_layer_nums_to_save)
+        if _resolved_grad_layer_nums_to_save is not None:
+            trace._refresh_resolved_grad_layer_nums_to_save = _resolved_grad_layer_nums_to_save
+        if _deferred_retention_selector is not None:
+            trace._deferred_retention_selector = _deferred_retention_selector
+        if _deferred_gradient_selector is not None:
+            trace._deferred_gradient_selector = _deferred_gradient_selector
+        if _refresh_projection_capture:
+            trace._refresh_projection_capture = True
+        _capture_output_metadata_from_model_config(trace, model)
+        trace._output_style = output_style
+        trace._output_head = output_head
+        trace._output_tokenizer = getattr(model, "_torchlens_output_tokenizer", None)
+        trace._semantic_output_metadata = semantic_output_cache_key(
+            model,
+            output_style=output_style,
+            output_head=output_head,
+        )
+        if intervention_spec is not None:
+            trace._intervention_spec = intervention_spec
+        trace.trace_label = name
+        trace.code_context = _get_code_context(
+            num_context_lines,
+            source_loading_enabled=save_code_context,
+        )
+        trace._module_containment_engine = module_containment_engine
+        forward_code = getattr(model.forward, "__code__", None)
+        trace.forward_source_line = getattr(forward_code, "co_firstlineno", None)
+        trace.intervention_ready = intervention_ready
+        trace._capture_container_structure = capture_container_structure
+        if hook_plan:
+            trace.state = TraceState.LIVE_CAPTURED
+        trace.model_object_id = model_object_id
+        trace.model_class_qualname = model_class_qualname
+        trace.param_hash_quick = weight_fingerprint
+        trace.param_hash_full = weight_fingerprint
+        trace.input_object_id = input_object_id
+        trace.input_signature_hash = input_signature_hash
+        trace._source_code_blob = capture_model_source_code(model)
+        trace._source_model_ref = make_weak_model_ref(model)
+        trace._out_sink = out_sink
+        trace._keep_outs_in_memory = keep_outs_in_memory
+        trace._grad_stream_retain_in_memory = retain_grads_in_memory
+        trace._defer_streaming_bundle_finalization = grad_storage_path is not None
+        trace._in_exhaustive_pass = True
+        trace.raise_on_nan = raise_on_nan
         trace._stop_directive = StopDirective(
-            halt_options=trace._predicate_save_options,
+            halt_options=getattr(trace, "_predicate_save_options", None),
             raise_on_nan=raise_on_nan,
-            forward_error_mode=trace._predicate_save_options.on_forward_error,
+            forward_error_mode="raise",
             inference_only=inference_only,
         )
-        trace._predicate_history_size = predicate_history_size
-        trace._predicate_lookback = lookback
-        trace._predicate_lookback_payload_policy = lookback_payload_policy
-    bundle_path = grad_storage_path if grad_storage_path is not None else save_outs_to
-    if bundle_path is not None:
-        trace._out_writer = BundleStreamWriter(bundle_path)
+        if retain_output_parents_for_layers_to_save:
+            trace._retain_layers_to_save_output_parents = True
+        if (
+            save_predicate is not None
+            or intervene_predicate is not None
+            or halt_predicate is not None
+        ):
+            predicate_history_size = lookback if lookback > 0 else 8
+            default_save = save_predicate is None and layers_to_save == "all"
+            default_op: bool | CaptureSpec = default_save
+            if backward_ready:
+                default_op = CaptureSpec(
+                    save_out=default_save,
+                    save_metadata=default_save,
+                    keep_grad=True,
+                )
+            trace._predicate_save_options = RecordingOptions(
+                keep_op=save_predicate,
+                intervene=intervene_predicate,
+                halt=halt_predicate,
+                default_op=default_op,
+                streaming=StreamingOptions(
+                    bundle_path=save_outs_to,
+                    retain_in_memory=keep_outs_in_memory,
+                )
+                if save_outs_to is not None
+                else None,
+                history_size=predicate_history_size,
+                lookback=lookback,
+                lookback_payload_policy=lookback_payload_policy,  # type: ignore[arg-type]
+                on_predicate_error="fail-fast",
+            )
+            trace._halt_returns_partial_trace = halt_predicate is not None
+            trace._stop_directive = StopDirective(
+                halt_options=trace._predicate_save_options,
+                raise_on_nan=raise_on_nan,
+                forward_error_mode=trace._predicate_save_options.on_forward_error,
+                inference_only=inference_only,
+            )
+            trace._predicate_history_size = predicate_history_size
+            trace._predicate_lookback = lookback
+            trace._predicate_lookback_payload_policy = lookback_payload_policy
+        bundle_path = grad_storage_path if grad_storage_path is not None else save_outs_to
+        if bundle_path is not None:
+            trace._out_writer = BundleStreamWriter(bundle_path)
+    except BaseException:
+        # A pre-forward setup failure (the Trace ctor or any later pre-forward
+        # step) must not leak the capture-global runtime context configured just
+        # above: the forward's own try/finally only guards the window starting
+        # below. Reset here so the protected region begins no later than
+        # configure_capture_runtime_context().
+        _state.reset_capture_runtime_context()
+        raise
     try:
         if trace.capture_mode == "predicate":
             from .capture.projections import (
@@ -1572,8 +1585,6 @@ def trace(
         grad_transform: Optional function applied to each grad before saving. The raw
             grad remains in ``layer.grad`` by default, and the transform result is stored
             in ``layer.transformed_grad``.
-        grad_transform: Alias for ``grad_transform``. Passing both names is an error.
-        activation_transform: Deprecated alias for ``activation_transform``.
         save_raw_activations: When ``False`` and ``activation_transform`` is set, do not retain
             raw out tensors in memory; raw out metadata is still populated.
         save_raw_gradients: When ``False`` and ``grad_transform`` is set, do not retain raw
@@ -1612,7 +1623,6 @@ def trace(
         random_seed: Fixed RNG seed for reproducibility with stochastic models.
         num_context_lines: Deprecated alias for ``source_context_lines``.
         optimizer: Optional optimizer to annotate which params are being optimized.
-        recurrence_detection: Deprecated alias for ``recurrence_detection``.
         save_outs_to: Deprecated alias for ``streaming.bundle_path``.
         keep_outs_in_memory: Deprecated alias for
             ``streaming.retain_in_memory``.
@@ -2237,6 +2247,26 @@ def _trace_torch_model(
             "save_predicate": _predicate_cache_key(save_predicate),
             "intervene": _predicate_cache_key(intervene),
             "halt": _predicate_cache_key(halt),
+            # Capability / payload-policy options that change WHAT is captured or
+            # stored in the returned trace. Omitting any of these let a second
+            # trace() with a different capability silently return an earlier cached
+            # trace built with the wrong capability (e.g. asked intervention_ready=True,
+            # got a cached False). Include them so a capability change misses the cache;
+            # callables are repr-keyed (conservative -- a distinct object misses rather
+            # than risking a false hit), matching how output_transform is keyed above.
+            "intervention_ready": intervention_ready,
+            "save_raw_input": repr(save_raw_input_policy),
+            "save_raw_output": repr(save_raw_output_policy),
+            "save_raw_activations": save_raw_activations,
+            "save_raw_gradients": save_raw_gradients,
+            "activation_transform": repr(activation_transform),
+            "grad_transform": repr(grad_transform),
+            "random_seed": random_seed,
+            "module_filter": repr(module_filter_value),
+            "layer_visualizers": repr(layer_visualizers_value),
+            "save_visualizations": repr(save_visualizations_value),
+            "optimizer": repr(optimizer),
+            "hooks": repr(hooks),
             "lookback": lookback,
             "lookback_payload_policy": lookback_payload_policy,
             "jax_control_flow": capture_options.jax_control_flow,

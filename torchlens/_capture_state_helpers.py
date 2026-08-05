@@ -1308,10 +1308,17 @@ def _prepare_log_for_capture_cache(trace: Trace) -> None:
         layer._internal_set("saved_args", _detach_nested_for_cache(layer.saved_args))
         layer._internal_set("saved_kwargs", _detach_nested_for_cache(layer.saved_kwargs))
     for layer_log in getattr(trace, "layer_logs", {}).values():
-        for field_name in ("transformed_out", "transformed_grad"):
-            value = getattr(layer_log, field_name, None)
-            if isinstance(value, torch.Tensor):
-                setattr(layer_log, field_name, value.detach().cpu())
+        # ``Layer.transformed_out``/``transformed_grad`` are read-only proxies that read
+        # through to the underlying ``Layer.ops[i]`` -- the real tensors live on the Op
+        # objects, which expose ``_internal_set`` (the Layer view does not, so a raw
+        # ``setattr`` here raised ``can't set attribute``). Detach on the ops directly,
+        # mirroring the ``layer_list`` loop above, so a cached capture with an
+        # activation/grad transform stays pickle-safe.
+        for op in layer_log.ops.values():
+            for field_name in ("transformed_out", "transformed_grad"):
+                value = _raw_cache_payload_field(op, field_name)
+                if isinstance(value, torch.Tensor):
+                    op._internal_set(field_name, value.detach().cpu())
         layer_log.grad_fn_handle = None
     trace.__dict__.pop("_container_ordinals_by_output_op_label", None)
     trace.__dict__.pop("_container_ordinals_by_input_func_call_id", None)
