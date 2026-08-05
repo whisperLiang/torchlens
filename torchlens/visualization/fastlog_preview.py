@@ -249,7 +249,8 @@ def _lookup_preview_node(
         pass_nodes: list[PreviewNode] = []
         if ops is not None:
             for op in ops.values():
-                node = preview_nodes.get(getattr(op, "label", None))
+                op_label = getattr(op, "label", None)
+                node = preview_nodes.get(op_label) if isinstance(op_label, str) else None
                 if node is not None:
                     pass_nodes.append(node)
         if pass_nodes and all(n.decision is pass_nodes[0].decision for n in pass_nodes):
