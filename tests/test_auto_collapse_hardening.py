@@ -24,6 +24,16 @@ it. Op-segment runs must split at module-call reuse boundaries, descriptor
 owners must be the exact call-qualified LCA of their members' rendered
 stacks, and runs across distinct single-call sibling modules must stay
 merged at the honest top-level LCA.
+
+Round-25 seal finding (MED): when an op segment absorbed a collapsed
+module's surfaced atomic-exit op (the last sibling block's own relu followed
+by a >=2-op trailing top-level chain), the op was double-represented --
+counted inside the box content label AND claimed as the leading endpoint of
+the segment range label -- so structurally identical sibling blocks rendered
+inconsistently ("1 op" vs "2 ops") and one op was claimed twice while node
+counts stayed exact. Segment runs must never absorb a box-owned surfaced
+exit op, and the box remainder accounting must treat op-segment members as
+rendered separately, exactly like standalone raw nodes.
 """
 
 import re
@@ -44,23 +54,30 @@ from torchlens.visualization.collapse_optimizer import (
     _child_segment_covered_ops,
     _child_segment_label,
     _condense_plan_with_child_segments,
+    _legal_plan_op_segment_run,
     _make_child_segment_descriptor,
     _op_segment_owner_key,
     _optimizer_total_units,
     _own_ops_segment_is_legal,
+    _plan_box_owned_surfaced_labels,
     _rendered_module_hidden_counts,
     select_collapse_level,
     select_collapse_plan,
 )
 from torchlens.visualization.collapse_plan import (
     ChildSegment,
+    CollapsePlan,
     ModuleBox,
     OpSegment,
     RawOp,
     RenderContext,
     RepeatFold,
 )
-from torchlens.visualization._render_edges import _run_fold_ellipsis_label
+from torchlens.visualization._render_edges import (
+    _collapsed_module_should_show_remainder,
+    _plan_separately_rendered_op_labels,
+    _run_fold_ellipsis_label,
+)
 
 
 class ResidualBlock(nn.Module):
@@ -1362,4 +1379,408 @@ def test_own_ops_segment_refuses_module_call_reuse():
     cross = tuple(by_call["core:1"] + by_call["core:2"])
     assert not _own_ops_segment_is_legal(state, cross), (
         "own-ops producer accepted a sequence spanning two calls of one module"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Round-25: box + op-segment double-representation of surfaced atomic-exit ops
+# ---------------------------------------------------------------------------
+
+
+class AtomicExitBlock(nn.Module):
+    """Linear child plus ONE own functional op: the relu is an atomic exit.
+
+    The block's only own op is the relu, so the renderer drops the innermost
+    box for it and keeps the op visible as the collapsed box's separate
+    sibling node (the box remainder label subtracts it).
+    """
+
+    def __init__(self, width: int = 8) -> None:
+        super().__init__()
+        self.l = nn.Linear(width, width)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(self.l(x))
+
+
+class NonAtomicExitBlock(nn.Module):
+    """Linear child plus TWO own functional ops: exits stay inside the box.
+
+    ``is_atomic_module`` requires the innermost call to own exactly one op,
+    so neither the tanh nor the relu surfaces; this is the classification
+    control for the round-25 sweep.
+    """
+
+    def __init__(self, width: int = 8) -> None:
+        super().__init__()
+        self.l = nn.Linear(width, width)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(torch.tanh(self.l(x)))
+
+
+def _tail_op(index: int, x: torch.Tensor) -> torch.Tensor:
+    """Apply the ``index``-th trailing chain op, resolving torch at call time.
+
+    Pre-binding ``torch.relu`` and friends in a module-level tuple would
+    capture the raw callables before TorchLens wraps torch and escape capture.
+    """
+
+    return (torch.relu, torch.tanh, torch.sigmoid)[index % 3](x)
+
+
+class SiblingBlocksTrailingChain(nn.Module):
+    """Round-25 seal repro (NetF): sibling blocks then a trailing chain.
+
+    The last block's surfaced atomic-exit op is immediately followed by
+    ``tail`` top-level ops, so a >=3-op run forms starting AT the exit op
+    and, pre-fix, absorbed it into the adjacent op segment.
+    """
+
+    def __init__(
+        self,
+        block_cls: type[nn.Module] = AtomicExitBlock,
+        width: int = 8,
+        depth: int = 6,
+        tail: int = 3,
+    ) -> None:
+        super().__init__()
+        self.tail = tail
+        self.blocks = nn.ModuleList([block_cls(width) for _ in range(depth)])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = torch.relu(x)
+        x = torch.tanh(x)
+        x = torch.sigmoid(x)
+        x = x * 2
+        x = x + 1
+        for block in self.blocks:
+            x = block(x)
+        for index in range(self.tail):
+            x = _tail_op(index, x)
+        return x
+
+
+class ReusedAtomicExitBlock(nn.Module):
+    """ONE atomic-exit block called several times, then a trailing chain.
+
+    Interplay with the round-24 containment class: each call renders its own
+    box plus its own surfaced exit-op occurrence, and only the LAST call's
+    occurrence is execution-adjacent to the trailing top-level chain.
+    """
+
+    def __init__(self, width: int = 8, calls: int = 4, tail: int = 3) -> None:
+        super().__init__()
+        self.blk = AtomicExitBlock(width)
+        self.calls = calls
+        self.tail = tail
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for _ in range(self.calls):
+            x = self.blk(x)
+        for index in range(self.tail):
+            x = _tail_op(index, x)
+        return x
+
+
+class NestedAtomicExitBlocks(nn.Module):
+    """Sibling atomic-exit blocks and their trailing chain inside a container."""
+
+    class Inner(nn.Module):
+        def __init__(self, width: int = 8, depth: int = 4, tail: int = 3) -> None:
+            super().__init__()
+            self.tail = tail
+            self.blocks = nn.ModuleList([AtomicExitBlock(width) for _ in range(depth)])
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            for block in self.blocks:
+                x = block(x)
+            for index in range(self.tail):
+                x = _tail_op(index, x)
+            return x
+
+    def __init__(self, width: int = 8) -> None:
+        super().__init__()
+        self.inner = self.Inner(width)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.inner(torch.relu(x))
+
+
+def _boxed_surfaced_labels(trace, plan) -> set[str]:
+    """Return pass-free surfaced own-output labels of every plan module box.
+
+    Independent test-side witness (not the implementation helper): an op is
+    box-owned surfaced when it is a non-buffer atomic-exit op whose own
+    module renders as a collapsed box or repeat-fold representative in the
+    plan.
+    """
+
+    addresses = {node.call.rsplit(":", 1)[0] for node in plan.nodes if isinstance(node, ModuleBox)}
+    addresses.update(
+        node.rep.call.rsplit(":", 1)[0] for node in plan.nodes if isinstance(node, RepeatFold)
+    )
+    labels: set[str] = set()
+    for op in trace.ops:
+        modules = list(getattr(op, "modules", ()) or ())
+        if (
+            getattr(op, "is_atomic_module", False)
+            and not getattr(op, "is_buffer", False)
+            and modules
+            and modules[-1].rsplit(":", 1)[0] in addresses
+        ):
+            labels.add(str(op.layer_label))
+    return labels
+
+
+def _plan_segment_member_labels(plan) -> set[str]:
+    """Return pass-free member labels of every op segment in a plan."""
+
+    labels: set[str] = set()
+    for node in plan.nodes:
+        if isinstance(node, OpSegment):
+            labels.update(str(label).rsplit(":", 1)[0] for label in node.ops)
+    return labels
+
+
+def test_surfaced_exit_op_not_double_represented(tmp_path):
+    """Round-25 pin: every op appears in EXACTLY ONE rendered label.
+
+    Executed seal repro: six structurally identical sibling blocks whose last
+    exit relu is followed by a 3-op trailing chain. Pre-fix, the max plan
+    absorbed the last block's surfaced exit op into the trailing op segment
+    while the box content label kept counting it: boxes read
+    ``1/1/1/1/1/2 ops``, the segment claimed 4 ops, and 5 real ops in the
+    region carried 6 label claims. Post-fix this asserts, on the max surface:
+
+    - no op segment claims a box-owned surfaced exit op;
+    - structurally identical sibling boxes render IDENTICAL op counts;
+    - each rendered op is claimed by exactly one label (box remainder,
+      segment range, or standalone raw node) with exact conservation;
+    - node-count parity holds: ``plan.total == count == rendered SVG nodes``.
+    """
+
+    torch.manual_seed(0)
+    trace = tl.trace(SiblingBlocksTrailingChain().eval(), torch.randn(2, 8))
+    context = RenderContext()
+    result = select_collapse_plan(trace, context, mode="max")
+    plan = result.plan
+
+    # 1. No segment member is a box-owned surfaced exit op.
+    overlap = _boxed_surfaced_labels(trace, plan) & _plan_segment_member_labels(plan)
+    assert not overlap, f"op segments absorb box-owned surfaced exit ops: {sorted(overlap)}"
+
+    # 2. Exact one-claim-per-op conservation across all label kinds.
+    box_addresses = [
+        node.call.rsplit(":", 1)[0] for node in plan.nodes if isinstance(node, ModuleBox)
+    ]
+    stub = SimpleNamespace(_torchlens_v2_plan=plan, _torchlens_v2_mode="max")
+    claimed: list[str] = []
+    for address in box_addresses:
+        module_call = trace.modules[address].ops[0]
+        module_labels = {str(trace.ops[label].layer_label) for label in module_call.ops}
+        if _collapsed_module_should_show_remainder(trace, address, module_call.ops, stub):
+            surfaced = {
+                str(op.layer_label)
+                for op in trace.ops
+                if getattr(op, "is_atomic_module", False)
+                and (getattr(op, "modules", ()) or ("",))[-1].rsplit(":", 1)[0] == address
+            }
+            module_labels -= surfaced
+        claimed.extend(sorted(module_labels))
+    for node in plan.nodes:
+        if isinstance(node, RawOp):
+            claimed.append(str(node.op) if isinstance(node.op, str) else str(node.op.layer_label))
+        elif isinstance(node, OpSegment):
+            claimed.extend(str(label).rsplit(":", 1)[0] for label in node.ops)
+    all_labels = sorted(str(op.layer_label) for op in trace.ops)
+    assert sorted(claimed) == all_labels, (
+        f"label claims must cover each op exactly once; claims={sorted(claimed)} ops={all_labels}"
+    )
+
+    # 3. SVG: sibling boxes identical, label-op totals honest, parity exact.
+    out = tmp_path / "r25_seal"
+    trace.draw(
+        vis_save_only=True,
+        vis_fileformat="svg",
+        collapse="max",
+        vis_outpath=str(out),
+    )
+    with open(str(out) + ".svg", encoding="utf-8") as handle:
+        svg = handle.read()
+    box_counts = re.findall(r">(\d+) ops?<", svg)
+    assert len(box_counts) == 6, f"expected six sibling box content labels, got {box_counts}"
+    assert len(set(box_counts)) == 1, (
+        f"structurally identical sibling blocks render inconsistent op counts: {box_counts}"
+    )
+    seg_counts = [int(match) for match in re.findall(r">[^<>]*&#45;&#45; (\d+) ops?<", svg)]
+    standalone_raw = sum(isinstance(node, RawOp) for node in plan.nodes)
+    label_total = sum(int(count) for count in box_counts) + sum(seg_counts) + standalone_raw
+    assert label_total == len(list(trace.ops)), (
+        f"total label op-count {label_total} != real op count {len(list(trace.ops))}"
+    )
+    assert _svg_node_group_count(str(out) + ".svg") == plan.total == result.visible_count
+
+
+_R25_SWEEP_CASES = [
+    ("seal_tail3", lambda: SiblingBlocksTrailingChain(tail=3)),
+    ("seal_tail2", lambda: SiblingBlocksTrailingChain(tail=2)),
+    ("seal_tail8", lambda: SiblingBlocksTrailingChain(tail=8)),
+    ("seal_tail0", lambda: SiblingBlocksTrailingChain(tail=0)),
+    ("depth2_tail3", lambda: SiblingBlocksTrailingChain(depth=2, tail=3)),
+    ("nonatomic_exits", lambda: SiblingBlocksTrailingChain(block_cls=NonAtomicExitBlock)),
+    ("reused_calls4", lambda: ReusedAtomicExitBlock(calls=4, tail=3)),
+    ("reused_calls6_tail5", lambda: ReusedAtomicExitBlock(calls=6, tail=5)),
+    ("nested_container", lambda: NestedAtomicExitBlocks()),
+]
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [case[1] for case in _R25_SWEEP_CASES],
+    ids=[case[0] for case in _R25_SWEEP_CASES],
+)
+def test_box_owned_exit_ops_never_absorbed_by_segments(builder):
+    """Round-25 class sweep: op segments never claim box-owned surfaced ops.
+
+    Every collapse surface (auto, max, float levels) in both vis modes must
+    keep each box-owned surfaced atomic-exit op OUT of every op segment, so
+    the box remainder label and the segment range label never both claim one
+    op. Covers trailing chains too short to re-segment, sibling and reused
+    blocks (round-24 interplay), nested containers, and the non-atomic
+    classification control.
+    """
+
+    torch.manual_seed(0)
+    trace = tl.trace(builder().eval(), torch.randn(2, 8))
+    for vis_mode in ("unrolled", "rolled"):
+        context = RenderContext(vis_mode=vis_mode)
+        results = {
+            "auto": select_collapse_plan(trace, context, mode="auto"),
+            "max": select_collapse_plan(trace, context, mode="max"),
+        }
+        for level in (0.5, 1.0):
+            results[f"t={level}"] = select_collapse_level(trace, context, level)
+        for label, result in results.items():
+            if result.declined:
+                continue
+            overlap = _boxed_surfaced_labels(trace, result.plan) & _plan_segment_member_labels(
+                result.plan
+            )
+            assert not overlap, (
+                f"{vis_mode}/{label}: op segments absorb box-owned surfaced "
+                f"exit ops: {sorted(overlap)}"
+            )
+            assert result.visible_count == result.plan.total
+
+
+def test_remainder_counts_segment_members_as_rendered_separately():
+    """Round-25 belt: remainder accounting sees op-segment members as visible.
+
+    ``_collapsed_module_should_show_remainder`` treated a surfaced exit op as
+    rendered-separately ONLY when it was a standalone ``RawOp`` plan node;
+    an op absorbed into an ``OpSegment`` returned False, so the box remainder
+    was not subtracted and the op was double-counted. The remainder side must
+    treat segment membership exactly like standalone raw visibility, even if
+    a future producer path reintroduces absorption.
+    """
+
+    torch.manual_seed(0)
+    trace = tl.trace(SiblingBlocksTrailingChain().eval(), torch.randn(2, 8))
+    plan = select_collapse_plan(trace, RenderContext(), mode="max").plan
+    module_call = trace.modules["blocks.5"].ops[0]
+    exit_label = "relu_7_17"
+    assert exit_label in {str(trace.ops[label].layer_label) for label in module_call.ops}
+
+    # Synthesize the pre-fix absorbed shape: the exit op inside a segment.
+    absorbed_nodes = []
+    for node in plan.nodes:
+        if isinstance(node, RawOp) and node.op == exit_label:
+            continue
+        if isinstance(node, OpSegment) and exit_label not in node.ops:
+            last_seg = OpSegment((exit_label, *node.ops)) if "tanh_2_19" in node.ops else node
+            absorbed_nodes.append(last_seg)
+            continue
+        absorbed_nodes.append(node)
+    absorbed = CollapsePlan(nodes=tuple(absorbed_nodes), context=plan.context)
+    assert exit_label in _plan_separately_rendered_op_labels(absorbed)
+    stub = SimpleNamespace(_torchlens_v2_plan=absorbed)
+    assert _collapsed_module_should_show_remainder(trace, "blocks.5", module_call.ops, stub), (
+        "a surfaced exit op absorbed into an op segment must still count as "
+        "rendered separately so the box remainder subtracts it"
+    )
+
+    # Control: with the op neither standalone nor in any segment, no remainder.
+    hidden_nodes = tuple(
+        node
+        for node in absorbed_nodes
+        if not (isinstance(node, OpSegment) and exit_label in node.ops)
+    )
+    hidden = CollapsePlan(nodes=hidden_nodes, context=plan.context)
+    stub_hidden = SimpleNamespace(_torchlens_v2_plan=hidden)
+    assert not _collapsed_module_should_show_remainder(
+        trace, "blocks.5", module_call.ops, stub_hidden
+    )
+
+
+def test_run_builder_refuses_box_owned_exit_op():
+    """Round-25 producer pin: runs refuse box-owned surfaced exit ops.
+
+    ``_legal_plan_op_segment_run`` must not start (or continue) a run at a
+    collapsed box's surfaced exit op; the run must instead start at the first
+    genuinely top-level op, and without the guard set the historical
+    absorbing 4-op run demonstrates what is being refused.
+    """
+
+    torch.manual_seed(0)
+    trace = tl.trace(SiblingBlocksTrailingChain().eval(), torch.randn(2, 8))
+    context = RenderContext()
+    nodes = (
+        ModuleBox("blocks.5:1"),
+        RawOp("relu_7_17"),
+        RawOp("relu_8_18"),
+        RawOp("tanh_2_19"),
+        RawOp("sigmoid_2_20"),
+    )
+    box_owned = _plan_box_owned_surfaced_labels(trace, context, nodes)
+    assert "relu_7_17" in box_owned
+    concrete = {1: "relu_7_17:1", 2: "relu_8_18:1", 3: "tanh_2_19:1", 4: "sigmoid_2_20:1"}
+    concrete = {
+        index: label if label in {str(op.label) for op in trace.ops} else label.rsplit(":", 1)[0]
+        for index, label in concrete.items()
+    }
+    guarded = _legal_plan_op_segment_run(
+        trace,
+        context,
+        nodes,
+        1,
+        total_ops=22,
+        dominance_limit=0.75,
+        concrete_labels=concrete,
+        box_owned_labels=box_owned,
+    )
+    assert guarded is None, "run starting at a box-owned surfaced exit op must be refused"
+    shifted = _legal_plan_op_segment_run(
+        trace,
+        context,
+        nodes,
+        2,
+        total_ops=22,
+        dominance_limit=0.75,
+        concrete_labels=concrete,
+        box_owned_labels=box_owned,
+    )
+    assert shifted == ("relu_8_18", "tanh_2_19", "sigmoid_2_20")
+    unguarded = _legal_plan_op_segment_run(
+        trace,
+        context,
+        nodes,
+        1,
+        total_ops=22,
+        dominance_limit=0.75,
+        concrete_labels=concrete,
+        box_owned_labels=frozenset(),
+    )
+    assert unguarded == ("relu_7_17", "relu_8_18", "tanh_2_19", "sigmoid_2_20"), (
+        "control: without the guard set the absorbing run forms, so the guard is what refuses it"
     )
