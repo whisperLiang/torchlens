@@ -2,6 +2,7 @@
 
 # ruff: noqa: F403, F405
 
+from ..utils._multipass_access import get_multipass_attr, is_multipass_layer
 from ._render_common import *
 from ._render_leaf import *
 from ._render_edges import *
@@ -1789,7 +1790,14 @@ def compute_default_node_lines(
     else:
         call_label = ""
 
-    if layer_log.layer_type in ["input", "output", "buffer"]:
+    if (layer_log.num_passes > 1) and (vis_mode == "unrolled"):
+        # F2: show the RESOLVABLE trace identity ``layer_label:pass`` (== op.label,
+        # e.g. linear_1_1:2) instead of ``{type}_{type_index}_{step_index}:{pass}``.
+        # The latter renumbers the ordinal from this pass's step_index and yields an
+        # un-lookup-able label (linear_1_3:2 for what is really linear_1_1:2), so
+        # users copying the displayed name got a "not found" ValueError.
+        title = f"{layer_log.layer_label}:{layer_log.pass_index}"
+    elif layer_log.layer_type in ["input", "output", "buffer"]:
         title = f"{layer_log.layer_type}_{layer_log.type_index}{call_label}"
     else:
         title = f"{layer_log.layer_type}_{layer_log.type_index}_{layer_log.step_index}{call_label}"
@@ -1864,17 +1872,26 @@ def _compute_selected_node_lines(
             if param_line is not None:
                 rows.append(param_line)
         elif field_name == "pass":
-            rows.append(
-                str(
-                    getattr(layer_log, "call_index", 1)
-                    if vis_mode == "unrolled"
-                    else getattr(layer_log, "num_passes", 1)
-                )
-            )
+            if vis_mode == "unrolled":
+                # Per-pass leaf node: show the op's real 1-based recurrent pass
+                # (``pass_index``). The old ``call_index`` default read 1 for every
+                # pass because Ops carry no ``call_index`` -- a field literally
+                # named "pass" that always says 1 is silent wrongness.
+                rows.append(str(get_multipass_attr(layer_log, "pass_index", 1, multipass=1)))
+            else:
+                rows.append(str(get_multipass_attr(layer_log, "num_passes", 1)))
         elif field_name == "flops":
             rows.append(str(getattr(layer_log, "flops_forward", 0) or 0))
         elif field_name == "time":
-            rows.append(str(Duration(float(getattr(layer_log, "func_duration", 0.0) or 0.0))))
+            if is_multipass_layer(layer_log):
+                # Rolled recurrent node: ``func_duration`` is per-pass and would
+                # leak the multi-pass ValueError tripwire. Report the aggregate
+                # total across passes (same choice as the rolled summary builder's
+                # ``total_func_duration``), an honest total rather than a crash.
+                duration = float(getattr(layer_log, "total_func_duration", 0.0) or 0.0)
+            else:
+                duration = float(get_multipass_attr(layer_log, "func_duration", 0.0) or 0.0)
+            rows.append(str(Duration(duration)))
         else:
             raise ValueError(f"Unsupported node label field: {field_name!r}.")
     return rows or compute_default_node_lines(layer_log, node_address, vis_mode)
