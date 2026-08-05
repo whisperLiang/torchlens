@@ -32,6 +32,37 @@ if TYPE_CHECKING:
     from .intervention import FireResult
 
 
+def _clone_op_event_for_replay(event: OpEvent) -> OpEvent:
+    """Return a projection copy of ``event`` with independent mutable state.
+
+    ``OpEvent`` is a frozen dataclass, but two of its fields are live dicts:
+    ``transform_config`` and ``parent_arg_positions``. A ``copy_for_replay``
+    projection must not be able to mutate those dicts on the sealed source
+    stream, so they are duplicated here. Every other field is immutable (or an
+    intentionally shared tensor payload / opaque handle), so the clone stays
+    cheap and never copies activations.
+
+    Parameters
+    ----------
+    event
+        Sealed source operation event.
+
+    Returns
+    -------
+    OpEvent
+        Event with fresh, independent ``transform_config`` and
+        ``parent_arg_positions`` containers.
+    """
+
+    return replace(
+        event,
+        parent_arg_positions={
+            domain: dict(positions) for domain, positions in event.parent_arg_positions.items()
+        },
+        transform_config=dict(event.transform_config),
+    )
+
+
 @dataclass(slots=False)
 class CaptureEvents:
     """Mutable event buffer allocated once per capture."""
@@ -77,10 +108,15 @@ class CaptureEvents:
         stream.
 
         Every mutable container is duplicated into a fresh object (nested list
-        values included where they are rebuilt in place); the frozen ``OpEvent``
-        objects and any tensor payloads are shared by reference, so the copy is
-        cheap and does not clone activations. Scalars and the opaque
-        ``backend_session`` are copied by value / reference.
+        values included where they are rebuilt in place). The ``OpEvent`` objects
+        are re-created with independent copies of their mutable dict fields
+        (``transform_config`` and ``parent_arg_positions``) so a projection can
+        never mutate those dicts on the sealed source stream; the same cloned
+        events back ``op_events``, ``op_event_by_label_raw``, and the projected
+        ``live_index`` so the projection stays internally consistent. Tensor
+        payloads and every other (immutable) event field are shared by
+        reference, so the copy is cheap and does not clone activations. Scalars
+        and the opaque ``backend_session`` are copied by value / reference.
 
         Returns
         -------
@@ -88,8 +124,16 @@ class CaptureEvents:
             Independent event buffer over the same underlying events.
         """
 
+        cloned_op_events = [_clone_op_event_for_replay(event) for event in self.op_events]
+        cloned_by_label = {event.label_raw: event for event in cloned_op_events}
+        projected_index = self.live_index.copy()
+        projected_index.by_raw_label = {
+            label: cloned_by_label.get(label, event)
+            for label, event in projected_index.by_raw_label.items()
+        }
+
         return CaptureEvents(
-            op_events=list(self.op_events),
+            op_events=cloned_op_events,
             module_events=list(self.module_events),
             module_prep_events=list(self.module_prep_events),
             module_enter_events=list(self.module_enter_events),
@@ -105,9 +149,12 @@ class CaptureEvents:
             recent_events=deque(self.recent_events),
             backend_session=self.backend_session,
             live_by_raw_label=dict(self.live_by_raw_label),
-            op_event_by_label_raw=dict(self.op_event_by_label_raw),
+            op_event_by_label_raw={
+                label: cloned_by_label.get(label, _clone_op_event_for_replay(event))
+                for label, event in self.op_event_by_label_raw.items()
+            },
             op_event_index_by_label_raw=dict(self.op_event_index_by_label_raw),
-            live_index=self.live_index.copy(),
+            live_index=projected_index,
             parent_op_label_raws={
                 key: list(value) for key, value in self.parent_op_label_raws.items()
             },

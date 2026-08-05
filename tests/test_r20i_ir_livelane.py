@@ -153,3 +153,66 @@ def test_release_runtime_sidecars_lets_handles_be_collected() -> None:
 
     assert session_ref() is None
     assert grad_ref() is None
+
+
+# -------------------------------------------------------------------------- N10
+
+
+def _seeded_capture_events() -> tuple[CaptureEvents, OpEvent]:
+    """Build a CaptureEvents with one event carrying mutable dict fields."""
+
+    op = dataclasses.replace(
+        _op_event("linear_1_1_raw"),
+        transform_config={"orig": 1},
+        parent_arg_positions={"args": {0: "input_1_0_raw"}, "kwargs": {}},
+    )
+    events = CaptureEvents()
+    events.append(op)
+    return events, op
+
+
+def test_copy_for_replay_does_not_share_mutable_event_dicts() -> None:
+    """A replay projection must not mutate the sealed source event dicts (N10)."""
+
+    source, op = _seeded_capture_events()
+    projection = source.copy_for_replay()
+
+    # Mutate every mutable projection event field across all three lanes.
+    projection.op_events[0].transform_config["INJECTED"] = 999
+    projection.op_events[0].parent_arg_positions["args"][7] = "PWNED"
+    projection.op_event_by_label_raw[op.label_raw].transform_config["VIA_BYLABEL"] = 1
+    projection.live_index.by_raw_label[op.label_raw].parent_arg_positions["kwargs"]["k"] = "v"
+
+    assert source.op_events[0].transform_config == {"orig": 1}
+    assert source.op_events[0].parent_arg_positions == {"args": {0: "input_1_0_raw"}, "kwargs": {}}
+    assert source.op_event_by_label_raw[op.label_raw].transform_config == {"orig": 1}
+    assert source.live_index.by_raw_label[op.label_raw].parent_arg_positions == {
+        "args": {0: "input_1_0_raw"},
+        "kwargs": {},
+    }
+
+
+def test_copy_for_replay_projection_lanes_reference_same_event() -> None:
+    """All projection lanes must reference one independent cloned event (N10)."""
+
+    source, op = _seeded_capture_events()
+    projection = source.copy_for_replay()
+
+    cloned = projection.op_events[0]
+    assert projection.op_event_by_label_raw[op.label_raw] is cloned
+    assert projection.live_index.by_raw_label[op.label_raw] is cloned
+    # The clone is a distinct object from the sealed source event.
+    assert cloned is not source.op_events[0]
+
+
+def test_copy_for_replay_projections_are_mutually_independent() -> None:
+    """Two projections of one source must not affect each other (N10)."""
+
+    source, _op = _seeded_capture_events()
+    first = source.copy_for_replay()
+    second = source.copy_for_replay()
+
+    first.op_events[0].transform_config["X"] = 1
+
+    assert "X" not in second.op_events[0].transform_config
+    assert "X" not in source.op_events[0].transform_config
