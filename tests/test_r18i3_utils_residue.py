@@ -145,3 +145,41 @@ def test_m13_positional_params_still_form_a_tuple() -> None:
     si = tl_utils.synthetic_input(model)
     assert isinstance(si, tuple) and len(si) == 2
     model.forward(*si)
+
+
+# --------------------------------------------------------------------------- #
+# M14 -- _probe_torch_capabilities must report the true status
+# --------------------------------------------------------------------------- #
+def test_m14_missing_capability_reports_warn_not_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A snapshot with any False flag must NOT stamp a green PASS row."""
+
+    monkeypatch.setattr(
+        tl_utils,
+        "_runtime_capability_snapshot",
+        lambda: {"cap_a": True, "cap_b": False, "cap_c": False},
+    )
+    row = tl_utils._probe_torch_capabilities()
+    assert row.status == "WARN", f"missing caps stamped {row.status!r} (should be WARN)"
+    # The detail must still enumerate exactly what is missing.
+    assert "missing=cap_b,cap_c" in row.detail
+
+
+def test_m14_all_capabilities_present_reports_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An all-True snapshot is a genuine PASS with no missing suffix."""
+
+    monkeypatch.setattr(
+        tl_utils,
+        "_runtime_capability_snapshot",
+        lambda: {"cap_a": True, "cap_b": True},
+    )
+    row = tl_utils._probe_torch_capabilities()
+    assert row.status == "PASS"
+    assert "missing=" not in row.detail
+
+
+def test_m14_status_is_a_valid_doctorcheck_value() -> None:
+    """WARN is part of the DoctorCheck status vocabulary (guards a typo regression)."""
+
+    valid = tl_utils.DoctorCheck.__annotations__["status"]
+    # Literal["PASS", "FAIL", "SKIP", "WARN"] -> the string must mention WARN.
+    assert "WARN" in str(valid) and "PASS" in str(valid)

@@ -354,7 +354,11 @@ def _probe_torch_capabilities() -> DoctorCheck:
     detail = _format_capability_snapshot(snapshot)
     if missing:
         detail += "; missing=" + ",".join(missing)
-    return DoctorCheck("runtime capabilities", "PASS", detail)
+    # Report the true state: a missing private-integration capability is a
+    # degraded (WARN) row, not a "PASS". These flags are feature-detected and may
+    # be legitimately absent across torch versions, so WARN (not FAIL) is honest.
+    status: Literal["PASS", "WARN"] = "PASS" if not missing else "WARN"
+    return DoctorCheck("runtime capabilities", status, detail)
 
 
 def _probe_torch_wrapper_bindings() -> DoctorCheck:
