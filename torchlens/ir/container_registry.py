@@ -113,6 +113,7 @@ class ContainerSnapshot:
         "leaf_occurrences": FieldPolicy.BLOB_RECURSIVE,
         "reconstructable": FieldPolicy.KEEP,
         "site_aliases": FieldPolicy.BLOB_RECURSIVE,
+        "site_alias_event_indices": FieldPolicy.KEEP,
     }
 
     site: Site
@@ -123,6 +124,43 @@ class ContainerSnapshot:
     leaf_occurrences: tuple[ContainerLeafOccurrence, ...]
     reconstructable: bool
     site_aliases: tuple[Site, ...] = ()
+    # Positionally parallel to ``site_aliases``: the observation event index each alias site
+    # was seen at. Dedup merges structurally-identical observations at multiple sites into one
+    # snapshot body; without this the LATER observation's event index was silently discarded
+    # (only the first site's index survived in ``observed_at_event_index``).
+    site_alias_event_indices: tuple[int, ...] = ()
+
+    def observed_index_for_site(self, site: Site) -> int:
+        """Return the observation event index recorded for ``site``.
+
+        ``observed_at_event_index`` is the PRIMARY site's index. After dedup folds a
+        structurally-identical observation seen at another site into this snapshot, that
+        site becomes an alias and its own event index is kept in
+        ``site_alias_event_indices`` (parallel to ``site_aliases``), so the per-site
+        observation chronology is recoverable rather than collapsed onto the first index.
+
+        Parameters
+        ----------
+        site:
+            Primary or alias site to look up.
+
+        Returns
+        -------
+        int
+            The event index at which ``site`` observed this container.
+
+        Raises
+        ------
+        ValueError
+            If this snapshot was not observed at ``site`` (nor an alias carrying an index).
+        """
+
+        if site == self.site:
+            return self.observed_at_event_index
+        for alias, index in zip(self.site_aliases, self.site_alias_event_indices):
+            if alias == site:
+                return index
+        raise ValueError(f"Snapshot was not observed at site {site!r}.")
 
 
 @dataclass(slots=True)
@@ -319,6 +357,10 @@ class ContainerRegistry:
                 leaf_occurrences=previous.leaf_occurrences,
                 reconstructable=previous.reconstructable,
                 site_aliases=(*previous.site_aliases, site),
+                site_alias_event_indices=(
+                    *previous.site_alias_event_indices,
+                    observed_at_event_index,
+                ),
             )
         else:
             record.snapshots.append(snapshot)

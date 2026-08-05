@@ -21,6 +21,9 @@ from torchlens.ir.container import (
     register_container,
 )
 from torchlens.ir.container_registry import (
+    ContainerRegistry,
+    FuncSite,
+    Phase,
     Role,
     walk_container,
 )
@@ -231,3 +234,53 @@ def test_n6_multiple_inheritance_and_exact_and_missing(clean_container_registry:
         pass
 
     assert get_registered_container(Unrelated) is None
+
+
+# ---------------------------------------------------------------------------
+# N7 -- snapshot dedup must not discard the later observation's event index
+# ---------------------------------------------------------------------------
+
+
+def _register_same_body_at_two_sites() -> tuple[object, object, object]:
+    """Register one identical container body at two sites (events 3 and 99)."""
+
+    registry = ContainerRegistry()
+    obj = {"a": torch.tensor([1.0])}
+    spec = ContainerSpec(kind="dict", length=1, keys=("a",))
+    site_early = FuncSite(func_call_id=1, position="out")
+    site_late = FuncSite(func_call_id=2, position="out")
+    common = dict(
+        role=Role.CALL_OUTPUT,
+        phase=Phase.POST_CALL,
+        spec=spec,
+        leaf_occurrences=(),
+        reconstructable=True,
+    )
+    registry.register_snapshot(obj, site=site_early, observed_at_event_index=3, **common)
+    record = registry.register_snapshot(obj, site=site_late, observed_at_event_index=99, **common)
+    return record, site_early, site_late
+
+
+def test_n7_dedup_preserves_each_sites_event_index() -> None:
+    """Deduped snapshot keeps ONE body plus aliases, and each site keeps its OWN index."""
+
+    record, site_early, site_late = _register_same_body_at_two_sites()
+    assert len(record.snapshots) == 1
+    snapshot = record.snapshots[0]
+    assert len(snapshot.site_aliases) == 1
+    # Primary site keeps its index; the later observation's index is NO LONGER discarded.
+    assert snapshot.observed_index_for_site(site_early) == 3
+    assert snapshot.observed_index_for_site(site_late) == 99
+    # snapshot_at(alias) resolves to the single deduped body (aliases are matches).
+    assert record.snapshot_at(site=site_late) is snapshot
+
+
+def test_n7_alias_indices_survive_pickle_roundtrip() -> None:
+    """The per-site indices are portable: they survive a serialize/deserialize round-trip."""
+
+    import pickle
+
+    record, site_early, site_late = _register_same_body_at_two_sites()
+    restored = pickle.loads(pickle.dumps(record.snapshots[0]))
+    assert restored.observed_index_for_site(site_early) == 3
+    assert restored.observed_index_for_site(site_late) == 99
