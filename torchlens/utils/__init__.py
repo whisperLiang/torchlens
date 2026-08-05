@@ -538,7 +538,11 @@ def _log_ops_for_mode(
     from torchlens import trace as trace_fn
     from torchlens.options import CaptureOptions
 
-    original_mode = model.training
+    # Snapshot every submodule's training flag, not just the root's. A recursive
+    # ``model.train(root_mode)`` restore would clobber mixed child states (e.g. a
+    # frozen ``bn.eval()`` under a training root). For ``mode="current"`` no mode
+    # change is applied at all, so the model is left byte-for-byte as found.
+    original_modes = {submodule: submodule.training for submodule in model.modules()}
     if mode == "eval":
         model.eval()
     elif mode == "train":
@@ -550,7 +554,8 @@ def _log_ops_for_mode(
             capture=CaptureOptions(layers_to_save=None),
         )
     finally:
-        model.train(original_mode)
+        for submodule, was_training in original_modes.items():
+            submodule.training = was_training
     return _ops_from_log(trace)
 
 
