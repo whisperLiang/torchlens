@@ -366,6 +366,5 @@ def test_os_module_not_leaked_by_container_resolver() -> None:
             ContainerSpec(kind="namedtuple", type_module="os", type_qualname="getcwd")
         )
         is None
-        or True
-    )  # getcwd is not a type -> graceful None; never executed
+    )  # getcwd is not a type -> graceful None
     assert not os.path.exists("/tmp/__r10_should_never_exist__")
