@@ -2668,7 +2668,7 @@
           "auto": "CollapsePlan(total=6, raw_op=6)",
           "max": "CollapsePlan(total=4, raw_op=3, op_segment=1)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=6, visible_count=6, collapsed_addresses=frozenset(), plan=CollapsePlan(total=6, raw_op=6)), CollapseScheduleStep(t=1.0, target_count=4, visible_count=4, collapsed_addresses=frozenset(), plan=CollapsePlan(total=4, raw_op=3, op_segment=1))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=6, visible_count=6, collapsed_addresses=frozenset(), plan=CollapsePlan(total=6, raw_op=6)), CollapseScheduleStep(t=1.0, target_count=4, visible_count=4, collapsed_addresses=frozenset({'add_1_3:1', 'linear_1_1:1', 'linear_2_2:1'}), plan=CollapsePlan(total=4, raw_op=3, op_segment=1))))",
         "structural": {
           "edges": [
             {
@@ -3039,7 +3039,7 @@
           "auto": "CollapsePlan(total=5, raw_op=5)",
           "max": "CollapsePlan(total=3, raw_op=2, op_segment=1)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset(), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset({'conv2d_1_1:1', 'maxpool2d_1_3:1', 'relu_1_2:1'}), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
         "structural": {
           "edges": [
             {
@@ -3410,7 +3410,7 @@
           "auto": "CollapsePlan(total=5, raw_op=5)",
           "max": "CollapsePlan(total=3, raw_op=2, op_segment=1)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset(), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset({'conv2d_1_1:1', 'maxpool2d_1_3:1', 'relu_1_2:1'}), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
         "structural": {
           "edges": [
             {
@@ -3645,7 +3645,7 @@
           "auto": "CollapsePlan(total=5, raw_op=5)",
           "max": "CollapsePlan(total=3, raw_op=2, op_segment=1)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset(), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset({'conv2d_1_1:1', 'maxpool2d_1_3:1', 'relu_1_2:1'}), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
         "structural": {
           "edges": [
             {
@@ -3885,7 +3885,7 @@
           "auto": "CollapsePlan(total=5, raw_op=5)",
           "max": "CollapsePlan(total=3, raw_op=2, op_segment=1)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset(), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset({'conv2d_1_1:1', 'maxpool2d_1_3:1', 'relu_1_2:1'}), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
         "structural": {
           "edges": [
             {
@@ -4124,7 +4124,7 @@
           "auto": "CollapsePlan(total=5, raw_op=5)",
           "max": "CollapsePlan(total=3, raw_op=2, op_segment=1)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset(), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset({'conv2d_1_1:1', 'maxpool2d_1_3:1', 'relu_1_2:1'}), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
         "structural": {
           "edges": [
             {
@@ -4359,7 +4359,7 @@
           "auto": "CollapsePlan(total=5, raw_op=5)",
           "max": "CollapsePlan(total=3, raw_op=2, op_segment=1)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset(), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset({'conv2d_1_1:1', 'maxpool2d_1_3:1', 'relu_1_2:1'}), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
         "structural": {
           "edges": [
             {
@@ -4594,7 +4594,7 @@
           "auto": "CollapsePlan(total=5, raw_op=5)",
           "max": "CollapsePlan(total=3, raw_op=2, op_segment=1)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset(), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset({'conv2d_1_1:1', 'maxpool2d_1_3:1', 'relu_1_2:1'}), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
         "structural": {
           "edges": [
             {
@@ -4834,7 +4834,7 @@
           "auto": "CollapsePlan(total=5, raw_op=5)",
           "max": "CollapsePlan(total=3, raw_op=2, op_segment=1)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset(), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset({'conv2d_1_1:1', 'maxpool2d_1_3:1', 'relu_1_2:1'}), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
         "structural": {
           "edges": [
             {
@@ -5069,7 +5069,7 @@
           "auto": "CollapsePlan(total=5, raw_op=5)",
           "max": "CollapsePlan(total=3, raw_op=2, op_segment=1)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset(), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset({'conv2d_1_1:1', 'maxpool2d_1_3:1', 'relu_1_2:1'}), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
         "structural": {
           "edges": [
             {
@@ -5297,14 +5297,14 @@
           "collapsed_node_spec_fn": [],
           "node_spec_fn": []
         },
-        "dot": "// Computational graph for the feedforward sweep\ndigraph OracleCNN {\n\tgraph [bgcolor=white label=<<FONT COLOR='black'><B>OracleCNN</B><br align='left'/>5 tensors total (1.5 KB)<br align='left'/>20 params (all trainable, 80 B)<br align='left'/></FONT>> labeljust=left labelloc=t ordering=out rankdir=BT]\n\tnode [ordering=out]\n\tinput_1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>input_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 1, 8, 8), 256 B</TD></TR><TR><TD ALIGN=\"CENTER\">@input.x</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=256B</TD></TR><TR><TD ALIGN=\"CENTER\">fn=none</TD></TR></TABLE>> color=black fillcolor=\"#98FB98\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\tinput_1 -> conv2d_1_1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tconv2d_1_1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>conv2d_1_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 8, 8), 512 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_channels=1, out_channels=2, kernel_size=(3, 3), padding=(1, 1)</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (2, 1, 3, 3) \u00b7 bias (2,)</TD></TR><TR><TD ALIGN=\"CENTER\">@conv</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=512B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=OracleCNN.forward</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\tconv2d_1_1 -> relu_1_2 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\trelu_1_2 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>relu_1_2</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 8, 8), 512 B</TD></TR><TR><TD ALIGN=\"CENTER\">@relu</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=512B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=OracleCNN.forward</TD></TR></TABLE>> color=black fillcolor=white fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\trelu_1_2 -> maxpool2d_1_3 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tmaxpool2d_1_3 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>maxpool2d_1_3</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 4, 4), 128 B</TD></TR><TR><TD ALIGN=\"CENTER\">kernel_size=2, stride=2</TD></TR><TR><TD ALIGN=\"CENTER\">@pool</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=128B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=OracleCNN.forward</TD></TR></TABLE>> color=black fillcolor=white fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\tmaxpool2d_1_3 -> output_1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\toutput_1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>output_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 4, 4), 128 B</TD></TR><TR><TD ALIGN=\"CENTER\">@output</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=128B</TD></TR><TR><TD ALIGN=\"CENTER\">fn=none</TD></TR></TABLE>> color=black fillcolor=\"#ff9999\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\t{\n\t\trank=sink\n\t\toutput_1\n\t}\n}\n",
+        "dot": "// Computational graph for the feedforward sweep\ndigraph OracleCNN {\n\tgraph [bgcolor=white label=<<FONT COLOR='black'><B>OracleCNN</B><br align='left'/>5 tensors total (1.5 KB)<br align='left'/>20 params (all trainable, 80 B)<br align='left'/></FONT>> labeljust=left labelloc=t ordering=out rankdir=BT]\n\tnode [ordering=out]\n\tinput_1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>input_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 1, 8, 8), 256 B</TD></TR><TR><TD ALIGN=\"CENTER\">@input.x</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=256B</TD></TR><TR><TD ALIGN=\"CENTER\">fn=none</TD></TR></TABLE>> color=black fillcolor=\"#98FB98\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\tinput_1 -> conv2d_1_1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tconv2d_1_1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>conv2d_1_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 8, 8), 512 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_channels=1, out_channels=2, kernel_size=(3, 3), padding=(1, 1)</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (2, 1, 3, 3) \u00b7 bias (2,)</TD></TR><TR><TD ALIGN=\"CENTER\">@conv</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=512B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=forward</TD></TR></TABLE>> color=black fillcolor=\"#D9D9D9\" fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\tconv2d_1_1 -> relu_1_2 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\trelu_1_2 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>relu_1_2</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 8, 8), 512 B</TD></TR><TR><TD ALIGN=\"CENTER\">@relu</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=512B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=forward</TD></TR></TABLE>> color=black fillcolor=white fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\trelu_1_2 -> maxpool2d_1_3 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tmaxpool2d_1_3 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>maxpool2d_1_3</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 4, 4), 128 B</TD></TR><TR><TD ALIGN=\"CENTER\">kernel_size=2, stride=2</TD></TR><TR><TD ALIGN=\"CENTER\">@pool</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=128B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=forward</TD></TR></TABLE>> color=black fillcolor=white fontcolor=black ordering=out shape=box style=\"filled,solid\"]\n\tmaxpool2d_1_3 -> output_1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\toutput_1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>output_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 4, 4), 128 B</TD></TR><TR><TD ALIGN=\"CENTER\">@output</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=128B</TD></TR><TR><TD ALIGN=\"CENTER\">fn=none</TD></TR></TABLE>> color=black fillcolor=\"#ff9999\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\t{\n\t\trank=sink\n\t\toutput_1\n\t}\n}\n",
         "plans": {
           "0.25": "CollapsePlan(total=5, raw_op=5)",
           "0.75": "CollapsePlan(total=5, raw_op=5)",
           "auto": "CollapsePlan(total=5, raw_op=5)",
           "max": "CollapsePlan(total=3, raw_op=2, op_segment=1)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset(), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset({'conv2d_1_1:1', 'maxpool2d_1_3:1', 'relu_1_2:1'}), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
         "structural": {
           "edges": [
             {
@@ -5416,13 +5416,13 @@
                 "color": "black",
                 "fillcolor": "#D9D9D9",
                 "fontcolor": "black",
-                "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>conv2d_1_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 8, 8), 512 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_channels=1, out_channels=2, kernel_size=(3, 3), padding=(1, 1)</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (2, 1, 3, 3) \u00b7 bias (2,)</TD></TR><TR><TD ALIGN=\"CENTER\">@conv</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=512B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=OracleCNN.forward</TD></TR></TABLE>>",
+                "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>conv2d_1_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 8, 8), 512 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_channels=1, out_channels=2, kernel_size=(3, 3), padding=(1, 1)</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (2, 1, 3, 3) \u00b7 bias (2,)</TD></TR><TR><TD ALIGN=\"CENTER\">@conv</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=512B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=forward</TD></TR></TABLE>>",
                 "ordering": "out",
                 "shape": "box",
                 "style": "filled,solid"
               },
               "kind": "raw_op",
-              "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>conv2d_1_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 8, 8), 512 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_channels=1, out_channels=2, kernel_size=(3, 3), padding=(1, 1)</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (2, 1, 3, 3) \u00b7 bias (2,)</TD></TR><TR><TD ALIGN=\"CENTER\">@conv</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=512B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=OracleCNN.forward</TD></TR></TABLE>>",
+              "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>conv2d_1_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 8, 8), 512 B</TD></TR><TR><TD ALIGN=\"CENTER\">in_channels=1, out_channels=2, kernel_size=(3, 3), padding=(1, 1)</TD></TR><TR><TD ALIGN=\"CENTER\">params: weight (2, 1, 3, 3) \u00b7 bias (2,)</TD></TR><TR><TD ALIGN=\"CENTER\">@conv</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=512B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=forward</TD></TR></TABLE>>",
               "name": "conv2d_1_1",
               "ordinal": 1,
               "region": [
@@ -5434,13 +5434,13 @@
                 "color": "black",
                 "fillcolor": "white",
                 "fontcolor": "black",
-                "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>relu_1_2</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 8, 8), 512 B</TD></TR><TR><TD ALIGN=\"CENTER\">@relu</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=512B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=OracleCNN.forward</TD></TR></TABLE>>",
+                "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>relu_1_2</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 8, 8), 512 B</TD></TR><TR><TD ALIGN=\"CENTER\">@relu</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=512B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=forward</TD></TR></TABLE>>",
                 "ordering": "out",
                 "shape": "box",
                 "style": "filled,solid"
               },
               "kind": "raw_op",
-              "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>relu_1_2</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 8, 8), 512 B</TD></TR><TR><TD ALIGN=\"CENTER\">@relu</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=512B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=OracleCNN.forward</TD></TR></TABLE>>",
+              "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>relu_1_2</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 8, 8), 512 B</TD></TR><TR><TD ALIGN=\"CENTER\">@relu</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=512B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=forward</TD></TR></TABLE>>",
               "name": "relu_1_2",
               "ordinal": 2,
               "region": [
@@ -5452,13 +5452,13 @@
                 "color": "black",
                 "fillcolor": "white",
                 "fontcolor": "black",
-                "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>maxpool2d_1_3</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 4, 4), 128 B</TD></TR><TR><TD ALIGN=\"CENTER\">kernel_size=2, stride=2</TD></TR><TR><TD ALIGN=\"CENTER\">@pool</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=128B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=OracleCNN.forward</TD></TR></TABLE>>",
+                "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>maxpool2d_1_3</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 4, 4), 128 B</TD></TR><TR><TD ALIGN=\"CENTER\">kernel_size=2, stride=2</TD></TR><TR><TD ALIGN=\"CENTER\">@pool</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=128B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=forward</TD></TR></TABLE>>",
                 "ordering": "out",
                 "shape": "box",
                 "style": "filled,solid"
               },
               "kind": "raw_op",
-              "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>maxpool2d_1_3</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 4, 4), 128 B</TD></TR><TR><TD ALIGN=\"CENTER\">kernel_size=2, stride=2</TD></TR><TR><TD ALIGN=\"CENTER\">@pool</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=128B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=OracleCNN.forward</TD></TR></TABLE>>",
+              "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>maxpool2d_1_3</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 2, 4, 4), 128 B</TD></TR><TR><TD ALIGN=\"CENTER\">kernel_size=2, stride=2</TD></TR><TR><TD ALIGN=\"CENTER\">@pool</TD></TR><TR><TD ALIGN=\"CENTER\">t=0.00 ns</TD></TR><TR><TD ALIGN=\"CENTER\">out=128B</TD></TR><TR><TD ALIGN=\"CENTER\">call=test_viz_render_identity_oracle.py:46</TD></TR><TR><TD ALIGN=\"CENTER\">fn=forward</TD></TR></TABLE>>",
               "name": "maxpool2d_1_3",
               "ordinal": 3,
               "region": [
@@ -5539,7 +5539,7 @@
           "auto": "CollapsePlan(total=6, raw_op=6)",
           "max": "CollapsePlan(total=4, raw_op=3, op_segment=1)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=6, visible_count=6, collapsed_addresses=frozenset(), plan=CollapsePlan(total=6, raw_op=6)), CollapseScheduleStep(t=1.0, target_count=4, visible_count=4, collapsed_addresses=frozenset(), plan=CollapsePlan(total=4, raw_op=3, op_segment=1))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=6, visible_count=6, collapsed_addresses=frozenset(), plan=CollapsePlan(total=6, raw_op=6)), CollapseScheduleStep(t=1.0, target_count=4, visible_count=4, collapsed_addresses=frozenset({'linear_1_1:1', 'linear_1_1:2', 'linear_2_2:1'}), plan=CollapsePlan(total=4, raw_op=3, op_segment=1))))",
         "structural": {
           "edges": [
             {
@@ -5769,7 +5769,7 @@
           "auto": "CollapsePlan(total=5, raw_op=5)",
           "max": "CollapsePlan(total=3, raw_op=2, op_segment=1)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset(), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset({'conv2d_1_1:1', 'maxpool2d_1_3:1', 'relu_1_2:1'}), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
         "structural": {
           "edges": [
             {
@@ -6049,7 +6049,7 @@
           "auto": "CollapsePlan(total=5, raw_op=5)",
           "max": "CollapsePlan(total=3, raw_op=2, op_segment=1)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset(), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=5, visible_count=5, collapsed_addresses=frozenset(), plan=CollapsePlan(total=5, raw_op=5)), CollapseScheduleStep(t=1.0, target_count=3, visible_count=3, collapsed_addresses=frozenset({'conv2d_1_1:1', 'maxpool2d_1_3:1', 'relu_1_2:1'}), plan=CollapsePlan(total=3, raw_op=2, op_segment=1))))",
         "structural": {
           "edges": [
             {
@@ -6773,7 +6773,7 @@
           "auto": "CollapsePlan(total=12, raw_op=12)",
           "max": "CollapsePlan(total=4, raw_op=2, op_segment=2)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=12, visible_count=12, collapsed_addresses=frozenset(), plan=CollapsePlan(total=12, raw_op=12)), CollapseScheduleStep(t=1.0, target_count=4, visible_count=4, collapsed_addresses=frozenset(), plan=CollapsePlan(total=4, raw_op=2, op_segment=2))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=12, visible_count=12, collapsed_addresses=frozenset(), plan=CollapsePlan(total=12, raw_op=12)), CollapseScheduleStep(t=1.0, target_count=4, visible_count=4, collapsed_addresses=frozenset({'linear_1_1:1', 'linear_2_3:1', 'linear_3_5:1', 'linear_4_7:1', 'linear_5_9:1', 'relu_1_2:1', 'relu_2_4:1', 'relu_3_6:1', 'relu_4_8:1', 'relu_5_10:1'}), plan=CollapsePlan(total=4, raw_op=2, op_segment=2))))",
         "structural": {
           "edges": [
             {
@@ -7267,7 +7267,7 @@
           "auto": "CollapsePlan(total=12, raw_op=12)",
           "max": "CollapsePlan(total=4, raw_op=2, op_segment=2)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=12, visible_count=12, collapsed_addresses=frozenset(), plan=CollapsePlan(total=12, raw_op=12)), CollapseScheduleStep(t=1.0, target_count=4, visible_count=4, collapsed_addresses=frozenset(), plan=CollapsePlan(total=4, raw_op=2, op_segment=2))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=12, visible_count=12, collapsed_addresses=frozenset(), plan=CollapsePlan(total=12, raw_op=12)), CollapseScheduleStep(t=1.0, target_count=4, visible_count=4, collapsed_addresses=frozenset({'linear_1_1:1', 'linear_2_3:1', 'linear_3_5:1', 'linear_4_7:1', 'linear_5_9:1', 'relu_1_2:1', 'relu_2_4:1', 'relu_3_6:1', 'relu_4_8:1', 'relu_5_10:1'}), plan=CollapsePlan(total=4, raw_op=2, op_segment=2))))",
         "structural": {
           "edges": [
             {
@@ -7759,7 +7759,7 @@
           "auto": "CollapsePlan(total=12, raw_op=12)",
           "max": "CollapsePlan(total=4, raw_op=2, op_segment=2)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=12, visible_count=12, collapsed_addresses=frozenset(), plan=CollapsePlan(total=12, raw_op=12)), CollapseScheduleStep(t=1.0, target_count=4, visible_count=4, collapsed_addresses=frozenset(), plan=CollapsePlan(total=4, raw_op=2, op_segment=2))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=12, visible_count=12, collapsed_addresses=frozenset(), plan=CollapsePlan(total=12, raw_op=12)), CollapseScheduleStep(t=1.0, target_count=4, visible_count=4, collapsed_addresses=frozenset({'linear_1_1:1', 'linear_2_3:1', 'linear_3_5:1', 'linear_4_7:1', 'linear_5_9:1', 'relu_1_2:1', 'relu_2_4:1', 'relu_3_6:1', 'relu_4_8:1', 'relu_5_10:1'}), plan=CollapsePlan(total=4, raw_op=2, op_segment=2))))",
         "structural": {
           "edges": [
             {
@@ -8449,7 +8449,7 @@
           "auto": "CollapsePlan(total=12, raw_op=12)",
           "max": "CollapsePlan(total=4, raw_op=2, op_segment=2)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=12, visible_count=12, collapsed_addresses=frozenset(), plan=CollapsePlan(total=12, raw_op=12)), CollapseScheduleStep(t=1.0, target_count=4, visible_count=4, collapsed_addresses=frozenset(), plan=CollapsePlan(total=4, raw_op=2, op_segment=2))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=12, visible_count=12, collapsed_addresses=frozenset(), plan=CollapsePlan(total=12, raw_op=12)), CollapseScheduleStep(t=1.0, target_count=4, visible_count=4, collapsed_addresses=frozenset({'linear_1_1:1', 'linear_2_3:1', 'linear_3_5:1', 'linear_4_7:1', 'linear_5_9:1', 'relu_1_2:1', 'relu_2_4:1', 'relu_3_6:1', 'relu_4_8:1', 'relu_5_10:1'}), plan=CollapsePlan(total=4, raw_op=2, op_segment=2))))",
         "structural": {
           "edges": [
             {
@@ -9142,7 +9142,7 @@
           "auto": "CollapsePlan(total=12, raw_op=12)",
           "max": "CollapsePlan(total=4, raw_op=2, op_segment=2)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=12, visible_count=12, collapsed_addresses=frozenset(), plan=CollapsePlan(total=12, raw_op=12)), CollapseScheduleStep(t=1.0, target_count=4, visible_count=4, collapsed_addresses=frozenset(), plan=CollapsePlan(total=4, raw_op=2, op_segment=2))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=12, visible_count=12, collapsed_addresses=frozenset(), plan=CollapsePlan(total=12, raw_op=12)), CollapseScheduleStep(t=1.0, target_count=4, visible_count=4, collapsed_addresses=frozenset({'linear_1_1:1', 'linear_2_3:1', 'linear_3_5:1', 'linear_4_7:1', 'linear_5_9:1', 'relu_1_2:1', 'relu_2_4:1', 'relu_3_6:1', 'relu_4_8:1', 'relu_5_10:1'}), plan=CollapsePlan(total=4, raw_op=2, op_segment=2))))",
         "structural": {
           "edges": [
             {
@@ -9498,14 +9498,14 @@
           "collapsed_node_spec_fn": [],
           "node_spec_fn": []
         },
-        "dot": "// Computational graph for the feedforward sweep\ndigraph OracleRepeat {\n\tgraph [bgcolor=white label=<<FONT COLOR='black'><B>OracleRepeat</B><br align='left'/>12 tensors total (192 B)<br align='left'/>100 params (all trainable, 400 B)<br align='left'/></FONT>> labeljust=left labelloc=t newrank=true ordering=out rankdir=BT]\n\tnode [ordering=out]\n\tinput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>input_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@input.x</TD></TR></TABLE>> color=black fillcolor=\"#98FB98\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\tinput_1pass1 -> linear_1_1__segment__linear_4_7pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tlinear_1_1__segment__linear_4_7pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_1_1 ... linear_4_7 -- 7 ops</B></TD></TR></TABLE>> color=\"#666666\" fillcolor=\"#f7f7f7\" fontcolor=\"#222222\" ordering=out shape=box style=\"rounded,dashed,filled\"]\n\tlinear_1_1__segment__linear_4_7pass1 -> relu_4_8__segment__relu_5_10pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\trelu_4_8__segment__relu_5_10pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>relu_4_8 ... relu_5_10 -- 3 ops</B></TD></TR></TABLE>> color=\"#666666\" fillcolor=\"#f7f7f7\" fontcolor=\"#222222\" ordering=out shape=box style=\"rounded,dashed,filled\"]\n\trelu_4_8__segment__relu_5_10pass1 -> output_1pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\toutput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>output_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@output</TD></TR></TABLE>> color=black fillcolor=\"#ff9999\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\t{\n\t\trank=sink\n\t\toutput_1pass1\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.0</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.1</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.2</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.3</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.4</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t}\n}\n",
+        "dot": "// Computational graph for the feedforward sweep\ndigraph OracleRepeat {\n\tgraph [bgcolor=white label=<<FONT COLOR='black'><B>OracleRepeat</B><br align='left'/>12 tensors total (192 B)<br align='left'/>100 params (all trainable, 400 B)<br align='left'/></FONT>> labeljust=left labelloc=t newrank=true ordering=out rankdir=BT]\n\tnode [ordering=out]\n\tinput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>input_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@input.x</TD></TR></TABLE>> color=black fillcolor=\"#98FB98\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\tinput_1pass1 -> linear_1_1pass1__segment__linear_4_7pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\tlinear_1_1pass1__segment__linear_4_7pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_1_1 ... linear_4_7 -- 7 ops</B></TD></TR></TABLE>> color=\"#666666\" fillcolor=\"#f7f7f7\" fontcolor=\"#222222\" ordering=out shape=box style=\"rounded,dashed,filled\"]\n\tlinear_1_1pass1__segment__linear_4_7pass1 -> relu_4_8pass1__segment__relu_5_10pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\trelu_4_8pass1__segment__relu_5_10pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>relu_4_8 ... relu_5_10 -- 3 ops</B></TD></TR></TABLE>> color=\"#666666\" fillcolor=\"#f7f7f7\" fontcolor=\"#222222\" ordering=out shape=box style=\"rounded,dashed,filled\"]\n\trelu_4_8pass1__segment__relu_5_10pass1 -> output_1pass1 [arrowsize=.7 color=black fontcolor=black labelfontsize=8 style=solid]\n\toutput_1pass1 [label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>output_1</B></TD></TR><TR><TD ALIGN=\"CENTER\">(1, 4), 16 B</TD></TR><TR><TD ALIGN=\"CENTER\">@output</TD></TR></TABLE>> color=black fillcolor=\"#ff9999\" fontcolor=black ordering=out shape=oval style=\"filled,solid\"]\n\t{\n\t\trank=sink\n\t\toutput_1pass1\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.0</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.1</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.2</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.3</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t\tfillcolor=white label=<<B>@blocks.4</B><br align='left'/>(Sequential)<br align='left'/>> labelloc=b margin=20 penwidth=5.0 style=\"filled,dashed\"\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.0_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.1_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.2_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.3_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t}\n\tsubgraph \"cluster_blocks.4_pass1\" {\n\t}\n}\n",
         "plans": {
           "0.25": "CollapsePlan(total=12, raw_op=12)",
           "0.75": "CollapsePlan(total=12, raw_op=12)",
           "auto": "CollapsePlan(total=12, raw_op=12)",
           "max": "CollapsePlan(total=4, raw_op=2, op_segment=2)"
         },
-        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=12, visible_count=12, collapsed_addresses=frozenset(), plan=CollapsePlan(total=12, raw_op=12)), CollapseScheduleStep(t=1.0, target_count=4, visible_count=4, collapsed_addresses=frozenset(), plan=CollapsePlan(total=4, raw_op=2, op_segment=2))))",
+        "schedule": "CollapseSchedule(steps=(CollapseScheduleStep(t=0.0, target_count=12, visible_count=12, collapsed_addresses=frozenset(), plan=CollapsePlan(total=12, raw_op=12)), CollapseScheduleStep(t=1.0, target_count=4, visible_count=4, collapsed_addresses=frozenset({'linear_1_1:1', 'linear_2_3:1', 'linear_3_5:1', 'linear_4_7:1', 'linear_5_9:1', 'relu_1_2:1', 'relu_2_4:1', 'relu_3_6:1', 'relu_4_8:1', 'relu_5_10:1'}), plan=CollapsePlan(total=4, raw_op=2, op_segment=2))))",
         "structural": {
           "edges": [
             {
@@ -9521,7 +9521,7 @@
                 "style": "solid"
               },
               "dst": 1,
-              "dst_name": "linear_1_1__segment__linear_4_7pass1",
+              "dst_name": "linear_1_1pass1__segment__linear_4_7pass1",
               "kind": "edge",
               "region": [
                 "OracleRepeat"
@@ -9542,13 +9542,13 @@
                 "style": "solid"
               },
               "dst": 2,
-              "dst_name": "relu_4_8__segment__relu_5_10pass1",
+              "dst_name": "relu_4_8pass1__segment__relu_5_10pass1",
               "kind": "edge",
               "region": [
                 "OracleRepeat"
               ],
               "src": 1,
-              "src_name": "linear_1_1__segment__linear_4_7pass1"
+              "src_name": "linear_1_1pass1__segment__linear_4_7pass1"
             },
             {
               "attrs": {
@@ -9569,7 +9569,7 @@
                 "OracleRepeat"
               ],
               "src": 2,
-              "src_name": "relu_4_8__segment__relu_5_10pass1"
+              "src_name": "relu_4_8pass1__segment__relu_5_10pass1"
             }
           ],
           "nodes": [
@@ -9603,7 +9603,7 @@
               },
               "kind": "repeat_ellipsis",
               "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>linear_1_1 ... linear_4_7 -- 7 ops</B></TD></TR></TABLE>>",
-              "name": "linear_1_1__segment__linear_4_7pass1",
+              "name": "linear_1_1pass1__segment__linear_4_7pass1",
               "ordinal": 1,
               "region": [
                 "OracleRepeat"
@@ -9621,7 +9621,7 @@
               },
               "kind": "repeat_ellipsis",
               "label": "<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"2\"><TR><TD ALIGN=\"CENTER\"><B>relu_4_8 ... relu_5_10 -- 3 ops</B></TD></TR></TABLE>>",
-              "name": "relu_4_8__segment__relu_5_10pass1",
+              "name": "relu_4_8pass1__segment__relu_5_10pass1",
               "ordinal": 2,
               "region": [
                 "OracleRepeat"
@@ -9847,8 +9847,8 @@
             ],
             "members": [
               "input_1pass1",
-              "linear_1_1__segment__linear_4_7pass1",
-              "relu_4_8__segment__relu_5_10pass1",
+              "linear_1_1pass1__segment__linear_4_7pass1",
+              "relu_4_8pass1__segment__relu_5_10pass1",
               "output_1pass1"
             ],
             "path": [
@@ -9862,13 +9862,13 @@
     "schema_version": 1
   },
   "sha256_chunks": [
-    "ad8d78f1",
-    "769950d3",
-    "09fbc00c",
-    "83722a6c",
-    "031c7e60",
-    "01701abf",
-    "3690524d",
-    "b865c05e"
+    "79b9b67d",
+    "fffe7452",
+    "f9e20629",
+    "f6e11940",
+    "66d1dca8",
+    "18a3af6a",
+    "37d2a41e",
+    "8b081905"
   ]
 }

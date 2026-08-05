@@ -931,6 +931,11 @@ def _digest_chunks(record: dict[str, Any]) -> list[str]:
 
 
 # Keep new module declarations below oracle models: profiling labels freeze their source lines.
+# Golden regenerated for r21 auto-collapse hardening: op-segment node names carry
+# injective per-endpoint pass suffixes, and the t=1.0 schedule step's
+# collapsed_addresses honestly reports the concrete op labels hidden by op
+# segments (previously an empty frozenset while nodes were hidden). Every
+# schedule step count, t value, node, and edge is otherwise unchanged.
 _BYTE_ORACLE_ENV = "TORCHLENS_RENDER_BYTE_ORACLE"
 
 

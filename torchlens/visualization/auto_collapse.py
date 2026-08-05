@@ -54,6 +54,10 @@ class ModuleRepeatFold:
         Short first-to-last output-shape summary when shapes vary, else ``None``.
     hidden_member_composition:
         Metadata describing hidden members represented by the ellipsis.
+    hidden_calls:
+        Total forward calls made by the hidden members ``addresses[1:]``, or
+        ``None`` when unknown. Multi-call members hide more forward calls than
+        addresses, and the elision label must disclose that mass.
     """
 
     representative: str
@@ -65,6 +69,7 @@ class ModuleRepeatFold:
     num_params_frozen: int
     shape_summary: str | None
     hidden_member_composition: Mapping[str, int]
+    hidden_calls: int | None = None
 
     @property
     def multiplicity(self) -> int:
@@ -1524,6 +1529,7 @@ def _make_run_fold(trace: "Trace", addresses: tuple[str, ...]) -> ModuleRepeatFo
         ),
         shape_summary=_run_shape_summary(trace, addresses),
         hidden_member_composition=_hidden_member_composition(trace, addresses),
+        hidden_calls=sum(int(getattr(module, "num_calls", 1) or 1) for module in modules[1:]),
     )
 
 

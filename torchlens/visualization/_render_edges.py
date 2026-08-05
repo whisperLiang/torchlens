@@ -195,9 +195,26 @@ def _segment_for_node(
     if not segments or isinstance(node, BoundaryNode):
         return None
     label = str(getattr(node, "layer_label", ""))
+    if isinstance(node, Op):
+        # Unrolled nodes carry pass-qualified labels; match those against
+        # concrete descriptor ops first so per-pass segments of a reused
+        # module absorb exactly their own pass.
+        qualified = str(node.label)
+        for segment in segments.values():
+            if qualified in segment.ops:
+                return segment
+        for segment in segments.values():
+            if label in segment.ops:
+                return segment
+    else:
+        # Rolled aggregates have no pass identity; match the base label
+        # against concrete or legacy pass-free descriptor ops.
+        for segment in segments.values():
+            if label in segment.ops or any(
+                str(op).rsplit(":", 1)[0] == label for op in segment.ops
+            ):
+                return segment
     for segment in segments.values():
-        if label in segment.ops:
-            return segment
         member_set = set(segment.members)
         for address_w_pass in getattr(node, "modules", ()) or ():
             if str(address_w_pass).rsplit(":", 1)[0] in member_set:
@@ -284,10 +301,18 @@ def _run_fold_ellipsis_label(fold: "ModuleRepeatFold") -> str:
     Returns
     -------
     str
-        Plaintext label describing the number of elided siblings.
+        Plaintext label describing the number of elided siblings. When the
+        hidden members run more forward calls than there are hidden
+        addresses, the exact hidden call count is disclosed as well, so the
+        ellipsis never understates the hidden execution mass.
     """
 
-    return f"... +{fold.multiplicity - 1} more {fold.class_name}"
+    hidden_members = fold.multiplicity - 1
+    label = f"... +{hidden_members} more {fold.class_name}"
+    hidden_calls = getattr(fold, "hidden_calls", None)
+    if hidden_calls is not None and hidden_calls != hidden_members:
+        label += f" ({hidden_calls} calls)"
+    return label
 
 
 def _run_fold_hidden_endpoint(
