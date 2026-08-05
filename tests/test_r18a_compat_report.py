@@ -524,3 +524,147 @@ def test_offload_row_detects_buffer_offload() -> None:
     row = _offload_row_for(_StubAlignDevicesHook(offload=False, offload_buffers=True))
 
     assert row.detected is True
+
+
+# ---------------------------------------------------------------------------
+# A3-12 (+ LOW-10) — the tied-parameter fallback must enumerate without dedup so
+# ties stay visible, and enumeration failure must not read as "no ties".
+# ---------------------------------------------------------------------------
+
+
+class LegacySignatureTiedModel(nn.Module):
+    """Tied model whose ``named_parameters`` override rejects ``remove_duplicate``."""
+
+    def __init__(self) -> None:
+        """Register two names bound to one shared submodule."""
+
+        super().__init__()
+        self.left = nn.Linear(2, 2)
+        self.right = self.left
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the shared linear twice.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Output tensor.
+        """
+
+        return self.right(self.left(x))
+
+    def named_parameters(self, prefix: str = "", recurse: bool = True):  # type: ignore[override]
+        """Override without a ``remove_duplicate`` keyword (legacy signature).
+
+        Parameters
+        ----------
+        prefix:
+            Name prefix.
+        recurse:
+            Whether to recurse into submodules.
+
+        Returns
+        -------
+        Iterator
+            Deduplicated parameter iterator from the base implementation.
+        """
+
+        return super().named_parameters(prefix=prefix, recurse=recurse)
+
+
+class OrdinaryTiedModel(nn.Module):
+    """Model with a shared embedding across two attribute names."""
+
+    def __init__(self) -> None:
+        """Register a shared embedding."""
+
+        super().__init__()
+        self.a = nn.Embedding(8, 4)
+        self.b = self.a
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Look up the shared embedding.
+
+        Parameters
+        ----------
+        x:
+            Token ids.
+
+        Returns
+        -------
+        torch.Tensor
+            Embedding output.
+        """
+
+        return self.b(x)
+
+
+class UninspectableParamModel(nn.Module):
+    """Model whose parameter enumeration fails outright."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the input unchanged.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            The input tensor.
+        """
+
+        return x
+
+    def named_parameters(self, *args: object, **kwargs: object):  # type: ignore[override]
+        """Always fail enumeration.
+
+        Parameters
+        ----------
+        args:
+            Ignored positional arguments.
+        kwargs:
+            Ignored keyword arguments.
+
+        Raises
+        ------
+        RuntimeError
+            Always.
+        """
+
+        raise RuntimeError("parameter enumeration unavailable")
+
+
+def test_tied_row_detects_ties_under_legacy_named_parameters_signature() -> None:
+    """A legacy override that dedups must not make ties invisible (fail-open)."""
+
+    row = report(LegacySignatureTiedModel(), torch.randn(1, 2)).row("tied_parameters")
+
+    assert row.detected is True
+    assert row.status == "pass"
+    assert row.severity == "info"
+
+
+def test_tied_row_detects_ordinary_shared_parameters() -> None:
+    """A plain shared parameter object stays detected via the primary path."""
+
+    row = report(OrdinaryTiedModel(), torch.tensor([1, 2, 3])).row("tied_parameters")
+
+    assert row.detected is True
+
+
+def test_tied_row_is_honest_when_enumeration_fails() -> None:
+    """A failed enumeration must not be reported as a positive 'no ties' fact."""
+
+    row = report(UninspectableParamModel(), torch.randn(1)).row("tied_parameters")
+
+    assert row.detected is False
+    assert "could not be inspected" in row.details
+    assert "No tied/shared parameter objects detected" not in row.details

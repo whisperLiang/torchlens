@@ -525,25 +525,26 @@ def _tied_parameters_row(model: nn.Module) -> CompatRow:
 
     seen: dict[int, str] = {}
     duplicates: list[str] = []
+    inspected = True
     try:
-        named_parameters = tuple(model.named_parameters(remove_duplicate=False))
-    except TypeError:
-        named_parameters = tuple(model.named_parameters())
+        for name, parameter in _iter_named_parameters_no_dedup(model):
+            param_id = id(parameter)
+            if param_id in seen:
+                duplicates.append(f"{seen[param_id]}={name}")
+            else:
+                seen[param_id] = name
     except Exception:
-        named_parameters = ()
-    for name, parameter in named_parameters:
-        param_id = id(parameter)
-        if param_id in seen:
-            duplicates.append(f"{seen[param_id]}={name}")
-        else:
-            seen[param_id] = name
+        inspected = False
     detected = bool(duplicates)
-    details = (
-        "Shared parameter objects detected; TorchLens tracks parameter identity and should "
-        f"preserve tied-edge metadata ({', '.join(duplicates[:3])})."
-        if detected
-        else "No tied/shared parameter objects detected."
-    )
+    if not inspected:
+        details = "Parameter enumeration failed; tied/shared parameters could not be inspected."
+    elif detected:
+        details = (
+            "Shared parameter objects detected; TorchLens tracks parameter identity and should "
+            f"preserve tied-edge metadata ({', '.join(duplicates[:3])})."
+        )
+    else:
+        details = "No tied/shared parameter objects detected."
     return CompatRow(
         "tied_parameters",
         "Tied/shared parameters",
@@ -553,6 +554,43 @@ def _tied_parameters_row(model: nn.Module) -> CompatRow:
         details,
         "",
     )
+
+
+def _iter_named_parameters_no_dedup(model: nn.Module) -> Iterable[tuple[str, nn.Parameter]]:
+    """Yield ``(name, parameter)`` pairs preserving shared-object duplicates.
+
+    ``named_parameters(remove_duplicate=False)`` is the primary source. If the model
+    overrides ``named_parameters`` with a signature that rejects that keyword
+    (older or custom signatures), fall back to a non-deduplicating walk over
+    registered parameter slots so tied objects stay visible instead of silently
+    collapsing into one entry (which would make ties invisible and the row a false
+    ``pass``).
+
+    Parameters
+    ----------
+    model:
+        Model whose parameters are enumerated.
+
+    Yields
+    ------
+    tuple[str, torch.nn.Parameter]
+        Qualified parameter name and parameter object, duplicates preserved.
+    """
+
+    try:
+        yield from model.named_parameters(remove_duplicate=False)
+        return
+    except TypeError:
+        pass
+    try:
+        modules = tuple(model.named_modules(remove_duplicate=False))
+    except TypeError:
+        modules = tuple(model.named_modules())
+    for module_name, module in modules:
+        for param_name, parameter in getattr(module, "_parameters", {}).items():
+            if parameter is None:
+                continue
+            yield (f"{module_name}.{param_name}" if module_name else param_name), parameter
 
 
 def _multi_gpu_rng_row() -> CompatRow:
