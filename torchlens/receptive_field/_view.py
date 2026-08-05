@@ -270,8 +270,8 @@ class ReceptiveFieldView:
         input:
             Optional exact IO role or model-input operation.
         source:
-            Optional ancestor graph point. The returned box is in this operation's
-            output-grid coordinate space.
+            Optional ancestor graph point. When given, the returned box is in the
+            SOURCE operation's output-grid coordinate space (not this operation's).
         clip:
             Whether bounds are clipped to captured input extents.
 
