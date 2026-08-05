@@ -247,8 +247,12 @@ def _non_torch_array_summary(array: Any) -> str:
         exposes. Never raises.
     """
 
+    # Reject callables (e.g. a ``.shape``/``.dtype`` *method* rather than a
+    # value attribute): reading them unguarded stringifies a bound-method repr
+    # as if it were a shape/dtype. Treat a callable -- or an absent attribute --
+    # as "unknown" so this helper never surfaces garbage and never raises.
     shape = getattr(array, "shape", None)
-    if shape is not None:
+    if shape is not None and not callable(shape):
         try:
             shape_text = "Tensor[" + ", ".join(str(dim) for dim in tuple(shape)) + "]"
         except TypeError:
@@ -256,7 +260,7 @@ def _non_torch_array_summary(array: Any) -> str:
     else:
         shape_text = "Tensor[?]"
     dtype = getattr(array, "dtype", None)
-    dtype_text = str(dtype) if dtype is not None else "unknown dtype"
+    dtype_text = str(dtype) if dtype is not None and not callable(dtype) else "unknown dtype"
     return f"{shape_text} {dtype_text}"
 
 

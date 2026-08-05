@@ -270,10 +270,20 @@ class _MutateWarningSuppression:
         """Initialize the suppression flag."""
 
         self._suppress = False
-        self._prior = False
+        # Stack of states to restore on ``__exit__``; supports nested ``with``.
+        self._restore_stack: list[bool] = []
+        # Pre-call state captured by ``__call__`` so ``with suppress(on):``
+        # restores the state that existed *before* the call instead of leaking
+        # the in-block value. ``None`` means no call-form entry is pending.
+        self._pending_prior: bool | None = None
 
     def __call__(self, on: bool = True) -> "_MutateWarningSuppression":
         """Set suppression state and return this context-capable object.
+
+        Toggling immediately keeps the bare ``suppress_mutate_warnings(True)``
+        session-level form working, while snapshotting the pre-call state lets a
+        ``with suppress_mutate_warnings(on):`` restore it on exit rather than
+        leaking the in-block value.
 
         Parameters
         ----------
@@ -286,6 +296,7 @@ class _MutateWarningSuppression:
             This suppression controller.
         """
 
+        self._pending_prior = self._suppress
         self._suppress = bool(on)
         return self
 
@@ -298,7 +309,12 @@ class _MutateWarningSuppression:
             This suppression controller.
         """
 
-        self._prior = self._suppress
+        if self._pending_prior is not None:
+            prior = self._pending_prior
+            self._pending_prior = None
+        else:
+            prior = self._suppress
+        self._restore_stack.append(prior)
         self._suppress = True
         return self
 
@@ -311,7 +327,8 @@ class _MutateWarningSuppression:
             Exception triple supplied by the context manager protocol.
         """
 
-        self._suppress = self._prior
+        self._pending_prior = None
+        self._suppress = self._restore_stack.pop() if self._restore_stack else False
 
     @property
     def is_suppressed(self) -> bool:
@@ -487,6 +504,41 @@ def _validate_fold_repeats(value: FoldRepeatsLiteral) -> None:
 
     if value not in {None, True, False}:
         raise ValueError("fold_repeats must be None, True, or False.")
+
+
+def _validate_capture_values(values: Mapping[str, Any]) -> None:
+    """Validate resolved capture field values.
+
+    Single source of truth for the invariants enforced on
+    :class:`CaptureOptions`, shared by ``__init__`` and ``from_values`` so the
+    flat-kwarg / ``from_values`` construction path can never accept values the
+    grouped constructor rejects (the asymmetry that let bad ``jax_control_flow``
+    and non-positive ``jax_max_control_flow_unroll`` slip through).
+
+    Parameters
+    ----------
+    values:
+        Resolved capture field values keyed by canonical field name.
+
+    Raises
+    ------
+    ValueError
+        If ``_module_containment_engine``, ``jax_control_flow``, or
+        ``jax_max_control_flow_unroll`` holds an unsupported value.
+    TypeError
+        If ``jax_max_control_flow_unroll`` is not an integer.
+    """
+
+    if values["_module_containment_engine"] not in {"thread_replay", "hook_stack", "both"}:
+        raise ValueError(
+            "_module_containment_engine must be 'thread_replay', 'hook_stack', or 'both'"
+        )
+    if values["jax_control_flow"] not in {"reject", "unroll", "region"}:
+        raise ValueError("jax_control_flow must be 'reject', 'unroll', or 'region'")
+    if not isinstance(values["jax_max_control_flow_unroll"], int):
+        raise TypeError("jax_max_control_flow_unroll must be an integer")
+    if values["jax_max_control_flow_unroll"] < 1:
+        raise ValueError("jax_max_control_flow_unroll must be >= 1")
 
 
 def _set_frozen_fields(
@@ -991,16 +1043,7 @@ class CaptureOptions:
                 specified_fields,
             ),
         }
-        if values["_module_containment_engine"] not in {"thread_replay", "hook_stack", "both"}:
-            raise ValueError(
-                "_module_containment_engine must be 'thread_replay', 'hook_stack', or 'both'"
-            )
-        if values["jax_control_flow"] not in {"reject", "unroll", "region"}:
-            raise ValueError("jax_control_flow must be 'reject', 'unroll', or 'region'")
-        if not isinstance(values["jax_max_control_flow_unroll"], int):
-            raise TypeError("jax_max_control_flow_unroll must be an integer")
-        if values["jax_max_control_flow_unroll"] < 1:
-            raise ValueError("jax_max_control_flow_unroll must be >= 1")
+        _validate_capture_values(values)
         _set_frozen_fields(self, _CAPTURE_FIELDS, values)
         object.__setattr__(self, "_specified_fields", frozenset(specified_fields))
 
@@ -1018,8 +1061,15 @@ class CaptureOptions:
     def from_values(
         cls, values: Mapping[str, Any], specified_fields: frozenset[str]
     ) -> "CaptureOptions":
-        """Build an instance from already-resolved field values."""
+        """Build an instance from already-resolved field values.
 
+        Applies the same invariants as ``__init__`` (via
+        :func:`_validate_capture_values`) so this construction path -- used by
+        the flat-kwarg merge -- cannot accept values the grouped constructor
+        rejects, matching the sibling :meth:`VisualizationOptions.from_values`.
+        """
+
+        _validate_capture_values(values)
         instance = object.__new__(cls)
         _set_frozen_fields(instance, _CAPTURE_FIELDS, values)
         object.__setattr__(instance, "_specified_fields", specified_fields)

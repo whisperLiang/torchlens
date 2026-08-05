@@ -41,6 +41,7 @@ from collections.abc import Callable, Iterable
 import ctypes
 from dataclasses import dataclass
 import importlib
+import inspect
 import os
 import sys
 from typing import Any
@@ -158,10 +159,16 @@ class RunnableTorchAlias:
     """One monotonic callable move used by sparse runnable reattachment.
 
     The table is capability-bounded rather than selected by parsing
-    ``torch.__version__``: an entry applies only when its source is absent and
-    its target exists in the current runtime. This makes an added entry able to
-    turn an unresolved reference into a resolved alias without ever
-    reinterpreting an exact current-runtime binding.
+    ``torch.__version__``. Source absence is established by the caller's
+    allowlisted exact-resolution pass, which runs first and only reaches the
+    alias stage when the recorded path does not resolve through a safe public
+    namespace; the private/internal recorded paths in this table are therefore
+    redirected to their public equivalents (a present internal binding such as
+    ``torch._C._nn.linear`` is intentionally routed to its public wrapper for
+    replay safety). This resolver additionally probes that an entry's *target*
+    exists in the current runtime (:func:`_runtime_alias_target_exists`) and
+    never hands back an alias whose target is absent -- so an unbounded/legacy
+    version key can never manufacture a dead alias.
     """
 
     source: str
@@ -361,6 +368,45 @@ _RUNNABLE_TORCH_ALIASES: tuple[RunnableTorchAlias, ...] = (
 )
 
 
+def _runtime_alias_target_exists(target_namespace: str, target_qualname: str) -> bool:
+    """Return whether an alias target resolves in the running torch.
+
+    Capability probe (feature detection, not a ``torch.__version__`` parse): the
+    resolver only offers an alias whose recorded target actually exists in the
+    current runtime, honoring :class:`RunnableTorchAlias`'s target-existence
+    contract. The first hop off the top-level ``torch`` module reads
+    ``torch.__dict__`` via :func:`torch_attr` (an identifier-only read that
+    avoids the PEP-562 lazy-submodule-import hazard); deeper hops are off
+    submodule/class roots that carry no lazy-import hazard, so they use
+    ``getattr``.
+
+    Parameters
+    ----------
+    target_namespace:
+        Public namespace of the alias target (always rooted at ``torch``).
+    target_qualname:
+        Attribute path of the alias target within ``target_namespace``.
+
+    Returns
+    -------
+    bool
+        True only when every path segment resolves to a non-``None`` attribute.
+    """
+
+    parts = f"{target_namespace}.{target_qualname}".split(".")
+    if parts[0] != "torch":
+        return False
+    current: Any = torch
+    for part in parts[1:]:
+        if current is torch:
+            current = torch_attr(part)
+        else:
+            current = getattr(current, part, None)
+        if current is None:
+            return False
+    return True
+
+
 def resolve_runnable_torch_alias(
     source_qualname: str,
     recorded_version: str | None = None,
@@ -403,6 +449,14 @@ def resolve_runnable_torch_alias(
             return None
         if alias.strip_target_prefix and target_qualname.startswith(alias.strip_target_prefix):
             target_qualname = target_qualname[len(alias.strip_target_prefix) :]
+        if not _runtime_alias_target_exists(alias.target_namespace, target_qualname):
+            # Capability gate: never manufacture an alias whose recorded target
+            # is absent from the running torch (the RunnableTorchAlias contract).
+            # This also closes the unbounded/legacy-version bypass: even when the
+            # version bounds are skipped, a matched entry can only resolve when
+            # its target genuinely exists. A later entry may still match with a
+            # live target, so keep scanning.
+            continue
         return alias.target_namespace, target_qualname, alias.provenance
     return None
 
@@ -1343,13 +1397,52 @@ def run_dynamo_explain(
     explain = get_dynamo_explain()
     if explain is None:
         raise RuntimeError("torch._dynamo.explain is unavailable in this torch runtime")
-    try:
+    # Feature-detect the calling convention from the *signature* instead of
+    # treating any TypeError raised by ``explain(model)`` as a legacy-signature
+    # signal. The old blanket ``except TypeError`` misread an internal TypeError
+    # (raised inside the modern one-arg convention) as a signature mismatch,
+    # silently swallowed it, and re-invoked ``explain(model, *args, **kwargs)``
+    # -- a double side effect that also masked the real error.
+    if _explain_accepts_single_callable(explain):
         candidate = explain(model)
+        if callable(candidate):
+            return candidate(*args, **kwargs)
+        return candidate
+    return explain(model, *args, **kwargs)
+
+
+def _explain_accepts_single_callable(explain: Callable[..., Any]) -> bool:
+    """Return whether ``explain(model)`` is a valid one-argument call.
+
+    Modern ``torch._dynamo.explain`` binds ``explain(f)`` (returning a callable)
+    while the legacy convention requires ``explain(f, *args, **kwargs)``. We
+    decide via :func:`inspect.signature`/``bind`` so that a genuine internal
+    TypeError from the modern one-argument convention propagates instead of
+    being mistaken for a signature mismatch.
+
+    Parameters
+    ----------
+    explain:
+        The ``torch._dynamo.explain`` callable resolved for this runtime.
+
+    Returns
+    -------
+    bool
+        True when ``explain(model)`` binds against the signature. When the
+        signature cannot be introspected we conservatively assume the modern
+        one-argument convention (torch's declared floor), which keeps internal
+        errors visible rather than re-invoking with a hidden double side effect.
+    """
+
+    try:
+        signature = inspect.signature(explain)
+    except (TypeError, ValueError):
+        return True
+    try:
+        signature.bind(object())
     except TypeError:
-        return explain(model, *args, **kwargs)
-    if callable(candidate):
-        return candidate(*args, **kwargs)
-    return candidate
+        return False
+    return True
 
 
 def _dynamo_break_source(reason: Any) -> tuple[str | None, int | None]:
