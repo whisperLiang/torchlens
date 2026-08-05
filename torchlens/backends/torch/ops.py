@@ -3419,20 +3419,33 @@ def _build_graph_relationship_fields(
     out_orig: Any,
 ) -> None:
     """Populate graph structure fields: parents, children, ancestors, buffer/IO flags."""
-    out_kwarg_label = None
+    # ``out=`` destinations are pre-allocated tensors the op writes into: their
+    # producers (``empty``/``empty_like``/...) are genuine parents of this op.
+    # Tuple/list destinations (``torch.sort(x, out=(v, i))``, topk, kthvalue,
+    # cummax, ...) carry the SAME contract per element as the single-tensor
+    # spelling; handling only ``isinstance(out_kwarg, torch.Tensor)`` dropped
+    # every tuple-destination edge AND let the pre-allocated producer op get
+    # orphan-pruned — an executed op vanished silently (W3 audit F3).
     out_kwarg = kwargs.get("out")
     if isinstance(out_kwarg, torch.Tensor):
+        out_destinations: tuple[torch.Tensor, ...] = (out_kwarg,)
+    elif isinstance(out_kwarg, (list, tuple)):
+        out_destinations = tuple(item for item in out_kwarg if isinstance(item, torch.Tensor))
+    else:
+        out_destinations = ()
+    for out_destination in out_destinations:
         out_kwarg_label = get_live_tensor_label(
-            out_kwarg, self.capture_events.live_index.by_raw_label
+            out_destination, self.capture_events.live_index.by_raw_label
         )
-    if out_kwarg_label is not None and out_kwarg_label not in parent_layer_labels:
-        parent_layer_labels = [*parent_layer_labels, out_kwarg_label]
-        parent_layer_entries = [
-            *parent_layer_entries,
-            cast(
-                Op, LiveOpView(self, self.capture_events.live_index.require_event(out_kwarg_label))
-            ),
-        ]
+        if out_kwarg_label is not None and out_kwarg_label not in parent_layer_labels:
+            parent_layer_labels = [*parent_layer_labels, out_kwarg_label]
+            parent_layer_entries = [
+                *parent_layer_entries,
+                cast(
+                    Op,
+                    LiveOpView(self, self.capture_events.live_index.require_event(out_kwarg_label)),
+                ),
+            ]
     parent_arg_positions = _locate_parent_tensors_in_args(self, parent_layer_entries, args, kwargs)
     input_ancestors, internal_source_ancestors = _get_ancestors_from_parents(parent_layer_entries)
     internal_parent_layer_labels = [
