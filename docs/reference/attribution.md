@@ -9,6 +9,14 @@ The examples use a deterministic small classifier. Input methods return a tensor
 the attributed input; layer methods return the named layer's activation shape. For convolutional
 maps, [`grad_cam`](#grad_cam) returns an input-resolution `N, 1, H, W` map.
 
+Passing the same tensor object to several input slots preserves that identity inside the
+attribution forward (`a is b` control flow runs exactly as in your own call), and every
+occurrence slot reports the shared tensor's full accumulated gradient. Path methods require
+repeated references to carry identical baselines. A module fired several times contributes
+through every firing: `layer_attribution`, `layer_integrated_gradients`, and
+`layer_conductance` total the per-firing terms, while `grad_cam` requires the target layer to
+fire exactly once and raises `AttributionError` otherwise.
+
 ## `saliency`
 
 `tl.attribution.saliency(model, inputs, input_kwargs=None, *, target=...)` returns absolute
@@ -100,7 +108,10 @@ AttributionResult(method='smoothgrad', values=Tensor(shape=(1, 2), dtype=torch.f
 
 `tl.attribution.grad_cam(model, inputs, input_kwargs=None, *, target=..., layer=..., relu=True)`
 forms a Grad-CAM map from a 4D `N, C, H, W` convolution-style layer and upsamples it to the
-input spatial size. Use a layer name from `model.named_modules()`.
+spatial size of the input that actually feeds the target layer (proven through the autograd
+graph, not taken from argument order). Use a layer name from `model.named_modules()`. If no
+spatial input feeds the layer, or several feed it with different grids, the call raises
+`AttributionError` instead of guessing a coordinate system.
 
 ```python
 import torch

@@ -254,8 +254,50 @@ def _make_input_leaf(inputs: Tensor) -> Tensor:
     return inputs.detach().clone().requires_grad_(True)
 
 
+def _interned_by_identity(
+    originals: tuple[Tensor, ...],
+    make_leaf: Callable[[int], Tensor],
+) -> tuple[Tensor, ...]:
+    """Create one new tensor per unique original object identity, shared across repeats.
+
+    The user's forward pass sees exactly the object topology the user built: a
+    tensor passed to several input slots is ONE object there, so identity
+    checks (``a is b``) and autograd accumulation treat it as one value.
+    Cloning each occurrence independently would silently run a DIFFERENT
+    function than the one the user called, so every occurrence of the same
+    original tensor must receive the same substituted leaf.
+
+    Parameters
+    ----------
+    originals
+        Original attributed leaves in traversal order, possibly containing
+        repeated references to the same tensor object.
+    make_leaf
+        Constructor invoked with the slot index of the FIRST occurrence of each
+        unique original; its result is reused at every repeated occurrence.
+
+    Returns
+    -------
+    tuple[Tensor, ...]
+        New leaves in traversal order, with object identity mirroring
+        ``originals``.
+    """
+
+    leaf_by_original_id: dict[int, Tensor] = {}
+    leaves: list[Tensor] = []
+    for slot, original in enumerate(originals):
+        key = id(original)
+        if key not in leaf_by_original_id:
+            leaf_by_original_id[key] = make_leaf(slot)
+        leaves.append(leaf_by_original_id[key])
+    return tuple(leaves)
+
+
 def _make_input_leaves(inputs: _PreparedInputs) -> tuple[Tensor, ...]:
     """Create detached leaf tensors for all attributed input leaves.
+
+    Repeated references to the same tensor object receive the SAME new leaf at
+    every occurrence, preserving the identity topology of the user's call.
 
     Parameters
     ----------
@@ -268,7 +310,49 @@ def _make_input_leaves(inputs: _PreparedInputs) -> tuple[Tensor, ...]:
         Detached clones with gradient tracking enabled.
     """
 
-    return tuple(_make_input_leaf(leaf) for leaf in inputs.attributed_leaves)
+    return _interned_by_identity(
+        inputs.attributed_leaves,
+        lambda slot: _make_input_leaf(inputs.attributed_leaves[slot]),
+    )
+
+
+def _interned_path_leaves(
+    inputs: _PreparedInputs,
+    baseline_tensors: tuple[Tensor, ...],
+    deltas: tuple[Tensor, ...],
+    alpha: float,
+) -> tuple[Tensor, ...]:
+    """Create differentiable path leaves for one baseline-to-input path point.
+
+    Repeated references to the same original tensor share ONE path leaf so the
+    interpolated forward preserves the identity topology of the user's call.
+    ``_validate_baselines`` guarantees repeated references carry identical
+    baselines, so constructing from the first occurrence loses nothing.
+
+    Parameters
+    ----------
+    inputs
+        Normalized attribution inputs.
+    baseline_tensors
+        Baseline leaves in attributed-leaf traversal order.
+    deltas
+        Input-minus-baseline tensors in the same order.
+    alpha
+        Interpolation coefficient on ``[0, 1]``.
+
+    Returns
+    -------
+    tuple[Tensor, ...]
+        Detached differentiable path leaves.
+    """
+
+    return _interned_by_identity(
+        inputs.attributed_leaves,
+        lambda slot: (baseline_tensors[slot] + alpha * deltas[slot])
+        .detach()
+        .clone()
+        .requires_grad_(True),
+    )
 
 
 def _replace_attributed_tensors(tree: Any, replacements: list[Tensor]) -> Any:
@@ -527,19 +611,30 @@ def _gradient_for_inputs(
 
     output = _call_model(model, inputs, input_leaves)
     scalar = _scalarize_output(output, target)
+    unique_index_by_id: dict[int, int] = {}
+    unique_leaves: list[Tensor] = []
+    for leaf in input_leaves:
+        if id(leaf) not in unique_index_by_id:
+            unique_index_by_id[id(leaf)] = len(unique_leaves)
+            unique_leaves.append(leaf)
     try:
         raw_gradients = torch.autograd.grad(
             scalar,
-            input_leaves,
+            unique_leaves,
             allow_unused=True,
         )
     except RuntimeError as exc:
         raise AttributionError(
             "target scalar is not differentiable with respect to the attributed inputs"
         ) from exc
+    # A leaf shared across several input slots accumulates ONE gradient over
+    # every use; each public slot reports that full gradient rather than an
+    # arbitrary per-occurrence split.
     gradients = tuple(
-        torch.zeros_like(input_leaf) if gradient is None else gradient
-        for input_leaf, gradient in zip(input_leaves, raw_gradients, strict=True)
+        torch.zeros_like(input_leaf)
+        if raw_gradients[unique_index_by_id[id(input_leaf)]] is None
+        else raw_gradients[unique_index_by_id[id(input_leaf)]]
+        for input_leaf in input_leaves
     )
     return gradients, scalar.detach()
 
@@ -646,6 +741,42 @@ def _validate_baseline_tree(input_tree: Any, baseline_tree: Any) -> list[Tensor]
     return []
 
 
+def _validate_repeated_reference_baselines(
+    inputs: _PreparedInputs,
+    baseline_leaves: tuple[Tensor, ...],
+) -> None:
+    """Require identical baselines at every occurrence of a repeated-reference input.
+
+    A tensor object passed to several input slots is ONE value along the whole
+    baseline-to-input path; two different baselines for it would demand the
+    shared leaf hold two values at once. Rejecting the contradiction keeps the
+    interpolated forwards running the user's actual function.
+
+    Parameters
+    ----------
+    inputs
+        Normalized attribution inputs.
+    baseline_leaves
+        Baseline tensors in attributed-leaf traversal order.
+
+    Raises
+    ------
+    AttributionError
+        If two occurrences of the same input tensor carry different baselines.
+    """
+
+    baseline_by_original_id: dict[int, Tensor] = {}
+    for original, baseline_leaf in zip(inputs.attributed_leaves, baseline_leaves, strict=True):
+        key = id(original)
+        seen = baseline_by_original_id.get(key)
+        if seen is None:
+            baseline_by_original_id[key] = baseline_leaf
+        elif not torch.equal(seen, baseline_leaf):
+            raise AttributionError(
+                "baseline values for repeated references to the same input tensor must match"
+            )
+
+
 def _validate_baselines(inputs: _PreparedInputs, baseline: Any | None) -> tuple[Tensor, ...]:
     """Validate or create Integrated Gradients baselines for attributed leaves.
 
@@ -694,7 +825,9 @@ def _validate_baselines(inputs: _PreparedInputs, baseline: Any | None) -> tuple[
 
     if len(baseline_leaves) != len(inputs.attributed_leaves):
         raise AttributionError("baseline must mirror attributed input leaves")
-    return tuple(baseline_leaves)
+    validated = tuple(baseline_leaves)
+    _validate_repeated_reference_baselines(inputs, validated)
+    return validated
 
 
 def saliency(
@@ -838,10 +971,7 @@ def integrated_gradients(
     with _temporarily_eval(model):
         for step in range(n_steps):
             alpha = (step + 0.5) / n_steps
-            path_leaves = tuple(
-                (baseline_tensor + alpha * delta).detach().clone().requires_grad_(True)
-                for baseline_tensor, delta in zip(baseline_tensors, deltas, strict=True)
-            )
+            path_leaves = _interned_path_leaves(prepared_inputs, baseline_tensors, deltas, alpha)
             gradients, _scalar = _gradient_for_inputs(
                 model,
                 prepared_inputs,
@@ -919,9 +1049,11 @@ def smoothgrad(
     saliency_samples: list[tuple[Tensor, ...]] = []
     with _temporarily_eval(model):
         for _sample_idx in range(n_samples):
-            noised_leaves = tuple(
-                _make_noised_leaf(input_leaf, noise_level, seed, generators)
-                for input_leaf in prepared_inputs.attributed_leaves
+            noised_leaves = _interned_by_identity(
+                prepared_inputs.attributed_leaves,
+                lambda slot: _make_noised_leaf(
+                    prepared_inputs.attributed_leaves[slot], noise_level, seed, generators
+                ),
             )
             gradients, _scalar = _gradient_for_inputs(
                 model,
