@@ -113,13 +113,18 @@ jobs:
         env:
           TORCHLENS_RENDER_BYTE_ORACLE: ${{ matrix.render_byte_oracle }}
         run: |
-          # tests/crawler/ belongs to the separate menagerie-crawler corpus (its
-          # own dedicated crawler-round21-* jobs run it under a full conda env with
-          # jsonschema/conda-lock). It is excluded from the core matrix like
-          # tests/test_menagerie_*.py -- otherwise pytest imports it during
-          # collection and fails on the crawler-only jsonschema dep. No smoke
-          # coverage is lost (no tests/crawler test is smoke-marked).
-          pytest tests/ -m smoke --ignore=tests/crawler --tb=short -q
+          # The menagerie build subsystem is excluded from the smoke matrix on
+          # BOTH of its trees: tests/test_menagerie_*.py hard-imports pydantic
+          # (via menagerie/schema.py), and tests/crawler/ is the menagerie-crawler
+          # corpus validated by its own dedicated crawler-round21-* conda-env
+          # jobs. Neither dependency set is present in this lean .[dev,tabular]
+          # smoke env (pydantic ships only in the .[test] extra), so collecting
+          # either tree ModuleNotFoundErrors at import time. tests/conftest.py
+          # auto-skips both on Python < 3.11 (menagerie uses datetime.UTC), but
+          # that guard is OFF on 3.11, so these explicit --ignore flags are
+          # REQUIRED on the 3.11 legs. No smoke coverage is lost (no menagerie or
+          # crawler test is smoke-marked).
+          pytest tests/ -m smoke --ignore-glob="*menagerie*" --ignore=tests/crawler --tb=short -q
           pytest tests/test_torch_compat.py --tb=short -q
 
   crawler-round21-linux-release:
