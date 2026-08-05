@@ -343,6 +343,11 @@ def _assert_evaluation_entry_edges_are_upstream(trace: Trace) -> None:
             if arm.kind == "else":
                 assert arm.evaluation_entry_edge is None
                 continue
+            if not arm.condition_evaluated:
+                # A short-circuited then/elif test never ran, so claiming an
+                # evaluation entry edge for it would be a false runtime claim.
+                assert arm.evaluation_entry_edge is None
+                continue
             source_label, target_label = arm.evaluation_entry_edge or (None, None)
             assert source_label is not None
             assert target_label is not None

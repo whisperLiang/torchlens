@@ -5090,6 +5090,15 @@ def _record_bool_consumer_location(trace: Any, source: torch.Tensor) -> None:
     """
 
     if source.dtype is not torch.bool:
+        # DELIBERATE, documented false negative: ``if x.sum():`` truthiness on
+        # a non-bool tensor is a real bool consumption, but recording it would
+        # materialize conditional arm edges whose predicate the runnable
+        # witness-obligation registry cannot witness (only ``is_scalar_bool``
+        # ops receive predicate witnesses), making every level="runnable" save
+        # of such a model refuse at producer preflight. Lifting this gate
+        # requires a truthiness predicate witness family in the runnable
+        # contract first. Pinned by
+        # tests/test_condbranch_hardening.py::test_float_truthiness_stays_documented_false_negative.
         return
     label = get_tensor_label(source)
     if not isinstance(label, str):

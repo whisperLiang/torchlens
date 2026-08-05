@@ -95,6 +95,14 @@ def _seed_proven_bool_consumers(self: "Trace") -> None:
     an internal graph sink. The capture-time ``__bool__`` observer independently
     proves that the tensor was consumed on the host; that proof, rather than
     childlessness, makes it a terminal conditional candidate.
+
+    Seeding stays gated on ``is_scalar_bool`` (0-dim ``torch.bool``): the
+    runnable witness-obligation registry can only witness scalar-bool
+    predicates, so seeding a proven non-bool truthiness consumer (or a
+    one-element bool VECTOR) would materialize conditional arm edges that
+    every level="runnable" save refuses at producer preflight. Recording
+    those classes is deferred until the runnable contract gains a matching
+    predicate witness family.
     """
 
     from ..backends.torch.completeness_witness import host_escape_bool_source_labels
@@ -178,8 +186,16 @@ def _build_file_indexes(
 
 def _classify_bool_layers(
     self: "Trace",
-) -> Tuple[List[ast_branches.ConditionalKey], Dict[str, ast_branches.BoolClassification]]:
+) -> Tuple[List[ast_branches.ConditionalKey], Dict[str, List[ast_branches.BoolClassification]]]:
     """Phase 5b: Classify terminal scalar bools and collect observed conditionals.
+
+    Every witnessed consumer location of a bool is classified — not just the
+    first non-``"unknown"`` one. A bool consumed by ``assert``/``while`` and
+    LATER by an ``if`` test is still a conditional bool (order independence),
+    and one bool gating several ``if`` statements yields one classification
+    per gated conditional (1:N predicate reuse). The runtime frame fallback
+    (column-precise) runs only when no consumer location produced a
+    branch-participating classification.
 
     Parameters
     ----------
@@ -188,63 +204,136 @@ def _classify_bool_layers(
 
     Returns
     -------
-    Tuple[List[ast_branches.ConditionalKey], Dict[str, ast_branches.BoolClassification]]
-        First-seen ordered conditional keys plus per-bool classification results
-        keyed by raw layer label.
+    Tuple[List[ast_branches.ConditionalKey], Dict[str, List[ast_branches.BoolClassification]]]
+        First-seen ordered conditional keys plus, per raw bool layer label, the
+        deduplicated list of branch-participating classifications (empty when
+        the bool participates in no conditional).
     """
 
     from ..backends.torch.completeness_witness import host_escape_bool_consumer_locations
 
-    bool_classifications: Dict[str, ast_branches.BoolClassification] = {}
+    bool_classifications: Dict[str, List[ast_branches.BoolClassification]] = {}
     ordered_conditional_keys: Dict[ast_branches.ConditionalKey, None] = {}
     consumer_locations = host_escape_bool_consumer_locations(self)
 
     for bool_label in _iter_terminal_scalar_bool_labels(self):
         bool_layer = self[bool_label]
-        classification = ast_branches.BoolClassification("unknown", None, None, None)
+        observed: List[ast_branches.BoolClassification] = []
         for filename, line_number in consumer_locations.get(bool_label, ()):
-            classification = ast_branches.classify_bool(filename, line_number, None)
-            if classification.kind != "unknown":
-                break
-        if classification.kind == "unknown":
-            for frame in reversed(bool_layer.code_context):
-                frame_classification = ast_branches.classify_bool(
-                    frame.file,
-                    frame.line_number,
-                    frame.col_offset,
-                )
-                if frame_classification.kind == "unknown":
-                    continue
-                classification = frame_classification
-                break
+            location_classification = ast_branches.classify_bool(filename, line_number, None)
+            if location_classification.kind != "unknown":
+                observed.append(location_classification)
 
-        is_terminal_conditional_bool = (
-            classification.kind in _BRANCH_CONTEXT_KINDS
-            and classification.conditional_key is not None
-        )
-        bool_layer.conditional_context_kind = classification.kind
-        bool_layer.conditional_wrapper_kind = classification.wrapper_kind
-        bool_layer.is_terminal_conditional_bool = is_terminal_conditional_bool
+        branch_classifications = _dedup_branch_classifications(observed)
+
+        frame_classification: Optional[ast_branches.BoolClassification] = None
+        for frame in reversed(bool_layer.code_context):
+            frame_candidate = ast_branches.classify_bool(
+                frame.file,
+                frame.line_number,
+                frame.col_offset,
+            )
+            if frame_candidate.kind == "unknown":
+                continue
+            frame_classification = frame_candidate
+            break
+
+        if not branch_classifications:
+            if frame_classification is not None:
+                observed.append(frame_classification)
+                branch_classifications = _dedup_branch_classifications([frame_classification])
+        elif (
+            frame_classification is not None
+            and frame_classification.kind in _BRANCH_CONTEXT_KINDS
+            and frame_classification.conditional_key is not None
+            and frame_classification.conditional_key
+            not in {c.conditional_key for c in branch_classifications}
+        ):
+            # Creation-site conflict: the bool op was created inside the test
+            # span of one conditional while the witnessed consumer line
+            # attributes it to a DIFFERENT conditional. Line-only runtime
+            # attribution is misreporting one of the two (e.g. a formatter-
+            # wrapped multi-line nested ternary, where the interpreter
+            # reports the inner ternary's line for the outer test's
+            # ``__bool__``). Linking either key could cross-wire a foreign
+            # bool into a conditional's public record, so fail closed for
+            # this bool instead of guessing.
+            observed = []
+            branch_classifications = []
+
+        if branch_classifications:
+            primary = branch_classifications[0]
+        elif observed:
+            primary = observed[0]
+        else:
+            primary = ast_branches.BoolClassification("unknown", None, None, None)
+
+        bool_layer.conditional_context_kind = primary.kind
+        bool_layer.conditional_wrapper_kind = primary.wrapper_kind
+        bool_layer.is_terminal_conditional_bool = bool(branch_classifications)
         bool_layer.terminal_conditional_id = None
-        bool_classifications[bool_label] = classification
+        bool_classifications[bool_label] = branch_classifications
 
-        if is_terminal_conditional_bool:
-            conditional_key = classification.conditional_key
-            if conditional_key is None:
-                raise ValueError("Branch-participating bool classification must include a key.")
-            assert conditional_key is not None  # mypy narrowing
-            ordered_conditional_keys.setdefault(conditional_key, None)
+        for classification in branch_classifications:
+            assert classification.conditional_key is not None  # mypy narrowing
+            ordered_conditional_keys.setdefault(classification.conditional_key, None)
 
     return list(ordered_conditional_keys.keys()), bool_classifications
+
+
+def _dedup_branch_classifications(
+    classifications: List[ast_branches.BoolClassification],
+) -> List[ast_branches.BoolClassification]:
+    """Return the branch-participating classifications, deduplicated in order.
+
+    Parameters
+    ----------
+    classifications:
+        Classification results from consumer locations or runtime frames.
+
+    Returns
+    -------
+    List[ast_branches.BoolClassification]
+        Classifications whose kind is branch-participating and whose
+        conditional key is present, deduplicated by
+        ``(conditional_key, branch_test_kind)`` preserving first-seen order.
+    """
+
+    deduplicated: List[ast_branches.BoolClassification] = []
+    seen: Set[Tuple[ast_branches.ConditionalKey, Optional[str]]] = set()
+    for classification in classifications:
+        if (
+            classification.kind not in _BRANCH_CONTEXT_KINDS
+            or classification.conditional_key is None
+        ):
+            continue
+        identity_key = (classification.conditional_key, classification.branch_test_kind)
+        if identity_key in seen:
+            continue
+        seen.add(identity_key)
+        deduplicated.append(classification)
+    return deduplicated
 
 
 def _materialize_conditional_records(
     self: "Trace",
     file_indexes: Dict[str, Optional[ast_branches.FileIndex]],
     conditional_keys: List[ast_branches.ConditionalKey],
-    bool_classifications: Dict[str, ast_branches.BoolClassification],
+    bool_classifications: Dict[str, List[ast_branches.BoolClassification]],
 ) -> Dict[ast_branches.ConditionalKey, "ConditionalEvent"]:
     """Phase 5c: Materialize dense conditional events and translate bool keys.
+
+    One bool may gate several conditionals (predicate reuse), so every
+    branch-participating classification links its bool to the matching event.
+    The scalar ``terminal_conditional_id`` keeps its historical 1:1 shape by
+    pointing at the FIRST linked event; the complete 1:N linkage lives on each
+    event's ``bool_layers``. Two postprocess-internal annotations are stashed
+    on each event for finalization's public record builder:
+    ``_arm_bool_indices`` (branch kind -> indices into ``bool_layers`` whose
+    runtime consumption evaluated THAT arm's test; indices survive the
+    raw-to-final label rename that rewrites ``bool_layers`` in place) and
+    ``_arm_test_structures`` (branch kind -> ``"bare"``/``"negated"``/
+    ``"compound"`` bool-value semantics of the arm's test expression).
 
     Parameters
     ----------
@@ -255,7 +344,7 @@ def _materialize_conditional_records(
     conditional_keys:
         Ordered structural conditional keys observed in phase 5b.
     bool_classifications:
-        Per-bool classifications keyed by raw layer label.
+        Per-bool branch-participating classifications keyed by raw layer label.
 
     Returns
     -------
@@ -289,6 +378,11 @@ def _materialize_conditional_records(
             parent_conditional_id=None,
             parent_branch_kind=record.parent_branch_kind,
         )
+        # Postprocess-internal annotations consumed by finalization's
+        # ``_build_conditional_records``; instance attributes (not dataclass
+        # fields) so the portable/public ConditionalEvent schema is unchanged.
+        setattr(event, "_arm_bool_indices", {})
+        setattr(event, "_arm_test_structures", dict(record.branch_test_structures))
         events_by_key[conditional_key] = event
         self.conditional_records.append(event)
 
@@ -299,15 +393,26 @@ def _materialize_conditional_records(
         if parent_conditional_key is not None and parent_conditional_key in events_by_key:
             event.parent_conditional_id = events_by_key[parent_conditional_key].id
 
-    for bool_label, classification in bool_classifications.items():
+    for bool_label, classifications in bool_classifications.items():
         bool_layer = self[bool_label]
-        bool_conditional_key: Optional[ast_branches.ConditionalKey] = classification.conditional_key
-        if bool_conditional_key is None or bool_conditional_key not in events_by_key:
-            bool_layer.terminal_conditional_id = None
-            continue
-        event = events_by_key[bool_conditional_key]
-        bool_layer.terminal_conditional_id = event.id
-        event.bool_layers.append(bool_label)
+        bool_layer.terminal_conditional_id = None
+        for classification in classifications:
+            bool_conditional_key: Optional[ast_branches.ConditionalKey] = (
+                classification.conditional_key
+            )
+            if bool_conditional_key is None or bool_conditional_key not in events_by_key:
+                continue
+            event = events_by_key[bool_conditional_key]
+            if bool_layer.terminal_conditional_id is None:
+                bool_layer.terminal_conditional_id = event.id
+            if bool_label not in event.bool_layers:
+                event.bool_layers.append(bool_label)
+            bool_index = event.bool_layers.index(bool_label)
+            arm_kind = classification.branch_test_kind or "then"
+            arm_bool_indices: Dict[str, List[int]] = getattr(event, "_arm_bool_indices")
+            arm_indices = arm_bool_indices.setdefault(arm_kind, [])
+            if bool_index not in arm_indices:
+                arm_indices.append(bool_index)
 
     for bool_label in _iter_terminal_scalar_bool_labels(self):
         assert not hasattr(self[bool_label], "_bool_conditional_key")
@@ -317,7 +422,7 @@ def _materialize_conditional_records(
 
 def _mark_conditional_branches_if_backward_flood(
     self: "Trace",
-    bool_classifications: Dict[str, ast_branches.BoolClassification],
+    bool_classifications: Dict[str, List[ast_branches.BoolClassification]],
 ) -> None:
     """Phase 5d: Backward-flood IF edges from branch-participating bools only.
 
@@ -326,7 +431,7 @@ def _mark_conditional_branches_if_backward_flood(
     self:
         Model log being postprocessed.
     bool_classifications:
-        Per-bool classifications keyed by raw layer label.
+        Per-bool branch-participating classifications keyed by raw layer label.
     """
 
     self.conditional_branch_edges = []
@@ -339,8 +444,7 @@ def _mark_conditional_branches_if_backward_flood(
     branch_bool_labels = [
         bool_label
         for bool_label in _iter_terminal_scalar_bool_labels(self)
-        if bool_classifications[bool_label].conditional_key is not None
-        and self[bool_label].is_terminal_conditional_bool
+        if bool_classifications[bool_label] and self[bool_label].is_terminal_conditional_bool
     ]
 
     nodes_seen: Set[str] = set()

@@ -83,6 +83,13 @@ class ConditionalRecord:
         Mapping from branch kind to the test expression range relevant for that
         arm. ``if`` chains use ``"then"`` and any flattened ``"elif_N"`` keys.
         Ternaries use ``"then"`` only.
+    branch_test_structures:
+        Mapping from branch kind to the bool-value structure of that arm's
+        test expression: ``"bare"`` (a consumed bool's runtime value IS the
+        test outcome), ``"negated"`` (outcome is the logical inverse: odd
+        ``not`` parity over a single consumed expression), or ``"compound"``
+        (``and``/``or`` aggregation: no single consumed bool determines the
+        outcome). Keys mirror ``branch_test_spans``.
     call_depth:
         Lexical conditional nesting depth within the owning function scope.
     parent_conditional_key:
@@ -99,6 +106,7 @@ class ConditionalRecord:
     test_span: SourceRange
     branch_ranges: Dict[str, SourceRange]
     branch_test_spans: Dict[str, SourceRange]
+    branch_test_structures: Dict[str, str]
     call_depth: int
     parent_conditional_key: Optional[ConditionalKey]
     parent_branch_kind: Optional[str]
@@ -168,6 +176,12 @@ class ScopeEntry:
         Owning AST function node.
     span:
         Inclusive line span for the function body.
+    decorated_firstlineno:
+        Line number of the FIRST decorator when the function is decorated,
+        else ``None``. Runtime code objects of decorated functions report
+        ``co_firstlineno`` at the first decorator line while the AST ``def``
+        line is ``code_firstlineno``; recording the decorator line makes
+        scope resolution exact for any number of (multi-line) decorators.
     conditionals:
         Conditional records defined inside the scope.
     branch_intervals:
@@ -179,6 +193,7 @@ class ScopeEntry:
     qualname: str
     node: FunctionNode
     span: LineSpan
+    decorated_firstlineno: Optional[int] = None
     conditionals: List[ConditionalRecord] = field(default_factory=list)
     branch_intervals: List[BranchInterval] = field(default_factory=list)
 
@@ -278,22 +293,59 @@ class FileIndex:
         Optional[ScopeEntry]
             Resolved scope entry, or ``None`` when the D14 fail-closed rules
             require the frame to be skipped.
+
+        Notes
+        -----
+        Decorated functions report ``co_firstlineno`` at the FIRST decorator
+        line, not the ``def`` line, so a frame lineno is accepted when it
+        matches either the ``def`` line or the recorded first-decorator line.
+        Multiple matches fail closed.
         """
 
         if func_qualname is not None:
-            for scope in self.scopes:
-                if scope.code_firstlineno == code_firstlineno and scope.qualname == func_qualname:
-                    return scope
+            qualname_matches = [
+                scope
+                for scope in self.scopes
+                if scope.qualname == func_qualname
+                and _scope_accepts_firstlineno(scope, code_firstlineno)
+            ]
+            if len(qualname_matches) == 1:
+                return qualname_matches[0]
             return None
 
         candidates = [
             scope
             for scope in self.scopes
-            if scope.code_firstlineno == code_firstlineno and scope.func_name == func_name
+            if scope.func_name == func_name and _scope_accepts_firstlineno(scope, code_firstlineno)
         ]
         if len(candidates) == 1:
             return candidates[0]
         return None
+
+
+def _scope_accepts_firstlineno(scope: ScopeEntry, code_firstlineno: int) -> bool:
+    """Return whether a runtime ``co_firstlineno`` can name this scope.
+
+    Parameters
+    ----------
+    scope:
+        Indexed function scope.
+    code_firstlineno:
+        ``co_firstlineno`` reported by the runtime frame.
+
+    Returns
+    -------
+    bool
+        ``True`` when the lineno matches the ``def`` line or, for decorated
+        functions, the first decorator's line (which is where CPython points
+        ``co_firstlineno`` for any number of stacked or multi-line decorators).
+    """
+
+    if scope.code_firstlineno == code_firstlineno:
+        return True
+    return (
+        scope.decorated_firstlineno is not None and scope.decorated_firstlineno == code_firstlineno
+    )
 
 
 def get_file_index(filename: str) -> Optional[FileIndex]:
@@ -429,6 +481,21 @@ def classify_bool(filename: str, line: int, col: Optional[int] = None) -> BoolCl
                 consumers.append(consumer)
         elif _range_contains_point(consumer.span, line, col):
             consumers.append(consumer)
+
+    if col is None:
+        distinct_branch_keys = {
+            consumer.conditional_key
+            for consumer in consumers
+            if consumer.kind in _BRANCH_CONSUMER_KINDS
+        }
+        if len(distinct_branch_keys) > 1:
+            # Degraded line-only matching cannot tell WHICH branch test consumed
+            # this bool when several distinct conditionals share the line (e.g.
+            # a same-line nested ternary): the deepest-first pick would silently
+            # cross-wire the outer bool into the inner conditional. Fail closed;
+            # the column-carrying code-context fallback in phase 5b of
+            # ``control_flow._classify_bool_layers`` disambiguates precisely.
+            return BoolClassification("unknown", None, None, None)
 
     consumers.sort(
         key=lambda item: (item.depth, 1 if item.kind == "bool_cast" else 0),
@@ -985,6 +1052,9 @@ def _collect_scopes_from_node(
                     qualname=qualname,
                     node=child,
                     span=(child.lineno, _end_lineno(child)),
+                    decorated_firstlineno=(
+                        child.decorator_list[0].lineno if child.decorator_list else None
+                    ),
                 )
             )
             _collect_scopes_from_node(child, qualname, "function", scopes)
@@ -1194,6 +1264,35 @@ def _ast_depth(node: ast.AST, parent_map: Dict[ast.AST, ast.AST]) -> int:
         current = parent_map[current]
         depth += 1
     return depth
+
+
+def _test_value_structure(test: ast.expr) -> str:
+    """Classify a branch test expression's bool-value semantics.
+
+    Parameters
+    ----------
+    test:
+        Full test expression node of one ``if``/``elif``/ternary arm.
+
+    Returns
+    -------
+    str
+        ``"bare"`` when the runtime value of a consumed bool IS the test
+        outcome (possibly under an even number of ``not``\\ s), ``"negated"``
+        when the outcome is the logical inverse (odd ``not`` parity over a
+        single consumed expression), and ``"compound"`` when the test
+        aggregates several truth values through ``and``/``or``, where no
+        single consumed bool's raw value can honestly stand for the outcome.
+    """
+
+    negations = 0
+    node: ast.expr = test
+    while isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        negations += 1
+        node = node.operand
+    if any(isinstance(child, ast.BoolOp) for child in ast.walk(node)):
+        return "compound"
+    return "negated" if negations % 2 else "bare"
 
 
 def _is_direct_bool_call(node: ast.AST) -> bool:
@@ -1441,6 +1540,7 @@ class _ScopeIndexer:
                 "else": _node_span(node.orelse),
             },
             branch_test_spans={"then": _node_span(node.test)},
+            branch_test_structures={"then": _test_value_structure(node.test)},
             call_depth=call_depth,
             parent_conditional_key=parent_conditional_key,
             parent_branch_kind=parent_branch_kind,
@@ -1523,11 +1623,13 @@ class _ScopeIndexer:
         )
         branch_ranges: Dict[str, SourceRange] = {"then": _statement_list_span(node.body)}
         branch_test_spans: Dict[str, SourceRange] = {"then": _node_span(node.test)}
+        branch_test_structures: Dict[str, str] = {"then": _test_value_structure(node.test)}
 
         for index, elif_node in enumerate(flattened_elifs, start=1):
             branch_kind = f"elif_{index}"
             branch_ranges[branch_kind] = _statement_list_span(elif_node.body)
             branch_test_spans[branch_kind] = _node_span(elif_node.test)
+            branch_test_structures[branch_kind] = _test_value_structure(elif_node.test)
 
         if terminal_else:
             branch_ranges["else"] = _statement_list_span(terminal_else)
@@ -1541,6 +1643,7 @@ class _ScopeIndexer:
             test_span=_node_span(node.test),
             branch_ranges=branch_ranges,
             branch_test_spans=branch_test_spans,
+            branch_test_structures=branch_test_structures,
             call_depth=call_depth,
             parent_conditional_key=parent_conditional_key,
             parent_branch_kind=parent_branch_kind,
