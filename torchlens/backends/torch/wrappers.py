@@ -64,6 +64,7 @@ from ...utils.arg_handling import copy_arg_tree
 from ...utils.tensor_utils import print_override, safe_copy
 from .ops import (
     _is_inplace_augmented_assignment_dunder,
+    _record_label_version_snapshot,
     _walk_output_tensors_with_paths,
     apply_live_hooks_to_outputs,
     log_function_output_tensors,
@@ -1075,6 +1076,96 @@ def _register_inplace_live_grad_hook(trace: Any, tensor: Any, raw_label: str) ->
     _add_tensor_backward_hook(trace, tensor, raw_label)
 
 
+def _storage_overlap_byte_interval(t: torch.Tensor) -> tuple[int, int]:
+    """Return the ``[start, end)`` byte interval ``t`` can address in its storage.
+
+    Conservative interval form (stride gaps ignored): a strided view's
+    addressable extent is treated as one contiguous byte range, so two views
+    with interleaved-but-disjoint elements inside the same range are treated
+    as overlapping. That errs toward LINKING a mutation to a possibly-affected
+    alias, never toward missing one. Negative strides do not exist in torch;
+    zero strides (``expand``) contribute nothing to the span.
+    """
+
+    element_size = t.element_size()
+    start = t.storage_offset() * element_size
+    if t.numel() == 0:
+        return (start, start)
+    span = 1 + sum((size - 1) * stride for size, stride in zip(t.shape, t.stride()))
+    return (start, start + span * element_size)
+
+
+def _propagate_mutation_label_to_storage_aliases(
+    trace: Any, mutated: torch.Tensor, out_label: str
+) -> None:
+    """Advance live labels of storage aliases overlapping an in-place op's target.
+
+    An in-place op that mutates a VIEW (``v = y[0]; v.add_(100.)``) changes the
+    BASE tensor's content, but the base is a different Python object: only the
+    view's label used to advance, so the mutation op was a dead end and later
+    consumers of the base bound to the stale pre-mutation parent while storing
+    the post-mutation value (W3 audit F1, silent). Resolve every OTHER live
+    labeled tensor whose storage byte range overlaps the mutated target and
+    advance its label to the mutating op, exactly like the direct same-object
+    propagation. Value replay is untouched: the consumer's version-snapshot
+    machinery (``_get_parent_output_version_snapshot``) records the alias's
+    actual content per child, so replay and perturbation both see the real
+    full-tensor values.
+
+    Parameters
+    ----------
+    trace
+        Active capture trace.
+    mutated
+        The live tensor object the op actually wrote through (``args[0]`` for
+        in-place/setter ops, each destination for ``out=`` ops).
+    out_label
+        The mutating op's freshly issued raw label.
+    """
+
+    from ._tl import session_storage_alias_candidates
+    from .ops import _record_label_version_snapshot
+
+    # ``untyped_storage`` is a WITNESSED host-escape method; TorchLens's own
+    # bookkeeping reads must run under pause_logging (see ``_tl._pinned_storage``).
+    with _state.pause_logging():
+        try:
+            storage_ptr = mutated.untyped_storage().data_ptr()
+        except Exception:
+            return
+        candidates = session_storage_alias_candidates(storage_ptr)
+        if not candidates or (len(candidates) == 1 and candidates[0] is mutated):
+            return
+        mutated_lo, mutated_hi = _storage_overlap_byte_interval(mutated)
+        if mutated_hi <= mutated_lo:
+            return
+        for alias in candidates:
+            if (
+                alias is mutated
+                or not isinstance(alias, torch.Tensor)
+                or isinstance(alias, torch.nn.Parameter)
+            ):
+                continue
+            # Gated read: rejects foreign-session stamps and storage-rebound
+            # objects, so a stale index entry can never act as a live alias.
+            alias_label = get_tensor_label(alias)
+            if alias_label is None or alias_label == out_label:
+                continue
+            try:
+                if (
+                    alias.untyped_storage().data_ptr() != storage_ptr
+                    or alias.device != mutated.device
+                ):
+                    continue
+                alias_lo, alias_hi = _storage_overlap_byte_interval(alias)
+            except Exception:
+                continue
+            if alias_lo < mutated_hi and mutated_lo < alias_hi:
+                set_tensor_label(alias, out_label)
+                _register_inplace_live_grad_hook(trace, alias, out_label)
+                _record_label_version_snapshot(alias)
+
+
 def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[..., Any]:
     """Wrap a single torch function with toggle-gated logging.
 
@@ -1452,9 +1543,56 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
                     if was_inplace:
                         set_tensor_label(args[0], out_label)
                         _register_inplace_live_grad_hook(trace, args[0], out_label)
+                        # W3 F1: the write may have gone through a VIEW; every
+                        # other live labeled alias whose storage bytes overlap
+                        # the target (its base, an overlapping sibling view)
+                        # saw its content change too, so consumers of THOSE
+                        # objects must also bind to this mutation op.
+                        _propagate_mutation_label_to_storage_aliases(trace, args[0], out_label)
                     if isinstance(return_value, torch.Tensor):
                         set_tensor_label(return_value, out_label)
                         _register_inplace_live_grad_hook(trace, return_value, out_label)
+
+            # W3 F6: the module-boundary identity mint (force_distinct_return)
+            # logs against a distinct safe copy so the boundary op attaches to
+            # the module's output_ops -- but the CALLER keeps the original
+            # object. Without advancing the live original's label, every
+            # downstream consumer bound to the pre-module label and the
+            # boundary node dangled (nn.Identity / pass-through modules).
+            # Advance the live object exactly like same-object propagation;
+            # the minted copy still carries the label for module bookkeeping.
+            if (
+                force_distinct_return
+                and out_orig is out_before_hooks
+                and len(args) > 0
+                and isinstance(args[0], torch.Tensor)
+                and not isinstance(args[0], torch.nn.Parameter)
+            ):
+                boundary_label = get_tensor_label(out_orig)
+                if boundary_label is not None:
+                    set_tensor_label(args[0], boundary_label)
+                    _register_inplace_live_grad_hook(trace, args[0], boundary_label)
+                    _record_label_version_snapshot(args[0])
+
+            # W3 F1 (out= family): an ``out=`` destination may itself be a view
+            # of a larger live tensor (``torch.add(x, 1, out=y[0])``); the
+            # destination object's label advances at logging time, but its
+            # overlapping aliases need the same mutation-provenance advance.
+            out_kwarg_destinations = kwargs.get("out")
+            if isinstance(out_kwarg_destinations, torch.Tensor):
+                out_destination_tensors: tuple[torch.Tensor, ...] = (out_kwarg_destinations,)
+            elif isinstance(out_kwarg_destinations, (list, tuple)):
+                out_destination_tensors = tuple(
+                    item for item in out_kwarg_destinations if isinstance(item, torch.Tensor)
+                )
+            else:
+                out_destination_tensors = ()
+            for out_destination in out_destination_tensors:
+                destination_label = get_tensor_label(out_destination)
+                if destination_label is not None:
+                    _propagate_mutation_label_to_storage_aliases(
+                        trace, out_destination, destination_label
+                    )
 
         mark_expected_original_accounted(expected_token, captured=call_emitted_op)
         if (

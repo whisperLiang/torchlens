@@ -35,6 +35,7 @@ __all__ = [
     "session_meta_is_anchored",
     "session_label_storage_intact",
     "session_labeled_tensors",
+    "session_storage_alias_candidates",
     "sweep_retired_label_stamps",
     "clear_tensor_label",
     "promote_label_to_buffer_source_and_clear_label",
@@ -393,7 +394,7 @@ _LABEL_SESSION_COUNTER = itertools.count(1)
 class _LabelSession:
     """One capture session's identity for issued raw labels."""
 
-    __slots__ = ("token", "stamped")
+    __slots__ = ("token", "stamped", "by_storage_ptr")
 
     def __init__(self, token: int) -> None:
         """Initialize an empty anchor registry for one capture session.
@@ -408,6 +409,13 @@ class _LabelSession:
         # inventory-driven cleanup (r83 C1 root A). One entry per OBJECT, not
         # per stamp: relabeling an in-place receiver does not re-register.
         self.stamped: "WeakIdKeyDictionary" = WeakIdKeyDictionary()
+        # Weak per-storage-base-address index of the stamped inventory, so an
+        # in-place op can resolve OTHER live labeled tensors sharing its
+        # target's storage (view-mediated mutation provenance -- W3 F1) in
+        # O(aliases) instead of scanning every stamped object. Keyed by the
+        # stamp-time ``UntypedStorage.data_ptr()``; consumers re-validate the
+        # LIVE storage before acting, so a stale (rebound/dead) entry is inert.
+        self.by_storage_ptr: dict[int, "WeakIdKeyDictionary"] = {}
 
 
 _ACTIVE_LABEL_SESSION: Optional[_LabelSession] = None
@@ -522,6 +530,33 @@ def session_labeled_tensors() -> List[Any]:
     if session is None:
         return []
     return list(session.stamped.keys())
+
+
+def session_storage_alias_candidates(storage_ptr: int) -> List[Any]:
+    """Return live tensors this session stamped whose stamp-time storage base matches.
+
+    Parameters
+    ----------
+    storage_ptr : int
+        ``UntypedStorage.data_ptr()`` of the storage of interest.
+
+    Returns
+    -------
+    List[Any]
+        Still-live labeled tensors indexed under that base address. Callers
+        must re-validate the LIVE storage (and label, via the gated
+        :func:`get_tensor_label`) before treating an entry as a current alias:
+        the index is keyed at stamp time, so a rebound or superseded entry is
+        possible and must stay inert.
+    """
+
+    session = _ACTIVE_LABEL_SESSION
+    if session is None:
+        return []
+    bucket = session.by_storage_ptr.get(storage_ptr)
+    if bucket is None:
+        return []
+    return list(bucket.keys())
 
 
 def _session_gate_blocks(meta: TensorMeta) -> bool:
@@ -848,6 +883,20 @@ def set_tensor_label(t: Any, label: str) -> None:
             # Not weak-referenceable: the anchor still holds; only the
             # inventory-driven cleanup skips it.
             pass
+    # Storage-alias index (W3 F1): registered on EVERY stamp (a relabel keeps
+    # the same storage, so re-insertion is idempotent) so in-place ops can
+    # resolve overlapping live labeled aliases of their target.
+    if meta.label_storage is not None:
+        try:
+            storage_ptr = meta.label_storage.data_ptr()
+        except Exception:
+            storage_ptr = None
+        if storage_ptr is not None:
+            bucket = session.by_storage_ptr.setdefault(storage_ptr, WeakIdKeyDictionary())
+            try:
+                bucket[t] = True
+            except TypeError:
+                pass
 
 
 def get_tensor_label(t: Any) -> Optional[str]:
