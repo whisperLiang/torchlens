@@ -78,6 +78,24 @@ class RecurrenceNode:
     each other: an N-step ``nn.LSTMCell`` loop is one N-pass h-layer plus one N-pass
     c-layer, mirroring how ``torch.max`` values/indices already split. Same-function,
     same-parameter merging must therefore never fuse nodes across output slots."""
+    module_site: Optional[tuple[str, ...]] = None
+    """Module ADDRESS stack (addresses only, no pass numbers), or ``None`` if unknown.
+
+    Exact parameter identity must never override module identity: two DISTINCT modules
+    that deliberately share a weight tensor (a tied ``encoder``/``decoder`` pair) are
+    two semantic sites, not two passes of one recurrent layer. A genuinely reused
+    module (ALBERT-style, one ``nn.Module`` called N times) keeps ONE address across
+    calls and still groups. ``None`` (backends that do not supply the field) preserves
+    the historical parameter-only behavior."""
+    arg_signature: Optional[str] = None
+    """Structural fingerprint of the call's NON-TENSOR arguments, or ``None`` if unknown.
+
+    Same-parameter identity must not override call semantics: two ``F.conv2d`` calls
+    sharing one kernel but differing in ``padding``/``stride``/``dilation``/``groups``
+    are different operations, never recurrent passes of one layer. The fingerprint
+    deliberately excludes tensor arguments AND their shapes so genuine variable-length
+    recurrence (a loop whose activations shrink each step) keeps one signature across
+    passes. ``None`` preserves the historical behavior."""
     recurrence_anchored: bool = False
     """Whether this op has a reused persistent identity that anchors genuine recurrence.
 
@@ -154,6 +172,8 @@ class _MutableRecurrenceNode:
     param_barcodes: tuple[str, ...]
     output_slot: Optional[int] = None
     recurrence_anchored: bool = False
+    module_site: Optional[tuple[str, ...]] = None
+    arg_signature: Optional[str] = None
 
 
 @dataclass
@@ -234,6 +254,8 @@ class _GroupingWorkspace:
                 param_barcodes=tuple(node.param_barcodes),
                 output_slot=node.output_slot,
                 recurrence_anchored=node.recurrence_anchored,
+                module_site=node.module_site,
+                arg_signature=node.arg_signature,
             )
             for label, node in graph.nodes.items()
             if label in eligible and node.retain and not node.pruned
@@ -1057,6 +1079,52 @@ def _seed_reaches(
     return found
 
 
+_ParamCallIdentity = Tuple[
+    str,
+    Tuple[str, ...],
+    Optional[int],
+    Optional[Tuple[str, ...]],
+    Optional[str],
+]
+
+
+def _param_call_identity(node: _MutableRecurrenceNode) -> _ParamCallIdentity:
+    """Return the full call identity two parameterized ops must share to be one layer.
+
+    Recurrent passes of ONE layer are repeated executions of the SAME call: same
+    function, same parameters, same output slot, same module address, and same
+    non-tensor structural arguments. Exact parameter identity alone must not
+    override the other axes:
+
+    * ``module_site`` -- two DISTINCT modules deliberately sharing a weight tensor
+      (tied ``encoder``/``decoder``) are two semantic sites, never a false 2-pass
+      recurrent layer. A genuinely reused module keeps one address and still groups.
+    * ``arg_signature`` -- one kernel applied with ``padding=0`` and ``padding=1``
+      is two different operations with different output structure, not recurrence.
+
+    ``None`` values (backends that do not supply the newer fields) compare equal to
+    each other, preserving the historical parameter-only behavior for those feeds.
+
+    Parameters
+    ----------
+    node:
+        Parameterized workspace node.
+
+    Returns
+    -------
+    _ParamCallIdentity
+        Hashable identity tuple.
+    """
+
+    return (
+        node.func_name,
+        tuple(sorted(node.param_barcodes)),
+        node.output_slot,
+        node.module_site,
+        node.arg_signature,
+    )
+
+
 def _merge_iso_groups_to_layers(
     workspace: _GroupingWorkspace,
     iso_node_groups: Dict[str, list[str]],
@@ -1136,6 +1204,17 @@ def _merge_iso_groups_to_layers(
             )
             node1 = workspace.nodes[node1_label]
             node2 = workspace.nodes[node2_label]
+            if (
+                node1.uses_params
+                and node2.uses_params
+                and _param_call_identity(node1) != _param_call_identity(node2)
+            ):
+                # Two parameterized ops that differ in module address, output slot,
+                # or non-tensor call structure are different semantic sites; no
+                # adjacency or shared-parameter evidence may unite them as passes
+                # of one recurrent layer. Identity equality is transitive, so
+                # allowed unions can never chain around this veto.
+                continue
             pair_anchored = node1.recurrence_anchored or node2.recurrence_anchored
             if not (node1.uses_params or node2.uses_params or pair_anchored):
                 # Two bare functional ops sitting inside DIFFERENT parametric loops
@@ -1173,24 +1252,21 @@ def _merge_iso_groups_to_layers(
             ):
                 union(node1_label, node2_label)
 
-    param_barcode_groups: dict[tuple[str, tuple[str, ...], Optional[int]], list[str]] = defaultdict(
-        list
-    )
+    param_barcode_groups: dict[_ParamCallIdentity, list[str]] = defaultdict(list)
     for node_label in all_iso_nodes:
         node = workspace.nodes[node_label]
         if node.uses_params and node.param_barcodes:
-            # The output slot is part of the identity: co-outputs of one call (h and
-            # c of an LSTMCell) share function name and parameters but are DISTINCT
-            # layers, not sequential passes of each other. Omitting the slot doubled
-            # ``num_passes`` for every multi-output recurrent cell.
-            barcode_key = (
-                node.func_name,
-                tuple(sorted(node.param_barcodes)),
-                node.output_slot,
-            )
-            param_barcode_groups[barcode_key].append(node_label)
+            # The FULL call identity is the key, not bare parameter identity. The
+            # output slot is part of it: co-outputs of one call (h and c of an
+            # LSTMCell) share function name and parameters but are DISTINCT layers,
+            # not sequential passes of each other (omitting the slot doubled
+            # ``num_passes`` for every multi-output recurrent cell). The module
+            # address and non-tensor arg signature are equally part of it: tied
+            # distinct modules and same-kernel/different-padding convolutions were
+            # unconditionally unioned here into false recurrent layers.
+            param_barcode_groups[_param_call_identity(node)].append(node_label)
 
-    for barcode_key, nodes_with_same_params in param_barcode_groups.items():
+    for _identity_key, nodes_with_same_params in param_barcode_groups.items():
         if len(nodes_with_same_params) > 1:
             first = nodes_with_same_params[0]
             for other in nodes_with_same_params[1:]:
