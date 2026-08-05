@@ -272,6 +272,12 @@ class ReceptiveFieldView:
         source:
             Optional ancestor graph point. When given, the returned box is in the
             SOURCE operation's output-grid coordinate space (not this operation's).
+        direction:
+            Optional per-call receptive/projective direction override. ``None``
+            uses the view's bound direction.
+        target:
+            Optional descendant graph point selecting the far endpoint of a
+            projective query. Not permitted together with ``source``.
         clip:
             Whether bounds are clipped to captured input extents.
 
@@ -383,6 +389,12 @@ class ReceptiveFieldView:
             Optional exact IO role or model-input operation.
         source:
             Reserved ancestor graph point for layer-to-layer receptive probes.
+        direction:
+            Optional per-call receptive/projective direction override. ``None``
+            uses the view's bound direction.
+        target:
+            Optional descendant graph point selecting the far endpoint of a
+            projective query. Not permitted together with ``source``.
         atol, rtol:
             Non-negative gradient support thresholds.
         retain_graph:
@@ -566,6 +578,12 @@ class ReceptiveFieldView:
             Optional complete target output-element index.
         input:
             Optional exact IO role or model-input operation.
+        direction:
+            Optional per-call receptive/projective direction override. ``None``
+            uses the view's bound direction.
+        target:
+            Optional descendant graph point selecting the far endpoint of a
+            projective overlay.
         image:
             Optional source image override.
         gradient:

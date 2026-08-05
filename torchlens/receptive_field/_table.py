@@ -274,6 +274,11 @@ def build_rf_profile(
         Optional profile column used for stable sorting.
     ascending:
         Whether an explicit ``sort_by`` sorts in ascending order.
+    direction:
+        ``"receptive"`` (default) reports per-input receptive fields;
+        ``"projective"`` reports source-anchored projective fields keyed by
+        projection target. ``input=`` filtering applies only to the receptive
+        direction.
 
     Returns
     -------
