@@ -600,7 +600,6 @@ def _merge_grouped_options(
     *,
     option: Any | None,
     option_factory: Callable[[], Any],
-    fields: tuple[str, ...],
     flat_to_group: Mapping[str, str],
     flat_values: Mapping[str, Any],
     group_name: str,
@@ -616,8 +615,6 @@ def _merge_grouped_options(
         Caller-supplied grouped options, if any.
     option_factory:
         Zero-argument constructor for defaults.
-    fields:
-        Canonical fields to preserve.
     flat_to_group:
         Mapping from flat kwarg names to canonical option field names.
     flat_values:
@@ -1814,7 +1811,6 @@ def merge_capture_options(
         _merge_grouped_options(
             option=capture,
             option_factory=CaptureOptions,
-            fields=_CAPTURE_FIELDS,
             flat_to_group=_CAPTURE_FLAT_TO_GROUP,
             flat_values=flat_values,
             group_name="capture",
@@ -1833,7 +1829,6 @@ def merge_save_options(*, save: SaveOptions | None, **flat_values: Any) -> SaveO
         _merge_grouped_options(
             option=save,
             option_factory=SaveOptions,
-            fields=_SAVE_FIELDS,
             flat_to_group=_SAVE_FLAT_TO_GROUP,
             flat_values=flat_values,
             group_name="save",
@@ -1933,7 +1928,6 @@ def merge_replay_options(*, replay: ReplayOptions | None, **flat_values: Any) ->
         _merge_grouped_options(
             option=replay,
             option_factory=ReplayOptions,
-            fields=_REPLAY_FIELDS,
             flat_to_group=_REPLAY_FLAT_TO_GROUP,
             flat_values=flat_values,
             group_name="replay",
@@ -1956,7 +1950,6 @@ def merge_intervention_options(
         _merge_grouped_options(
             option=intervention,
             option_factory=InterventionOptions,
-            fields=_INTERVENTION_FIELDS,
             flat_to_group=_INTERVENTION_FLAT_TO_GROUP,
             flat_values=flat_values,
             group_name="intervention",
@@ -1980,7 +1973,6 @@ def merge_streaming_options(
         _merge_grouped_options(
             option=streaming,
             option_factory=StreamingOptions,
-            fields=_STREAMING_FIELDS,
             flat_to_group=_STREAMING_FLAT_TO_GROUP,
             flat_values=flat_values,
             group_name="streaming",
