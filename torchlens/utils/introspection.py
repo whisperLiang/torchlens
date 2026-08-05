@@ -636,9 +636,14 @@ def iter_accessible_attributes(
         # Attribute access can fail for any number of reasons, especially when
         # working with objects that we don't know anything about.  This
         # function makes a best-effort attempt to access every attribute, but
-        # gracefully skips any that cause problems.
+        # gracefully skips any that cause problems. Warnings raised *during
+        # access* (deprecated properties, etc.) are suppressed as promised; the
+        # suppression is scoped narrowly to the getattr so it never leaks into
+        # the consumer's code between yields.
         try:
-            attr = getattr(obj, attr_name)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                attr = getattr(obj, attr_name)
         except Exception:
             continue
 
