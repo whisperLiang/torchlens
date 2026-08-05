@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import torchlens as tl
 from torchlens.receptive_field import ReceptiveFieldValidationStatus
@@ -221,3 +222,112 @@ def test_plain_maxpool_stays_exact() -> None:
     box = pool.receptive_field.at((1, 1))
     assert box.exact
     assert_box_against_truth(box, truth, (2, 3), context="plain maxpool RF")
+
+
+# ---------------------------------------------------------------------------
+# G2 — antialiased interpolation
+# ---------------------------------------------------------------------------
+
+
+class _Interp(nn.Module):
+    """Interpolate wrapper covering keyword and positional argument spellings."""
+
+    def __init__(self, *, positional: bool = False, **kwargs: object) -> None:
+        super().__init__()
+        self.positional = positional
+        self.kwargs = kwargs
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.positional:
+            return F.interpolate(
+                x,
+                self.kwargs.get("size"),
+                self.kwargs.get("scale_factor"),
+                self.kwargs.get("mode", "nearest"),
+                self.kwargs.get("align_corners"),
+                self.kwargs.get("recompute_scale_factor"),
+                self.kwargs.get("antialias", False),
+            )
+        return F.interpolate(x, **self.kwargs)
+
+
+@pytest.mark.parametrize(
+    ("mode", "in_size", "kwargs"),
+    [
+        ("bilinear", 4, {"scale_factor": (0.5, 0.5)}),
+        ("bilinear", 6, {"size": (2, 2)}),
+        ("bilinear", 13, {"size": (7, 7)}),  # odd/odd scale: float-boundary taps
+        ("bilinear", 8, {"size": (3, 3)}),
+        ("bicubic", 9, {"size": (3, 3)}),  # interior filter zeros (holes)
+        ("bicubic", 4, {"scale_factor": (0.5, 0.5)}),
+        ("bilinear", 4, {"size": (6, 6)}),  # antialiased upsampling
+    ],
+)
+def test_antialias_interpolate_rf_pf_against_truth(mode: str, in_size: int, kwargs: dict) -> None:
+    """Exact AA boxes equal, and inexact ones contain, the perturbation truth."""
+
+    model = _Interp(mode=mode, align_corners=False, antialias=True, **kwargs)
+    x = torch.randn(1, 1, in_size, in_size, dtype=torch.float64)
+    trace = capture(model, x)
+    interp = op_named(trace, "interpolate")
+    source = sole_input(trace)
+    out_extent = int(interp.shape[-1])
+    for out_pos in ((0, 0), (out_extent - 1, out_extent - 1), (0, out_extent // 2)):
+        truth = true_receptive_support(model, x, (0, 0, *out_pos), deltas=(0.5, -0.5))
+        box = interp.receptive_field.at(out_pos)
+        assert_box_against_truth(
+            box, truth, (2, 3), context=f"AA RF {mode} in{in_size} out{out_pos}"
+        )
+    for src in ((0, 1), (in_size - 1, in_size - 1), (in_size // 2, 0)):
+        truth = true_projective_support(model, x, (0, 0, *src), deltas=(0.5, -0.5))
+        box = source.projective_field.at(src)
+        assert_box_against_truth(box, truth, (2, 3), context=f"AA PF {mode} in{in_size} src{src}")
+
+
+def test_antialias_positional_and_keyword_spellings_agree() -> None:
+    """The r21 positional-antialias repro: both spellings give the same exact box."""
+
+    x = torch.randn(1, 1, 4, 4, dtype=torch.float64)
+    boxes = []
+    for positional in (False, True):
+        model = _Interp(
+            positional=positional,
+            scale_factor=(0.5, 0.5),
+            mode="bilinear",
+            align_corners=False if positional else None,
+            antialias=True,
+        )
+        trace = capture(model, x)
+        interp = op_named(trace, "interpolate")
+        box = interp.receptive_field.at((0, 0))
+        boxes.append([(axis.clipped_start, axis.clipped_stop) for axis in box.axes[-2:]])
+        assert box.exact
+        verification = tl.receptive_field.verify(trace, units="center")
+        assert verification.passed
+    assert boxes[0] == boxes[1] == [(0, 3), (0, 3)]
+
+
+def test_antialias_align_corners_true_fails_closed() -> None:
+    """Uncertified AA configurations must refuse rather than claim geometry."""
+
+    model = _Interp(size=(3, 3), mode="bicubic", align_corners=True, antialias=True)
+    trace = capture(model, torch.randn(1, 1, 7, 7, dtype=torch.float64))
+    interp = op_named(trace, "interpolate")
+    with pytest.raises(Exception, match="(?i)geometry|gradient"):
+        interp.receptive_field.at((0, 0))
+
+
+def test_non_antialiased_interpolate_regression() -> None:
+    """The AA branch must not disturb ordinary interpolation geometry."""
+
+    for mode, align in (("bilinear", False), ("bilinear", True), ("nearest", None)):
+        kwargs = {"size": (3, 3), "mode": mode}
+        if align is not None:
+            kwargs["align_corners"] = align
+        model = _Interp(**kwargs)
+        x = torch.randn(1, 1, 7, 7, dtype=torch.float64)
+        trace = capture(model, x)
+        interp = op_named(trace, "interpolate")
+        truth = true_receptive_support(model, x, (0, 0, 1, 1), deltas=(0.5, -0.5))
+        box = interp.receptive_field.at((1, 1))
+        assert_box_against_truth(box, truth, (2, 3), context=f"non-AA {mode} ac={align}")
