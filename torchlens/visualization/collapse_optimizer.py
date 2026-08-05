@@ -1,4 +1,22 @@
-"""Tree-cut dynamic-programming optimizer for v2 auto collapse."""
+"""Bounded beam-search tree-cut optimizer for v2 auto collapse.
+
+The selection is a memoized tree cut with a deterministic, bounded frontier,
+not an exact optimizer:
+
+- every frontier merge keeps at most one point per rendered node count and at
+  most ``FRONTIER_CAP`` node-count buckets, so reachable counts can be pruned
+  (a beam, with classic beam suboptimality);
+- per-count pruning minimizes the additive sum of box costs, while the global
+  objective (:func:`_global_q` / :func:`_global_max_q`) also adds a
+  non-additive ``w_max * max(box_costs)`` term, so a same-count point that
+  wins globally can be pruned locally;
+- subtrees larger than ``K_CAP`` rendered nodes are dropped from frontiers
+  entirely.
+
+The result is a deterministic approximation of the stated objective. "DP" and
+"frontier" in the helper names refer to the memoized structure, not to an
+optimality guarantee.
+"""
 
 from __future__ import annotations
 
@@ -242,7 +260,7 @@ class _MemoKey:
 
 
 _RESULT_CACHE: weakref.WeakKeyDictionary[
-    object, dict[tuple[RenderContext, str], OptimizerResult]
+    object, dict[tuple[RenderContext, str, OptimizerWeights], OptimizerResult]
 ] = weakref.WeakKeyDictionary()
 _SCHEDULE_CACHE: weakref.WeakKeyDictionary[object, dict[RenderContext, CollapseSchedule]] = (
     weakref.WeakKeyDictionary()
@@ -274,7 +292,10 @@ def select_collapse_plan(
         Selected collapse result, or a declined result when unsupported.
     """
 
-    cache_key = (context, mode)
+    resolved_weights = OptimizerWeights() if weights is None else weights
+    # Weights are part of the cache identity: a weighted result must never be
+    # served for a differently weighted call (stale-cache defect class).
+    cache_key = (context, mode, resolved_weights)
     cached_by_context = _RESULT_CACHE.setdefault(trace, {})
     cached = cached_by_context.get(cache_key)
     if cached is not None:
@@ -283,7 +304,6 @@ def select_collapse_plan(
         result = _select_max_plan(trace, context, weights)
         cached_by_context[cache_key] = result
         return result
-    resolved_weights = OptimizerWeights() if weights is None else weights
     analysis = analyze_collapse(trace)
     start = time.perf_counter()
     hidden_counts = _rendered_module_hidden_counts(trace, context)
@@ -485,7 +505,9 @@ def collapse_schedule(
     context:
         Rendering context.
     weights:
-        Optional optimizer weights.
+        Accepted for signature compatibility and ignored: the public float
+        schedule is weight-independent and always derives from the
+        default-weight max plan, so caching by context alone is sound.
 
     Returns
     -------
@@ -521,7 +543,7 @@ def collapse_schedule(
                     1.0,
                     max_count,
                     max_count,
-                    _collapsed_addresses_for_result(max_result),
+                    _reported_collapsed_addresses(max_result),
                     max_result.plan,
                 ),
             )
@@ -544,7 +566,10 @@ def collapse_schedule(
             previous_count = visible_count
     max_addresses = _collapsed_addresses_for_result(max_result)
     if raw_steps[-1][2] != max_count or raw_steps[-1][0] != max_addresses:
-        raw_steps.append((max_addresses, max_result.plan, max_count))
+        # The append decision keys on the narrow module-address set (frozen
+        # schedule behavior); the appended max step reports the honest wider
+        # set including op-segment-hidden op labels.
+        raw_steps.append((_reported_collapsed_addresses(max_result), max_result.plan, max_count))
     denominator = max(full_count - max_count, 1)
     steps = tuple(
         CollapseScheduleStep(
@@ -611,6 +636,33 @@ def _collapsed_addresses_for_result(result: OptimizerResult) -> frozenset[str]:
     addresses.update(result.repeat_folds)
     for segment in (result.segments or {}).values():
         addresses.update(segment.members)
+    return frozenset(addresses)
+
+
+def _reported_collapsed_addresses(result: OptimizerResult) -> frozenset[str]:
+    """Return the honest public hidden set for an optimizer result.
+
+    Extends :func:`_collapsed_addresses_for_result` with the concrete op
+    labels hidden by operation segments, which hide rendered nodes without
+    collapsing any module address. This wider set is used only for public
+    schedule-step reporting; schedule construction keys on the narrow
+    module-address set to preserve the frozen schedule behavior.
+
+    Parameters
+    ----------
+    result:
+        Optimizer result to inspect.
+
+    Returns
+    -------
+    frozenset[str]
+        Collapsed module addresses plus op labels hidden by op segments.
+    """
+
+    addresses = set(_collapsed_addresses_for_result(result))
+    for segment in (result.segments or {}).values():
+        if segment.kind == "op":
+            addresses.update(str(op) for op in segment.ops)
     return frozenset(addresses)
 
 
@@ -994,6 +1046,7 @@ def _condense_plan_with_child_segments(
     nodes: list[PlanNode] = []
     segments: dict[str, SegmentDescriptor] = {}
     hidden_raw_ops: set[str] = set()
+    concrete_raw_labels, _ = _concrete_plan_op_labels(trace, plan.nodes)
     index = 0
     while index < len(plan.nodes):
         node = plan.nodes[index]
@@ -1006,9 +1059,14 @@ def _condense_plan_with_child_segments(
             index,
             total_ops,
             dominance_limit=dominance_limit,
+            concrete_labels=concrete_raw_labels,
         )
         if op_run:
-            descriptor = _make_op_segment_descriptor(trace, context, op_run)
+            concrete_run = tuple(
+                concrete_raw_labels.get(index + offset, label)
+                for offset, label in enumerate(op_run)
+            )
+            descriptor = _make_op_segment_descriptor(trace, context, op_run, concrete_run)
             segments[descriptor.name] = descriptor
             nodes.append(OpSegment(op_run))
             index += len(op_run)
@@ -1027,12 +1085,13 @@ def _condense_plan_with_child_segments(
             covered_ops = _child_segment_covered_ops(analysis, run)
             descriptor = _make_child_segment_descriptor(trace, context, run, covered_ops)
             segments[descriptor.name] = descriptor
-            hidden_raw_ops.update(covered_ops)
+            hidden_raw_ops.update(str(label).rsplit(":", 1)[0] for label in covered_ops)
             nodes.append(ChildSegment(run))
             index += len(run)
             continue
         nodes.append(node)
         index += 1
+    _assert_segment_descriptor_parity(nodes, segments)
     return CollapsePlan(nodes=tuple(nodes), context=context), segments
 
 
@@ -1062,14 +1121,17 @@ def _segments_from_plan_nodes(
     """
 
     segments: dict[str, SegmentDescriptor] = {}
-    for node in plan.nodes:
+    _, concrete_segment_ops = _concrete_plan_op_labels(trace, plan.nodes)
+    for index, node in enumerate(plan.nodes):
         if isinstance(node, ChildSegment):
             covered_ops = _child_segment_covered_ops(analysis, node.members)
             descriptor = _make_child_segment_descriptor(trace, context, node.members, covered_ops)
             segments[descriptor.name] = descriptor
         elif isinstance(node, OpSegment):
-            descriptor = _make_op_segment_descriptor(trace, context, node.ops)
+            concrete = concrete_segment_ops.get(index, tuple(node.ops))
+            descriptor = _make_op_segment_descriptor(trace, context, node.ops, concrete)
             segments[descriptor.name] = descriptor
+    _assert_segment_descriptor_parity(plan.nodes, segments)
     return segments
 
 
@@ -1085,25 +1147,88 @@ def _plan_respects_max_dominance(
     total_ops = _optimizer_total_units(trace, plan.context)
     if total_ops <= 0:
         return True
-    segment_by_member = {
-        tuple(segment.members if segment.kind == "child" else segment.ops): segment
-        for segment in segments.values()
-    }
+    # Descriptors are built in plan order, so pair each segment plan node with
+    # its descriptor positionally; identity keys such as member tuples are not
+    # unique under per-pass segments of reused modules.
+    ordered_segments = list(segments.values())
+    position = 0
     for node in plan.nodes:
         if isinstance(node, ModuleBox):
             address = node.call.rsplit(":", 1)[0]
             signal = analysis.signals.get(address)
             if signal is not None and signal.hidden_ops / total_ops > dominance_limit:
                 return False
-        elif isinstance(node, ChildSegment):
-            segment = segment_by_member.get(tuple(node.members))
-            if segment is not None and segment.num_ops / total_ops > dominance_limit:
-                return False
-        elif isinstance(node, OpSegment):
-            segment = segment_by_member.get(tuple(node.ops))
+        elif isinstance(node, (ChildSegment, OpSegment)):
+            segment = ordered_segments[position] if position < len(ordered_segments) else None
+            position += 1
             if segment is not None and segment.num_ops / total_ops > dominance_limit:
                 return False
     return True
+
+
+def _concrete_plan_op_labels(
+    trace: "Trace",
+    nodes: Sequence[PlanNode],
+) -> tuple[dict[int, str], dict[int, tuple[str, ...]]]:
+    """Attribute pass-qualified op identity to plan nodes by occurrence order.
+
+    Plan nodes carry pass-free render labels, so an op executed on multiple
+    module passes appears several times under one base label. Rendered plans
+    enumerate ops in execution order, which makes the ``k``-th plan occurrence
+    of a base label the ``k``-th pass of that op layer.
+
+    Parameters
+    ----------
+    trace:
+        Trace being optimized.
+    nodes:
+        Plan-node sequence.
+
+    Returns
+    -------
+    tuple[dict[int, str], dict[int, tuple[str, ...]]]
+        Concrete labels for string ``RawOp`` nodes keyed by plan index, and
+        concrete member labels for ``OpSegment`` nodes keyed by plan index.
+        Entries that cannot be attributed to a concrete op are omitted from
+        the raw mapping and left pass-free in the segment mapping.
+    """
+
+    valid = {str(op.label) for op in trace.ops}
+    counts: dict[str, int] = {}
+    raw: dict[int, str] = {}
+    segment_ops: dict[int, tuple[str, ...]] = {}
+
+    def resolve(base: str) -> str | None:
+        """Return the concrete label for the next occurrence of ``base``."""
+
+        if base in valid:
+            return base
+        counts[base] = counts.get(base, 0) + 1
+        qualified = f"{base}:{counts[base]}"
+        return qualified if qualified in valid else None
+
+    for index, node in enumerate(nodes):
+        if isinstance(node, RawOp) and isinstance(node.op, str):
+            resolved = resolve(node.op)
+            if resolved is not None:
+                raw[index] = resolved
+        elif isinstance(node, OpSegment):
+            segment_ops[index] = tuple(resolve(op) or op for op in node.ops)
+    return raw, segment_ops
+
+
+def _assert_segment_descriptor_parity(
+    nodes: Sequence[PlanNode],
+    segments: Mapping[str, SegmentDescriptor],
+) -> None:
+    """Fail loudly when segment descriptors collide before renderer exposure."""
+
+    segment_nodes = sum(isinstance(node, (ChildSegment, OpSegment)) for node in nodes)
+    assert len(segments) == segment_nodes, (
+        f"segment descriptor cardinality {len(segments)} != plan segment "
+        f"nodes {segment_nodes}; a non-injective segment identity would "
+        "silently drop rendered structure"
+    )
 
 
 def _legal_plan_op_segment_run(
@@ -1113,6 +1238,7 @@ def _legal_plan_op_segment_run(
     total_ops: int,
     *,
     dominance_limit: float,
+    concrete_labels: Mapping[int, str],
 ) -> tuple[str, ...] | None:
     """Return a legal consecutive raw-op segment run at ``start``.
 
@@ -1128,6 +1254,8 @@ def _legal_plan_op_segment_run(
         Total rendered operation units.
     dominance_limit:
         Maximum segment dominance.
+    concrete_labels:
+        Pass-qualified op labels for string ``RawOp`` nodes by plan index.
 
     Returns
     -------
@@ -1136,22 +1264,23 @@ def _legal_plan_op_segment_run(
     """
 
     labels: list[str] = []
-    op_by_label = {str(op.label).rsplit(":", 1)[0]: op for op in trace.ops}
-    op_order = {str(op.label).rsplit(":", 1)[0]: index for index, op in enumerate(trace.ops)}
+    op_order = {str(op.label): index for index, op in enumerate(trace.ops)}
     previous_index: int | None = None
-    for node in nodes[start:]:
+    for offset, node in enumerate(nodes[start:]):
         if not isinstance(node, RawOp) or not isinstance(node.op, str):
             break
-        label = node.op
-        current_index = op_order.get(label)
+        concrete = concrete_labels.get(start + offset)
+        if concrete is None:
+            break
+        current_index = op_order.get(concrete)
         if current_index is None:
             break
-        op = op_by_label[label]
+        op = trace.ops[concrete]
         if getattr(op, "is_input", False) or getattr(op, "is_output", False):
             break
         if previous_index is not None and current_index != previous_index + 1:
             break
-        labels.append(label)
+        labels.append(node.op)
         previous_index = current_index
     if len(labels) < 3:
         return None
@@ -1199,7 +1328,6 @@ def _legal_plan_child_segment_run(
         Legal run, or ``None``.
     """
 
-    _ = context
     addresses: list[str] = []
     parent: str | None = None
     for node in nodes[start:]:
@@ -1222,7 +1350,7 @@ def _legal_plan_child_segment_run(
             continue
         if not _segment_is_legal(candidate, graph):
             continue
-        hidden = _child_segment_hidden_units(analysis, candidate, hidden_counts)
+        hidden = _child_segment_hidden_units(analysis, candidate, hidden_counts, context.vis_mode)
         if total_ops > 0 and hidden / total_ops > dominance_limit:
             continue
         best = candidate
@@ -1233,11 +1361,19 @@ def _child_segment_hidden_units(
     analysis: CollapseAnalysis,
     addresses: tuple[str, ...],
     hidden_counts: Mapping[str, int],
+    vis_mode: str = "unrolled",
 ) -> int:
-    """Return rendered hidden-unit count for a candidate child segment."""
+    """Return rendered hidden-unit count for a candidate child segment.
+
+    The count is expressed in the active render currency: concrete
+    pass-qualified ops for unrolled graphs and deduplicated layer labels for
+    rolled graphs, matching the optimizer's total-unit normalization.
+    """
 
     covered_ops = _child_segment_covered_ops(analysis, addresses)
     if covered_ops:
+        if vis_mode == "rolled":
+            return len({str(label).rsplit(":", 1)[0] for label in covered_ops})
         return len(covered_ops)
     return sum(
         hidden_counts.get(address, analysis.signals[address].hidden_ops) for address in addresses
@@ -1265,6 +1401,16 @@ def _segment_is_legal(
     return _run_fold_is_chain_interval(addresses, graph)
 
 
+def _encode_segment_address(address: str) -> str:
+    """Return an injective Graphviz-safe encoding of one module address.
+
+    Escaping literal underscores before mapping dots keeps distinct addresses
+    distinct: ``a.b0`` becomes ``a_b0`` while ``a_b0`` becomes ``a__b0``.
+    """
+
+    return address.replace("_", "__").replace(".", "_")
+
+
 def _make_child_segment_descriptor(
     trace: "Trace",
     context: RenderContext,
@@ -1273,11 +1419,22 @@ def _make_child_segment_descriptor(
 ) -> SegmentDescriptor:
     """Build a renderer descriptor for one child segment."""
 
-    _ = context
     if covered_ops:
-        covered_entries = tuple(_trace_op_for_render_label(trace, label) for label in covered_ops)
-        num_layers = len(covered_entries)
-        num_buffers = sum(bool(entry.is_buffer) for entry in covered_entries)
+        covered_entries = tuple(_trace_op_for_concrete_label(trace, label) for label in covered_ops)
+        if context.vis_mode == "rolled":
+            seen_bases: set[str] = set()
+            num_layers = 0
+            num_buffers = 0
+            for label, entry in zip(covered_ops, covered_entries, strict=True):
+                base = str(label).rsplit(":", 1)[0]
+                if base in seen_bases:
+                    continue
+                seen_bases.add(base)
+                num_layers += 1
+                num_buffers += bool(entry.is_buffer)
+        else:
+            num_layers = len(covered_entries)
+            num_buffers = sum(bool(entry.is_buffer) for entry in covered_entries)
     else:
         num_layers = sum(
             int(getattr(trace.modules[address], "num_layers", 0) or 0) for address in addresses
@@ -1294,7 +1451,10 @@ def _make_child_segment_descriptor(
     )
     owner = _segment_owner_key(trace, addresses)
     label = _child_segment_label(addresses, num_layers, num_buffers, num_params)
-    name = f"{addresses[0].replace('.', '_')}__segment__{addresses[-1].replace('.', '_')}pass1"
+    name = (
+        f"{_encode_segment_address(addresses[0])}__segment__"
+        f"{_encode_segment_address(addresses[-1])}pass1"
+    )
     return SegmentDescriptor(
         name=name,
         kind="child",
@@ -1312,14 +1472,14 @@ def _child_segment_covered_ops(
     analysis: CollapseAnalysis,
     addresses: tuple[str, ...],
 ) -> tuple[str, ...]:
-    """Return pass-free raw op labels covered by a child segment."""
+    """Return concrete pass-qualified op labels covered by a child segment."""
 
     labels: list[str] = []
     for address in addresses:
         signal = analysis.signals.get(address)
         if signal is None:
             continue
-        labels.extend(str(label).rsplit(":", 1)[0] for label in signal.subtree_ops)
+        labels.extend(str(label) for label in signal.subtree_ops)
     return tuple(dict.fromkeys(labels))
 
 
@@ -1327,20 +1487,35 @@ def _make_op_segment_descriptor(
     trace: "Trace",
     context: RenderContext,
     labels: tuple[str, ...],
+    concrete: tuple[str, ...] | None = None,
 ) -> SegmentDescriptor:
-    """Build a renderer descriptor for one operation segment."""
+    """Build a renderer descriptor for one operation segment.
+
+    Parameters
+    ----------
+    trace:
+        Trace being optimized.
+    context:
+        Rendering context.
+    labels:
+        Pass-free plan labels in segment order.
+    concrete:
+        Pass-qualified op labels matching ``labels``. Falls back to the plan
+        labels when concrete attribution is unavailable.
+    """
 
     _ = context
-    owner = _op_segment_owner_key(trace, labels)
-    label = _op_segment_label(labels)
-    name = f"{labels[0].replace(':', 'pass')}__segment__{labels[-1].replace(':', 'pass')}pass1"
+    resolved = tuple(concrete) if concrete else tuple(labels)
+    owner = _op_segment_owner_key(trace, resolved)
+    label = _op_segment_label(trace, labels, resolved)
+    name = f"{resolved[0].replace(':', 'pass')}__segment__{resolved[-1].replace(':', 'pass')}"
     return SegmentDescriptor(
         name=name,
         kind="op",
         label=label,
-        ops=labels,
+        ops=resolved,
         owner=owner,
-        num_ops=len(labels),
+        num_ops=len(resolved),
         num_params=0,
     )
 
@@ -1350,7 +1525,7 @@ def _op_segment_owner_key(trace: "Trace", labels: tuple[str, ...]) -> str | None
 
     module_stacks: list[list[str]] = []
     for label in labels:
-        op = _trace_op_for_render_label(trace, label)
+        op = _trace_op_for_concrete_label(trace, label)
         modules = [str(module) for module in getattr(op, "modules", ()) or ()]
         if getattr(op, "is_atomic_module", False) and modules:
             modules = modules[:-1]
@@ -1375,10 +1550,44 @@ def _trace_op_for_render_label(trace: "Trace", label: str) -> "Op":
         return trace.ops[label]
 
 
-def _op_segment_label(labels: tuple[str, ...]) -> str:
-    """Return a class-free range label for an operation segment."""
+def _trace_op_for_concrete_label(trace: "Trace", label: str) -> "Op":
+    """Return the trace op for a concrete or legacy pass-free label.
 
-    return f"{labels[0]} ... {labels[-1]} -- {len(labels)} ops"
+    Pass-qualified labels are exact accessor keys and resolve without any
+    fuzzy lookup; legacy pass-free labels fall back to the render-label
+    helper.
+    """
+
+    if ":" in label:
+        return trace.ops[label]
+    return _trace_op_for_render_label(trace, label)
+
+
+def _op_segment_label(
+    trace: "Trace",
+    labels: tuple[str, ...],
+    concrete: tuple[str, ...],
+) -> str:
+    """Return a class-free range label for an operation segment.
+
+    Endpoints stay pass-free for single-pass layers and show the concrete
+    pass-qualified label when the layer runs multiple passes, so two per-pass
+    segments of a reused block are visually distinguishable and each label
+    stands for exactly its own hidden ops.
+    """
+
+    # Exact-key membership only: probing missing keys through the public
+    # accessor would enter fuzzy lookup, which canonical collapse work must
+    # never do.
+    valid = {str(op.label) for op in trace.ops}
+
+    def endpoint(base: str, resolved: str) -> str:
+        multipass = f"{base}:2" in valid
+        return resolved if ":" in resolved and multipass else base
+
+    first = endpoint(labels[0], concrete[0])
+    last = endpoint(labels[-1], concrete[-1])
+    return f"{first} ... {last} -- {len(labels)} ops"
 
 
 def _segment_owner_key(trace: "Trace", addresses: tuple[str, ...]) -> str | None:
@@ -1391,6 +1600,54 @@ def _segment_owner_key(trace: "Trace", addresses: tuple[str, ...]) -> str | None
     return parent_key if parent_key in trace.modules else parent
 
 
+def _members_are_name_consecutive(addresses: tuple[str, ...]) -> bool:
+    """Return whether member leaf names form an ascending consecutive range.
+
+    Segment legality is flow-based, so members can be name-noncontiguous or
+    name-descending; a ``first-last`` interval label is only honest when the
+    leaf names share one parent and one stem and count up by exactly one.
+    """
+
+    import re
+
+    parents = {address.rsplit(".", 1)[0] if "." in address else "" for address in addresses}
+    if len(parents) != 1:
+        return False
+    stems: list[str] = []
+    values: list[int] = []
+    for address in addresses:
+        leaf = address.rsplit(".", 1)[-1]
+        match = re.fullmatch(r"(.*?)(\d+)", leaf)
+        if match is None:
+            return False
+        stems.append(match.group(1))
+        values.append(int(match.group(2)))
+    if len(set(stems)) != 1:
+        return False
+    return all(right == left + 1 for left, right in zip(values, values[1:]))
+
+
+def _child_segment_range_text(addresses: tuple[str, ...]) -> str:
+    """Return an honest member summary for a child-segment label.
+
+    Name-consecutive runs keep the compact ``prefix.first-last`` interval.
+    Flow-legal but name-noncontiguous runs enumerate their members (elided in
+    the middle for long runs) because an interval would overstate coverage.
+    """
+
+    first = addresses[0]
+    prefix = first.rsplit(".", 1)[0] if "." in first else ""
+    leaves = [address.rsplit(".", 1)[-1] for address in addresses]
+    if _members_are_name_consecutive(addresses):
+        range_text = f"{leaves[0]}-{leaves[-1]}"
+        return f"{prefix}.{range_text}" if prefix else range_text
+    if len(leaves) > 4:
+        listed = f"{leaves[0]}, {leaves[1]}, ..., {leaves[-1]}"
+    else:
+        listed = ", ".join(leaves)
+    return f"{prefix}.{{{listed}}}" if prefix else f"{{{listed}}}"
+
+
 def _child_segment_label(
     addresses: tuple[str, ...],
     num_layers: int,
@@ -1401,12 +1658,7 @@ def _child_segment_label(
 
     from ._render_common import format_collapsed_module_contents
 
-    first = addresses[0]
-    last = addresses[-1]
-    prefix = first.rsplit(".", 1)[0] if "." in first else ""
-    first_leaf = first.rsplit(".", 1)[-1]
-    last_leaf = last.rsplit(".", 1)[-1]
-    range_text = f"{prefix}.{first_leaf}-{last_leaf}" if prefix else f"{first_leaf}-{last_leaf}"
+    range_text = _child_segment_range_text(addresses)
     contents = format_collapsed_module_contents(num_layers, num_buffers)
     return (
         f"{range_text} -- {len(addresses)} blocks, {contents}, "
@@ -1547,7 +1799,10 @@ def _select_best_decision(
     ]
     | None
 ):
-    """Return the best global decision for one fold-gating pass.
+    """Return the best surviving global decision for one fold-gating pass.
+
+    "Best" is relative to the beam-capped frontiers described in the module
+    docstring; globally better cuts can be pruned before scoring.
 
     Parameters
     ----------
@@ -2721,7 +2976,12 @@ def _merge_frontiers(
     left_points: Sequence[_FrontierPoint],
     right_points: Sequence[_FrontierPoint],
 ) -> tuple[_FrontierPoint, ...]:
-    """Merge two frontier sequences by standard node-count knapsack."""
+    """Merge two frontier sequences by per-count best, beam-capped.
+
+    Keeps one cheapest-sum point per merged node count and at most
+    ``FRONTIER_CAP`` counts; see the module docstring for why this is an
+    approximation of the non-additive global objective.
+    """
 
     best_by_count: dict[
         int, tuple[_FrontierPoint, tuple[float, int, tuple[Any, ...], tuple[Any, ...]]]
@@ -2758,7 +3018,11 @@ def _retain_best_frontier_point(
 def _frontier_from_best_by_count(
     best_by_count: Mapping[int, tuple[Any, tuple[float, int, tuple[Any, ...], tuple[Any, ...]]]],
 ) -> tuple[Any, ...]:
-    """Return the capped deterministic frontier from per-count best points."""
+    """Return the beam-capped deterministic frontier from per-count bests.
+
+    Dropping node-count buckets beyond ``FRONTIER_CAP`` is the beam bound
+    described in the module docstring.
+    """
 
     ordered = sorted(best_by_count.values(), key=lambda item: item[1])
     return tuple(sorted((item[0] for item in ordered[:FRONTIER_CAP]), key=lambda point: point.k))
@@ -2893,7 +3157,7 @@ def _merge_component_member_frontiers(
 
 
 def _prune_frontier(points: Sequence[Any]) -> tuple[Any, ...]:
-    """Keep deterministic Pareto frontier points, capped for R3a."""
+    """Keep per-count best points under the deterministic beam cap."""
 
     best_by_count: dict[int, tuple[Any, tuple[float, int, tuple[Any, ...], tuple[Any, ...]]]] = {}
     for point in points:
