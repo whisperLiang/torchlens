@@ -34,13 +34,22 @@ def _group_by_shared_params(self: "Trace") -> None:
     ``num_passes`` on every retained op.
     """
 
-    param_barcode_groups: dict[tuple[str, tuple[str, ...]], list[str]] = defaultdict(list)
+    param_barcode_groups: dict[tuple[str, tuple[str, ...], int | None], list[str]] = defaultdict(
+        list
+    )
     for label in self._raw_layer_labels_list:
         node = self[label]
         if getattr(node, "is_orphan", False):
             continue
         if node.uses_params and node._param_barcodes:
-            key = (node.func_name, tuple(sorted(node._param_barcodes)))
+            # Include the output slot: co-outputs of one multi-output call (h and c
+            # of an LSTMCell) share function and parameters but are distinct layers,
+            # never sequential passes of each other.
+            key = (
+                node.func_name,
+                tuple(sorted(node._param_barcodes)),
+                getattr(node, "multi_output_index", None),
+            )
             param_barcode_groups[key].append(label)
 
     for members in param_barcode_groups.values():
@@ -105,6 +114,7 @@ def _build_recurrence_grouping_graph(self: "Trace") -> RecurrenceGroupingGraph:
             uses_params=bool(node.uses_params),
             func_name=node.func_name,
             param_barcodes=tuple(node._param_barcodes),
+            output_slot=getattr(node, "multi_output_index", None),
             retain=retain,
             pruned=is_pruned,
             recurrence_anchored=(
