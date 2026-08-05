@@ -768,7 +768,20 @@ def _apply_full(
             for axis in state.axes
         )
         return replace(state, axes=fallback_axes, notes=notes, rule=rule_name)
-    assert passthrough.axes is not None
+    if passthrough.axes is None:
+        # A partial-axes kind="full" rule applied across a rank-mismatched
+        # parent (for example an input-derived computed-weight branch) has no
+        # derivable axis map and no explicit surviving_parent_axes obligation.
+        # Degrade fail-closed to UNKNOWN instead of crashing a public
+        # validation or table query with a bare assertion.
+        return replace(
+            state,
+            axes=None,
+            taint=ReceptiveFieldStatus.UNKNOWN,
+            notes=notes
+            + (f"{op.label}: rank-changing partial-full relation lacks an explicit axis map",),
+            rule=rule_name,
+        )
     axes = []
     for old_axis, mapped_axis in zip(state.axes, passthrough.axes):
         if old_axis.output_axis in selected:

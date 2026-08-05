@@ -289,7 +289,17 @@ class ReceptiveFieldRuleContext:
         note: str | None = None,
         **callbacks: RuleCallback,
     ) -> _RuleResult:
-        """Construct a whole-extent dependence result specification."""
+        """Construct a whole-extent dependence result specification.
+
+        Notes
+        -----
+        Axis-map obligation: a rule that selects a PARTIAL axis set and can be
+        applied across rank-changing parent relations (computed weights,
+        broadcast buffers) must declare ``surviving_parent_axes`` in its result
+        values the way the batch-norm rule does. Without it, both geometry
+        engines degrade such parents fail-closed to ``UNKNOWN`` — they never
+        guess an axis alignment and never crash.
+        """
 
         return self._result("full", {"axes": axes, "exact": exact}, note, callbacks)
 

@@ -487,6 +487,80 @@ def test_translation_equivariance() -> None:
         assert axis.index_stop - base_axis.index_stop == jump * shift
 
 
+# ---------------------------------------------------------------------------
+# Crash-class pins — rank-changing partial-full transposes (line-637 assert)
+# ---------------------------------------------------------------------------
+
+
+class _HyperLinear(nn.Module):
+    """F.linear with a computed weight: the audited line-637 crash model."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.raw = nn.Parameter(torch.randn(4, 3))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.linear(x, torch.tanh(self.raw))
+
+
+class _ComputedParent(nn.Module):
+    """Partial-axes full rules (softmax/cumsum) fed by a rank-mismatched parent."""
+
+    def __init__(self, op: str) -> None:
+        super().__init__()
+        self.op = op
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        if self.op == "softmax":
+            return F.softmax(x + y.mean(), dim=-1)
+        return torch.cumsum(x * y.mean(), dim=-1)
+
+
+def test_hypernetwork_projective_solve_degrades_typed() -> None:
+    """The r21 4-op hypernetwork must pass invariants with an UNKNOWN branch."""
+
+    from torchlens.receptive_field._validation import check_geometric_metadata_invariants
+
+    trace = tl.trace(_HyperLinear(), torch.randn(2, 5, 3))
+    assert check_geometric_metadata_invariants(trace) is True
+    tanh = op_named(trace, "tanh")
+    descriptors = tanh.projective_field.per_input
+    assert descriptors, "weight branch must still produce a projective descriptor"
+    for descriptor in descriptors.values():
+        assert descriptor.status.value == "unknown"
+        assert descriptor.status.value != "exact"
+
+
+def test_hypernetwork_input_weight_receptive_degrades_typed() -> None:
+    """Input-fed computed weights hit the same class in the receptive engine."""
+
+    from torchlens.receptive_field._validation import check_geometric_metadata_invariants
+
+    class HyperInput(nn.Module):
+        def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+            return F.linear(x, torch.tanh(y))
+
+    trace = tl.trace(HyperInput(), (torch.randn(2, 5, 3), torch.randn(4, 3)))
+    assert check_geometric_metadata_invariants(trace) is True
+    linear = op_named(trace, "linear")
+    statuses = {
+        role: descriptor.status.value
+        for role, descriptor in linear.receptive_field.per_input.items()
+    }
+    assert statuses.get("input.y") == "unknown"
+    assert len(trace.projective_fields().to_pandas()) > 0
+
+
+@pytest.mark.parametrize("op", ["softmax", "cumsum"])
+def test_partial_full_rule_computed_parent_never_crashes(op: str) -> None:
+    """softmax/cumsum with rank-mismatched parents solve without assertions."""
+
+    from torchlens.receptive_field._validation import check_geometric_metadata_invariants
+
+    trace = tl.trace(_ComputedParent(op), (torch.randn(2, 5, 3), torch.randn(4, 3)))
+    assert check_geometric_metadata_invariants(trace) is True
+
+
 def test_non_antialiased_interpolate_regression() -> None:
     """The AA branch must not disturb ordinary interpolation geometry."""
 
