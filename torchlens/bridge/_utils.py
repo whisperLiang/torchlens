@@ -129,11 +129,24 @@ def tensor_layers(log: Any, sites: Iterable[Any] | None = None) -> list[Any]:
     Returns
     -------
     list[Any]
-        Layer-pass records in requested order.
+        Layer-pass records in requested order, each carrying a tensor ``out``.
+
+    Raises
+    ------
+    ValueError
+        If an explicitly requested site does not carry a saved tensor ``out``.
     """
 
     if sites is not None:
-        return [resolve_one_site(log, site) for site in sites]
+        resolved: list[Any] = []
+        for site in sites:
+            layer = resolve_one_site(log, site)
+            out = getattr(layer, "out", None)
+            if not isinstance(out, torch.Tensor):
+                label = getattr(layer, "layer_label", site)
+                raise ValueError(f"Bridge site {label!r} does not have a saved tensor out.")
+            resolved.append(layer)
+        return resolved
     return [
         layer
         for layer in getattr(log, "layer_list", [])
