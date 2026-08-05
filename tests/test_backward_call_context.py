@@ -97,6 +97,7 @@ def test_backward_call_context_survives_tlspec_round_trip(tmp_path: Path) -> Non
         trace.cleanup()
 
 
+@pytest.mark.rare
 @pytest.mark.skip(
     reason=(
         "No stable public fixture currently forces orphan hook-only implicit backward without "

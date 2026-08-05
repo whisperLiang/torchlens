@@ -101,7 +101,11 @@ def pytest_sessionfinish(session, exitstatus):
     _state._collect_usage_stats = False
     try:
         from coverage import Coverage
+        from coverage.exceptions import NoDataError
+    except ImportError:
+        return
 
+    try:
         cov = Coverage()
         cov.load()
         report_path = opj(REPORTS_DIR, "coverage_report.txt")
@@ -109,8 +113,8 @@ def pytest_sessionfinish(session, exitstatus):
             cov.report(file=f, show_missing=True, skip_empty=True)
         html_dir = opj(REPORTS_DIR, "coverage_html")
         cov.html_report(directory=html_dir, skip_empty=True)
-    except Exception:
-        pass  # No coverage data or coverage not installed — skip silently
+    except (FileNotFoundError, NoDataError):
+        return
 
 
 # Fixtures

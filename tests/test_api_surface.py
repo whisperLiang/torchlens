@@ -9,6 +9,7 @@ import torchlens
 
 TARGET_ALL = [
     "trace",
+    "release_model",
     "export",
     "hash",
     "assert_unchanged",
@@ -128,8 +129,8 @@ CANONICAL_SUBMODULES = [
 ]
 
 
-def test_all_size_exactly_92() -> None:
-    """Top-level ``__all__`` should contain exactly the current API budget.
+def test_all_matches_frozen_93_name_surface() -> None:
+    """Top-level ``__all__`` should match the current frozen API ledger.
 
     Phase 1a budget was 40; backward-parity sprint added 6 (grad_clip, grad_noise,
     grad_clamp, grad_fn, intervening, label) = 46; post-backward
@@ -153,12 +154,13 @@ def test_all_size_exactly_92() -> None:
     `record_kpi_in_graph`, `register_tensor_connection`, `show_bundle_graph`,
     `options`, `to_disk`, `grad_input`, `grad_output`, and `in_backward_pass` = 90.
     The provisional structural-hash namespace and CI tripwire add `hash` and
-    `assert_unchanged` = 92.
+    `assert_unchanged` = 92. Model-lifecycle release support adds
+    `release_model` = 93.
     Paper-era compatibility shims remain available through ``__getattr__`` but
     are not advertised in ``__all__``.
     """
 
-    assert len(torchlens.__all__) == 92
+    assert len(torchlens.__all__) == len(TARGET_ALL)
     assert torchlens.__all__ == TARGET_ALL
 
 
