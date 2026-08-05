@@ -301,9 +301,14 @@ class _GroupingWorkspace:
         signature) when the parent is parameterized, else the parent's context. It
         identifies WHICH parametric loop a parameter-free op sits inside: a
         ``tanh`` fed by parameterized site A carries context ``{A}``, one fed by
-        site B carries ``{B}``. Two bare functional ops whose contexts are nonempty
-        and disjoint provably belong to different parametric loops and must never
-        be merged as recurrent passes of one layer.
+        site B carries ``{B}``. Two bare functional ops whose nonempty contexts
+        DIFFER AT ALL provably sit after different parent topologies and must not
+        be merged as recurrent passes of one layer -- disjointness is not
+        required: with a shared module reused in both loops next to
+        site-specific halves, the contexts ``{shared, enc}`` and
+        ``{shared, dec}`` overlap yet still mark different loops. The sole
+        honest unequal case, the not-yet-saturated loop-entry call, is
+        re-admitted through :func:`_entry_adoption_pairs`.
 
         The context element must be the full call identity, never the bare
         parameter barcodes: two DISTINCT weight-tied modules (a tied
@@ -1140,6 +1145,144 @@ def _param_call_identity(node: _MutableRecurrenceNode) -> _ParamCallIdentity:
     )
 
 
+def _param_free_flow_reachable(
+    workspace: _GroupingWorkspace,
+    src_label: str,
+    max_order: int,
+) -> set[str]:
+    """Return labels reachable from ``src_label`` along parameter-free data paths.
+
+    Traversal follows ``data_children`` edges but never enters a parameterized
+    node -- the same ``uses_params and param_barcodes`` predicate that cuts
+    :meth:`_GroupingWorkspace.param_contexts` propagation. Membership in the
+    result therefore certifies that the source's parametric context FLOWED to
+    the target along the wire: for every returned label ``m``,
+    ``context(m) >= context(src_label)`` holds by construction of the context
+    recurrence. Containment that instead arises from RE-CALLING a shared
+    parameterized identity behind a parametric cut (a second loop re-invoking a
+    shared module on the first loop's output) is deliberately NOT certified --
+    that is a loop-boundary crossing, not context flow.
+
+    Parameters
+    ----------
+    workspace:
+        Mutable grouping workspace.
+    src_label:
+        Parameter-free source node label.
+    max_order:
+        Raw-order upper bound; children past every candidate target are pruned.
+
+    Returns
+    -------
+    set[str]
+        Parameter-free labels reachable from ``src_label`` without crossing a
+        parameterized node.
+    """
+    reachable: set[str] = set()
+    seen: set[str] = {src_label}
+    stack: list[str] = [src_label]
+    while stack:
+        current = stack.pop()
+        for child in workspace.nodes[current].data_children:
+            child_node = workspace.nodes.get(child)
+            if child_node is None or child in seen or child_node.raw_order > max_order:
+                continue
+            seen.add(child)
+            if child_node.uses_params and child_node.param_barcodes:
+                continue
+            reachable.add(child)
+            stack.append(child)
+    return reachable
+
+
+def _entry_adoption_pairs(
+    workspace: _GroupingWorkspace,
+    iso_nodes: list[str],
+    param_contexts: Dict[str, frozenset[_ParamCallIdentity]],
+) -> set[tuple[str, str]]:
+    """Return the loop-entry pairs exempt from the unequal-context veto.
+
+    The veto in :func:`_merge_iso_groups_to_layers` keeps a bare param-free op
+    from grouping across calls whose nearest-parameterized-ancestor contexts
+    differ AT ALL. One honest case has genuinely unequal contexts: the LOOP
+    ENTRY. On pass 1 a recurrent op reads state produced OUTSIDE the loop, so
+    its context is missing the in-loop sites that saturate every later pass
+    through the recurrent feedback wire (``h = emb(x); for: h = h + attn(h)``
+    gives the first ``add`` context ``{emb, attn}`` and every later one
+    ``{emb, attn, mlp, ...}``). Splitting pass 1 off would shear the entry call
+    from its own loop.
+
+    An exemption is granted only when ALL of the following hold, each one
+    adversarially load-bearing:
+
+    * ``context(entry)`` is a STRICT SUBSET of ``context(target)`` -- entry
+      saturation only ever grows the context. Disjoint or crosswise-different
+      contexts (two loops with different site-specific halves) never qualify.
+    * The entry call is the UNIQUE carrier of its context among the iso group's
+      veto-governed candidates. A multi-call context class is a recurrent site
+      of its own (a 3-pass loop upstream of a 2-pass loop), never a dangling
+      entry, so it must stay a separate layer.
+    * The entry call reaches the target through a PARAM-FREE data path
+      (:func:`_param_free_flow_reachable`), certifying the subset relation came
+      from context flow along the feedback wire -- not from a second loop
+      re-calling a shared parameterized identity behind a parametric cut.
+    * Each entry call adopts AT MOST ONE target: the earliest reachable
+      qualifying call. Union-find merges are transitive, so a pairwise
+      exemption must not let one entry bridge two mutually-vetoed classes.
+      With out-degree <= 1 and strictly increasing raw order, adoption edges
+      form an in-forest whose components terminate at exactly one class, so
+      two multi-member classes can never merge through adoptions.
+
+    Parameters
+    ----------
+    workspace:
+        Mutable grouping workspace.
+    iso_nodes:
+        Iso-group member labels sorted by raw capture order.
+    param_contexts:
+        Nearest-parameterized-ancestor contexts keyed by node label.
+
+    Returns
+    -------
+    set[tuple[str, str]]
+        ``(entry_label, target_label)`` pairs, entry strictly earlier in raw
+        capture order than target.
+    """
+    classes: Dict[frozenset[_ParamCallIdentity], list[str]] = defaultdict(list)
+    for label in iso_nodes:
+        node = workspace.nodes[label]
+        if node.uses_params or node.recurrence_anchored:
+            continue
+        context = param_contexts.get(label, frozenset())
+        if context:
+            classes[context].append(label)
+    if len(classes) < 2:
+        return set()
+    pairs: set[tuple[str, str]] = set()
+    for context, members in classes.items():
+        if len(members) != 1:
+            continue
+        entry = members[0]
+        entry_order = workspace.nodes[entry].raw_order
+        candidates = [
+            member
+            for other_context, other_members in classes.items()
+            if context < other_context
+            for member in other_members
+            if workspace.nodes[member].raw_order > entry_order
+        ]
+        if not candidates:
+            continue
+        max_order = max(workspace.nodes[member].raw_order for member in candidates)
+        reachable = _param_free_flow_reachable(workspace, entry, max_order)
+        reachable_candidates = [member for member in candidates if member in reachable]
+        if not reachable_candidates:
+            continue
+        target = min(reachable_candidates, key=lambda member: workspace.nodes[member].raw_order)
+        pairs.add((entry, target))
+    return pairs
+
+
 def _merge_iso_groups_to_layers(
     workspace: _GroupingWorkspace,
     iso_node_groups: Dict[str, list[str]],
@@ -1204,6 +1347,7 @@ def _merge_iso_groups_to_layers(
         iso_nodes = sorted(
             iso_nodes_orig, key=lambda node_label: workspace.nodes[node_label].raw_order
         )
+        entry_adoptions = _entry_adoption_pairs(workspace, iso_nodes, param_contexts)
         # Consecutive pairs first: in a genuine loop they carry the unions, so the
         # full pairwise sweep afterwards short-circuits on shared union-find roots
         # instead of re-deriving (and re-checking reachability for) distant pairs.
@@ -1233,14 +1377,28 @@ def _merge_iso_groups_to_layers(
             pair_anchored = node1.recurrence_anchored or node2.recurrence_anchored
             if not (node1.uses_params or node2.uses_params or pair_anchored):
                 # Two bare functional ops sitting inside DIFFERENT parametric loops
-                # (nonempty, disjoint nearest-param-ancestor contexts) are passes of
-                # different loops; merging them straddles the loop boundary and
-                # yields incoherent pass counts (a 3-pass and a 2-pass layer cannot
-                # share a 5-pass neighbor). Anchored ops are exempt: a reused module
-                # identity is real recurrence wherever its calls sit.
+                # are passes of different loops; merging them straddles the loop
+                # boundary and yields incoherent pass counts (a 3-pass and a 2-pass
+                # layer cannot share a 5-pass neighbor). The veto fires whenever the
+                # nonempty nearest-param-ancestor contexts differ AT ALL: disjoint
+                # contexts (untied loops), overlapping-but-unequal contexts (a
+                # shared module reused in both loops next to site-specific halves,
+                # where each bridge op must follow its OWN loop's parent topology),
+                # and strict-subset contexts alike. Equality is transitive, so
+                # allowed unions can never chain around the veto -- the one honest
+                # unequal case, the loop-entry call whose context has not yet
+                # saturated through the recurrent feedback, is re-admitted solely
+                # through its precomputed adoption pair (see
+                # :func:`_entry_adoption_pairs`). Anchored ops are exempt: a reused
+                # module identity is real recurrence wherever its calls sit.
                 context1 = param_contexts.get(node1_label, frozenset())
                 context2 = param_contexts.get(node2_label, frozenset())
-                if context1 and context2 and context1.isdisjoint(context2):
+                if (
+                    context1
+                    and context2
+                    and context1 != context2
+                    and (node1_label, node2_label) not in entry_adoptions
+                ):
                     continue
             overlapping_param_types = (
                 sg_param_types[node1_subgraph_label] & sg_param_types[node2_subgraph_label]
