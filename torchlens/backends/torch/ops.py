@@ -22,6 +22,7 @@ from ..._state import pause_logging
 from torch.utils.weak import WeakIdKeyDictionary
 
 from ._tl import (
+    active_label_session_token,
     get_label_list,
     get_live_label_list,
     get_live_tensor_label,
@@ -231,7 +232,62 @@ identity-keyed side table records each labeled op output's version so a later op
 tensor can tell a genuine mutation (version bumped since it was labeled) from an identity return
 (version unchanged). It is capture-transient state, kept off the Trace field schema and dropped
 automatically on tensor GC.
+
+Entries are ``(label_session_token, version)`` pairs. A tensor that survives across captures
+(a reused ``out=`` buffer, a cached activation the user held onto) keeps its module-lifetime
+weak entry, so a baseline recorded by an EARLIER session must never be consulted by a LATER
+one: the tensor may have been mutated between captures, and a stale baseline would falsely
+classify a non-mutating identity return as in-place (W3 audit F7). Reads go through
+:func:`_label_version_baseline`, which discards any entry whose session token is not the
+active label session; writes go through :func:`_record_label_version_snapshot`.
 """
+
+
+def _record_label_version_snapshot(t: Any) -> None:
+    """Record ``t``'s current version, keyed to the active label session.
+
+    Parameters
+    ----------
+    t
+        Tensor that was just labeled (as an op output, or by live in-place /
+        alias label propagation).
+    """
+
+    if not isinstance(t, torch.Tensor):
+        return
+    # ``_version`` is a WITNESSED input-metadata property (r33): the scoped patch
+    # records a genuine USER ``x._version`` read on a model-input leaf. This snapshot is
+    # TorchLens's OWN bookkeeping read, so it must run under the internal marker or it
+    # spuriously records a ``_version`` fact for every model, falsely diverging any
+    # runtime input whose version counter differs from capture (an over-trigger).
+    with internal_scalar_read():
+        version = tensor_version_or_none(t)
+    if version is not None:
+        _LABEL_VERSION_SNAPSHOT[t] = (active_label_session_token(), version)
+
+
+def _label_version_baseline(t: Any) -> int | None:
+    """Return ``t``'s labeled-version baseline, only if the ACTIVE session recorded it.
+
+    Parameters
+    ----------
+    t
+        Tensor being logged as an op output.
+
+    Returns
+    -------
+    int | None
+        The version recorded when this session last labeled ``t``, or ``None``
+        when no baseline exists or the entry belongs to another (stale) session.
+    """
+
+    entry = _LABEL_VERSION_SNAPSHOT.get(t)
+    if entry is None:
+        return None
+    session_token, version = entry
+    if session_token is None or session_token != active_label_session_token():
+        return None
+    return version
 
 
 CaptureProducerMode = Literal["exhaustive", "predicate"]
@@ -3842,16 +3898,7 @@ def _tag_tensor_and_track_variations(
     # Record the output's version at label time so a later op consuming this tensor can
     # distinguish a genuine in-place mutation (version bumped since it was labeled) from a
     # non-mutating identity return that reuses the same object (see is_inplace at capture).
-    if isinstance(out, torch.Tensor):
-        # ``_version`` is a WITNESSED input-metadata property (r33): the scoped patch
-        # records a genuine USER ``x._version`` read on a model-input leaf. This snapshot is
-        # TorchLens's OWN bookkeeping read, so it must run under the internal marker or it
-        # spuriously records a ``_version`` fact for every model, falsely diverging any
-        # runtime input whose version counter differs from capture (an over-trigger).
-        with internal_scalar_read():
-            version = tensor_version_or_none(out)
-        if version is not None:
-            _LABEL_VERSION_SNAPSHOT[out] = version
+    _record_label_version_snapshot(out)
     _add_tensor_backward_hook(self, out, out_label)
 
     child_event = self.capture_events.live_index.require_event(new_layer_entry._label_raw)
@@ -4686,8 +4733,10 @@ def _log_output_tensor_info(
         # ``mul_`` / ``copy_`` / ``__i*``), a setter dunder (``__setitem__`` / ``__delitem__``, which
         # mutate but do not end in ``_``), or an ``out=`` tensor kwarg -- so genuine mutation is
         # still detected while a non-mutating identity return (``x.cpu()`` / ``x.contiguous()``,
-        # which has no mutation-signature name) is not, and does not crash.
-        baseline = _LABEL_VERSION_SNAPSHOT.get(t)
+        # which has no mutation-signature name) is not, and does not crash. Baselines are
+        # session-scoped: a snapshot recorded by an EARLIER capture never serves as this
+        # session's baseline (the tensor may have been mutated between captures -- W3 F7).
+        baseline = _label_version_baseline(t)
         current_version = tensor_version_or_none(t)
         if baseline is not None and current_version is not None:
             fields_dict["is_inplace"] = current_version != baseline
