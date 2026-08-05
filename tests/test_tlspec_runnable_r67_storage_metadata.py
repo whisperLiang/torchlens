@@ -566,7 +566,12 @@ def test_r67_hostile_subclass_admission_refuses(surface: str, tmp_path: Path) ->
 
         model, payload = Model(), _Hostile(torch.randn(3))
 
-    with pytest.raises(Exception):
+    # NOTE (untyped-error finding, follow-up): the hostile ``__torch_function__`` subclass IS
+    # fail-closed at the CAPTURE admission boundary, but via a generic untyped ``RuntimeError``
+    # (model-output attribution fails on the subclass tensor) rather than a typed hostile-
+    # admission refusal as the docstring implies. Pin the real type + a stable message substring
+    # so a wrong-exception mutation fails; the product raise is unchanged (TEST-only strengthen).
+    with pytest.raises(RuntimeError, match="could not attribute a model output tensor"):
         trace = _trace(model, payload)
         _save(trace, tmp_path / "hostile.tlspec")
 
