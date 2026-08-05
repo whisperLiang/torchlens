@@ -347,11 +347,19 @@ def _run_capture_cells(
     def lookback_payload() -> tl.Trace:
         """Run retroactive save with detached lookback payloads."""
 
+        # Use a bare ``linear`` selector: every workload in the matrix (tiny-conv's
+        # final Linear, ResNet-50's ``fc``, and the transformer/GPT projection stacks)
+        # contains linear ops, so the selector always matches at least one site. The
+        # retroactive behaviour under test comes from ``lookback=4`` (the 4 predecessor
+        # ops of each matched op are saved), NOT from a downstream ``followed_by``
+        # trigger. The old ``& followed_by(relu)`` compound zero-matched TinyConv
+        # (Linear is last) and any gelu/relu-free stack, which the zero-match tripwire
+        # (``error::UserWarning:torchlens``) then promoted to a hard failure.
         return tl.trace(
             workload.model,
             list(workload.args),
             workload.kwargs or None,
-            save=tl.func("linear") & tl.followed_by(tl.func("relu")),
+            save=tl.func("linear"),
             lookback=4,
             lookback_payload_policy="detached_raw",
         )
