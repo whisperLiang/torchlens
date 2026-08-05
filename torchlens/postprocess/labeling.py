@@ -25,6 +25,7 @@ from dataclasses import fields, is_dataclass, replace
 from typing import Any, Dict, List, TYPE_CHECKING
 
 from .._errors import AmbiguousOpLookupError
+from ..data_classes.cleanup import _project_conditional_child_views
 from ..data_classes.op import Op
 from ..intervention.types import ParentRef
 
@@ -292,8 +293,6 @@ _LIST_FIELDS_TO_RENAME = [
     "internal_source_parents",
     "internal_source_ancestors",
     "conditional_entry_children",
-    "conditional_then_children",
-    "conditional_else_children",
     "op_equivalence_classes",
     "recurrent_ops",
 ]
@@ -396,17 +395,37 @@ def _replace_layer_names_for_layer_entry(self: "Trace", layer_entry: Op) -> None
             {mapping[child_label]: tensor_version for child_label, tensor_version in ctv.items()},
         )
 
-    elif_children = getattr(layer_entry, "conditional_elif_children", None)
-    if elif_children:
-        set_entry_field(
-            "conditional_elif_children", _rename_elif_children(elif_children, layer_mapping)
-        )
-
     children_by_cond = getattr(layer_entry, "conditional_arm_children", None)
-    if children_by_cond:
-        set_entry_field(
-            "conditional_arm_children", _rename_children_by_cond(children_by_cond, layer_mapping)
-        )
+    if children_by_cond is not None:
+        renamed_children_by_cond = _rename_children_by_cond(children_by_cond, layer_mapping)
+        set_entry_field("conditional_arm_children", renamed_children_by_cond)
+        (
+            conditional_then_children,
+            conditional_elif_children,
+            conditional_else_children,
+        ) = _project_conditional_child_views(renamed_children_by_cond)
+        set_entry_field("conditional_then_children", conditional_then_children)
+        set_entry_field("conditional_elif_children", conditional_elif_children)
+        set_entry_field("conditional_else_children", conditional_else_children)
+    else:
+        elif_children = getattr(layer_entry, "conditional_elif_children", None)
+        if elif_children:
+            set_entry_field(
+                "conditional_elif_children",
+                _rename_elif_children(elif_children, layer_mapping),
+            )
+        conditional_then_children = getattr(layer_entry, "conditional_then_children", None)
+        if conditional_then_children:
+            set_entry_field(
+                "conditional_then_children",
+                [layer_mapping[layer_label] for layer_label in conditional_then_children],
+            )
+        conditional_else_children = getattr(layer_entry, "conditional_else_children", None)
+        if conditional_else_children:
+            set_entry_field(
+                "conditional_else_children",
+                [layer_mapping[layer_label] for layer_label in conditional_else_children],
+            )
 
     edge_uses = getattr(layer_entry, "_edge_uses", None)
     if edge_uses:
