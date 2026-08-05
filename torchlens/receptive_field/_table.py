@@ -284,6 +284,18 @@ def build_rf_profile(
     if level not in {"op", "layer", "call", "module"}:
         raise ValueError("level must be 'op', 'layer', 'call', or 'module'.")
     resolved_direction = ReceptiveFieldDirection(direction)
+    if resolved_direction is ReceptiveFieldDirection.PROJECTIVE and input is not None:
+        # In projective mode each row is keyed by its projection TARGET, not a
+        # model input, so a model-input filter can never match any row and would
+        # silently return an empty table. Reject the misapplied filter instead of
+        # lying with an empty result. (The handle is still validated so a bad
+        # handle raises the same diagnostic in both directions.)
+        _require_input_role(trace, input)
+        raise ValueError(
+            "input= filters model inputs and applies only to direction='receptive'; "
+            "projective tables are keyed by projection target and cannot be filtered "
+            "by a model input."
+        )
     requested_role = _require_input_role(trace, input)
     status_filter = None if statuses is None else frozenset(statuses)
     if status_filter is not None and not all(
