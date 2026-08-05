@@ -1135,8 +1135,9 @@ def _build_overview_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str
             "train": "-",
         }
     ]
+    origin_by_label, input_labels = _module_dataflow_origins(trace)
     for module in _iter_summary_modules(trace):
-        rows.append(_module_overview_row(trace, module))
+        rows.append(_module_overview_row(trace, module, origin_by_label, input_labels))
     rows.append(
         {
             "name": "output",
@@ -1175,13 +1176,14 @@ def _build_graph_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]:
         Graph rows and footer lines.
     """
     rows = []
+    origin_by_label, input_labels = _module_dataflow_origins(trace)
     for module in _iter_summary_modules(trace):
         rows.append(
             {
                 "name": f"{module.address} ({module.class_name})",
                 "shape": _module_shape(trace, module),
                 "params": _human_count(module.num_params),
-                "parents": _module_parent_summary(module),
+                "parents": _module_parent_summary(module, origin_by_label, input_labels),
             }
         )
     footer_lines = [
@@ -1260,13 +1262,47 @@ def _build_control_flow_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List
                 "notes": event.function_qualname,
             }
         )
+    loop_groups = _recurrent_loop_groups(trace)
+    recurrent = bool(loop_groups) or bool(getattr(trace, "is_recurrent", False))
     if not rows:
-        footer_lines = [
-            "No conditional branches or recurrent loop groups were detected in this forward pass."
-        ]
-        return rows, footer_lines
-    footer_lines = [f"Conditionals: {len(rows)}"]
+        if not recurrent:
+            return rows, [
+                "No conditional branches or recurrent loop groups were detected "
+                "in this forward pass."
+            ]
+        footer_lines = ["No conditional branches were detected in this forward pass."]
+    else:
+        footer_lines = [f"Conditionals: {len(rows)}"]
+    footer_lines.extend(_recurrent_loop_group_lines(loop_groups, recurrent))
     return rows, footer_lines
+
+
+def _recurrent_loop_groups(trace: "Trace") -> List[tuple[str, int]]:
+    """Return ``(layer_label, num_passes)`` for every recurrent (multi-pass) layer.
+
+    These are the loop groups the control-flow summary claims to detect. Driven
+    off the concrete per-layer pass counts rather than only ``trace.is_recurrent``
+    so the disclosure names the exact layers that replay.
+    """
+    groups: List[tuple[str, int]] = []
+    for layer in trace.layer_logs.values():
+        num_passes = int(getattr(layer, "num_passes", 1) or 1)
+        if num_passes > 1:
+            groups.append((str(layer.layer_label), num_passes))
+    return groups
+
+
+def _recurrent_loop_group_lines(
+    loop_groups: List[tuple[str, int]],
+    recurrent: bool,
+) -> List[str]:
+    """Return honest footer disclosure lines for recurrent loop groups."""
+    if not recurrent:
+        return []
+    if not loop_groups:
+        return ["Recurrent execution detected (rolled layers replay across passes)."]
+    detail = ", ".join(f"{label} (x{passes})" for label, passes in loop_groups)
+    return [f"Recurrent loop groups ({len(loop_groups)}): {detail}"]
 
 
 def _build_compute_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]:
@@ -1294,12 +1330,26 @@ def _build_compute_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]
                 "dtype": _module_dtype(trace, module),
             }
         )
+    accumulated_ms = (
+        sum(
+            _entry_func_duration(entry) for entry in _iter_operation_entries(trace, mode="unrolled")
+        )
+        * 1000.0
+    )
+    wall_ms = float(getattr(trace, "forward_duration", 0.0) or 0.0) * 1000.0
     footer_lines = [
         f"Params: {_int_with_commas(trace.num_params)} unique",
         f"Forward FLOPs: {_human_flops(trace.total_flops_forward)}",
         f"MACs: {_human_flops(trace.total_macs_forward)}",
         _unknown_flops_footer(trace),
-        f"Forward time: {float(trace.forward_duration) * 1000:.2f} ms",
+        # Report the compute-relevant accumulated op time (matching the waterfall
+        # level) as the headline number, and disclose the raw capture wall time
+        # separately as overhead-inclusive. Previously a single "Forward time"
+        # line reported trace.forward_duration -- capture wall time that INCLUDES
+        # all TorchLens instrumentation overhead (~100x+ the real op time) -- and
+        # sitting next to FLOPs/MACs it read as the model's forward compute cost.
+        f"Accumulated op time: {accumulated_ms:.2f} ms",
+        f"Capture wall time (includes TorchLens overhead): {wall_ms:.2f} ms",
     ]
     return rows, footer_lines
 
@@ -1358,7 +1408,7 @@ def _build_waterfall_rows(
     peak_memory = 0
     rows: List[Dict[str, str]] = []
     for entry in _iter_operation_entries(trace, mode=mode):
-        duration = float(getattr(entry, "func_duration", 0.0) or 0.0)
+        duration = _entry_func_duration(entry)
         memory = int(getattr(entry, "activation_memory", 0) or 0)
         peak_memory = max(peak_memory, memory)
         rows.append(
@@ -1416,7 +1466,7 @@ def _build_operation_rows(
                 "running_mb": _mb_str(running_total),
                 "flops": _human_flops(int(getattr(entry, "flops_forward", 0) or 0)),
                 "macs": _human_flops(int(getattr(entry, "macs_forward", 0) or 0)),
-                "time_ms": f"{float(getattr(entry, 'func_duration', 0.0) or 0.0) * 1000:.2f}",
+                "time_ms": f"{_entry_func_duration(entry) * 1000:.2f}",
             }
         )
     footer_lines = [
@@ -1467,7 +1517,12 @@ def _iter_summary_modules(trace: "Trace") -> List["Module"]:
     return modules
 
 
-def _module_overview_row(trace: "Trace", module: "Module") -> Dict[str, str]:
+def _module_overview_row(
+    trace: "Trace",
+    module: "Module",
+    origin_by_label: Dict[str, str],
+    input_labels: set[str],
+) -> Dict[str, str]:
     """Build one overview row for a module.
 
     Parameters
@@ -1476,6 +1531,10 @@ def _module_overview_row(trace: "Trace", module: "Module") -> Dict[str, str]:
         Finalized log object.
     module:
         Module to summarize.
+    origin_by_label:
+        Reverse index mapping op labels to owning top-level module addresses.
+    input_labels:
+        Set of graph-input op labels.
 
     Returns
     -------
@@ -1490,7 +1549,7 @@ def _module_overview_row(trace: "Trace", module: "Module") -> Dict[str, str]:
         "shape": _module_shape(trace, module),
         "params": _human_count(module.num_params),
         "train": train,
-        "parents": _module_parent_summary(module),
+        "parents": _module_parent_summary(module, origin_by_label, input_labels),
         "class": module.class_name,
     }
 
@@ -1516,22 +1575,61 @@ def _module_shape(trace: "Trace", module: "Module") -> str:
     return _shape_str(getattr(layer, "shape", None))
 
 
-def _module_parent_summary(module: "Module") -> str:
-    """Return a short parent summary for a module row.
+def _strip_pass_suffix(label: str) -> str:
+    """Return the aggregate layer label for a possibly pass-qualified op label.
 
-    Parameters
-    ----------
-    module:
-        Module to summarize.
-
-    Returns
-    -------
-    str
-        Parent summary text.
+    ``relu_1_1:2`` -> ``relu_1_1``; a label without a pass suffix is returned
+    unchanged.
     """
-    if module.address_parent in (None, "self"):
-        return "input"
-    return str(module.address_parent)
+    return str(label).split(":", 1)[0]
+
+
+def _module_dataflow_origins(trace: "Trace") -> tuple[Dict[str, str], set[str]]:
+    """Build a reverse index for module-level dataflow connectivity.
+
+    Returns ``(origin_by_label, input_labels)`` where ``origin_by_label`` maps
+    every (aggregate) op label to the address of the top-level summary module
+    that owns it, and ``input_labels`` is the set of graph-input op labels. Both
+    are keyed by pass-stripped labels so pass-qualified producers resolve.
+    """
+    origin_by_label: Dict[str, str] = {}
+    for module in _iter_summary_modules(trace):
+        for label in module.layer_labels:
+            origin_by_label[_strip_pass_suffix(label)] = module.address
+    input_labels = {_strip_pass_suffix(op.label) for op in trace.input_ops}
+    return origin_by_label, input_labels
+
+
+def _module_parent_summary(
+    module: "Module",
+    origin_by_label: Dict[str, str],
+    input_labels: set[str],
+) -> str:
+    """Return the REAL upstream dataflow producers feeding a module.
+
+    The graph/overview "Connected To" column is a dataflow claim. Previously it
+    returned ``module.address_parent`` -- the containment-tree parent -- and
+    hard-coded ``"input"`` for every top-level module, so a chain ``a -> b``
+    falsely reported both ``a`` and ``b`` as connected to ``input``. This
+    fabricated topology from the wrong graph entirely. Now each of the module's
+    recorded input ops is mapped to its producing top-level module (or ``input``
+    for a graph-input producer, or the bare op label when the producer is not
+    inside any summary module). Producers are de-duplicated in first-seen order;
+    a module with no recorded upstream reports ``-`` rather than inventing one.
+    """
+    input_ops = getattr(module, "input_ops", None)
+    if not input_ops:
+        return "-"
+    upstream: List[str] = []
+    for op_label in input_ops:
+        normalized = _strip_pass_suffix(op_label)
+        if normalized in input_labels:
+            origin = "input"
+        else:
+            origin = origin_by_label.get(normalized, normalized)
+        if origin not in upstream:
+            upstream.append(origin)
+    return ", ".join(upstream) if upstream else "-"
 
 
 def _module_dtype(trace: "Trace", module: "Module") -> str:
@@ -1614,6 +1712,25 @@ def _module_time_ms(trace: "Trace", module: "Module") -> float:
     return total * 1000.0
 
 
+def _entry_func_duration(entry: Any) -> float:
+    """Return an entry's forward duration in seconds without tripping the tripwire.
+
+    In ``rolled`` mode ``_iter_operation_entries`` yields aggregate ``Layer``
+    objects; a recurrent (multi-pass) ``Layer`` deliberately RAISES ``ValueError``
+    on the per-pass ``func_duration`` accessor (the locked multi-pass tripwire) and
+    exposes the documented aggregate ``total_func_duration`` (sum over passes)
+    instead. In ``unrolled`` mode the entries are per-pass ``Op`` objects, which
+    expose their own ``func_duration`` and do not define ``total_func_duration``.
+    Prefer the aggregate accessor when present, else the per-pass value; this is
+    the same safe idiom already used by ``_module_time_ms`` and never lets the
+    tripwire ``ValueError`` leak nor silently substitutes a wrong default.
+    """
+    duration = getattr(entry, "total_func_duration", None)
+    if duration is None:
+        duration = getattr(entry, "func_duration", 0.0)
+    return float(duration or 0.0)
+
+
 def _iter_operation_entries(
     trace: "Trace",
     *,
@@ -1676,11 +1793,35 @@ def _entry_name(entry: Any) -> str:
     if base_name is None:
         base_name = getattr(entry, "label", None) or getattr(entry, "layer_label", "?")
     num_passes = int(getattr(entry, "num_passes", 1) or 1)
+    if num_passes > 1 and _is_pass_op(entry):
+        # Unrolled tables emit one row PER PASS; each such row is a per-pass Op,
+        # not the aggregate Layer. Name it with its pass-qualified identity
+        # (relu_1_1:2) rather than the aggregate "xN" multiplicity, which on a
+        # per-pass row would imply N calls per row (a false 9-call reading for a
+        # 3-pass layer). An Op exposes a safe pass-qualified label; only the
+        # aggregate Layer would raise the multi-pass tripwire here.
+        pass_label = getattr(entry, "label", None)
+        if isinstance(pass_label, str):
+            return pass_label
     if num_passes > 1 and hasattr(entry, "ops"):
         return f"{base_name} x{num_passes}"
     if getattr(entry, "call_index", 1) > 1:
         return str(getattr(entry, "layer_label", base_name))
     return str(base_name)
+
+
+def _is_pass_op(entry: Any) -> bool:
+    """Return True if ``entry`` is a per-pass ``Op`` (vs an aggregate ``Layer``).
+
+    Unrolled summaries iterate per-pass ``Op`` objects while rolled summaries
+    iterate aggregate ``Layer`` objects, but an ``Op`` proxies its parent's
+    ``num_passes``/``ops`` so those attributes cannot tell them apart. Use the
+    concrete type as the discriminator (imported lazily to avoid any import
+    cycle at module load).
+    """
+    from ...data_classes.op import Op
+
+    return isinstance(entry, Op)
 
 
 def _combined_shape_str(trace: "Trace", labels: Sequence[str]) -> str:
