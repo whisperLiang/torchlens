@@ -138,6 +138,8 @@ from ...capture.arg_positions import (
     extract_tensors_and_params,
     _cache_dynamic_spec,
     _normalize_func_name,
+    _schema_arg_is_parent_candidate,
+    _schema_tensor_arg_kind,
 )
 from ...capture.session import capture_session_for
 
@@ -1871,6 +1873,137 @@ def _tensor_has_known_provenance(trace: "Trace", value: torch.Tensor) -> bool:
     return False
 
 
+_SCHEMA_TENSOR_OPERAND_SLOTS_CACHE: dict[str, tuple[frozenset[int], frozenset[str]] | None] = {}
+
+
+def _compute_schema_tensor_operand_slots(
+    canonical: str,
+) -> tuple[frozenset[int], frozenset[str]] | None:
+    """Derive Tensor-operand slots for ``canonical`` from its ATen schemas.
+
+    Parameters
+    ----------
+    canonical:
+        Underscore-preserving operator name (``func_name.strip("_")``) used to
+        resolve ``torch.ops.aten.<canonical>``.
+
+    Returns
+    -------
+    tuple[frozenset[int], frozenset[str]] | None
+        ``(tensor_positional_indices, tensor_arg_names)`` unioned across every
+        overload, or ``None`` when no authoritative schema exists. A slot counts
+        only when it is an input operand (not a write-only ``out=`` destination)
+        AND its schema type carries ``Tensor`` (single or list).
+    """
+
+    packet = getattr(torch.ops.aten, canonical, None)
+    if packet is None:
+        return None
+    positions: set[int] = set()
+    names: set[str] = set()
+    found_schema = False
+    for overload_name in packet.overloads():
+        schema = getattr(getattr(packet, overload_name, None), "_schema", None)
+        if schema is None:
+            continue
+        found_schema = True
+        for index, schema_arg in enumerate(getattr(schema, "arguments", ()) or ()):
+            if not _schema_arg_is_parent_candidate(schema_arg):
+                continue
+            if _schema_tensor_arg_kind(schema_arg) is None:
+                continue
+            positions.add(index)
+            arg_name = getattr(schema_arg, "name", None)
+            if isinstance(arg_name, str):
+                names.add(arg_name)
+    if not found_schema:
+        return None
+    return frozenset(positions), frozenset(names)
+
+
+def _arg_position_is_tensor_operand(func_name: str, path: str) -> bool:
+    """Return whether ``path`` names a DATA-operand (tensor) slot for ``func_name``.
+
+    The unattributed-tensor witness's branch (2) fires only for a tensor that
+    already HAS known TorchLens provenance (a fully-traced producer) but whose
+    producer label is absent from the recorded parent edges. There are two very
+    different reasons a provenanced tensor lands in that state:
+
+    * **Data-operand slot with a dropped edge** -- e.g. ``add`` position 1, or a
+      tensor operand whose parent edge was dropped because its ``FUNC_ARG_SPECS``
+      entry is under-specified. The tensor's value flows into the op, so it MUST
+      become a graph parent; a provenanced operand missing from
+      ``recorded_parent_labels`` is a genuine missing-edge capture bug and the
+      witness MUST keep firing on it.
+    * **Size / shape / metadata slot** -- e.g. a dynamic-shape scalar tensor
+      passed as a ``torch.zeros`` size dim, a ``view``/``reshape``/``as_strided``
+      size arg, or a ``new_zeros`` size element. The graph builder deliberately
+      does NOT treat these positions as tensor operands, so they are correctly
+      absent from ``recorded_parent_labels``. A *provenanced* tensor here is
+      benign -- it is recomputed deterministically by its own traced producer --
+      and flagging it is a FALSE POSITIVE that breaks exotic families
+      (RNN/packed-sequence internal ``h0``/``c0`` allocation, Longformer
+      windowed-attention dynamic dims).
+
+    The authority for operand-ness is the ATen **schema** (ground truth), NOT the
+    local ``FUNC_ARG_SPECS`` that produced the parent edges. Deriving it from the
+    schema keeps the witness an independent cross-check: a dropped edge caused by
+    an under-specified/corrupted ``FUNC_ARG_SPECS`` entry (the incomplete-spec bug
+    class) still fires, because the schema still types that position as a Tensor.
+    Returning ``True`` (operand) keeps the witness armed; returning ``False``
+    (non-operand) suppresses ONLY the benign provenanced size-arg case.
+
+    Tripwire safety: this narrowing can NEVER open a capture-gap hole. A real
+    capture gap means the tensor is UN-provenanced, which is caught earlier by
+    branch (1) (``not _tensor_has_known_provenance``) at ANY position, before this
+    classifier is consulted. It fails SAFE (returns ``True``, keep flagging)
+    whenever authority is uncertain: variadic-arity transform ops (whose Tensor
+    operands are extracted by a fresh crawl and whose positional-to-schema mapping
+    is call-dependent) and ops with no resolvable ATen schema. The union over
+    overloads can only ADD Tensor slots, so it never turns a real operand into a
+    suppressed non-operand.
+
+    Parameters
+    ----------
+    func_name:
+        Raw wrapped callable name for the current op.
+    path:
+        Stable argument-position string such as ``"arg1"``, ``"arg1.1"``, or
+        ``"kw:size.1"`` produced by the witness's ``visit`` walk.
+
+    Returns
+    -------
+    bool
+        ``True`` when the path's top-level slot is a Tensor-operand position (or
+        authority is uncertain); ``False`` for a schema-confirmed non-operand
+        size/shape slot.
+    """
+
+    if _normalize_func_name(func_name) in VARIADIC_TENSOR_ARG_FUNCS:
+        return True
+    canonical = func_name.strip("_")
+    if canonical not in _SCHEMA_TENSOR_OPERAND_SLOTS_CACHE:
+        _SCHEMA_TENSOR_OPERAND_SLOTS_CACHE[canonical] = _compute_schema_tensor_operand_slots(
+            canonical
+        )
+    slots = _SCHEMA_TENSOR_OPERAND_SLOTS_CACHE[canonical]
+    if slots is None:
+        return True
+    tensor_positions, tensor_names = slots
+    if path.startswith("kw:"):
+        top_key = path[len("kw:") :].split(".", 1)[0]
+        normalized_key = _normalize_func_name(top_key)
+        return any(_normalize_func_name(name) == normalized_key for name in tensor_names)
+    if path.startswith("arg"):
+        index_text = path[len("arg") :].split(".", 1)[0]
+        try:
+            index = int(index_text)
+        except ValueError:
+            return True
+        return index in tensor_positions
+    return True
+
+
 def _unattributed_tensor_arg_positions(
     trace: "Trace",
     args: tuple[Any, ...],
@@ -1989,7 +2122,19 @@ def _unattributed_tensor_arg_positions(
                 positions.append(path)
                 return
             provenance_labels = tensor_session_parent_labels(value)
-            if provenance_labels and recorded_parent_labels.isdisjoint(provenance_labels):
+            # Branch (2): a fully-provenanced tensor whose producer label is not a
+            # recorded parent edge. This is only a real missing-edge bug at a DATA
+            # operand slot; at a size/shape/metadata slot (factory size dims,
+            # view/reshape/as_strided size args) the graph builder deliberately
+            # excludes the position from parents, so a provenanced tensor there is
+            # benign and flagging it is a false positive. Un-provenanced tensors
+            # never reach here -- branch (1) already caught them at every position
+            # -- so this narrowing cannot mask any capture gap.
+            if (
+                provenance_labels
+                and recorded_parent_labels.isdisjoint(provenance_labels)
+                and _arg_position_is_tensor_operand(func_name, path)
+            ):
                 positions.append(path)
             return
         if isinstance(value, (list, tuple)):
