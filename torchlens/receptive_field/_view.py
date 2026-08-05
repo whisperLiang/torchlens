@@ -305,8 +305,10 @@ class ReceptiveFieldView:
                     raise ReceptiveFieldError(
                         f"No projective-field solution is available from source {self._op.label!r}."
                     )
-                descriptor = _select_target_descriptor(descriptors, cast("Op | str | None", target))
-                source_unit = self._center_unit(descriptor)
+                proj_descriptor = _select_target_descriptor(
+                    descriptors, cast("Op | str | None", target)
+                )
+                source_unit = self._center_unit(proj_descriptor)
             else:
                 source_unit = cast(Sequence[int], unit)
             return box_for_source_unit(
