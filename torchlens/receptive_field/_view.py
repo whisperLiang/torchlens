@@ -7,7 +7,12 @@ from importlib import import_module
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal, Mapping, cast
 
-from ._errors import AmbiguousInputError, ReceptiveFieldError, ReceptiveFieldUnavailableError
+from ._errors import (
+    AmbiguousInputError,
+    AmbiguousTargetError,
+    ReceptiveFieldError,
+    ReceptiveFieldUnavailableError,
+)
 from ._types import (
     GradientReceptiveField,
     GridLayout,
@@ -164,7 +169,7 @@ class ReceptiveFieldView:
         Parameters
         ----------
         input:
-            Optional exact IO role or model-input operation.
+            Optional exact IO role or graph endpoint operation.
 
         Returns
         -------
@@ -174,19 +179,33 @@ class ReceptiveFieldView:
         Raises
         ------
         AmbiguousInputError
-            If no input is selected and several are reachable.
+            If this is a receptive view, no input is selected, and several
+            are reachable.
+        AmbiguousTargetError
+            If this is a projective view, no target is selected, and several
+            are reachable.
         ReceptiveFieldError
-            If no input is reachable or the requested input is not reachable.
+            If no endpoint is reachable or the requested one is not reachable.
         """
 
+        projective = self._direction is ReceptiveFieldDirection.PROJECTIVE
         if input is None:
             if len(self.per_input) > 1:
                 roles = ", ".join(self.per_input)
+                if projective:
+                    raise AmbiguousTargetError(
+                        f"Source {self._op.label!r} has multiple reachable targets: "
+                        f"{roles}. Select one with view[target_op] or target=<io_role>."
+                    )
                 raise AmbiguousInputError(
                     f"Target {self._op.label!r} has multiple reachable inputs: {roles}. "
                     "Select one with view[input_op] or input=<io_role>."
                 )
             if not self.per_input:
+                if projective:
+                    raise ReceptiveFieldError(
+                        f"Source {self._op.label!r} has no reachable model output."
+                    )
                 raise ReceptiveFieldError(
                     f"Target {self._op.label!r} has no reachable model input."
                 )
@@ -195,6 +214,10 @@ class ReceptiveFieldView:
             return self[input]
         except KeyError as exc:
             identity = input if isinstance(input, str) else input.label
+            if projective:
+                raise ReceptiveFieldError(
+                    f"Target {identity!r} is not reachable from source {self._op.label!r}."
+                ) from exc
             raise ReceptiveFieldError(
                 f"Input {identity!r} is not reachable from target {self._op.label!r}."
             ) from exc

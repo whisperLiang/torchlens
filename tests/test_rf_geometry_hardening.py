@@ -601,6 +601,39 @@ def test_nonempty_box_slices_match_support_hull() -> None:
     assert selected.shape[-2:] == (rows[1] - rows[0], cols[1] - cols[0])
 
 
+# ---------------------------------------------------------------------------
+# Projective ambiguity vocabulary
+# ---------------------------------------------------------------------------
+
+
+def test_multi_target_projective_raises_target_error() -> None:
+    """Projective convenience properties speak target vocabulary, not input."""
+
+    from torchlens.receptive_field import AmbiguousInputError, AmbiguousTargetError
+
+    class TwoOut(nn.Module):
+        def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            return x * 2.0, x + 1.0
+
+    trace = tl.trace(TwoOut(), torch.randn(1, 3))
+    source = sole_input(trace)
+    for accessor in ("status", "axes", "size", "jump", "center0", "layout"):
+        with pytest.raises(AmbiguousTargetError, match="target") as exc_info:
+            getattr(source.projective_field, accessor)
+        assert not isinstance(exc_info.value, AmbiguousInputError)
+        message = str(exc_info.value)
+        assert "target=" in message and "input=" not in message
+
+    class TwoIn(nn.Module):
+        def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+            return a + b
+
+    trace_in = tl.trace(TwoIn(), (torch.randn(1, 3), torch.randn(1, 3)))
+    add = op_named(trace_in, "add")
+    with pytest.raises(AmbiguousInputError, match="input="):
+        _ = add.receptive_field.status
+
+
 def test_non_antialiased_interpolate_regression() -> None:
     """The AA branch must not disturb ordinary interpolation geometry."""
 
