@@ -4,6 +4,7 @@
 
 from collections import deque
 
+from ..utils._multipass_access import get_multipass_attr, is_multipass_layer
 from ._render_common import *
 
 # Bound the forward walk that maps a branch-entry edge to its condition bool, so a
@@ -344,13 +345,46 @@ def _add_combined_correspondence_edges(
             cluster_name = f"cluster_{module_key.replace(':', '_pass')}"
             edge_attrs["ltail"] = cluster_name
             edge_attrs["lhead"] = cluster_name
-        op = grad_fn_handle.op
-        if op is not None:
+        forward_node_name = _forward_correspondence_node_name(grad_fn_handle.op)
+        if forward_node_name is not None:
             graphviz_graph.edge(
-                op.layer_label,
+                forward_node_name,
                 _backward_dot_node_name(grad_fn_handle),
                 **edge_attrs,
             )
+
+
+def _forward_correspondence_node_name(op: "Layer | None") -> str | None:
+    """Return the DECLARED forward dot-node name a combined correspondence edge targets.
+
+    Combined graphs render forward nodes unrolled, so their dot names are
+    ``op.label.replace(':', 'pass')`` (e.g. ``linear_1_1pass1``). The correspondence
+    edge historically emitted the bare aggregate ``op.layer_label`` (``linear_1_1``),
+    which is NOT a declared node -- Graphviz then auto-created a PHANTOM duplicate
+    node for every dashed edge, so the forward/backward correspondence was wrong in
+    every combined render (feedforward included). Emit the real declared name.
+
+    For a recurrent aggregate ``Layer`` the specific forward *pass* a grad_fn maps to
+    is not recoverable from current metadata (all passes share ``op_label`` and
+    ``backward_pass_index``), so return ``None`` and let the caller SKIP the edge
+    rather than fabricate a phantom or attach to an arbitrary pass. Omitting an
+    unprovable correspondence is honest; drawing a wrong one is not.
+
+    Parameters
+    ----------
+    op:
+        Forward ``Op`` or aggregate ``Layer`` paired with a grad_fn, or ``None``.
+
+    Returns
+    -------
+    str | None
+        Declared forward dot-node name, or ``None`` to skip the edge.
+    """
+
+    label = get_multipass_attr(op, "label", None, multipass=None)
+    if not isinstance(label, str):
+        return None
+    return label.replace(":", "pass")
 
 
 def _module_key_for_grad_fn(
@@ -393,6 +427,38 @@ def _module_key_for_grad_fn(
     raise ValueError("intervening_cluster must be 'upstream', 'outside', 'downstream', or 'own'.")
 
 
+def _forward_op_is_module_output(op: "Layer") -> bool:
+    """Resolve ``is_module_output`` for a forward op, aggregate-safe on recurrent Layers.
+
+    ``is_module_output`` is a per-pass field whose access raises the multi-pass
+    ``ValueError`` tripwire on a recurrent aggregate ``Layer`` (this is what
+    detonated ``draw_combined`` on any recurrent model). Module-output status is a
+    static containment property, so -- matching how the sibling module fields
+    ``output_of_modules`` / ``modules`` are already stored aggregate-as-first-pass
+    on the Layer -- resolve it explicitly from the first captured pass instead of
+    leaking the tripwire out of the public combined renderer.
+
+    Parameters
+    ----------
+    op:
+        Forward ``Op`` or aggregate ``Layer`` paired with a grad_fn.
+
+    Returns
+    -------
+    bool
+        Whether the forward op is a module output.
+    """
+
+    if is_multipass_layer(op):
+        ops = getattr(op, "ops", None)
+        if ops is not None:
+            first_pass = next(iter(ops.values()), None)
+            if first_pass is not None:
+                return bool(getattr(first_pass, "is_module_output", False))
+        return False
+    return bool(get_multipass_attr(op, "is_module_output", False, multipass=False))
+
+
 def _module_key_for_forward_op(op: "Layer") -> str | None:
     """Return the unrolled module cluster key for a forward op.
 
@@ -408,7 +474,7 @@ def _module_key_for_forward_op(op: "Layer") -> str | None:
     """
 
     output_modules = list(getattr(op, "output_of_modules", []) or [])
-    if getattr(op, "is_module_output", False) and output_modules:
+    if _forward_op_is_module_output(op) and output_modules:
         output_module = str(output_modules[0])
         output_calls = list(getattr(op, "output_of_module_calls", []) or [])
         for output_call in output_calls:
