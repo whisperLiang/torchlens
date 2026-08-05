@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import torch
 
+from torchlens.utils import rng as rngmod
 from torchlens.utils.rng import (
     AutocastRestore,
     _call_site_argcount,
@@ -269,3 +270,40 @@ def test_f4_call_method_argcount_decoded():
         # The regression is py3.10-specific; nothing to assert on newer opcodes.
         pytest.skip(f"method-call opcode is {opname}, not CALL_METHOD (py>=3.11)")
     assert argcount == 1
+
+
+# ---------------------------------------------------------------------------
+# F5 -- _numpy_global_name_cache must RETAIN the keyed code object and globals
+# mapping so their id()s cannot be reused mid-window (stale-co_names / under-
+# witness). No deterministic functional repro exists (id reuse is nondeterministic);
+# this asserts the retention invariant directly (mirrors the sibling cache).
+# ---------------------------------------------------------------------------
+_F5_GEN = np.random.default_rng(0)
+
+
+def test_f5_global_name_cache_retains_code_and_globals(monkeypatch):
+    monkeypatch.setattr(rngmod, "_NUMPY_RNG_METHODS_NEED_FRAME_DIGEST", True)
+    monitor = host_nondeterminism_monitor(None)
+
+    holder: dict = {}
+
+    def user_frame_fn():
+        _g = _F5_GEN  # global reference -> co_names includes '_F5_GEN'
+        assert _g is not None
+        holder["frame"] = sys._getframe()
+
+    user_frame_fn()
+    frame = holder["frame"]
+    assert monitor._numpy_frame_needs_rng_snapshot(frame.f_code)
+
+    monitor._snapshot_numpy_frame_rngs(frame)
+
+    key = (id(frame.f_code), id(frame.f_globals))
+    assert key in monitor._numpy_global_name_cache
+    value = monitor._numpy_global_name_cache[key]
+    # Retention invariant: the value holds the EXACT code object and globals
+    # mapping (strong refs), not merely the names tuple.
+    assert value[0] is frame.f_code
+    assert value[1] is frame.f_globals
+    assert isinstance(value[2], tuple)
+    assert "_F5_GEN" in value[2]

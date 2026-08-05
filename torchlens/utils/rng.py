@@ -1852,7 +1852,15 @@ class host_nondeterminism_monitor:
         # frame or one inert holder edge below them and compares them at return,
         # preserving the no-method-name invariant.
         self._numpy_frame_rng_states: dict[int, list[tuple[Any, str]]] = {}
-        self._numpy_global_name_cache: dict[tuple[int, int], tuple[str, ...]] = {}
+        # Value RETAINS the code object and globals mapping strongly (like the
+        # sibling ``_numpy_frame_digest_scope_cache`` below) so their ``id()``
+        # cannot be reused by a different frame within the monitoring window. A
+        # bare ``tuple[str, ...]`` value (the former shape) retained neither, so
+        # an id collision after GC returned STALE ``co_names`` and snapshotted
+        # the wrong RNG receivers -- an under-witness.
+        self._numpy_global_name_cache: dict[
+            tuple[int, int], tuple[CodeType, Dict[str, Any], tuple[str, ...]]
+        ] = {}
         # Code objects compare structurally and ignore ``co_filename``. Key by identity
         # and retain the code object strongly in the value so an id cannot be reused
         # during the monitoring window and an internal structural twin cannot suppress
@@ -2185,10 +2193,19 @@ class host_nondeterminism_monitor:
         if not self._numpy_frame_needs_rng_snapshot(frame.f_code):
             return
         cache_key = (id(frame.f_code), id(frame.f_globals))
-        global_names = self._numpy_global_name_cache.get(cache_key)
-        if global_names is None:
+        cached = self._numpy_global_name_cache.get(cache_key)
+        if cached is None:
             global_names = tuple(frame.f_code.co_names)
-            self._numpy_global_name_cache[cache_key] = global_names
+            # Retain the code object AND globals mapping in the value so their
+            # id()s cannot be reused mid-window (see the field comment); an id
+            # collision would otherwise return stale co_names -> under-witness.
+            self._numpy_global_name_cache[cache_key] = (
+                frame.f_code,
+                frame.f_globals,
+                global_names,
+            )
+        else:
+            global_names = cached[2]
         global_candidates = [
             frame.f_globals[name] for name in global_names if name in frame.f_globals
         ]
