@@ -14,12 +14,20 @@ from typing import Dict, Mapping, Optional, Set, Tuple
 
 FrontierNodes = OrderedDict[str, dict[str, deque[str]]]
 
-# Minimum number of operations a parameter-free loop body must span before adjacent
-# repetitions are grouped as a recurrent loop. Raising the bar from 1 to 2 kills the
-# "two adjacent same-op nodes are a 2-pass loop" false positive (e.g. y = tanh(x);
-# z = tanh(y)) without touching parameter-based recurrence (RNNs, weight tying), which
-# is decided by shared parameters rather than body size.
-_MIN_PARAM_FREE_LOOP_BODY_OPS = 2
+# Backend marker ``func_name`` for pseudo-ops (model inputs and outputs). Pseudo-ops
+# are never recurrent passes of anything -- a user input or model output executes once
+# by definition -- so the topological param-free grouping pass excludes them outright.
+_PSEUDO_FUNC_NAME = "none"
+
+# A slot color is the site identity a parent contributes to a param-free op's
+# signature: ``("param", call_identity)`` for parameterized calls, ``("anchor",
+# (equivalence_key, output_slot))`` for anchored (module-bound or buffer) ops,
+# ``("class", leader_label)`` for unanchored param-free ops (their CURRENT topological
+# class), and ``("ext", label)`` for everything external (pseudo-ops, pruned or
+# non-eligible parents). Colors deliberately carry NO pass index: repeated passes of
+# one site contribute one color, which is what lets lockstep loop iterations produce
+# EQUAL signatures.
+_SlotColor = Tuple[str, object]
 
 
 @dataclass(frozen=True)
@@ -228,7 +236,6 @@ class _GroupingWorkspace:
     raw_labels: tuple[str, ...]
     source_labels: tuple[str, ...]
     eligible_labels: set[str]
-    _param_contexts: Optional[dict[str, frozenset[_ParamCallIdentity]]] = None
 
     @classmethod
     def from_graph(
@@ -291,64 +298,6 @@ class _GroupingWorkspace:
         """
         node = self.nodes[label]
         return tuple(equiv for equiv in node.equivalent_labels if equiv in self.nodes)
-
-    def param_contexts(self) -> dict[str, frozenset[_ParamCallIdentity]]:
-        """Return each node's nearest-parameter-ancestor call-identity context.
-
-        A node's parametric context is the union, over its data parents, of the
-        parent's own SITE-QUALIFIED call identity (:func:`_param_call_identity`:
-        function, parameter barcodes, output slot, module site, and non-tensor arg
-        signature) when the parent is parameterized, else the parent's context. It
-        identifies WHICH parametric loop a parameter-free op sits inside: a
-        ``tanh`` fed by parameterized site A carries context ``{A}``, one fed by
-        site B carries ``{B}``. Two bare functional ops whose nonempty contexts
-        DIFFER AT ALL provably sit after different parent topologies and must not
-        be merged as recurrent passes of one layer -- disjointness is not
-        required: with a shared module reused in both loops next to
-        site-specific halves, the contexts ``{shared, enc}`` and
-        ``{shared, dec}`` overlap yet still mark different loops. The sole
-        honest unequal case, the not-yet-saturated loop-entry call, is
-        re-admitted through :func:`_entry_adoption_pairs`.
-
-        The context element must be the full call identity, never the bare
-        parameter barcodes: two DISTINCT weight-tied modules (a tied
-        ``encoder``/``decoder`` pair) and one kernel applied under different
-        non-tensor args share barcodes yet are different semantic sites, so a bare
-        functional interior (``torch.tanh``) between their loops would otherwise
-        inherit one indistinguishable context and merge ACROSS the loop boundary --
-        yielding a 5-pass layer bridging the 3-pass and 2-pass parameterized
-        layers that the disjoint-context veto exists to keep apart. A genuinely
-        reused module (ALBERT-style, one ``nn.Module`` called in both loops) keeps
-        ONE identity across calls, so its interiors still share a context and still
-        merge.
-
-        The computation is a single pass over capture order (parents precede
-        children in a captured DAG) and depends only on set-valued inputs, so it is
-        invariant to sibling capture order.
-
-        Returns
-        -------
-        dict[str, frozenset[_ParamCallIdentity]]
-            Parameterized-ancestor call-identity context keyed by node label.
-            Cached after the first call.
-        """
-        if self._param_contexts is not None:
-            return self._param_contexts
-        contexts: dict[str, frozenset[_ParamCallIdentity]] = {}
-        for label in self.raw_labels:
-            node = self.nodes[label]
-            accumulated: set[_ParamCallIdentity] = set()
-            for parent in node.data_parents:
-                parent_node = self.nodes.get(parent)
-                if parent_node is None:
-                    continue
-                if parent_node.uses_params and parent_node.param_barcodes:
-                    accumulated.add(_param_call_identity(parent_node))
-                else:
-                    accumulated.update(contexts.get(parent, frozenset()))
-            contexts[label] = frozenset(accumulated)
-        self._param_contexts = contexts
-        return contexts
 
     def assignments(self) -> dict[str, RecurrenceAssignment]:
         """Return computed assignments for every eligible node.
@@ -434,6 +383,7 @@ def _detect_and_label_workspace_loops(workspace: _GroupingWorkspace) -> None:
 
         _expand_isomorphic_subgraphs(workspace, node_label)
 
+    _assign_param_free_layers(workspace)
     _rebuild_pass_assignments(workspace)
 
 
@@ -1005,55 +955,6 @@ def _finalize_layer_assignments(
             node.equivalence_key = canonical_equiv_type
 
 
-def _param_free_adjacency_merge_allowed(
-    workspace: "_GroupingWorkspace",
-    node1_label: str,
-    node2_label: str,
-    subgraph_a: SubgraphInfo,
-    subgraph_b: SubgraphInfo,
-) -> bool:
-    """Return whether an adjacency-only, param-free merge is a real loop.
-
-    Two structurally isomorphic subgraphs that are adjacent but share no parameters are only
-    a genuine recurrent loop when EITHER:
-
-    * a seed op is recurrence-anchored -- a reused submodule call (one ``nn.ReLU`` invoked
-      four times) or a stateful buffer node (a buffer rewritten each iteration) -- whose
-      repeated persistent identity is real recurrence even with a single-op body; or
-    * the repeated body spans at least ``_MIN_PARAM_FREE_LOOP_BODY_OPS`` operations.
-
-    This rejects the historical false positive where two bare adjacent same-op calls in the
-    parent forward -- ``y = tanh(x); z = tanh(y)`` -- were grouped as a two-pass loop despite
-    being a straight-line chain. Parameter-based merges (RNNs, weight tying) never reach this
-    guard; they are decided by shared parameters and are left untouched.
-
-    Parameters
-    ----------
-    workspace:
-        Mutable grouping workspace, used to read the seed ops' module binding.
-    node1_label:
-        Seed op label of the first subgraph.
-    node2_label:
-        Seed op label of the second subgraph.
-    subgraph_a:
-        One candidate loop-body subgraph.
-    subgraph_b:
-        The structurally isomorphic partner subgraph.
-
-    Returns
-    -------
-    bool
-        ``True`` when the two subgraphs may be merged into a recurrent group.
-    """
-    if (
-        workspace.nodes[node1_label].recurrence_anchored
-        or workspace.nodes[node2_label].recurrence_anchored
-    ):
-        return True
-    smallest_body = min(len(subgraph_a.node_set), len(subgraph_b.node_set))
-    return smallest_body >= _MIN_PARAM_FREE_LOOP_BODY_OPS
-
-
 def _seed_reaches(
     workspace: _GroupingWorkspace,
     node1_label: str,
@@ -1145,212 +1046,519 @@ def _param_call_identity(node: _MutableRecurrenceNode) -> _ParamCallIdentity:
     )
 
 
-def _param_free_flow_reachable(
+# ---------------------------------------------------------------------------
+# Topological parameter-free grouping
+# ---------------------------------------------------------------------------
+#
+# Which N-pass layer (or singleton) a bare (unanchored, parameter-free) op belongs
+# to is a DERIVED quantity: it follows deterministically from the already-solved
+# parameterized/anchored grouping plus data-flow topology. The pass below computes
+# it as a coarsest-fixpoint partition:
+#
+# * Every bare op gets a SIGNATURE: the multiset of its parents' slot colors
+#   (parameterized call identity / anchored key / bare-op class / external label).
+#   Colors carry no pass index, so lockstep iterations of one source-code site
+#   produce EQUAL signatures, while a site whose parameterized direct parents
+#   differ in LAYER (``enc`` versus ``dec``) is split by construction -- the exact
+#   DAG evidence the r22/r23/r24 seals demanded.
+# * Classes start maximally coarse (one class per equivalence key and output slot)
+#   and are only ever SPLIT, so every division is backed by definite evidence and
+#   iteration converges. Signatures reference the classes themselves (a ``tanh``
+#   fed by an ``add`` carries the add CLASS as its color), so sibling ops in one
+#   loop body partition in lockstep by construction.
+# * The one honest same-site signature difference is the LOOP ENTRY: pass 1 reads
+#   state produced before the loop, later passes read it through the feedback
+#   wire. Entry pairs are re-admitted through a guarded carry-slot exemption
+#   (:func:`_pf_entry_union_allowed`) instead of context-set heuristics.
+# * Loop-invariant-fed repeats (a factory op or a recompute of a pre-loop value
+#   inside the body) carry no sequencing evidence on the parent side; they are
+#   sequenced through their CONSUMERS (:func:`_pf_child_route_allows`).
+
+
+def _reaches_forward(
     workspace: _GroupingWorkspace,
     src_label: str,
-    max_order: int,
-) -> set[str]:
-    """Return labels reachable from ``src_label`` along parameter-free data paths.
+    dst_label: str,
+    memo: dict[tuple[str, str], bool],
+) -> bool:
+    """Return whether ``src_label`` reaches ``dst_label`` along directed data edges.
 
-    Traversal follows ``data_children`` edges but never enters a parameterized
-    node -- the same ``uses_params and param_barcodes`` predicate that cuts
-    :meth:`_GroupingWorkspace.param_contexts` propagation. Membership in the
-    result therefore certifies that the source's parametric context FLOWED to
-    the target along the wire: for every returned label ``m``,
-    ``context(m) >= context(src_label)`` holds by construction of the context
-    recurrence. Containment that instead arises from RE-CALLING a shared
-    parameterized identity behind a parametric cut (a second loop re-invoking a
-    shared module on the first loop's output) is deliberately NOT certified --
-    that is a loop-boundary crossing, not context flow.
+    Unlike :func:`_seed_reaches` this query is DIRECTIONAL and reflexive: the
+    loop-carried-dependence certificate requires that the later call's carry
+    parent was computed FROM the earlier call (possibly the earlier call itself),
+    never merely that the two are connected in some order.
 
     Parameters
     ----------
     workspace:
         Mutable grouping workspace.
     src_label:
-        Parameter-free source node label.
-    max_order:
-        Raw-order upper bound; children past every candidate target are pruned.
+        Candidate producer label.
+    dst_label:
+        Candidate consumer label.
+    memo:
+        Shared cache of resolved reachability queries.
 
     Returns
     -------
-    set[str]
-        Parameter-free labels reachable from ``src_label`` without crossing a
-        parameterized node.
+    bool
+        ``True`` when ``dst_label`` is ``src_label`` or lies downstream of it.
     """
-    reachable: set[str] = set()
-    seen: set[str] = {src_label}
-    stack: list[str] = [src_label]
-    while stack:
-        current = stack.pop()
-        for child in workspace.nodes[current].data_children:
-            child_node = workspace.nodes.get(child)
-            if child_node is None or child in seen or child_node.raw_order > max_order:
-                continue
-            seen.add(child)
-            if child_node.uses_params and child_node.param_barcodes:
-                continue
-            reachable.add(child)
-            stack.append(child)
-    return reachable
+    if src_label == dst_label:
+        return True
+    if workspace.nodes[dst_label].raw_order < workspace.nodes[src_label].raw_order:
+        return False
+    return _seed_reaches(workspace, src_label, dst_label, memo)
 
 
-def _entry_adoption_pairs(
+def _pf_slot_color(
     workspace: _GroupingWorkspace,
-    iso_nodes: list[str],
-    param_contexts: Dict[str, frozenset[_ParamCallIdentity]],
-    context_carriers: Dict[tuple[str, frozenset[_ParamCallIdentity]], int],
-) -> set[tuple[str, str]]:
-    """Return the loop-entry pairs exempt from the unequal-context veto.
-
-    The veto in :func:`_merge_iso_groups_to_layers` keeps a bare param-free op
-    from grouping across calls whose nearest-parameterized-ancestor contexts
-    differ AT ALL. One honest case has genuinely unequal contexts: the LOOP
-    ENTRY. On pass 1 a recurrent op reads state produced OUTSIDE the loop, so
-    its context is missing the in-loop sites that saturate every later pass
-    through the recurrent feedback wire (``h = emb(x); for: h = h + attn(h)``
-    gives the first ``add`` context ``{emb, attn}`` and every later one
-    ``{emb, attn, mlp, ...}``). Splitting pass 1 off would shear the entry call
-    from its own loop.
-
-    An exemption is granted only when ALL of the following hold, each one
-    adversarially load-bearing:
-
-    * ``context(entry)`` is a STRICT SUBSET of ``context(target)`` -- entry
-      saturation only ever grows the context. Disjoint or crosswise-different
-      contexts (two loops with different site-specific halves) never qualify.
-    * The entry call is the GLOBALLY unique carrier of its context: no other
-      veto-governed candidate anywhere in the workspace with the SAME
-      equivalence key (the population of calls that could be passes of the
-      same layer) carries the same context. A multi-call context class is a
-      recurrent site of its own (a 3-pass loop upstream of a 2-pass loop),
-      never a dangling entry, so it must stay a separate layer. The census
-      must be workspace-wide, NOT per iso group: a SATURATED interior class
-      can fragment across iso groups -- in a 2-iteration param-free-headed
-      loop, pass 1's parent is the pre-loop op while pass 2's parent is the
-      in-loop feedback op, so the two passes land in different iso groups and
-      a per-group count misreads the saturated pass 2 as a dangling singleton
-      entry, adopting it across the next loop's boundary (the r24 defect:
-      ``emb -> for 2: tanh(h+enc(h)) -> for 2: tanh(h+dec(h))`` grouped
-      ``add`` as [1, 3] beside ``tanh`` [2, 2]). Same-key scoping is equally
-      load-bearing in the other direction: two DIFFERENT-typed honest entries
-      sharing one context (a ``tanh`` and a ``sigmoid`` both reading the same
-      pre-loop state) must not disqualify each other.
-    * The entry call reaches the target through a PARAM-FREE data path
-      (:func:`_param_free_flow_reachable`), certifying the subset relation came
-      from context flow along the feedback wire -- not from a second loop
-      re-calling a shared parameterized identity behind a parametric cut.
-    * Each entry call adopts AT MOST ONE target: the earliest reachable
-      qualifying call. Union-find merges are transitive, so a pairwise
-      exemption must not let one entry bridge two mutually-vetoed classes.
-      With out-degree <= 1 and strictly increasing raw order, adoption edges
-      form an in-forest whose components terminate at exactly one class, so
-      two multi-member classes can never merge through adoptions.
+    label: str,
+    class_of: dict[str, str],
+) -> _SlotColor:
+    """Return the site-identity color a node contributes as a signature slot.
 
     Parameters
     ----------
     workspace:
         Mutable grouping workspace.
-    iso_nodes:
-        Iso-group member labels sorted by raw capture order.
-    param_contexts:
-        Nearest-parameterized-ancestor contexts keyed by node label.
-    context_carriers:
-        Workspace-wide carrier counts keyed by ``(equivalence_key, context)``
-        over every veto-governed candidate (:func:`_context_carrier_counts`).
+    label:
+        Node label to color (need not be eligible; unknown labels are external).
+    class_of:
+        Current bare-op class assignment (label to class leader).
 
     Returns
     -------
-    set[tuple[str, str]]
-        ``(entry_label, target_label)`` pairs, entry strictly earlier in raw
-        capture order than target.
+    _SlotColor
+        Kind-tagged site identity. Parameterized calls color by their full call
+        identity (all passes of one layer share a color); anchored ops by their
+        module-suffixed equivalence key; bare ops by their CURRENT topological
+        class; everything else (pseudo-ops, pruned or non-eligible parents) by
+        its own label.
     """
-    classes: Dict[frozenset[_ParamCallIdentity], list[str]] = defaultdict(list)
-    for label in iso_nodes:
-        node = workspace.nodes[label]
-        if node.uses_params or node.recurrence_anchored:
-            continue
-        context = param_contexts.get(label, frozenset())
-        if context:
-            classes[context].append(label)
-    if len(classes) < 2:
-        return set()
-    pairs: set[tuple[str, str]] = set()
-    for context, members in classes.items():
-        if len(members) != 1:
-            continue
-        entry = members[0]
-        entry_key = workspace.nodes[entry].equivalence_key
-        if context_carriers.get((entry_key, context), 0) != 1:
-            # The context is carried by another same-key candidate elsewhere in
-            # the workspace (typically the sibling pass of a saturated 2-iteration
-            # loop that fragmented into a different iso group), so this call is an
-            # interior pass of an already-realized class -- never a dangling
-            # loop entry eligible for cross-boundary adoption.
-            continue
-        entry_order = workspace.nodes[entry].raw_order
-        candidates = [
-            member
-            for other_context, other_members in classes.items()
-            if context < other_context
-            for member in other_members
-            if workspace.nodes[member].raw_order > entry_order
-        ]
-        if not candidates:
-            continue
-        max_order = max(workspace.nodes[member].raw_order for member in candidates)
-        reachable = _param_free_flow_reachable(workspace, entry, max_order)
-        reachable_candidates = [member for member in candidates if member in reachable]
-        if not reachable_candidates:
-            continue
-        target = min(reachable_candidates, key=lambda member: workspace.nodes[member].raw_order)
-        pairs.add((entry, target))
-    return pairs
+    node = workspace.nodes.get(label)
+    if node is None:
+        return ("ext", label)
+    if node.uses_params and node.param_barcodes:
+        return ("param", _param_call_identity(node))
+    if node.recurrence_anchored:
+        return ("anchor", (node.equivalence_key, node.output_slot))
+    leader = class_of.get(label)
+    if leader is not None:
+        return ("class", leader)
+    return ("ext", label)
 
 
-def _context_carrier_counts(
-    workspace: _GroupingWorkspace,
-    param_contexts: Dict[str, frozenset[_ParamCallIdentity]],
-) -> Dict[tuple[str, frozenset[_ParamCallIdentity]], int]:
-    """Return workspace-wide carrier counts of each (equivalence key, context) pair.
+def _pf_realization_counts(workspace: _GroupingWorkspace) -> dict[_SlotColor, int]:
+    """Count how many calls realize each parameterized/anchored slot color.
 
-    Counts every veto-governed candidate -- param-free, non-anchored, with a
-    nonempty nearest-parameterized-ancestor context -- across the WHOLE
-    workspace, keyed by its equivalence key and context. This is the global
-    census behind the unique-carrier condition of
-    :func:`_entry_adoption_pairs`: only calls sharing an equivalence key can
-    ever be passes of one layer, so a same-key second carrier of a context
-    proves the context class is an already-saturated recurrent site rather
-    than a dangling loop entry -- even when iso-grouping fragments that class
-    across groups (a 2-iteration loop's two interior passes have structurally
-    different parents and always fragment). Scoping the census to the iso
-    group instead is exactly the r24 defect: the fragment looks like a
-    singleton and gets adopted across the next loop's boundary.
-
-    The census is computed per merge invocation, after any equivalence-key
-    canonicalization by earlier expansion rounds, so counts always reflect the
-    same keys the current round groups by.
+    A color realized ONCE is a one-shot site (a pre-loop embedding, an init); a
+    color realized several times is itself a recurring site. The distinction is
+    load-bearing for entry admission: a genuine loop entry's odd parent is the
+    one-shot pre-loop producer, never a realized recurrent site -- an op whose
+    odd parent recurs sits BESIDE a loop (an interior or a boundary), and
+    admitting it is exactly the historical cross-boundary straddle.
 
     Parameters
     ----------
     workspace:
         Mutable grouping workspace.
-    param_contexts:
-        Nearest-parameterized-ancestor contexts keyed by node label.
 
     Returns
     -------
-    dict[tuple[str, frozenset[_ParamCallIdentity]], int]
-        Carrier counts keyed by ``(equivalence_key, context)``.
+    dict[_SlotColor, int]
+        Realization counts for ``("param", ...)`` and ``("anchor", ...)`` colors.
     """
-    counts: Dict[tuple[str, frozenset[_ParamCallIdentity]], int] = defaultdict(int)
-    for label, node in workspace.nodes.items():
-        if node.uses_params or node.recurrence_anchored:
-            continue
-        context = param_contexts.get(label, frozenset())
-        if context:
-            counts[(node.equivalence_key, context)] += 1
+    counts: dict[_SlotColor, int] = defaultdict(int)
+    for node in workspace.nodes.values():
+        if node.uses_params and node.param_barcodes:
+            counts[("param", _param_call_identity(node))] += 1
+        elif node.recurrence_anchored:
+            counts[("anchor", (node.equivalence_key, node.output_slot))] += 1
     return dict(counts)
+
+
+def _pf_child_route_allows(
+    workspace: _GroupingWorkspace,
+    node1_label: str,
+    node2_label: str,
+    class_of: dict[str, str],
+    reach_memo: dict[tuple[str, str], bool],
+) -> bool:
+    """Return whether two loop-invariant-fed calls sequence through their consumers.
+
+    A per-iteration factory op (``torch.ones(...)`` in the body) or a recompute of
+    a loop-invariant value (``torch.tanh(x)`` on the unchanging input) has no
+    parent-side sequencing evidence: its parents are external or absent, and no
+    data path connects one repetition to the next. Its repetition is still real
+    -- one consumer per iteration -- so sequencing is certified on the consumer
+    side instead: the two calls feed DISJOINT consumers of IDENTICAL site colors,
+    and the earlier call's consumer flows into the later call's consumer.
+    Requiring disjointness rejects sibling inits (the ``h``/``c`` zeros of one
+    LSTMCell feed the SAME call and are two distinct values, not two passes).
+
+    Parameters
+    ----------
+    workspace:
+        Mutable grouping workspace.
+    node1_label:
+        Earlier candidate call.
+    node2_label:
+        Later candidate call.
+    class_of:
+        Current bare-op class assignment.
+    reach_memo:
+        Shared reachability cache.
+
+    Returns
+    -------
+    bool
+        ``True`` when consumer topology certifies consecutive repetition.
+    """
+    children1 = [
+        child for child in workspace.nodes[node1_label].data_children if child in workspace.nodes
+    ]
+    children2 = [
+        child for child in workspace.nodes[node2_label].data_children if child in workspace.nodes
+    ]
+    if not children1 or not children2:
+        return False
+    if set(children1) & set(children2):
+        return False
+    colors1 = Counter(_pf_slot_color(workspace, child, class_of) for child in children1)
+    colors2 = Counter(_pf_slot_color(workspace, child, class_of) for child in children2)
+    if colors1 != colors2:
+        return False
+    return any(
+        _reaches_forward(workspace, child1, child2, reach_memo)
+        for child1 in children1
+        for child2 in children2
+    )
+
+
+def _pf_entry_union_allowed(
+    workspace: _GroupingWorkspace,
+    entry_label: str,
+    target_label: str,
+    signatures: dict[str, Counter],
+    parent_colors: dict[str, list[tuple[str, _SlotColor]]],
+    cohort_sizes: dict[frozenset, int],
+    global_signature_counts: dict[frozenset, int],
+    realizations: dict[_SlotColor, int],
+    reach_memo: dict[tuple[str, str], bool],
+) -> bool:
+    """Return whether a loop-entry call may join a later same-key call's site.
+
+    On pass 1 a recurrent bare op reads state produced OUTSIDE the loop; every
+    later pass reads it through the feedback wire. The two signatures therefore
+    differ in exactly ONE slot -- the carry slot -- and agree everywhere else.
+    Admission demands, each condition independently load-bearing:
+
+    * **Single-slot difference.** Signatures agreeing on all but one matched
+      slot. Two differing slots mean a differing FLANK as well -- positive
+      evidence of a different site (the n1=1 peeled chain), never an entry.
+    * **One-shot odd parent.** The entry-side odd color, when parameterized or
+      anchored, must be realized exactly once. A realized (multi-call) odd
+      parent marks a recurring neighbor site: the candidate sits at a loop
+      boundary, not at a loop entry (the r22 tied chain, the r24 straddle).
+    * **Globally unique entry signature.** No other same-key candidate anywhere
+      carries the entry's signature (the r24 global-census doctrine): a
+      multi-carrier signature class is a realized site of its own, merely
+      fragmented, never a dangling entry.
+    * **Carry certificate.** The target's odd parent is computed FROM the entry
+      (reflexively): the differing slot really is the loop feedback, not an
+      unrelated topology change.
+    * **Recurrence evidence.** Either a parameterized/anchored flank survives in
+      the agreeing remainder (the loop beacon whose passes the pair rides), or
+      -- for flankless (unary-style) entries -- the target's site is realized:
+      its equal-signature cohort has two or more members, or its odd parent is
+      a parameterized site realized at least twice. A bare two-op chain
+      (``tanh(tanh(x))``) has neither and stays split.
+
+    Parameters
+    ----------
+    workspace:
+        Mutable grouping workspace.
+    entry_label:
+        Earlier call whose context has not yet saturated.
+    target_label:
+        Later same-key call.
+    signatures:
+        Current signature (parent color multiset) per candidate label.
+    parent_colors:
+        Per-label ``(parent_label, color)`` pairs backing the signatures.
+    cohort_sizes:
+        Class-local member count per signature.
+    global_signature_counts:
+        Same-key-universe-wide carrier count per signature.
+    realizations:
+        Parameterized/anchored color realization counts.
+    reach_memo:
+        Shared reachability cache.
+
+    Returns
+    -------
+    bool
+        ``True`` when every admission condition holds.
+    """
+    signature_entry = signatures[entry_label]
+    signature_target = signatures[target_label]
+    odd_entry = signature_entry - signature_target
+    odd_target = signature_target - signature_entry
+    if sum(odd_entry.values()) != 1 or sum(odd_target.values()) != 1:
+        return False
+    entry_odd_color = next(iter(odd_entry))
+    target_odd_color = next(iter(odd_target))
+    if entry_odd_color[0] in ("param", "anchor") and realizations.get(entry_odd_color, 0) != 1:
+        return False
+    if global_signature_counts.get(frozenset(signature_entry.items()), 0) != 1:
+        return False
+    carry_certified = any(
+        parent_label in workspace.nodes
+        and _reaches_forward(workspace, entry_label, parent_label, reach_memo)
+        for parent_label, color in parent_colors[target_label]
+        if color == target_odd_color
+    )
+    if not carry_certified:
+        return False
+    agreeing_remainder = signature_entry & signature_target
+    if any(color[0] in ("param", "anchor") for color in agreeing_remainder):
+        return True
+    if cohort_sizes.get(frozenset(signature_target.items()), 0) >= 2:
+        return True
+    return target_odd_color[0] in ("param", "anchor") and realizations.get(target_odd_color, 0) >= 2
+
+
+def _pf_partition_class(
+    workspace: _GroupingWorkspace,
+    members: list[str],
+    signatures: dict[str, Counter],
+    parent_colors: dict[str, list[tuple[str, _SlotColor]]],
+    class_of: dict[str, str],
+    global_signature_counts: dict[frozenset, int],
+    realizations: dict[_SlotColor, int],
+    reach_memo: dict[tuple[str, str], bool],
+) -> list[list[str]]:
+    """Partition one same-key candidate class into topological site groups.
+
+    Members with EQUAL signatures union when data flow connects them (loop
+    iterations always connect through the carry; parallel streams never do) or,
+    for loop-invariant-fed repeats, when consumer topology certifies sequencing.
+    Entry calls union with their EARLIEST admissible target only -- adoption
+    edges with out-degree one form an in-forest, so one entry can never bridge
+    two mutually split sites (the r23 at-most-one guard, preserved).
+
+    Parameters
+    ----------
+    workspace:
+        Mutable grouping workspace.
+    members:
+        Class member labels sorted by raw capture order.
+    signatures:
+        Current signature per candidate label.
+    parent_colors:
+        Per-label ``(parent_label, color)`` pairs backing the signatures.
+    class_of:
+        Current bare-op class assignment.
+    global_signature_counts:
+        Same-key-universe-wide carrier count per signature.
+    realizations:
+        Parameterized/anchored color realization counts.
+    reach_memo:
+        Shared reachability cache.
+
+    Returns
+    -------
+    list[list[str]]
+        New member groups, each sorted by raw capture order.
+    """
+    parent_map = {member: member for member in members}
+
+    def find(label: str) -> str:
+        """Return the union-find root for a member label."""
+        while parent_map[label] != label:
+            parent_map[label] = parent_map[parent_map[label]]
+            label = parent_map[label]
+        return label
+
+    def union(label1: str, label2: str) -> None:
+        """Merge the union-find sets of two member labels."""
+        root1, root2 = find(label1), find(label2)
+        if root1 != root2:
+            parent_map[root2] = root1
+
+    cohorts: dict[frozenset, list[str]] = defaultdict(list)
+    for member in members:
+        cohorts[frozenset(signatures[member].items())].append(member)
+    cohort_sizes = {signature: len(cohort) for signature, cohort in cohorts.items()}
+
+    for signature, cohort in cohorts.items():
+        if len(cohort) < 2:
+            continue
+        invariant_fed = all(color[0] == "ext" for color, _ in signature)
+        pair_iter = it.chain(zip(cohort, cohort[1:]), it.combinations(cohort, 2))
+        for member1, member2 in pair_iter:
+            if find(member1) == find(member2):
+                continue
+            if _reaches_forward(workspace, member1, member2, reach_memo):
+                union(member1, member2)
+            elif invariant_fed and _pf_child_route_allows(
+                workspace, member1, member2, class_of, reach_memo
+            ):
+                union(member1, member2)
+
+    for index, entry in enumerate(members):
+        entry_signature = frozenset(signatures[entry].items())
+        for target in members[index + 1 :]:
+            if frozenset(signatures[target].items()) == entry_signature:
+                continue
+            if find(entry) == find(target):
+                break
+            if _pf_entry_union_allowed(
+                workspace,
+                entry,
+                target,
+                signatures,
+                parent_colors,
+                cohort_sizes,
+                global_signature_counts,
+                realizations,
+                reach_memo,
+            ):
+                union(entry, target)
+                break
+
+    groups: dict[str, list[str]] = defaultdict(list)
+    for member in members:
+        groups[find(member)].append(member)
+    return [
+        sorted(group, key=lambda label: workspace.nodes[label].raw_order)
+        for group in groups.values()
+    ]
+
+
+def _assign_param_free_layers(workspace: _GroupingWorkspace) -> None:
+    """Assign every bare param-free op's layer from its parents' solved grouping.
+
+    Runs after all isomorphic expansion rounds, when parameterized and anchored
+    grouping is final. Candidate classes start maximally coarse (one class per
+    equivalence key and output slot over all bare non-pseudo ops) and are
+    refined to a fixpoint: each round snapshots colors, partitions every
+    multi-member class (:func:`_pf_partition_class`), and applies the splits;
+    signatures reference classes, so a split propagates to consumers on the
+    next round and sibling ops in one loop body settle in lockstep. Refinement
+    only splits, so the result is the coarsest partition consistent with the
+    evidence and iteration terminates.
+
+    After the partition stabilizes, a self-evidence gate dissolves classes whose
+    steady members (all but the earliest call) are fed exclusively by the class
+    itself: a bare single-op self-chain (``for: h = tanh(h)`` and the straight
+    ``tanh(tanh(tanh(x)))`` chain alike) carries no recurrence evidence beyond
+    its own repetition and stays single-pass -- the historical minimum-body-size
+    policy, restated topologically. Dissolution changes consumers' colors, so
+    the fixpoint reruns until no class dissolves.
+
+    Parameters
+    ----------
+    workspace:
+        Mutable grouping workspace.
+
+    Returns
+    -------
+    None
+        Mutates each bare op's ``layer_label``.
+    """
+    universe: dict[tuple[str, Optional[int]], list[str]] = OrderedDict()
+    for label in workspace.raw_labels:
+        node = workspace.nodes[label]
+        if node.uses_params and node.param_barcodes:
+            continue
+        if node.recurrence_anchored:
+            continue
+        if node.func_name == _PSEUDO_FUNC_NAME:
+            continue
+        universe.setdefault((node.equivalence_key, node.output_slot), []).append(label)
+
+    realizations = _pf_realization_counts(workspace)
+    reach_memo: dict[tuple[str, str], bool] = {}
+
+    classes: "OrderedDict[str, list[str]]" = OrderedDict()
+    class_key: dict[str, tuple[str, Optional[int]]] = {}
+    class_of: dict[str, str] = {}
+    for key, labels in universe.items():
+        leader = labels[0]
+        classes[leader] = list(labels)
+        class_key[leader] = key
+        for label in labels:
+            class_of[label] = leader
+
+    while True:
+        signatures: dict[str, Counter] = {}
+        parent_colors: dict[str, list[tuple[str, _SlotColor]]] = {}
+        key_signature_counts: dict[tuple[str, Optional[int]], Counter] = defaultdict(Counter)
+        for leader, members in classes.items():
+            for member in members:
+                pairs = [
+                    (parent, _pf_slot_color(workspace, parent, class_of))
+                    for parent in workspace.nodes[member].data_parents
+                ]
+                parent_colors[member] = pairs
+                signature = Counter(color for _, color in pairs)
+                signatures[member] = signature
+                key_signature_counts[class_key[leader]][frozenset(signature.items())] += 1
+
+        changed = False
+        new_classes: "OrderedDict[str, list[str]]" = OrderedDict()
+        new_class_key: dict[str, tuple[str, Optional[int]]] = {}
+        for leader, members in classes.items():
+            if len(members) < 2:
+                new_classes[leader] = members
+                new_class_key[leader] = class_key[leader]
+                continue
+            groups = _pf_partition_class(
+                workspace,
+                members,
+                signatures,
+                parent_colors,
+                class_of,
+                dict(key_signature_counts[class_key[leader]]),
+                realizations,
+                reach_memo,
+            )
+            if len(groups) > 1:
+                changed = True
+            for group in sorted(groups, key=lambda group_: workspace.nodes[group_[0]].raw_order):
+                new_leader = group[0]
+                new_classes[new_leader] = group
+                new_class_key[new_leader] = class_key[leader]
+
+        if changed:
+            classes = new_classes
+            class_key = new_class_key
+            class_of = {label: leader for leader, members in classes.items() for label in members}
+            continue
+
+        dissolved = False
+        for leader, members in list(classes.items()):
+            if len(members) < 2:
+                continue
+            steady_colors: set[_SlotColor] = set()
+            for member in members[1:]:
+                steady_colors.update(signatures[member])
+            if steady_colors and steady_colors <= {("class", leader)}:
+                del classes[leader]
+                key = class_key.pop(leader)
+                for member in members:
+                    classes[member] = [member]
+                    class_key[member] = key
+                    class_of[member] = member
+                dissolved = True
+        if not dissolved:
+            break
+
+    for leader, members in classes.items():
+        for member in members:
+            workspace.nodes[member].layer_label = leader if len(members) > 1 else member
 
 
 def _merge_iso_groups_to_layers(
@@ -1410,16 +1618,11 @@ def _merge_iso_groups_to_layers(
                     workspace.nodes[pnode].equivalence_key for pnode in sg.param_nodes
                 )
 
-    param_contexts = workspace.param_contexts()
-    context_carriers = _context_carrier_counts(workspace, param_contexts)
     reach_memo: dict[tuple[str, str], bool] = {}
 
     for iso_group_label, iso_nodes_orig in iso_node_groups.items():
         iso_nodes = sorted(
             iso_nodes_orig, key=lambda node_label: workspace.nodes[node_label].raw_order
-        )
-        entry_adoptions = _entry_adoption_pairs(
-            workspace, iso_nodes, param_contexts, context_carriers
         )
         # Consecutive pairs first: in a genuine loop they carry the unions, so the
         # full pairwise sweep afterwards short-circuits on shared union-find roots
@@ -1449,30 +1652,13 @@ def _merge_iso_groups_to_layers(
                 continue
             pair_anchored = node1.recurrence_anchored or node2.recurrence_anchored
             if not (node1.uses_params or node2.uses_params or pair_anchored):
-                # Two bare functional ops sitting inside DIFFERENT parametric loops
-                # are passes of different loops; merging them straddles the loop
-                # boundary and yields incoherent pass counts (a 3-pass and a 2-pass
-                # layer cannot share a 5-pass neighbor). The veto fires whenever the
-                # nonempty nearest-param-ancestor contexts differ AT ALL: disjoint
-                # contexts (untied loops), overlapping-but-unequal contexts (a
-                # shared module reused in both loops next to site-specific halves,
-                # where each bridge op must follow its OWN loop's parent topology),
-                # and strict-subset contexts alike. Equality is transitive, so
-                # allowed unions can never chain around the veto -- the one honest
-                # unequal case, the loop-entry call whose context has not yet
-                # saturated through the recurrent feedback, is re-admitted solely
-                # through its precomputed adoption pair (see
-                # :func:`_entry_adoption_pairs`). Anchored ops are exempt: a reused
-                # module identity is real recurrence wherever its calls sit.
-                context1 = param_contexts.get(node1_label, frozenset())
-                context2 = param_contexts.get(node2_label, frozenset())
-                if (
-                    context1
-                    and context2
-                    and context1 != context2
-                    and (node1_label, node2_label) not in entry_adoptions
-                ):
-                    continue
+                # Bare (unanchored, parameter-free) ops are never grouped through
+                # iso-subgraph adjacency: their layer membership is DERIVED from
+                # their parents' already-solved grouping by the dedicated
+                # topological pass (:func:`_assign_param_free_layers`), which runs
+                # after all iso rounds. Deciding them here from local subgraph
+                # evidence is exactly what let bridges straddle loop boundaries.
+                continue
             overlapping_param_types = (
                 sg_param_types[node1_subgraph_label] & sg_param_types[node2_subgraph_label]
             )
@@ -1489,13 +1675,12 @@ def _merge_iso_groups_to_layers(
                     workspace, node1_label, node2_label, reach_memo
                 ):
                     union(node1_label, node2_label)
-            elif subgraphs_are_adjacent and _param_free_adjacency_merge_allowed(
-                workspace,
-                node1_label,
-                node2_label,
-                node_to_subgraph[node1_label],
-                node_to_subgraph[node2_label],
-            ):
+            elif subgraphs_are_adjacent and pair_anchored:
+                # A reused persistent identity -- a submodule call repeated across
+                # iterations (one ``nn.ReLU`` invoked four times) or a stateful
+                # buffer rewritten each pass -- is real recurrence even with a
+                # single-op body. Bare param-free pairs never reach this branch
+                # (they are skipped above for the topological pass).
                 union(node1_label, node2_label)
 
     param_barcode_groups: dict[_ParamCallIdentity, list[str]] = defaultdict(list)
