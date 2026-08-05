@@ -668,3 +668,28 @@ def test_tied_row_is_honest_when_enumeration_fails() -> None:
     assert row.detected is False
     assert "could not be inspected" in row.details
     assert "No tied/shared parameter objects detected" not in row.details
+
+
+# ---------------------------------------------------------------------------
+# LOW-8 — show() must expose the same Suggestion column as to_markdown().
+# ---------------------------------------------------------------------------
+
+
+def test_show_includes_suggestion_column_like_markdown() -> None:
+    """``show()`` renders a Suggestion column so it agrees with ``to_markdown()``."""
+
+    # A DataParallel model produces a row with a non-empty suggestion.
+    compat_report = report(nn.DataParallel(_Passthrough()), torch.randn(1))
+
+    text_table = compat_report.show()
+    markdown_table = compat_report.to_markdown()
+
+    header_line = text_table.splitlines()[3]
+    assert "Suggestion" in header_line
+    assert "Suggestion" in markdown_table
+
+    # The concrete suggestion text present in markdown is also present in show().
+    dp_suggestion = compat_report.row("data_parallel").suggestion
+    assert dp_suggestion
+    assert dp_suggestion in text_table
+    assert dp_suggestion in markdown_table

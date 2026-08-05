@@ -142,7 +142,7 @@ class CompatReport:
             Text table suitable for terminals and notebook display.
         """
 
-        headers = ("Row", "Status", "Severity", "Detected", "Details")
+        headers = ("Row", "Status", "Severity", "Detected", "Details", "Suggestion")
         body = [
             (
                 row.label,
@@ -150,6 +150,7 @@ class CompatReport:
                 row.severity,
                 "yes" if row.detected else "no",
                 row.details,
+                row.suggestion,
             )
             for row in self.rows
         ]
