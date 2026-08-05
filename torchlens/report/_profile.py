@@ -274,7 +274,11 @@ def _row(name: str, kind: str, ops: list[Any], *, param_count: int | None) -> di
         "saved_activation": saved_activation,
         "param_count": param_count,
         "dtype": _values(ops, "dtype"),
-        "device": _values(ops, "device"),
+        # ``Op`` has no ``device`` attribute; the canonical field is ``device_ref``
+        # (a ``DeviceRef`` whose ``str`` is the device name, e.g. ``"cpu"``).
+        # Reading the nonexistent ``device`` left this column permanently ``None``
+        # on every model via the ``getattr(op, field, None)`` default.
+        "device": _values(ops, "device_ref"),
     }
 
 

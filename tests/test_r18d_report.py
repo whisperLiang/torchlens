@@ -49,3 +49,13 @@ def test_profile_recurrent_call_and_module_levels_no_crash() -> None:
     # Real per-pass metrics were summed, not skipped.
     assert call_frame["flops"].notna().any()
     assert call_frame["time"].notna().any()
+
+
+# --------------------------------------------------------------------------- M2
+def test_profile_device_column_is_populated() -> None:
+    """The device column reports the real device (device_ref), never a blanket None."""
+
+    frame = tl.trace(nn.Linear(4, 4), torch.randn(2, 4)).profile().to_pandas()
+    assert "device" in frame.columns
+    assert frame["device"].notna().all()
+    assert set(frame["device"]) == {"cpu"}
