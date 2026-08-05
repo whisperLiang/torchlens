@@ -544,7 +544,11 @@ def _clone_tensor_payload(
         if label is not None:
             set_tensor_label(vals_tensor, label)
         if isinstance(x, torch.nn.Parameter):
-            return torch.nn.Parameter(vals_tensor)
+            # Preserve the source parameter's requires_grad. torch.nn.Parameter
+            # defaults requires_grad=True, so a frozen (requires_grad=False)
+            # parameter would otherwise yield a copy that falsely claims grad --
+            # misrepresenting the captured parameter in every save mode.
+            return torch.nn.Parameter(vals_tensor, requires_grad=x.requires_grad)
         return vals_tensor
 
 

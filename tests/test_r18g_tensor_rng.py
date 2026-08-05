@@ -9,7 +9,11 @@ fail. These tests are deterministic and CPU-only.
 import pytest
 import torch
 
-from torchlens.utils.tensor_utils import _copy_tensor_payload, tensor_nanequal
+from torchlens.utils.tensor_utils import (
+    _copy_tensor_payload,
+    copy_tensor_payload,
+    tensor_nanequal,
+)
 
 
 class _UncloneableTensor(torch.Tensor):
@@ -109,3 +113,21 @@ def test_h3_normal_tensor_still_copies():
     out = _copy_tensor_payload(x, detach_tensor=True, save_mode="copy")
     assert out.dtype == torch.float64
     assert torch.equal(out, x)
+
+
+# ---------------------------------------------------------------------------
+# M5 -- copying a Parameter must preserve requires_grad (esp. frozen params).
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("save_mode", ["copy", "reference", "view", "cpu_async"])
+def test_m5_frozen_parameter_copy_stays_frozen(save_mode):
+    frozen = torch.nn.Parameter(torch.randn(3), requires_grad=False)
+    out = copy_tensor_payload(frozen, save_mode=save_mode)
+    assert isinstance(out, torch.nn.Parameter)
+    assert out.requires_grad is False
+
+
+def test_m5_trainable_parameter_copy_stays_trainable():
+    trainable = torch.nn.Parameter(torch.randn(3), requires_grad=True)
+    out = copy_tensor_payload(trainable, save_mode="copy")
+    assert isinstance(out, torch.nn.Parameter)
+    assert out.requires_grad is True
