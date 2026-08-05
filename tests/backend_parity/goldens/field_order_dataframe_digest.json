@@ -969,7 +969,10 @@
       "_raw_to_final_op_labels",
       "_raw_to_final_parent_layer_labels",
       "_raw_transform_escape_detected",
+      "_receptive_field_solution",
       "_replay_arg_version_data_complete",
+      "_rf_source_solutions",
+      "_rf_target_solutions",
       "_runnable_archived_activations",
       "_runnable_capture_ambient",
       "_runnable_capture_state",
@@ -1005,6 +1008,7 @@
       "_tf_validation_result",
       "_tl_backward_hooked_tensor_keys",
       "_tl_backward_triggers_disarmed",
+      "_tl_save_selector_fire_count",
       "_tracing_finished",
       "_transform",
       "_visualizer_dir",
@@ -1195,13 +1199,13 @@
     ]
   },
   "sha256_chunks": [
-    "7943fcae",
-    "c629c3d3",
-    "1904978c",
-    "2dc8ec76",
-    "8849297a",
-    "cdf1f0a4",
-    "51457d98",
-    "469b2a46"
+    "dd257b5d",
+    "2506cbfd",
+    "89e6b9dd",
+    "7c5e82de",
+    "f0707df9",
+    "dae66ff8",
+    "f3fcfa65",
+    "a491570d"
   ]
 }
