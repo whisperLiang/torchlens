@@ -13,6 +13,7 @@ import signal
 import sys
 import types
 import weakref
+from functools import partial
 
 import pytest
 import torch
@@ -606,40 +607,80 @@ class TestDetachedImports:
         assert model.payload is payload
         assert model.act is _state._orig_to_decorated[id(original_relu)]
 
-    def test_model_with_func_in_list(self):
-        """A model storing functions in a list should still have them logged."""
+    def test_model_with_func_in_list(self) -> None:
+        """A model storing stale torch functions in a list should still trace."""
+
+        original_relu = _state._decorated_to_orig[id(torch.relu)]
+        original_sigmoid = _state._decorated_to_orig[id(torch.sigmoid)]
 
         class ListFuncModel(nn.Module):
-            def __init__(self):
+            def __init__(self) -> None:
+                """Capture stale torch callables before trace-time patching."""
+
                 super().__init__()
-                self.funcs = [torch.relu, torch.sigmoid]
+                self.funcs = [original_relu, original_sigmoid]
                 self.linear = nn.Linear(5, 5)
 
-            def forward(self, x):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                """Apply the stored function list in order."""
+
                 x = self.linear(x)
                 for f in self.funcs:
                     x = f(x)
                 return x
 
         model = ListFuncModel()
+        assert model.funcs == [original_relu, original_sigmoid]
         result = trace_fn(model, torch.randn(5))
         labels = " ".join(result.layer_labels).lower()
         assert "relu" in labels, "relu from list not logged"
         assert "sigmoid" in labels, "sigmoid from list not logged"
 
-    def test_model_with_func_in_dict(self):
-        """A model storing functions in a dict should still have them logged."""
+    def test_model_with_func_in_dict(self) -> None:
+        """A model storing a stale torch function in a dict should still trace."""
+
+        original_relu = _state._decorated_to_orig[id(torch.relu)]
 
         class DictFuncModel(nn.Module):
-            def __init__(self):
+            def __init__(self) -> None:
+                """Capture the stale function before trace-time patching."""
+
                 super().__init__()
-                self.ops = {"out": torch.relu}
+                self.ops = {"out": original_relu}
                 self.linear = nn.Linear(5, 5)
 
-            def forward(self, x):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                """Apply the stored dict-dispatched function."""
+
                 return self.ops["out"](self.linear(x))
 
         model = DictFuncModel()
+        assert model.ops["out"] is original_relu
+        result = trace_fn(model, torch.randn(5))
+        relu_layers = [lbl for lbl in result.layer_labels if "relu" in lbl.lower()]
+        assert len(relu_layers) > 0
+
+    def test_model_with_partial_of_stale_torch_func(self) -> None:
+        """A model storing a stale torch function inside ``partial`` should trace."""
+
+        original_relu = _state._decorated_to_orig[id(torch.relu)]
+
+        class PartialFuncModel(nn.Module):
+            """Store a stale callable inside ``functools.partial``."""
+
+            def __init__(self) -> None:
+                """Capture the stale partial before trace-time patching."""
+
+                super().__init__()
+                self.act = partial(original_relu)
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                """Call the stored partial."""
+
+                return self.act(x)
+
+        model = PartialFuncModel()
+        assert model.act.func is original_relu
         result = trace_fn(model, torch.randn(5))
         relu_layers = [lbl for lbl in result.layer_labels if "relu" in lbl.lower()]
         assert len(relu_layers) > 0

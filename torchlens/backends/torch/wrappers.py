@@ -2757,6 +2757,94 @@ def _patch_function_defaults(func: Any, mapping: dict[int, Any]) -> int:
     return patched
 
 
+def _rewrite_model_attribute_value(
+    value: Any,
+    mapping: dict[int, Any],
+    memo: dict[int, Any],
+) -> Any:
+    """Return a detached-reference-safe replacement for one model attribute.
+
+    Parameters
+    ----------
+    value:
+        Attribute value being scanned for stale pre-wrap torch callables.
+    mapping:
+        Original-to-decorated callable identity map.
+    memo:
+        Per-rewrite memo for recursive container shells.
+
+    Returns
+    -------
+    Any
+        Original value when no stale callable was found, otherwise a replacement
+        with the same public behavior and patched callable leaves.
+    """
+
+    decorated = mapping.get(id(value))
+    if decorated is not None:
+        return decorated
+
+    cached = memo.get(id(value))
+    if cached is not None:
+        return cached
+
+    if isinstance(value, list):
+        rewritten: list[Any] = []
+        memo[id(value)] = rewritten
+        changed = False
+        for item in value:
+            new_item = _rewrite_model_attribute_value(item, mapping, memo)
+            changed = changed or (new_item is not item)
+            rewritten.append(new_item)
+        return rewritten if changed else value
+
+    if isinstance(value, tuple):
+        rewritten_items = tuple(
+            _rewrite_model_attribute_value(item, mapping, memo) for item in value
+        )
+        if any(new_item is not old_item for new_item, old_item in zip(rewritten_items, value)):
+            return rewritten_items
+        return value
+
+    if isinstance(value, dict):
+        rewritten_dict: dict[Any, Any] = {}
+        memo[id(value)] = rewritten_dict
+        changed = False
+        for key, item in value.items():
+            new_item = _rewrite_model_attribute_value(item, mapping, memo)
+            changed = changed or (new_item is not item)
+            rewritten_dict[key] = new_item
+        return rewritten_dict if changed else value
+
+    if isinstance(value, partial):
+        new_func = _rewrite_model_attribute_value(value.func, mapping, memo)
+        new_args = tuple(_rewrite_model_attribute_value(item, mapping, memo) for item in value.args)
+        new_keywords: dict[str, Any] | None = None
+        if value.keywords is not None:
+            new_keywords = {
+                key: _rewrite_model_attribute_value(item, mapping, memo)
+                for key, item in value.keywords.items()
+            }
+        changed = (
+            new_func is not value.func
+            or any(new_item is not old_item for new_item, old_item in zip(new_args, value.args))
+            or (
+                value.keywords is not None
+                and any(new_keywords[key] is not value.keywords[key] for key in value.keywords)
+            )
+        )
+        if not changed:
+            return value
+        replacement = partial(new_func, *new_args, **(new_keywords or {}))
+        try:
+            replacement.__dict__.update(value.__dict__)
+        except AttributeError:
+            pass
+        return replacement
+
+    return value
+
+
 def patch_model_instance(model: Any) -> None:
     """Level 4 crawl: patch detached torch function references on a model instance.
 
@@ -2777,15 +2865,16 @@ def patch_model_instance(model: Any) -> None:
         except TypeError:
             continue
         for attr_name, attr_val in list(mod_dict.items()):
-            if attr_name.startswith("__") or not callable(attr_val):
+            if attr_name.startswith("__"):
                 continue
-            decorated_func = mapping.get(id(attr_val))
-            if decorated_func is not None:
-                try:
-                    if mod_dict.get(attr_name) is not attr_val:
-                        continue
-                    mod_dict[attr_name] = decorated_func
-                except (TypeError, KeyError):
-                    pass
-                else:
-                    _record_mutation(module, "model", attr_name, attr_val, decorated_func)
+            replacement = _rewrite_model_attribute_value(attr_val, mapping, memo={})
+            if replacement is attr_val:
+                continue
+            try:
+                if mod_dict.get(attr_name) is not attr_val:
+                    continue
+                mod_dict[attr_name] = replacement
+            except (TypeError, KeyError):
+                pass
+            else:
+                _record_mutation(module, "model", attr_name, attr_val, replacement)

@@ -6208,7 +6208,9 @@ def _finalize_census(state: _WitnessState) -> None:
     if reports:
         trace.capture_verified = False
         trace.capture_verification_reason = (
-            "dispatch_witness_unaccounted_ops" if diagnostics else "input_boundary_unverifiable"
+            "dispatch_witness_unaccounted_ops"
+            if diagnostics or _reports_include_non_input_boundary(reports)
+            else "input_boundary_unverifiable"
         )
         if diagnostics:
             first = diagnostics[0]
@@ -6235,6 +6237,26 @@ def _finalize_census(state: _WitnessState) -> None:
             if detector_verified is True
             else "dispatch_witness_verified"
         )
+
+
+def _reports_include_non_input_boundary(reports: Any) -> bool:
+    """Return whether accumulated reports include a non-input-boundary gap.
+
+    Parameters
+    ----------
+    reports:
+        Sequence of previously accumulated completeness diagnostics.
+
+    Returns
+    -------
+    bool
+        ``True`` when any report is not an ``input_boundary``-scoped entry.
+    """
+
+    return any(
+        not isinstance(report, Mapping) or report.get("scope") != "input_boundary"
+        for report in reports
+    )
 
 
 def _finalize_input_semantics_without_census(trace: Any) -> None:

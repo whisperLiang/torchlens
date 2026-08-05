@@ -7,6 +7,7 @@ import inspect
 import textwrap
 import warnings
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -1070,6 +1071,28 @@ def test_writeback_sampling_outer_failures_are_fail_closed(
     assert trace not in cw._HOST_ESCAPE_MUTABLE_WRITEBACK
     cw._sample_writeback_at_consumption(state, (torch.tensor([2.0]),), None)
     assert trace in cw._HOST_ESCAPE_MUTABLE_WRITEBACK
+
+
+def test_finalize_census_keeps_dispatch_reason_across_later_guard_passes() -> None:
+    """Later clean passes must not relabel earlier dispatch gaps as input-boundary gaps."""
+
+    trace = SimpleNamespace(
+        completeness_diagnostics=[
+            {
+                "scope": "active_logging",
+                "reason": "owner_not_captured",
+                "operator": "aten.relu.default",
+            }
+        ],
+        completeness_decompositions=[],
+    )
+    state = cw._WitnessState(trace=trace, owner_thread_id=0, guard_pass_index=2)
+
+    cw._finalize_census(state)
+
+    assert trace.capture_verified is False
+    assert trace.capture_verification_reason == "dispatch_witness_unaccounted_ops"
+    assert len(trace.completeness_diagnostics) == 1
 
 
 @pytest.mark.smoke
