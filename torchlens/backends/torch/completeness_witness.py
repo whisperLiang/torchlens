@@ -5748,6 +5748,13 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
     # Storage-handle raw-pointer accessors (r16-C1): ``UntypedStorage.data_ptr`` /
     # ``TypedStorage.data_ptr`` reach the SAME raw pointer as ``Tensor.data_ptr`` but off the
     # storage object, so the Tensor patch never sees them. Fail closed on a genuine user call.
+    # W1_F3 (round7 B1 class): an EMPTY storage-class scan is version-drift uncertainty, not
+    # proof of absence -- the Tensor storage-bridge methods could still hand out handles of a
+    # class this scan failed to enumerate, leaving every storage accessor unobserved. Same
+    # fail-closed posture as the ``_torch_ops_call_classes`` / ``_private_c_module_callables``
+    # empty scans below.
+    if not _STORAGE_RAW_POINTER_TARGETS():
+        _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
     storage_originals: list[tuple[Any, Any]] = []
     for storage_cls in _STORAGE_RAW_POINTER_TARGETS():
         storage_original = storage_cls.data_ptr
@@ -5786,6 +5793,11 @@ def _observe_invisible_host_escapes(state: _WitnessState) -> Iterator[None]:
                 replacement = _make_storage_property_wrapper(descriptor, state, member, disposition)
                 restore_value = descriptor
             else:
+                # W1_F3 (round7 B1 class): a wrap-REQUIRED row whose member EXISTS but is
+                # neither callable nor a descriptor cannot be wrapped, so its reads are
+                # unobservable -- exactly the docstring contract "can neither be wrapped nor
+                # its source recorded": fail closed, never a silent skip.
+                _HOST_ESCAPE_OBSERVER_FAILED.add(state.trace)
                 continue
             try:
                 setattr(storage_cls, member, replacement)
