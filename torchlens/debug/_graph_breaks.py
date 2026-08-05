@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 import os
-from typing import Any
+from typing import Any, Iterator
 
+import torch
 from torch import nn
 
 from .._input_coerce import _coerce_input_args
@@ -68,6 +70,82 @@ class GraphBreakReport:
         """
 
         return len(self.breaks)
+
+
+def _snapshot_model_state(model: nn.Module) -> tuple[dict[str, torch.Tensor], Any, Any]:
+    """Capture model parameters, buffers, and global RNG for later restoration.
+
+    Parameters
+    ----------
+    model:
+        Model whose forward mutates buffers or global RNG.
+
+    Returns
+    -------
+    tuple[dict[str, torch.Tensor], Any, Any]
+        Cloned ``state_dict`` tensors and CPU/CUDA RNG states.
+    """
+
+    with torch.no_grad():
+        params = {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
+    cpu_rng = torch.get_rng_state()
+    cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    return params, cpu_rng, cuda_rng
+
+
+def _restore_model_state(
+    model: nn.Module,
+    snapshot: tuple[dict[str, torch.Tensor], Any, Any],
+) -> None:
+    """Restore a snapshot captured by :func:`_snapshot_model_state`.
+
+    Parameters
+    ----------
+    model:
+        Model to restore in place (preserving tied-parameter identity).
+    snapshot:
+        Snapshot from :func:`_snapshot_model_state`.
+    """
+
+    params, cpu_rng, cuda_rng = snapshot
+    with torch.no_grad():
+        current = model.state_dict()
+        for name, tensor in params.items():
+            if name in current:
+                current[name].copy_(tensor)
+    torch.set_rng_state(cpu_rng)
+    if cuda_rng is not None:
+        torch.cuda.set_rng_state_all(cuda_rng)
+
+
+@contextlib.contextmanager
+def _clean_torch() -> Iterator[None]:
+    """Temporarily restore original torch callables for a Dynamo probe.
+
+    TorchLens installs persistent wrappers on the first capture and leaves them
+    installed process-wide. Dynamo cannot inline a wrapped torch function, so it
+    reports every wrapped call as an ``Attempted to inline function marked as
+    skipped`` graph break -- misattributing TorchLens instrumentation as a MODEL
+    graph break. Restoring the originals for the probe measures the real model.
+
+    Yields
+    ------
+    None
+        Control while torch is unwrapped; wrappers are re-installed on exit if
+        they were installed on entry.
+    """
+
+    from .. import _state
+    from ..backends.torch.wrappers import unwrap_torch, wrap_torch
+
+    was_decorated = bool(getattr(_state, "_is_decorated", False))
+    if was_decorated:
+        unwrap_torch()
+    try:
+        yield
+    finally:
+        if was_decorated:
+            wrap_torch()
 
 
 def _model_call_args(
@@ -180,10 +258,15 @@ def _correlate_break(trace: Any, record: Any) -> GraphBreak:
 def graph_breaks(model: nn.Module, x: Any, **trace_kwargs: Any) -> GraphBreakReport:
     """Report Dynamo graph breaks and correlate them to eager trace operations.
 
-    The Dynamo result is normalized through ``torchlens.utils._torch_compat``
-    without torch-version parsing. Correlation uses recorded
-    :class:`FuncCallLocation` file/line evidence; empty matches state why no
-    correlation was possible.
+    The Dynamo probe runs against ORIGINAL (unwrapped) torch so TorchLens's
+    persistent wrappers are not misreported as model graph breaks, and the
+    model's parameters, buffers, and global RNG are snapshotted and restored so
+    neither the probe nor the eager correlation trace mutates the caller's
+    model. Both runs observe identical state, so a stateful branching model
+    takes the same path in the probe and the correlation trace. The Dynamo
+    result is normalized through ``torchlens.utils._torch_compat`` without
+    torch-version parsing. Correlation uses recorded :class:`FuncCallLocation`
+    file/line evidence; empty matches state why no correlation was possible.
 
     Parameters
     ----------
@@ -212,21 +295,34 @@ def graph_breaks(model: nn.Module, x: Any, **trace_kwargs: Any) -> GraphBreakRep
             "torch._dynamo.explain is unavailable in this torch runtime"
         )
     args, kwargs = _model_call_args(model, x, trace_kwargs)
+    snapshot = _snapshot_model_state(model)
     try:
-        raw_explanation = _torch_compat.run_dynamo_explain(model, args, kwargs)
-    except RuntimeError as exc:
-        if _torch_compat.get_dynamo_explain() is None:
-            raise GraphBreaksUnavailableError(str(exc)) from exc
-        raise
-    try:
-        normalized = _torch_compat.normalize_dynamo_explain_output(raw_explanation)
-    except _torch_compat._DynamoExplainOutputError as exc:
-        raise GraphBreaksNormalizationError(str(exc)) from exc
+        with _clean_torch():
+            try:
+                raw_explanation = _torch_compat.run_dynamo_explain(model, args, kwargs)
+            except RuntimeError as exc:
+                if _torch_compat.get_dynamo_explain() is None:
+                    raise GraphBreaksUnavailableError(str(exc)) from exc
+                raise
+        # Reset so the eager correlation trace observes the SAME state the
+        # probe did (a stateful branching model must take the same path in both
+        # runs for correlation to be valid), not the probe's mutated state.
+        _restore_model_state(model, snapshot)
+        try:
+            normalized = _torch_compat.normalize_dynamo_explain_output(raw_explanation)
+        except _torch_compat._DynamoExplainOutputError as exc:
+            raise GraphBreaksNormalizationError(str(exc)) from exc
 
-    from .. import trace as capture_trace
+        from .. import trace as capture_trace
 
-    eager_trace = capture_trace(model, x, **trace_kwargs)
-    return GraphBreakReport(tuple(_correlate_break(eager_trace, record) for record in normalized))
+        eager_trace = capture_trace(model, x, **trace_kwargs)
+        return GraphBreakReport(
+            tuple(_correlate_break(eager_trace, record) for record in normalized)
+        )
+    finally:
+        # Neither the probe nor the eager trace should leave the caller's model
+        # mutated (buffers or global RNG).
+        _restore_model_state(model, snapshot)
 
 
 __all__ = [

@@ -12,10 +12,12 @@ Covers:
 
 from __future__ import annotations
 
+import pytest
 import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens.utils import _torch_compat
 
 
 class _Recurrent(nn.Module):
@@ -166,3 +168,98 @@ def test_audit_wires_dtype_range_and_surfaces_finding() -> None:
 
     assert "dtype_range_audit" in audit.checks_run
     assert any(finding.check == "dtype_near_max" for finding in audit.findings)
+
+
+# ---------------------------------------------------------------------------
+# H6 / H7 -- graph_breaks probes clean torch and preserves model state
+# ---------------------------------------------------------------------------
+
+
+class _BreakFree(nn.Module):
+    """Fully traceable model with no genuine graph break."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply traceable tensor operations only.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Rectified affine tensor.
+        """
+
+        return torch.relu(x + 1)
+
+
+class _StatefulBranch(nn.Module):
+    """Stateful branching model whose buffer increments each forward."""
+
+    def __init__(self) -> None:
+        """Register the call-count buffer and a linear."""
+
+        super().__init__()
+        self.register_buffer("n", torch.zeros(()))
+        self.lin = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Branch on call parity and mutate the buffer.
+
+        Parameters
+        ----------
+        x:
+            Input batch.
+
+        Returns
+        -------
+        torch.Tensor
+            Linear output.
+        """
+
+        self.n += 1
+        if self.n.item() % 2 == 1:
+            x = x + 1.0
+            torch._dynamo.graph_break()
+            x = x * 2.0
+        else:
+            x = torch.relu(x)
+            x = x - 1.0
+        return self.lin(x)
+
+
+@pytest.mark.skipif(
+    not _torch_compat.HAS_DYNAMO_EXPLAIN,
+    reason="torch._dynamo.explain unavailable",
+)
+def test_graph_breaks_after_prior_capture_is_break_free() -> None:
+    """A break-free model is empty even when TorchLens wrappers are installed.
+
+    MUTATION PROOF (H6): the prior ``tl.trace`` installs persistent wrappers.
+    Without the ``_clean_torch`` probe, Dynamo reports those wrappers as
+    'Attempted to inline function marked as skipped' breaks and this assertion
+    fails (non-zero breaks).
+    """
+
+    tl.trace(_BreakFree(), torch.ones(2, 3))  # install persistent wrappers
+    report = tl.debug.graph_breaks(_BreakFree(), torch.ones(2, 3))
+    assert report.breaks == ()
+
+
+@pytest.mark.skipif(
+    not _torch_compat.HAS_DYNAMO_EXPLAIN,
+    reason="torch._dynamo.explain unavailable",
+)
+def test_graph_breaks_does_not_mutate_stateful_model() -> None:
+    """graph_breaks restores the caller's model state (H7)."""
+
+    model = _StatefulBranch()
+    before = model.n.item()
+    report = tl.debug.graph_breaks(model, torch.randn(2, 4))
+    assert model.n.item() == before  # neither probe nor eager trace leaks mutation
+    # The correlated ops must come from the branch actually taken by both runs
+    # (the odd/IF branch: add then mul), not the else branch (relu/sub).
+    matched = {label for graph_break in report.breaks for label in graph_break.matched_op_labels}
+    assert not any(label.startswith(("relu", "sub")) for label in matched)
