@@ -37,6 +37,7 @@ from torchlens._input_walk import (
 from torchlens._io import runnable_load
 from torchlens.errors import (
     PathDivergenceError,
+    RunCapabilityUnavailableError,
     RunnablePreflightError,
     RunPreconditionError,
 )
@@ -1077,8 +1078,11 @@ def _assert_context_field_invalid(path: Path, run_inputs) -> None:
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     codes = {diagnostic.code.value for diagnostic in readiness.diagnostics}
     assert "context_field_invalid" in codes, codes
-    with pytest.raises(Exception):
+    # An analysis-only load must refuse to run with the SPECIFIC typed capability error,
+    # not merely "some exception" (a generic pytest.raises here is vacuous).
+    with pytest.raises(RunCapabilityUnavailableError) as excinfo:
         loaded.run(inputs=run_inputs)
+    assert excinfo.value.fields.get("code") == "run_capability_unavailable"
 
 
 def _heal_capture_state(source_path: Path, run_inputs) -> None:
