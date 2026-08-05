@@ -780,6 +780,48 @@ def test_provenance_warning_foreign_tensor_contract() -> None:
     assert module_add.unattributed_tensor_args == ()
 
 
+def test_known_provenance_parent_drop_warns_with_arg_position() -> None:
+    """A labeled tensor arg warns when a broken spec drops its parent edge."""
+
+    from torchlens.capture.arg_positions import ArgSpec, FUNC_ARG_SPECS
+
+    class _BrokenSpecPolygammaModel(nn.Module):
+        """Exercise a schema-known tensor operand at argument position ``1``."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return a scalar reduction through ``torch.polygamma``.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Scalar reduction of the polygamma output.
+            """
+
+            base = x + 1.0
+            operand = base * 3.0
+            return torch.polygamma(2, operand).sum()
+
+    original_spec = FUNC_ARG_SPECS["polygamma"]
+    broken_spec = ArgSpec(positions=(0,), tensor_kwargs=("input", "self", "tensor"))
+    FUNC_ARG_SPECS["polygamma"] = broken_spec
+    try:
+        with pytest.warns(UserWarning, match=r"no graph/source provenance.*arg1"):
+            trace = tl.trace(_BrokenSpecPolygammaModel().eval(), torch.ones(2, 2))
+    finally:
+        FUNC_ARG_SPECS["polygamma"] = original_spec
+
+    op = next(op for op in trace.ops if op.type == "polygamma")
+
+    assert op.parents == []
+    assert op.is_internal_source is True
+    assert op.unattributed_tensor_args == ("arg1",)
+
+
 @pytest.mark.skipif(not _HAS_TORCH_FUNC, reason="torch.func not available")
 def test_prebuilt_transform_wrap_order_and_raw_warning_contract() -> None:
     """Prebuilt decorated transforms capture; raw prebuilt transforms retain warning."""

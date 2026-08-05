@@ -434,3 +434,121 @@ def test_reflected_bitwise_and_captures_tensor_parent() -> None:
     op = trace[and_ops[0]]
     assert op.parents, "reflected & op must capture its tensor parent, not be orphaned"
     assert op.is_internal_source is False
+
+
+@pytest.mark.parametrize(
+    ("case_name", "expected_type", "expected_arg_positions", "expected_parent_count"),
+    [
+        ("polygamma", "polygamma", {1}, 1),
+        ("max_unpool2d", "maxunpool2d", {0, 1}, 2),
+        ("select_scatter", "selectscatter", {0, 1}, 2),
+        ("householder_product", "householderproduct", {0, 1}, 2),
+        ("repeat_interleave", "repeatinterleave", {0, 1}, 2),
+        ("chebyshev_polynomial_t", "chebyshevpolynomialt", {0, 1}, 2),
+    ],
+)
+def test_schema_corrected_unary_specs_capture_all_tensor_parents(
+    case_name: str,
+    expected_type: str,
+    expected_arg_positions: set[int],
+    expected_parent_count: int,
+) -> None:
+    """Schema-corrected unary-like specs capture every tensor operand.
+
+    The regressions here all came from static specs that claimed only argument
+    position ``0`` could hold a tensor, even though the live ATen schema and
+    wrapped Python surface expose additional tensor operands.
+    """
+
+    import torchlens as tl
+
+    class _SchemaCorrectedArgSpecModel(torch.nn.Module):
+        """Exercise one representative schema-corrected operator family."""
+
+        def __init__(self, selected_case: str) -> None:
+            """Store the selected operator case.
+
+            Parameters
+            ----------
+            selected_case:
+                Operator case name to exercise.
+            """
+
+            super().__init__()
+            self.selected_case = selected_case
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return a scalar reduction through the selected operator.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Scalar reduction of the selected operator output.
+            """
+
+            if self.selected_case == "polygamma":
+                base = x + 1.0
+                operand = base * 3.0
+                return torch.polygamma(2, operand).sum()
+            if self.selected_case == "max_unpool2d":
+                pooled, indices = torch.nn.functional.max_pool2d(
+                    x,
+                    kernel_size=2,
+                    stride=2,
+                    return_indices=True,
+                )
+                lifted = pooled + 1.0
+                index_source = indices.clone()
+                return torch.nn.functional.max_unpool2d(
+                    lifted,
+                    index_source,
+                    kernel_size=2,
+                    stride=2,
+                ).sum()
+            if self.selected_case == "select_scatter":
+                destination = x + 1.0
+                source = x[:, 0].clone()
+                return torch.select_scatter(destination, source, 1, 0).sum()
+            if self.selected_case == "householder_product":
+                matrix = x + torch.eye(2, dtype=x.dtype, device=x.device)
+                tau = x[0].clone() + 0.5
+                return torch.linalg.householder_product(matrix, tau).sum()
+            if self.selected_case == "repeat_interleave":
+                repeats = x[:, 0].abs().to(dtype=torch.int64) + 1
+                source = x + 1.0
+                return torch.repeat_interleave(source, repeats, dim=0).sum()
+            if self.selected_case == "chebyshev_polynomial_t":
+                degrees = x.abs().to(dtype=torch.int64) + 2
+                base = x + 1.0
+                return torch.special.chebyshev_polynomial_t(base, degrees).sum()
+            raise ValueError(f"Unhandled schema correction case: {self.selected_case}")
+
+    input_tensor = (
+        torch.arange(1, 17, dtype=torch.float32).reshape(1, 1, 4, 4)
+        if case_name == "max_unpool2d"
+        else torch.ones(2, 2, dtype=torch.float32)
+    )
+    deterministic_enabled = torch.are_deterministic_algorithms_enabled()
+    deterministic_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    if case_name == "max_unpool2d":
+        torch.use_deterministic_algorithms(False)
+    try:
+        trace = tl.trace(_SchemaCorrectedArgSpecModel(case_name).eval(), input_tensor)
+    finally:
+        if case_name == "max_unpool2d":
+            torch.use_deterministic_algorithms(
+                deterministic_enabled,
+                warn_only=deterministic_warn_only,
+            )
+
+    op = next(op for op in trace.ops if op.type == expected_type)
+
+    assert expected_arg_positions <= set(op.parent_arg_positions["args"])
+    assert len(op.parents) == expected_parent_count
+    assert op.is_internal_source is False
+    assert all(trace[parent_label].has_output_descendant for parent_label in op.parents)

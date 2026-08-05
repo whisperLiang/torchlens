@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import torch
 
 from .. import _state
+from ..constants import get_orig_torch_funcs
 
 
 # COMMUTATIVE reflected operator dunders (invoked when a non-tensor is on the LEFT, e.g.
@@ -151,6 +152,178 @@ def extract_tensors_and_params(
             _append_tensor_or_param(val)
 
     return tensors, params
+
+
+_ATEN_PACKET_NAMESPACE_PREFIXES: dict[str, tuple[str, ...]] = {
+    "torch.linalg": ("linalg_",),
+    "torch.special": ("special_",),
+}
+
+
+def _iter_aten_packet_names(namespace_name: str, func_name: str) -> tuple[str, ...]:
+    """Return candidate ATen packet names for a wrapped torch target.
+
+    Parameters
+    ----------
+    namespace_name:
+        Namespace string from ``get_orig_torch_funcs()``.
+    func_name:
+        Wrapped callable name in that namespace.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Candidate ``torch.ops.aten`` packet names to inspect for schemas.
+    """
+
+    canonical_name = func_name.strip("_")
+    candidates = [canonical_name]
+    for prefix in _ATEN_PACKET_NAMESPACE_PREFIXES.get(namespace_name, ()):
+        candidates.append(f"{prefix}{canonical_name}")
+    return tuple(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+
+def _schema_tensor_arg_kind(schema_arg: object) -> str | None:
+    """Classify whether a schema argument carries tensor provenance.
+
+    Parameters
+    ----------
+    schema_arg:
+        One ``torch.FunctionSchema`` argument entry.
+
+    Returns
+    -------
+    str | None
+        ``"single"`` for a tensor/optional tensor, ``"sequence"`` for a tensor
+        list, else ``None``.
+    """
+
+    arg_type = str(getattr(schema_arg, "type", ""))
+    if "Tensor" not in arg_type:
+        return None
+    if arg_type.startswith("List[") or arg_type.endswith("[]"):
+        return "sequence"
+    return "single"
+
+
+def _schema_arg_is_parent_candidate(schema_arg: object) -> bool:
+    """Return whether a schema argument should become a graph parent.
+
+    Parameters
+    ----------
+    schema_arg:
+        One ``torch.FunctionSchema`` argument entry.
+
+    Returns
+    -------
+    bool
+        ``True`` when the argument is an input operand rather than an ``out=``
+        destination slot.
+    """
+
+    if getattr(schema_arg, "name", None) == "out" and bool(
+        getattr(schema_arg, "kwarg_only", False)
+    ):
+        return False
+    alias_info = getattr(schema_arg, "alias_info", None)
+    return not (
+        alias_info is not None
+        and bool(getattr(alias_info, "is_write", False))
+        and not bool(getattr(alias_info, "is_read", False))
+    )
+
+
+def _merge_schema_tensor_slots(spec: ArgSpec, schemas: tuple[object, ...]) -> ArgSpec:
+    """Return ``spec`` widened by tensor operands present in authoritative schemas.
+
+    Parameters
+    ----------
+    spec:
+        Existing static argument spec.
+    schemas:
+        Function schemas associated with wrapped variants of the same operator.
+
+    Returns
+    -------
+    ArgSpec
+        Merged argument spec. Existing positions stay intact; schema-backed
+        tensor positions and kwarg names are appended when missing.
+    """
+
+    positions = list(spec.positions)
+    position_set = set(spec.positions)
+    sequence_positions = list(spec.sequence_positions)
+    sequence_position_set = set(spec.sequence_positions)
+    tensor_kwargs = list(spec.tensor_kwargs)
+    tensor_kwarg_set = set(spec.tensor_kwargs)
+
+    for schema in schemas:
+        for index, schema_arg in enumerate(getattr(schema, "arguments", ()) or ()):
+            if not _schema_arg_is_parent_candidate(schema_arg):
+                continue
+            tensor_kind = _schema_tensor_arg_kind(schema_arg)
+            if tensor_kind is None:
+                continue
+            if tensor_kind == "single" and index not in position_set:
+                positions.append(index)
+                position_set.add(index)
+            if tensor_kind == "sequence" and index not in sequence_position_set:
+                sequence_positions.append(index)
+                sequence_position_set.add(index)
+            arg_name = getattr(schema_arg, "name", None)
+            if isinstance(arg_name, str) and arg_name not in tensor_kwarg_set:
+                tensor_kwargs.append(arg_name)
+                tensor_kwarg_set.add(arg_name)
+
+    return ArgSpec(
+        positions=tuple(positions),
+        sequence_positions=tuple(sequence_positions),
+        tensor_kwargs=tuple(tensor_kwargs),
+    )
+
+
+def _apply_schema_tensor_position_corrections() -> None:
+    """Upgrade under-specified unary-style static specs from ATen schemas.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+        Mutates ``FUNC_ARG_SPECS`` in place.
+    """
+
+    corrected_specs: dict[str, ArgSpec] = {}
+    for namespace_name, func_name in get_orig_torch_funcs(include_torchvision=False):
+        normalized_name = _normalize_func_name(func_name.strip("_"))
+        current_spec = corrected_specs.get(normalized_name, FUNC_ARG_SPECS.get(normalized_name))
+        if current_spec is None:
+            continue
+        if current_spec.sequence_positions or any(
+            position != 0 for position in current_spec.positions
+        ):
+            continue
+
+        schemas: list[object] = []
+        for packet_name in _iter_aten_packet_names(namespace_name, func_name):
+            packet = getattr(torch.ops.aten, packet_name, None)
+            if packet is None:
+                continue
+            for overload_name in packet.overloads():
+                overload = getattr(packet, overload_name, None)
+                schema = getattr(overload, "_schema", None)
+                if schema is not None:
+                    schemas.append(schema)
+        if not schemas:
+            continue
+
+        widened_spec = _merge_schema_tensor_slots(current_spec, tuple(schemas))
+        if widened_spec != current_spec:
+            corrected_specs[normalized_name] = widened_spec
+
+    FUNC_ARG_SPECS.update(corrected_specs)
 
 
 def _cache_dynamic_spec(
@@ -2164,6 +2337,8 @@ for _name in [
     "reinforce",
 ]:
     FUNC_ARG_SPECS[_name] = _P0
+
+_apply_schema_tensor_position_corrections()
 
 # Cleanup loop variable leakage
 del _name, _spec
