@@ -253,8 +253,16 @@ def mark_detached_saved_activation(
         The weak identity registry is updated only for a proven TorchLens detach.
     """
 
-    source_was_connected = bool(source.requires_grad and source.grad_fn is not None)
-    retained_is_disconnected = not retained.requires_grad and retained.grad_fn is None
+    # These `requires_grad`/`grad_fn` reads are TorchLens-internal bookkeeping run for
+    # every saved activation (including registered-buffer sources). Mark them as internal
+    # scalar reads so the r65 host-escape witness does not record them as host declared-state
+    # facts. Import locally: completeness_witness imports from this module, so a top-level
+    # import here would create a cycle.
+    from .completeness_witness import internal_scalar_read
+
+    with internal_scalar_read():
+        source_was_connected = bool(source.requires_grad and source.grad_fn is not None)
+        retained_is_disconnected = not retained.requires_grad and retained.grad_fn is None
     if source_was_connected and retained_is_disconnected:
         _DETACHED_SAVED_ACTIVATIONS[retained] = label or "saved activation"
 
