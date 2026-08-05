@@ -235,6 +235,101 @@ def _filter_conditional_edge_call_indices(
     }
 
 
+def _project_conditional_child_views(
+    conditional_arm_children: Dict[int, Dict[str, List[str]]],
+) -> Tuple[List[str], Dict[int, List[str]], List[str]]:
+    """Project pass-level child views from ``conditional_arm_children``.
+
+    Parameters
+    ----------
+    conditional_arm_children:
+        Primary ``cond_id -> branch_kind -> child labels`` mapping for a
+        concrete ``Op`` record.
+
+    Returns
+    -------
+    tuple[list[str], dict[int, list[str]], list[str]]
+        THEN, ELIF, and ELSE child views normalized to the invariant
+        contract: unique labels sorted lexicographically.
+    """
+
+    then_children = sorted(
+        {
+            child_label
+            for branch_children in conditional_arm_children.values()
+            for child_label in branch_children.get("then", [])
+        }
+    )
+    elif_children: Dict[int, List[str]] = {}
+    for branch_children in conditional_arm_children.values():
+        for branch_kind, child_labels in branch_children.items():
+            if not branch_kind.startswith("elif_"):
+                continue
+            elif_index = int(branch_kind.split("_", 1)[1])
+            existing_children = set(elif_children.get(elif_index, []))
+            existing_children.update(child_labels)
+            elif_children[elif_index] = sorted(existing_children)
+
+    else_children = sorted(
+        {
+            child_label
+            for branch_children in conditional_arm_children.values()
+            for child_label in branch_children.get("else", [])
+        }
+    )
+    return then_children, elif_children, else_children
+
+
+def _append_unique_child_label(child_labels: List[str], child_label: str) -> None:
+    """Append ``child_label`` to ``child_labels`` if it is not already present.
+
+    Parameters
+    ----------
+    child_labels:
+        Ordered child-label list being built.
+    child_label:
+        Candidate label to append.
+    """
+
+    if child_label not in child_labels:
+        child_labels.append(child_label)
+
+
+def _project_aggregate_conditional_child_views(
+    conditional_arm_children: Dict[int, Dict[str, List[str]]],
+) -> Tuple[List[str], Dict[int, List[str]], List[str]]:
+    """Project aggregate child views from ``conditional_arm_children``.
+
+    Parameters
+    ----------
+    conditional_arm_children:
+        Primary ``cond_id -> branch_kind -> child labels`` mapping for an
+        aggregate ``Layer`` record.
+
+    Returns
+    -------
+    tuple[list[str], dict[int, list[str]], list[str]]
+        THEN, ELIF, and ELSE child views preserving first-seen order.
+    """
+
+    then_children: List[str] = []
+    elif_children: Dict[int, List[str]] = {}
+    else_children: List[str] = []
+    for branch_children in conditional_arm_children.values():
+        for child_label in branch_children.get("then", []):
+            _append_unique_child_label(then_children, child_label)
+        for branch_kind, child_labels in branch_children.items():
+            if not branch_kind.startswith("elif_"):
+                continue
+            elif_index = int(branch_kind.split("_", 1)[1])
+            aggregate_children = elif_children.setdefault(elif_index, [])
+            for child_label in child_labels:
+                _append_unique_child_label(aggregate_children, child_label)
+        for child_label in branch_children.get("else", []):
+            _append_unique_child_label(else_children, child_label)
+    return then_children, elif_children, else_children
+
+
 def _scrub_layer_entry_conditional_fields(
     layer_entry: Op,
     labels_to_remove: Set[str],
@@ -254,20 +349,11 @@ def _scrub_layer_entry_conditional_fields(
         layer_entry.conditional_arm_children,
         labels_to_remove,
     )
-    layer_entry.conditional_then_children = [
-        child_label
-        for child_label in layer_entry.conditional_then_children
-        if child_label not in labels_to_remove
-    ]
-    layer_entry.conditional_elif_children = _filter_conditional_elif_children(
+    (
+        layer_entry.conditional_then_children,
         layer_entry.conditional_elif_children,
-        labels_to_remove,
-    )
-    layer_entry.conditional_else_children = [
-        child_label
-        for child_label in layer_entry.conditional_else_children
-        if child_label not in labels_to_remove
-    ]
+        layer_entry.conditional_else_children,
+    ) = _project_conditional_child_views(layer_entry.conditional_arm_children)
 
 
 def _scrub_layer_log_conditional_fields(self: "Trace", labels_to_remove_no_pass: Set[str]) -> None:
@@ -287,20 +373,11 @@ def _scrub_layer_log_conditional_fields(self: "Trace", labels_to_remove_no_pass:
             layer_log.conditional_arm_children,
             labels_to_remove_no_pass,
         )
-        layer_log.conditional_then_children = [
-            child_label
-            for child_label in layer_log.conditional_then_children
-            if child_label not in labels_to_remove_no_pass
-        ]
-        layer_log.conditional_elif_children = _filter_conditional_elif_children(
+        (
+            layer_log.conditional_then_children,
             layer_log.conditional_elif_children,
-            labels_to_remove_no_pass,
-        )
-        layer_log.conditional_else_children = [
-            child_label
-            for child_label in layer_log.conditional_else_children
-            if child_label not in labels_to_remove_no_pass
-        ]
+            layer_log.conditional_else_children,
+        ) = _project_aggregate_conditional_child_views(layer_log.conditional_arm_children)
 
 
 def _scrub_conditional_fields_after_removal(
@@ -621,12 +698,6 @@ def _scrub_conditional_child_maps(op: "Op", labels_to_remove: Set[str]) -> None:
         Raw labels that no longer have a materialized operation record.
     """
 
-    conditional_elif_children = getattr(op, "conditional_elif_children", None)
-    if conditional_elif_children:
-        op.conditional_elif_children = {
-            elif_ix: [label for label in child_labels if label not in labels_to_remove]
-            for elif_ix, child_labels in conditional_elif_children.items()
-        }
     conditional_arm_children = getattr(op, "conditional_arm_children", None)
     if conditional_arm_children:
         op.conditional_arm_children = {
@@ -635,4 +706,17 @@ def _scrub_conditional_child_maps(op: "Op", labels_to_remove: Set[str]) -> None:
                 for branch_kind, child_labels in branch_children.items()
             }
             for cond_id, branch_children in conditional_arm_children.items()
+        }
+        (
+            op.conditional_then_children,
+            op.conditional_elif_children,
+            op.conditional_else_children,
+        ) = _project_conditional_child_views(op.conditional_arm_children)
+        return
+
+    conditional_elif_children = getattr(op, "conditional_elif_children", None)
+    if conditional_elif_children:
+        op.conditional_elif_children = {
+            elif_ix: [label for label in child_labels if label not in labels_to_remove]
+            for elif_ix, child_labels in conditional_elif_children.items()
         }

@@ -14,7 +14,11 @@ from torch import nn
 import torchlens as tl
 from torchlens.errors import TraceNotReproducibleWarning
 from torchlens.backends.torch import buffer_writes
-from torchlens.data_classes.cleanup import _scrub_per_op_equivalence_lists
+from torchlens.data_classes.cleanup import (
+    _scrub_layer_entry_conditional_fields,
+    _scrub_per_op_equivalence_lists,
+)
+from torchlens.postprocess.labeling import _replace_layer_names_for_layer_entry
 
 
 TensorFactory = Callable[[], torch.Tensor]
@@ -54,15 +58,67 @@ def test_removed_buffer_raw_label_is_scrubbed_from_per_op_graph_fields() -> None
     assert op.internal_source_parents == []
     assert op.internal_source_ancestors == set()
     assert op.conditional_entry_children == []
-    assert op.conditional_then_children == ["relu_1_raw"]
+    assert op.conditional_then_children == []
     # NOTE: op_equivalence_classes is a Trace-level dict, never a per-op field;
     # the dead per-op scrub for it was removed by the cert round-1 data-model fix.
     assert op.equivalent_ops == ["add_1_raw"]
     assert op.recurrent_ops == []
     assert op.parent_arg_positions == {"args": {1: "add_1_raw"}, "kwargs": {}}
     assert set(op.out_versions_by_child) == {"add_1_raw"}
-    assert op.conditional_elif_children == {0: ["add_1_raw"]}
+    assert op.conditional_elif_children == {}
     assert op.conditional_arm_children == {1: {"then": [], "else": ["add_1_raw"]}}
+
+
+def test_conditional_child_views_are_rebuilt_after_label_rename() -> None:
+    """Relabeling rebuilds derived conditional child views from the primary map."""
+
+    trace = SimpleNamespace(
+        _raw_to_final_layer_labels={},
+        _raw_to_final_parent_layer_labels={
+            "child_a_raw": "child_a",
+            "child_b_raw": "child_b",
+        },
+        _raw_to_final_op_labels={},
+    )
+    layer_entry = SimpleNamespace(
+        parents=[],
+        root_ancestors=set(),
+        children=[],
+        input_ancestors=set(),
+        output_descendants=set(),
+        internal_source_parents=[],
+        internal_source_ancestors=set(),
+        conditional_entry_children=[],
+        conditional_then_children=["child_b_raw", "child_a_raw"],
+        conditional_else_children=[],
+        recurrent_ops=[],
+        parent_arg_positions=None,
+        out_versions_by_child=None,
+        conditional_elif_children={},
+        conditional_arm_children={1: {"then": ["child_a_raw", "child_b_raw"]}},
+    )
+
+    _replace_layer_names_for_layer_entry(trace, layer_entry)
+
+    assert layer_entry.conditional_arm_children == {1: {"then": ["child_a", "child_b"]}}
+    assert layer_entry.conditional_then_children == ["child_a", "child_b"]
+
+
+def test_cleanup_rebuilds_conditional_child_views_from_primary_structure() -> None:
+    """Conditional cleanup normalizes derived branch-child order from the primary map."""
+
+    layer_entry = SimpleNamespace(
+        conditional_entry_children=[],
+        conditional_then_children=["drop_me", "child_b", "child_a"],
+        conditional_else_children=[],
+        conditional_elif_children={},
+        conditional_arm_children={1: {"then": ["child_a", "child_b", "drop_me"]}},
+    )
+
+    _scrub_layer_entry_conditional_fields(layer_entry, {"drop_me"})
+
+    assert layer_entry.conditional_arm_children == {1: {"then": ["child_a", "child_b"]}}
+    assert layer_entry.conditional_then_children == ["child_a", "child_b"]
 
 
 class RecurrentReassign(nn.Module):
