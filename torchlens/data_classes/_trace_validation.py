@@ -844,9 +844,10 @@ class TraceValidationMixin(_TraceMixinBase):
         labels_to_remove = set()
         for entry in entries_to_remove:
             labels_to_remove.add(_label_for_reference_removal(entry, self._tracing_finished))
-            _clear_entry_attributes(entry)
 
         if not remove_references:
+            for entry in entries_to_remove:
+                _clear_entry_attributes(entry)
             return
 
         _scrub_conditional_fields_after_removal(self, labels_to_remove, surviving_entries)
@@ -880,3 +881,6 @@ class TraceValidationMixin(_TraceMixinBase):
         }
 
         _scrub_per_op_equivalence_lists(surviving_entries, labels_to_remove)
+
+        for entry in entries_to_remove:
+            _clear_entry_attributes(entry)

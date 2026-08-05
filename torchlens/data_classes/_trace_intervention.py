@@ -123,6 +123,30 @@ class TraceInterventionMixin(_TraceMixinBase):
 
         return self._ensure_intervention_spec().freeze()
 
+    def _history_site_payload(self: "Trace", site: Any) -> Any:
+        """Return a stable site payload for ``state_history`` records.
+
+        Parameters
+        ----------
+        site:
+            Original selector-like site payload supplied to a mutator.
+
+        Returns
+        -------
+        Any
+            Plain layer labels for direct label targets, otherwise a stable
+            repr-style string for human-readable history records.
+        """
+
+        del self
+        if isinstance(site, str):
+            return site
+        selector_kind = getattr(site, "selector_kind", None)
+        selector_value = getattr(site, "selector_value", None)
+        if selector_kind == "label" and isinstance(selector_value, str):
+            return selector_value
+        return repr(site)
+
     def set(
         self: "Trace",
         site: Any,
@@ -179,7 +203,7 @@ class TraceInterventionMixin(_TraceMixinBase):
             if direction == "backward":
                 self._record_operation(
                     "set",
-                    site=repr(site),
+                    site=self._history_site_payload(site),
                     value_kind=type(value).__name__,
                     strict=strict,
                     callable=callable(value),
@@ -220,7 +244,7 @@ class TraceInterventionMixin(_TraceMixinBase):
             )
             self._record_operation(
                 "set",
-                site=repr(site),
+                site=self._history_site_payload(site),
                 value_kind=type(value).__name__,
                 strict=strict,
                 callable=callable(value),
@@ -238,7 +262,7 @@ class TraceInterventionMixin(_TraceMixinBase):
         self._mark_intervention_spec_mutated()
         self._record_operation(
             "set",
-            site=repr(site),
+            site=self._history_site_payload(site),
             value_kind=type(value).__name__,
             strict=strict,
             callable=callable(value),
@@ -329,7 +353,7 @@ class TraceInterventionMixin(_TraceMixinBase):
         self._record_operation(
             "attach_hooks",
             hook_count=len(entries),
-            sites=tuple(repr(entry.site_target) for entry in entries),
+            sites=tuple(self._history_site_payload(entry.site_target) for entry in entries),
             strict=strict,
             prepend=prepend,
             handles=tuple(handle_ids),
@@ -435,7 +459,7 @@ class TraceInterventionMixin(_TraceMixinBase):
             self._mark_intervention_spec_mutated()
         self._record_operation(
             "detach_hooks",
-            site=repr(site) if site is not None else None,
+            site=self._history_site_payload(site) if site is not None else None,
             handle=str(handle) if handle is not None else None,
             removed=removed,
             strict=strict,
