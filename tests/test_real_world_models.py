@@ -1538,6 +1538,7 @@ def _instantiate_transformers_model_or_skip(
         pytest.skip(f"transformers optional backend unavailable: {exc}")
 
 
+@pytest.mark.slow
 def test_mamba() -> None:
     """Mamba SSM via HuggingFace transformers (small config, no pretrained)."""
     transformers = pytest.importorskip("transformers")
@@ -1562,6 +1563,7 @@ def test_mamba() -> None:
     assert validate_forward_pass(model, [], model_kwargs)
 
 
+@pytest.mark.slow
 def test_mamba2() -> None:
     """Mamba-2 SSM via HuggingFace transformers (small config, no pretrained)."""
     transformers = pytest.importorskip("transformers")
@@ -1612,6 +1614,7 @@ def test_rwkv():
     assert validate_forward_pass(model, [], model_kwargs)
 
 
+@pytest.mark.slow
 def test_falcon_mamba() -> None:
     """Falcon-Mamba hybrid SSM via HuggingFace transformers (small config)."""
     transformers = pytest.importorskip("transformers")
