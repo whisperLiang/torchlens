@@ -8,7 +8,12 @@ from typing import Any, cast
 
 
 def execution_trace(log: Any, trace_path: str | Path) -> dict[str, Any]:
-    """Export a lightweight PyTorch ExecutionTraceObserver-compatible trace.
+    """Export a lightweight TorchLens execution-trace JSON file.
+
+    This writes TorchLens' own ``torchlens.execution_trace.v1`` schema (per-layer
+    ``id``/``name``/``op``/``inputs``/``bytes`` nodes). It is NOT the PyTorch
+    ExecutionTraceObserver / Chakra execution-trace schema (``1.1.1-chakra`` with
+    ``attrs``/``ctrl_deps``/``outputs``), so Chakra/HTA consumers cannot parse it.
 
     Parameters
     ----------
