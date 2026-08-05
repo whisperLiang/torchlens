@@ -75,6 +75,21 @@ def _combined_trace(model: nn.Module) -> tl.Trace:
     return log
 
 
+def _assert_combined_render(dot: object, svg_path: str) -> None:
+    """Assert ``draw_combined`` produced real DOT source and a real SVG artifact.
+
+    A no-op renderer would return ``""`` (still ``is not None``) and write no
+    file; the original ``assert dot is not None`` did not catch that. This does.
+    """
+
+    assert isinstance(dot, str) and "digraph" in dot, "expected non-empty DOT source"
+    path = f"{svg_path}.svg"
+    assert os.path.exists(path), f"expected SVG artifact at {path}"
+    with open(path, encoding="utf-8") as fh:
+        svg_text = fh.read()
+    assert "<svg" in svg_text, f"expected {path} to contain SVG markup"
+
+
 # --------------------------------------------------------------------------- #
 # Direct unit coverage of the robustness fix
 # --------------------------------------------------------------------------- #
@@ -135,33 +150,36 @@ def test_recurrent_draw_combined_renders(tmp_path) -> None:
     """The reported crash: recurrent ``draw_combined`` raised KeyError: 'fc:3'."""
 
     log = _combined_trace(RecurrentLinear())
+    out = str(tmp_path / "rec_combined")
     dot = log.draw_combined(
-        vis_outpath=str(tmp_path / "rec_combined"),
+        vis_outpath=out,
         vis_save_only=True,
         vis_fileformat="svg",
     )
-    assert dot is not None
+    _assert_combined_render(dot, out)
 
 
 def test_recurrent_nested_module_draw_combined_renders(tmp_path) -> None:
     """Class coverage: a recurrent reuse of a nested module also renders."""
 
     log = _combined_trace(RecurrentReLU())
+    out = str(tmp_path / "recrelu_combined")
     dot = log.draw_combined(
-        vis_outpath=str(tmp_path / "recrelu_combined"),
+        vis_outpath=out,
         vis_save_only=True,
         vis_fileformat="svg",
     )
-    assert dot is not None
+    _assert_combined_render(dot, out)
 
 
 def test_feedforward_draw_combined_still_renders(tmp_path) -> None:
     """Behavior-preservation smoke: the non-recurrent combined path is unchanged."""
 
     log = _combined_trace(FeedForward())
+    out = str(tmp_path / "ff_combined")
     dot = log.draw_combined(
-        vis_outpath=str(tmp_path / "ff_combined"),
+        vis_outpath=out,
         vis_save_only=True,
         vis_fileformat="svg",
     )
-    assert dot is not None
+    _assert_combined_render(dot, out)

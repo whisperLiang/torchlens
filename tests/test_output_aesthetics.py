@@ -1621,13 +1621,15 @@ class TestVisualizationBugfixes:
             log.cleanup()
 
     def test_vis_call_depth_0(self):
-        """vis_call_depth=0 should not crash."""
+        """vis_call_depth=0 should not crash and must emit a real PDF."""
         model = _SimpleLinear()
         log = trace_fn(model, torch.randn(2, 10))
+        pdf_path = Path(VIS_DIR) / "test_call_depth_0.pdf"
+        pdf_path.unlink(missing_ok=True)
         try:
             from torchlens.visualization.rendering import draw
 
-            draw(
+            dot = draw(
                 log,
                 vis_call_depth=0,
                 vis_save_only=True,
@@ -1635,6 +1637,9 @@ class TestVisualizationBugfixes:
             )
         except ImportError:
             pytest.skip("graphviz not available")
+        # A no-op renderer would return "" and write nothing; assert real output.
+        assert isinstance(dot, str) and "digraph" in dot
+        _assert_generated_pdf(pdf_path)
 
     def test_intervention_visualization_styles(self):
         """Intervention node-mark and as-node modes emit expected style cues."""
@@ -1671,15 +1676,20 @@ class TestVisualizationBugfixes:
             log.cleanup()
 
     def test_vis_selective_save(self):
-        """Selective activation saving should not crash visualization."""
+        """Selective activation saving should render a real PDF, not just not crash."""
         model = _SimpleLinear()
         log = trace_fn(model, torch.randn(2, 10), layers_to_save="all")
+        pdf_path = Path(VIS_DIR) / "test_selective_save.pdf"
+        pdf_path.unlink(missing_ok=True)
         try:
             from torchlens.visualization.rendering import draw
 
-            draw(log, vis_save_only=True, vis_outpath=opj(VIS_DIR, "test_selective_save"))
+            dot = draw(log, vis_save_only=True, vis_outpath=opj(VIS_DIR, "test_selective_save"))
         except ImportError:
             pytest.skip("graphviz not available")
+        # A no-op renderer would return "" and write nothing; assert real output.
+        assert isinstance(dot, str) and "digraph" in dot
+        _assert_generated_pdf(pdf_path)
 
 
 class TestVisModuleListFormat:
@@ -1704,4 +1714,9 @@ class TestVisModuleListFormat:
 
         model = Outer()
         log = trace_fn(model, torch.randn(2, 10))
-        log.draw(vis_save_only=True, vis_outpath=opj(VIS_DIR, "test_nested_modules"))
+        pdf_path = Path(VIS_DIR) / "test_nested_modules.pdf"
+        pdf_path.unlink(missing_ok=True)
+        dot = log.draw(vis_save_only=True, vis_outpath=opj(VIS_DIR, "test_nested_modules"))
+        # A no-op renderer would return "" and write nothing; assert real output.
+        assert isinstance(dot, str) and "digraph" in dot
+        _assert_generated_pdf(pdf_path)

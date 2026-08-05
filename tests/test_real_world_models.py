@@ -29,6 +29,33 @@ from torchlens.validation import validate_forward_pass  # noqa: E402
 from torchlens.visualization import show_model_graph  # noqa: E402
 
 
+def _clear_render_pdf(*path_parts: str) -> None:
+    """Remove any stale PDF artifact before a render so it cannot mask a no-op."""
+    import os
+
+    path = opj(VIS_OUTPUT_DIR, *path_parts) + ".pdf"
+    if os.path.exists(path):
+        os.remove(path)
+
+
+def _assert_render_pdf(*path_parts: str) -> None:
+    """Assert a ``show_model_graph`` run wrote a fresh non-empty PDF artifact.
+
+    Cheap render-output check for tests that render but otherwise assert nothing
+    (or skip forward-pass validation). A no-op renderer leaves no file (or an
+    empty one), which this catches. ``path_parts`` are the ``vis_outpath`` parts
+    (without extension); the default ``vis_fileformat`` is ``pdf``. Pair with
+    :func:`_clear_render_pdf` before the render so a stale file cannot mask a no-op.
+    """
+    import os
+
+    path = opj(VIS_OUTPUT_DIR, *path_parts) + ".pdf"
+    assert os.path.exists(path), f"expected visualization artifact at {path}"
+    with open(path, "rb") as fh:
+        head = fh.read(4)
+    assert head == b"%PDF", f"expected {path} to be a non-empty PDF artifact"
+
+
 # =============================================================================
 # TorchVision Classification Models
 # =============================================================================
@@ -1993,6 +2020,7 @@ def test_video_mc3_18():
 def test_video_mvit_v2_s():
     model = torchvision.models.video.mvit_v2_s()
     model_input = torch.randn(16, 3, 448, 896)
+    _clear_render_pdf("torchvision-video", "video_mvit_v2_s")
     show_model_graph(
         model,
         model_input,
@@ -2000,6 +2028,7 @@ def test_video_mvit_v2_s():
         vis_mode="unrolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "torchvision-video", "video_mvit_v2_s"),
     )
+    _assert_render_pdf("torchvision-video", "video_mvit_v2_s")
 
 
 @pytest.mark.slow
@@ -3276,6 +3305,7 @@ def test_longformer():
     model = transformers.LongformerModel(config).eval()
     x = torch.randint(0, 100, (1, 16))
     model_kwargs = {"input_ids": x}
+    _clear_render_pdf("efficient-transformers", "longformer")
     show_model_graph(
         model,
         [],
@@ -3284,6 +3314,7 @@ def test_longformer():
         vis_mode="unrolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "efficient-transformers", "longformer"),
     )
+    _assert_render_pdf("efficient-transformers", "longformer")
 
 
 @pytest.mark.slow

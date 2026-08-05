@@ -3941,8 +3941,28 @@ def _ensure_loop_comparison_dir():
     os.makedirs(LOOP_COMPARISON_DIR, exist_ok=True)
 
 
+def _assert_render_pdf(stem: str) -> None:
+    """Assert a ``show_model_graph`` run wrote a fresh non-empty PDF artifact.
+
+    A no-op renderer would leave no file (or an empty one); this catches that.
+    """
+    import os
+
+    path = opj(LOOP_COMPARISON_DIR, f"{stem}.pdf")
+    assert os.path.exists(path), f"expected visualization artifact at {path}"
+    with open(path, "rb") as fh:
+        head = fh.read(4)
+    assert head == b"%PDF", f"expected {path} to be a non-empty PDF artifact"
+
+
 def _render_both(model, x, name):
     """Render a model with and without loop detection for comparison."""
+    import os
+
+    for stem in (f"{name}_loops_on", f"{name}_loops_off", f"{name}_loops_off_unrolled"):
+        artifact = opj(LOOP_COMPARISON_DIR, f"{stem}.pdf")
+        if os.path.exists(artifact):
+            os.remove(artifact)
     show_model_graph(
         model,
         x,
@@ -3968,6 +3988,10 @@ def _render_both(model, x, name):
         vis_outpath=opj(LOOP_COMPARISON_DIR, f"{name}_loops_off_unrolled"),
         recurrence_detection=False,
     )
+    # Each of the three renders must have produced a real PDF on disk.
+    _assert_render_pdf(f"{name}_loops_on")
+    _assert_render_pdf(f"{name}_loops_off")
+    _assert_render_pdf(f"{name}_loops_off_unrolled")
 
 
 def test_loop_compare_repeated_module(vector_input):
