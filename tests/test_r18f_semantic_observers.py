@@ -82,3 +82,84 @@ def test_residual_recipe_marks_genuine_transformer_block() -> None:
     # resid_mid is the post-attention add, not the first-add fallback that collapses
     # onto the block output (resid_post).
     assert not torch.equal(facets.resid_mid.value, facets.resid_post.value)
+
+
+# --------------------------------------------------------------------------------------
+# H8 - patching state / RNG safety
+# --------------------------------------------------------------------------------------
+
+
+class _StatefulBlock(nn.Module):
+    """A transformer block whose forward mutates a buffer that affects its output."""
+
+    def __init__(self) -> None:
+        """Initialize attention, MLP, and a per-forward counter buffer."""
+
+        super().__init__()
+        self.attn = nn.Linear(4, 4)
+        self.mlp = nn.Linear(4, 4)
+        self.register_buffer("counter", torch.ones(1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run an attention/MLP residual update scaled by the mutating counter."""
+
+        self.counter += 1.0
+        resid_mid = x + self.attn(x) * self.counter
+        return resid_mid + self.mlp(resid_mid)
+
+
+class _StatefulModel(nn.Module):
+    """Wrapper exposing a stateful transformer block as a non-root module."""
+
+    def __init__(self) -> None:
+        """Initialize the stateful block."""
+
+        super().__init__()
+        self.block = _StatefulBlock()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the stateful block."""
+
+        return self.block(x)
+
+
+def _metric(log: object) -> torch.Tensor:
+    """Return a scalar metric from a trace output."""
+
+    return log[log.output_layers[0]].out.sum()  # type: ignore[index]
+
+
+def _patch_inputs() -> tuple[torch.Tensor, torch.Tensor]:
+    """Return clean and corrupted toy inputs."""
+
+    torch.manual_seed(0)
+    return torch.randn(1, 3, 4), torch.randn(1, 3, 4)
+
+
+def test_activation_patch_preserves_caller_model_state_and_rng() -> None:
+    """Residual-stream patching must leave the caller's model state and RNG untouched."""
+
+    # A real session has already initialized torchlens; warm it up so the one-time
+    # first-capture setup does not perturb the RNG snapshot under test.
+    tl.trace(nn.Linear(3, 3), torch.randn(2, 3))
+    model = _StatefulModel()
+    clean, corrupted = _patch_inputs()
+
+    counter_before = model.block.counter.clone()
+    rng_before = torch.get_rng_state().clone()
+    tl.facets.patching.activation_patch_residual_stream(model, clean, corrupted, _metric)
+
+    assert torch.equal(model.block.counter, counter_before)
+    assert torch.equal(rng_before, torch.get_rng_state())
+
+
+def test_activation_patch_is_idempotent_across_calls() -> None:
+    """Two identical patching calls give identical results (no cross-call state drift)."""
+
+    model = _StatefulModel()
+    clean, corrupted = _patch_inputs()
+
+    first = tl.facets.patching.activation_patch_residual_stream(model, clean, corrupted, _metric)
+    second = tl.facets.patching.activation_patch_residual_stream(model, clean, corrupted, _metric)
+
+    assert torch.equal(first, second)
