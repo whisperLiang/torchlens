@@ -28,8 +28,8 @@ if TYPE_CHECKING:
     from ._engine_forward import _ProjectiveFieldSolution
 
 
-def _optional_callable(module_name: str, function_name: str, task: str) -> Any:
-    """Load an optional later-phase receptive-field callable.
+def _optional_callable(module_name: str, function_name: str, feature: str) -> Any:
+    """Load an optional receptive-field callable.
 
     Parameters
     ----------
@@ -37,8 +37,8 @@ def _optional_callable(module_name: str, function_name: str, task: str) -> Any:
         Receptive-field module containing the callable.
     function_name:
         Callable name within the module.
-    task:
-        Feature phase used in the unavailable diagnostic.
+    feature:
+        Human-readable capability name used in the unavailable diagnostic.
 
     Returns
     -------
@@ -48,7 +48,7 @@ def _optional_callable(module_name: str, function_name: str, task: str) -> Any:
     Raises
     ------
     ReceptiveFieldUnavailableError
-        If the backing feature phase has not landed.
+        If the backing capability is not importable in this installation.
     """
 
     try:
@@ -56,7 +56,7 @@ def _optional_callable(module_name: str, function_name: str, task: str) -> Any:
         return getattr(module, function_name)
     except (AttributeError, ImportError) as exc:
         raise ReceptiveFieldUnavailableError(
-            f"This receptive-field method is not available until {task} is installed."
+            f"Receptive-field {feature} is not available in this installation."
         ) from exc
 
 
@@ -402,7 +402,7 @@ class ReceptiveFieldView:
             if input is not None or source is not None:
                 raise TypeError("Projective queries select their far endpoint with target=.")
             projective_gradient = _optional_callable(
-                "._gradient_forward", "projective_gradient_for_unit", "Task T19"
+                "._gradient_forward", "projective_gradient_for_unit", "projective gradient support"
             )
             return cast(
                 GradientReceptiveField | Mapping[str, GradientReceptiveField],
@@ -475,7 +475,7 @@ class ReceptiveFieldView:
         resolved_direction = self._direction_for(direction)
         if input is not None and source is not None:
             raise TypeError("input and source cannot be supplied together.")
-        check_for_unit = _optional_callable("._validation", "check_for_unit", "Task T20")
+        check_for_unit = _optional_callable("._validation", "check_for_unit", "validation")
         return cast(
             ReceptiveFieldValidation,
             check_for_unit(
@@ -585,7 +585,7 @@ class ReceptiveFieldView:
             Rendered input-space overlay.
         """
 
-        show = _optional_callable("._viz", "show", "Task T10")
+        show = _optional_callable("._viz", "show", "visualization")
 
         return cast(
             "Image.Image",
