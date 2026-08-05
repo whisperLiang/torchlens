@@ -61,9 +61,14 @@ jobs:
           python -c 'import torch; assert torch.__version__ == "2.13.0+cpu"; print(torch.__version__)'
 
       - name: Run pip-audit
-        # CVE-2026-3219 affects pip itself (the package installed on
-        # the GitHub runner image). It's outside this project's
-        # dependency surface and not actionable from pyproject.toml.
-        # Ignore that single ID; remove this once a pip release with
-        # the fix is generally available.
+        # Two advisory IDs are suppressed below:
+        #   * CVE-2026-3219 -- affects pip itself (the package on the GitHub
+        #     runner image), which is outside this project's dependency surface
+        #     and not actionable from pyproject.toml. Remove once a pip release
+        #     with the fix is generally available.
+        #   * PYSEC-2026-3447 -- suppression inherited without a recorded
+        #     justification; its advisory target has NOT been re-verified here
+        #     (that needs the advisory DB / network). FLAGGED for owner review:
+        #     confirm it targets a non-actionable or transitive dependency, or
+        #     drop this ignore so the advisory surfaces.
         run: pip-audit --ignore-vuln CVE-2026-3219 --ignore-vuln PYSEC-2026-3447
