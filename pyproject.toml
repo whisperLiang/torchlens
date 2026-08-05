@@ -52,6 +52,9 @@ viz = ["torchshow~=0.5", "lovely-tensors~=0.1.18"]
 tabular = ["pandas>=2.0", "pyarrow>=14"]
 captum = ["captum~=0.7"]
 sae = ["sae-lens~=6.45; python_version >= '3.10'"]
+# `profiler` is an intentional no-op capability marker: torch.profiler ships with
+# torch itself, so this extra pulls no extra packages but stays advertised so users
+# and tooling can request the profiler surface by name.
 profiler = []
 lightning = ["lightning~=2.4"]
 wandb = ["wandb>=0.16"]
@@ -112,7 +115,6 @@ dev = [
     "jsonschema>=4.18",
     "referencing>=0.28",
 ]
-io = ["pyarrow"]
 test = [
     "lightning",
     "pydot",
@@ -146,24 +148,6 @@ test = [
 [project.urls]
 Homepage = "https://github.com/johnmarktaylor91/torchlens"
 Repository = "https://github.com/johnmarktaylor91/torchlens"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 [tool.setuptools.packages.find]
 include = ["torchlens*", "menagerie*"]

@@ -80,3 +80,30 @@ def test_all_extra_resolves_to_real_packages() -> None:
         for spec in extras[name]:
             packages.add(Requirement(spec).name.lower())
     assert packages, "`all` must transitively install real third-party packages"
+
+
+def test_vestigial_io_extra_is_removed() -> None:
+    """The orphan `io` extra (unpinned pyarrow duplicate of `tabular`) is gone."""
+
+    extras = _optional_dependencies()
+    assert "io" not in extras, (
+        "the `io` extra was a vestigial unpinned duplicate of `tabular`'s "
+        "pyarrow>=14; the parquet exporter directs users to `[tabular]`"
+    )
+
+
+def test_pyarrow_is_declared_only_pinned() -> None:
+    """`tabular` must keep a pinned pyarrow; no extra may declare it unpinned."""
+
+    extras = _optional_dependencies()
+    tabular_pyarrow = [
+        req for spec in extras["tabular"] if (req := Requirement(spec)).name == "pyarrow"
+    ]
+    assert tabular_pyarrow, "`tabular` must declare pyarrow"
+    for req in tabular_pyarrow:
+        assert str(req.specifier), "`tabular`'s pyarrow must stay pinned"
+    for name, specs in extras.items():
+        for spec in specs:
+            req = Requirement(spec)
+            if req.name == "pyarrow":
+                assert str(req.specifier), f"pyarrow in extra `{name}` must be pinned"
