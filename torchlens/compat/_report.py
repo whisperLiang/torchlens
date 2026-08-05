@@ -799,24 +799,26 @@ def _lightning_row(model: nn.Module) -> CompatRow:
         Report row.
     """
 
-    detected = callable(getattr(model, "training_step", None))
+    has_training_step = callable(getattr(model, "training_step", None))
+    is_lightning = _class_in_namespace(model, ("pytorch_lightning", "lightning.pytorch"))
     is_train_mode = bool(getattr(model, "training", False))
-    status: Status = "known_broken" if detected and is_train_mode else "pass"
+    detected = has_training_step and is_lightning and is_train_mode
+    status: Status = "known_broken" if detected else "pass"
     details = (
         "LightningModule training_step detected while the module is in training mode; mid-loop "
         "trainer capture is not a supported TorchLens entry point."
-        if detected and is_train_mode
-        else "Lightning training_step not detected in an active training-mode model."
+        if detected
+        else "Lightning training_step not detected in an active training-mode LightningModule."
     )
     return CompatRow(
         "lightning_training_step",
         "Lightning training_step mid-loop",
         status,
-        "error" if detected and is_train_mode else "ok",
-        detected and is_train_mode,
+        "error" if detected else "ok",
+        detected,
         details,
         "Use torchlens.callbacks.lightning.LayerProfilerCallback or log a plain forward."
-        if detected and is_train_mode
+        if detected
         else "",
     )
 

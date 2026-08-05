@@ -8,6 +8,7 @@ kill the false-positive and false-negative detection classes flagged in round 18
 
 from __future__ import annotations
 
+import pytest
 import torch
 from torch import nn
 
@@ -215,3 +216,107 @@ def test_deepspeed_row_detects_real_deepspeed_namespace() -> None:
 
     assert row.detected is True
     assert row.status == "scope"
+
+
+# ---------------------------------------------------------------------------
+# A3-02 — Lightning training_step detection must require real Lightning identity,
+# not merely a callable method named ``training_step`` on a train-mode module.
+# ---------------------------------------------------------------------------
+
+
+class OrdinaryTrainingUtility(nn.Module):
+    """Plain module with a conventional ``training_step`` helper method."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the input unchanged.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            The input tensor.
+        """
+
+        return x
+
+    def training_step(self, batch: torch.Tensor) -> torch.Tensor:
+        """Return the batch unchanged.
+
+        Parameters
+        ----------
+        batch:
+            Training batch.
+
+        Returns
+        -------
+        torch.Tensor
+            The batch.
+        """
+
+        return batch
+
+
+def test_lightning_row_ignores_plain_training_step_method() -> None:
+    """A plain train-mode module with a ``training_step`` method is not Lightning."""
+
+    model = OrdinaryTrainingUtility()
+    assert model.training is True  # nn.Module defaults to train mode
+
+    row = report(model, torch.randn(1)).row("lightning_training_step")
+
+    assert row.detected is False
+    assert row.status == "pass"
+    assert row.severity == "ok"
+
+
+def test_lightning_row_detects_real_lightning_module_in_train_mode() -> None:
+    """A genuine LightningModule in training mode stays flagged known_broken."""
+
+    pl = pytest.importorskip("pytorch_lightning")
+
+    class RealLit(pl.LightningModule):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return input unchanged."""
+
+            return x
+
+        def training_step(self, batch: torch.Tensor) -> torch.Tensor:
+            """Return batch unchanged."""
+
+            return batch
+
+    model = RealLit()
+    model.train()
+    row = report(model, torch.randn(1)).row("lightning_training_step")
+
+    assert row.detected is True
+    assert row.status == "known_broken"
+    assert row.severity == "error"
+
+
+def test_lightning_row_clears_when_lightning_module_in_eval_mode() -> None:
+    """A LightningModule switched to eval mode is a supported plain forward."""
+
+    pl = pytest.importorskip("pytorch_lightning")
+
+    class RealLit(pl.LightningModule):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return input unchanged."""
+
+            return x
+
+        def training_step(self, batch: torch.Tensor) -> torch.Tensor:
+            """Return batch unchanged."""
+
+            return batch
+
+    model = RealLit()
+    model.eval()
+    row = report(model, torch.randn(1)).row("lightning_training_step")
+
+    assert row.detected is False
+    assert row.status == "pass"
