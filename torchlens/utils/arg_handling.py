@@ -48,7 +48,7 @@ def _clone_input_tensor_payload(arg: torch.Tensor) -> torch.Tensor:
     return cast(torch.Tensor, _clone_tensor_payload(arg, detach_tensor=False, save_mode="copy"))
 
 
-def copy_arg_tree(arg: Any) -> Any:
+def copy_arg_tree(arg: Any, _in_progress: Optional[dict[int, Any]] = None) -> Any:
     """Copy an input argument tree, cloning tensors and recursing built-in containers.
 
     Why not ``copy.deepcopy``?  Many third-party tensor wrappers hold
@@ -63,6 +63,14 @@ def copy_arg_tree(arg: Any) -> Any:
     GeometricTensor) while still protecting user inputs from in-place
     mutations like device moves.
 
+    Standard containers that refer back to themselves (directly or through a
+    cycle of mutable containers) are handled without a ``RecursionError``: a
+    mutable container being built is registered in ``_in_progress`` before its
+    elements are recursed, so a self-reference resolves to the same in-progress
+    copy and the cycle is reproduced in the copy.  The registration is scoped to
+    the active recursion path only, so a non-cyclic structure that reuses the
+    same sub-container twice is still copied twice (unchanged behavior).
+
     Note: custom objects containing tensors are passed by reference.  If the
     model is on a different device, _fetch_label_move_input_tensors may
     mutate the wrapper's tensor attribute in-place.  This is acceptable
@@ -72,6 +80,10 @@ def copy_arg_tree(arg: Any) -> Any:
     ----------
     arg
         Argument value to copy.
+    _in_progress
+        Internal recursion state mapping ``id()`` of a mutable container being
+        built to its (partially populated) copy, used to terminate reference
+        cycles. Callers should not supply this.
 
     Returns
     -------
@@ -79,21 +91,57 @@ def copy_arg_tree(arg: Any) -> Any:
         Argument copy with nested tensors cloned and custom objects preserved
         by reference.
     """
+    if _in_progress is None:
+        _in_progress = {}
     if isinstance(arg, torch.Tensor):
+        # Tensors are leaves and are cloned per occurrence (never memoized), so a
+        # structure that reuses the same tensor keeps its historical per-slot
+        # clone semantics.
         return _clone_input_tensor_payload(arg)
-    elif isinstance(arg, defaultdict):
+    arg_id = id(arg)
+    existing = _in_progress.get(arg_id)
+    if existing is not None:
+        # A container on the current recursion path referred back to itself.
+        return existing
+    if isinstance(arg, defaultdict):
         # defaultdict(factory, {k: v, ...}) — preserve the default_factory (#127).
         # A plain dict() constructor would lose default_factory.
-        copied = defaultdict(arg.default_factory, {k: copy_arg_tree(v) for k, v in arg.items()})
+        copied: Any = defaultdict(arg.default_factory)
+        _in_progress[arg_id] = copied
+        try:
+            for key, value in arg.items():
+                copied[key] = copy_arg_tree(value, _in_progress)
+        finally:
+            _in_progress.pop(arg_id, None)
         return copied
     elif isinstance(arg, dict):
-        # type(arg)({...}) preserves OrderedDict and other dict subclasses.
-        return type(arg)({k: copy_arg_tree(v) for k, v in arg.items()})
-    elif isinstance(arg, (list, tuple)):
-        copied = [copy_arg_tree(item) for item in arg]  # type: ignore[assignment]
-        # NamedTuples have _fields and need *args construction;
-        # plain tuples/lists take an iterable.
-        return type(arg)(*copied) if hasattr(type(arg), "_fields") else type(arg)(copied)
+        # type(arg)() preserves OrderedDict and other dict subclasses; populate
+        # after registering so a cyclic value can point back at this copy.
+        copied = type(arg)()
+        _in_progress[arg_id] = copied
+        try:
+            for key, value in arg.items():
+                copied[key] = copy_arg_tree(value, _in_progress)
+        finally:
+            _in_progress.pop(arg_id, None)
+        return copied
+    elif isinstance(arg, list):
+        copied = type(arg)()
+        _in_progress[arg_id] = copied
+        try:
+            for item in arg:
+                copied.append(copy_arg_tree(item, _in_progress))
+        finally:
+            _in_progress.pop(arg_id, None)
+        return copied
+    elif isinstance(arg, tuple):
+        # Tuples are immutable and cannot self-reference directly; any cycle
+        # through a tuple passes through a mutable container that is already
+        # registered above, so recursing eagerly here is safe.
+        items = [copy_arg_tree(item, _in_progress) for item in arg]
+        # NamedTuples have _fields and need *args construction; plain tuples
+        # take an iterable.
+        return type(arg)(*items) if hasattr(type(arg), "_fields") else type(arg)(items)
     else:
         # Non-container, non-tensor objects (ints, strings, custom wrappers)
         # are returned by reference — shallow enough to avoid circular ref issues.
