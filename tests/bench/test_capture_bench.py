@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 import gc
 import importlib.util
@@ -347,11 +347,19 @@ def _run_capture_cells(
     def lookback_payload() -> tl.Trace:
         """Run retroactive save with detached lookback payloads."""
 
+        # Use a bare ``linear`` selector: every workload in the matrix (tiny-conv's
+        # final Linear, ResNet-50's ``fc``, and the transformer/GPT projection stacks)
+        # contains linear ops, so the selector always matches at least one site. The
+        # retroactive behaviour under test comes from ``lookback=4`` (the 4 predecessor
+        # ops of each matched op are saved), NOT from a downstream ``followed_by``
+        # trigger. The old ``& followed_by(relu)`` compound zero-matched TinyConv
+        # (Linear is last) and any gelu/relu-free stack, which the zero-match tripwire
+        # (``error::UserWarning:torchlens``) then promoted to a hard failure.
         return tl.trace(
             workload.model,
             list(workload.args),
             workload.kwargs or None,
-            save=tl.func("linear") & tl.followed_by(tl.func("relu")),
+            save=tl.func("linear"),
             lookback=4,
             lookback_payload_policy="detached_raw",
         )
@@ -396,6 +404,23 @@ def _format_table(results: list[BenchResult]) -> str:
     return "\n".join(lines)
 
 
+@pytest.fixture
+def _restore_torch_num_threads() -> Iterator[None]:
+    """Snapshot and restore torch's process-global thread count around a test.
+
+    These bench tests pin ``torch.set_num_threads(1)`` for measurement determinism.
+    Without restoration that ``1`` leaks into torch's global state for the rest of the
+    pytest process, making later tests order-dependent (observed leak: baseline 10 ->
+    1). The fixture captures the count before the test and restores it in ``finally``.
+    """
+
+    original = torch.get_num_threads()
+    try:
+        yield
+    finally:
+        torch.set_num_threads(original)
+
+
 def test_logging_off_wrapper_overhead_microbench() -> None:
     """Report logging-off wrapper overhead without enforcing a perf threshold."""
 
@@ -404,7 +429,7 @@ def test_logging_off_wrapper_overhead_microbench() -> None:
     assert overhead_ns >= 0
 
 
-def test_capture_bench_matrix() -> None:
+def test_capture_bench_matrix(_restore_torch_num_threads: None) -> None:
     """Run the fixed benchmark matrix and print informational results."""
 
     torch.set_num_threads(1)
@@ -421,7 +446,7 @@ def test_capture_bench_matrix() -> None:
     assert all(r.median_wall_s > 0 for r in measured)
 
 
-def test_tiny_capture_bench_smoke() -> None:
+def test_tiny_capture_bench_smoke(_restore_torch_num_threads: None) -> None:
     """Run one tiny benchmark case so the harness can be smoke-tested quickly."""
 
     torch.set_num_threads(1)
@@ -432,7 +457,9 @@ def test_tiny_capture_bench_smoke() -> None:
     assert all(result.median_wall_s > 0 for result in results)
 
 
-def test_gradient_selector_deferred_retention_peak_memory() -> None:
+def test_gradient_selector_deferred_retention_peak_memory(
+    _restore_torch_num_threads: None,
+) -> None:
     """Gate unwindowable gradient-selector peak RSS against the recorded budget."""
 
     torch.set_num_threads(1)
