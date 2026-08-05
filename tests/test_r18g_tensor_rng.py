@@ -9,7 +9,15 @@ fail. These tests are deterministic and CPU-only.
 import pytest
 import torch
 
-from torchlens.utils.rng import AutocastRestore, log_current_autocast_state
+import random
+
+import numpy as np
+
+from torchlens.utils.rng import (
+    AutocastRestore,
+    execute_with_restored_rng_autocast,
+    log_current_autocast_state,
+)
 from torchlens.utils.tensor_utils import (
     _copy_tensor_payload,
     copy_tensor_payload,
@@ -155,3 +163,30 @@ def test_h1_restore_enabled_state_reproduces_autocast():
     with AutocastRestore(saved):
         dt = (torch.randn(4, 4) @ torch.randn(4, 4)).dtype
     assert dt == torch.bfloat16
+
+
+# ---------------------------------------------------------------------------
+# M4 -- execute_with_restored_rng_autocast must roll back caller RNG even when
+# the target-state restore partially applies and then raises.
+# ---------------------------------------------------------------------------
+def test_m4_partial_restore_failure_rolls_back_caller_rng():
+    # Build a malformed target state: has Python + NumPy engines but NO "torch"
+    # key, so set_rng_from_saved_states applies both then KeyErrors on torch.
+    random.seed(999)
+    np.random.seed(999)
+    bad_target = {"random": random.getstate(), "np": np.random.get_state()}
+
+    # Establish a distinct caller state.
+    random.seed(1)
+    np.random.seed(1)
+    py_before = random.getstate()
+    np_before = np.random.get_state()
+
+    with pytest.raises(KeyError):
+        execute_with_restored_rng_autocast(
+            lambda: None, (), {}, rng_states=bad_target, autocast_state={}
+        )
+
+    # Caller engines must be exactly as before the failed call.
+    assert random.getstate() == py_before
+    assert np.array_equal(np.random.get_state()[1], np_before[1])

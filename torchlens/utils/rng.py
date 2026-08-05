@@ -465,9 +465,14 @@ def execute_with_restored_rng_autocast(
     """
 
     current_rng_states = log_current_rng_states()
-    if rng_states:
-        set_rng_from_saved_states(rng_states)
+    # Apply the target RNG state INSIDE the try so the finally always restores
+    # the caller's state -- even if the restore itself partially applies and then
+    # raises (e.g. a malformed rng_states dict sets the Python/NumPy engines then
+    # KeyErrors on the torch key). Doing the set before the try left the caller's
+    # engines corrupted with no rollback.
     try:
+        if rng_states:
+            set_rng_from_saved_states(rng_states)
         with AutocastRestore(autocast_state or {}):
             return func(*args, **kwargs)
     finally:
