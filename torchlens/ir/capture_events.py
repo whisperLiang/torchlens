@@ -152,10 +152,20 @@ class CaptureEvents:
     def release_runtime_sidecars(self) -> None:
         """Detach payload and runtime handles while retaining structural facts.
 
+        Operation entries are rebuilt as payload-free immutable facts, and every
+        runtime-handle sidecar the buffer holds is dropped so the advertised
+        release boundary really frees backend / autograd / runtime-context object
+        graphs: the backend session (``backend_session``), the per-label autograd
+        ``grad_fn`` handles (``grad_fn_handles_by_label_raw``, also cleared by the
+        sibling :meth:`release_working_projection`), and the runtime record-context
+        deque (``recent_events``). Structural event facts (op/module/prep/enter/
+        exit/output-version lanes with payloads stripped) are retained.
+
         Returns
         -------
         None
-            Replaces operation entries with payload-free immutable facts.
+            Replaces operation entries with payload-free immutable facts and
+            detaches all runtime-handle sidecars.
         """
 
         structural_events: list[OpEvent] = []
@@ -233,6 +243,9 @@ class CaptureEvents:
         ]
         self.live_by_raw_label.clear()
         self.live_index.clear()
+        self.backend_session = None
+        self.grad_fn_handles_by_label_raw.clear()
+        self.recent_events.clear()
 
     def next_backward_seq(self) -> int:
         """Return the next monotonic backward event sequence number."""

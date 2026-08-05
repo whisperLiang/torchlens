@@ -15,12 +15,19 @@ Covers hardening findings on ``torchlens/ir``:
 from __future__ import annotations
 
 import dataclasses
+import gc
+import weakref
+from collections import deque
 
 from test_ir_basic import _build_ir_instances
 
 from torchlens.ir.capture_events import CaptureEvents
 from torchlens.ir.events import OpEvent, ParentEdge
 from torchlens.ir.live_index import LiveIndex
+
+
+class _Handle:
+    """Weak-referenceable runtime-handle sentinel."""
 
 
 def _base_op_event() -> OpEvent:
@@ -103,3 +110,46 @@ def test_capture_events_append_keeps_live_index_consistent() -> None:
     assert events.live_index.labels.count("dup") == 1
     assert events.live_index.children("old") == ()
     assert events.live_index.parents("dup") == ("new",)
+
+
+# --------------------------------------------------------------------------- N9
+
+
+def test_release_runtime_sidecars_detaches_runtime_handles() -> None:
+    """release_runtime_sidecars must drop the handles its docstring names (N9)."""
+
+    events = CaptureEvents()
+    op = _op_event("linear_1_1_raw")
+    events.append(op)
+    events.backend_session = _Handle()
+    events.grad_fn_handles_by_label_raw[op.label_raw] = _Handle()
+    events.recent_events = deque([object()])
+
+    events.release_runtime_sidecars()
+
+    assert events.backend_session is None
+    assert events.grad_fn_handles_by_label_raw == {}
+    assert len(events.recent_events) == 0
+    # Structural facts are retained (payload-free op events).
+    assert len(events.op_events) == 1
+
+
+def test_release_runtime_sidecars_lets_handles_be_collected() -> None:
+    """The detached runtime handles must become garbage-collectible (N9)."""
+
+    events = CaptureEvents()
+    op = _op_event("linear_1_1_raw")
+    events.append(op)
+    session = _Handle()
+    grad_handle = _Handle()
+    events.backend_session = session
+    events.grad_fn_handles_by_label_raw[op.label_raw] = grad_handle
+    session_ref = weakref.ref(session)
+    grad_ref = weakref.ref(grad_handle)
+
+    events.release_runtime_sidecars()
+    del session, grad_handle
+    gc.collect()
+
+    assert session_ref() is None
+    assert grad_ref() is None
