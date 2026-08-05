@@ -1330,12 +1330,26 @@ def _build_compute_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]
                 "dtype": _module_dtype(trace, module),
             }
         )
+    accumulated_ms = (
+        sum(
+            _entry_func_duration(entry) for entry in _iter_operation_entries(trace, mode="unrolled")
+        )
+        * 1000.0
+    )
+    wall_ms = float(getattr(trace, "forward_duration", 0.0) or 0.0) * 1000.0
     footer_lines = [
         f"Params: {_int_with_commas(trace.num_params)} unique",
         f"Forward FLOPs: {_human_flops(trace.total_flops_forward)}",
         f"MACs: {_human_flops(trace.total_macs_forward)}",
         _unknown_flops_footer(trace),
-        f"Forward time: {float(trace.forward_duration) * 1000:.2f} ms",
+        # Report the compute-relevant accumulated op time (matching the waterfall
+        # level) as the headline number, and disclose the raw capture wall time
+        # separately as overhead-inclusive. Previously a single "Forward time"
+        # line reported trace.forward_duration -- capture wall time that INCLUDES
+        # all TorchLens instrumentation overhead (~100x+ the real op time) -- and
+        # sitting next to FLOPs/MACs it read as the model's forward compute cost.
+        f"Accumulated op time: {accumulated_ms:.2f} ms",
+        f"Capture wall time (includes TorchLens overhead): {wall_ms:.2f} ms",
     ]
     return rows, footer_lines
 
