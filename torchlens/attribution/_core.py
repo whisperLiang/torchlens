@@ -101,7 +101,16 @@ class _PreparedInputs:
 
 @contextmanager
 def _temporarily_eval(model: Module) -> Any:
-    """Run attribution with ``model`` in eval mode, then restore its prior mode.
+    """Run attribution with ``model`` in eval mode, then restore prior per-module modes.
+
+    The model is placed in eval mode for the duration of the context so that
+    attribution measures the deterministic inference computation. Every
+    submodule's training flag is snapshotted before the switch and restored
+    individually afterward. Restoring with ``module.train(flag)`` would recurse
+    and collapse an intentionally-mixed configuration (for example a frozen
+    ``BatchNorm`` deliberately left in eval while the rest of the model trains)
+    to the root module's single flag, so this restores each module's own flag
+    directly instead.
 
     Parameters
     ----------
@@ -114,12 +123,13 @@ def _temporarily_eval(model: Module) -> Any:
         Context body executes while the model is in eval mode.
     """
 
-    was_training = model.training
+    previous_modes = [(module, module.training) for module in model.modules()]
     model.eval()
     try:
         yield
     finally:
-        model.train(was_training)
+        for module, was_training in previous_modes:
+            module.training = was_training
 
 
 def _is_attributed_tensor(value: Any) -> bool:
