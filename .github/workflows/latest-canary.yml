@@ -54,5 +54,13 @@ jobs:
 
       - name: Run smoke tests and compatibility coverage
         run: |
-          pytest tests/ -m smoke --tb=short -q
+          # Exclude the menagerie build subsystem from smoke, matching tests.yml:
+          # tests/test_menagerie_*.py hard-imports pydantic (via
+          # menagerie/schema.py) and tests/crawler/ is the crawler corpus -- both
+          # absent from this .[dev,tabular] env (pydantic is only in .[test]).
+          # This is a py3.11 leg, so it is past the tests/conftest.py < 3.11
+          # auto-skip and needs these explicit --ignore flags to avoid a
+          # collection ModuleNotFoundError. No smoke coverage is lost (no
+          # menagerie or crawler test is smoke-marked).
+          pytest tests/ -m smoke --ignore-glob="*menagerie*" --ignore=tests/crawler --tb=short -q
           pytest tests/test_torch_compat.py --tb=short -q
