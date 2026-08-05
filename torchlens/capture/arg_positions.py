@@ -1546,6 +1546,12 @@ for _name in [
     FUNC_ARG_SPECS[_name] = _P01_BINARY
 
 FUNC_ARG_SPECS["addr"] = ArgSpec(positions=(0, 1, 2), tensor_kwargs=("input", "vec1", "vec2"))
+# ``align_as`` (named-tensor Tensor method) was REMOVED from torch in 2.13, so on this runtime
+# it is undecorated and this static spec is unused. It is RETAINED (not pruned) because the
+# pinned torch<=2.12 CI legs still decorate ``Tensor.align_as``; deleting the spec there would
+# make it a decorated-without-static-spec op absent from the arg-spec ledger, hard-failing
+# tests/test_arg_spec_coverage.py::test_every_decorated. It is version-varying, so it is dropped
+# from _HIGH_CONFIDENCE_STATIC_NAMES (mirrors F5's handling of torch-version-varying fills).
 FUNC_ARG_SPECS["alignas"] = ArgSpec(positions=(0, 1), tensor_kwargs=("self", "other"))
 FUNC_ARG_SPECS["binarycrossentropy"] = ArgSpec(
     positions=(0, 1, 2), tensor_kwargs=("input", "target", "weight")
