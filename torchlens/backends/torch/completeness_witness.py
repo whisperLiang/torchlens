@@ -5086,24 +5086,20 @@ def _record_bool_consumer_location(trace: Any, source: torch.Tensor) -> None:
     trace:
         Active capture trace.
     source:
-        Tensor consumed by Python control flow or ``bool(...)``.
+        Bool tensor consumed by Python control flow or ``bool(...)``.
     """
 
     if source.dtype is not torch.bool:
-        # Python truthiness of ANY single-element tensor (``if x.sum():``) is a
-        # bool consumption gating a taken branch exactly like an explicit bool
-        # predicate; dtype-gating here made such conditionals fully invisible.
-        # Multi-element tensors raise inside ``__bool__`` and cannot gate a
-        # branch, so they are not recorded. Element count comes from shape
-        # metadata (attribute access, no dispatch).
-        try:
-            element_count = 1
-            for dim in source.shape:
-                element_count *= int(dim)
-        except Exception:
-            return
-        if element_count != 1:
-            return
+        # DELIBERATE, documented false negative: ``if x.sum():`` truthiness on
+        # a non-bool tensor is a real bool consumption, but recording it would
+        # materialize conditional arm edges whose predicate the runnable
+        # witness-obligation registry cannot witness (only ``is_scalar_bool``
+        # ops receive predicate witnesses), making every level="runnable" save
+        # of such a model refuse at producer preflight. Lifting this gate
+        # requires a truthiness predicate witness family in the runnable
+        # contract first. Pinned by
+        # tests/test_condbranch_hardening.py::test_float_truthiness_stays_documented_false_negative.
+        return
     label = get_tensor_label(source)
     if not isinstance(label, str):
         return

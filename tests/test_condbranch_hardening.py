@@ -589,7 +589,7 @@ def test_short_circuit_and_never_reports_true_for_unfired_then() -> None:
 
 
 # ---------------------------------------------------------------------------
-# F7: non-bool tensor truthiness (`if x.sum():`) is a recorded conditional
+# F7 (documented gap, DEFERRED): non-bool tensor truthiness stays invisible
 # ---------------------------------------------------------------------------
 
 
@@ -606,33 +606,36 @@ class FloatTruthinessModel(nn.Module):
 
 
 @pytest.mark.parametrize(
-    ("input_tensor", "expected_arm", "executed", "not_executed"),
+    ("input_tensor", "executed", "not_executed"),
     [
-        (torch.ones(2, 2), "then", {"relu", "sum", "mul"}, {"sigmoid"}),
-        (torch.zeros(2, 2), "else", {"sigmoid", "sum", "mul"}, {"relu"}),
+        (torch.ones(2, 2), {"relu", "sum", "mul"}, {"sigmoid"}),
+        (torch.zeros(2, 2), {"sigmoid", "sum", "mul"}, {"relu"}),
     ],
     ids=["truthy-then", "falsy-else"],
 )
-def test_float_truthiness_conditional_is_recorded(
+def test_float_truthiness_stays_documented_false_negative(
     input_tensor: torch.Tensor,
-    expected_arm: str,
     executed: set[str],
     not_executed: set[str],
 ) -> None:
-    """Non-bool scalar truthiness materializes the conditional with arms."""
+    """DELIBERATE false negative, pinned: non-bool tensor truthiness is a real
+    bool consumption but is NOT recorded as a conditional. Recording it would
+    materialize arm edges whose predicate the runnable witness-obligation
+    registry cannot witness (only ``is_scalar_bool`` ops receive predicate
+    witnesses), so every level="runnable" save of such a model would refuse at
+    producer preflight (caught by the round-22 smoke gate on the raw-input
+    truthiness escape-witness tests). Recording is deferred until the runnable
+    contract gains a truthiness predicate witness family. This pin flips to a
+    positive capture test at that point; meanwhile nothing may false-fire."""
 
     trace = _log_model(FloatTruthinessModel(), input_tensor)
 
-    assert len(trace.conditional_records) == 1
-    (event,) = trace.conditional_records
+    assert trace.conditional_records == []
+    assert list(trace.conditionals) == []
     sum_layer = _find_only_layer(trace, "sum")
-    assert event.bool_layers == [sum_layer.layer_label]
-    assert sum_layer.is_terminal_conditional_bool is True
-
-    (conditional,) = list(trace.conditionals)
-    assert conditional.fired_arm_kind == expected_arm
-    branch_layer = _find_only_layer(trace, next(iter({"relu", "sigmoid"} & executed)))
-    assert branch_layer.conditional_branch_stack == [(0, expected_arm)]
+    assert sum_layer.is_terminal_conditional_bool is not True
+    for layer in trace.layer_list:
+        assert layer.conditional_branch_stack == []
 
     _assert_no_false_fired(trace, executed, not_executed)
     _assert_bool_value_never_contradicts_fired(trace)

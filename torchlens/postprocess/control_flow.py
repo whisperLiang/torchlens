@@ -96,11 +96,13 @@ def _seed_proven_bool_consumers(self: "Trace") -> None:
     proves that the tensor was consumed on the host; that proof, rather than
     childlessness, makes it a terminal conditional candidate.
 
-    The proof is dtype-agnostic: ``if x.sum():`` consumes a single-element
-    FLOAT tensor through the same ``__bool__`` protocol, and the taken branch
-    is exactly as data-dependent as with an explicit bool predicate. Any
-    proven single-element consumer is therefore seeded, not only
-    ``is_scalar_bool`` (0-dim ``torch.bool``) ops.
+    Seeding stays gated on ``is_scalar_bool`` (0-dim ``torch.bool``): the
+    runnable witness-obligation registry can only witness scalar-bool
+    predicates, so seeding a proven non-bool truthiness consumer (or a
+    one-element bool VECTOR) would materialize conditional arm edges that
+    every level="runnable" save refuses at producer preflight. Recording
+    those classes is deferred until the runnable contract gains a matching
+    predicate witness family.
     """
 
     from ..backends.torch.completeness_witness import host_escape_bool_source_labels
@@ -110,37 +112,11 @@ def _seed_proven_bool_consumers(self: "Trace") -> None:
         if label not in proven_labels:
             continue
         layer = self[label]
-        if getattr(layer, "is_orphan", False):
-            continue
-        if not (layer.is_scalar_bool or _is_single_element_shape(layer)):
+        if not layer.is_scalar_bool or getattr(layer, "is_orphan", False):
             continue
         if label not in self.internally_terminated_bool_ops:
             self.internally_terminated_bool_ops.append(label)
         layer.is_terminal_bool = True
-
-
-def _is_single_element_shape(layer: Op) -> bool:
-    """Return whether an op's recorded tensor shape holds exactly one element.
-
-    Parameters
-    ----------
-    layer:
-        Op whose capture-time ``shape`` metadata is inspected.
-
-    Returns
-    -------
-    bool
-        ``True`` for 0-dim and one-element shapes — the only tensors whose
-        ``__bool__`` succeeds and can gate a taken branch.
-    """
-
-    shape = getattr(layer, "shape", None)
-    if shape is None:
-        return False
-    element_count = 1
-    for dim in shape:
-        element_count *= int(dim)
-    return element_count == 1
 
 
 def _can_fast_skip_step5(self: "Trace") -> bool:
@@ -623,7 +599,7 @@ def _iter_terminal_scalar_bool_labels(self: "Trace") -> List[str]:
         layer_label
         for layer_label in self._raw_layer_labels_list
         if layer_label in terminal_bool_labels
-        and (self[layer_label].is_scalar_bool or _is_single_element_shape(self[layer_label]))
+        and self[layer_label].is_scalar_bool
         and not getattr(self[layer_label], "is_orphan", False)
     ]
 
