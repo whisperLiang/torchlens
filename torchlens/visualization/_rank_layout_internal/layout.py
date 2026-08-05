@@ -399,6 +399,78 @@ def _rank_node_statement(
     return next((statement for statement in statements if statement.kind == "node"), None)
 
 
+def _rank_legend_lines(theme: Any, max_y: float) -> list[str]:
+    """Emit the compact color legend as a pinned-node cluster for the rank path.
+
+    Mirrors ``_render_edges._add_legend_to_graphviz`` (which builds the legend
+    through the ``graphviz.Digraph`` API and cannot be reused on the raw-DOT
+    rank path). Nodes carry the ``tl_legend_<i>`` ids and are pinned to the left
+    of the graph so ``neato -n`` places them deterministically.
+
+    Parameters
+    ----------
+    theme:
+        Resolved visualization theme (may be ``None``; sensible defaults apply).
+    max_y:
+        Maximum node y-coordinate, used to anchor the legend near the graph.
+
+    Returns
+    -------
+    list[str]
+        Raw DOT lines for the legend subgraph.
+    """
+    from .._render_common import (
+        BOOL_NODE_COLOR,
+        DEFAULT_BG_COLOR,
+        INPUT_COLOR,
+        OUTPUT_COLOR,
+        TRAINABLE_PARAMS_BG_COLOR,
+    )
+    from ..node_spec import INTERVENTION_CONE_COLOR, INTERVENTION_SITE_COLOR
+
+    border = getattr(theme, "default_border", "black")
+    font = getattr(theme, "default_font", "black")
+    specs = [
+        ("input", "oval", INPUT_COLOR, "black"),
+        ("output", "oval", OUTPUT_COLOR, "black"),
+        ("parameterized", "oval", TRAINABLE_PARAMS_BG_COLOR, "black"),
+        ("buffer", "cylinder", DEFAULT_BG_COLOR, "black"),
+        ("boolean", "oval", BOOL_NODE_COLOR, "black"),
+        ("intervention/cone", "oval", INTERVENTION_CONE_COLOR, INTERVENTION_SITE_COLOR),
+    ]
+    legend_x = -240.0
+    top_y = (len(specs) - 1) * 48.0
+    # neato -n does not auto-compute cluster boxes/labels from pinned nodes, so
+    # pin an explicit bounding box around the legend nodes (same technique the
+    # module clusters use above) for the box outline and "TorchLens legend" title.
+    bb_llx, bb_lly, bb_urx, bb_ury = legend_x - 120.0, -40.0, legend_x + 120.0, top_y + 56.0
+    lines = [
+        "  subgraph cluster_torchlens_legend {",
+        '    label="TorchLens legend"',
+        "    labelloc=t",
+        f"    color={_dot_quote(str(border))}",
+        f"    fontcolor={_dot_quote(str(font))}",
+        "    style=rounded",
+        f'    bb="{bb_llx:.1f},{bb_lly:.1f},{bb_urx:.1f},{bb_ury:.1f}"',
+    ]
+    for index, (text, shape, fill, node_border) in enumerate(specs):
+        y = index * 48.0
+        parts = [
+            f"label={_dot_quote(text)}",
+            f"shape={shape}",
+            "style=filled",
+            f"fillcolor={_dot_quote(fill)}",
+            "fontcolor=black",
+            f"color={_dot_quote(node_border)}",
+            f'pos="{legend_x:.1f},{y:.1f}!"',
+        ]
+        if node_border == INTERVENTION_SITE_COLOR:
+            parts.append("penwidth=2.0")
+        lines.append(f"    tl_legend_{index} [{' '.join(parts)}]")
+    lines.append("  }")
+    return lines
+
+
 def render_rank_layout(
     ir: RenderIR,
     vis_mode: str,
@@ -408,6 +480,11 @@ def render_rank_layout(
     graph_caption: str,
     rankdir: str,
     code_panel_source: str | None = None,
+    *,
+    show_legend: bool = False,
+    theme: Any = None,
+    dpi: int | None = None,
+    graph_overrides: dict[str, str] | None = None,
 ) -> str:
     """Render a graph with the pure-Python rank layout.
 
@@ -430,6 +507,12 @@ def render_rank_layout(
         graph_caption: HTML label for the graph title.
         rankdir: Graphviz rank direction (BT, TB, LR).
         code_panel_source: Optional source code to embed as a graph cluster.
+        show_legend: If True, emit the compact colorblind-safe legend cluster
+            (parity with the dot path, which was previously dropped here).
+        theme: Resolved visualization theme; used only for the legend styling.
+        dpi: Optional Graphviz output DPI, applied as a graph attribute.
+        graph_overrides: Resolved (string-valued) graph-attribute overrides,
+            applied last so they win, matching the dot path.
 
     Returns:
         The generated DOT source string.
@@ -510,9 +593,21 @@ def render_rank_layout(
 
     lines = []
     lines.append("digraph {")
-    lines.append(
-        f"  graph [rankdir={rankdir} label={graph_caption} labelloc=t labeljust=left ordering=out]"
-    )
+    # Graph-level attributes. dpi and caller graph overrides used to be dropped
+    # on the rank path (the dot path applied them). Emit dpi and the resolved
+    # overrides too; overrides are appended last so later-wins matches dot.
+    graph_attr_parts = [
+        f"rankdir={rankdir}",
+        f"label={graph_caption}",
+        "labelloc=t",
+        "labeljust=left",
+        "ordering=out",
+    ]
+    if dpi is not None:
+        graph_attr_parts.append(f"dpi={int(dpi)}")
+    for override_key, override_val in (graph_overrides or {}).items():
+        graph_attr_parts.append(f"{override_key}={_dot_quote(str(override_val))}")
+    lines.append(f"  graph [{' '.join(graph_attr_parts)}]")
     lines.append("  node [ordering=out]")
 
     def _node_line(name: str, indent: int = 1) -> str:
@@ -625,6 +720,12 @@ def render_rank_layout(
         head = _dot_id(edge_data.pop("head_name"))
         parts = [f"{k}={_dot_quote(str(v))}" for k, v in edge_data.items()]
         lines.append(f"  {tail} -> {head} [{' '.join(parts)}]")
+
+    # The legend was silently dropped on the rank path (the dot path adds it via
+    # _add_legend_to_graphviz after the rank branch has already returned). Emit
+    # an equivalent pinned-node legend cluster here so show_legend is honored.
+    if show_legend:
+        lines.extend(_rank_legend_lines(theme, max_y))
 
     lines.append("}")
     dot_source = "\n".join(lines)

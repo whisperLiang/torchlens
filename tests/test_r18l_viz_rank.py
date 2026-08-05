@@ -226,3 +226,54 @@ def test_m4_within_rank_sort_is_total_order():
     pos, _, _ = _compute_topological_layout(nd, [], sz, {}, {})
     order = [n for n, _ in sorted(pos.items(), key=lambda kv: kv[1][0])]
     assert order == sorted(labels)
+
+
+# ---------------------------------------------------------------------------
+# M7 — rank engine honors show_legend (parity with the dot engine)
+# ---------------------------------------------------------------------------
+def _rank_model():
+    return nn.Sequential(nn.Linear(2, 2), nn.ReLU())
+
+
+def test_m7_rank_engine_emits_legend(tmp_path):
+    trace = tl.trace(_rank_model(), torch.ones(1, 2))
+    src = trace.draw(
+        vis_outpath=str(tmp_path / "m7rank"),
+        vis_fileformat="svg",
+        vis_save_only=True,
+        vis_node_placement="rank",
+        show_legend=True,
+    )
+    assert src.count("tl_legend_") == 6
+    svg = (tmp_path / "m7rank.svg").read_text()
+    assert "TorchLens legend" in svg
+    assert ">input<" in svg and ">output<" in svg
+
+
+def test_m7_rank_engine_no_legend_by_default(tmp_path):
+    trace = tl.trace(_rank_model(), torch.ones(1, 2))
+    src = trace.draw(
+        vis_outpath=str(tmp_path / "m7rank_off"),
+        vis_fileformat="svg",
+        vis_save_only=True,
+        vis_node_placement="rank",
+        show_legend=False,
+    )
+    assert "tl_legend_" not in src
+
+
+# ---------------------------------------------------------------------------
+# M10 — rank engine honors dpi and vis_graph_overrides
+# ---------------------------------------------------------------------------
+def test_m10_rank_engine_applies_dpi_and_overrides(tmp_path):
+    trace = tl.trace(_rank_model(), torch.ones(1, 2))
+    src = trace.draw(
+        vis_outpath=str(tmp_path / "m10rank"),
+        vis_fileformat="svg",
+        vis_save_only=True,
+        vis_node_placement="rank",
+        dpi=123,
+        vis_graph_overrides={"bgcolor": "lightyellow"},
+    )
+    assert "dpi=123" in src
+    assert "bgcolor=" in src and "lightyellow" in src

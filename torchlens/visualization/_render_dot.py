@@ -730,6 +730,13 @@ def draw(
     if engine == "rank":
         from ._rank_layout_internal.layout import render_rank_layout
 
+        # Resolve graph overrides to plain strings here (callables need the
+        # Trace, which the raw-DOT rank renderer does not receive) so the rank
+        # path honors vis_graph_overrides / dpi / show_legend like the dot path.
+        resolved_graph_overrides = {
+            key: str(val(self)) if callable(val) else str(val)
+            for key, val in overrides.graph.items()  # type: ignore[union-attr]
+        }
         with _timed_phase(self, "render:graphviz:forward"):
             result = render_rank_layout(
                 forward_render_ir,
@@ -740,6 +747,10 @@ def draw(
                 graph_caption,
                 rankdir,
                 source_text,
+                show_legend=show_legend,
+                theme=theme,
+                dpi=dpi,
+                graph_overrides=resolved_graph_overrides,
             )
         _vprint(self, f"Graph saved to {vis_outpath}.{vis_fileformat}")
         return result
