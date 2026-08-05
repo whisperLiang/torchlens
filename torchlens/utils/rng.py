@@ -673,11 +673,18 @@ class AutocastRestore:
                 # Reserved non-device entries (e.g. ``__execution__`` grad/inference
                 # mode) are not autocast device records and open no context here.
                 continue
-            if state["enabled"]:
-                autocast = cast(Any, getattr(torch.amp, "autocast"))
-                ctx = autocast(device, dtype=state["dtype"])
-                ctx.__enter__()
-                self._contexts.append(ctx)
+            # Open an autocast context for EVERY captured device -- including
+            # devices that were DISABLED at capture time. Previously a saved
+            # ``enabled=False`` device opened NO context, so if the replay caller
+            # had live autocast enabled for that device the replayed op silently
+            # ran under the caller's autocast (wrong dtype / arithmetic, returned
+            # normally). Opening an explicit ``enabled=False`` context shields the
+            # replay against the caller's live state, reproducing the captured
+            # autocast posture exactly.
+            autocast = cast(Any, getattr(torch.amp, "autocast"))
+            ctx = autocast(device, dtype=state["dtype"], enabled=bool(state["enabled"]))
+            ctx.__enter__()
+            self._contexts.append(ctx)
         return self
 
     def __exit__(

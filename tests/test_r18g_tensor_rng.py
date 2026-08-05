@@ -9,6 +9,7 @@ fail. These tests are deterministic and CPU-only.
 import pytest
 import torch
 
+from torchlens.utils.rng import AutocastRestore, log_current_autocast_state
 from torchlens.utils.tensor_utils import (
     _copy_tensor_payload,
     copy_tensor_payload,
@@ -131,3 +132,26 @@ def test_m5_trainable_parameter_copy_stays_trainable():
     out = copy_tensor_payload(trainable, save_mode="copy")
     assert isinstance(out, torch.nn.Parameter)
     assert out.requires_grad is True
+
+
+# ---------------------------------------------------------------------------
+# H1 -- AutocastRestore must reproduce the captured autocast posture exactly,
+# including DISABLED devices (shielding against the replay caller's live state).
+# ---------------------------------------------------------------------------
+def test_h1_restore_disabled_state_shields_caller_autocast():
+    saved = log_current_autocast_state()  # cpu autocast currently DISABLED
+    # Replay caller has LIVE bf16 autocast; restore must force it back off.
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        with AutocastRestore(saved):
+            dt = (torch.randn(4, 4) @ torch.randn(4, 4)).dtype
+    assert dt == torch.float32
+
+
+def test_h1_restore_enabled_state_reproduces_autocast():
+    # Capture an ENABLED bf16 cpu autocast posture.
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        saved = log_current_autocast_state()
+    # Replay with NO live caller autocast; restore must re-enable bf16.
+    with AutocastRestore(saved):
+        dt = (torch.randn(4, 4) @ torch.randn(4, 4)).dtype
+    assert dt == torch.bfloat16
