@@ -1262,13 +1262,47 @@ def _build_control_flow_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List
                 "notes": event.function_qualname,
             }
         )
+    loop_groups = _recurrent_loop_groups(trace)
+    recurrent = bool(loop_groups) or bool(getattr(trace, "is_recurrent", False))
     if not rows:
-        footer_lines = [
-            "No conditional branches or recurrent loop groups were detected in this forward pass."
-        ]
-        return rows, footer_lines
-    footer_lines = [f"Conditionals: {len(rows)}"]
+        if not recurrent:
+            return rows, [
+                "No conditional branches or recurrent loop groups were detected "
+                "in this forward pass."
+            ]
+        footer_lines = ["No conditional branches were detected in this forward pass."]
+    else:
+        footer_lines = [f"Conditionals: {len(rows)}"]
+    footer_lines.extend(_recurrent_loop_group_lines(loop_groups, recurrent))
     return rows, footer_lines
+
+
+def _recurrent_loop_groups(trace: "Trace") -> List[tuple[str, int]]:
+    """Return ``(layer_label, num_passes)`` for every recurrent (multi-pass) layer.
+
+    These are the loop groups the control-flow summary claims to detect. Driven
+    off the concrete per-layer pass counts rather than only ``trace.is_recurrent``
+    so the disclosure names the exact layers that replay.
+    """
+    groups: List[tuple[str, int]] = []
+    for layer in trace.layer_logs.values():
+        num_passes = int(getattr(layer, "num_passes", 1) or 1)
+        if num_passes > 1:
+            groups.append((str(layer.layer_label), num_passes))
+    return groups
+
+
+def _recurrent_loop_group_lines(
+    loop_groups: List[tuple[str, int]],
+    recurrent: bool,
+) -> List[str]:
+    """Return honest footer disclosure lines for recurrent loop groups."""
+    if not recurrent:
+        return []
+    if not loop_groups:
+        return ["Recurrent execution detected (rolled layers replay across passes)."]
+    detail = ", ".join(f"{label} (x{passes})" for label, passes in loop_groups)
+    return [f"Recurrent loop groups ({len(loop_groups)}): {detail}"]
 
 
 def _build_compute_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]:
