@@ -1098,6 +1098,7 @@ def _condense_plan_with_child_segments(
             continue
         op_run = _legal_plan_op_segment_run(
             trace,
+            context,
             plan.nodes,
             index,
             total_ops,
@@ -1276,6 +1277,7 @@ def _assert_segment_descriptor_parity(
 
 def _legal_plan_op_segment_run(
     trace: "Trace",
+    context: RenderContext,
     nodes: Sequence[PlanNode],
     start: int,
     total_ops: int,
@@ -1289,6 +1291,9 @@ def _legal_plan_op_segment_run(
     ----------
     trace:
         Trace being optimized.
+    context:
+        Rendering context; its ``vis_mode`` fixes the cluster keyspace used
+        for the module-call containment boundary.
     nodes:
         Plan-node sequence.
     start:
@@ -1309,6 +1314,8 @@ def _legal_plan_op_segment_run(
     labels: list[str] = []
     op_order = {str(op.label): index for index, op in enumerate(trace.ops)}
     previous_index: int | None = None
+    previous_stack: tuple[str, ...] | None = None
+    seen_stacks: dict[tuple[str, ...], tuple[str, ...]] = {}
     for offset, node in enumerate(nodes[start:]):
         if not isinstance(node, RawOp) or not isinstance(node.op, str):
             break
@@ -1321,6 +1328,23 @@ def _legal_plan_op_segment_run(
         op = trace.ops[concrete]
         if getattr(op, "is_input", False) or getattr(op, "is_output", False):
             break
+        # Module-call containment (round-24 C1): an unrolled run must never
+        # absorb two different CALLS of one reused module -- the segment
+        # renders as one node in one cluster, so crossing a reuse boundary
+        # nests later calls' work under the first call's cluster and leaves
+        # the other call clusters falsely empty. Runs across distinct
+        # single-call sibling modules stay legal: their exact call-qualified
+        # LCA owner renders the segment at the honest common ancestor.
+        # Rolled clusters merge passes per address (no call boundary to
+        # cross), so rolled runs keep their historical shape.
+        if context.vis_mode != "rolled":
+            stack = _effective_render_module_stack(op)
+            if previous_stack is not None and _crosses_module_call_boundary(previous_stack, stack):
+                break
+            pass_free = tuple(entry.rsplit(":", 1)[0] for entry in stack)
+            if seen_stacks.setdefault(pass_free, stack) != stack:
+                break
+            previous_stack = stack
         if previous_index is not None and current_index != previous_index + 1:
             break
         labels.append(node.op)
@@ -1556,9 +1580,8 @@ def _make_op_segment_descriptor(
         labels when concrete attribution is unavailable.
     """
 
-    _ = context
     resolved = tuple(concrete) if concrete else tuple(labels)
-    owner = _op_segment_owner_key(trace, resolved)
+    owner = _op_segment_owner_key(trace, resolved, context.vis_mode)
     label = _op_segment_label(trace, labels, resolved)
     name = f"{resolved[0].replace(':', 'pass')}__segment__{resolved[-1].replace(':', 'pass')}"
     return SegmentDescriptor(
@@ -1572,22 +1595,69 @@ def _make_op_segment_descriptor(
     )
 
 
-def _op_segment_owner_key(trace: "Trace", labels: tuple[str, ...]) -> str | None:
-    """Return the lowest common rendered module cluster for operation labels."""
+def _effective_render_module_stack(op: "Op") -> tuple[str, ...]:
+    """Return the call-qualified module stack that clusters a visible op.
 
-    module_stacks: list[list[str]] = []
+    Mirrors the renderer's ``_raw_render_node_owner_key``: an atomic module's
+    own exit op stays visible while its innermost atomic box is dropped, so
+    that op clusters under the atomic module's parent call.
+    """
+
+    modules = [str(module) for module in getattr(op, "modules", ()) or ()]
+    if getattr(op, "is_atomic_module", False) and modules:
+        modules = modules[:-1]
+    return tuple(modules)
+
+
+def _crosses_module_call_boundary(
+    previous: tuple[str, ...],
+    current: tuple[str, ...],
+) -> bool:
+    """Return whether two adjacent rendered stacks cross a module-CALL reuse boundary.
+
+    A boundary is crossed exactly when some shared stack level holds two
+    different CALLS of the same module address (``core:1`` -> ``core:2``).
+    Levels holding genuinely different sibling modules are not boundaries:
+    merging across siblings is honest because the segment then owns their
+    exact call-qualified LCA.
+    """
+
+    for prev_entry, entry in zip(previous, current):
+        if prev_entry == entry:
+            continue
+        if prev_entry.rsplit(":", 1)[0] == entry.rsplit(":", 1)[0]:
+            return True
+    return False
+
+
+def _op_segment_owner_key(
+    trace: "Trace",
+    labels: tuple[str, ...],
+    vis_mode: str = "unrolled",
+) -> str | None:
+    """Return the lowest common rendered module cluster for operation labels.
+
+    Unrolled clusters are per module CALL, so commonality is exact
+    call-qualified stack equality: a segment whose ops span several calls of
+    one reused module has no common call-level entry and owns the honest LCA
+    (the shared parent call, or ``None`` for top level) instead of falsely
+    claiming the first call (round-24 C1). Rolled clusters merge passes per
+    address, so rolled commonality stays pass-free.
+    """
+
+    module_stacks: list[tuple[str, ...]] = []
     for label in labels:
         op = _trace_op_for_concrete_label(trace, label)
-        modules = [str(module) for module in getattr(op, "modules", ()) or ()]
-        if getattr(op, "is_atomic_module", False) and modules:
-            modules = modules[:-1]
-        module_stacks.append(modules)
+        module_stacks.append(_effective_render_module_stack(op))
     if not module_stacks or any(not stack for stack in module_stacks):
         return None
     common: str | None = None
     for values in zip(*module_stacks, strict=False):
-        pass_free = {value.rsplit(":", 1)[0] for value in values}
-        if len(pass_free) != 1:
+        if vis_mode == "rolled":
+            keys = {value.rsplit(":", 1)[0] for value in values}
+        else:
+            keys = set(values)
+        if len(keys) != 1:
             break
         common = values[0]
     return common
@@ -1643,7 +1713,16 @@ def _op_segment_label(
 
 
 def _segment_owner_key(trace: "Trace", addresses: tuple[str, ...]) -> str | None:
-    """Return the lowest rendered module cluster that owns ``addresses``."""
+    """Return the lowest rendered module cluster that owns ``addresses``.
+
+    Child segments replace consecutive single-call child BOXES (multi-call
+    members are refused at run construction), and the renderer places those
+    boxes with the lexical parent plus the member's own call index
+    (``_collapsed_module_owner_key``) -- always ``parent:1`` here. The
+    segment owner mirrors that exact box rule so a segment always renders in
+    the same cluster the boxes it replaces would have; deriving it from call
+    nesting instead would split a segment from its unabsorbed sibling boxes.
+    """
 
     parent = addresses[0].rsplit(".", 1)[0] if "." in addresses[0] else "self"
     if parent == "self" or parent not in trace.modules:
@@ -2456,12 +2535,28 @@ def _own_ops_segment_is_legal(state: _OptimizerState, own_ops: tuple[str, ...]) 
     if state.total_ops > 0 and len(own_ops) / state.total_ops > 0.75:
         return False
     op_by_label = {str(op.label): op for op in state.trace.ops}
+    previous_stack: tuple[str, ...] | None = None
+    seen_stacks: dict[tuple[str, ...], tuple[str, ...]] = {}
     for label in own_ops:
         op = op_by_label.get(label)
         if op is None:
             return False
         if getattr(op, "is_input", False) or getattr(op, "is_output", False):
             return False
+        if state.context.vis_mode != "rolled":
+            # Module-call containment (round-24 C1): a multi-call module's
+            # own ops span several rendered call clusters, so replacing them
+            # with ONE segment node would nest later calls' work under one
+            # call's cluster. Refuse reuse-crossing sequences here; the
+            # condense pass re-segments the raw ops per call where
+            # beneficial. Same rule as ``_legal_plan_op_segment_run``.
+            stack = _effective_render_module_stack(op)
+            if previous_stack is not None and _crosses_module_call_boundary(previous_stack, stack):
+                return False
+            pass_free = tuple(entry.rsplit(":", 1)[0] for entry in stack)
+            if seen_stacks.setdefault(pass_free, stack) != stack:
+                return False
+            previous_stack = stack
     return True
 
 
