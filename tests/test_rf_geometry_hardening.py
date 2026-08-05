@@ -561,6 +561,46 @@ def test_partial_full_rule_computed_parent_never_crashes(op: str) -> None:
     assert check_geometric_metadata_invariants(trace) is True
 
 
+# ---------------------------------------------------------------------------
+# Empty-box slices()
+# ---------------------------------------------------------------------------
+
+
+def test_empty_box_slices_select_nothing() -> None:
+    """An empty RF box's slices() must select zero elements, never the whole input."""
+
+    model = nn.ConvTranspose2d(1, 1, 3, stride=3, padding=1, output_padding=2, bias=False)
+    x = torch.randn(1, 1, 6, 6)
+    trace = capture(model, x)
+    conv = op_named(trace, "conv_transpose")
+    last = int(conv.shape[-1]) - 1
+    truth = true_receptive_support(model, x, (0, 0, last, last), deltas=(0.5, -0.5))
+    assert truth == [], "the output_padding artifact unit must have no true support"
+    box = conv.receptive_field.at((last, last))
+    assert box.empty
+    selected = x[box.slices()]
+    assert selected.numel() == 0, f"empty box selected {tuple(selected.shape)}"
+    # Pointwise batch/channel axes keep their same-index full-slice semantics.
+    assert selected.shape[:2] == (1, 1)
+
+
+def test_nonempty_box_slices_match_support_hull() -> None:
+    """Non-empty boxes still slice exactly their clipped spatial hull."""
+
+    model = nn.ConvTranspose2d(1, 1, 3, stride=3, padding=1, output_padding=2, bias=False)
+    x = torch.randn(1, 1, 6, 6)
+    trace = capture(model, x)
+    conv = op_named(trace, "conv_transpose")
+    box = conv.receptive_field.at((4, 4))
+    assert not box.empty
+    truth = true_receptive_support(model, x, (0, 0, 4, 4), deltas=(0.5, -0.5))
+    selected = x[box.slices()]
+    rows = hull(truth, 2)
+    cols = hull(truth, 3)
+    assert rows is not None and cols is not None
+    assert selected.shape[-2:] == (rows[1] - rows[0], cols[1] - cols[0])
+
+
 def test_non_antialiased_interpolate_regression() -> None:
     """The AA branch must not disturb ordinary interpolation geometry."""
 
