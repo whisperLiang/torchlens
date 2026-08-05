@@ -8,6 +8,7 @@ verify integrity, return a tensor, and close the file immediately.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
@@ -25,6 +26,32 @@ from .paths import resolve_bundle_blob_path
 
 _INLINE_LOAD_MAX_BYTES = 500 * 1024 * 1024
 _TORCH_BACKEND_NAME = "torch"
+
+
+def _file_identity(stat_result: os.stat_result) -> tuple[int, int, int, int]:
+    """Return the ``(st_dev, st_ino, st_size, st_mtime_ns)`` identity of a file.
+
+    Two stat results with the same tuple describe the same file content at the
+    same version: an atomic rename-replace changes ``st_ino`` and an in-place
+    rewrite changes ``st_size``/``st_mtime_ns``.
+
+    Parameters
+    ----------
+    stat_result:
+        Stat result to summarize.
+
+    Returns
+    -------
+    tuple[int, int, int, int]
+        Device, inode, size, and nanosecond mtime identity.
+    """
+
+    return (
+        stat_result.st_dev,
+        stat_result.st_ino,
+        stat_result.st_size,
+        stat_result.st_mtime_ns,
+    )
 
 
 @dataclass(frozen=True)
@@ -152,11 +179,33 @@ class LazyActivationRef:
             except (OSError, SafetensorError, ValueError) as exc:
                 raise TorchLensIOError(f"Failed to materialize blob at {blob_path}.") from exc
         else:
+            # Large blobs are stream-hashed and memory-mapped for load to keep
+            # peak memory bounded (IO-S9), which unavoidably means two reads of
+            # the same path -- unlike the single-read small-blob branch above,
+            # whose hash and load observe identical in-memory bytes. Bracket the
+            # hash with the file identity and re-check it immediately before the
+            # load so a rename-replace or in-place rewrite that occurs between
+            # the integrity check and the load is refused rather than silently
+            # loading content that was never hashed.
+            try:
+                pre_hash_identity = _file_identity(blob_path.stat())
+            except OSError as exc:
+                raise TorchLensIOError(f"Failed to access blob at {blob_path}.") from exc
+
             observed_sha256 = sha256_of_file(blob_path)
             if observed_sha256 != self.expected_sha256:
                 raise TorchLensIOError(
                     f"blob at {blob_path} sha256 mismatch; expected {self.expected_sha256} "
                     f"got {observed_sha256}"
+                )
+
+            try:
+                pre_load_identity = _file_identity(blob_path.stat())
+            except OSError as exc:
+                raise TorchLensIOError(f"Failed to access blob at {blob_path}.") from exc
+            if pre_load_identity != pre_hash_identity:
+                raise TorchLensIOError(
+                    f"blob at {blob_path} changed between integrity check and load."
                 )
 
             try:
