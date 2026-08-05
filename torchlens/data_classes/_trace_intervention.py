@@ -341,9 +341,22 @@ class TraceInterventionMixin(_TraceMixinBase):
             handle_id = f"hook-{uuid.uuid4().hex}"
             handle_ids.append(handle_id)
             metadata = dict(entry.metadata)
+            if metadata.get("facet_write"):
+                # Facet-slice entries MUST store the scatter wrapper built by
+                # expand_facet_hook_entries as the fire-time hook: storing the raw
+                # helper would drop the wrapper, and rerun normalization would then
+                # apply the helper to the whole home tensor instead of the selected
+                # facet slice. The raw helper is kept in ``helper=`` as provenance.
+                stored_hook: Any = entry.normalized_callable
+            else:
+                stored_hook = (
+                    entry.helper_spec
+                    if entry.helper_spec is not None
+                    else entry.normalized_callable
+                )
             spec.add_hook(
                 self._target_spec_from_site(entry.site_target, strict=strict),
-                entry.helper_spec if entry.helper_spec is not None else entry.normalized_callable,
+                stored_hook,
                 helper=entry.helper_spec,
                 handle=handle_id,
                 metadata=metadata,
