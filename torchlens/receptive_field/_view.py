@@ -28,8 +28,8 @@ if TYPE_CHECKING:
     from ._engine_forward import _ProjectiveFieldSolution
 
 
-def _optional_callable(module_name: str, function_name: str, task: str) -> Any:
-    """Load an optional later-phase receptive-field callable.
+def _optional_callable(module_name: str, function_name: str, feature: str) -> Any:
+    """Load an optional receptive-field callable.
 
     Parameters
     ----------
@@ -37,8 +37,8 @@ def _optional_callable(module_name: str, function_name: str, task: str) -> Any:
         Receptive-field module containing the callable.
     function_name:
         Callable name within the module.
-    task:
-        Feature phase used in the unavailable diagnostic.
+    feature:
+        Human-readable capability name used in the unavailable diagnostic.
 
     Returns
     -------
@@ -48,7 +48,7 @@ def _optional_callable(module_name: str, function_name: str, task: str) -> Any:
     Raises
     ------
     ReceptiveFieldUnavailableError
-        If the backing feature phase has not landed.
+        If the backing capability is not importable in this installation.
     """
 
     try:
@@ -56,7 +56,7 @@ def _optional_callable(module_name: str, function_name: str, task: str) -> Any:
         return getattr(module, function_name)
     except (AttributeError, ImportError) as exc:
         raise ReceptiveFieldUnavailableError(
-            f"This receptive-field method is not available until {task} is installed."
+            f"Receptive-field {feature} is not available in this installation."
         ) from exc
 
 
@@ -235,6 +235,22 @@ class ReceptiveFieldView:
 
         return self._descriptor().layout
 
+    def _center_unit(self, descriptor: ReceptiveField) -> tuple[int, ...]:
+        """Return windowed-axis midpoint coordinates for the ``"center"`` selector.
+
+        The midpoint is taken in this view operation's own output grid, which is
+        the coordinate space that ``unit`` addresses for both receptive and
+        projective queries. Shared by both directions so ``"center"`` is honored
+        identically wherever ``at`` accepts it.
+        """
+
+        if descriptor.axes is None:
+            raise ReceptiveFieldError("Geometric axes are unavailable; use .gradient() instead.")
+        output_axes = tuple(
+            cast(int, axis.output_axis) for axis in descriptor.axes if axis.kind == "windowed"
+        )
+        return tuple(int(self._op.shape[axis]) // 2 for axis in output_axes)
+
     def at(
         self,
         unit: tuple[int, ...] | Literal["center"],
@@ -251,11 +267,19 @@ class ReceptiveFieldView:
         ----------
         unit:
             Windowed-axis coordinates, or ``"center"`` for their midpoint.
+            Coordinates must be non-negative and in range; unlike ``.gradient()``
+            and ``.check()``, negative indices are rejected rather than wrapped.
         input:
             Optional exact IO role or model-input operation.
         source:
-            Optional ancestor graph point. The returned box is in this operation's
-            output-grid coordinate space.
+            Optional ancestor graph point. When given, the returned box is in the
+            SOURCE operation's output-grid coordinate space (not this operation's).
+        direction:
+            Optional per-call receptive/projective direction override. ``None``
+            uses the view's bound direction.
+        target:
+            Optional descendant graph point selecting the far endpoint of a
+            projective query. Not permitted together with ``source``.
         clip:
             Whether bounds are clipped to captured input extents.
 
@@ -271,12 +295,26 @@ class ReceptiveFieldView:
         if resolved_direction is ReceptiveFieldDirection.PROJECTIVE:
             if input is not None or source is not None:
                 raise TypeError("Projective queries select their far endpoint with target=.")
-            from ._forward_query import box_for_source_unit
+            from ._forward_query import _select_target_descriptor, box_for_source_unit
 
+            projective_solution = self._projective_solution(target)
+            source_unit: Sequence[int]
+            if unit == "center":
+                descriptors = projective_solution.per_op.get(self._op.label)
+                if not descriptors:
+                    raise ReceptiveFieldError(
+                        f"No projective-field solution is available from source {self._op.label!r}."
+                    )
+                proj_descriptor = _select_target_descriptor(
+                    descriptors, cast("Op | str | None", target)
+                )
+                source_unit = self._center_unit(proj_descriptor)
+            else:
+                source_unit = cast(Sequence[int], unit)
             return box_for_source_unit(
-                self._projective_solution(target),
+                projective_solution,
                 self._op,
-                cast(Sequence[int], unit),
+                source_unit,
                 target=cast("Op | str | None", target),
                 clip=clip,
             )
@@ -321,14 +359,7 @@ class ReceptiveFieldView:
                 raise ReceptiveFieldError(
                     f"Source {source_op.label!r} is not reachable from target {self._op.label!r}."
                 )
-            if descriptor.axes is None:
-                raise ReceptiveFieldError(
-                    "Geometric axes are unavailable; use .gradient() instead."
-                )
-            output_axes = tuple(
-                cast(int, axis.output_axis) for axis in descriptor.axes if axis.kind == "windowed"
-            )
-            selected = tuple(int(self._op.shape[axis]) // 2 for axis in output_axes)
+            selected = self._center_unit(descriptor)
         else:
             selected = unit
         return box_for_unit(
@@ -362,6 +393,12 @@ class ReceptiveFieldView:
             Optional exact IO role or model-input operation.
         source:
             Reserved ancestor graph point for layer-to-layer receptive probes.
+        direction:
+            Optional per-call receptive/projective direction override. ``None``
+            uses the view's bound direction.
+        target:
+            Optional descendant graph point selecting the far endpoint of a
+            projective query. Not permitted together with ``source``.
         atol, rtol:
             Non-negative gradient support thresholds.
         retain_graph:
@@ -381,7 +418,7 @@ class ReceptiveFieldView:
             if input is not None or source is not None:
                 raise TypeError("Projective queries select their far endpoint with target=.")
             projective_gradient = _optional_callable(
-                "._gradient_forward", "projective_gradient_for_unit", "Task T19"
+                "._gradient_forward", "projective_gradient_for_unit", "projective gradient support"
             )
             return cast(
                 GradientReceptiveField | Mapping[str, GradientReceptiveField],
@@ -454,7 +491,7 @@ class ReceptiveFieldView:
         resolved_direction = self._direction_for(direction)
         if input is not None and source is not None:
             raise TypeError("input and source cannot be supplied together.")
-        check_for_unit = _optional_callable("._validation", "check_for_unit", "Task T20")
+        check_for_unit = _optional_callable("._validation", "check_for_unit", "validation")
         return cast(
             ReceptiveFieldValidation,
             check_for_unit(
@@ -545,6 +582,12 @@ class ReceptiveFieldView:
             Optional complete target output-element index.
         input:
             Optional exact IO role or model-input operation.
+        direction:
+            Optional per-call receptive/projective direction override. ``None``
+            uses the view's bound direction.
+        target:
+            Optional descendant graph point selecting the far endpoint of a
+            projective overlay.
         image:
             Optional source image override.
         gradient:
@@ -564,7 +607,7 @@ class ReceptiveFieldView:
             Rendered input-space overlay.
         """
 
-        show = _optional_callable("._viz", "show", "Task T10")
+        show = _optional_callable("._viz", "show", "visualization")
 
         return cast(
             "Image.Image",

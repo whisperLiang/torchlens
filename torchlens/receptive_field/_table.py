@@ -45,12 +45,19 @@ def _require_pandas() -> Any:
 def _require_input_role(trace: "Trace", input_op: "Op | None") -> str | None:
     """Validate a bulk-table input handle and return its IO role.
 
+    Accepts either the canonical ``layer_list`` operation or a public trace
+    accessor handle (for example ``trace.input_ops[0]``). Trace accessors
+    intentionally expose lightweight ``Layer`` handles rather than the canonical
+    ``Op`` in ``layer_list``, so the handle is resolved by trace ownership plus
+    its exact input label/IO role -- mirroring ``_gradient._select_inputs`` -- so
+    that both API surfaces accept the same public input handle.
+
     Parameters
     ----------
     trace:
         Trace that owns the receptive-field solution.
     input_op:
-        Optional model-input operation handle.
+        Optional model-input operation or trace-owned accessor handle.
 
     Returns
     -------
@@ -60,25 +67,44 @@ def _require_input_role(trace: "Trace", input_op: "Op | None") -> str | None:
     Raises
     ------
     TypeError
-        If ``input_op`` is not an operation handle.
+        If ``input_op`` is a bare string layer name.
     ValueError
-        If the operation is not a model input belonging to ``trace``.
+        If the handle is not a model input belonging to ``trace``.
     """
 
     if input_op is None:
         return None
 
-    from ..data_classes.op import Op
-
-    if not isinstance(input_op, Op):
+    if isinstance(input_op, str):
         raise TypeError(
             "input must be a model-input Op handle; string layer names are not accepted."
         )
-    if not input_op.is_input or input_op.io_role is None:
-        raise ValueError("input must be a model-input Op handle.")
-    if not any(op is input_op for op in trace.layer_list):
-        raise ValueError("input must be a model-input Op belonging to this trace.")
-    return input_op.io_role
+
+    model_inputs = [
+        op
+        for op in trace.layer_list
+        if bool(getattr(op, "is_input", False)) and getattr(op, "io_role", None) is not None
+    ]
+
+    # Canonical layer_list operation supplied directly.
+    for op in model_inputs:
+        if op is input_op:
+            return op.io_role
+
+    # Trace accessor handle: resolve to its canonical model-input op by trace
+    # ownership plus exact input label/IO role, then reject anything foreign.
+    if getattr(input_op, "source_trace", None) is trace:
+        handle_label = str(getattr(input_op, "label", ""))
+        handle_role = getattr(input_op, "io_role", None)
+        for op in model_inputs:
+            if op.label == handle_label or (
+                handle_role is not None and op.io_role == str(handle_role)
+            ):
+                return op.io_role
+
+    raise ValueError(
+        "input must be a model-input Op (or trace input accessor handle) belonging to this trace."
+    )
 
 
 def _resolved_output_label(trace: "Trace", output_label: str) -> str:
@@ -248,6 +274,11 @@ def build_rf_profile(
         Optional profile column used for stable sorting.
     ascending:
         Whether an explicit ``sort_by`` sorts in ascending order.
+    direction:
+        ``"receptive"`` (default) reports per-input receptive fields;
+        ``"projective"`` reports source-anchored projective fields keyed by
+        projection target. ``input=`` filtering applies only to the receptive
+        direction.
 
     Returns
     -------
@@ -258,6 +289,18 @@ def build_rf_profile(
     if level not in {"op", "layer", "call", "module"}:
         raise ValueError("level must be 'op', 'layer', 'call', or 'module'.")
     resolved_direction = ReceptiveFieldDirection(direction)
+    if resolved_direction is ReceptiveFieldDirection.PROJECTIVE and input is not None:
+        # In projective mode each row is keyed by its projection TARGET, not a
+        # model input, so a model-input filter can never match any row and would
+        # silently return an empty table. Reject the misapplied filter instead of
+        # lying with an empty result. (The handle is still validated so a bad
+        # handle raises the same diagnostic in both directions.)
+        _require_input_role(trace, input)
+        raise ValueError(
+            "input= filters model inputs and applies only to direction='receptive'; "
+            "projective tables are keyed by projection target and cannot be filtered "
+            "by a model input."
+        )
     requested_role = _require_input_role(trace, input)
     status_filter = None if statuses is None else frozenset(statuses)
     if status_filter is not None and not all(
