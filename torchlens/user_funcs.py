@@ -1919,9 +1919,13 @@ def _trace_torch_model(
     """
     # DataParallel is not supported - unwrap and warn if present.
     warn_parallel()
-    _reject_opaque_wrappers(model)
+    # Reject non-Module input first: `_reject_opaque_wrappers` calls
+    # `model.named_modules()` (FSDP/ScriptModule checks), which only makes sense on a real
+    # nn.Module. A non-Module input previously leaked an AttributeError from that call
+    # instead of the documented "Unsupported model type" ValueError.
     if not isinstance(model, nn.Module):
         raise ValueError("Unsupported model type for capture")
+    _reject_opaque_wrappers(model)
     model = unwrap_compiled_model(model)
     model = _unwrap_data_parallel(model)
     if reconstruction_ready is not MISSING and reconstruction_ready:
