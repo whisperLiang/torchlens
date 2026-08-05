@@ -3792,7 +3792,18 @@ def _build_shared_fields_dict(
     fields_dict["func_duration"] = exec_ctx.time_elapsed
     fields_dict["func_rng_states"] = exec_ctx.rng_states
     fields_dict["func_autocast_state"] = exec_ctx.autocast_state
-    fields_dict["arg_names"] = _st._arg_names.get(func_name.strip("_"), ())
+    # Exact-name lookup first (add / add_ / __add__ have distinct signatures --
+    # W3 F9). The underscore-stripped key remains a best-effort fallback for
+    # NON-dunder names whose own introspection stored nothing; a dunder whose
+    # signature is opaque stays honestly unknown (empty) rather than borrowing
+    # the namesake torch function's different signature.
+    _op_arg_names = _st._arg_names.get(func_name)
+    if _op_arg_names is None:
+        if func_name.startswith("__"):
+            _op_arg_names = ()
+        else:
+            _op_arg_names = _st._arg_names.get(func_name.strip("_"), ())
+    fields_dict["arg_names"] = _op_arg_names
     fields_dict["num_args_total"] = len(args) + len(kwargs)
     fields_dict["num_pos_args"] = len(args)
     fields_dict["num_kwargs"] = len(kwargs)

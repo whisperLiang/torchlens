@@ -1657,8 +1657,13 @@ def get_arg_names(orig_func: Callable[..., Any], func_name: str) -> None:
     Tries ``inspect.signature`` first (works for Python functions). Falls back
     to docstring parsing for C builtins whose signature isn't introspectable.
 
-    Stores under the underscore-stripped name (e.g. ``"add"`` for both ``add``
-    and ``add_``) so callers can look up via ``func_name.strip("_")`` consistently (#82).
+    Stores under the EXACT registered name: ``add``, ``add_``, and ``__add__``
+    have meaningfully different signatures (``__add__(self, other)`` is a
+    2-arg dunder; ``torch.add(input, other, *, alpha, out)`` is not), and the
+    historical underscore-stripped shared key (#82) let whichever registered
+    last overwrite the rest, recording wrong ``arg_names`` metadata (W3 audit
+    F9). Lookup falls back to the stripped key for names whose own
+    introspection stored nothing, preserving the old best-effort behavior.
 
     Skipped for property-like attributes (``real``, ``imag``, ``T``, etc.) that
     aren't callable in the normal sense.
@@ -1666,7 +1671,7 @@ def get_arg_names(orig_func: Callable[..., Any], func_name: str) -> None:
     if func_name in ["real", "imag", "T", "mT", "data", "H"]:
         return
 
-    storage_key = func_name.strip("_")
+    storage_key = func_name
 
     try:
         params = inspect.signature(orig_func).parameters
@@ -1681,8 +1686,13 @@ def get_arg_names(orig_func: Callable[..., Any], func_name: str) -> None:
                 argnames.append(f"**{name}")
             else:
                 argnames.append(name)
-        _state._arg_names[storage_key] = tuple(argnames)
-        return
+        # A purely-variadic signature ((*args, **kwargs) on opaque C dunders)
+        # names nothing; prefer the docstring parse, and store nothing when
+        # that also fails -- honest-unknown beats a wrong borrowed signature.
+        # A genuinely empty signature (zero-arg methods) still stores ().
+        if not argnames or not all(name.startswith("*") for name in argnames):
+            _state._arg_names[storage_key] = tuple(argnames)
+            return
     except (ValueError, TypeError):
         # TypeError: Python 3.14+ deferred annotation evaluation (PEP 649)
         # can fail when class-level names (e.g. Tensor.bool) shadow builtins
@@ -1824,7 +1834,11 @@ def decorate_all_once() -> None:
     # Tensor.bool first, then inspect Tensor.dim_order, the annotation
     # bool | list[...] resolves bool to our wrapper -> TypeError (#138).
     for namespace_name, func_name in get_orig_torch_funcs():
-        if func_name.strip("_") in _state._arg_names:
+        # Exact-name dedup (W3 F9): ``add``, ``add_``, and ``__add__`` have
+        # meaningfully different signatures, so each registers its own entry.
+        # The historical stripped-key dedup made whichever spelling appeared
+        # first swallow all the others' registrations.
+        if func_name in _state._arg_names:
             continue
         namespace_key = namespace_name.replace("torch.", "")
         local_func_namespace = nested_getattr(torch, namespace_key)
