@@ -414,17 +414,17 @@ def _replace_layer_names_for_layer_entry(self: "Trace", layer_entry: Op) -> None
                 "conditional_elif_children",
                 _rename_elif_children(elif_children, layer_mapping),
             )
-        conditional_then_children = getattr(layer_entry, "conditional_then_children", None)
-        if conditional_then_children:
+        conditional_then_children_value = getattr(layer_entry, "conditional_then_children", None)
+        if conditional_then_children_value:
             set_entry_field(
                 "conditional_then_children",
-                [layer_mapping[layer_label] for layer_label in conditional_then_children],
+                [layer_mapping[layer_label] for layer_label in conditional_then_children_value],
             )
-        conditional_else_children = getattr(layer_entry, "conditional_else_children", None)
-        if conditional_else_children:
+        conditional_else_children_value = getattr(layer_entry, "conditional_else_children", None)
+        if conditional_else_children_value:
             set_entry_field(
                 "conditional_else_children",
-                [layer_mapping[layer_label] for layer_label in conditional_else_children],
+                [layer_mapping[layer_label] for layer_label in conditional_else_children_value],
             )
 
     edge_uses = getattr(layer_entry, "_edge_uses", None)
