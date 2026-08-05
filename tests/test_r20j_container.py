@@ -12,10 +12,13 @@ import pytest
 import torch
 
 from torchlens.ir.container import (
+    _CONTAINER_REGISTRY,
     ContainerReconstructionError,
     ContainerSpec,
     TupleIndex,
+    get_registered_container,
     rebuild_container_from_spec,
+    register_container,
 )
 from torchlens.ir.container_registry import (
     Role,
@@ -150,3 +153,81 @@ def test_n5_valid_specs_still_rebuild() -> None:
         leaves = [torch.zeros(1) for _ in result.leaf_occurrences]
         # Must not raise -- a faithful capture spec always validates.
         rebuild_container_from_spec(result.spec, leaves)
+
+
+# ---------------------------------------------------------------------------
+# N6 -- get_registered_container must return the MOST-DERIVED match
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def clean_container_registry() -> object:
+    """Snapshot and restore the module-global container registry around a test."""
+
+    saved = dict(_CONTAINER_REGISTRY)
+    _CONTAINER_REGISTRY.clear()
+    try:
+        yield _CONTAINER_REGISTRY
+    finally:
+        _CONTAINER_REGISTRY.clear()
+        _CONTAINER_REGISTRY.update(saved)
+
+
+def _reg(marker: str):
+    return (lambda v: (list(v), marker), lambda aux, children: list(children))
+
+
+def test_n6_subclass_wins_when_base_registered_first(clean_container_registry: object) -> None:
+    """Base registered BEFORE subclass: the subclass must resolve to its OWN registration."""
+
+    class Base(list):
+        pass
+
+    class Sub(Base):
+        pass
+
+    register_container(Base, *_reg("BASE"), state_complete=True)
+    register_container(Sub, *_reg("SUB"), state_complete=True)
+    reg = get_registered_container(Sub)
+    assert reg is not None
+    assert reg.flatten(Sub([1]))[1] == "SUB"
+
+
+def test_n6_subclass_wins_when_base_registered_last(clean_container_registry: object) -> None:
+    """Order-independence: subclass registered FIRST, base LAST -- subclass still wins."""
+
+    class Base(list):
+        pass
+
+    class Sub(Base):
+        pass
+
+    register_container(Sub, *_reg("SUB"), state_complete=True)
+    register_container(Base, *_reg("BASE"), state_complete=True)
+    assert get_registered_container(Sub).flatten(Sub([1]))[1] == "SUB"
+    assert get_registered_container(Base).flatten(Base([1]))[1] == "BASE"
+
+
+def test_n6_multiple_inheritance_and_exact_and_missing(clean_container_registry: object) -> None:
+    """Exact match, most-derived via MRO, and no-match all resolve correctly."""
+
+    class A(list):
+        pass
+
+    class B(A):
+        pass
+
+    class C(B):
+        pass
+
+    register_container(A, *_reg("A"), state_complete=True)
+    register_container(C, *_reg("C"), state_complete=True)
+    # C is an exact match -> C.
+    assert get_registered_container(C).flatten(C([1]))[1] == "C"
+    # B is between A and C, only A registered on its ancestry -> A (nearest registered ancestor).
+    assert get_registered_container(B).flatten(B([1]))[1] == "A"
+
+    class Unrelated(tuple):
+        pass
+
+    assert get_registered_container(Unrelated) is None

@@ -1365,12 +1365,29 @@ def get_registered_container(container_type: type[Any]) -> RegisteredContainer |
     -------
     RegisteredContainer | None
         Registered hook pair or ``None``.
+
+    Notes
+    -----
+    When both a base class and one of its subclasses are registered, the MOST-DERIVED
+    matching registration wins regardless of insertion order. The prior implementation
+    returned the FIRST ``issubclass`` match by dict-insertion order, so a subclass registered
+    after its base silently inherited the base's (wrong) ``flatten``/``unflatten`` hooks and
+    ``aux_data``. ``issubclass`` (not ``__mro__``) still selects candidates so ABC virtual
+    subclass registrations keep matching; among candidates the one that is a subclass of all
+    other matches is chosen, falling back to insertion order only for unrelated matches.
     """
 
+    best_type: type[Any] | None = None
+    best_registration: RegisteredContainer | None = None
     for registered_type, registration in _CONTAINER_REGISTRY.items():
-        if issubclass(container_type, registered_type):
-            return registration
-    return None
+        if not issubclass(container_type, registered_type):
+            continue
+        if best_type is None or (
+            issubclass(registered_type, best_type) and registered_type is not best_type
+        ):
+            best_type = registered_type
+            best_registration = registration
+    return best_registration
 
 
 def namedtuple_extra_instance_state(value: Any) -> bool:
