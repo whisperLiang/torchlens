@@ -45,7 +45,7 @@ from torchlens._io._safe_unpickle import (
     _DeferredForeignCallable,
     _is_torchlens_appliance_module,
 )
-from torchlens.intervention.errors import UntrustedCallableError
+from torchlens.intervention.errors import ReplayPreconditionError, UntrustedCallableError
 from torchlens.intervention.resolver import (
     _is_torchlens_appliance_module as _resolver_is_appliance_module,
 )
@@ -234,7 +234,10 @@ def test_resolver_admits_appliance_module_only_under_explicit_trust() -> None:
     # No such public attribute exists yet, so resolution fails downstream --
     # but the important behavior is that the trust gate is what governs whether
     # the module is imported at all, not a name-based hard block.
-    with pytest.raises(Exception):
+    with pytest.raises(
+        ReplayPreconditionError,
+        match="Could not resolve function registry key",
+    ):
         resolve_function_registry_key(key, allowed_custom_callable_modules={"torchlens.neuro"})
     assert "torchlens.neuro" in sys.modules
 

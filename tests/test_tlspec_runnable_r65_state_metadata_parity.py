@@ -70,7 +70,7 @@ from torchlens.backends.torch.completeness_witness import (
     host_escape_state_metadata_facts,
     host_escape_state_metadata_reads,
 )
-from torchlens.errors import RunnablePreflightError
+from torchlens.errors import RunCapabilityUnavailableError, RunnablePreflightError
 from torchlens.options import CaptureOptions
 from torchlens.runnable import ControlWitness, ControlWitnessKind, PathFaithfulness
 
@@ -1073,7 +1073,8 @@ def test_r67_meta_destination_has_no_oracle_copy() -> None:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             oracle.load_state_dict(source, strict=True, assign=False)
-    except (RuntimeError, NotImplementedError):
+    except (RuntimeError, NotImplementedError) as exc:
+        assert "meta" in str(exc).lower()
         return  # raising torch versions: no destination exists, trivially no canonical
     entries = list(oracle.named_parameters(remove_duplicate=False))
     entries.extend(oracle.named_buffers(remove_duplicate=False))
@@ -1131,7 +1132,10 @@ def _r69_assert_refused(path: Path) -> None:
     assert readiness is not None
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     assert "context_field_invalid" in {d.code.value for d in readiness.diagnostics}
-    with pytest.raises(Exception):
+    with pytest.raises(
+        RunCapabilityUnavailableError,
+        match="analysis-only and has no sparse run descriptor",
+    ):
         loaded.run(inputs=torch.randn(3))
 
 

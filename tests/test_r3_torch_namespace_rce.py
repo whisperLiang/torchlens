@@ -24,6 +24,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens.errors import RunCapabilityUnavailableError
 from torchlens.intervention.errors import UntrustedCallableError
 from torchlens.intervention.resolver import resolve_function_registry_key
 from torchlens.intervention.types import FunctionRegistryKey
@@ -214,7 +215,10 @@ def test_runnable_load_blocks_torch_save_file_write(tmp_path: Path) -> None:
     manifest_path.write_text(json.dumps(manifest))
 
     loaded = tl.load(evil)
-    with pytest.raises(Exception):
+    with pytest.raises(
+        RunCapabilityUnavailableError,
+        match="analysis-only and has no sparse run descriptor",
+    ):
         loaded.run(inputs=torch.ones(1, 4))
     assert not target.exists()
 
@@ -260,7 +264,10 @@ def test_runnable_load_blocks_torch_load_rce(tmp_path: Path) -> None:
     manifest_path.write_text(json.dumps(manifest))
 
     loaded = tl.load(evil)
-    with pytest.raises(Exception):
+    with pytest.raises(
+        RunCapabilityUnavailableError,
+        match="analysis-only and has no sparse run descriptor",
+    ):
         loaded.run(inputs=torch.ones(1, 4))
     assert not proof.exists()
 
