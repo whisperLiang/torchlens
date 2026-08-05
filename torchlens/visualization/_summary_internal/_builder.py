@@ -1779,11 +1779,35 @@ def _entry_name(entry: Any) -> str:
     if base_name is None:
         base_name = getattr(entry, "label", None) or getattr(entry, "layer_label", "?")
     num_passes = int(getattr(entry, "num_passes", 1) or 1)
+    if num_passes > 1 and _is_pass_op(entry):
+        # Unrolled tables emit one row PER PASS; each such row is a per-pass Op,
+        # not the aggregate Layer. Name it with its pass-qualified identity
+        # (relu_1_1:2) rather than the aggregate "xN" multiplicity, which on a
+        # per-pass row would imply N calls per row (a false 9-call reading for a
+        # 3-pass layer). An Op exposes a safe pass-qualified label; only the
+        # aggregate Layer would raise the multi-pass tripwire here.
+        pass_label = getattr(entry, "label", None)
+        if isinstance(pass_label, str):
+            return pass_label
     if num_passes > 1 and hasattr(entry, "ops"):
         return f"{base_name} x{num_passes}"
     if getattr(entry, "call_index", 1) > 1:
         return str(getattr(entry, "layer_label", base_name))
     return str(base_name)
+
+
+def _is_pass_op(entry: Any) -> bool:
+    """Return True if ``entry`` is a per-pass ``Op`` (vs an aggregate ``Layer``).
+
+    Unrolled summaries iterate per-pass ``Op`` objects while rolled summaries
+    iterate aggregate ``Layer`` objects, but an ``Op`` proxies its parent's
+    ``num_passes``/``ops`` so those attributes cannot tell them apart. Use the
+    concrete type as the discriminator (imported lazily to avoid any import
+    cycle at module load).
+    """
+    from ...data_classes.op import Op
+
+    return isinstance(entry, Op)
 
 
 def _combined_shape_str(trace: "Trace", labels: Sequence[str]) -> str:
