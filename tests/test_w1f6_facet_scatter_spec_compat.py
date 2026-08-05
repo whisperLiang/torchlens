@@ -1,0 +1,251 @@
+"""W1_F6 regression tests: facet scatter wrapper survival and spec graph-compat honesty.
+
+Sol-1 (CRITICAL): a sticky facet-slice hook (``tl.head(0, "q")`` + ``tl.zero_ablate()``)
+must fire through the slice-scatter wrapper on rerun; losing the wrapper silently
+applied the helper to the WHOLE home tensor (zeroing every head).
+
+Sol-2 (HIGH): ``check_spec_compat`` must refuse an EXECUTABLE spec whose saved
+``graph_shape_hash`` does not match the target log, instead of returning
+``COMPATIBLE_WITH_CONFIRMATION``.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+import torch
+from torch import nn
+
+import torchlens as tl
+from torchlens.intervention.errors import (
+    GraphShapeMismatchError,
+    OpaqueCallableInExecutableSaveError,
+    ReplayPreconditionError,
+)
+from torchlens.intervention.hooks import normalize_hooks_from_spec
+from torchlens.intervention.save import check_spec_compat, load_intervention_spec
+from torchlens.intervention.types import InterventionSpec, TargetSpec
+
+
+class MultiHeadSelfAttention(nn.Module):
+    """Tiny attention block matching the DistilBERT facet recipe class name."""
+
+    def __init__(self) -> None:
+        """Initialize projection children used by the built-in recipe."""
+
+        super().__init__()
+        self.n_heads = 2
+        self.dim = 8
+        self.q_lin = nn.Linear(8, 8)
+        self.k_lin = nn.Linear(8, 8)
+        self.v_lin = nn.Linear(8, 8)
+        self.out_lin = nn.Linear(8, 8)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run projection children so q/k/v facets are op-anchored."""
+
+        return self.out_lin(self.q_lin(x) + self.k_lin(x) + self.v_lin(x))
+
+
+class _AttnWrapper(nn.Module):
+    """Wrapper exposing the attention block under a stable module address."""
+
+    def __init__(self) -> None:
+        """Initialize the attention child."""
+
+        super().__init__()
+        self.attn = MultiHeadSelfAttention()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the attention child."""
+
+        return self.attn(x)
+
+
+class ReluModel(nn.Module):
+    """Single-relu model for graph-compat tests."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply relu."""
+
+        return torch.relu(x)
+
+
+class SigmoidReluModel(nn.Module):
+    """Two-op model whose graph shape differs from ``ReluModel``."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply sigmoid(relu(x))."""
+
+        return torch.sigmoid(torch.relu(x))
+
+
+def _traced_attention() -> tuple[nn.Module, torch.Tensor, Any]:
+    """Trace the attention fixture and return (model, input, clean trace)."""
+
+    torch.manual_seed(0)
+    model = _AttnWrapper()
+    x = torch.randn(2, 3, 8)
+    clean = tl.trace(model, x, layers_to_save="all", save_arg_values=True)
+    return model, x, clean
+
+
+# ---------------------------------------------------------------------------
+# Sol-1: facet scatter wrapper must survive sticky storage and rerun.
+# ---------------------------------------------------------------------------
+
+
+def test_facet_head_ablate_zeroes_only_selected_head() -> None:
+    """``tl.head(0, "q")`` + zero_ablate zeroes head 0's q and ONLY head 0's q."""
+
+    model, x, clean = _traced_attention()
+    clean_h1 = clean.modules["attn"].facets.head(1).q.clone()
+    assert int(torch.count_nonzero(clean_h1)) > 0
+
+    zeroed = clean.fork("zero_q_head")
+    zeroed.attach_hooks(tl.head(0, "q"), tl.zero_ablate())
+    zeroed.run(model, x)
+
+    h0 = zeroed.modules["attn"].facets.head(0).q
+    h1 = zeroed.modules["attn"].facets.head(1).q
+    assert int(torch.count_nonzero(h0)) == 0
+    # The unselected head must be byte-identical to the clean capture: the wrapper
+    # was previously dropped and the raw helper zeroed the whole home tensor.
+    assert torch.equal(h1, clean_h1)
+
+
+def test_facet_helper_hook_stores_scatter_wrapper_with_helper_provenance() -> None:
+    """Sticky facet entries store the scatter wrapper as the fire-time hook."""
+
+    _, _, clean = _traced_attention()
+    edited = clean.fork("wrapper_storage")
+    edited.attach_hooks(tl.head(0, "q"), tl.zero_ablate())
+
+    facet_specs = [
+        hook_spec
+        for hook_spec in edited._intervention_spec.hook_specs
+        if hook_spec.metadata.get("facet_write")
+    ]
+    assert facet_specs, "facet attachment must store facet_write hook specs"
+    for hook_spec in facet_specs:
+        assert getattr(hook_spec.hook, "_tl_facet_scatter", False), (
+            "stored fire-time hook must be the facet scatter wrapper"
+        )
+        assert hook_spec.helper is not None, "raw helper must be kept as provenance"
+
+
+def test_facet_write_spec_without_wrapper_refuses_typed() -> None:
+    """A facet_write hook spec whose wrapper was lost refuses to normalize.
+
+    This is the class tripwire: ANY path that stores a facet_write entry without
+    the live scatter wrapper (e.g. a spec reconstructed from disk) must fail
+    closed instead of silently firing the helper against the whole home tensor.
+    """
+
+    helper = tl.zero_ablate()
+    spec = InterventionSpec()
+    spec.add_hook(
+        TargetSpec("label", "linear_1_1"),
+        helper,
+        helper=helper,
+        metadata={
+            "facet_write": True,
+            "facet_name": "q",
+            "facet_home_label": "linear_1_1",
+            "direction": "forward",
+        },
+    )
+    with pytest.raises(ReplayPreconditionError, match="facet-slice hook lost its scatter wrapper"):
+        normalize_hooks_from_spec(spec)
+
+
+@pytest.mark.parametrize("level", ["executable_with_callables", "portable"])
+def test_save_facet_hook_refuses_at_executable_levels(tmp_path: Any, level: str) -> None:
+    """Executable-level saves of facet-slice hooks refuse instead of persisting
+    a spec whose replay would write the whole home tensor."""
+
+    _, _, clean = _traced_attention()
+    edited = clean.fork("facet_save_refusal")
+    edited.attach_hooks(tl.head(0, "q"), tl.zero_ablate())
+
+    with pytest.raises(OpaqueCallableInExecutableSaveError, match="facet-slice hook"):
+        edited.save_intervention(tmp_path / f"facet_{level}.tlspec", level=level)
+
+
+# ---------------------------------------------------------------------------
+# Sol-2: executable spec compat must refuse on graph_shape_hash mismatch.
+# ---------------------------------------------------------------------------
+
+
+def _saved_relu_scale_spec(tmp_path: Any, *, level: str = "executable_with_callables") -> Any:
+    """Save and reload a scale-relu intervention spec captured on ``ReluModel``."""
+
+    torch.manual_seed(0)
+    x = torch.randn(2, 3)
+    log_a = tl.trace(ReluModel(), x, layers_to_save="all", save_arg_values=True)
+    log_a.attach_hooks(tl.func("relu"), tl.scale(2.0), confirm_mutation=True)
+    path = tmp_path / f"scale_relu_{level}.tlspec"
+    log_a.save_intervention(path, level=level)
+    return load_intervention_spec(path)
+
+
+def test_check_spec_compat_executable_hash_mismatch_raises(tmp_path: Any) -> None:
+    """An executable spec checked against a different graph refuses, even when
+    every saved selector still resolves identically on the new log.
+
+    BEHAVIOR CHANGE (authorized false-compatibility fix): this previously
+    returned ``COMPATIBLE_WITH_CONFIRMATION``.
+    """
+
+    spec = _saved_relu_scale_spec(tmp_path)
+    assert spec.metadata.get("executable") is True
+
+    torch.manual_seed(0)
+    log_b = tl.trace(
+        SigmoidReluModel(), torch.randn(2, 3), layers_to_save="all", save_arg_values=True
+    )
+    with pytest.raises(GraphShapeMismatchError):
+        check_spec_compat(spec, log_b)
+
+
+def test_check_spec_compat_tampered_hash_refuses(tmp_path: Any) -> None:
+    """Mutation proof: tampering the saved graph_shape_hash must refuse against
+    the very model the spec was captured on."""
+
+    spec = _saved_relu_scale_spec(tmp_path)
+    torch.manual_seed(0)
+    same_log = tl.trace(ReluModel(), torch.randn(2, 3), layers_to_save="all", save_arg_values=True)
+
+    for entry in spec.metadata["target_manifest"]:
+        entry["graph_shape_hash"] = "0" * 64
+
+    with pytest.raises(GraphShapeMismatchError):
+        check_spec_compat(spec, same_log)
+
+
+def test_check_spec_compat_same_graph_stays_exact(tmp_path: Any) -> None:
+    """No false refusal: the untampered spec against the same graph is EXACT."""
+
+    spec = _saved_relu_scale_spec(tmp_path)
+    torch.manual_seed(0)
+    same_log = tl.trace(ReluModel(), torch.randn(2, 3), layers_to_save="all", save_arg_values=True)
+
+    compat = check_spec_compat(spec, same_log)
+    assert compat.outcome == "EXACT"
+    assert compat.targets_resolve_identically is True
+
+
+def test_check_spec_compat_nonexecutable_mismatch_still_confirmation(tmp_path: Any) -> None:
+    """Audit-level (non-executable) specs keep the confirmation verdict on a
+    mismatched graph so inspection-level reuse stays possible."""
+
+    spec = _saved_relu_scale_spec(tmp_path, level="audit")
+    assert bool(spec.metadata.get("executable", False)) is False
+
+    torch.manual_seed(0)
+    log_b = tl.trace(
+        SigmoidReluModel(), torch.randn(2, 3), layers_to_save="all", save_arg_values=True
+    )
+    compat = check_spec_compat(spec, log_b)
+    assert compat.outcome == "COMPATIBLE_WITH_CONFIRMATION"

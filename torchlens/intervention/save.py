@@ -470,12 +470,19 @@ def check_spec_compat(spec: InterventionSpec, new_log: Any) -> SpecCompat:
         outcome: Literal["EXACT", "COMPATIBLE_WITH_CONFIRMATION", "FAIL"] = "FAIL"
     elif targets_identical and graph_matches:
         outcome = "EXACT"
-    elif all_saved.issubset(all_resolved) or not graph_matches:
+    elif all_saved.issubset(all_resolved):
         outcome = "COMPATIBLE_WITH_CONFIRMATION"
     else:
         outcome = "FAIL"
 
-    if outcome == "FAIL" and bool(spec.metadata.get("executable", False)) and not graph_matches:
+    # An executable spec is a replay recipe for a SPECIFIC captured graph; a
+    # graph_shape_hash mismatch means the target log is a different graph, and
+    # applying the recipe there is silent wrongness even when every selector still
+    # resolves. Refuse on ANY mismatch, not only when target resolution also failed --
+    # a hash mismatch must never be laundered into COMPATIBLE_WITH_CONFIRMATION for
+    # an executable spec. Non-executable (audit/portable) specs keep the confirmation
+    # verdict so inspection-level reuse on a changed model stays possible.
+    if not graph_matches and bool(spec.metadata.get("executable", False)):
         raise GraphShapeMismatchError(
             "Saved spec's graph_shape_hash doesn't match target log; refusing to apply at "
             "executable level."
