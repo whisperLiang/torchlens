@@ -76,3 +76,93 @@ def test_lineage_recurrent_model_never_raises() -> None:
     qualified = tl.debug.lineage(trace, "linear_1_1:2", direction="descendants")
     assert qualified.start_label == "linear_1_1:2"
     assert qualified.nodes
+
+
+# ---------------------------------------------------------------------------
+# H2 / M8 -- audit_trace stops manufacturing reassuring coverage
+# ---------------------------------------------------------------------------
+
+
+class _DeadModel(nn.Module):
+    """Model whose ReLU output is structurally all-zero (fully dead)."""
+
+    def __init__(self) -> None:
+        """Build a linear whose large negative bias zeroes every ReLU output."""
+
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+        with torch.no_grad():
+            self.lin.bias.fill_(-1e6)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return ``relu(lin(x))`` (all zeros).
+
+        Parameters
+        ----------
+        x:
+            Input batch.
+
+        Returns
+        -------
+        torch.Tensor
+            An all-zero activation.
+        """
+
+        return torch.relu(self.lin(x))
+
+
+def test_audit_dead_model_does_not_manufacture_coverage() -> None:
+    """A fully dead model no longer reports a validated 'no issues; N checks run' lie.
+
+    dead_neurons is an insufficient-sample signal on one trace, so it is listed
+    as SKIPPED with a reason instead of being counted as a health check that ran.
+    """
+
+    audit = tl.trace(_DeadModel(), torch.randn(2, 4), save=tl.where(lambda record: True)).audit()
+
+    skipped = dict(audit.skipped)
+    assert "dead_neurons" not in audit.checks_run
+    assert "dead_neurons" in skipped
+    assert "insufficient-sample" in skipped["dead_neurons"]
+    # hot_path / recompute_candidates are perf rankings, not health checks.
+    assert "hot_path" not in audit.checks_run
+    assert "recompute_candidates" not in audit.checks_run
+    assert "hot_path" in skipped
+    # bisect_nan is a real health check that runs on a fully saved trace.
+    assert "bisect_nan" in audit.checks_run
+
+
+def test_audit_multi_backward_gradient_is_skipped_not_run() -> None:
+    """A multi-backward trace refuses gradient_flow_audit; audit must SKIP, not RUN it.
+
+    MUTATION PROOF (false-VERIFIED tripwire): if the multi-backward guard in
+    ``audit_trace`` is reverted so the empty refusal frame is counted as a check
+    that ran, this test's ``not in checks_run`` / ``in skipped`` assertions fail.
+    """
+
+    trace = tl.trace(nn.Linear(3, 3), torch.randn(2, 3), save_grads=True)
+    output = trace[trace.output_layers[0]].out
+    trace.log_backward(output.sum(), retain_graph=True)
+    trace.log_backward((output**2).sum())
+
+    audit = trace.audit()
+    skipped = dict(audit.skipped)
+
+    assert "gradient_flow_audit" not in audit.checks_run
+    assert "gradient_flow_audit" in skipped
+    assert "backward passes captured" in skipped["gradient_flow_audit"]
+
+
+def test_audit_wires_dtype_range_and_surfaces_finding() -> None:
+    """audit runs dtype_range_audit (M8) and surfaces its findings.
+
+    MUTATION PROOF (docstring-completeness / report-truth): removing the
+    dtype_range_audit wiring drops ``dtype_range_audit`` from checks_run and the
+    dtype_near_max finding, failing both assertions.
+    """
+
+    dtype_max = torch.finfo(torch.float16).max
+    audit = tl.trace(nn.ReLU(), torch.full((2, 3), dtype_max * 0.95, dtype=torch.float16)).audit()
+
+    assert "dtype_range_audit" in audit.checks_run
+    assert any(finding.check == "dtype_near_max" for finding in audit.findings)
