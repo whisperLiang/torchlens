@@ -155,3 +155,39 @@ def test_trace_docstring_has_no_self_referential_aliases():
         # The real canonical parameter still exists and stays documented.
         assert name in signature_params
         assert doc.count(f"        {name}:") == 1
+
+
+# -------------------------------------------------------------------- SOL-A5-002
+@pytest.mark.smoke
+def test_pre_forward_failure_resets_capture_runtime_context(monkeypatch):
+    """A pre-forward setup failure must not leak capture-global runtime state.
+
+    Fail-before: configure_capture_runtime_context() ran before the outer
+    try/finally; a raise in the Trace ctor (or later pre-forward setup) left
+    _capture_replay_templates=True and the relationship model/input identity
+    stale until the next trace() happened to reset at its start.
+    """
+    from torchlens import _state
+    from torchlens import user_funcs as uf
+
+    real_trace_cls = uf.Trace
+
+    class _ExplodingTrace(real_trace_cls):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("boom-in-ctor")
+
+    model = _tiny_model()
+    x = torch.randn(2, 4)
+
+    _state.reset_capture_runtime_context()
+    try:
+        monkeypatch.setattr(uf, "Trace", _ExplodingTrace)
+        with pytest.raises(RuntimeError, match="boom-in-ctor"):
+            tl.trace(model, x, intervention_ready=True)
+        # The pre-forward failure window must have reset the capture-global state.
+        assert getattr(_state, "_capture_replay_templates") is False
+        assert getattr(_state, "_relationship_model_id") is None
+        assert getattr(_state, "_relationship_model_class") is None
+        assert getattr(_state, "_relationship_input_id") is None
+    finally:
+        _state.reset_capture_runtime_context()
