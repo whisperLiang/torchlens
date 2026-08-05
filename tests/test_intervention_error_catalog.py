@@ -363,33 +363,53 @@ def test_axis_a_public_verbs_success_paths() -> None:
 
 
 @pytest.mark.parametrize(
-    ("verb", "operation"),
+    ("verb", "operation", "expected_exc"),
     (
-        ("set", lambda log: log.set(tl.func("missing"), torch.zeros(1, 3), confirm_mutation=True)),
+        # ``expected_exc`` pins the SPECIFIC exception each failure path raises today
+        # (probed live). A generic ``pytest.raises(Exception)`` here is vacuous: it would
+        # pass even if the wrong error escaped. Each verb below asserts its cataloged typed
+        # error, EXCEPT ``rerun`` which the product currently raises as a bare builtin
+        # ``ValueError`` (untyped -- see the module TODO; do not weaken this test to hide it).
+        (
+            "set",
+            lambda log: log.set(tl.func("missing"), torch.zeros(1, 3), confirm_mutation=True),
+            terrors.SiteResolutionError,
+        ),
         (
             "attach_hooks",
             lambda log: log.attach_hooks(tl.func("missing"), _zero_hook, confirm_mutation=True),
+            terrors.SiteResolutionError,
         ),
         (
             "do",
             lambda log: log.do(
                 tl.func("relu"), _zero_hook, x=torch.zeros(1, 3), confirm_mutation=True
             ),
+            terrors.EngineDispatchError,
         ),
-        ("replay", lambda log: log.replay()),
-        ("rerun", lambda log: log.run(_ReluAdd())),
-        ("append", lambda log: log.run(_ReluAdd(), torch.ones(1, 4), append=True)),
+        ("replay", lambda log: log.replay(), terrors.ReplayPreconditionError),
+        # NOTE (untyped-error finding, follow-up): ``log.run(model)`` with no forward input
+        # raises a bare ``ValueError`` instead of a typed catalog error. Pinned to the real
+        # type so a wrong-exception mutation still fails; product raise is unchanged here.
+        ("rerun", lambda log: log.run(_ReluAdd()), ValueError),
+        (
+            "append",
+            lambda log: log.run(_ReluAdd(), torch.ones(1, 4), append=True),
+            terrors.AppendMismatchError,
+        ),
     ),
 )
 def test_axis_a_public_verbs_failure_paths(
-    verb: str, operation: Callable[[tl.Trace], object]
+    verb: str,
+    operation: Callable[[tl.Trace], object],
+    expected_exc: type[BaseException],
 ) -> None:
-    """Each public propagation verb has at least one cataloged or stable failure path."""
+    """Each public propagation verb raises its SPECIFIC cataloged/stable failure error."""
 
     log = _capture()
     if verb == "replay":
         log._intervention_spec.clear()
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(expected_exc) as excinfo:
         operation(log)
     assert str(excinfo.value)
 
