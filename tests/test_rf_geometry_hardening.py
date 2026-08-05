@@ -317,6 +317,176 @@ def test_antialias_align_corners_true_fails_closed() -> None:
         interp.receptive_field.at((0, 0))
 
 
+class _GetItem(nn.Module):
+    """Basic-indexing wrapper for slice-geometry probes."""
+
+    def __init__(self, key: tuple) -> None:
+        super().__init__()
+        self.key = key
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x[self.key]
+
+
+@pytest.mark.parametrize("start", [0, 1, 2])
+@pytest.mark.parametrize("step", [1, 2, 3])
+def test_strided_slice_projective_lattice(start: int, step: int) -> None:
+    """PF of every source under a strided slice equals perturbation truth.
+
+    Off-lattice sources must be exactly EMPTY; on-lattice sources must map to
+    their single surviving output. Guards the forward window-edge transpose's
+    integer membership proof.
+    """
+
+    if (start, step) == (0, 1):
+        pytest.skip("identity slice is a passthrough with no windowed axes")
+    extent = 9
+    key = (slice(None), slice(None), slice(start, None, step))
+    model = _GetItem(key)
+    x = torch.arange(extent, dtype=torch.float64).reshape(1, 1, extent) * 1.0
+    trace = capture(model, x)
+    source = sole_input(trace)
+    for src in range(extent):
+        truth = true_projective_support(model, x, (0, 0, src))
+        box = source.projective_field.at((src,))
+        assert box.exact, f"slice start={start} step={step} src={src} must stay exact"
+        assert_box_against_truth(
+            box, truth, (2,), context=f"slice PF start={start} step={step} src={src}"
+        )
+    getitem = op_named(trace, "getitem")
+    for out_pos in range(int(getitem.shape[-1])):
+        truth = true_receptive_support(model, x, (0, 0, out_pos))
+        box = getitem.receptive_field.at((out_pos,))
+        assert_box_against_truth(
+            box, truth, (2,), context=f"slice RF start={start} step={step} out={out_pos}"
+        )
+
+
+def test_strided_slice_spurious_nonempty_pin() -> None:
+    """The r21 repro: source 1 of ``x[:, :, ::2]`` must report an EMPTY box."""
+
+    model = _GetItem((slice(None), slice(None), slice(None, None, 2)))
+    x = torch.arange(5, dtype=torch.float64).reshape(1, 1, 5) * 1.0
+    trace = capture(model, x)
+    source = sole_input(trace)
+    off_lattice = source.projective_field.at((1,))
+    assert off_lattice.empty, "off-lattice source must have an empty projective field"
+    assert off_lattice.exact
+    on_lattice = source.projective_field.at((2,))
+    axis = on_lattice.axes[-1]
+    assert (axis.clipped_start, axis.clipped_stop) == (1, 2)
+
+
+# ---------------------------------------------------------------------------
+# Metamorphic laws: adjoint duality, composition, translation equivariance
+# ---------------------------------------------------------------------------
+
+
+def _windowed_hull(box: object) -> tuple[tuple[int, int] | None, ...]:
+    """Clipped hull over the trailing windowed axes, ``None`` for empty."""
+
+    if box.empty:
+        return (None,)
+    return tuple(
+        (axis.clipped_start, axis.clipped_stop) for axis in box.axes if axis.kind == "windowed"
+    )
+
+
+@pytest.mark.parametrize(
+    "model_factory",
+    [
+        lambda: _GetItem((slice(None), slice(None), slice(1, None, 2))),
+        lambda: nn.Conv1d(1, 1, 3, stride=2, bias=False),
+        lambda: nn.AvgPool1d(2, stride=2),
+        lambda: _Interp(scale_factor=(0.5,), mode="linear", align_corners=False),
+    ],
+)
+def test_adjoint_duality_law(model_factory) -> None:
+    """For dense exact windows: ``u in PF(p)`` iff ``p in RF(u)`` (no autograd)."""
+
+    extent = 8
+    model = model_factory()
+    x = torch.randn(1, 1, extent)
+    trace = capture(model, x)
+    source = sole_input(trace)
+    target = [op for op in trace.layer_list if not op.is_input and not op.is_output][-1]
+    out_extent = int(target.shape[-1])
+    for src in range(extent):
+        pf_box = source.projective_field.at((src,))
+        for out_pos in range(out_extent):
+            rf_box = target.receptive_field.at((out_pos,))
+            if not (pf_box.exact and rf_box.exact):
+                continue
+            pf_axis = pf_box.axes[-1]
+            rf_axis = rf_box.axes[-1]
+            in_pf = (
+                not pf_box.empty
+                and pf_axis.clipped_start is not None
+                and pf_axis.clipped_start <= out_pos < pf_axis.clipped_stop
+            )
+            in_rf = (
+                not rf_box.empty
+                and rf_axis.clipped_start is not None
+                and rf_axis.clipped_start <= src < rf_axis.clipped_stop
+            )
+            assert in_pf == in_rf, (
+                f"{type(model).__name__}: adjoint duality broken at src={src} "
+                f"out={out_pos}: u-in-PF={in_pf} p-in-RF={in_rf}"
+            )
+
+
+def test_layer_to_layer_composition_law() -> None:
+    """box_input(u) equals the bbox of box_input over box_mid(u) members."""
+
+    model = nn.Sequential(
+        nn.Conv1d(1, 1, 3, stride=2, bias=False),
+        nn.Conv1d(1, 1, 3, bias=False),
+    )
+    x = torch.randn(1, 1, 17)
+    trace = capture(model, x)
+    convs = [op for op in trace.layer_list if "conv" in op.func_name]
+    mid, final = convs[0], convs[1]
+    source = sole_input(trace)
+    for out_pos in range(int(final.shape[-1])):
+        full_box = final.receptive_field.at((out_pos,), input=source)
+        mid_box = final.receptive_field.at((out_pos,), source=mid)
+        mid_axis = mid_box.axes[-1]
+        assert mid_axis.clipped_start is not None
+        starts, stops = [], []
+        for mid_pos in range(mid_axis.clipped_start, mid_axis.clipped_stop):
+            inner = mid.receptive_field.at((mid_pos,), input=source)
+            inner_axis = inner.axes[-1]
+            starts.append(inner_axis.clipped_start)
+            stops.append(inner_axis.clipped_stop)
+        composed = (min(starts), max(stops))
+        full_axis = full_box.axes[-1]
+        assert (full_axis.clipped_start, full_axis.clipped_stop) == composed, (
+            f"composition broken at out={out_pos}: "
+            f"full={(full_axis.clipped_start, full_axis.clipped_stop)} composed={composed}"
+        )
+
+
+def test_translation_equivariance() -> None:
+    """Interior units of a pure conv stack shift RFs by exactly jump*d."""
+
+    model = nn.Sequential(
+        nn.Conv1d(1, 1, 3, stride=2, bias=False),
+        nn.Conv1d(1, 1, 3, dilation=2, bias=False),
+    )
+    x = torch.randn(1, 1, 33)
+    trace = capture(model, x)
+    final = [op for op in trace.layer_list if "conv" in op.func_name][-1]
+    view = final.receptive_field
+    jump = view.jump[-1]
+    base = view.at((5,), clip=False)
+    base_axis = base.axes[-1]
+    for shift in (1, 2, 3):
+        shifted = view.at((5 + shift,), clip=False)
+        axis = shifted.axes[-1]
+        assert axis.index_start - base_axis.index_start == jump * shift
+        assert axis.index_stop - base_axis.index_stop == jump * shift
+
+
 def test_non_antialiased_interpolate_regression() -> None:
     """The AA branch must not disturb ordinary interpolation geometry."""
 
