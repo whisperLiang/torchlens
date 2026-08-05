@@ -4574,6 +4574,43 @@ def test_save_arg_values_keeps_inplace_alias_contract_versions() -> None:
     )
 
 
+def test_validate_forward_handles_structseq_tensor_arguments() -> None:
+    """Forward validation accepts tensor-bearing structseq arguments without crashing."""
+
+    class StructseqStackModel(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Pass a torch structseq of tensors directly into ``torch.stack``."""
+
+            return torch.stack(torch.sort(x, dim=0))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert tl.validate(StructseqStackModel(), torch.randn(3, 4), scope="forward") is True
+
+
+def test_trace_save_arg_values_handles_namedtuple_tensor_arguments() -> None:
+    """Child-version snapshots support namedtuple tensor arguments."""
+
+    pair_type = namedtuple("Pair", ["left", "right"])
+
+    class NamedtupleCatModel(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Pass a namedtuple of tensors directly into ``torch.cat``."""
+
+            return torch.cat(pair_type(x * 2, x + 1), dim=1)
+
+    trace = trace_fn(NamedtupleCatModel(), torch.randn(3, 4), save_arg_values=True)
+
+    cat_layer = _only_layer_with_func_name(trace, "cat")
+    arg_positions = cat_layer.parent_arg_positions["args"]
+
+    assert set(arg_positions) == {(0, 0), (0, 1)}
+    assert {
+        arg_positions[(0, 0)],
+        arg_positions[(0, 1)],
+    } == set(cat_layer.parents)
+
+
 def test_validation_with_zeros_like():
     model = _ZerosLikeModel()
     x = torch.randn(3, 3)

@@ -7,6 +7,7 @@ tracking, and structural fingerprints used by loop detection.
 import time
 import warnings
 import weakref
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -555,26 +556,15 @@ def _find_arg_positions_for_single_parent(
         arg_struct: The actual args tuple or kwargs dict.
         tensor_all_arg_positions: Accumulator dict; mutated in place.
     """
-    # Polymorphic iteration: enumerate for positional, .items() for keyword.
-    iteration_strategies = {
-        "args": enumerate,
-        "kwargs": lambda x: x.items(),
-        list: enumerate,
-        tuple: enumerate,
-        dict: lambda x: x.items(),
-    }
-    iterfunc = iteration_strategies[arg_type]
-
-    for arg_key, arg in iterfunc(arg_struct):  # type: ignore[operator]
+    for arg_key, arg in _iter_arg_container_items(arg_type, arg_struct):
         if (
             not isinstance(arg, torch.nn.Parameter)
             and get_tensor_label(arg) == parent_entry._label_raw
         ):
             tensor_all_arg_positions[arg_type][arg_key] = parent_entry._label_raw
-        elif type(arg) in [list, tuple, dict]:
+        elif _is_supported_parent_arg_container(arg):
             # Second level of nesting (e.g., torch.cat([tensor_a, tensor_b])).
-            iterfunc2 = iteration_strategies[type(arg)]
-            for sub_arg_key, sub_arg in iterfunc2(arg):  # type: ignore[operator]
+            for sub_arg_key, sub_arg in _iter_arg_container_items(arg, arg):
                 if (
                     not isinstance(sub_arg, torch.nn.Parameter)
                     and get_tensor_label(sub_arg) == parent_entry._label_raw
@@ -582,6 +572,58 @@ def _find_arg_positions_for_single_parent(
                     tensor_all_arg_positions[arg_type][(arg_key, sub_arg_key)] = (
                         parent_entry._label_raw
                     )
+
+
+def _is_supported_parent_arg_container(value: object) -> bool:
+    """Return whether ``value`` participates in parent arg-position mapping.
+
+    Parameters
+    ----------
+    value:
+        Candidate nested argument value.
+
+    Returns
+    -------
+    bool
+        True when ``value`` is a supported list/tuple or mapping container.
+    """
+
+    return isinstance(value, (Mapping, tuple, list))
+
+
+def _iter_arg_container_items(
+    container_kind: str | object,
+    container: object,
+) -> Iterable[tuple[Any, Any]]:
+    """Yield items from an args/kwargs structure or nested supported container.
+
+    Parameters
+    ----------
+    container_kind:
+        Either ``"args"``, ``"kwargs"``, or the nested container object itself.
+    container:
+        Args tuple, kwargs mapping, or a nested supported container.
+
+    Returns
+    -------
+    Iterable[tuple[Any, Any]]
+        Position keys paired with container values.
+
+    Raises
+    ------
+    TypeError
+        If ``container`` is not a supported args/kwargs or nested container shape.
+    """
+
+    if container_kind == "args":
+        return enumerate(cast(tuple[Any, ...], container))
+    if container_kind == "kwargs":
+        return cast(dict[Any, Any], container).items()
+    if isinstance(container, Mapping):
+        return container.items()
+    if isinstance(container, (list, tuple)):
+        return enumerate(container)
+    raise TypeError(f"Unsupported parent-arg container: {type(container)!r}")
 
 
 def _get_ancestors_from_parents(
