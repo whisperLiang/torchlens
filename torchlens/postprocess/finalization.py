@@ -1229,12 +1229,15 @@ def _build_conditional_records(self: "Trace") -> None:
 
         # Per-arm test identity: phase 5c stashes ``_arm_bool_indices``
         # (branch kind -> indices into ``bool_layers`` for bools whose runtime
-        # consumption evaluated THAT arm's test) and ``_arm_test_structures``
-        # (branch kind -> "bare"/"negated"/"compound" bool-value semantics).
-        # Without the stash (legacy/degraded events) every then/elif arm falls
-        # back to the historical whole-event bool list.
+        # consumption evaluated THAT arm's test), ``_arm_test_structures``
+        # (branch kind -> "bare"/"negated"/"compound" bool-value semantics),
+        # and ``_bool_layers_raw`` (index-aligned raw labels resolving the
+        # exact per-pass op of rolled multi-pass bools). Without the stash
+        # (legacy/degraded events) every then/elif arm falls back to the
+        # historical whole-event bool list.
         arm_bool_indices = getattr(event, "_arm_bool_indices", None)
         arm_test_structures = getattr(event, "_arm_test_structures", None) or {}
+        bool_layers_raw = getattr(event, "_bool_layers_raw", None)
 
         arms: list[ConditionalArm] = []
         for branch_kind in ordered_branch_kinds:
@@ -1261,10 +1264,27 @@ def _build_conditional_records(self: "Trace") -> None:
             else:
                 terminal_bool = None
             bool_value = None
-            if terminal_bool is not None and terminal_bool in self.layer_dict_all_keys:
-                raw_bool_value = getattr(
-                    self.layer_dict_all_keys[terminal_bool], "bool_value", None
+            witnessed_indices = (
+                list(arm_bool_indices.get(branch_kind, [])) if arm_bool_indices is not None else []
+            )
+            if (
+                terminal_bool is not None
+                and arm_bool_indices is not None
+                and (len(witnessed_indices) > 1)
+            ):
+                # N witnessed evaluations of this arm's test (rolled or
+                # unrolled multi-pass loops) cannot be represented by ONE
+                # scalar: promoting an arbitrary evaluation's value
+                # contradicts ``fired`` whenever the values differ across
+                # passes (round-24 condbranch seal, S3). Mirror the
+                # compound-test refusal and stay None; per-pass values remain
+                # queryable on the bool ops themselves.
+                bool_value = None
+            elif terminal_bool is not None:
+                value_op = _resolve_conditional_bool_op(
+                    self, terminal_bool, witnessed_indices, bool_layers_raw
                 )
+                raw_bool_value = getattr(value_op, "bool_value", None)
                 # ``bool_value_at_run`` must never contradict ``fired``: apply
                 # the test expression's statically-known polarity, and refuse a
                 # single-bool value for compound (``and``/``or``) tests where
@@ -1377,6 +1397,48 @@ def _make_public_conditional_ids(condition_events: list[Any]) -> dict[int, str]:
         )
         for event in condition_events
     }
+
+
+def _resolve_conditional_bool_op(
+    self: "Trace",
+    terminal_bool: str,
+    witnessed_indices: list[int],
+    bool_layers_raw: list[str] | None,
+) -> Any | None:
+    """Resolve the op whose ``bool_value`` backs one arm's single evaluation.
+
+    Parameters
+    ----------
+    self:
+        Trace whose lookup keys resolve conditional bool ops.
+    terminal_bool:
+        Renamed public label of the arm's terminal bool layer.
+    witnessed_indices:
+        Indices into the owning event's ``bool_layers`` witnessed for this
+        arm's test. Only single-witness arms reach this resolver.
+    bool_layers_raw:
+        Index-aligned RAW labels stashed by phase 5c, or ``None`` for
+        legacy/degraded events.
+
+    Returns
+    -------
+    Any | None
+        The exact evaluating op. The raw label is preferred because it is
+        unique per pass: a rolled multi-pass bool layer renames every pass to
+        ONE base label, and an unqualified ``layer_dict_all_keys`` lookup
+        resolves last-writer-wins to an arbitrary pass (round-24 condbranch
+        seal, S3). Falls back to the renamed label for legacy events.
+    """
+
+    if (
+        bool_layers_raw is not None
+        and len(witnessed_indices) == 1
+        and 0 <= witnessed_indices[0] < len(bool_layers_raw)
+    ):
+        raw_op = self.layer_dict_all_keys.get(bool_layers_raw[witnessed_indices[0]])
+        if raw_op is not None:
+            return raw_op
+    return self.layer_dict_all_keys.get(terminal_bool)
 
 
 def _merge_conditional_role_labels(

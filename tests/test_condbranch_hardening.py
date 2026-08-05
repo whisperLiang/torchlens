@@ -1,22 +1,28 @@
-"""Round-22 conditional/taken-branch hardening regressions.
+"""Round-22 + round-24 conditional/taken-branch hardening regressions.
 
 Adversarial audit findings (round22 condbranch): order-dependent branch
 erasure, 1:N predicate reuse, same-line nested-ternary cross-wiring,
 decorated-forward scope loss, short-circuited elif evaluation claims,
 ``bool_value_at_run`` vs ``fired`` contradictions, and invisible non-bool
-tensor truthiness. Every test asserts the recorded conditional structure
-against the ACTUALLY executed branches, and that no false-``fired`` arm is
-introduced (an arm never claims execution that did not happen).
+tensor truthiness. Round-24 seal residuals: single-line ``if``/``elif``
+bodies false-firing on the test's own ops (S1), the dead column-offset map
+for method-call frames on 3.11+ (S2), and multi-pass loop evaluations
+resolving ``bool_value_at_run`` to an arbitrary pass (S3). Every test
+asserts the recorded conditional structure against the ACTUALLY executed
+branches, and that no false-``fired`` arm is introduced (an arm never
+claims execution that did not happen).
 
 All models live at module level so the file stays AST-readable for the
-conditional classifier, and every branch arm body sits on its own source
-line so degraded line-only attribution works on Python 3.10 (no column
-info before 3.11).
+conditional classifier. The round-22 models keep every branch arm body on
+its own source line so degraded line-only attribution works on Python 3.10
+(no column info before 3.11); the round-24 SingleLine* models deliberately
+put the arm body ON the test's line — the exact blind spot the seal hit.
 """
 
 from __future__ import annotations
 
 import functools
+import sys
 import warnings
 from typing import Callable, Optional
 
@@ -671,4 +677,366 @@ def test_comprehension_ternary_never_false_fires() -> None:
                 assert arm.fired is False
 
     _assert_no_false_fired(trace, {"relu", "all", "__gt__", "mul", "unbind", "stack"}, {"sigmoid"})
+    _assert_bool_value_never_contradicts_fired(trace)
+
+
+# ---------------------------------------------------------------------------
+# Round-24 S1: single-line if/elif — arm body shares the TEST's source line
+# ---------------------------------------------------------------------------
+
+
+def _assert_fired_arms_exclude_test_ops(trace: Trace, test_funcs: set[str]) -> None:
+    """Assert no fired arm is backed by a test-expression op.
+
+    The round-24 S1 false-fire was EXACTLY this: the test's ops executed (they
+    always do), got misattributed into the same-line arm body, and flipped the
+    arm to ``fired=True`` although the body never ran. A fired arm may only be
+    backed by ops that are NOT part of any test expression.
+
+    Parameters
+    ----------
+    trace:
+        Trace whose public conditionals are checked.
+    test_funcs:
+        Function names of ops belonging to conditional test expressions.
+    """
+
+    test_op_labels = {
+        layer.layer_label for layer in trace.layer_list if layer.func_name in test_funcs
+    }
+    for conditional in trace.conditionals:
+        for arm in conditional.arms:
+            overlap = set(arm.execution_ops) & test_op_labels
+            assert not overlap, (
+                f"arm {arm.kind!r} of {conditional.id} is backed by test-expression "
+                f"ops {sorted(overlap)}"
+            )
+
+
+class SingleLineIfModel(nn.Module):
+    """Single-line ``if``: the arm body shares the TEST's source line."""
+
+    # fmt: off
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the single-line conditional forward pass."""
+        if x.sum() > 0: x = torch.relu(x)  # noqa: E701
+        return x * 2
+    # fmt: on
+
+
+class SingleLineIfMethodBoolModel(nn.Module):
+    """Single-line ``if`` gated by a method-PRODUCED bool (``.all()``)."""
+
+    # fmt: off
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the method-bool single-line conditional forward pass."""
+        if (x > 0).all(): x = torch.relu(x)  # noqa: E701
+        return x * 2
+    # fmt: on
+
+
+class SingleLineElifModel(nn.Module):
+    """Single-line ``elif`` whose test ops share the elif body's line."""
+
+    # fmt: off
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the single-line-elif ladder forward pass."""
+        ok = (x > 100).all()
+        if ok:
+            x = torch.relu(x)
+        elif x.sum() > 50: x = torch.tanh(x)  # noqa: E701
+        else:
+            x = torch.sigmoid(x)
+        return x * 2
+    # fmt: on
+
+
+class SingleLineItemBoolModel(nn.Module):
+    """Single-line ``if`` on an ``.item()`` python-scalar comparison."""
+
+    # fmt: off
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the scalar-escape-gated single-line conditional."""
+        if x.sum().item() > 0: x = torch.relu(x)  # noqa: E701
+        return x * 2
+    # fmt: on
+
+
+@pytest.mark.parametrize(
+    ("model_factory", "test_funcs"),
+    [
+        (SingleLineIfModel, {"sum", "__gt__"}),
+        (SingleLineIfMethodBoolModel, {"__gt__", "all"}),
+    ],
+    ids=["compare-bool", "method-bool"],
+)
+def test_single_line_if_false_never_fires_then(
+    model_factory: Callable[[], nn.Module],
+    test_funcs: set[str],
+) -> None:
+    """LOAD-BEARING: a single-line ``if`` whose test is False takes NO arm.
+
+    The seal's S1: the test ops share the body's source line, degraded
+    line-only matching attributed them INTO the arm, and the record claimed
+    ``fired_arm_kind='then'`` for a branch that never executed."""
+
+    trace = _log_model(model_factory(), -torch.ones(2, 2))
+
+    (conditional,) = list(trace.conditionals)
+    assert conditional.fired_arm_kind is None
+    then_arm = conditional.arms[0]
+    assert then_arm.fired is False
+    assert then_arm.execution_ops == []
+
+    _assert_fired_arms_exclude_test_ops(trace, test_funcs)
+    _assert_no_false_fired(trace, test_funcs | {"mul"}, {"relu"})
+    _assert_bool_value_never_contradicts_fired(trace)
+
+
+@pytest.mark.parametrize(
+    ("model_factory", "test_funcs"),
+    [
+        (SingleLineIfModel, {"sum", "__gt__"}),
+        (SingleLineIfMethodBoolModel, {"__gt__", "all"}),
+    ],
+    ids=["compare-bool", "method-bool"],
+)
+def test_single_line_if_true_arm_never_backed_by_test_ops(
+    model_factory: Callable[[], nn.Module],
+    test_funcs: set[str],
+) -> None:
+    """A genuinely-fired single-line arm is backed ONLY by body ops.
+
+    On 3.11+ the column-offset map (S2 fix) separates the same-line test from
+    the body precisely; on 3.10 (no ``co_positions``) the arm honestly fails
+    closed — a documented false NEGATIVE, never a false fire."""
+
+    trace = _log_model(model_factory(), torch.ones(2, 2))
+
+    (conditional,) = list(trace.conditionals)
+    then_arm = conditional.arms[0]
+    _assert_fired_arms_exclude_test_ops(trace, test_funcs)
+    if sys.version_info >= (3, 11):
+        assert conditional.fired_arm_kind == "then"
+        assert then_arm.fired is True
+        fired_funcs = {
+            trace.layer_dict_all_keys[label].func_name for label in then_arm.execution_ops
+        }
+        assert fired_funcs == {"relu"}
+    else:
+        assert then_arm.fired is False
+        assert then_arm.execution_ops == []
+
+    _assert_no_false_fired(trace, test_funcs | {"mul", "relu"}, set())
+    _assert_bool_value_never_contradicts_fired(trace)
+
+
+def test_single_line_elif_false_never_fires_elif() -> None:
+    """A False single-line ``elif`` must not fire NOR corrupt the real arm.
+
+    The seal's S1 collateral: the false elif fire made two arms "fired", so
+    ``fired_arm_kind`` reported ``None`` instead of the true ``else``."""
+
+    trace = _log_model(SingleLineElifModel(), torch.ones(2, 2))
+
+    (conditional,) = list(trace.conditionals)
+    then_arm, elif_arm, else_arm = conditional.arms
+    assert (then_arm.kind, elif_arm.kind, else_arm.kind) == ("then", "elif", "else")
+
+    assert conditional.fired_arm_kind == "else"
+    assert then_arm.fired is False
+    assert elif_arm.fired is False
+    assert elif_arm.execution_ops == []
+    assert else_arm.fired is True
+    else_funcs = {trace.layer_dict_all_keys[label].func_name for label in else_arm.execution_ops}
+    assert else_funcs == {"sigmoid"}
+
+    _assert_fired_arms_exclude_test_ops(trace, {"all", "__gt__", "sum"})
+    _assert_no_false_fired(trace, {"all", "__gt__", "sum", "sigmoid", "mul"}, {"relu", "tanh"})
+    _assert_bool_value_never_contradicts_fired(trace)
+
+
+def test_single_line_item_scalar_if_never_false_fires() -> None:
+    """A ``.item()`` python-scalar gate is invisible — and never false-fires.
+
+    ``x.sum().item() > 0`` consumes a python float, not a captured tensor
+    bool: no conditional materializes (documented scalar-escape class). The
+    single-line body must not resurrect a false fire through attribution."""
+
+    trace = _log_model(SingleLineItemBoolModel(), -torch.ones(2, 2))
+
+    assert list(trace.conditionals) == []
+    for layer in trace.layer_list:
+        assert layer.conditional_branch_stack == []
+
+    _assert_no_false_fired(trace, {"sum", "item", "mul"}, {"relu"})
+    _assert_bool_value_never_contradicts_fired(trace)
+
+
+# ---------------------------------------------------------------------------
+# Round-24 S2: column-offset map must cover 3.11+ inline-cache regions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="co_positions require Python 3.11+")
+def test_col_offset_map_covers_method_call_cache_regions() -> None:
+    """Every code unit resolves to its owning instruction's column.
+
+    On 3.11+ a caller frame's ``f_lasti`` during a METHOD call points inside
+    the CALL instruction's inline-cache region — offsets ``dis`` does not
+    list. A map keyed only on listed offsets returns ``None`` for every
+    ``x.sum()``-style frame, silently degrading branch attribution to
+    line-only mode (the S1 enabler)."""
+
+    import dis
+
+    from torchlens.utils.introspection import _build_col_offset_map
+
+    def probe(x: torch.Tensor) -> torch.Tensor:
+        """Exercise method calls, attribute loads, and binary ops."""
+        return x.sum() + x.mean()
+
+    code = probe.__code__
+    offset_map = _build_col_offset_map(code)
+    missing = [offset for offset in range(0, len(code.co_code), 2) if offset not in offset_map]
+    assert missing == [], f"cache-region offsets missing from the column map: {missing}"
+
+    instructions = list(dis.get_instructions(code))
+    for index, instruction in enumerate(instructions):
+        expected = None if instruction.positions is None else instruction.positions.col_offset
+        next_offset = (
+            instructions[index + 1].offset if index + 1 < len(instructions) else len(code.co_code)
+        )
+        for offset in range(instruction.offset, next_offset, 2):
+            assert offset_map[offset] == expected
+
+
+# ---------------------------------------------------------------------------
+# Round-24 S3: multi-pass loop evaluations vs the scalar bool_value_at_run
+# ---------------------------------------------------------------------------
+
+
+class RolledLoopSideFireModel(nn.Module):
+    """Rolled loop whose ``if`` fires on pass 1 (True) but not pass 2 (False).
+
+    The uniform ``x`` chain rolls, so both bool passes rename to ONE base
+    label; an unqualified lookup resolves last-writer-wins to pass 2."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the rolled side-fire loop forward pass."""
+        acc = x + 0.0
+        for _ in range(2):
+            x = x * 2.0
+            if x.sum() < 5:
+                acc = torch.relu(acc)
+        return x + acc
+
+
+class SavedFirstPassBoolModel(nn.Module):
+    """Rolled loop; a later ``if`` consumes ONLY pass 1's bool tensor."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the saved-first-pass-bool forward pass."""
+        bools = []
+        for _ in range(2):
+            x = x * 4.0
+            bools.append(x.sum() < 5)
+        if bools[0]:
+            y = torch.relu(x)
+        else:
+            y = torch.sigmoid(x)
+        return y * 2
+
+
+class UnrolledBothArmsLoopModel(nn.Module):
+    """Unrolled loop taking ELSE on iteration 1 and THEN on iteration 2."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the alternating-arm loop forward pass."""
+        for _ in range(2):
+            x = x * 3.0
+            if x.sum() > 5:
+                x = torch.relu(x)
+            else:
+                x = torch.sigmoid(x)
+        return x + 1
+
+
+def test_rolled_loop_multi_evaluation_refuses_arbitrary_pass_value() -> None:
+    """N rolled evaluations refuse a single scalar instead of contradicting.
+
+    The seal's S3 strict form: the rolled duplicate label resolved
+    last-writer-wins to pass 2 (False) while the arm fired at pass 1 —
+    ``fired_arm_kind='then'`` + ``bool_value_at_run=False``."""
+
+    trace = _log_model(RolledLoopSideFireModel(), torch.full((2, 2), 0.5))
+
+    (conditional,) = list(trace.conditionals)
+    then_arm = conditional.arms[0]
+    assert conditional.fired_arm_kind == "then"
+    assert then_arm.fired is True
+    # Two witnessed evaluations with different outcomes: one scalar cannot
+    # represent them. Mirror the compound-test refusal.
+    assert then_arm.bool_value_at_run is None
+
+    fired_funcs = {trace.layer_dict_all_keys[label].func_name for label in then_arm.execution_ops}
+    assert fired_funcs == {"relu"}
+
+    # Rolled: both passes share ONE layer label; per-pass ground truth stays
+    # queryable on the ops themselves.
+    bool_ops = [layer for layer in trace.layer_list if layer.func_name == "__lt__"]
+    assert len({op.layer_label for op in bool_ops}) == 1
+    assert {op.pass_index: op.bool_value for op in bool_ops} == {1: True, 2: False}
+
+    _assert_no_false_fired(trace, {"relu", "mul", "sum", "__lt__", "add"}, set())
+    _assert_bool_value_never_contradicts_fired(trace)
+
+
+def test_single_witness_rolled_bool_resolves_exact_pass_value() -> None:
+    """A single witnessed evaluation of a rolled bool reads the RIGHT pass.
+
+    ``bools[0]`` is PASS 1's tensor (True). The renamed public label is the
+    shared base label, and an unqualified ``layer_dict_all_keys`` lookup
+    resolves last-writer-wins to pass 2 (False) — contradicting the fired
+    then arm. Raw-label resolution must read pass 1."""
+
+    trace = _log_model(SavedFirstPassBoolModel(), torch.full((2, 2), 0.1))
+
+    (conditional,) = list(trace.conditionals)
+    then_arm = conditional.arms[0]
+    assert conditional.fired_arm_kind == "then"
+    assert then_arm.fired is True
+    assert then_arm.bool_value_at_run is True
+
+    bool_ops = [layer for layer in trace.layer_list if layer.func_name == "__lt__"]
+    assert len({op.layer_label for op in bool_ops}) == 1, "loop no longer rolls; fix the model"
+    assert {op.pass_index: op.bool_value for op in bool_ops} == {1: True, 2: False}
+
+    _assert_no_false_fired(trace, {"relu", "mul", "sum", "__lt__"}, {"sigmoid"})
+    _assert_bool_value_never_contradicts_fired(trace)
+
+
+def test_unrolled_both_arms_loop_reports_honest_multi_fire() -> None:
+    """Alternating arms across iterations refuse first-witnessed-wins values.
+
+    The seal's S3 unrolled sibling: ``then.fired=True`` with
+    ``bool_value_at_run=False`` stamped from iteration 1's evaluation."""
+
+    trace = _log_model(UnrolledBothArmsLoopModel(), torch.full((2, 2), 0.3))
+
+    (conditional,) = list(trace.conditionals)
+    then_arm, else_arm = conditional.arms
+    # Both arms genuinely fired across iterations; no single fired arm exists.
+    assert then_arm.fired is True
+    assert else_arm.fired is True
+    assert conditional.fired_arm_kind is None
+    # Two witnessed evaluations (False then True): the scalar refuses.
+    assert then_arm.bool_value_at_run is None
+
+    fired_funcs = {trace.layer_dict_all_keys[label].func_name for label in then_arm.execution_ops}
+    assert fired_funcs == {"relu"}
+    else_funcs = {trace.layer_dict_all_keys[label].func_name for label in else_arm.execution_ops}
+    assert else_funcs == {"sigmoid"}
+
+    _assert_no_false_fired(trace, {"relu", "sigmoid", "mul", "sum", "__gt__", "add"}, set())
     _assert_bool_value_never_contradicts_fired(trace)
