@@ -37,7 +37,7 @@ from .._io.lazy import LazyActivationRef
 from .._io.manifest import sha256_of_file
 from .._io.scrub import BlobSpec
 from .._io.streaming import BundleStreamWriter
-from ..quantities import Bytes, Duration
+from ..quantities import Bytes, Duration, Flops
 from ..data_classes._module_role_hints import (
     multi_output_role_from_path,
     role_hints_for_module_class,
@@ -964,6 +964,122 @@ def _build_module_logs(self: "Trace") -> None:
             pass_log.forward_kwargs = None
 
 
+# Aggregate Layer fields that may legitimately DIVERGE across genuine recurrent
+# passes (variable-length recurrence, autocast dtype shifts, tied-site module
+# attribution) and therefore must never be silently projected from pass 1.
+# Fields absent here are structurally uniform per the grouping identity
+# (function, parameters, output slot, module address, non-tensor args).
+_MULTIPASS_SHAPE_FIELDS = ("shape", "transformed_out_shape")
+_MULTIPASS_BYTES_FIELDS = ("activation_memory", "transformed_activation_memory")
+_MULTIPASS_FLOPS_FIELDS = ("flops_forward", "flops_backward")
+_MULTIPASS_MARKER_ONLY_FIELDS = ("dtype", "transformed_out_dtype", "device_ref")
+
+
+def _honest_multipass_shape(values: List[Any]) -> tuple:
+    """Return an honest aggregate shape for divergent per-pass shapes.
+
+    Constant dimensions keep their integer; divergent dimensions become an
+    explicit ``"lo..hi"`` range token. Rank divergence collapses to
+    ``("varies",)`` — never a silently wrong pass-1 tuple.
+
+    Parameters
+    ----------
+    values:
+        Per-pass shape values in pass order.
+
+    Returns
+    -------
+    tuple
+        Honest aggregate shape.
+    """
+
+    tuples = [tuple(value) for value in values if isinstance(value, (tuple, list))]
+    if len(tuples) != len(values) or len({len(t) for t in tuples}) != 1:
+        return ("varies",)
+    dims: List[Any] = []
+    for dim_values in zip(*tuples):
+        distinct = set(dim_values)
+        if len(distinct) == 1:
+            dims.append(dim_values[0])
+        elif all(isinstance(dim, int) for dim in dim_values):
+            dims.append(f"{min(dim_values)}..{max(dim_values)}")
+        else:
+            dims.append("varies")
+    return tuple(dims)
+
+
+def _reconcile_multipass_layer_fields(layer_log: "Layer") -> None:
+    """Make multi-pass aggregate Layer fields honest about divergent passes.
+
+    ``Layer`` construction projects pass-1 values onto 78+ aggregate fields on the
+    premise that grouping guarantees uniform structural metadata. That premise is
+    FALSE for genuine variable-length recurrence: a 3-step recurrent Linear over a
+    shrinking sequence has per-pass shapes ``[(4, 4), (3, 4), (2, 4)]``, yet the
+    rolled view published ``(4, 4), 64 B`` for every call — silent metadata and
+    rolled-render corruption that forward validation cannot catch.
+
+    For every divergent field this records the explicit machine-readable marker
+    ``layer_log.annotations["varying_across_passes"]`` (field name -> per-pass
+    values in pass order) and, for the display-critical fields, replaces the
+    pass-1 projection with an honest aggregate: per-dimension range tuples for
+    shapes, and the per-pass MAXIMUM (a documented upper bound, not a call-1
+    sample) for byte and FLOP counts. ``Layer.ops`` remains the exact per-pass
+    truth. Uniform layers — every non-recurrent model and every fixed-shape
+    loop — are left byte-identical.
+
+    The byte/FLOP aggregates stay plain ``Bytes``/``Flops``: the ``.tlspec``
+    metadata unpickler admits types by a frozen default-deny allowlist, so a
+    range-displaying quantity subclass would fail every load of a trace with a
+    varying-shape recurrence until ``quantities`` grows a vetted first-class
+    range type (deferred to the owner).
+
+    Parameters
+    ----------
+    layer_log:
+        Aggregate layer with its ``ops`` accessor fully populated.
+    """
+
+    if len(layer_log.ops) <= 1:
+        return
+    # OpAccessor iterates 1-based pass-index keys; ``get`` is the dict lookup
+    # (``[]`` is 0-based positional access).
+    pass_ops = [layer_log.ops.get(index) for index in sorted(layer_log.ops)]
+    varying: Dict[str, List[Any]] = {}
+
+    def record_if_varying(field_name: str, values: List[Any]) -> bool:
+        distinct_count = len({repr(value) for value in values})
+        if distinct_count > 1:
+            varying[field_name] = values
+            return True
+        return False
+
+    for field_name in _MULTIPASS_SHAPE_FIELDS:
+        values = [getattr(op, field_name, None) for op in pass_ops]
+        if record_if_varying(field_name, values):
+            setattr(layer_log, field_name, _honest_multipass_shape(values))
+
+    for field_name, quantity_type in (
+        *((name, Bytes) for name in _MULTIPASS_BYTES_FIELDS),
+        *((name, Flops) for name in _MULTIPASS_FLOPS_FIELDS),
+    ):
+        values = [getattr(op, field_name, None) for op in pass_ops]
+        if record_if_varying(field_name, values):
+            numeric = [value for value in values if isinstance(value, (int, float))]
+            if numeric and len(numeric) == len(values):
+                setattr(layer_log, field_name, quantity_type(int(max(numeric))))
+
+    for field_name in _MULTIPASS_MARKER_ONLY_FIELDS:
+        record_if_varying(field_name, [getattr(op, field_name, None) for op in pass_ops])
+
+    module_stacks = [
+        [module_pass[0] for module_pass in (getattr(op, "modules", None) or ())] for op in pass_ops
+    ]
+    record_if_varying("modules", module_stacks)
+
+    if varying:
+        layer_log.annotations["varying_across_passes"] = varying
+
+
 def _build_layer_logs(self: "Trace") -> None:
     """Step 15.5: Build aggregate Layer objects from per-pass Op entries.
 
@@ -1071,6 +1187,7 @@ def _build_layer_logs(self: "Trace") -> None:
             layer_log.autograd_memory = None
             layer_log.total_autograd_memory = None
             layer_log.num_autograd_tensors = None
+        _reconcile_multipass_layer_fields(layer_log)
         _rebuild_layer_log_conditional_views(layer_log)
 
     self.total_autograd_memory = Bytes(autograd_memory) if has_autograd_saved_value else None
