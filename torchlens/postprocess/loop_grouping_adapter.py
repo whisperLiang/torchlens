@@ -1003,6 +1003,60 @@ def _param_free_adjacency_merge_allowed(
     return smallest_body >= _MIN_PARAM_FREE_LOOP_BODY_OPS
 
 
+def _seed_reaches(
+    workspace: _GroupingWorkspace,
+    node1_label: str,
+    node2_label: str,
+    memo: dict[tuple[str, str], bool],
+) -> bool:
+    """Return whether one seed reaches the other along directed data edges.
+
+    Capture order is a topological order (parents precede children), so
+    reachability is only possible from the earlier-captured seed to the later one,
+    and the search window is bounded by the later seed's ``raw_order``.
+
+    Parameters
+    ----------
+    workspace:
+        Mutable grouping workspace.
+    node1_label:
+        First seed label.
+    node2_label:
+        Second seed label.
+    memo:
+        Per-merge cache of resolved reachability queries.
+
+    Returns
+    -------
+    bool
+        ``True`` when a directed data path connects the two seeds.
+    """
+    src_label, dst_label = node1_label, node2_label
+    if workspace.nodes[src_label].raw_order > workspace.nodes[dst_label].raw_order:
+        src_label, dst_label = dst_label, src_label
+    key = (src_label, dst_label)
+    cached = memo.get(key)
+    if cached is not None:
+        return cached
+    dst_order = workspace.nodes[dst_label].raw_order
+    stack = [src_label]
+    seen = {src_label}
+    found = False
+    while stack:
+        current = stack.pop()
+        if current == dst_label:
+            found = True
+            break
+        for child in workspace.nodes[current].data_children:
+            child_node = workspace.nodes.get(child)
+            if child_node is None or child in seen or child_node.raw_order > dst_order:
+                continue
+            seen.add(child)
+            stack.append(child)
+    memo[key] = found
+    return found
+
+
 def _merge_iso_groups_to_layers(
     workspace: _GroupingWorkspace,
     iso_node_groups: Dict[str, list[str]],
@@ -1061,27 +1115,25 @@ def _merge_iso_groups_to_layers(
                 )
 
     param_contexts = workspace.param_contexts()
+    reach_memo: dict[tuple[str, str], bool] = {}
 
     for iso_group_label, iso_nodes_orig in iso_node_groups.items():
-        iso_nodes = sorted(iso_nodes_orig)
-        for node1_label, node2_label in it.combinations(iso_nodes, 2):
+        iso_nodes = sorted(
+            iso_nodes_orig, key=lambda node_label: workspace.nodes[node_label].raw_order
+        )
+        # Consecutive pairs first: in a genuine loop they carry the unions, so the
+        # full pairwise sweep afterwards short-circuits on shared union-find roots
+        # instead of re-deriving (and re-checking reachability for) distant pairs.
+        pair_iter = it.chain(zip(iso_nodes, iso_nodes[1:]), it.combinations(iso_nodes, 2))
+        for node1_label, node2_label in pair_iter:
+            if find(node1_label) == find(node2_label):
+                continue
             node1_subgraph_label = node_to_subgraph[node1_label].starting_node
             node2_subgraph_label = node_to_subgraph[node2_label].starting_node
-            # Adjacency is required for BOTH merge paths and is DIRECT (pairwise).
-            # Structural body similarity alone -- including a shared-weight param op
-            # captured inside two structurally-disjoint bodies -- is not evidence of
-            # recurrence between the seeds: without a data connection the two
-            # "iterations" never feed each other (independent terminal reductions on
-            # parallel streams must stay single-pass). Genuine loops chain through
-            # consecutive directly-adjacent iterations via union-find. Parameterized
-            # seeds are unaffected: same-key param seeds share barcodes by
-            # construction and merge through the barcode groups below.
             subgraphs_are_adjacent = (
                 node1_subgraph_label in adjacent_subgraphs
                 and node2_subgraph_label in adjacent_subgraphs[node1_subgraph_label]
             )
-            if not subgraphs_are_adjacent:
-                continue
             node1 = workspace.nodes[node1_label]
             node2 = workspace.nodes[node2_label]
             pair_anchored = node1.recurrence_anchored or node2.recurrence_anchored
@@ -1100,8 +1152,19 @@ def _merge_iso_groups_to_layers(
                 sg_param_types[node1_subgraph_label] & sg_param_types[node2_subgraph_label]
             )
             if overlapping_param_types:
-                union(node1_label, node2_label)
-            elif _param_free_adjacency_merge_allowed(
+                # Shared parametric body content marks two iterations of one
+                # weight-tied loop -- but only when the iterations actually CHAIN:
+                # directly adjacent, or one seed feeds the other through the graph
+                # (interleaved bodies, e.g. tied-linear/mul/tied-linear/log). A
+                # shared weight captured inside two structurally-disjoint parallel
+                # branches is NOT recurrence between the branches' ops; without the
+                # connectivity requirement, independent terminal reductions on
+                # parallel streams were grouped as spurious recurrent passes.
+                if subgraphs_are_adjacent or _seed_reaches(
+                    workspace, node1_label, node2_label, reach_memo
+                ):
+                    union(node1_label, node2_label)
+            elif subgraphs_are_adjacent and _param_free_adjacency_merge_allowed(
                 workspace,
                 node1_label,
                 node2_label,
