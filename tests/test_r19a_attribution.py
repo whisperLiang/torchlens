@@ -113,3 +113,52 @@ def test_eval_root_with_training_submodule_is_restored() -> None:
 
     after = (model.training, model.lin.training, model.frozen_bn.training)
     assert after == before
+
+
+# --------------------------------------------------------------------------- #
+# W2A3-06: attribution must compute under an ambient torch.no_grad().
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        pytest.param(lambda m, x: saliency(m, x, target=0), id="saliency"),
+        pytest.param(lambda m, x: input_x_grad(m, x, target=0), id="input_x_grad"),
+        pytest.param(
+            lambda m, x: integrated_gradients(m, x, target=0, n_steps=3),
+            id="integrated_gradients",
+        ),
+        pytest.param(
+            lambda m, x: layer_attribution(m, x, target=0, layer="lin"),
+            id="layer_attribution",
+        ),
+    ],
+)
+def test_attribution_works_under_ambient_no_grad(run) -> None:
+    """Ambient no_grad must not defeat attribution; values match the normal path."""
+
+    torch.manual_seed(0)
+    model = _MixedModeNet()
+    model.eval()
+    x = torch.randn(8, 4)
+
+    reference = run(model, x)
+    with torch.no_grad():
+        under_no_grad = run(model, x)
+
+    ref_tensor = _first_tensor(reference.values)
+    got_tensor = _first_tensor(under_no_grad.values)
+    assert torch.allclose(ref_tensor, got_tensor)
+
+
+def test_no_grad_does_not_leak_grad_state() -> None:
+    """Running attribution under no_grad must not turn grad back on for the caller."""
+
+    torch.manual_seed(0)
+    model = nn.Linear(4, 3)
+    x = torch.randn(8, 4)
+    with torch.no_grad():
+        assert not torch.is_grad_enabled()
+        saliency(model, x, target=0)
+        assert not torch.is_grad_enabled()
