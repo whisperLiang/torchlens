@@ -53,7 +53,8 @@ def main() -> None:
         return out
 
     edited = log.fork("probe")
-    edited.attach_hooks(tl.func("relu"), readout).replay()
+    edited.attach_hooks(tl.func("relu"), readout)
+    edited.replay()
 
     scores = edited.last_run["probe_scores"]
     assert len(scores) == 1
