@@ -169,23 +169,40 @@ def _resolve_storage(
         if keep_raw:
             ram_payload = raw_ram
     if intent.on_disk:
-        raw_disk = safe_copy(
-            tensor,
-            detach_tensor=True,
-            save_mode=_save_mode_for_payload(spec, target="disk"),
-        )
-        raw_disk = _apply_payload_transforms(raw_disk, spec)
-        if transform is not None:
-            transformed_disk = _invoke_transform(
-                raw_disk,
-                transform,
-                ctx=ctx,
-                spec=spec,
-                intent=intent,
-                target="disk",
+        raw_disk: torch.Tensor | None = None
+        if intent.in_ram:
+            if raw_ram is None:
+                raise RuntimeError("RAM mirror payload missing for disk-backed fastlog capture")
+            if keep_raw:
+                disk_payload = safe_copy(
+                    raw_ram,
+                    detach_tensor=True,
+                    save_mode=_save_mode_for_payload(spec, target="disk"),
+                )
+            if transformed_ram is not None:
+                transformed_disk = safe_copy(
+                    transformed_ram,
+                    detach_tensor=True,
+                    save_mode=_save_mode_for_payload(spec, target="disk"),
+                )
+        else:
+            raw_disk = safe_copy(
+                tensor,
+                detach_tensor=True,
+                save_mode=_save_mode_for_payload(spec, target="disk"),
             )
-        if keep_raw:
-            disk_payload = raw_disk
+            raw_disk = _apply_payload_transforms(raw_disk, spec)
+            if transform is not None:
+                transformed_disk = _invoke_transform(
+                    raw_disk,
+                    transform,
+                    ctx=ctx,
+                    spec=spec,
+                    intent=intent,
+                    target="disk",
+                )
+            if keep_raw:
+                disk_payload = raw_disk
     return ram_payload, disk_payload, transformed_ram, transformed_disk
 
 

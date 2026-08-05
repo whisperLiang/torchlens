@@ -13,6 +13,7 @@ from .types import (
     RecordContext,
     Recording,
     StorageIntent,
+    _distinct_label_index_keys,
 )
 
 
@@ -92,13 +93,8 @@ class RamStorageBackend:
         index = len(self.recording.records)
         self.recording.records.append(record)
         self.recording.by_pass.setdefault(record.ctx.pass_index, []).append(index)
-        self.recording.by_label.setdefault(record.ctx.label, []).append(
-            (record.ctx.pass_index, index)
-        )
-        if record.ctx.raw_label is not None:
-            self.recording.by_label.setdefault(record.ctx.raw_label, []).append(
-                (record.ctx.pass_index, index)
-            )
+        for label_key in _distinct_label_index_keys(record.ctx.label, record.ctx.raw_label):
+            self.recording.by_label.setdefault(label_key, []).append((record.ctx.pass_index, index))
         if record.ctx.address is not None:
             self.recording.by_address.setdefault(record.ctx.address, []).append(index)
 
@@ -110,11 +106,8 @@ class RamStorageBackend:
         self.recording.by_address.clear()
         for index, record in enumerate(self.recording.records):
             self.recording.by_pass.setdefault(record.ctx.pass_index, []).append(index)
-            self.recording.by_label.setdefault(record.ctx.label, []).append(
-                (record.ctx.pass_index, index)
-            )
-            if record.ctx.raw_label is not None:
-                self.recording.by_label.setdefault(record.ctx.raw_label, []).append(
+            for label_key in _distinct_label_index_keys(record.ctx.label, record.ctx.raw_label):
+                self.recording.by_label.setdefault(label_key, []).append(
                     (record.ctx.pass_index, index)
                 )
             if record.ctx.address is not None:

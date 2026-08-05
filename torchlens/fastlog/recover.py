@@ -52,7 +52,12 @@ def load(path: str | Path) -> Recording:
             "fastlog bundle manifest is invalid; use tl.fastlog.recover()"
         ) from exc
     _validate_fastlog_layout(bundle_path, manifest)
-    return _load_from_index(bundle_path, recovered=False, recovery_warnings=[])
+    return _load_from_index(
+        bundle_path,
+        recovered=False,
+        recovery_warnings=[],
+        strict_integrity=True,
+    )
 
 
 def recover(path: str | Path) -> Recording:
@@ -83,12 +88,22 @@ def recover(path: str | Path) -> Recording:
         except TorchLensIOError:
             pass
         else:
-            return _load_from_index(bundle_path, recovered=False, recovery_warnings=[])
+            return _load_from_index(
+                bundle_path,
+                recovered=False,
+                recovery_warnings=[],
+                strict_integrity=False,
+            )
 
     index_path = bundle_path / "fastlog_index.jsonl"
     if not index_path.exists():
         raise RecoveryError("no recoverable index")
-    return _load_from_index(bundle_path, recovered=True, recovery_warnings=[])
+    return _load_from_index(
+        bundle_path,
+        recovered=True,
+        recovery_warnings=[],
+        strict_integrity=False,
+    )
 
 
 def _load_from_index(
@@ -96,6 +111,7 @@ def _load_from_index(
     *,
     recovered: bool,
     recovery_warnings: list[str],
+    strict_integrity: bool,
 ) -> Recording:
     """Load records by scanning ``fastlog_index.jsonl``."""
 
@@ -130,15 +146,47 @@ def _load_from_index(
         if rehydrated_record is None:
             continue
         records.append(rehydrated_record)
+    if strict_integrity and warnings_out:
+        raise TorchLensIOError(_format_strict_integrity_error(warnings_out))
     recording = _recording_from_records(
         records,
         bundle_path=bundle_path,
         metadata=metadata,
-        recovered=recovered,
+        recovered=recovered or bool(warnings_out),
         recovery_warnings=warnings_out,
     )
     RamStorageBackend(recording).finalize()
     return recording
+
+
+def _format_strict_integrity_error(recovery_warnings: list[str]) -> str:
+    """Return a finalized-load integrity error message.
+
+    Parameters
+    ----------
+    recovery_warnings:
+        Recovery diagnostics accumulated while scanning the JSONL index.
+
+    Returns
+    -------
+    str
+        Human-readable error explaining why a finalized bundle load refused to
+        continue.
+    """
+
+    if not recovery_warnings:
+        return "Finalized fastlog bundle failed integrity validation."
+    primary = recovery_warnings[0]
+    if len(recovery_warnings) == 1:
+        return (
+            "Finalized fastlog bundle failed integrity validation: "
+            f"{primary}. Use tl.fastlog.recover() to inspect salvageable records."
+        )
+    return (
+        "Finalized fastlog bundle failed integrity validation: "
+        f"{primary} (and {len(recovery_warnings) - 1} more issue(s)). "
+        "Use tl.fastlog.recover() to inspect salvageable records."
+    )
 
 
 def _read_index_lines(path: Path) -> list[str]:
@@ -197,8 +245,16 @@ def _validate_blob_metadata(
 ) -> tuple[bool, Any | None]:
     """Validate a single blob entry from record metadata."""
 
-    if blob_id is None or relative_path is None or expected_sha256 is None:
+    if blob_id is None and relative_path is None and expected_sha256 is None:
         return True, None
+    if blob_id is None or relative_path is None or expected_sha256 is None:
+        warning_id = "unknown"
+        if blob_id is not None:
+            warning_id = str(blob_id)
+        elif relative_path is not None:
+            warning_id = str(relative_path)
+        recovery_warnings.append(f"incomplete blob metadata {warning_id}")
+        return False, None
     try:
         blob_path = resolve_bundle_blob_path(bundle_path, str(relative_path))
     except TorchLensIOError:
@@ -345,7 +401,16 @@ def _read_metadata(path: Path) -> dict[str, Any]:
 
 
 def _validate_fastlog_layout(bundle_path: Path, manifest: Manifest) -> None:
-    """Validate the finalized fastlog directory layout."""
+    """Validate the finalized fastlog directory layout.
+
+    Notes
+    -----
+    This finalized-layout tripwire currently validates the required fastlog
+    sidecar files by presence only. ``load()`` reconstructs the effective
+    lookup indexes from ``fastlog_index.jsonl`` rather than trusting the
+    sidecar contents directly; the sidecar authority contract remains an owner
+    decision.
+    """
 
     enforce_version_policy(manifest)
     if manifest.bundle_format != "fastlog-directory":
