@@ -320,3 +320,115 @@ def test_lightning_row_clears_when_lightning_module_in_eval_mode() -> None:
 
     assert row.detected is False
     assert row.status == "pass"
+
+
+# ---------------------------------------------------------------------------
+# A3-03 — functorch/vmap detection must inspect executable AST references, not
+# raw source substrings that also match comments and docstrings.
+# ---------------------------------------------------------------------------
+
+
+class DocstringMentionsVmapModel(nn.Module):
+    """Model whose docstring mentions vmap but whose code never calls it."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return input directly; this model does NOT call vmap or functorch."""
+
+        # A comment that also mentions torch.func should be ignored.
+        return x
+
+
+class CommentMentionsFunctorchModel(nn.Module):
+    """Model whose only functorch mention is an inline comment."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the input unchanged.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            The input tensor.
+        """
+
+        result = x  # note: intentionally avoids functorch.vmap for tracing
+        return result
+
+
+class RealVmapModel(nn.Module):
+    """Model that actually calls ``torch.vmap`` in its forward."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply an increment through ``torch.vmap``.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Incremented tensor.
+        """
+
+        return torch.vmap(lambda t: t + 1)(x)
+
+
+class RealTorchFuncModel(nn.Module):
+    """Model that references the ``torch.func`` submodule in its forward."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply an increment through ``torch.func.vmap``.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Incremented tensor.
+        """
+
+        return torch.func.vmap(lambda t: t + 1)(x)
+
+
+def test_functorch_row_ignores_docstring_mention() -> None:
+    """A docstring mentioning vmap must not flag the model as broken."""
+
+    row = report(DocstringMentionsVmapModel(), torch.randn(3)).row("vmap_functorch")
+
+    assert row.detected is False
+    assert row.status == "pass"
+    assert row.severity == "ok"
+
+
+def test_functorch_row_ignores_comment_mention() -> None:
+    """An inline comment mentioning functorch.vmap must not flag the model."""
+
+    row = report(CommentMentionsFunctorchModel(), torch.randn(3)).row("vmap_functorch")
+
+    assert row.detected is False
+
+
+def test_functorch_row_detects_real_torch_vmap_call() -> None:
+    """An actual ``torch.vmap`` call in forward stays detected."""
+
+    row = report(RealVmapModel(), torch.randn(3)).row("vmap_functorch")
+
+    assert row.detected is True
+    assert row.status == "known_broken"
+
+
+def test_functorch_row_detects_torch_func_submodule_reference() -> None:
+    """A ``torch.func`` submodule reference in forward stays detected."""
+
+    row = report(RealTorchFuncModel(), torch.randn(3)).row("vmap_functorch")
+
+    assert row.detected is True

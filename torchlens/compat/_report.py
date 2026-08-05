@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 import inspect
 import multiprocessing
+import textwrap
 import threading
 from typing import Any, Literal
 
@@ -837,7 +839,7 @@ def _functorch_row(model: nn.Module) -> CompatRow:
         Report row.
     """
 
-    detected = _forward_source_contains(model, ("vmap", "functorch", "torch.func"))
+    detected = _forward_references_functorch(model)
     status: Status = "known_broken" if detected else "pass"
     details = (
         "forward source references vmap/functorch; TorchLens skips logging inside active "
@@ -858,28 +860,46 @@ def _functorch_row(model: nn.Module) -> CompatRow:
     )
 
 
-def _forward_source_contains(model: nn.Module, needles: Sequence[str]) -> bool:
-    """Return whether ``model.forward`` source contains any marker.
+def _forward_references_functorch(model: nn.Module) -> bool:
+    """Return whether ``model.forward`` references vmap/functorch in executable code.
+
+    The forward source is parsed into an AST and searched for real name/attribute
+    references (``vmap``, ``functorch``, or the ``torch.func`` submodule). Comments
+    and docstrings are ignored, so prose that merely mentions vmap (for example a
+    docstring saying the model does *not* use vmap) does not trip detection.
 
     Parameters
     ----------
     model:
-        Model to inspect.
-    needles:
-        Source substrings to search for.
+        Model whose ``forward`` source is inspected.
 
     Returns
     -------
     bool
-        True if source was available and a marker matched.
+        True only when forward code references a functorch/vmap marker.
     """
 
     try:
         source = inspect.getsource(model.forward)
     except (OSError, TypeError):
         return False
-    source_lower = source.lower()
-    return any(needle in source_lower for needle in needles)
+    try:
+        tree = ast.parse(textwrap.dedent(source))
+    except (SyntaxError, ValueError):
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in ("vmap", "functorch"):
+            return True
+        if isinstance(node, ast.Attribute):
+            if node.attr == "vmap":
+                return True
+            if (
+                node.attr == "func"
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "torch"
+            ):
+                return True
+    return False
 
 
 def _quantized_row(model: nn.Module, input_value: Any) -> CompatRow:
