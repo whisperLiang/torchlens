@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -14,6 +15,109 @@ from ..user_funcs import trace
 from .facets import Facet, MissingGradient
 
 Metric = Callable[[Any], torch.Tensor]
+
+
+class _CounterfactualStateGuard:
+    """Snapshot and restore model state and global RNG around patching runs.
+
+    Activation and attribution patching run several forward passes (a clean
+    baseline, a corrupted baseline, and one per patched cell) on the SAME live
+    model. Without resetting state between runs, mutable buffers (e.g.
+    BatchNorm running statistics or any buffer written during forward) and the
+    global RNG drift: every counterfactual after the first starts from a
+    different model/RNG state than the clean baseline, so the reported effect is
+    a silently wrong comparison, and the caller's model + global RNG are left
+    mutated when the helper returns.
+
+    Call :meth:`open` before the first run and :meth:`close` in a ``finally``.
+    ``open`` snapshots the model's parameters/buffers and enters
+    ``torch.random.fork_rng`` so the caller's global RNG is restored robustly on
+    ``close`` no matter what the traced forwards do. Call :meth:`reset` before
+    each counterfactual run to return the model and RNG to the captured baseline
+    so every counterfactual is a true comparison. ``close`` restores the model
+    state and releases the forked RNG.
+    """
+
+    def __init__(self, model: nn.Module) -> None:
+        """Snapshot the model's parameters/buffers and the global RNG state."""
+
+        self._tensors: list[tuple[torch.Tensor, torch.Tensor]] = [
+            (tensor, tensor.detach().clone()) for tensor in _stateful_tensors(model)
+        ]
+        self._rng: dict[str, Any] = _snapshot_rng()
+        self._fork: Any = None
+
+    def open(self) -> None:
+        """Enter a forked-RNG scope so the caller's global RNG is preserved."""
+
+        self._fork = torch.random.fork_rng(devices=_fork_rng_devices())
+        self._fork.__enter__()
+
+    def close(self) -> None:
+        """Restore the model state and release the forked RNG scope."""
+
+        try:
+            self._restore_model()
+        finally:
+            fork, self._fork = self._fork, None
+            if fork is not None:
+                fork.__exit__(None, None, None)
+
+    def reset(self) -> None:
+        """Reset model state and global RNG to the captured baseline."""
+
+        self._restore_model()
+        _restore_rng(self._rng)
+
+    def _restore_model(self) -> None:
+        """Copy every captured parameter/buffer value back in place."""
+
+        with torch.no_grad():
+            for tensor, saved in self._tensors:
+                tensor.copy_(saved)
+
+
+def _stateful_tensors(model: nn.Module) -> list[torch.Tensor]:
+    """Return every distinct parameter and buffer tensor of a model.
+
+    Uses object identity to include non-persistent buffers and to stage tied /
+    double-registered tensors exactly once.
+    """
+
+    seen: set[int] = set()
+    tensors: list[torch.Tensor] = []
+    for _, tensor in itertools.chain(model.named_parameters(), model.named_buffers()):
+        if id(tensor) in seen:
+            continue
+        seen.add(id(tensor))
+        tensors.append(tensor)
+    return tensors
+
+
+def _fork_rng_devices() -> list[int]:
+    """Return the CUDA device ordinals to fork RNG for (empty when CPU-only)."""
+
+    if torch.cuda.is_available():
+        return list(range(torch.cuda.device_count()))
+    return []
+
+
+def _snapshot_rng() -> dict[str, Any]:
+    """Capture the global CPU (and CUDA, when available) RNG state."""
+
+    snapshot: dict[str, Any] = {"cpu": torch.get_rng_state()}
+    if torch.cuda.is_available():
+        snapshot["cuda"] = torch.cuda.get_rng_state_all()
+    return snapshot
+
+
+def _restore_rng(snapshot: Mapping[str, Any]) -> None:
+    """Restore the global CPU (and CUDA, when available) RNG state."""
+
+    torch.set_rng_state(snapshot["cpu"])
+    cuda_states = snapshot.get("cuda")
+    if cuda_states is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(cuda_states)
 
 
 def activation_patch_residual_stream(
@@ -60,10 +164,13 @@ def activation_patch_residual_stream(
         Metric values shaped ``[layer, pos]`` or ``[layer]``.
     """
 
-    clean_log, corrupted_log = _baseline_traces(
-        model, clean_input, corrupted_input, trace_kwargs=trace_kwargs
-    )
+    guard = _CounterfactualStateGuard(model)
+    guard.open()
+    clean_log = corrupted_log = None
     try:
+        clean_log, corrupted_log = _baseline_traces(
+            model, clean_input, corrupted_input, trace_kwargs=trace_kwargs, guard=guard
+        )
         metric_template = _baseline_metric_template(clean_log, corrupted_log, metric)
         modules = _modules_with_facet(clean_log, facet_name)
         _ensure_matching_modules(corrupted_log, modules, facet_name=facet_name)
@@ -77,6 +184,7 @@ def activation_patch_residual_stream(
                 facet_name=facet_name,
                 metric=metric,
                 metric_template=metric_template,
+                guard=guard,
             )
 
         if not modules:
@@ -117,6 +225,7 @@ def activation_patch_residual_stream(
                     selector,
                     _patch_position,
                     name=f"patch_{facet_name}_{layer_index}_{position}",
+                    guard=guard,
                 )
                 try:
                     result[layer_index, pos_index] = _metric_scalar(
@@ -126,8 +235,11 @@ def activation_patch_residual_stream(
                     patched_log.cleanup()
         return result
     finally:
-        clean_log.cleanup()
-        corrupted_log.cleanup()
+        if clean_log is not None:
+            clean_log.cleanup()
+        if corrupted_log is not None:
+            corrupted_log.cleanup()
+        guard.close()
 
 
 def activation_patch_attention_output(
@@ -162,10 +274,13 @@ def activation_patch_attention_output(
         Metric values shaped ``[layer]``.
     """
 
-    clean_log, corrupted_log = _baseline_traces(
-        model, clean_input, corrupted_input, trace_kwargs=trace_kwargs
-    )
+    guard = _CounterfactualStateGuard(model)
+    guard.open()
+    clean_log = corrupted_log = None
     try:
+        clean_log, corrupted_log = _baseline_traces(
+            model, clean_input, corrupted_input, trace_kwargs=trace_kwargs, guard=guard
+        )
         metric_template = _baseline_metric_template(clean_log, corrupted_log, metric)
         modules = _modules_with_facet(clean_log, facet_name)
         _ensure_matching_modules(corrupted_log, modules, facet_name=facet_name)
@@ -178,10 +293,14 @@ def activation_patch_attention_output(
             facet_name=facet_name,
             metric=metric,
             metric_template=metric_template,
+            guard=guard,
         )
     finally:
-        clean_log.cleanup()
-        corrupted_log.cleanup()
+        if clean_log is not None:
+            clean_log.cleanup()
+        if corrupted_log is not None:
+            corrupted_log.cleanup()
+        guard.close()
 
 
 def activation_patch_attention_heads(
@@ -217,10 +336,13 @@ def activation_patch_attention_heads(
         Metric values shaped ``[layer, head]``.
     """
 
-    clean_log, corrupted_log = _baseline_traces(
-        model, clean_input, corrupted_input, trace_kwargs=trace_kwargs
-    )
+    guard = _CounterfactualStateGuard(model)
+    guard.open()
+    clean_log = corrupted_log = None
     try:
+        clean_log, corrupted_log = _baseline_traces(
+            model, clean_input, corrupted_input, trace_kwargs=trace_kwargs, guard=guard
+        )
         metric_template = _baseline_metric_template(clean_log, corrupted_log, metric)
         return _activation_patch_heads(
             model,
@@ -230,10 +352,14 @@ def activation_patch_attention_heads(
             facet_name=facet_name,
             metric=metric,
             metric_template=metric_template,
+            guard=guard,
         )
     finally:
-        clean_log.cleanup()
-        corrupted_log.cleanup()
+        if clean_log is not None:
+            clean_log.cleanup()
+        if corrupted_log is not None:
+            corrupted_log.cleanup()
+        guard.close()
 
 
 def activation_patch_mlp_output(
@@ -268,10 +394,13 @@ def activation_patch_mlp_output(
         Metric values shaped ``[layer]``.
     """
 
-    clean_log, corrupted_log = _baseline_traces(
-        model, clean_input, corrupted_input, trace_kwargs=trace_kwargs
-    )
+    guard = _CounterfactualStateGuard(model)
+    guard.open()
+    clean_log = corrupted_log = None
     try:
+        clean_log, corrupted_log = _baseline_traces(
+            model, clean_input, corrupted_input, trace_kwargs=trace_kwargs, guard=guard
+        )
         metric_template = _baseline_metric_template(clean_log, corrupted_log, metric)
         modules = [
             address
@@ -288,10 +417,14 @@ def activation_patch_mlp_output(
             facet_name=facet_name,
             metric=metric,
             metric_template=metric_template,
+            guard=guard,
         )
     finally:
-        clean_log.cleanup()
-        corrupted_log.cleanup()
+        if clean_log is not None:
+            clean_log.cleanup()
+        if corrupted_log is not None:
+            corrupted_log.cleanup()
+        guard.close()
 
 
 def attribution_patch_attention_heads(
@@ -329,10 +462,18 @@ def attribution_patch_attention_heads(
         Approximate metric effects shaped ``[layer, head]``.
     """
 
-    clean_log, corrupted_log = _baseline_traces(
-        model, clean_input, corrupted_input, trace_kwargs=trace_kwargs, save_grads=True
-    )
+    guard = _CounterfactualStateGuard(model)
+    guard.open()
+    clean_log = corrupted_log = None
     try:
+        clean_log, corrupted_log = _baseline_traces(
+            model,
+            clean_input,
+            corrupted_input,
+            trace_kwargs=trace_kwargs,
+            save_grads=True,
+            guard=guard,
+        )
         clean_metric = _require_scalar_metric(metric(clean_log))
         corrupted_metric = _require_scalar_metric(metric(corrupted_log))
         clean_log.log_backward(clean_metric)
@@ -356,8 +497,11 @@ def attribution_patch_attention_heads(
                 result[layer_index, head_index] = (grad * (clean_value - corrupted_value)).sum()
         return result
     finally:
-        clean_log.cleanup()
-        corrupted_log.cleanup()
+        if clean_log is not None:
+            clean_log.cleanup()
+        if corrupted_log is not None:
+            corrupted_log.cleanup()
+        guard.close()
 
 
 def _baseline_traces(
@@ -367,11 +511,19 @@ def _baseline_traces(
     *,
     trace_kwargs: Mapping[str, Any] | None,
     save_grads: bool | None = None,
+    guard: _CounterfactualStateGuard,
 ) -> tuple[Any, Any]:
-    """Return clean and corrupted traces with all layer activations saved."""
+    """Return clean and corrupted traces with all layer activations saved.
+
+    Both baselines start from the guard's pristine model/RNG snapshot so the
+    corrupted run is a true counterfactual of the clean run rather than a run on
+    a model already mutated by the clean forward.
+    """
 
     kwargs = _trace_kwargs(trace_kwargs, save_grads=save_grads)
+    guard.reset()
     clean_log = trace(model, clean_input, **kwargs)
+    guard.reset()
     corrupted_log = trace(model, corrupted_input, **kwargs)
     return clean_log, corrupted_log
 
@@ -414,6 +566,7 @@ def _activation_patch_by_module(
     facet_name: str,
     metric: Metric,
     metric_template: torch.Tensor,
+    guard: _CounterfactualStateGuard,
 ) -> torch.Tensor:
     """Patch one whole facet per module and return metric values."""
 
@@ -440,6 +593,7 @@ def _activation_patch_by_module(
             facet(facet_name).in_module(address),
             _patch_whole,
             name=f"patch_{facet_name}_{layer_index}",
+            guard=guard,
         )
         try:
             result[layer_index] = _metric_scalar(metric(patched_log), like=result)
@@ -457,6 +611,7 @@ def _activation_patch_heads(
     facet_name: str,
     metric: Metric,
     metric_template: torch.Tensor,
+    guard: _CounterfactualStateGuard,
 ) -> torch.Tensor:
     """Patch one clean head per attention module and return metric values."""
 
@@ -489,6 +644,7 @@ def _activation_patch_heads(
                 facet(facet_name).head(head_index).in_module(address),
                 _patch_head,
                 name=f"patch_{facet_name}_{layer_index}_{head_index}",
+                guard=guard,
             )
             try:
                 result[layer_index, head_index] = _metric_scalar(metric(patched_log), like=result)
@@ -505,11 +661,18 @@ def _run_patch(
     hook: Callable[..., torch.Tensor],
     *,
     name: str,
+    guard: _CounterfactualStateGuard,
 ) -> Any:
-    """Fork the corrupted trace, attach one facet hook, and rerun."""
+    """Fork the corrupted trace, attach one facet hook, and rerun.
+
+    The model/RNG state is reset to the pristine snapshot before the rerun so
+    the only difference between the corrupted baseline and this patched run is
+    the injected clean activation.
+    """
 
     patched_log = corrupted_log.fork(name)
     patched_log.attach_hooks(selector, hook)
+    guard.reset()
     patched_log.run(model, corrupted_input)
     return patched_log
 
