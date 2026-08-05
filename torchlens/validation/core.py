@@ -771,13 +771,19 @@ def validate_saved_outs(
     (checks A-R in ``invariants.py``) run to verify structural/semantic
     consistency of the entire Trace.
 
-    Args:
-        ground_truth_output_tensors: Output tensors from a fresh forward pass,
-            used to confirm the logged outputs are accurate before BFS begins.
-        verbose: Whether to print warning messages on validation failure.
-        validate_metadata: Whether to run metadata invariant checks (default True).
+    Parameters
+    ----------
+    ground_truth_output_tensors:
+        Output tensors from a fresh forward pass, used to confirm the logged
+        outputs are accurate before BFS begins.
+    verbose:
+        Whether to print warning messages on validation failure.
+    validate_metadata:
+        Whether to run metadata invariant checks.
 
-    Returns:
+    Returns
+    -------
+    ValidationReplayStatus
         Aggregate replay-validation status. Fully validated pass/fail results
         remain bool-compatible through callers that unwrap completed statuses.
     """
@@ -1065,17 +1071,29 @@ def validate_parents_of_saved_layer(
     validated-child-edge set is still retained for diagnostics and structural
     completeness checks.
 
-    Args:
-        layer_to_validate_parents_for_label: Label of the layer whose parent edges are being validated.
-        validated_layers: Set of layer labels already validated; mutated in-place to add newly validated layers.
-        validated_op_labels: Set of exact op labels already queued or validated; mutated in-place.
-        validated_child_edges_for_each_layer: Dict mapping each layer label to the set of its child edges
-            that have been validated so far; mutated in-place as child edges are confirmed.
-        layers_to_validate_parents_for: Work queue of layer labels still needing parent validation;
-            mutated in-place to append newly discovered layers.
-        verbose: Whether to print warning messages on validation failure.
+    Parameters
+    ----------
+    layer_to_validate_parents_for_label:
+        Label of the layer whose parent edges are being validated.
+    validated_layers:
+        Set of layer labels already validated; mutated in place to add newly
+        validated layers.
+    validated_op_labels:
+        Set of exact op labels already queued or validated; mutated in place.
+    validated_child_edges_for_each_layer:
+        Mapping from each layer label to the set of validated child edges;
+        mutated in place as edges are confirmed.
+    layers_to_validate_parents_for:
+        Work queue of layer labels still needing parent validation; mutated in
+        place to append newly discovered layers.
+    verbose:
+        Whether to print warning messages on validation failure.
+    decision_recorder:
+        Optional recorder that captures per-op replay decisions.
 
-    Returns:
+    Returns
+    -------
+    ValidationCheckResult
         Structured result for the parent-edge validation step.
     """
     layer_to_validate_parents_for = _op_for_validation_label(
@@ -1383,16 +1401,29 @@ def _is_provable_functionless_source_or_boundary(layer: "Op") -> bool:
         return False
     if _is_intentional_intervention_replacement(layer):
         return True
-    source_category = (
-        bool(getattr(layer, "is_input", False))
-        or bool(getattr(layer, "is_output", False))
-        or bool(getattr(layer, "is_buffer", False))
-        or bool(getattr(layer, "input_was_parameter", False))
-        or bool(getattr(layer, "is_internal_source", False))
+    parents = tuple(getattr(layer, "parents", ()) or ())
+    children = tuple(getattr(layer, "children", ()) or ())
+    parent_arg_positions = getattr(layer, "parent_arg_positions", {}) or {}
+    has_parent_arg_positions = any(
+        bool(parent_arg_positions.get(arg_type)) for arg_type in ("args", "kwargs")
     )
-    if not source_category:
-        return False
-    return str(getattr(layer, "func_name", "none")) in {"none", "input", "output", "buffer"}
+    saved_args = getattr(layer, "saved_args", None)
+    has_saved_args = bool(saved_args)
+    func_call_id = getattr(layer, "func_call_id", None)
+    is_buffer_boundary = (
+        func_call_id is None
+        and bool(getattr(layer, "buffer_source", None))
+        and bool(getattr(layer, "buffer_write_kind", None))
+    )
+    if is_buffer_boundary:
+        return True
+    is_source = (
+        not parents and not has_parent_arg_positions and not has_saved_args and func_call_id is None
+    )
+    if is_source:
+        return True
+    is_output_boundary = bool(parents) and not children and has_parent_arg_positions
+    return is_output_boundary
 
 
 def _resolve_output_entry_for_index(
@@ -1547,10 +1578,14 @@ def _check_layer_arguments_logged_correctly(
     """Check whether the outs of the parent layers match the saved arguments of
     the target layer, and that the argument locations have been logged correctly.
 
-    Args:
-        target_layer_label: Layer to check
+    Parameters
+    ----------
+    target_layer_label:
+        Layer to check.
 
-    Returns:
+    Returns
+    -------
+    ValidationCheckResult
         Structured validation result for argument logging evidence.
     """
     target_entry = self.layer_logs.get(
@@ -1643,19 +1678,27 @@ def _validate_layer_against_arg(
     key: Any,
     val: Any,
 ) -> ValidationCheckResult:
-    """Validate whether a parent layer is correctly logged for a specific argument of a target layer.
+    """Validate whether a parent layer is logged correctly for one argument.
 
     Handles nested argument structures (lists, tuples, dicts) by recursing into them
     and delegating to ``_check_arglocs_correct_for_arg`` for each leaf value.
 
-    Args:
-        target_layer: The child layer whose argument log is being checked.
-        parent_layer: The parent layer being tested against the argument.
-        arg_type: Either ``"args"`` or ``"kwargs"``.
-        key: The positional index (for args) or keyword string (for kwargs) of the argument.
-        val: The saved argument value to inspect.
+    Parameters
+    ----------
+    target_layer:
+        Child layer whose argument log is being checked.
+    parent_layer:
+        Parent layer being tested against the argument.
+    arg_type:
+        Either ``"args"`` or ``"kwargs"``.
+    key:
+        Positional index or keyword string for the argument.
+    val:
+        Saved argument value to inspect.
 
-    Returns:
+    Returns
+    -------
+    ValidationCheckResult
         Structured validation result for this argument position.
     """
     if type(val) in [list, tuple]:
@@ -1750,14 +1793,22 @@ def _check_arglocs_correct_for_arg(
       for in-place RNG ops like ``bernoulli_`` that mutate after
       logging).
 
-    Args:
-        target_layer: The child layer whose argument log is being checked.
-        parent_layer: The parent layer being tested against the argument.
-        arg_type: Either ``"args"`` or ``"kwargs"``.
-        argloc_key: The position key (int, str, or tuple for nested args).
-        saved_arg_val: The saved argument value at that position.
+    Parameters
+    ----------
+    target_layer:
+        Child layer whose argument log is being checked.
+    parent_layer:
+        Parent layer being tested against the argument.
+    arg_type:
+        Either ``"args"`` or ``"kwargs"``.
+    argloc_key:
+        Position key for the argument slot.
+    saved_arg_val:
+        Saved argument value at that position.
 
-    Returns:
+    Returns
+    -------
+    ValidationCheckResult
         Structured validation result for this argument location.
     """
     target_layer_label = target_layer.layer_label
@@ -2430,16 +2481,23 @@ def _check_whether_func_on_saved_parents_yields_saved_tensor(
     layers_to_perturb: Optional[List[str]] = None,
     verbose: bool = False,
 ) -> ValidationCheckResult:
-    """Checks whether executing the saved function for a layer on the saved value of its parent layers
-    in fact yields the saved outs for that layer.
+    """Check whether replaying a layer from saved parents reproduces its output.
 
-    Args:
-        layer_to_validate_parents_for_label: label of the layer to check the saved outs
-        perturb: whether to perturb the saved outs
-        layers_to_perturb: layers for which to perturb the saved outs
+    Parameters
+    ----------
+    layer_to_validate_parents_for_label:
+        Label of the layer to replay.
+    perturb:
+        Whether to perturb one or more parent values before replay.
+    layers_to_perturb:
+        Layers whose saved outs should be perturbed.
+    verbose:
+        Whether to print replay diagnostics on failure.
 
-    Returns:
-        Structured validation decision for this replay/perturbation attempt.
+    Returns
+    -------
+    ValidationCheckResult
+        Structured validation decision for this replay or perturbation attempt.
     """
     if layers_to_perturb is None:
         layers_to_perturb = []
@@ -2905,9 +2963,18 @@ def _prepare_input_args_for_validating_layer(
     ``parent_arg_positions`` key is a tuple ``(outer_key, inner_key)`` and
     ``assign_to_sequence_or_dict`` handles the nested assignment.
 
-    Args:
-        layer_to_validate_parents_for: Layer being checked.
-        layers_to_perturb: Layers for which to perturb the saved outs.
+    Parameters
+    ----------
+    layer_to_validate_parents_for:
+        Layer being checked.
+    layers_to_perturb:
+        Layers whose saved outs should be perturbed.
+
+    Returns
+    -------
+    tuple[dict[str, Any] | None, str | None]
+        Replay argument dictionary, plus an optional unverified reason when the
+        replay inputs cannot be reconstructed.
 
     Returns:
         Tuple of prepared replay args and an optional unverified reason code.
@@ -3801,14 +3868,18 @@ def _deep_clone_tensors(val: Any) -> Any:
 
 
 def _copy_validation_args(input_args: dict[str, Any]) -> dict[str, Any]:
-    """Deep-clone all tensors in the input argument dict to avoid in-place mutation during validation.
+    """Deep-clone replay arguments to avoid in-place mutation during validation.
 
-    Args:
-        input_args: Dict with ``"args"`` (list) and ``"kwargs"`` (dict) keys holding
-            the raw creation arguments for a layer.
+    Parameters
+    ----------
+    input_args:
+        Dictionary with ``"args"`` and ``"kwargs"`` entries holding replay
+        inputs for a layer.
 
-    Returns:
-        A new dict with the same structure but with every tensor replaced by a detached clone.
+    Returns
+    -------
+    dict[str, Any]
+        Structure-equivalent dictionary with tensor leaves detached and cloned.
     """
     return {
         "args": [_deep_clone_tensors(v) for v in input_args["args"]],
@@ -3833,13 +3904,17 @@ def _perturb_layer_outs(parent_outs: torch.Tensor, output_outs: torch.Tensor) ->
       whose saved values are entirely non-finite are perturbed to finite zeros
       so NaN-aware equality cannot turn the perturbation into a no-op.
 
-    Args:
-        parent_outs: The original parent tensor to perturb.
-        output_outs: The child layer's output tensor, used to calibrate
-            the perturbation scale for float types.
+    Parameters
+    ----------
+    parent_outs:
+        Original parent tensor to perturb.
+    output_outs:
+        Child layer output tensor, used to calibrate float perturbation scale.
 
-    Returns:
-        A new tensor of the same shape/dtype with perturbed values.
+    Returns
+    -------
+    torch.Tensor
+        New tensor of the same shape and dtype with perturbed values.
     """
     device = parent_outs.device
     if parent_outs.numel() == 0:

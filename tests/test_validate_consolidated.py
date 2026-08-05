@@ -160,7 +160,7 @@ def test_validate_scope_backward_random_seed(
 def test_validate_intervention_scope_returns_report(
     model_and_input: tuple[TinyModel, torch.Tensor],
 ) -> None:
-    """Intervention scope should return a truthy five-axis report."""
+    """Intervention scope returns a report with explicit unevaluated axes."""
 
     model, x = model_and_input
     report = tl.validate(model, x, scope="intervention", random_seed=42)
@@ -173,6 +173,12 @@ def test_validate_intervention_scope_returns_report(
         "consistency",
         "locality",
     }
+    assert report.invariance is True
+    assert report.specificity is False
+    assert report.completeness is False
+    assert report.consistency is False
+    assert report.locality is False
+    assert bool(report) is False
 
 
 def test_scope_keyword_visibility(model_and_input: tuple[TinyModel, torch.Tensor]) -> None:

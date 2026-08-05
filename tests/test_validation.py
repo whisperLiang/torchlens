@@ -1207,7 +1207,7 @@ def test_validate_forward_pass_pristine_replay_catches_mutation_masked_bug(
                 torch.randn(3),
                 validate_metadata=False,
             )
-            is True
+            is False
         )
     monkeypatch.setattr(user_public_impls, "_restore_validation_replay_state", original_restore)
 
@@ -1260,7 +1260,7 @@ def test_validate_forward_pass_replay_copy_fallback_fails_for_lock_attr() -> Non
 
 
 def test_validate_forward_pass_warns_on_stateful_retrace_divergence() -> None:
-    """Structural re-trace divergence emits a structured retained warning."""
+    """Structural re-trace divergence warns and downgrades the result."""
 
     class ToggleBranch(nn.Module):
         """Model that changes control flow after one forward pass."""
@@ -1292,19 +1292,70 @@ def test_validate_forward_pass_warns_on_stateful_retrace_divergence() -> None:
         TraceNotReproducibleWarning,
         match="stateful/non-reproducible.*make the forward path state-independent",
     ) as caught:
-        assert user_public_impls._validate_forward_pass_torch(
-            ToggleBranch(),
-            torch.randn(2, 3),
-            _trace_observer=observe_trace,
+        assert (
+            user_public_impls._validate_forward_pass_torch(
+                ToggleBranch(),
+                torch.randn(2, 3),
+                _trace_observer=observe_trace,
+            )
+            is False
         )
 
-    warning = caught[0].message
+    warning = next(
+        warning.message
+        for warning in caught
+        if isinstance(warning.message, TraceNotReproducibleWarning)
+    )
     assert isinstance(warning, TraceNotReproducibleWarning)
     assert warning.fields["first_graph_hash"] != warning.fields["retrace_graph_hash"]
     assert warning.fields["first_divergence"] is not None
     assert len(diagnostics) == 1
     assert diagnostics[0][0].check == "trace_retrace_structure_mismatch"
     assert diagnostics[0][0].extra["first_op_count"] == warning.fields["first_op_count"]
+
+
+def test_validate_forward_pass_retrace_mismatch_marks_trace_unverified() -> None:
+    """The retained trace status stays honest after pristine re-trace drift."""
+
+    class ToggleBranch(nn.Module):
+        """Model that changes control flow after one forward pass."""
+
+        def __init__(self) -> None:
+            """Initialize branch state."""
+
+            super().__init__()
+            self.use_mul = False
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Run a different branch after the first pass."""
+
+            if self.use_mul:
+                out = x * 2
+            else:
+                out = x + 1
+            self.use_mul = True
+            return out
+
+    retained_statuses = []
+
+    def observe_trace(trace: Trace) -> None:
+        """Retain the disposable validation status before cleanup."""
+
+        retained_statuses.append(trace.validation_replay_status)
+
+    with pytest.warns(TraceNotReproducibleWarning, match="stateful/non-reproducible"):
+        assert (
+            user_public_impls._validate_forward_pass_torch(
+                ToggleBranch(),
+                torch.randn(2, 3),
+                _trace_observer=observe_trace,
+            )
+            is False
+        )
+
+    assert len(retained_statuses) == 1
+    assert retained_statuses[0].state == "unverified"
+    assert retained_statuses[0].reason == "trace_retrace_structure_mismatch"
 
 
 def test_validate_forward_pass_no_retrace_warning_for_stateless_model() -> None:
@@ -2504,6 +2555,41 @@ def test_replay_validation_checks_every_recurrent_pass() -> None:
         "linear_1_1:4",
         "linear_1_1:5",
     }
+
+
+def test_validate_forward_pass_metadata_off_rejects_functionless_op_laundering() -> None:
+    """Metadata-off replay still fails a compute op laundered into a source."""
+
+    class Tiny(nn.Module):
+        """Small model with one relu op available for tampering."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Apply a two-op computation."""
+
+            y = x + 1
+            z = torch.relu(y)
+            return z * 2
+
+    model = Tiny()
+    x = torch.tensor([-1.0, 2.0])
+    trace = trace_fn(model, x, save_arg_values=True)
+    try:
+        relu_op = next(op for op in trace.layer_list if op.func_name == "relu")
+        relu_op.func = None
+        relu_op.func_name = "input"
+        relu_op.is_internal_source = True
+
+        ground_truth = [model(x).detach().clone()]
+        result = trace.validate_forward_pass(ground_truth, validate_metadata=False)
+        assert bool(result) is False
+        assert trace.validation_replay_status.state == "failed"
+        assert any(
+            decision.get("reason") == "functionless_computational_op"
+            and decision.get("decision") == "failed"
+            for decision in trace.validation_replay_status.decisions
+        )
+    finally:
+        trace.cleanup()
 
 
 def test_replay_validation_detects_corrupted_third_recurrent_pass_inputs() -> None:
