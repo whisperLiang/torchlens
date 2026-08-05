@@ -135,3 +135,20 @@ def test_f12_in_range_point_unchanged():
     x, y = pt
     assert x == pytest.approx(55.0)
     assert y == pytest.approx(42.5)
+
+
+# ---------------------------------------------------------------------------
+# M6 — channel_grid documents that it renders only the first batch element
+# ---------------------------------------------------------------------------
+def test_m6_channel_grid_uses_first_batch_element():
+    base = torch.tensor([[[[0.0, 1.0], [2.0, 3.0]]], [[[4.0, 5.0], [6.0, 7.0]]]])
+    changed_tail = base.clone()
+    changed_tail[1] = torch.tensor([[[400.0, -500.0], [600.0, -700.0]]])  # batch 1 differs
+    cg = tl.viz.channel_grid(n=1, max_size=40)
+    # Documented: batch element 0 is the only one rendered, so changing batch 1
+    # must not change the output.
+    assert cg(base).tobytes() == cg(changed_tail).tobytes()
+    # ... but changing batch 0 must change the output (proves it uses batch 0).
+    changed_head = base.clone()
+    changed_head[0] = torch.tensor([[[9.0, -9.0], [3.0, -3.0]]])
+    assert cg(base).tobytes() != cg(changed_head).tobytes()

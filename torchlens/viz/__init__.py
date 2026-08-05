@@ -83,6 +83,11 @@ def heatmap(max_size: int = 200) -> Callable[[torch.Tensor], Image.Image | None]
 def channel_grid(n: int = 16, max_size: int = 300) -> Callable[[torch.Tensor], Image.Image | None]:
     """Create a grid visualizer for the first ``n`` activation channels.
 
+    For a batched ``(B, C, H, W)`` activation the grid shows the channels of the
+    FIRST batch element only (``tensor[0]``); the remaining batch items are not
+    rendered. A channel mosaic depicts a single feature map, so pass one sample
+    at a time to visualize other batch elements.
+
     Parameters
     ----------
     n:
@@ -105,7 +110,8 @@ def channel_grid(n: int = 16, max_size: int = 300) -> Callable[[torch.Tensor], I
         Parameters
         ----------
         tensor:
-            Tensor with shape ``(C, H, W)`` or ``(B, C, H, W)``.
+            Tensor with shape ``(C, H, W)`` or ``(B, C, H, W)``. For a batched
+            tensor only the first batch element (``tensor[0]``) is rendered.
         layer_label:
             Optional layer label, accepted for the visualizer contract.
 
@@ -251,7 +257,9 @@ def _to_channel_stack(tensor: torch.Tensor) -> torch.Tensor | None:
     Parameters
     ----------
     tensor:
-        Tensor to normalize.
+        Tensor to normalize. A batched ``(B, C, H, W)`` tensor is reduced to its
+        FIRST batch element (``tensor[0]``); other batch items are dropped, since
+        a channel stack represents a single feature map.
 
     Returns
     -------
@@ -262,7 +270,7 @@ def _to_channel_stack(tensor: torch.Tensor) -> torch.Tensor | None:
     with torch.no_grad():
         data = tensor.detach().to(device="cpu", dtype=torch.float32)
         if data.ndim == 4:
-            data = data[0]
+            data = data[0]  # first batch element only (documented)
         if data.ndim != 3:
             return None
         return torch.nan_to_num(data)
