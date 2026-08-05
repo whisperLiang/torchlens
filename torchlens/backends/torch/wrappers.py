@@ -1088,10 +1088,10 @@ def _storage_overlap_byte_interval(t: torch.Tensor) -> tuple[int, int]:
     """
 
     element_size = t.element_size()
-    start = t.storage_offset() * element_size
+    start = int(t.storage_offset()) * element_size
     if t.numel() == 0:
         return (start, start)
-    span = 1 + sum((size - 1) * stride for size, stride in zip(t.shape, t.stride()))
+    span = 1 + sum((int(size) - 1) * int(stride) for size, stride in zip(t.shape, t.stride()))
     return (start, start + span * element_size)
 
 
