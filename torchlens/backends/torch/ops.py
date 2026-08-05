@@ -13,7 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from math import prod
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
+from typing import TYPE_CHECKING, Any, Iterator, Literal, NamedTuple, cast
 
 import torch
 
@@ -133,13 +133,15 @@ from ...intervention.types import (
 from ...intervention.hooks import make_live_site_proxy, normalize_hook_plan
 from ...intervention.runtime import active_intervention_context
 from ...capture.arg_positions import (
+    DYNAMIC_SPEC_UNCACHEABLE,
     FUNC_ARG_SPECS,
     VARIADIC_TENSOR_ARG_FUNCS,
+    ArgSpec,
+    dynamic_spec_covers_call,
     extract_tensors_and_params,
     _cache_dynamic_spec,
     _normalize_func_name,
     _schema_arg_is_parent_candidate,
-    _schema_tensor_arg_kind,
 )
 from ...capture.session import capture_session_for
 
@@ -1873,13 +1875,102 @@ def _tensor_has_known_provenance(trace: "Trace", value: torch.Tensor) -> bool:
     return False
 
 
-_SCHEMA_TENSOR_OPERAND_SLOTS_CACHE: dict[str, tuple[frozenset[int], frozenset[str]] | None] = {}
+class _SchemaOperandSlots(NamedTuple):
+    """Schema-derived slot classification for one ATen operator packet.
+
+    Attributes:
+        operand_positions: Indices that can carry DATA provenance in some overload.
+        operand_names: Argument names that can carry data provenance.
+        seen_positions: Every index present in any overload (authority scope).
+        seen_names: Every argument name present in any overload (authority scope).
+        int_list_positions: Parent-candidate indices typed as an int/SymInt list in
+            some overload -- Python variadic-size bindings (``view(a, b, c)``,
+            ``zeros(d0, d1, ...)``) spread MULTIPLE positional args into one such
+            schema slot, so later python indices map into it, not past it.
+    """
+
+    operand_positions: frozenset[int]
+    operand_names: frozenset[str]
+    seen_positions: frozenset[int]
+    seen_names: frozenset[str]
+    int_list_positions: frozenset[int]
 
 
-def _compute_schema_tensor_operand_slots(
-    canonical: str,
-) -> tuple[frozenset[int], frozenset[str]] | None:
-    """Derive Tensor-operand slots for ``canonical`` from its ATen schemas.
+_SCHEMA_TENSOR_OPERAND_SLOTS_CACHE: dict[str, "_SchemaOperandSlots | None"] = {}
+
+# Schema base types that can NEVER carry tensor-data provenance: shape/dim/flag/
+# config metadata. Everything OUTSIDE this closed vocabulary (Tensor, number/Scalar,
+# float, complex, generic ``t``, Storage, Dict[...], unknown future types) is treated
+# as a potential DATA operand -- fail-closed: an unrecognized type keeps the witness
+# armed rather than silently suppressing a real operand.
+_SCHEMA_METADATA_ONLY_BASE_TYPES = frozenset(
+    {
+        "int",
+        "SymInt",
+        "bool",
+        "str",
+        "Device",
+        "Generator",
+        "AnyEnumType",
+        "ScalarType",
+        "Layout",
+        "MemoryFormat",
+        "Dimname",
+        "QScheme",
+        "Stream",
+    }
+)
+
+
+def _schema_type_base(type_text: str) -> str:
+    """Strip ``Optional[...]``/``List[...]``/``?``/``[]`` wrappers to the base type.
+
+    Parameters
+    ----------
+    type_text:
+        ``str(schema_arg.type)`` rendering, e.g. ``"Optional[List[int]]"``.
+
+    Returns
+    -------
+    str
+        Innermost base type token, e.g. ``"int"``.
+    """
+
+    text = type_text.strip()
+    while True:
+        if text.endswith("?"):
+            text = text[:-1].strip()
+            continue
+        if text.endswith("[]"):
+            text = text[:-2].strip()
+            continue
+        for wrapper in ("Optional[", "List["):
+            if text.startswith(wrapper) and text.endswith("]"):
+                text = text[len(wrapper) : -1].strip()
+                break
+        else:
+            return text
+
+
+def _schema_type_is_metadata_only(type_text: str) -> bool:
+    """Return whether a schema type can never carry tensor-data provenance."""
+
+    return _schema_type_base(type_text) in _SCHEMA_METADATA_ONLY_BASE_TYPES
+
+
+def _schema_type_is_int_list(type_text: str) -> bool:
+    """Return whether a schema type is an int/SymInt list (variadic-size slot)."""
+
+    text = type_text.strip()
+    if text.startswith("Optional[") and text.endswith("]"):
+        text = text[len("Optional[") : -1].strip()
+    if text.endswith("?"):
+        text = text[:-1].strip()
+    return text in ("List[int]", "List[SymInt]", "int[]", "SymInt[]")
+
+
+def _compute_schema_tensor_operand_slots(canonical: str) -> "_SchemaOperandSlots | None":
+    """Derive operand/metadata slot classification from ``canonical``'s ATen schemas.
 
     Parameters
     ----------
@@ -1889,18 +1980,25 @@ def _compute_schema_tensor_operand_slots(
 
     Returns
     -------
-    tuple[frozenset[int], frozenset[str]] | None
-        ``(tensor_positional_indices, tensor_arg_names)`` unioned across every
-        overload, or ``None`` when no authoritative schema exists. A slot counts
-        only when it is an input operand (not a write-only ``out=`` destination)
-        AND its schema type carries ``Tensor`` (single or list).
+    _SchemaOperandSlots | None
+        Slot classification unioned across every overload, or ``None`` when no
+        authoritative schema exists. A slot is an OPERAND when it is an input
+        (not a write-only ``out=`` destination) and its type is outside the
+        closed metadata vocabulary (so ``Tensor``, ``Scalar``/``number``,
+        ``float``, ``complex``, and generic list types all count -- a tensor
+        passed at such a slot feeds its VALUE into the op). ``seen_*`` records
+        the packet's full authority scope: a path outside it cannot be
+        classified by this packet at all.
     """
 
     packet = getattr(torch.ops.aten, canonical, None)
     if packet is None:
         return None
-    positions: set[int] = set()
-    names: set[str] = set()
+    operand_positions: set[int] = set()
+    operand_names: set[str] = set()
+    seen_positions: set[int] = set()
+    seen_names: set[str] = set()
+    int_list_positions: set[int] = set()
     found_schema = False
     for overload_name in packet.overloads():
         schema = getattr(getattr(packet, overload_name, None), "_schema", None)
@@ -1908,17 +2006,30 @@ def _compute_schema_tensor_operand_slots(
             continue
         found_schema = True
         for index, schema_arg in enumerate(getattr(schema, "arguments", ()) or ()):
-            if not _schema_arg_is_parent_candidate(schema_arg):
-                continue
-            if _schema_tensor_arg_kind(schema_arg) is None:
-                continue
-            positions.add(index)
             arg_name = getattr(schema_arg, "name", None)
+            seen_positions.add(index)
             if isinstance(arg_name, str):
-                names.add(arg_name)
+                seen_names.add(arg_name)
+            if not _schema_arg_is_parent_candidate(schema_arg):
+                # Write-only ``out=`` destination: seen (the packet KNOWS the
+                # slot) but never a data parent.
+                continue
+            type_text = str(getattr(schema_arg, "type", ""))
+            if _schema_type_is_int_list(type_text):
+                int_list_positions.add(index)
+            if not _schema_type_is_metadata_only(type_text):
+                operand_positions.add(index)
+                if isinstance(arg_name, str):
+                    operand_names.add(arg_name)
     if not found_schema:
         return None
-    return frozenset(positions), frozenset(names)
+    return _SchemaOperandSlots(
+        operand_positions=frozenset(operand_positions),
+        operand_names=frozenset(operand_names),
+        seen_positions=frozenset(seen_positions),
+        seen_names=frozenset(seen_names),
+        int_list_positions=frozenset(int_list_positions),
+    )
 
 
 def _arg_position_is_tensor_operand(func_name: str, path: str) -> bool:
@@ -1953,15 +2064,33 @@ def _arg_position_is_tensor_operand(func_name: str, path: str) -> bool:
     Returning ``True`` (operand) keeps the witness armed; returning ``False``
     (non-operand) suppresses ONLY the benign provenanced size-arg case.
 
+    Authority boundary (round-22 F6 hardening): a same-named ``torch.ops.aten``
+    packet may describe a NARROWER binding than the wrapped Python callable
+    (``torch.tensor`` vs the scalar-only ``aten::tensor`` overloads). The packet is
+    therefore trusted to confirm a non-operand ONLY inside its own scope:
+
+    * A slot is suppressed only when some overload KNOWS it (``seen``) and every
+      overload that knows it types it inside the closed metadata vocabulary
+      (int/SymInt/bool/str/Device/... -- shape, dim, flag, config). Value-typed
+      slots (``Scalar``/``number``, ``float``, ``complex``, generic lists) count
+      as DATA operands: a tensor passed there feeds its value into the op.
+    * A kwarg name or positional index UNKNOWN to every overload means the packet
+      is not authority for that path -- fail OPEN (keep the witness armed). One
+      carve-out keeps the capprov false-positive fix intact: python variadic-size
+      bindings (``view(a, b, c)``, ``zeros(d0, d1, ...)``) spread multiple python
+      positional args into ONE ``int[]``/``SymInt[]`` schema slot, so an index at
+      or past such a slot maps INTO it (benign size dim), not past the schema.
+
     Tripwire safety: this narrowing can NEVER open a capture-gap hole. A real
     capture gap means the tensor is UN-provenanced, which is caught earlier by
     branch (1) (``not _tensor_has_known_provenance``) at ANY position, before this
     classifier is consulted. It fails SAFE (returns ``True``, keep flagging)
     whenever authority is uncertain: variadic-arity transform ops (whose Tensor
     operands are extracted by a fresh crawl and whose positional-to-schema mapping
-    is call-dependent) and ops with no resolvable ATen schema. The union over
-    overloads can only ADD Tensor slots, so it never turns a real operand into a
-    suppressed non-operand.
+    is call-dependent), ops with no resolvable ATen schema, and paths outside the
+    resolved packet's scope. The union over overloads can only ADD operand slots,
+    and unknown types classify as operands, so a real data operand is never turned
+    into a schema-"confirmed" non-operand.
 
     Parameters
     ----------
@@ -1974,9 +2103,9 @@ def _arg_position_is_tensor_operand(func_name: str, path: str) -> bool:
     Returns
     -------
     bool
-        ``True`` when the path's top-level slot is a Tensor-operand position (or
+        ``True`` when the path's top-level slot is a data-operand position (or
         authority is uncertain); ``False`` for a schema-confirmed non-operand
-        size/shape slot.
+        size/shape/metadata slot.
     """
 
     if _normalize_func_name(func_name) in VARIADIC_TENSOR_ARG_FUNCS:
@@ -1989,18 +2118,34 @@ def _arg_position_is_tensor_operand(func_name: str, path: str) -> bool:
     slots = _SCHEMA_TENSOR_OPERAND_SLOTS_CACHE[canonical]
     if slots is None:
         return True
-    tensor_positions, tensor_names = slots
     if path.startswith("kw:"):
         top_key = path[len("kw:") :].split(".", 1)[0]
         normalized_key = _normalize_func_name(top_key)
-        return any(_normalize_func_name(name) == normalized_key for name in tensor_names)
+        if any(_normalize_func_name(name) == normalized_key for name in slots.operand_names):
+            return True
+        if any(_normalize_func_name(name) == normalized_key for name in slots.seen_names):
+            return False
+        # Kwarg unknown to every overload: the packet does not describe this
+        # binding's keyword surface (name-collision / narrower packet) -- fail open.
+        return True
     if path.startswith("arg"):
         index_text = path[len("arg") :].split(".", 1)[0]
         try:
             index = int(index_text)
         except ValueError:
             return True
-        return index in tensor_positions
+        if index in slots.operand_positions:
+            return True
+        if index in slots.seen_positions:
+            return False
+        if any(position <= index for position in slots.int_list_positions):
+            # Beyond every overload's arity but at/past a variadic int-list slot:
+            # the python binding spreads size dims positionally into that slot
+            # (``x.view(b, s, h, d)``), so this index is a benign size dim.
+            return False
+        # Beyond the packet's entire positional scope with no variadic-size slot
+        # to absorb it: the packet is not authority for this binding -- fail open.
+        return True
     return True
 
 
@@ -3361,18 +3506,33 @@ def _extract_arg_tensors_and_params(
     always take the fresh Tier-3 crawl and never touch the name-keyed dynamic
     cache: their tensor-operand arity is call-dependent, so a first-call spec
     would drop later operands (a capture gap; see ``VARIADIC_TENSOR_ARG_FUNCS``).
+
+    Tier-2 dynamic-cache specs are OBSERVED, not authoritative, so they are
+    trusted only when they cover every shallow tensor in the live call
+    (``dynamic_spec_covers_call``); otherwise the call re-crawls and the cache
+    union-merges, so a scalar-RHS first observation can never freeze away the
+    tensor-RHS parent of a later call (round-22 F3). Names whose crawled tensors
+    exceed ArgSpec's representable shapes are marked ``DYNAMIC_SPEC_UNCACHEABLE``
+    and re-crawl every call.
     """
     is_variadic_transform = normalized_name in VARIADIC_TENSOR_ARG_FUNCS
     if not is_variadic_transform:
-        spec = FUNC_ARG_SPECS.get(normalized_name) or _st._dynamic_arg_specs.get(normalized_name)
+        spec = FUNC_ARG_SPECS.get(normalized_name)
         if spec is not None:
-            return extract_tensors_and_params(spec, args, kwargs)  # type: ignore[arg-type]
+            return extract_tensors_and_params(spec, args, kwargs)
+        cached = _st._dynamic_arg_specs.get(normalized_name)
+        if isinstance(cached, ArgSpec) and dynamic_spec_covers_call(cached, args, kwargs):
+            return extract_tensors_and_params(cached, args, kwargs)
 
-    # Tier 3 fallback: BFS crawl. Cache the derived spec only for fixed-arity
-    # functions; variadic transform ops must re-crawl every call.
+    # Tier 3 fallback: BFS crawl. Cache/union-merge the derived spec only for
+    # fixed-arity functions; variadic transform ops and uncacheable names must
+    # re-crawl every call.
     all_args = list(args) + list(kwargs.values())
     arg_tensors, arg_parameters = _get_tensors_and_params_from_obj(all_args)
-    if not is_variadic_transform:
+    if (
+        not is_variadic_transform
+        and _st._dynamic_arg_specs.get(normalized_name) is not DYNAMIC_SPEC_UNCACHEABLE
+    ):
         _cache_dynamic_spec(normalized_name, args, kwargs, arg_tensors, arg_parameters)
     return arg_tensors, arg_parameters
 

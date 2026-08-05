@@ -283,7 +283,19 @@ def _merge_schema_tensor_slots(spec: ArgSpec, schemas: tuple[object, ...]) -> Ar
 
 
 def _apply_schema_tensor_position_corrections() -> None:
-    """Upgrade under-specified unary-style static specs from ATen schemas.
+    """Upgrade under-specified static specs from ATen schemas.
+
+    Every static spec is widened by the union of its ATen schemas' input-tensor
+    slots (round-22 F1/F2/F4/F5 class fix). The pass previously refused to touch
+    non-unary-style specs (any nonzero position or sequence position), which left
+    hand-grouped multi-operand entries permanently exempt from schema correction:
+    ``lu_solve`` keyed to the generic binary (0, 1) spec dropped its third tensor
+    operand, ``cosine_similarity`` grouped with the input/target losses dropped
+    both kwarg-passed operands, ``ctc_loss`` dropped tensor lengths, and
+    ``searchsorted`` dropped ``sorter``. The merge is append-only (existing
+    positions/kwargs stay intact) and parent-candidate-filtered (write-only
+    ``out=`` destinations never join), so widening a correct spec is a no-op and
+    widening an under-specified spec can only restore dropped parent edges.
 
     Parameters
     ----------
@@ -300,10 +312,6 @@ def _apply_schema_tensor_position_corrections() -> None:
         normalized_name = _normalize_func_name(func_name.strip("_"))
         current_spec = corrected_specs.get(normalized_name, FUNC_ARG_SPECS.get(normalized_name))
         if current_spec is None:
-            continue
-        if current_spec.sequence_positions or any(
-            position != 0 for position in current_spec.positions
-        ):
             continue
 
         schemas: list[object] = []
@@ -326,6 +334,86 @@ def _apply_schema_tensor_position_corrections() -> None:
     FUNC_ARG_SPECS.update(corrected_specs)
 
 
+DYNAMIC_SPEC_UNCACHEABLE = object()
+"""Sentinel cached for Tier-2 names whose BFS-found tensors cannot be represented
+by an ``ArgSpec`` (tensors nested deeper than top-level args, shallow sequences,
+or top-level kwargs). Such names must re-crawl every call: caching a lossy spec
+would silently drop the unrepresentable operands from every later call."""
+
+
+def _shallow_holds_tensor(value: object) -> bool:
+    """Return whether ``value`` is a tensor or a shallow sequence holding one.
+
+    Parameters
+    ----------
+    value:
+        Candidate argument value.
+
+    Returns
+    -------
+    bool
+        ``True`` for a tensor/Parameter or a list/tuple containing one.
+    """
+
+    if isinstance(value, torch.Tensor):
+        return True
+    if isinstance(value, (list, tuple)):
+        return any(isinstance(item, torch.Tensor) for item in value)
+    return False
+
+
+def dynamic_spec_covers_call(
+    spec: ArgSpec,
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+) -> bool:
+    """Return whether a Tier-2 cached spec covers every shallow tensor in this call.
+
+    The dynamic cache derives an ``ArgSpec`` from a previously OBSERVED call shape.
+    A later call may put a tensor at a slot an earlier call filled with a scalar
+    (``x % 2.0`` then ``a % b``); extracting through the frozen spec would silently
+    drop that operand's parent edge, making capture correctness depend on call
+    order within and ACROSS traces (round-22 F3b: the cache is process-global).
+    This coverage check is the guard: when the live call carries a tensor at any
+    position or kwarg the cached spec does not extract, the caller must fall back
+    to a fresh BFS crawl (and union-merge the result) instead of trusting the
+    cache. With it, every top-level / shallow-sequence tensor operand is extracted
+    identically regardless of what any earlier call looked like.
+
+    Parameters
+    ----------
+    spec:
+        Cached dynamic spec for the normalized function name.
+    args:
+        Live positional arguments.
+    kwargs:
+        Live keyword arguments.
+
+    Returns
+    -------
+    bool
+        ``True`` when extraction through ``spec`` finds every shallow tensor in
+        the live call; ``False`` when a fresh crawl is required.
+    """
+
+    position_set = set(spec.positions)
+    sequence_position_set = set(spec.sequence_positions)
+    for index, arg in enumerate(args):
+        if isinstance(arg, torch.Tensor):
+            if index not in position_set:
+                return False
+        elif isinstance(arg, (list, tuple)) and any(isinstance(item, torch.Tensor) for item in arg):
+            if index not in position_set and index not in sequence_position_set:
+                return False
+    if not kwargs:
+        return True
+    covered_kwargs = {_normalize_func_name(str(name)) for name in spec.tensor_kwargs}
+    for key, value in kwargs.items():
+        if _shallow_holds_tensor(value) and _normalize_func_name(str(key)) not in covered_kwargs:
+            return False
+    return True
+
+
 def _cache_dynamic_spec(
     normalized_name: str,
     args: tuple[object, ...],
@@ -333,7 +421,47 @@ def _cache_dynamic_spec(
     found_tensors: list[torch.Tensor],
     found_params: list[torch.nn.Parameter],
 ) -> None:
-    """Construct and cache an ArgSpec from BFS crawl results (Tier 3)."""
+    """Construct, union-merge, and cache an ArgSpec from BFS crawl results (Tier 3).
+
+    Round-22 F3 hardening. The cache used to freeze the FIRST observed call shape
+    for the lifetime of the process, so one ``x % scalar`` observation dropped the
+    tensor RHS parent of every later ``a % b`` -- in the same trace AND in every
+    later ``tl.trace`` (``_state._dynamic_arg_specs`` is never cleared). Now:
+
+    * the derived spec is UNION-merged (append-only) with any existing cached spec,
+      so a new observation can only widen coverage, never narrow it; and
+    * when the merged spec cannot re-extract everything the BFS found (tensors
+      nested beyond ArgSpec's representable shapes), the name is marked
+      ``DYNAMIC_SPEC_UNCACHEABLE`` so every later call re-crawls instead of
+      silently dropping the unrepresentable operands on calls after the first.
+
+    Together with the ``dynamic_spec_covers_call`` guard at the lookup site, this
+    restores order-independence: extraction results for a call no longer depend on
+    which call shapes were observed earlier in the process.
+
+    Parameters
+    ----------
+    normalized_name:
+        Normalized function name key.
+    args:
+        Positional arguments of the crawled call.
+    kwargs:
+        Keyword arguments of the crawled call.
+    found_tensors:
+        Tensors the BFS crawl located anywhere in the call.
+    found_params:
+        Parameters the BFS crawl located anywhere in the call.
+
+    Returns
+    -------
+    None
+        Mutates ``_state._dynamic_arg_specs`` in place.
+    """
+
+    existing = _state._dynamic_arg_specs.get(normalized_name)
+    if existing is DYNAMIC_SPEC_UNCACHEABLE:
+        return
+
     all_found_ids = {id(t) for t in found_tensors} | {id(p) for p in found_params}
 
     positions = []
@@ -350,14 +478,35 @@ def _cache_dynamic_spec(
                     break
 
     for key, val in kwargs.items():
-        if val is not None and id(val) in all_found_ids:
+        if val is None:
+            continue
+        if id(val) in all_found_ids:
             tensor_kwargs_found.append(key)
+        elif isinstance(val, (list, tuple)) and any(id(item) in all_found_ids for item in val):
+            tensor_kwargs_found.append(key)
+
+    if isinstance(existing, ArgSpec):
+        existing_positions = set(existing.positions)
+        existing_sequences = set(existing.sequence_positions)
+        existing_kwargs = set(existing.tensor_kwargs)
+        positions = list(existing.positions) + [p for p in positions if p not in existing_positions]
+        sequence_positions = list(existing.sequence_positions) + [
+            p for p in sequence_positions if p not in existing_sequences
+        ]
+        tensor_kwargs_found = list(existing.tensor_kwargs) + [
+            k for k in tensor_kwargs_found if k not in existing_kwargs
+        ]
 
     spec = ArgSpec(
         positions=tuple(positions),
         sequence_positions=tuple(sequence_positions),
         tensor_kwargs=tuple(tensor_kwargs_found),
     )
+    re_tensors, re_params = extract_tensors_and_params(spec, args, kwargs)
+    re_found_ids = {id(t) for t in re_tensors} | {id(p) for p in re_params}
+    if not all_found_ids <= re_found_ids:
+        _state._dynamic_arg_specs[normalized_name] = DYNAMIC_SPEC_UNCACHEABLE
+        return
     _state._dynamic_arg_specs[normalized_name] = spec
 
 
@@ -936,6 +1085,11 @@ _BINARY_FUNCS = [
     "floordivide",
     "remainder",
     "fmod",
+    # "mod" is Tensor.__mod__, the PUBLIC ``%`` operator (the only decorated callable
+    # normalizing to this key). It was missing here, so it fell to the Tier-2 dynamic
+    # cache and a first ``x % scalar`` observation froze positions=(0,), dropping the
+    # tensor RHS parent of every later ``a % b`` (round-22 F3a).
+    "mod",
     "rsub",
     "pow",
     "floatpower",
@@ -1131,7 +1285,9 @@ _FACTORY_FUNCS = [
     "eye",
     "full",
     "empty",
-    "tensor",
+    # NOTE: "tensor" (torch.tensor) is NOT a pure factory -- ``torch.tensor(data)``
+    # accepts an existing tensor as ``data`` (torch warns but executes), a real
+    # data-lineage edge. It gets an explicit spec below (round-22 F6).
     "astensor",
     "fromnumpy",
     "fromfile",
@@ -1183,6 +1339,17 @@ FUNC_ARG_SPECS["fulllike"] = ArgSpec(
 )
 FUNC_ARG_SPECS["newfull"] = ArgSpec(positions=(0, 2), tensor_kwargs=("self", "fill_value"))
 FUNC_ARG_SPECS["newtensor"] = ArgSpec(positions=(0, 1), tensor_kwargs=("self", "data"))
+
+# torch.tensor(data): a value-COPY factory whose ``data`` may be an EXISTING tensor
+# (legal; torch emits a UserWarning recommending clone().detach() but executes).
+# That is a data-lineage edge exactly like ``as_tensor``/``clone``/``detach``, so the
+# source must become a graph parent; dropping it disconnected the op from its input
+# ancestry with NO unattributed marker (round-22 F6 -- the only fully silent drop
+# found, because the narrower scalar-only ``aten::tensor`` packet disarmed the
+# witness; see _arg_position_is_tensor_operand in backends/torch/ops.py for the
+# witness-side fix). Scalar/list ``data`` holds no tensor, so extraction's
+# isinstance checks keep plain factory calls parentless.
+FUNC_ARG_SPECS["tensor"] = ArgSpec(positions=(0,), tensor_kwargs=("data",))
 
 # ---------------------------------------------------------------------------
 # Special patterns (custom ArgSpec per function or group)
