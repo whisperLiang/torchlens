@@ -279,6 +279,26 @@ def test_classical_mds_sign_convention_is_deterministic() -> None:
     assert np.array_equal(embedding_a, embedding_b)
 
 
+def test_classical_mds_warns_on_ambiguous_square_feature_matrix() -> None:
+    """Square symmetric feature matrices should no longer be treated silently."""
+
+    features = np.array(
+        [
+            [0.0, 0.81632961, 0.47703871, 0.86999729],
+            [0.81632961, 0.0, 1.886532, 1.35998054],
+            [0.47703871, 1.886532, 0.0, 0.50481297],
+            [0.86999729, 1.35998054, 0.50481297, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+    with pytest.warns(UserWarning, match="ambiguous square input"):
+        embedding, info = repgeom.classical_mds(features, min_n=3)
+
+    assert embedding.shape == (4, 2)
+    assert info["input_kind"] == "distances"
+
+
 def test_activation_distance_matrix_metrics() -> None:
     """Activation distance helper should flatten rows and support core metrics."""
 
@@ -866,6 +886,15 @@ def test_mds_evolution_recurrent_aggregate_requires_pass_selection() -> None:
         repgeom.mds_evolution(trace, save=tl.func("linear"), min_n=8)
 
 
+def test_mds_evolution_default_recurrent_saved_layer_requires_pass_selection() -> None:
+    """Default recurrent selection should not silently omit saved recurrent layers."""
+
+    trace = _mds_trace(_RecurrentMDS(), tl.func("linear"))
+
+    with pytest.raises(ValueError, match="select a pass \\(layer is recurrent\\)"):
+        repgeom.mds_evolution(trace, min_n=8)
+
+
 def test_mds_evolution_recurrent_pass_qualified_selector_uses_op_key() -> None:
     """A single recurrent pass selection should read op.out and store op coords."""
 
@@ -890,6 +919,15 @@ def test_rdm_evolution_recurrent_aggregate_requires_pass_selection() -> None:
 
     with pytest.raises(ValueError, match="select a pass \\(layer is recurrent\\)"):
         repgeom.rdm_evolution(trace, save=tl.func("linear"), min_n=8)
+
+
+def test_rdm_evolution_default_recurrent_saved_layer_requires_pass_selection() -> None:
+    """Default recurrent RDM selection should not silently omit saved passes."""
+
+    trace = _mds_trace(_RecurrentMDS(), tl.func("linear"))
+
+    with pytest.raises(ValueError, match="select a pass \\(layer is recurrent\\)"):
+        repgeom.rdm_evolution(trace, min_n=8)
 
 
 def test_rdm_evolution_recurrent_pass_qualified_selector_uses_op_key() -> None:
@@ -936,6 +974,15 @@ def test_scree_evolution_recurrent_pass_qualified_selector_uses_op_key(tmp_path:
     assert torch.equal(
         loaded._annotation_blobs[f"scree:{key}"], torch.from_numpy(spectra_by_key[key])
     )
+
+
+def test_scree_evolution_default_recurrent_saved_layer_requires_pass_selection() -> None:
+    """Default recurrent scree selection should not silently omit saved passes."""
+
+    trace = _mds_trace(_RecurrentMDS(), tl.func("linear"))
+
+    with pytest.raises(ValueError, match="select a pass \\(layer is recurrent\\)"):
+        repgeom.scree_evolution(trace, min_n=8)
 
 
 def test_mds_evolution_unsaved_activation_raises_capture_guidance() -> None:
