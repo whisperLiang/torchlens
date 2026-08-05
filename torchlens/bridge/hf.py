@@ -14,6 +14,61 @@ from torchlens.data_classes.trace import ResolvedPreprocessing, Trace
 _MODALITY_KEYS = frozenset({"text", "image", "images", "audio", "videos"})
 
 
+def _is_hf_chat_message(item: Any) -> bool:
+    """Return whether ``item`` is a plausible Hugging Face chat-message dict.
+
+    A conservative shape check: a chat message must be a dict whose ``role`` is a
+    string and whose ``content`` is a string or a list (the two shapes real chat
+    templates accept). Presence of the keys alone is not sufficient -- values
+    such as ``None`` or arbitrary objects must decline the text auto-route.
+
+    Parameters
+    ----------
+    item:
+        Candidate chat-message record.
+
+    Returns
+    -------
+    bool
+        True only for a dict with a string ``role`` and a str/list ``content``.
+    """
+
+    return (
+        isinstance(item, dict)
+        and isinstance(item.get("role"), str)
+        and isinstance(item.get("content"), (str, list))
+    )
+
+
+def _is_plausible_media_value(value: Any) -> bool:
+    """Return whether ``value`` is a plausible audio/video modality payload.
+
+    Conservative acceptance so ``None`` and arbitrary objects decline the
+    multimodal auto-route. Accepts tensors, raw bytes, non-empty sequences (raw
+    waveforms, frame lists), and array-like objects (e.g. NumPy arrays exposing
+    ``__array__``); everything else -- ``None``, bare objects, empty containers,
+    scalars -- is rejected.
+
+    Parameters
+    ----------
+    value:
+        Candidate value for an ``audio`` or ``videos`` modality key.
+
+    Returns
+    -------
+    bool
+        True only for a plausibly media-bearing value.
+    """
+
+    if isinstance(value, torch.Tensor):
+        return True
+    if isinstance(value, (bytes, bytearray)):
+        return True
+    if isinstance(value, (list, tuple)):
+        return bool(value)
+    return hasattr(value, "__array__")
+
+
 def _is_hf_text_input(value: Any) -> bool:
     """Return whether ``value`` is a supported Hugging Face text payload.
 
@@ -26,7 +81,8 @@ def _is_hf_text_input(value: Any) -> bool:
     -------
     bool
         True for a string, a non-empty list of strings, or a non-empty
-        chat-message list with ``role`` and ``content`` keys.
+        chat-message list whose entries have a string ``role`` and str/list
+        ``content``.
     """
 
     if isinstance(value, str):
@@ -36,9 +92,7 @@ def _is_hf_text_input(value: Any) -> bool:
         if isinstance(first, str):
             return all(isinstance(item, str) for item in value)
         if isinstance(first, dict):
-            return all(
-                isinstance(item, dict) and "role" in item and "content" in item for item in value
-            )
+            return all(_is_hf_chat_message(item) for item in value)
     return False
 
 
@@ -128,7 +182,7 @@ def _is_hf_multimodal_input(value: Any) -> bool:
                 return True
         if key == "text" and isinstance(item, str):
             return True
-        if key in {"audio", "videos"}:
+        if key in {"audio", "videos"} and _is_plausible_media_value(item):
             return True
     return False
 
