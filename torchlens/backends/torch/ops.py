@@ -4039,11 +4039,37 @@ def _emit_exhaustive_operation_events(
         expected_output_count=expected_output_count,
     )
 
+    # Container entries that ARE an input object (broadcast_tensors(x, x) with
+    # conforming shapes, atleast_1d/2d/3d, ...) are pure pass-throughs: torch
+    # hands back the caller's own tensor inside the returned tuple. Labeling
+    # the live input directly would steal its label (last-wins for duplicated
+    # entries), leave phantom dead-end siblings, and reroute downstream direct
+    # consumers of the input through an op whose result the user may never use
+    # (W3 audit F4). Mirror the scalar pass-through machinery: log each such
+    # entry against a minted safe copy so the live input keeps its label.
+    # out= destinations are excluded -- the op genuinely WROTE into them, so
+    # the live destination must keep advancing to this op's label.
+    out_kwarg_value = kwargs.get("out") if isinstance(kwargs, dict) else None
+    if isinstance(out_kwarg_value, torch.Tensor):
+        out_destination_ids: frozenset[int] = frozenset((id(out_kwarg_value),))
+    elif isinstance(out_kwarg_value, (list, tuple)):
+        out_destination_ids = frozenset(
+            id(item) for item in out_kwarg_value if isinstance(item, torch.Tensor)
+        )
+    else:
+        out_destination_ids = frozenset()
+
     for i, output_entry in enumerate(output_entries):
         out = output_entry.value
         if not _output_should_be_logged(out, is_bottom_level_func):
             continue
         out_tensor = cast(torch.Tensor, out)
+        if (
+            output_entry.container_spec is not None
+            and id(out_tensor) not in out_destination_ids
+            and any(out_tensor is arg_tensor for arg_tensor in arg_tensors)
+        ):
+            out_tensor = safe_copy(out_tensor)
 
         fields_dict_onetensor = (
             fields_dict if use_single_output_fields else _copy_shared_fields_for_output(fields_dict)
