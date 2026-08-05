@@ -249,6 +249,9 @@ class BufferWriteTracker:
         # mirrored onto params. address -> (whole-storage uint8 byte clone, tensor version).
         self.address_to_param_snapshot: dict[str, tuple[torch.Tensor, int | None]] = {}
         self.address_to_param_tensor: dict[str, torch.Tensor] = {}
+        self._installed_module_refs: dict[
+            type[nn.Module], list[weakref.ReferenceType[nn.Module]]
+        ] = {}
 
     def install(self) -> None:
         """Install scoped class ``__setattr__`` patches and seed the buffer index."""
@@ -270,25 +273,24 @@ class BufferWriteTracker:
                 cls.__setattr__ = _make_scoped_setattr(cls, original)  # type: ignore[assignment]
             patched.prepared_instances.add(module)
             patched.refcount += 1
-            self._installed_classes.add(cls)
+            self._installed_module_refs.setdefault(cls, []).append(weakref.ref(module))
 
     def uninstall(self) -> None:
         """Restore class ``__setattr__`` methods whose session refcount reaches zero."""
 
-        model = self.model_ref()
-        modules = list(model.modules()) if model is not None else []
-        for cls in list(self._installed_classes):
+        for cls, module_refs in list(self._installed_module_refs.items()):
             patched = self._patched_classes.get(cls)
             if patched is None:
                 continue
-            for module in modules:
-                if type(module) is cls:
+            for module_ref in module_refs:
+                module = module_ref()
+                if module is not None:
                     patched.prepared_instances.discard(module)
-                    patched.refcount = max(0, patched.refcount - 1)
+            patched.refcount = max(0, patched.refcount - len(module_refs))
             if patched.refcount == 0:
                 cls.__setattr__ = patched.original_setattr  # type: ignore[assignment]
                 del self._patched_classes[cls]
-        self._installed_classes.clear()
+        self._installed_module_refs.clear()
 
     def refresh_index(self) -> None:
         """Refresh address, object, storage, version, and value snapshots."""

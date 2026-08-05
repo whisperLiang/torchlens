@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 _INCOMPLETE_VERSION = "tensor_version_unavailable"
 _INCOMPLETE_BYPASS = "registration_interposition_bypassed"
+_INCOMPLETE_OPAQUE_OBJECT = "opaque_object_untraversed"
 _IMMUTABLE_LEAF_TYPES = (str, bytes, int, float, bool, complex, type(None))
 
 
@@ -830,6 +831,7 @@ def _walk_value(
         structure.append((path, "immutable", type(value).__name__))
         leaves.append((path, "immutable", (type(value).__name__, value)))
         return
+    reasons.add(_INCOMPLETE_OPAQUE_OBJECT)
     structure.append((path, "object", type(value).__qualname__))
     leaves.append((path, "object", (type(value).__qualname__, id(value))))
 

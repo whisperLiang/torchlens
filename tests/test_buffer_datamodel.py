@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,35 @@ from torchlens.postprocess.labeling import _replace_layer_names_for_layer_entry
 
 
 TensorFactory = Callable[[], torch.Tensor]
+
+
+def test_buffer_write_tracker_uninstall_restores_class_after_model_gc() -> None:
+    """Tracker teardown must restore patched classes even after model GC."""
+
+    class _TrackerModel(nn.Module):
+        """Minimal model whose class receives the scoped ``__setattr__`` patch."""
+
+        def __init__(self) -> None:
+            """Register one buffer for tracker installation."""
+
+            super().__init__()
+            self.register_buffer("buf", torch.tensor([1.0]))
+
+    trace = SimpleNamespace(_buffer_initial_values={})
+    model = _TrackerModel()
+    tracker = buffer_writes.BufferWriteTracker(trace, model)
+    original = _TrackerModel.__setattr__
+
+    tracker.install()
+    assert _TrackerModel.__setattr__ is not original
+    assert _TrackerModel in buffer_writes.BufferWriteTracker._patched_classes
+
+    del model
+    gc.collect()
+    tracker.uninstall()
+
+    assert _TrackerModel.__setattr__ is original
+    assert _TrackerModel not in buffer_writes.BufferWriteTracker._patched_classes
 
 
 def test_removed_buffer_raw_label_is_scrubbed_from_per_op_graph_fields() -> None:
