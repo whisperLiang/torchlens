@@ -488,8 +488,21 @@ def _copy_tensor_payload(
         except Exception:
             try:
                 return x.data.cpu().clone()
-            except Exception:
-                return torch.zeros(x.shape, dtype=torch.float32)
+            except Exception as exc:
+                # Fail loud rather than fabricate a payload. The former
+                # ``torch.zeros(x.shape, dtype=torch.float32)`` last resort
+                # silently returned a WRONG value AND a WRONG dtype (float32
+                # regardless of the source) with no marker, corrupting the
+                # captured activation invisibly. A tensor that survives none of
+                # the three clone strategies cannot be copied; surfacing that is
+                # the only honest outcome, and it mirrors the non-detached path
+                # above, which already propagates a clone failure.
+                raise RuntimeError(
+                    "torchlens could not copy a tensor payload: every clone "
+                    "strategy failed. Refusing to fabricate a placeholder tensor "
+                    "(which would silently corrupt the captured activation). "
+                    f"Source tensor: shape={tuple(x.shape)}, dtype={x.dtype}."
+                ) from exc
 
 
 def _clone_tensor_payload(

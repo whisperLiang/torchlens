@@ -9,7 +9,23 @@ fail. These tests are deterministic and CPU-only.
 import pytest
 import torch
 
-from torchlens.utils.tensor_utils import tensor_nanequal
+from torchlens.utils.tensor_utils import _copy_tensor_payload, tensor_nanequal
+
+
+class _UncloneableTensor(torch.Tensor):
+    """Tensor whose every clone strategy fails, exercising the last-resort path.
+
+    ``detach`` returns ``self`` and ``.data`` preserves the subclass, so
+    ``x.detach().clone()`` and ``x.data.cpu().clone()`` both route back through
+    the overridden ``clone`` and raise -- reaching ``_copy_tensor_payload``'s
+    final fallback.
+    """
+
+    def clone(self, *args, **kwargs):  # type: ignore[override]
+        raise RuntimeError("clone deliberately disabled")
+
+    def detach(self, *args, **kwargs):  # type: ignore[override]
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -75,3 +91,21 @@ def test_h4_float_tolerance_still_allowed():
     b = torch.tensor([1.0 + 1e-7, 2.0 - 1e-7], dtype=torch.float32)
     assert tensor_nanequal(a, b, allow_tolerance=True) is True
     assert tensor_nanequal(a, b, allow_tolerance=False) is False
+
+
+# ---------------------------------------------------------------------------
+# H3 -- _copy_tensor_payload must fail loud, never fabricate a zeros payload.
+# ---------------------------------------------------------------------------
+def test_h3_clone_failure_raises_not_fabricates():
+    """A tensor that cannot be cloned must raise, not return fabricated zeros."""
+    x = torch.tensor([3.0, 4.0], dtype=torch.float64).as_subclass(_UncloneableTensor)
+    with pytest.raises(RuntimeError, match="could not copy a tensor payload"):
+        _copy_tensor_payload(x, detach_tensor=True, save_mode="copy")
+
+
+def test_h3_normal_tensor_still_copies():
+    """The fail-loud path must not disturb ordinary copyable tensors."""
+    x = torch.tensor([3.0, 4.0], dtype=torch.float64)
+    out = _copy_tensor_payload(x, detach_tensor=True, save_mode="copy")
+    assert out.dtype == torch.float64
+    assert torch.equal(out, x)
