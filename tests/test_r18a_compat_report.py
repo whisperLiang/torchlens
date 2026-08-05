@@ -105,3 +105,113 @@ def test_hf_row_detects_transformers_subclass_by_mro() -> None:
     row = report(UserModel(), torch.randn(1)).row("hf_transformers")
 
     assert row.detected is True
+
+
+# ---------------------------------------------------------------------------
+# A3-11 (+ DDP/DeepSpeed siblings) — distributed-wrapper detection must key on
+# real module namespaces, not on a substring of a user class name.
+# ---------------------------------------------------------------------------
+
+
+class _Passthrough(nn.Module):
+    """Minimal passthrough module used for namespace-detection fixtures."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the input unchanged.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            The input tensor.
+        """
+
+        return x
+
+
+def _named(module_path: str, class_name: str) -> nn.Module:
+    """Build a passthrough instance advertising a specific module/class identity.
+
+    Parameters
+    ----------
+    module_path:
+        Value for the synthetic type's ``__module__``.
+    class_name:
+        Name for the synthetic type.
+
+    Returns
+    -------
+    nn.Module
+        Instance of the synthesized module class.
+    """
+
+    klass = type(class_name, (_Passthrough,), {"__module__": module_path})
+    return klass()
+
+
+def test_fsdp_row_ignores_user_class_merely_named_fsdp() -> None:
+    """A user class named ``FsdpExportHelper`` must not trip the FSDP row."""
+
+    row = report(_named("my_project.helpers", "FsdpExportHelper"), torch.randn(1)).row("fsdp")
+
+    assert row.detected is False
+    assert row.status == "pass"
+
+
+def test_fsdp_row_detects_real_fsdp_namespace() -> None:
+    """A class defined under ``torch.distributed.fsdp`` stays detected."""
+
+    model = _named("torch.distributed.fsdp.fully_sharded_data_parallel", "FullyShardedDataParallel")
+    row = report(model, torch.randn(1)).row("fsdp")
+
+    assert row.detected is True
+    assert row.status == "scope"
+
+
+def test_ddp_row_ignores_user_class_merely_named_distributed() -> None:
+    """A user class named like DDP but in a user module must not be detected."""
+
+    model = _named("my_project.net", "MyDistributedDataParallelHelper")
+    row = report(model, torch.randn(1)).row("distributed_data_parallel")
+
+    assert row.detected is False
+
+
+def test_ddp_row_detects_real_torch_ddp_namespace() -> None:
+    """A class under ``torch.nn.parallel.distributed`` stays detected."""
+
+    model = _named("torch.nn.parallel.distributed", "DistributedDataParallel")
+    row = report(model, torch.randn(1)).row("distributed_data_parallel")
+
+    assert row.detected is True
+
+
+def test_ddp_row_does_not_fire_on_data_parallel() -> None:
+    """``nn.DataParallel`` (a different namespace) must not trip the DDP row."""
+
+    row = report(nn.DataParallel(_Passthrough()), torch.randn(1)).row("distributed_data_parallel")
+
+    assert row.detected is False
+
+
+def test_deepspeed_row_ignores_user_class_merely_named_deepspeed() -> None:
+    """A user class named ``DeepspeedConfigHelper`` must not trip the DeepSpeed row."""
+
+    model = _named("my_project.cfg", "DeepspeedConfigHelper")
+    row = report(model, torch.randn(1)).row("deepspeed")
+
+    assert row.detected is False
+
+
+def test_deepspeed_row_detects_real_deepspeed_namespace() -> None:
+    """A class under the ``deepspeed`` namespace stays detected."""
+
+    model = _named("deepspeed.runtime.engine", "DeepSpeedEngine")
+    row = report(model, torch.randn(1)).row("deepspeed")
+
+    assert row.detected is True
+    assert row.status == "scope"

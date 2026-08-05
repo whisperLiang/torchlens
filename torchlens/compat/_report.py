@@ -317,26 +317,6 @@ def _class_identity(value: Any) -> str:
     return f"{value_type.__module__}.{value_type.__qualname__}".lower()
 
 
-def _model_class_contains(model: nn.Module, needles: Sequence[str]) -> bool:
-    """Return whether a model class identity contains any needle.
-
-    Parameters
-    ----------
-    model:
-        Model to inspect.
-    needles:
-        Lowercase substrings to search for.
-
-    Returns
-    -------
-    bool
-        True if any needle matches.
-    """
-
-    identity = _class_identity(model)
-    return any(needle in identity for needle in needles)
-
-
 def _class_in_namespace(value: Any, module_prefixes: Sequence[str]) -> bool:
     """Return whether ``value``'s type or a base lives in a listed module namespace.
 
@@ -649,7 +629,7 @@ def _ddp_row(model: nn.Module) -> CompatRow:
         Report row.
     """
 
-    detected = _model_class_contains(model, ("distributeddataparallel",))
+    detected = _class_in_namespace(model, ("torch.nn.parallel.distributed",))
     details = (
         "DistributedDataParallel detected; TorchLens unwraps the rank-local .module and "
         "captures that eager module."
@@ -681,7 +661,9 @@ def _fsdp_row(model: nn.Module) -> CompatRow:
         Report row.
     """
 
-    detected = _model_class_contains(model, ("fullyshardeddataparallel", "fsdp"))
+    detected = _class_in_namespace(
+        model, ("torch.distributed.fsdp", "torch.distributed._composable.fsdp")
+    )
     status: Status = "scope" if detected else "pass"
     details = (
         "FSDP detected; sharded parameter materialization is outside TorchLens' launch scope."
@@ -713,7 +695,7 @@ def _deepspeed_row(model: nn.Module) -> CompatRow:
         Report row.
     """
 
-    detected = _model_class_contains(model, ("deepspeed", "deepspeedengine"))
+    detected = _class_in_namespace(model, ("deepspeed",))
     status: Status = "scope" if detected else "pass"
     details = (
         "DeepSpeed engine detected; ZeRO/offload execution is outside TorchLens' launch scope."
