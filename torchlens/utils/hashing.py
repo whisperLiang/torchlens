@@ -242,11 +242,17 @@ def compute_graph_shape_hash(trace: Any, *, include_module_address: bool = True)
     for index, layer in enumerate(trace.layer_list):
         address = normalize_address_for_hash(getattr(layer, "module", None))
         hash_address = address if include_module_address else None
-        parent_indices = sorted(
+        # Preserve parent EDGE ORDER: ``layer.parents`` is an ordered list whose
+        # position encodes operand routing. Sorting would make a noncommutative
+        # op's ``(a, b)`` and ``(b, a)`` parents hash identically, silently
+        # accepting operand-order drift. This mirrors the operand-order-sensitive
+        # refresh graph signature (commit 74898ada); the shape hash must not be
+        # blind to a distinction the refresh tripwire enforces.
+        parent_indices = [
             order_by_label[parent_label]
             for parent_label in getattr(layer, "parents", ())
             if parent_label in order_by_label
-        )
+        ]
         records.append(
             {
                 "index": index,
@@ -293,11 +299,14 @@ def compute_raw_event_shape_hash(capture_events: Any) -> str:
         function = event.function
         output = event.output
         tensor = output.tensor
-        parent_indices = sorted(
+        # Preserve parent EDGE ORDER (see ``compute_graph_shape_hash``):
+        # ``event.parents`` is ordered by operand position, so sorting would
+        # discard the very order this hash claims to include.
+        parent_indices = [
             order_by_raw_label[parent.parent_label_raw]
             for parent in event.parents
             if parent.parent_label_raw in order_by_raw_label
-        )
+        ]
         module_addresses = [
             normalize_address_for_hash(address)
             for address, _call_index in getattr(event, "modules", ()) or ()
