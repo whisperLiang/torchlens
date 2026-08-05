@@ -216,6 +216,10 @@ class _TlSpecWriter:
         target_path = Path(path)
         _reject_symlink_path(target_path, context="bundle tlspec target")
         tmp_path = target_path.parent / f"tmp.{uuid.uuid4().hex}"
+        # ``backup_path`` holds the pre-overwrite bundle *renamed aside* (never
+        # deleted) so a failure during the final swap can restore it. It stays
+        # ``None`` unless we actually move an existing target out of the way.
+        backup_path: Path | None = None
         body_filename = "body.safetensors"
         try:
             if target_path.exists() and not overwrite:
@@ -250,12 +254,39 @@ class _TlSpecWriter:
                 }
             ]
             cls.write_json(tmp_path / TLSPEC_MANIFEST_FILENAME, manifest)
+            # Atomic overwrite. Never ``rmtree`` the only good bundle before
+            # the replacement is known installed: move the existing target
+            # ASIDE to a sibling backup (rename, not delete), swap the freshly
+            # written bundle into place, then remove the backup only after the
+            # swap succeeds. Any failure before/during the swap leaves the OLD
+            # bundle recoverable (see the ``except`` restore below). All three
+            # paths are siblings under ``target_path.parent`` so every rename
+            # is same-filesystem/atomic. Mirrors the backup/restore state
+            # machine in ``torchlens/_io/bundle.py`` (``_make_backup_path`` /
+            # ``_restore_backup``).
             if target_path.exists():
-                shutil.rmtree(target_path)
+                backup_path = target_path.parent / f"tmp.bak.{uuid.uuid4().hex}"
+                os.rename(target_path, backup_path)
             os.rename(tmp_path, target_path)
-        except Exception:
+            if backup_path is not None:
+                # The overwrite is complete; discarding the backup can never
+                # lose the new bundle, so a cleanup failure must not fail the
+                # save nor trigger a spurious restore.
+                shutil.rmtree(backup_path, ignore_errors=True)
+        except BaseException:
+            # ``BaseException`` (not ``Exception``) so an interrupt unwinding
+            # mid-swap still restores the old bundle; ``raise`` re-raises the
+            # original unchanged, preserving control-flow semantics.
             if tmp_path.exists():
                 shutil.rmtree(tmp_path, ignore_errors=True)
+            if backup_path is not None and not target_path.exists() and backup_path.exists():
+                # The swap did not install the new bundle; put the old one back
+                # exactly where it was. If this restore itself fails, the old
+                # bundle survives under ``backup_path`` as a recovery artifact.
+                try:
+                    os.rename(backup_path, target_path)
+                except OSError:
+                    pass
             raise
 
     @classmethod
