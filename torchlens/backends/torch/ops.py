@@ -4137,7 +4137,13 @@ def _output_should_be_logged(out: Any, is_bottom_level_func: bool) -> bool:
     """Determine whether an output value should be logged as a new graph node.
 
     Two conditions must hold:
-      1. ``out`` must be a torch.Tensor (non-tensor outputs like ints are skipped).
+      1. ``out`` must be a torch.Tensor INSTANCE — including user Tensor
+         SUBCLASSES (tv_tensors, ``__torch_function__`` wrappers, ...), whose
+         ops dispatch through the same wrapped functions and are just as real.
+         The exact-type spelling ``type(out) is not torch.Tensor`` silently
+         dropped every op in a subclass region (missing ops that still
+         validated True — W3 F5). ``nn.Parameter`` stays excluded: parameters
+         are SOURCE tensors, never op outputs.
       2. Either the tensor is genuinely new (no ``_tl.label_raw`` value),
          OR this is a bottom-level function.  Bottom-level functions are leaf
          operations in the decoration nesting — even if they return an already-
@@ -4148,7 +4154,7 @@ def _output_should_be_logged(out: Any, is_bottom_level_func: bool) -> bool:
     Returns:
         True if the output should be logged, False otherwise.
     """
-    if type(out) is not torch.Tensor:
+    if not isinstance(out, torch.Tensor) or isinstance(out, torch.nn.Parameter):
         return False
 
     if (get_tensor_label(out) is None) or is_bottom_level_func:
