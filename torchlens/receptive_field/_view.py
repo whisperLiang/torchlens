@@ -267,6 +267,8 @@ class ReceptiveFieldView:
         ----------
         unit:
             Windowed-axis coordinates, or ``"center"`` for their midpoint.
+            Coordinates must be non-negative and in range; unlike ``.gradient()``
+            and ``.check()``, negative indices are rejected rather than wrapped.
         input:
             Optional exact IO role or model-input operation.
         source:

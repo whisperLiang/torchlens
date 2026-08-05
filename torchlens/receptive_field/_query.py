@@ -245,7 +245,14 @@ def _validate_descriptor_for_query(descriptor: ReceptiveField) -> None:
 
 
 def _normalize_unit(op: Op, descriptor: ReceptiveField, unit: Sequence[int]) -> tuple[int, ...]:
-    """Validate or resolve target windowed-axis coordinates."""
+    """Validate or resolve target windowed-axis coordinates.
+
+    Geometric queries (``.at()``) require in-range non-negative coordinates:
+    a coordinate ``< 0`` is rejected as out of bounds, it is NOT Python-wrapped.
+    This differs deliberately from the gradient/validation path
+    (``_gradient._normalize_unit``), which wraps negative complete-index
+    coordinates. The two contracts are distinct and are not unified here.
+    """
     assert descriptor.axes is not None
     output_axes = tuple(
         cast(int, axis.output_axis) for axis in descriptor.axes if axis.kind == "windowed"
