@@ -265,6 +265,9 @@ _RESULT_CACHE: weakref.WeakKeyDictionary[
 _SCHEDULE_CACHE: weakref.WeakKeyDictionary[object, dict[RenderContext, CollapseSchedule]] = (
     weakref.WeakKeyDictionary()
 )
+_BOX_UNITS_CACHE: weakref.WeakKeyDictionary[
+    object, dict[RenderContext, Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]]]
+] = weakref.WeakKeyDictionary()
 
 
 def select_collapse_plan(
@@ -1333,6 +1336,15 @@ def _legal_plan_child_segment_run(
     for node in nodes[start:]:
         address = _plan_module_address(node)
         if address is None:
+            break
+        module = trace.modules[address] if address in trace.modules else None
+        if int(getattr(module, "num_calls", 1) or 1) > 1:
+            # Rendered segment absorption is address-global: every call of a
+            # member address is hidden by the one segment node, while this
+            # condensation only replaces the consecutive plan nodes of a
+            # single pass. Absorbing a multi-call member would therefore
+            # leave sibling-pass boxes in the plan that the renderer hides,
+            # making ``plan.total`` over-count the rendered graph.
             break
         node_parent = address.rsplit(".", 1)[0] if "." in address else "self"
         if parent is None:
@@ -2652,6 +2664,77 @@ def _maximal_legal_runs(
     return tuple(runs)
 
 
+def _module_render_box_units(
+    trace: "Trace",
+    context: RenderContext,
+) -> Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]]:
+    """Return per-call rendered collapse units for every module address.
+
+    For each pass-free module address the value is ``(box_calls, kept_ops)``:
+
+    - ``box_calls``: the pass-qualified module calls the renderer draws as one
+      collapsed box each when the address is selected. A call is included only
+      when it hides at least one rendered node, so a pure atomic module (whose
+      only content is its own atomic exit op) has no box calls at all: the
+      renderer drops the innermost atomic box and keeps the op visible.
+    - ``kept_ops``: one pass-free render label per concrete op occurrence that
+      stays visible when the address is selected, because atomic module
+      collapse drops the innermost module from the op's owner stack.
+
+    Both tuples enumerate in render order, so occurrences of one op layer
+    appear in pass order. The map is meaningful for unrolled contexts; rolled
+    selection always renders one merged box per address.
+
+    Parameters
+    ----------
+    trace:
+        Trace being optimized.
+    context:
+        Render context for the selected plan.
+
+    Returns
+    -------
+    Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]]
+        Rendered box calls and kept op occurrences keyed by module address.
+    """
+
+    cached_by_trace = _BOX_UNITS_CACHE.setdefault(trace, {})
+    cached = cached_by_trace.get(context)
+    if cached is not None:
+        return cached
+    from .rendering import (
+        BoundaryNode,
+        _entries_to_plot_for_context,
+        _is_buffer_visible,
+        _normalize_buffer_visibility,
+    )
+
+    show_buffer_layers = _normalize_buffer_visibility(context.show_buffer_layers)
+    box_calls: dict[str, dict[str, None]] = {}
+    kept_ops: dict[str, list[str]] = {}
+    for node in _entries_to_plot_for_context(trace, context.vis_mode).values():
+        if isinstance(node, BoundaryNode):
+            continue
+        if node.is_buffer and not _is_buffer_visible(node, show_buffer_layers):
+            continue
+        modules = [str(module_call) for module_call in (getattr(node, "modules", ()) or ())]
+        if getattr(node, "is_atomic_module", False) and modules:
+            innermost_address = modules[-1].rsplit(":", 1)[0]
+            remaining = modules[:-1]
+            if innermost_address not in {call.rsplit(":", 1)[0] for call in remaining}:
+                base = str(node.layer_label).rsplit(":", 1)[0]
+                kept_ops.setdefault(innermost_address, []).append(base)
+            modules = remaining
+        for module_call in modules:
+            box_calls.setdefault(module_call.rsplit(":", 1)[0], {})[module_call] = None
+    units: Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+        address: (tuple(box_calls.get(address, ())), tuple(kept_ops.get(address, ())))
+        for address in set(box_calls) | set(kept_ops)
+    }
+    cached_by_trace[context] = units
+    return units
+
+
 def _module_box_plan_nodes(
     trace: "Trace",
     context: RenderContext,
@@ -2671,33 +2754,27 @@ def _module_box_plan_nodes(
     Returns
     -------
     tuple[PlanNode, ...]
-        The module box plus raw atomic own-output ops that the renderer keeps
-        visible because atomic module collapse drops the innermost module.
+        One module box per rendered call of ``address`` plus the raw atomic
+        own-output op occurrences that the renderer keeps visible because
+        atomic module collapse drops the innermost module. Multi-call modules
+        contribute one box per call, matching the per-call render of the
+        address collapse predicate; counting them once per address is the
+        round-22 plan/schedule node-count lie.
     """
 
-    nodes: list[PlanNode] = [ModuleBox(f"{address}:1")]
     if context.vis_mode == "rolled":
-        return tuple(nodes)
-    module = trace.modules[address]
-    for label in getattr(module, "layer_labels", ()) or ():
-        # ``layer_labels`` entries are pass-free and become ambiguous for the
-        # public fuzzy accessor when the module is called more than once, so
-        # resolve through the pass-qualified helper. Every pass of an op layer
-        # shares the structural fields read below.
-        op = _trace_op_for_render_label(trace, label)
-        if getattr(op, "is_buffer", False):
-            continue
-        if not getattr(op, "is_atomic_module", False):
-            continue
-        modules = list(getattr(op, "modules", ()) or ())
-        if not modules:
-            continue
-        if modules[-1].rsplit(":", 1)[0] != address:
-            continue
-        remaining = [module_call.rsplit(":", 1)[0] for module_call in modules[:-1]]
-        if address in remaining:
-            continue
-        nodes.append(RawOp(str(label).rsplit(":", 1)[0]))
+        return (ModuleBox(f"{address}:1"),)
+    units = _module_render_box_units(trace, context).get(address)
+    if units is None:
+        # Address absent from the rendered universe (for example fully
+        # invisible content): preserve the legacy single-box shape rather
+        # than claiming zero rendered nodes for a selected module.
+        return (ModuleBox(f"{address}:1"),)
+    calls, kept = units
+    nodes: list[PlanNode] = [ModuleBox(module_call) for module_call in calls]
+    nodes.extend(RawOp(label) for label in kept)
+    if not nodes:
+        return (ModuleBox(f"{address}:1"),)
     return tuple(nodes)
 
 
@@ -2949,18 +3026,30 @@ def _instantiate_component_folded(
             _cached_box_cost(state.trace, state.analysis.signals[member], state) for member in run
         ]
         fold_cost = round(sum(member_costs) / len(member_costs) + state.weights.fold_intrinsic, 6)
+        # The renderer folds hidden members on every pass but still draws the
+        # representative once per call: pass 1 renders as the fold (box plus
+        # one ellipsis) and every later pass renders a plain module box.
+        # Charging a flat 2 regardless of the representative's call count is
+        # the round-22 fold leg of the plan/schedule node-count lie.
+        rep_plan_nodes = _module_box_plan_nodes(state.trace, state.context, fold.representative)
+        rep_boxes = [node for node in rep_plan_nodes if isinstance(node, ModuleBox)]
+        rep_kept = [node for node in rep_plan_nodes if isinstance(node, RawOp)]
+        if not rep_boxes:
+            rep_boxes = [ModuleBox(f"{fold.representative}:1")]
         nodes.append(
             RepeatFold(
-                rep=ModuleBox(f"{fold.representative}:1"),
+                rep=rep_boxes[0],
                 members=fold.addresses,
                 ellipsis=EllipsisNode(fold.addresses[1:]),
             )
         )
+        nodes.extend(rep_boxes[1:])
+        nodes.extend(rep_kept)
         selected.update(run)
         folds.append(fold)
         box_costs.append(fold_cost)
         total_cost += fold_cost
-        total_k += 2
+        total_k += 1 + len(rep_boxes) + len(rep_kept)
         skipped.update(indices)
     return _FrontierPoint(
         k=total_k,
