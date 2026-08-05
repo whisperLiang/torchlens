@@ -14,7 +14,7 @@ import warnings
 from collections import defaultdict, deque
 from typing import Any
 
-from .._render_utils import _open_file_quietly, html_escape
+from .._render_utils import _open_file_quietly
 from .._render_utils import compute_module_penwidth
 from ..code_panel import _code_panel_label
 from ..render_ir import RenderIR, RenderIRDotStatement
@@ -908,46 +908,3 @@ def _run_neato_with_fallbacks(
 
     if result.returncode != 0:
         raise RuntimeError(f"neato rendering failed (exit {result.returncode}):\n{result.stderr}")
-
-
-def _add_arg_label(
-    parent_node: Any,
-    child_node: Any,
-    edge_dict: dict[str, Any],
-    trace: Any,
-    show_buffer_layers: bool,
-    occurrence_argument_label: str | None = None,
-) -> None:
-    """Add argument position labels to an edge when the child has multiple parents.
-
-    Simplified version of ``rendering._label_node_arguments_if_needed`` for the
-    direct rank-layout path.
-    """
-    from ...data_classes.layer import Layer
-    from ...data_classes.op import Op
-
-    # Count visible parents
-    num_parents = len(child_node.parents)
-    if not show_buffer_layers:
-        for pl in child_node.parents:
-            if isinstance(child_node, Op):
-                if trace[pl].is_buffer:
-                    num_parents -= 1
-            elif isinstance(child_node, Layer):
-                if trace.layer_logs[pl].is_buffer:
-                    num_parents -= 1
-    if num_parents <= 1:
-        return
-
-    if occurrence_argument_label is not None:
-        arg_labels = [occurrence_argument_label]
-    else:
-        arg_labels = []
-        for arg_type in ["args", "kwargs"]:
-            for arg_loc, arg_label in child_node.parent_arg_positions[arg_type].items():
-                if parent_node.layer_label == arg_label:
-                    arg_labels.append(f"{arg_type[:-1]} {arg_loc}")
-
-    if arg_labels:
-        label_str = "<br/>".join(html_escape(str(label)) for label in arg_labels)
-        edge_dict["label"] = f"<<FONT POINT-SIZE='10'><b>{label_str}</b></FONT>>"
