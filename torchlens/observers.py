@@ -77,7 +77,7 @@ class TapObserver:
 
         with _state.pause_logging():
             value = out.detach().clone()
-        span_names = tuple(str(span["name"]) for span in _state._active_record_spans)
+        span_names = _active_span_names("forward")
         self.records.append(
             TapRecord(
                 value=value,
@@ -127,7 +127,7 @@ class TapObserver:
             return
         with _state.pause_logging():
             value = grad_value.detach().clone()
-        span_names = tuple(str(span["name"]) for span in _state._active_record_spans)
+        span_names = _active_span_names("backward")
         self.records.append(
             TapRecord(
                 value=value,
@@ -188,6 +188,23 @@ def _first_tensor_grad(
         if isinstance(grad, torch.Tensor):
             return grad, grad_kind
     return None, None
+
+
+def _active_span_names(direction: Literal["forward", "backward"]) -> tuple[str, ...]:
+    """Return active span names whose declared direction includes ``direction``.
+
+    A span opened with ``direction="forward"`` scopes only forward observation and
+    a ``direction="backward"`` span only backward observation; a ``"both"`` span
+    scopes both. Enforcing this here stops a forward-only span from tagging a
+    backward tap record (and vice versa), which previously happened because every
+    active span was attached regardless of its declared direction.
+    """
+
+    return tuple(
+        str(span["name"])
+        for span in _state._active_record_spans
+        if span.get("direction") in (direction, "both")
+    )
 
 
 def _hook_layer_label(layer_log: Any) -> str | None:

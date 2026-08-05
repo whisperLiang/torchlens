@@ -163,3 +163,62 @@ def test_activation_patch_is_idempotent_across_calls() -> None:
     second = tl.facets.patching.activation_patch_residual_stream(model, clean, corrupted, _metric)
 
     assert torch.equal(first, second)
+
+
+# --------------------------------------------------------------------------------------
+# M9 (obs-local) - observer span direction enforcement
+# --------------------------------------------------------------------------------------
+
+
+class _LinearRelu(nn.Module):
+    """Tiny linear + ReLU module with a backward-capable ReLU grad_fn."""
+
+    def __init__(self) -> None:
+        """Initialize a single linear layer."""
+
+        super().__init__()
+        self.linear = nn.Linear(3, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run a linear layer followed by ReLU."""
+
+        return torch.relu(self.linear(x))
+
+
+def test_backward_record_span_direction_enforced() -> None:
+    """A backward tap record carries backward/both spans, never a forward-only span."""
+
+    torch.manual_seed(12)
+    model = _LinearRelu()
+    x = torch.randn(2, 3)
+    tap = tl.tap(tl.grad_fn(type="relu"), direction="backward")
+
+    with tl.span("fwd_only", direction="forward"), tl.span("bwd_ok", direction="backward"):
+        trace = tl.trace(
+            model, x, capture=tl.options.CaptureOptions(intervention_ready=True, hooks=tap)
+        )
+        trace.log_backward(trace[trace.output_layers[0]].out.sum())
+
+    assert tap.records
+    record = tap.records[0]
+    assert record.direction == "backward"
+    assert "fwd_only" not in record.span_names
+    assert "bwd_ok" in record.span_names
+
+
+def test_forward_record_span_direction_enforced() -> None:
+    """A forward tap record carries forward/both spans, never a backward-only span."""
+
+    torch.manual_seed(12)
+    model = _LinearRelu()
+    x = torch.randn(2, 3)
+    tap = tl.tap(tl.func("relu"), direction="forward")
+
+    with tl.span("bwd_only", direction="backward"), tl.span("fwd_ok", direction="forward"):
+        tl.trace(model, x, capture=tl.options.CaptureOptions(intervention_ready=True, hooks=tap))
+
+    assert tap.records
+    record = tap.records[0]
+    assert record.direction == "forward"
+    assert "bwd_only" not in record.span_names
+    assert "fwd_ok" in record.span_names
