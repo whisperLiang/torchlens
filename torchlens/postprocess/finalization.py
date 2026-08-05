@@ -1227,25 +1227,64 @@ def _build_conditional_records(self: "Trace") -> None:
         if "else" in ast_branch_kinds:
             ordered_branch_kinds.append("else")
 
+        # Per-arm test identity: phase 5c stashes ``_arm_bool_indices``
+        # (branch kind -> indices into ``bool_layers`` for bools whose runtime
+        # consumption evaluated THAT arm's test) and ``_arm_test_structures``
+        # (branch kind -> "bare"/"negated"/"compound" bool-value semantics).
+        # Without the stash (legacy/degraded events) every then/elif arm falls
+        # back to the historical whole-event bool list.
+        arm_bool_indices = getattr(event, "_arm_bool_indices", None)
+        arm_test_structures = getattr(event, "_arm_test_structures", None) or {}
+
         arms: list[ConditionalArm] = []
         for branch_kind in ordered_branch_kinds:
             kind = "elif" if branch_kind.startswith("elif_") else branch_kind
             edge_list = list(self.conditional_arm_entry_edges.get((event.id, branch_kind), []))
             execution_labels = list(dict.fromkeys(child for _parent, child in edge_list))
-            evaluation_labels = list(event.bool_layers) if kind in {"then", "elif"} else []
-            terminal_bool = terminal_bool_label if kind == "then" and event.bool_layers else None
+            if kind not in {"then", "elif"}:
+                evaluation_labels = []
+            elif arm_bool_indices is not None:
+                # An arm whose test never ran (short-circuited elif) has no
+                # witnessed consumption, so its evaluation set is honestly
+                # empty and ``condition_evaluated`` below reports False.
+                evaluation_labels = [
+                    event.bool_layers[bool_index]
+                    for bool_index in arm_bool_indices.get(branch_kind, [])
+                    if bool_index < len(event.bool_layers)
+                ]
+            else:
+                evaluation_labels = list(event.bool_layers)
+            if kind == "then" and evaluation_labels:
+                terminal_bool = evaluation_labels[0]
+            elif kind == "then" and arm_bool_indices is None and event.bool_layers:
+                terminal_bool = terminal_bool_label
+            else:
+                terminal_bool = None
             bool_value = None
             if terminal_bool is not None and terminal_bool in self.layer_dict_all_keys:
-                bool_value = getattr(self.layer_dict_all_keys[terminal_bool], "bool_value", None)
+                raw_bool_value = getattr(
+                    self.layer_dict_all_keys[terminal_bool], "bool_value", None
+                )
+                # ``bool_value_at_run`` must never contradict ``fired``: apply
+                # the test expression's statically-known polarity, and refuse a
+                # single-bool value for compound (``and``/``or``) tests where
+                # no one consumed bool determines the outcome.
+                test_structure = arm_test_structures.get(branch_kind, "bare")
+                if test_structure == "compound":
+                    bool_value = None
+                elif test_structure == "negated":
+                    bool_value = (not raw_bool_value) if raw_bool_value is not None else None
+                else:
+                    bool_value = raw_bool_value
             arm = ConditionalArm(
                 kind=kind,  # type: ignore[arg-type]
                 terminal_bool_op_label=terminal_bool,
                 bool_value_at_run=bool_value,
                 condition_evaluated=bool(evaluation_labels) or kind == "else",
                 evaluation_entry_edge=_find_conditional_evaluation_entry_edge(
-                    self, event.bool_layers
+                    self, evaluation_labels
                 )
-                if event.bool_layers and kind in {"then", "elif"}
+                if evaluation_labels and kind in {"then", "elif"}
                 else None,
                 fired=bool(execution_labels),
                 execution_entry_edge=edge_list[0] if edge_list else None,
