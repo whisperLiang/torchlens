@@ -555,6 +555,9 @@ def _try_hf_image_processor(
 
         return processor(images=image, return_tensors="pt")
 
+    # HF image processors batch a list of images internally in a single call.
+    transform._tl_batch_input = True  # type: ignore[attr-defined]
+
     return (
         transform,
         ResolvedPreprocessing(
@@ -744,11 +747,21 @@ def _make_image_transform(transform: Callable[[Any], Any]) -> Callable[[Any], An
         """
 
         if isinstance(image, list):
-            transformed_items = [transform(item) for item in image]
-            if transformed_items and all(
-                isinstance(item, torch.Tensor) for item in transformed_items
-            ):
-                return torch.stack(cast(list[torch.Tensor], transformed_items), dim=0)
+            if not image:
+                return transform(image)
+            # Batch-native processors (HF image processors) accept the whole list
+            # in one call and return a mapping; invoke them exactly once.
+            if getattr(transform, "_tl_batch_input", False):
+                return transform(image)
+            # Otherwise discriminate with a SINGLE probe on the first item rather
+            # than transforming every item speculatively and discarding the
+            # results. A tensor result means a per-item transform (reuse the probe
+            # and transform the rest); a non-tensor result means a batch-native
+            # processor, so call it once on the whole list.
+            first = transform(image[0])
+            if isinstance(first, torch.Tensor):
+                rest = [transform(item) for item in image[1:]]
+                return torch.stack(cast(list[torch.Tensor], [first, *rest]), dim=0)
             return transform(image)
         transformed = transform(image)
         if isinstance(transformed, torch.Tensor) and transformed.ndim == 3:
