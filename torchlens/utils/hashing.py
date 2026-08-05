@@ -237,7 +237,23 @@ def compute_graph_shape_hash(trace: Any, *, include_module_address: bool = True)
         SHA-256 hex digest over the canonical graph-shape payload.
     """
 
-    order_by_label = {layer.layer_label: index for index, layer in enumerate(trace.layer_list)}
+    # ``layer.parents`` references each parent by its FINAL lookup label: the
+    # non-pass-qualified ``layer_label`` for single-pass parents but the
+    # pass-qualified ``label`` (e.g. ``linear_1_1:2``) for multi-pass/recurrent
+    # parents (see ``postprocess/labeling.py`` ``final_lookup_label``). The
+    # ordering map must be keyed by that same injective label space: keying by
+    # ``layer_label`` alone silently dropped every multi-pass parent edge (the
+    # pass-qualified reference never matched) and collapsed all passes of a
+    # recurrent layer onto one index, letting structurally different recurrent
+    # graphs hash identically and defeating ``tl.hash.assert_unchanged``.
+    order_by_label = {}
+    for index, layer in enumerate(trace.layer_list):
+        reference_label = (
+            layer.layer_label
+            if getattr(layer, "num_passes", 1) == 1
+            else getattr(layer, "label", None) or layer.layer_label
+        )
+        order_by_label[reference_label] = index
     records = []
     for index, layer in enumerate(trace.layer_list):
         address = normalize_address_for_hash(getattr(layer, "module", None))
@@ -248,10 +264,13 @@ def compute_graph_shape_hash(trace: Any, *, include_module_address: bool = True)
         # accepting operand-order drift. This mirrors the operand-order-sensitive
         # refresh graph signature (commit 74898ada); the shape hash must not be
         # blind to a distinction the refresh tripwire enforces.
+        #
+        # EVERY parent edge contributes to the hash input: an unresolvable
+        # reference maps to a position-preserving ``None`` sentinel instead of
+        # being skipped, so any future label-scheme drift changes the digest
+        # loudly rather than silently reintroducing dropped-edge false matches.
         parent_indices = [
-            order_by_label[parent_label]
-            for parent_label in getattr(layer, "parents", ())
-            if parent_label in order_by_label
+            order_by_label.get(parent_label) for parent_label in getattr(layer, "parents", ())
         ]
         records.append(
             {
