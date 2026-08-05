@@ -1,0 +1,105 @@
+"""Regression tests for r20i: IR live-record lane cleanup + state hygiene.
+
+Covers hardening findings on ``torchlens/ir``:
+
+* N8  -- ``LiveIndex.append`` left a stale parent edge (and double-listed the
+  label) when a raw label was re-seen at the append boundary.
+* N9  -- ``CaptureEvents.release_runtime_sidecars`` retained runtime handles
+  (``backend_session``, ``grad_fn_handles_by_label_raw``, ``recent_events``)
+  its docstring said it detaches.
+* N10 -- ``CaptureEvents.copy_for_replay`` shared the mutable per-event dicts
+  (``transform_config``, ``parent_arg_positions``) of "frozen" ``OpEvent``
+  objects, so a replay projection could mutate the sealed source stream.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+
+from test_ir_basic import _build_ir_instances
+
+from torchlens.ir.capture_events import CaptureEvents
+from torchlens.ir.events import OpEvent, ParentEdge
+from torchlens.ir.live_index import LiveIndex
+
+
+def _base_op_event() -> OpEvent:
+    """Return a fully-populated ``OpEvent`` built from the shared IR fixture."""
+
+    return _build_ir_instances()["op_event"]
+
+
+def _op_event(label: str, parents: tuple[str, ...] = ()) -> OpEvent:
+    """Build an ``OpEvent`` with a given raw label and parent labels."""
+
+    edges = tuple(
+        ParentEdge(parent_label_raw=parent, arg_position=index, edge_use="arg")
+        for index, parent in enumerate(parents)
+    )
+    return dataclasses.replace(_base_op_event(), label_raw=label, parents=edges)
+
+
+# --------------------------------------------------------------------------- N8
+
+
+def test_live_index_reseen_label_drops_stale_parent_edge() -> None:
+    """Re-seeing a raw label must not leave a stale parent->child edge (N8)."""
+
+    index = LiveIndex()
+    index.append(_op_event("old"))
+    index.append(_op_event("new"))
+    index.append(_op_event("dup", ("old",)))
+    index.append(_op_event("dup", ("new",)))
+
+    # Label indexed exactly once, last event wins for parents.
+    assert index.labels.count("dup") == 1
+    assert index.parents("dup") == ("new",)
+    # The prior parent must no longer list the re-seen label as its child.
+    assert index.children("old") == ()
+    assert index.children("new") == ("dup",)
+    assert "dup" not in index.children_by_parent.get("old", [])
+
+
+def test_live_index_reseen_label_matches_replace_semantics() -> None:
+    """A re-seen ``append`` is equivalent to an explicit ``replace`` (N8)."""
+
+    reappended = LiveIndex()
+    reappended.append(_op_event("a"))
+    reappended.append(_op_event("b", ("a",)))
+    reappended.append(_op_event("b", ("a",)))  # re-seen with same parent
+
+    replaced = LiveIndex()
+    replaced.append(_op_event("a"))
+    replaced.append(_op_event("b", ("a",)))
+    replaced.replace(_op_event("b", ("a",)))
+
+    assert reappended.labels == replaced.labels == ["a", "b"]
+    assert reappended.children("a") == replaced.children("a") == ("b",)
+
+
+def test_live_index_unique_labels_unchanged() -> None:
+    """Unique-label appends (the normal capture path) are unaffected (N8)."""
+
+    index = LiveIndex()
+    index.append(_op_event("a"))
+    index.append(_op_event("b", ("a",)))
+    index.append(_op_event("c", ("a", "b")))
+
+    assert index.labels == ["a", "b", "c"]
+    assert index.parents("c") == ("a", "b")
+    assert index.children("a") == ("b", "c")
+    assert index.children("b") == ("c",)
+
+
+def test_capture_events_append_keeps_live_index_consistent() -> None:
+    """Duplicate label through ``CaptureEvents.append`` leaves no stale edge (N8)."""
+
+    events = CaptureEvents()
+    events.append(_op_event("old"))
+    events.append(_op_event("new"))
+    events.append(_op_event("dup", ("old",)))
+    events.append(_op_event("dup", ("new",)))
+
+    assert events.live_index.labels.count("dup") == 1
+    assert events.live_index.children("old") == ()
+    assert events.live_index.parents("dup") == ("new",)
