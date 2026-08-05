@@ -181,12 +181,20 @@ def test_every_parent_edge_contributes_to_hash_input() -> None:
     # 2) Edge sensitivity: rewiring ANY single parent edge changes the digest,
     #    proving the edge is present in the hash input (the pre-fix code
     #    silently dropped every multi-pass parent edge, making rewires of
-    #    those edges invisible).
+    #    those edges invisible). The replacement stays within the parent's
+    #    qualification class (pass-qualified -> another pass-qualified label,
+    #    plain -> another plain label): a cross-class rewire would become
+    #    visible to the broken hash merely by entering its keyed label space,
+    #    masking the dropped-edge blindness this test exists to catch.
     baseline = compute_graph_shape_hash(trace)
     reference_labels = list(order_by_reference)
     for layer, position, parent in edges:
         assert isinstance(layer.parents, list)
-        replacement = next(label for label in reference_labels if label != parent)
+        replacement = next(
+            label
+            for label in reference_labels
+            if label != parent and (":" in label) == (":" in parent)
+        )
         try:
             layer.parents[position] = replacement
             assert compute_graph_shape_hash(trace) != baseline, (
