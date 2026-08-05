@@ -128,10 +128,13 @@ def pool(context: ReceptiveFieldRuleContext) -> _RuleResult:
     kernel = int_tuple(raw_kernel, rank)
     stride = int_config(context, "stride", rank, default=raw_kernel)
     padding = int_config(context, "padding", rank, default=0)
-    dilation = int_config(context, "dilation", rank, default=1)
+    # Salient capture omits max-pool dilation and ceil_mode, so read the raw
+    # call arguments (position-correct) before assuming PyTorch's defaults.
+    raw_dilation = context.cfg("dilation", context.arg("dilation", None))
+    dilation = int_tuple(1 if raw_dilation is None else raw_dilation, rank)
     if kernel is None or stride is None or padding is None or dilation is None:
         return context.unknown("pooling has malformed spatial parameters")
-    ceil_mode = bool(context.cfg("ceil_mode", False))
+    ceil_mode = bool(context.cfg("ceil_mode", context.arg("ceil_mode", False)))
     return context.window(
         kernel=kernel,
         stride=stride,

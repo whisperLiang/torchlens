@@ -114,7 +114,8 @@ class ReceptiveFieldRuleContext:
         Parameters
         ----------
         name_or_pos:
-            Argument name or positional index.
+            Argument name, resolved against the raw call signature, or a direct
+            index into the captured (tensor-filtered) positional arguments.
         default:
             Value used when the argument was not captured.
 
@@ -122,18 +123,75 @@ class ReceptiveFieldRuleContext:
         -------
         object
             Captured non-tensor argument or ``default``.
+
+        Notes
+        -----
+        ``Op.non_tensor_pos_args`` drops tensor arguments, so raw signature
+        positions shift left past every filtered tensor argument. Name lookups
+        reconstruct that shift from the recorded tensor-argument positions and
+        fail closed to ``default`` when the shift cannot be proven, so a rule
+        can never silently read a neighboring argument's value.
         """
 
         if isinstance(name_or_pos, str):
             if name_or_pos in self.op.non_tensor_kwargs:
                 return self.op.non_tensor_kwargs[name_or_pos]
             try:
-                name_or_pos = tuple(self.op.arg_names).index(name_or_pos)
+                raw_position = tuple(self.op.arg_names).index(name_or_pos)
             except ValueError:
                 return default
+            num_pos_args = int(getattr(self.op, "num_pos_args", 0) or 0)
+            if raw_position >= num_pos_args:
+                return default
+            compacted = self._compacted_positional_index(raw_position, num_pos_args)
+            if compacted is None:
+                return default
+            name_or_pos = compacted
         if 0 <= name_or_pos < len(self.op.non_tensor_pos_args):
             return self.op.non_tensor_pos_args[name_or_pos]
         return default
+
+    def _compacted_positional_index(self, raw_position: int, num_pos_args: int) -> int | None:
+        """Map one raw positional index onto the tensor-filtered argument list.
+
+        Parameters
+        ----------
+        raw_position:
+            Zero-based position within the raw call's positional arguments.
+        num_pos_args:
+            Captured raw positional-argument count.
+
+        Returns
+        -------
+        int | None
+            Index into ``Op.non_tensor_pos_args``, or ``None`` when the raw
+            argument was itself a tensor or the filtered positions cannot be
+            reconstructed exactly (the lookup then fails closed).
+        """
+
+        dropped = num_pos_args - len(self.op.non_tensor_pos_args)
+        if dropped == 0:
+            return raw_position
+        tensor_positions: set[int] = set()
+        positions = getattr(self.op, "parent_arg_positions", None) or {}
+        for key in positions.get("args", {}):
+            if isinstance(key, int):
+                tensor_positions.add(key)
+            elif isinstance(key, tuple) and key and isinstance(key[0], int):
+                tensor_positions.add(key[0])
+        for token in getattr(self.op, "unattributed_tensor_args", ()) or ():
+            if isinstance(token, str) and token.startswith("arg"):
+                head = token[3:].split(".", 1)[0]
+                if head.isdigit():
+                    tensor_positions.add(int(head))
+        tensor_positions = {
+            position for position in tensor_positions if 0 <= position < num_pos_args
+        }
+        if len(tensor_positions) != dropped:
+            return None
+        if raw_position in tensor_positions:
+            return None
+        return raw_position - sum(1 for position in tensor_positions if position < raw_position)
 
     def parent_role(self, parent_index: int) -> str | None:
         """Return the captured argument role for one parent, if available.
@@ -231,7 +289,17 @@ class ReceptiveFieldRuleContext:
         note: str | None = None,
         **callbacks: RuleCallback,
     ) -> _RuleResult:
-        """Construct a whole-extent dependence result specification."""
+        """Construct a whole-extent dependence result specification.
+
+        Notes
+        -----
+        Axis-map obligation: a rule that selects a PARTIAL axis set and can be
+        applied across rank-changing parent relations (computed weights,
+        broadcast buffers) must declare ``surviving_parent_axes`` in its result
+        values the way the batch-norm rule does. Without it, both geometry
+        engines degrade such parents fail-closed to ``UNKNOWN`` — they never
+        guess an axis alignment and never crash.
+        """
 
         return self._result("full", {"axes": axes, "exact": exact}, note, callbacks)
 

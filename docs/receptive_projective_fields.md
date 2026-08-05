@@ -125,8 +125,10 @@ For extension, use `register_rf_rule()` and `rules()`; `ReceptiveFieldRule` and
 snapshot. `node_spec()` creates a `Trace.draw(node_spec_fn=...)` callback. `verify()` and
 `self_check()` run the model-facing diagnostics: each returns a `ReceptiveFieldVerification` that
 pairs geometric containment checks with sampled `EmpiricalAdjointCheck` comparisons (the
-receptive/projective empirical derivatives at a shared unit), and its `.passed` property is true
-only when both the containment and the adjoint samples hold. `cross_validate()` gives the batch sweep.
+receptive/projective empirical derivatives at a shared unit). Its `.verdict` property is the
+tri-state summary: `FAIL` reports a real violation, `INDETERMINATE` means the empirical half never
+armed (see below), and `PASS` requires every containment check to pass with no adjoint mismatch;
+`.passed` is true only for `PASS`. `cross_validate()` gives the batch sweep.
 The typed error surface is `ReceptiveFieldError`, `ReceptiveFieldUnavailableError`,
 `ReceptiveFieldValidationError`, `AmbiguousInputError`, `AmbiguousPassError`,
 `AmbiguousCallError`, `AmbiguousTargetError`, `NoInfluencePathError`, and
@@ -134,7 +136,18 @@ The typed error surface is `ReceptiveFieldError`, `ReceptiveFieldUnavailableErro
 
 ## Verify the tripwire
 
+The empirical half only arms on a trace captured with gradient-ready inputs, a
+backward-ready graph, and reference-saved payloads; anything less is reported as
+`INDETERMINATE`, never as a failure:
+
 ```python
+trace = tl.trace(
+    model,
+    x.requires_grad_(True),
+    capture=tl.options.CaptureOptions(backward_ready=True),
+    save_mode="reference",
+)
+
 # Exhaustive/sampled trace sweep over center units (and optionally corners).
 results = tl.receptive_field.cross_validate(trace, units="center")
 

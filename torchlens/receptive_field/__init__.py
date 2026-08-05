@@ -78,12 +78,41 @@ class ReceptiveFieldVerification:
     empirical_adjoint: tuple[EmpiricalAdjointCheck, ...]
 
     @property
-    def passed(self) -> bool:
-        """Return whether every definitive containment and adjoint check passed."""
+    def verdict(self) -> ReceptiveFieldValidationStatus:
+        """Return the tri-state verdict, never conflating unarmed with wrong.
 
-        containment_passed = all(result.passed for result in self.containment)
-        adjoint_passed = all(result.passed is not False for result in self.empirical_adjoint)
-        return containment_passed and adjoint_passed
+        ``FAIL`` reports a real violation: a containment ``FAIL`` or a
+        definitive empirical-adjoint mismatch. ``INDETERMINATE`` means at
+        least one containment check could not be evaluated (typically a trace
+        captured without ``requires_grad`` inputs, ``backward_ready=True``,
+        and ``save_mode="reference"``) and no check failed. ``PASS`` requires
+        every containment check to pass with no adjoint mismatch; adjoint
+        samples that were structurally unavailable (``passed is None``) never
+        substitute for a failed or unarmed containment check.
+        """
+
+        containment_failed = any(
+            result.status is ReceptiveFieldValidationStatus.FAIL for result in self.containment
+        )
+        adjoint_failed = any(check.passed is False for check in self.empirical_adjoint)
+        if containment_failed or adjoint_failed:
+            return ReceptiveFieldValidationStatus.FAIL
+        if not self.containment or any(
+            result.status is ReceptiveFieldValidationStatus.INDETERMINATE
+            for result in self.containment
+        ):
+            return ReceptiveFieldValidationStatus.INDETERMINATE
+        return ReceptiveFieldValidationStatus.PASS
+
+    @property
+    def passed(self) -> bool:
+        """Return whether the verdict is ``PASS``.
+
+        ``INDETERMINATE`` stays ``False`` — an unarmed tripwire never reads
+        as a pass — and is distinguishable from ``FAIL`` via ``verdict``.
+        """
+
+        return self.verdict is ReceptiveFieldValidationStatus.PASS
 
 
 def _op_by_label(trace: Trace, label: str) -> Op | None:
@@ -275,6 +304,13 @@ def verify(
     if empirical_adjoint_atol < 0 or empirical_adjoint_rtol < 0:
         raise ValueError("empirical_adjoint_atol and empirical_adjoint_rtol must be non-negative.")
     containment = tuple(cross_validate(trace, **kwargs))  # type: ignore[arg-type]
+    if not any(key in kwargs for key in ("direction", "inputs", "source", "target")):
+        # Sweep the projective direction too: exact-box corner cross-checks
+        # there are what expose a spurious-nonempty forward claim, which
+        # receptive-only containment is structurally unable to see.
+        containment += tuple(
+            cross_validate(trace, direction="projective", **kwargs)  # type: ignore[arg-type]
+        )
     return ReceptiveFieldVerification(
         containment=containment,
         empirical_adjoint=_empirical_adjoint_checks(

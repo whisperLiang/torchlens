@@ -322,11 +322,9 @@ def _map_window_edges_forward(
                 source_set, child_start + local_axis, child, result, mapping, local_axis
             )
         else:
-            image = _candidate_envelope(
+            image, callback_exact = _affine_membership_image(
                 source_set, mapping, int(child.shape[child_start + local_axis])
             )
-            callback_exact = bool(result.values.get("exact", False)) and mapping.exact
-            image = _IndexSet(image.progressions, image.exact and callback_exact)
         mapped[child_start + local_axis] = image
         exact = exact and callback_exact and image.exact
     return tuple(mapped), exact
@@ -353,6 +351,57 @@ def _membership_image(
             return _call_index_callback(result.map_index_set, local_axis, candidate_set)
         assert result.map_interval is not None
         return _call_interval_callback(result.map_interval, local_axis, candidate_set)
+
+    return forward_index_image(source_set, candidates, backward_map)
+
+
+def _affine_membership_image(
+    source_set: _IndexSet, mapping: _Mapped, child_extent: int
+) -> tuple[_IndexSet, bool]:
+    """Transpose a callback-free two-edge window by exact integer membership.
+
+    The affine candidate envelope alone loses lattice structure: a point-edge
+    map such as a step-2 slice admits at most one child per source index, yet
+    interval inversion plus floor/ceil widening reports a nonempty child range
+    for off-lattice sources. Every candidate is therefore tested against the
+    window's own integer backward relation (``ceil(lo(c)) <= s <= floor(hi(c))``)
+    so the image contains exactly the children whose windows reach the source
+    set. Over-budget candidate ranges fall back to the inexact envelope.
+
+    Parameters
+    ----------
+    source_set:
+        Parent indices whose forward image is requested.
+    mapping:
+        Sealed backward affine edge map for this axis.
+    child_extent:
+        Child-axis extent used for clipping.
+
+    Returns
+    -------
+    tuple[_IndexSet, bool]
+        Membership-proven child indices and the hop's exactness.
+    """
+
+    candidates = _candidate_envelope(source_set, mapping, child_extent)
+    if _index_set_size(candidates) > _TRANSPOSE_CANDIDATE_BUDGET:
+        return _IndexSet(candidates.progressions, exact=False), False
+
+    def backward_map(candidate_set: _IndexSet) -> tuple[_IndexSet, bool]:
+        """Return the integer taps of each candidate child's affine window."""
+
+        intervals: list[_IndexSet] = []
+        for candidate in candidate_set.values():
+            bounds = sorted(
+                (
+                    mapping.lo.a * candidate + mapping.lo.b,
+                    mapping.hi.a * candidate + mapping.hi.b,
+                )
+            )
+            start = ceil(bounds[0])
+            stop = floor(bounds[1])
+            intervals.append(_IndexSet.empty() if start > stop else _IndexSet.interval(start, stop))
+        return _IndexSet.union(intervals), mapping.exact
 
     return forward_index_image(source_set, candidates, backward_map)
 

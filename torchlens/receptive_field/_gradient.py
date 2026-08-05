@@ -29,7 +29,8 @@ if TYPE_CHECKING:
 
 
 _RECAPTURE_RECIPE = (
-    "tl.trace(model, x, capture=tl.options.CaptureOptions(backward_ready=True), save=...)"
+    "tl.trace(model, x.requires_grad_(True), "
+    'capture=tl.options.CaptureOptions(backward_ready=True), save_mode="reference")'
 )
 
 
@@ -458,8 +459,9 @@ def _source_recapture_recipe(source: Op, target: Op) -> str:
     """
 
     return (
-        "tl.trace(model, x, backward_ready=True, save="
-        f"tl.label({source.layer_label_short!r}) | tl.label({target.layer_label_short!r}))"
+        "tl.trace(model, x.requires_grad_(True), "
+        'capture=tl.options.CaptureOptions(backward_ready=True), save_mode="reference", '
+        f"save=tl.label({source.layer_label_short!r}) | tl.label({target.layer_label_short!r}))"
     )
 
 
@@ -810,8 +812,9 @@ def gradient_for_unit(
         if grad is None:
             raise ReceptiveFieldUnavailableError(
                 f"Source {source_op.label!r} is reachable from {target.label!r} in the captured "
-                "DAG, but autograd returned no gradient. The saved tensor identity may be stale "
-                f"or the path may have been detached; recapture with {_source_recapture_recipe(source_op, target)}."
+                "DAG, but autograd returned no gradient. The trace was likely captured with a "
+                'detaching save mode (the default); recapture with save_mode="reference", '
+                f"for example {_source_recapture_recipe(source_op, target)}."
             )
         return _build_result(
             target=target,
@@ -853,8 +856,8 @@ def gradient_for_unit(
         if grad is None and descriptor is not None:
             raise ReceptiveFieldUnavailableError(
                 f"Input {role!r} is reachable from {target.label!r} in the captured DAG, but "
-                "autograd returned no gradient. The saved tensor identity may be stale or the "
-                "path may have been detached; recapture and inspect the path."
+                "autograd returned no gradient. The trace was likely captured with a detaching "
+                f"save mode (the default); recapture with {_RECAPTURE_RECIPE}."
             )
         if grad is None:
             grad = torch.zeros_like(_saved_tensor(input_op, "input"))

@@ -422,7 +422,10 @@ class ReceptiveFieldBox:
         Returns
         -------
         tuple[slice, ...]
-            One slice per input axis.
+            One slice per input axis. An ``empty=True`` box yields zero-width
+            slices on its windowed axes, so indexing selects no elements; the
+            absent-bound full-slice convention applies only to pointwise axes
+            whose coordinate was intentionally left unspecified.
         """
 
         coordinates = {} if pointwise_coords is None else pointwise_coords
@@ -435,6 +438,8 @@ class ReceptiveFieldBox:
                         f"pointwise coordinate for axis {axis.input_axis} is out of bounds."
                     )
                 result.append(slice(coordinate, coordinate + 1))
+            elif self.empty and axis.kind == "windowed":
+                result.append(slice(0, 0))
             elif axis.clipped_start is None or axis.clipped_stop is None:
                 result.append(slice(0, extent))
             else:
