@@ -54,7 +54,8 @@ def main() -> None:
     log = tl.trace(model, x, intervention_ready=True)
 
     edited = log.fork("sae_splice")
-    edited.attach_hooks(tl.func("relu"), tl.splice_module(SAEStyleSplice())).replay()
+    edited.attach_hooks(tl.func("relu"), tl.splice_module(SAEStyleSplice()))
+    edited.replay()
 
     assert edited.last_run_records()[-1].helper_name == "splice_module"
     assert not torch.allclose(log.layer_list[-1].out, edited.layer_list[-1].out)
