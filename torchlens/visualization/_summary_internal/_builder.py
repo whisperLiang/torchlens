@@ -1135,8 +1135,9 @@ def _build_overview_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str
             "train": "-",
         }
     ]
+    origin_by_label, input_labels = _module_dataflow_origins(trace)
     for module in _iter_summary_modules(trace):
-        rows.append(_module_overview_row(trace, module))
+        rows.append(_module_overview_row(trace, module, origin_by_label, input_labels))
     rows.append(
         {
             "name": "output",
@@ -1175,13 +1176,14 @@ def _build_graph_rows(trace: "Trace") -> tuple[List[Dict[str, str]], List[str]]:
         Graph rows and footer lines.
     """
     rows = []
+    origin_by_label, input_labels = _module_dataflow_origins(trace)
     for module in _iter_summary_modules(trace):
         rows.append(
             {
                 "name": f"{module.address} ({module.class_name})",
                 "shape": _module_shape(trace, module),
                 "params": _human_count(module.num_params),
-                "parents": _module_parent_summary(module),
+                "parents": _module_parent_summary(module, origin_by_label, input_labels),
             }
         )
     footer_lines = [
@@ -1467,7 +1469,12 @@ def _iter_summary_modules(trace: "Trace") -> List["Module"]:
     return modules
 
 
-def _module_overview_row(trace: "Trace", module: "Module") -> Dict[str, str]:
+def _module_overview_row(
+    trace: "Trace",
+    module: "Module",
+    origin_by_label: Dict[str, str],
+    input_labels: set[str],
+) -> Dict[str, str]:
     """Build one overview row for a module.
 
     Parameters
@@ -1476,6 +1483,10 @@ def _module_overview_row(trace: "Trace", module: "Module") -> Dict[str, str]:
         Finalized log object.
     module:
         Module to summarize.
+    origin_by_label:
+        Reverse index mapping op labels to owning top-level module addresses.
+    input_labels:
+        Set of graph-input op labels.
 
     Returns
     -------
@@ -1490,7 +1501,7 @@ def _module_overview_row(trace: "Trace", module: "Module") -> Dict[str, str]:
         "shape": _module_shape(trace, module),
         "params": _human_count(module.num_params),
         "train": train,
-        "parents": _module_parent_summary(module),
+        "parents": _module_parent_summary(module, origin_by_label, input_labels),
         "class": module.class_name,
     }
 
@@ -1516,22 +1527,61 @@ def _module_shape(trace: "Trace", module: "Module") -> str:
     return _shape_str(getattr(layer, "shape", None))
 
 
-def _module_parent_summary(module: "Module") -> str:
-    """Return a short parent summary for a module row.
+def _strip_pass_suffix(label: str) -> str:
+    """Return the aggregate layer label for a possibly pass-qualified op label.
 
-    Parameters
-    ----------
-    module:
-        Module to summarize.
-
-    Returns
-    -------
-    str
-        Parent summary text.
+    ``relu_1_1:2`` -> ``relu_1_1``; a label without a pass suffix is returned
+    unchanged.
     """
-    if module.address_parent in (None, "self"):
-        return "input"
-    return str(module.address_parent)
+    return str(label).split(":", 1)[0]
+
+
+def _module_dataflow_origins(trace: "Trace") -> tuple[Dict[str, str], set[str]]:
+    """Build a reverse index for module-level dataflow connectivity.
+
+    Returns ``(origin_by_label, input_labels)`` where ``origin_by_label`` maps
+    every (aggregate) op label to the address of the top-level summary module
+    that owns it, and ``input_labels`` is the set of graph-input op labels. Both
+    are keyed by pass-stripped labels so pass-qualified producers resolve.
+    """
+    origin_by_label: Dict[str, str] = {}
+    for module in _iter_summary_modules(trace):
+        for label in module.layer_labels:
+            origin_by_label[_strip_pass_suffix(label)] = module.address
+    input_labels = {_strip_pass_suffix(op.label) for op in trace.input_ops}
+    return origin_by_label, input_labels
+
+
+def _module_parent_summary(
+    module: "Module",
+    origin_by_label: Dict[str, str],
+    input_labels: set[str],
+) -> str:
+    """Return the REAL upstream dataflow producers feeding a module.
+
+    The graph/overview "Connected To" column is a dataflow claim. Previously it
+    returned ``module.address_parent`` -- the containment-tree parent -- and
+    hard-coded ``"input"`` for every top-level module, so a chain ``a -> b``
+    falsely reported both ``a`` and ``b`` as connected to ``input``. This
+    fabricated topology from the wrong graph entirely. Now each of the module's
+    recorded input ops is mapped to its producing top-level module (or ``input``
+    for a graph-input producer, or the bare op label when the producer is not
+    inside any summary module). Producers are de-duplicated in first-seen order;
+    a module with no recorded upstream reports ``-`` rather than inventing one.
+    """
+    input_ops = getattr(module, "input_ops", None)
+    if not input_ops:
+        return "-"
+    upstream: List[str] = []
+    for op_label in input_ops:
+        normalized = _strip_pass_suffix(op_label)
+        if normalized in input_labels:
+            origin = "input"
+        else:
+            origin = origin_by_label.get(normalized, normalized)
+        if origin not in upstream:
+            upstream.append(origin)
+    return ", ".join(upstream) if upstream else "-"
 
 
 def _module_dtype(trace: "Trace", module: "Module") -> str:
