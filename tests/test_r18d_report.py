@@ -25,6 +25,13 @@ class _RecurrentLinear(nn.Module):
         return x
 
 
+class _SelectiveTinyModel(nn.Module):
+    """Add + relu + sigmoid; boundary/input ops go unsaved under a relu-only save."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.sigmoid(torch.relu(x + 1.0))
+
+
 # --------------------------------------------------------------------------- H1
 def test_profile_recurrent_call_and_module_levels_no_crash() -> None:
     """profile() at every level survives a recurrent model and counts every pass."""
@@ -59,3 +66,43 @@ def test_profile_device_column_is_populated() -> None:
     assert "device" in frame.columns
     assert frame["device"].notna().all()
     assert set(frame["device"]) == {"cpu"}
+
+
+# --------------------------------------------------------------------------- M1
+def test_explain_selective_save_reports_without_crashing() -> None:
+    """explain() honors its unknown/clean contract on a selective-save trace."""
+
+    log = tl.trace(_SelectiveTinyModel(), torch.randn(2, 4), save=tl.func("relu"))
+
+    saved = [
+        layer.layer_label
+        for layer in log.layer_list
+        if getattr(layer, "has_saved_activation", False)
+    ]
+    unsaved = [
+        layer.layer_label
+        for layer in log.layer_list
+        if not getattr(layer, "has_saved_activation", False)
+    ]
+    # Precondition: the input boundary is genuinely unsaved (the crash trigger).
+    assert unsaved and saved
+
+    report_json = tl.report.explain(log, format="json")
+    assert isinstance(report_json, dict)
+    assert isinstance(report_json["first_nonfinite"], str)
+
+    report_text = tl.report.explain(log, format="text")
+    assert isinstance(report_text, str)
+    assert "Shared parameters" in report_text
+
+
+def test_explain_selective_save_still_flags_saved_nonfinite() -> None:
+    """Gating on saved payloads must not blind the anomaly scan to a saved NaN."""
+
+    x = torch.randn(2, 4)
+    x[0, 0] = float("nan")
+    log = tl.trace(_SelectiveTinyModel(), x, save=tl.func("relu"))
+
+    report_json = tl.report.explain(log, format="json")
+    # relu(nan) == nan and relu IS saved, so the scan must still detect it.
+    assert "non-finite" in report_json["first_nonfinite"].lower()

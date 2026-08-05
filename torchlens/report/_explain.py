@@ -333,6 +333,38 @@ def _partial_json(
     return result
 
 
+def _saved_out(layer: Any) -> Any:
+    """Return a layer's saved output payload, or ``None`` when unavailable.
+
+    The anomaly scans below only reason about *saved* activation payloads. On a
+    selective-save trace most layers retain no payload, and reading ``.out`` on
+    such an op raises ``ValueError`` (``"... was not saved; no saved payload is
+    available"``) -- a per-pass ``ValueError`` that a plain ``getattr(layer,
+    "out", None)`` cannot swallow, so both the JSON and prose reports previously
+    crashed on the ordinary predicate-save trace shape instead of honoring their
+    documented ``unknown``/scoped-clean contract. Gate on the saved-payload flag
+    first, then read the property inside the known-unavailable boundary so an
+    unsaved op is honestly skipped rather than aborting the whole report.
+
+    Parameters
+    ----------
+    layer:
+        A per-pass operation/layer entry from ``log.layer_list``.
+
+    Returns
+    -------
+    Any
+        The saved output tensor when a payload was retained, else ``None``.
+    """
+
+    if not bool(getattr(layer, "has_saved_activation", False)):
+        return None
+    try:
+        return getattr(layer, "out", None)
+    except ValueError:
+        return None
+
+
 def _first_nonfinite_summary(log: Any) -> str:
     """Return a saved-output non-finite summary without speculation.
 
@@ -348,17 +380,46 @@ def _first_nonfinite_summary(log: Any) -> str:
     """
 
     for layer in getattr(log, "layer_list", []) or []:
-        out = getattr(layer, "out", None)
+        out = _saved_out(layer)
         if not isinstance(out, torch.Tensor) or out.numel() == 0:
             continue
         try:
             if bool((~torch.isfinite(out.detach())).any().item()):
-                if hasattr(log, "first_nonfinite"):
-                    return str(log.first_nonfinite())
-                return f"saved output {getattr(layer, 'layer_label', 'unknown')} is non-finite"
+                label = str(getattr(layer, "layer_label", "unknown"))
+                return _first_nonfinite_detail(log, label)
         except (RuntimeError, TypeError):
             continue
     return "No non-finite values found in saved outputs."
+
+
+def _first_nonfinite_detail(log: Any, saved_label: str) -> str:
+    """Return the log's own non-finite detail, or a scoped fallback.
+
+    ``log.first_nonfinite()`` rescans the trace and can itself raise ``ValueError``
+    on a selective-save trace (it reads unsaved ``.out`` payloads). explain() must
+    not propagate that: fall back to the scoped saved-output statement so the
+    report always honors its ``unknown``/clean contract.
+
+    Parameters
+    ----------
+    log:
+        Completed trace-like object.
+    saved_label:
+        Label of the saved output already found non-finite.
+
+    Returns
+    -------
+    str
+        First recorded non-finite detail, or a scoped fallback statement.
+    """
+
+    scoped = f"saved output {saved_label} is non-finite"
+    if not hasattr(log, "first_nonfinite"):
+        return scoped
+    try:
+        return str(log.first_nonfinite())
+    except (ValueError, RuntimeError, TypeError):
+        return scoped
 
 
 def _model_summary_lines(log: Any) -> list[str]:
@@ -477,7 +538,7 @@ def _anomaly_lines(log: Any) -> list[str]:
 
     nonfinite_labels: list[str] = []
     for layer in getattr(log, "layer_list", []) or []:
-        out = getattr(layer, "out", None)
+        out = _saved_out(layer)
         if not isinstance(out, torch.Tensor) or out.numel() == 0:
             continue
         try:
@@ -493,7 +554,7 @@ def _anomaly_lines(log: Any) -> list[str]:
     return [
         f"- {len(nonfinite_labels)} saved out(s) contain NaN or Inf values.",
         f"- First affected layer: {first}.",
-        f"- Detail: {log.first_nonfinite() if hasattr(log, 'first_nonfinite') else 'unavailable'}",
+        f"- Detail: {_first_nonfinite_detail(log, first)}",
     ]
 
 
