@@ -2054,16 +2054,12 @@ def _unattributed_tensor_arg_positions(
             # position when an input-derived RHS would otherwise appear fully
             # represented, while the independent data-alias witness ceilings replay.
             unsafe_data_alias_receiver = path == "arg0" and unsafe_receiver_with_graph_rhs
-            # ``t.data = rhs`` (round-31 M6; the GETTER records as "detach", so
-            # ``func_name == "data"`` here means the SETTER) rebinds the
-            # receiver onto RHS's storage before this walk runs, so the
-            # receiver's label is storage-gated BY THE OP ITSELF and its old
-            # value has zero dataflow into the output. The RHS operand at
-            # arg1 stays fully witnessed.
-            rebind_setter_receiver = path == "arg0" and func_name == "data"
-            if unsafe_data_alias_receiver or (
-                not rebind_setter_receiver and not _tensor_has_known_provenance(trace, value)
-            ):
+            # ``t.data = rhs`` (round-31 M6, r28 reconcile): the setter is
+            # logged as the canonical single-argument ``detach(rhs)`` call, so
+            # the rebound receiver never appears as a recorded argument and no
+            # receiver-slot exemption exists here -- ``arg0`` IS the RHS and is
+            # fully witnessed like any other operand.
+            if unsafe_data_alias_receiver or not _tensor_has_known_provenance(trace, value):
                 positions.append(path)
                 return
             provenance_labels = tensor_session_parent_labels(value)

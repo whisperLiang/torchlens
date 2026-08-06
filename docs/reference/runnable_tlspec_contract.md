@@ -399,6 +399,10 @@ structure, re-derives, and requires exact discharge.
   `buf[:] = ...`) keeps the pointer and stays trusted (honest journaled/tracked mutation is
   untouched), while only a pointer-swapping `.data=`/`set_` rebind ceils; a same-storage rebind
   that re-strides to an input layout keeps the pointer and is caught instead by the layout net.
+  A rebind captured as an explicit `data` op (round-31 M6) re-labels the receiver with the op's
+  own fresh storage pin, so for THAT path the ceiling is carried by the storage-rebind ancestry
+  barrier instead: the swapping op's label taints layout/witness rooting exactly like an
+  unattributed break (r28 reconcile), while a pointer-preserving rebind keeps clean ancestry.
   For an honest activation the keeper is the tensor's own current storage (zero net retention,
   released with the tensor -- it never pins the activation graph, so sparse `save=` memory is
   untouched); an intervention replacement re-pins to its OWN storage while the session token
@@ -2185,7 +2189,13 @@ byte write: a state-derived activation (or buffer) whose storage is `.data=`/`se
 foreign or input-derived storage AFTER it was captured/labeled. The label-rung storage-integrity
 belt (r85) witnesses it -- the rebound receiver no longer matches its stamp-time storage keeper, so
 it is orphaned and the run ceils / the save refuses rather than replaying the pre-rebind value as a
-same-input false `verified` (section 4). An in-place write into the object's OWN storage keeps the
+same-input false `verified` (section 4). A `.data=` rebind executed INSIDE the captured forward is
+additionally recorded as an explicit op (round-31 M6): the setter is captured as the canonical
+single-argument `detach(rhs)` call under the user-facing `data` op name (consumers of the rebound
+object thread to the RHS producer), and when the rebind SWAPS the receiver's storage object the
+op's label is registered as an ancestry BARRIER -- layout/witness attribution never roots THROUGH
+the swap, so every verdict-steering fact downstream of it fails closed to the same permanent
+ceiling as the belt (r28 reconcile). An in-place write into the object's OWN storage keeps the
 pointer and stays `verified`; only the pointer-swapping rebind ceils.
 
 State ALIAS topology is part of the declared model (r37): repeated live object identity across

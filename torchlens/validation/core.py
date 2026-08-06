@@ -2253,18 +2253,11 @@ def _check_unattributed_arg_slots(self: "Trace", target_layer: Op) -> Validation
                 continue
             if _matches_own_parameter(target_layer, value):
                 continue
-            if (
-                arg_type == "args"
-                and argloc_key == 0
-                and func_name == "data"
-                and str(getattr(getattr(target_layer, "func", None), "__name__", "")) == "__set__"
-            ):
-                # ``t.data = rhs`` (round-31 M6): the receiver slot's saved
-                # value is the PRE-rebind tensor, which matches its old
-                # producer by construction while having zero dataflow into the
-                # op's output (the rebind replaces every value). The RHS slot
-                # at arg1 remains fully swept.
-                continue
+            # ``t.data = rhs`` (round-31 M6, r28 reconcile): the setter is
+            # captured as the canonical single-argument ``detach(rhs)`` call,
+            # so the pre-rebind receiver never appears as a recorded argument
+            # and no receiver-slot exemption is needed -- every recorded slot
+            # of a ``data`` op is the fully-swept RHS.
             # Round-31 H2: a runtime TENSOR at any input slot -- including
             # schema-typed ``int``/``Scalar`` control slots (``roll`` shifts,
             # ``softmax`` dim, factory size dims) -- is a data dependency whose

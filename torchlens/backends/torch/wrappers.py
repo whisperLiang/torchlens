@@ -985,10 +985,17 @@ def _canonical_capture_callable(
     returns the same storage-sharing, autograd-detached value as ``Tensor.detach``.
     Record that operation under the canonical detach callable so live validation
     and portable replay agree without admitting the unsafe ``data`` descriptor
-    through the callable resolver. The SETTER (``t.data = rhs``, round-31 M6) is
-    a receiver-rebinding mutation with a completely different call shape
-    ``(receiver, rhs)``; it keeps its own descriptor-``__set__`` identity so the
-    emitted op replays as a setter, never as a bogus two-argument ``detach``.
+    through the callable resolver. The SETTER (``t.data = rhs``, round-31 M6 +
+    r28 reconcile) rebinds the receiver onto RHS's storage: the receiver's old
+    value has zero dataflow into the result, so the op is RECORDED as the
+    canonical single-argument ``detach(rhs)`` call (the wrapper logs only the
+    RHS argument; see ``wrapped_func``) while keeping the user-facing ``"data"``
+    op name. That makes the emitted op value- and alias-exact for validation
+    replay and gives the runnable producer/resolver a trusted, already-supported
+    callable identity -- never a bogus two-argument ``detach`` and never the
+    unresolvable raw descriptor ``__set__``. Non-rebinding mutating setters
+    (``real`` / ``imag``) write through the receiver's own storage -- genuine
+    receiver dataflow -- and keep their descriptor-``__set__`` identity.
 
     Parameters
     ----------
@@ -1005,11 +1012,34 @@ def _canonical_capture_callable(
         Callable and operation name to persist for capture/replay.
     """
 
-    if func_name != "data" or property_accessor in ("set", "del"):
+    if func_name != "data" or property_accessor == "del":
         return func, func_name
     decorated_detach = torch.Tensor.detach
     original_detach = _state._decorated_to_orig.get(id(decorated_detach), decorated_detach)
+    if property_accessor == "set":
+        # Keep the user-facing "data" op name; the recorded/replayed callable is
+        # the canonical single-argument detach over the RHS-only logged args.
+        return cast(Callable[..., Any], original_detach), "data"
     return cast(Callable[..., Any], original_detach), "detach"
+
+
+def _untyped_storage_key(t: torch.Tensor) -> tuple[int, int, str] | None:
+    """Return a tensor's storage identity key ``(data_ptr, nbytes, device)``.
+
+    Reads run under ``pause_logging`` + ``internal_scalar_read`` so TorchLens's
+    own pointer read is never recorded as a user raw-pointer escape (which
+    would fail-close every runnable capture). ``None`` means the storage is
+    unreadable; callers must fail closed.
+    """
+
+    from .completeness_witness import internal_scalar_read
+
+    try:
+        with _state.pause_logging(), internal_scalar_read():
+            storage = t.untyped_storage()
+            return (storage.data_ptr(), storage.nbytes(), str(storage.device))
+    except Exception:
+        return None
 
 
 def _func_mutates_receiver(func_name: str) -> bool:
@@ -1533,6 +1563,30 @@ def torch_func_decorator(
 
         buffer_snapshots = snapshot_buffer_args(trace, func_name, arg_tensorlike, kwargs)
 
+        # ---- Storage-rebinding setter pre-call snapshot (r28 reconcile) ----
+        # ``t.data = rhs`` rebinds the receiver onto RHS's storage. Whether the
+        # rebind SWAPS the storage object (rhs on foreign storage) or PRESERVES
+        # it (rhs a view of the receiver's own storage) decides the ancestry
+        # barrier below, and is only observable BEFORE the setter runs.
+        is_storage_rebinding_setter = (
+            is_mutating_property_setter and func_name in _STORAGE_REBINDING_PROPERTY_SETTERS
+        )
+        rebind_setter_swaps_storage = False
+        if (
+            is_storage_rebinding_setter
+            and len(args) >= 2
+            and isinstance(args[0], torch.Tensor)
+            and isinstance(args[1], torch.Tensor)
+        ):
+            receiver_storage_key = _untyped_storage_key(args[0])
+            rhs_storage_key = _untyped_storage_key(args[1])
+            # Fail closed: an unreadable storage on either side counts as a swap.
+            rebind_setter_swaps_storage = (
+                receiver_storage_key is None
+                or rhs_storage_key is None
+                or receiver_storage_key != rhs_storage_key
+            )
+
         # ---- Execute the original function ----
         # Write a unique barcode BEFORE the call. If any inner wrapped functions
         # execute during this call, they will overwrite it. After the call,
@@ -1653,13 +1707,25 @@ def torch_func_decorator(
         capture_func, capture_func_name = _canonical_capture_callable(
             func, func_name, property_accessor
         )
+        # r28 reconcile: a storage-rebinding setter is RECORDED as the canonical
+        # single-argument ``detach(rhs)`` call -- the receiver's OLD value has
+        # zero dataflow into the result (the rebind replaces every value), so
+        # only the RHS argument is logged. The live receiver still gets the
+        # op's label through the same-object in-place propagation below.
+        log_args, log_kwargs = args, kwargs
+        log_arg_copies, log_kwarg_copies = arg_copies, kwarg_copies
+        if is_storage_rebinding_setter and len(args) >= 2:
+            log_args = (args[1],)
+            log_kwargs = {}
+            log_arg_copies = (arg_copies[1],) if len(arg_copies) >= 2 else log_args
+            log_kwarg_copies = {}
         out_before_hooks = out_orig
         out_orig = apply_live_hooks_to_outputs(
             trace,
             capture_func,
             capture_func_name,
-            args,
-            kwargs,
+            log_args,
+            log_kwargs,
             out_orig,
             exec_ctx,
             is_bottom_level_func,
@@ -1684,10 +1750,10 @@ def torch_func_decorator(
                         trace,
                         capture_func,
                         capture_func_name,
-                        args,
-                        kwargs,
-                        arg_copies,
-                        kwarg_copies,
+                        log_args,
+                        log_kwargs,
+                        log_arg_copies,
+                        log_kwarg_copies,
                         out_orig,
                         exec_ctx,
                         is_bottom_level_func,
@@ -1698,10 +1764,10 @@ def torch_func_decorator(
                     trace,
                     capture_func,
                     capture_func_name,
-                    args,
-                    kwargs,
-                    arg_copies,
-                    kwarg_copies,
+                    log_args,
+                    log_kwargs,
+                    log_arg_copies,
+                    log_kwarg_copies,
                     out_orig,
                     exec_ctx,
                     is_bottom_level_func,
@@ -1740,6 +1806,17 @@ def torch_func_decorator(
                     if was_inplace:
                         set_tensor_label(args[0], out_label)
                         _register_inplace_live_grad_hook(trace, args[0], out_label)
+                        # r28 reconcile: a storage-SWAPPING ``.data=`` rebind
+                        # threads its consumers to the RHS producer (correct
+                        # dataflow), but verdict-steering attribution must
+                        # never root THROUGH the swap -- the r79/r81 belt
+                        # posture. Register the op label as an ancestry
+                        # barrier so layout/witness rooting fails closed
+                        # exactly like the pre-M6 unattributed break.
+                        if is_storage_rebinding_setter and rebind_setter_swaps_storage:
+                            from .completeness_witness import record_storage_rebind_barrier
+
+                            record_storage_rebind_barrier(trace, out_label)
                         # W3 F1: the write may have gone through a VIEW; every
                         # other live labeled alias whose storage bytes overlap
                         # the target (its base, an overlapping sibling view)
