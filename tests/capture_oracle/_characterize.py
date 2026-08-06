@@ -1056,8 +1056,6 @@ def _capture_once(case: CaseSpec) -> tuple[dict[str, Any], dict[str, float | int
 
     with tempfile.TemporaryDirectory(prefix="torchlens-capture-oracle-") as temp_dir:
         disk_path = Path(temp_dir) / "capture.tlspec"
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
         tracemalloc.start()
         started = time.perf_counter()
         product: Any | None = None
@@ -1165,11 +1163,11 @@ def _capture_once(case: CaseSpec) -> tuple[dict[str, Any], dict[str, float | int
             "ground_truth": ground_truth,
             "expected_to_change": expected_to_change,
         }
-        cuda_peak = int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else None
         tracking: dict[str, float | int | None] = {
             "wall_time_ms": elapsed_ms,
             "python_peak_memory_bytes": int(peak_memory),
-            "cuda_peak_memory_bytes": cuda_peak,
+            # CUDA visibility is a property of the test host, not capture behavior.
+            "cuda_peak_memory_bytes": None,
         }
         return semantics, tracking
 

@@ -227,6 +227,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -345,6 +346,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -463,6 +465,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -584,6 +587,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -834,21 +838,21 @@
     },
     "schema_version": 1,
     "tracking": {
-      "cuda_peak_memory_median_bytes": 0,
-      "python_peak_memory_median_bytes": 315834,
+      "cuda_peak_memory_median_bytes": null,
+      "python_peak_memory_median_bytes": 387253,
       "sample_count": 3,
-      "torch_version": "2.8.0+cu128",
-      "wall_time_median_ms": 82.2516669286415
+      "torch_version": "2.13.0+cu130",
+      "wall_time_median_ms": 61.9878638535738
     }
   },
   "sha256_chunks": [
-    "8ac5bc63",
-    "bb8f38a5",
-    "811056c7",
-    "e666c16d",
-    "9ffd3574",
-    "b89d0784",
-    "19010096",
-    "c6bcd992"
+    "9dcf2867",
+    "829cc053",
+    "bfe5546f",
+    "8b0ab92c",
+    "5501e342",
+    "a035b9b1",
+    "beb82cdc",
+    "1ab4f06d"
   ]
 }

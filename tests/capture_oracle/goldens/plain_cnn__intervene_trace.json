@@ -65,6 +65,7 @@
             "bool_value": "unknown",
             "capture_spec": "unknown",
             "construction_done": "defaulted_false",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "equivalence_class": "populated",
             "fire_results": "defaulted_empty",
             "func_call_id": "populated",
@@ -213,6 +214,7 @@
             "bool_value": "unknown",
             "capture_spec": "unknown",
             "construction_done": "defaulted_false",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "equivalence_class": "populated",
             "fire_results": "populated",
             "func_call_id": "populated",
@@ -579,21 +581,21 @@
     },
     "schema_version": 1,
     "tracking": {
-      "cuda_peak_memory_median_bytes": 0,
-      "python_peak_memory_median_bytes": 437217,
+      "cuda_peak_memory_median_bytes": null,
+      "python_peak_memory_median_bytes": 698989,
       "sample_count": 3,
-      "torch_version": "2.8.0+cu128",
-      "wall_time_median_ms": 200.9580790763721
+      "torch_version": "2.13.0+cu130",
+      "wall_time_median_ms": 387.8713499289006
     }
   },
   "sha256_chunks": [
-    "1cb2bb0e",
-    "5fdbec23",
-    "8a984d2c",
-    "bc844e06",
-    "3dbecd92",
-    "c24b93f5",
-    "3a29f478",
-    "640dbf1d"
+    "0f6c8aa8",
+    "ea774976",
+    "21aa7f6b",
+    "ee5da6d8",
+    "2db021b4",
+    "e6357dc5",
+    "9607c84c",
+    "8cd12679"
   ]
 }
