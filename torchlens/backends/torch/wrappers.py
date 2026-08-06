@@ -1126,9 +1126,14 @@ def _propagate_mutation_label_to_storage_aliases(
     from ._tl import session_storage_alias_candidates
     from .ops import _record_label_version_snapshot
 
-    # ``untyped_storage`` is a WITNESSED host-escape method; TorchLens's own
-    # bookkeeping reads must run under pause_logging (see ``_tl._pinned_storage``).
-    with _state.pause_logging():
+    # ``untyped_storage()`` / ``data_ptr()`` / ``stride()`` / ``storage_offset()``
+    # are WITNESSED host-escape / metadata surfaces, and a genuine user
+    # ``data_ptr()`` read fail-closes runnable captures to UNVERIFIABLE
+    # (r15-H1). These are TorchLens's OWN bookkeeping reads, so they run under
+    # ``pause_logging`` (no spurious op capture) plus ``internal_scalar_read``
+    # (kept off the escape census / metadata patches) -- the same sanctioned
+    # pattern as ``completeness_witness``'s storage-site indexers.
+    with _state.pause_logging(), internal_scalar_read():
         try:
             storage_ptr = mutated.untyped_storage().data_ptr()
         except Exception:

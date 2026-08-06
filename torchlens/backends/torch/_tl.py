@@ -885,10 +885,19 @@ def set_tensor_label(t: Any, label: str) -> None:
             pass
     # Storage-alias index (W3 F1): registered on EVERY stamp (a relabel keeps
     # the same storage, so re-insertion is idempotent) so in-place ops can
-    # resolve overlapping live labeled aliases of their target.
+    # resolve overlapping live labeled aliases of their target. The
+    # ``data_ptr()`` read is TorchLens bookkeeping on an already-pinned
+    # storage handle: it MUST run under ``internal_scalar_read`` (lazy import;
+    # ``completeness_witness`` imports from this module) plus
+    # ``pause_logging``, or the runnable host-escape patches record it as a
+    # user raw-pointer escape and fail-close EVERY runnable capture to
+    # UNVERIFIABLE (r15-H1 ``_HOST_ESCAPE_RAW_POINTER``).
     if meta.label_storage is not None:
+        from .completeness_witness import internal_scalar_read
+
         try:
-            storage_ptr = meta.label_storage.data_ptr()
+            with _state.pause_logging(), internal_scalar_read():
+                storage_ptr = meta.label_storage.data_ptr()
         except Exception:
             storage_ptr = None
         if storage_ptr is not None:
