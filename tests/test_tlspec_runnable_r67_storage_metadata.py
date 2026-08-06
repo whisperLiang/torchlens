@@ -566,12 +566,14 @@ def test_r67_hostile_subclass_admission_refuses(surface: str, tmp_path: Path) ->
 
         model, payload = Model(), _Hostile(torch.randn(3))
 
-    # NOTE (untyped-error finding, follow-up): the hostile ``__torch_function__`` subclass IS
-    # fail-closed at the CAPTURE admission boundary, but via a generic untyped ``RuntimeError``
-    # (model-output attribution fails on the subclass tensor) rather than a typed hostile-
-    # admission refusal as the docstring implies. Pin the real type + a stable message substring
-    # so a wrong-exception mutation fails; the product raise is unchanged (TEST-only strengthen).
-    with pytest.raises(RuntimeError, match="could not attribute a model output tensor"):
+    # r26 (W3-F5): subclass outputs are now genuinely CAPTURED (the old untyped
+    # ``could not attribute a model output tensor`` RuntimeError was a side effect of the
+    # exact-type emit gate silently dropping every subclass op -- the very gap this NOTE
+    # lamented). The admission boundary is now the SAVE preflight, which the docstring and
+    # the sibling ``MutateThroughHandle`` test already treat as equally fail-closed: the
+    # hostile class object refuses TYPED (``unsupported_literal``: a ``torch._C._TensorMeta``
+    # is outside the frozen non-tensor literal grammar), never blessed into an artifact.
+    with pytest.raises(RunnablePreflightError, match="preflight failed"):
         trace = _trace(model, payload)
         _save(trace, tmp_path / "hostile.tlspec")
 

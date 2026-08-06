@@ -1126,6 +1126,25 @@ def _propagate_mutation_label_to_storage_aliases(
     from ._tl import session_storage_alias_candidates
     from .ops import _record_label_version_snapshot
 
+    # SCOPE (r26 reconcile): descriptor/grad-bound captures keep the HISTORICAL
+    # topology. The runnable recipe + numeric attestation key payloads PER
+    # LABEL, and advancing a base tensor's label to a view-mutation op makes
+    # one label denote two different values (the op's view-shaped output AND
+    # the full post-mutation base as the consumer's parent) -- byte-exact
+    # attestation then fails on a genuinely-verifiable run (r29 suite).
+    # Those modes stay honest without the edge: the r29 view-lineage gate
+    # fail-closes view-mediated input mutation, and validation's
+    # version-snapshot replay is green with EITHER topology. Default captures
+    # (receptive fields, influence geometry, collapse -- the W3-F1 impact
+    # surface) get the mutation edge. Follow-up: teach the runnable reader
+    # per-(label, consumer) payload keying, then lift this scope.
+    if (
+        getattr(trace, "intervention_ready", False)
+        or getattr(trace, "backward_ready", False)
+        or getattr(trace, "save_grads", None) not in (None, False)
+    ):
+        return
+
     # ``untyped_storage()`` / ``data_ptr()`` / ``stride()`` / ``storage_offset()``
     # are WITNESSED host-escape / metadata surfaces, and a genuine user
     # ``data_ptr()`` read fail-closes runnable captures to UNVERIFIABLE
