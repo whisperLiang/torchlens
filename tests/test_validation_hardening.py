@@ -630,3 +630,69 @@ def test_unit_step_retry_still_fails_true_insensitivity() -> None:
     )
     assert result.decision == "failed"
     assert result.reason == "perturbation_insensitive"
+
+
+# ---------------------------------------------------------------------------
+# r33 R1/R2 (round-35): dead zones WIDER than one unit (geometric ladder)
+# ---------------------------------------------------------------------------
+
+
+class _WideBucketize(nn.Module):
+    """``bucketize(x*0, [100])`` -- a 100-wide dead zone the unit step missed."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.bucketize(x * 0, torch.tensor([100.0])).float() + x
+
+
+class _NegativeDecimalsRound(nn.Module):
+    """``round(x*0, decimals=-2)`` quantizes to the nearest 100."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.round(x * 0, decimals=-2) + x
+
+
+def test_wide_bucketize_dead_zone_validates_true() -> None:
+    """PIN (round-35 R2): a bin wider than one unit must still validate True.
+
+    The all-zero parent sits 100 away from the only ``bucketize`` boundary,
+    so the +-1.0 unit-step retry stayed inside the bin and the provably-real
+    edge false-FAILed. The geometric magnitude ladder crosses the boundary.
+    """
+
+    torch.manual_seed(0)
+    assert _quiet_validate(_WideBucketize(), torch.randn(4, 5)) is True
+
+
+def test_negative_decimals_round_dead_zone_validates_true() -> None:
+    """PIN (round-35 R2): ``round(decimals=-2)`` has a +-50 dead zone."""
+
+    torch.manual_seed(0)
+    assert _quiet_validate(_NegativeDecimalsRound(), torch.randn(4, 5)) is True
+
+
+def test_geometric_ladder_still_fails_spurious_discretizing_edge() -> None:
+    """Armed-proof: the ladder cannot bless a genuinely dead discretizing edge.
+
+    Freeze the wide-bin ``bucketize`` op's replay callable to return its saved
+    out regardless of inputs (the recorded parent provably does not influence
+    the output): no rung of the geometric ladder -- +-1 through +-1e9 -- can
+    change the output, so the tripwire must still fire
+    ``perturbation_insensitive``. This proves the round-35 R2 extension only
+    ADDED influence-detection attempts and introduced no false-VERIFIED path.
+    """
+
+    from torchlens.validation.core import (
+        _check_whether_func_on_saved_parents_yields_saved_tensor,
+    )
+
+    trace, _ground_truth = _capture(_WideBucketize(), torch.randn(4, 5))
+    bucketize_op = [op for op in trace.layer_list if op.func_name == "bucketize"][0]
+    saved = bucketize_op.out.detach().clone()
+    object.__setattr__(bucketize_op, "func", lambda *args, **kwargs: saved.clone())
+    parent_label = bucketize_op.parents[0]
+
+    result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+        trace, bucketize_op.label, perturb=True, layers_to_perturb=[parent_label]
+    )
+    assert result.decision == "failed"
+    assert result.reason == "perturbation_insensitive"
