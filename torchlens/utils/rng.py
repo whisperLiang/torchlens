@@ -21,6 +21,7 @@ mixed-precision ops can be replayed under the same dtype context.
 """
 
 import collections as _collections_module
+import contextvars as _contextvars_module
 import datetime as _datetime_module
 import dis as _dis_module
 import functools as _functools_module
@@ -41,6 +42,7 @@ from types import (
     FrameType,
     FunctionType,
     GetSetDescriptorType,
+    MappingProxyType,
     MemberDescriptorType,
     MethodType,
     MethodWrapperType,
@@ -184,6 +186,28 @@ _PARTIAL_SLOT_DESCRIPTORS: tuple[Any, ...] = tuple(
 inventory reads them through these BASE descriptors so a hostile subclass shadow never
 executes. The ``func`` edge recovers ``partial(gen.random)``-style receivers through the
 bound-callable extraction."""
+
+_WEAKREF_PROXY_TYPES: tuple[type, ...] = (
+    _weakref_module.ProxyType,
+    _weakref_module.CallableProxyType,
+)
+"""The two weakref PROXY C types (r39 -- executed false-VERIFIED V9a).
+
+A proxy is NOT a ``weakref.ref`` subclass and has NO inert dereference: CPython's proxy
+``tp_traverse`` does not yield the referent (``gc.get_referents(proxy)`` is empty --
+verified on py3.10), and EVERY other read, including ``isinstance`` (via ``__class__``)
+and attribute access, forwards through the referent's own attribute machinery, where a
+hostile ``__getattribute__`` could fire. Both walks therefore match on the EXACT
+``type(value)`` (which never forwards) and fail CLOSED."""
+
+_LRU_CACHE_WRAPPER_TYPE: type | None = getattr(_functools_module, "_lru_cache_wrapper", None)
+"""The C ``functools.lru_cache`` wrapper type (r39 -- executed false-VERIFIED V9b).
+
+A cache WARMED before the capture returns its cached generator with no Python frame (the
+wrapped function never runs), so the draw is witnessable only by digesting the cache
+contents, exposed inertly by ``tp_traverse``. ``None`` on a runtime whose ``lru_cache``
+is the pure-Python fallback -- there the wrapper is a plain ``FunctionType`` whose cache
+hits still enter a profiled Python frame, so the return-transfer digest covers it."""
 
 
 def aten_qualname_is_seeded_rng(namespace: str | None, qualname: str | None) -> bool:
@@ -2154,6 +2178,14 @@ class host_nondeterminism_monitor:
             return (*dict.keys(value), *dict.values(value))
         if value_type in (list, tuple, set, frozenset):
             return tuple(value)
+        # r39: match weakref PROXIES on EXACT type BEFORE any isinstance branch below
+        # -- ``isinstance`` consults the proxy's forwarded ``__class__``, so a proxy
+        # whose referent is a deque/local/partial would otherwise be dispatched into a
+        # base-C read that raises (or, worse, forwards). NO inert deref exists (see
+        # :data:`_WEAKREF_PROXY_TYPES`); leaf here -- the deep frame walk fail-closes
+        # this shape to INCOMPLETE.
+        if type(value) in _WEAKREF_PROXY_TYPES:
+            return ()
         # r38 stdlib-instance holder edges, mirroring the deep-inventory parity
         # branches: every read below is base-C (deref / member descriptor /
         # ``tp_traverse`` / base ``__iter__``), so no user code can fire.
@@ -2182,16 +2214,66 @@ class host_nondeterminism_monitor:
             return tuple(interior)
         if isinstance(value, _collections_module.deque):
             return tuple(_collections_module.deque.__iter__(value))
+        # r39 C-holder parity branches (round-39 executed false-VERIFIEDs V9a-V9f):
+        # a generator reached ONLY through a C-implemented holder with a C accessor
+        # path never enters a Python frame. Every read below is base-C
+        # (``tp_traverse`` / base getset / C ``Context`` lookup); no user code fires.
+        if _LRU_CACHE_WRAPPER_TYPE is not None and isinstance(value, _LRU_CACHE_WRAPPER_TYPE):
+            # A WARM wrapper's ``tp_traverse`` exposes its cache dict; flatten one
+            # dict level so this single-edge belt sees the cached values directly.
+            cached_values: list[Any] = []
+            for referent in _gc_module.get_referents(value):
+                if type(referent) is dict:
+                    cached_values.extend(dict.values(referent))
+            return tuple(cached_values)
+        if type(value) is MappingProxyType:
+            # ``tp_traverse`` yields the BACKING mapping without invoking its (possibly
+            # user-defined) ``keys``/``values``; flatten an exact-dict backing one level.
+            proxied: list[Any] = []
+            for referent in _gc_module.get_referents(value):
+                if type(referent) is dict:
+                    proxied.extend(dict.keys(referent))
+                    proxied.extend(dict.values(referent))
+                else:
+                    proxied.append(referent)
+            return tuple(proxied)
+        if type(value) is _contextvars_module.ContextVar:
+            # The VALUE lives in the per-thread ``Context``, off the reference graph;
+            # the base C ``get`` (set value or declared default, owner thread) is the
+            # only inert edge. Pre-existing OTHER threads' contexts stay the documented
+            # foreign-thread residual.
+            try:
+                return (_contextvars_module.ContextVar.get(value),)
+            except LookupError:
+                return ()
+        if isinstance(value, type):
+            # Class-attribute surface across the OWN MRO and the METACLASS MRO --
+            # ``CLS.gen`` on a base class or user metaclass resolves entirely in C.
+            return host_nondeterminism_monitor._class_attr_surface(value)
+        if isinstance(value, np.ndarray):
+            # An OBJECT-dtype ndarray holds ordinary Python references (numpy's own
+            # parallel-streams idiom: arrays of spawned Generators) and ``ARR[0]`` is
+            # a profile-silent C subscript. Element-iterate ONLY object dtypes through
+            # the base getsets; non-object dtypes stay hard leaves. This belt has no
+            # budget of its own, so an over-cap object array is left to the budgeted
+            # (fail-closed) deep frame walk.
+            try:
+                dtype = np.ndarray.dtype.__get__(value)
+                if dtype.hasobject and int(np.ndarray.size.__get__(value)) <= (
+                    _DEEP_INVENTORY_NODE_CAP
+                ):
+                    return tuple(np.ndarray.flat.__get__(value))
+            except Exception:
+                return ()
+            return ()
         if isinstance(
             value,
             (
-                type,
                 ModuleType,
                 FunctionType,
                 BuiltinFunctionType,
                 MethodType,
                 MethodWrapperType,
-                np.ndarray,
                 np.generic,
                 torch.Tensor,
                 torch.nn.Module,
@@ -3106,6 +3188,33 @@ class host_nondeterminism_monitor:
                 if visited_nodes > _INVENTORY_NODE_CAP:
                     self._flag_uncertain("inventory_budget_exhausted")
                     return snapshots
+                # r39 (frame-walk parity, executed false-VERIFIED V9a): a weakref
+                # PROXY forwards EVERY read -- including ``isinstance`` (via
+                # ``__class__``) and the Mapping/Collection protocol reads below --
+                # through its referent's own attribute machinery, and NO inert deref
+                # exists (``tp_traverse`` does not yield the referent; see
+                # :data:`_WEAKREF_PROXY_TYPES`). Match the EXACT type BEFORE any
+                # isinstance branch can be spoofed into a forwarding read, and fail
+                # CLOSED by design (pre-r39 this only ceilinged via an incidental
+                # ``inventory_scan_failed`` exception).
+                if type(value) in _WEAKREF_PROXY_TYPES:
+                    self._flag_uncertain("inventory_opaque_container")
+                    continue
+                # r39 (frame-walk parity, executed false-VERIFIED V9c-model): a
+                # ``ContextVar``'s VALUE lives in the per-thread ``Context``, off the
+                # reference graph -- ``tp_traverse`` does not expose it, so the gc
+                # fallback below is blind. The base C ``get`` (set value or declared
+                # default, owner thread) is the only inert edge; pre-existing OTHER
+                # threads' contexts stay the documented foreign-thread residual.
+                if type(value) is _contextvars_module.ContextVar:
+                    if id(value) in seen_container_ids:
+                        continue
+                    seen_container_ids.add(id(value))
+                    try:
+                        pending.append(_contextvars_module.ContextVar.get(value))
+                    except LookupError:
+                        pass
+                    continue
                 # r53 corr_1 (class-surface edge): a CLASS node contributes its raw
                 # ``__dict__`` values -- a mappingproxy read reaches descriptor OBJECTS
                 # (class-descriptor-held submodules/generators) and plain class-attribute
@@ -3119,6 +3228,12 @@ class host_nondeterminism_monitor:
                     if id(value) in seen_container_ids:
                         continue
                     seen_container_ids.add(id(value))
+                    # r39 (executed false-VERIFIED V9d): ``CLS.gen`` can resolve
+                    # through ``type(CLS).__mro__`` -- a user METACLASS class-var --
+                    # entirely in C. Enqueue the metaclass into this same
+                    # trusted-leaf-gated branch (``type`` itself is a trusted leaf,
+                    # so the extra edge is dedup-bounded to user metaclasses).
+                    pending.append(type(value))
                     if self._is_trusted_leaf_class(value):
                         continue
                     try:
@@ -3152,6 +3267,42 @@ class host_nondeterminism_monitor:
                     if type(value) is not _weakref_module.ref:
                         pending.extend(self._custom_holder_children(value))
                         pending.append(type(value))
+                    continue
+                # r39 (executed false-VERIFIED V9f): an OBJECT-dtype ndarray's ELEMENTS
+                # are ordinary Python references -- numpy's own parallel-streams idiom
+                # stores spawned Generators this way -- and ``ARR[i]`` is a
+                # profile-silent C subscript. Element-iterate ONLY object dtypes,
+                # through the base getsets so a subclass property never fires; numeric
+                # dtypes keep their buffer unwalked. An over-cap object array fails
+                # closed (INCOMPLETE), never a silent partial read. The instance
+                # ``__dict__``/``__slots__`` and class edges mirror the gc fallback's
+                # numeric-payload branch (r61/r63), which this branch pre-empts for
+                # ndarrays only.
+                if isinstance(value, np.ndarray):
+                    if id(value) in seen_container_ids:
+                        continue
+                    seen_container_ids.add(id(value))
+                    try:
+                        dtype = np.ndarray.dtype.__get__(value)
+                    except Exception:
+                        self._flag_uncertain("inventory_state_read_failed")
+                        continue
+                    if dtype.hasobject:
+                        try:
+                            size = int(np.ndarray.size.__get__(value))
+                        except Exception:
+                            self._flag_uncertain("inventory_state_read_failed")
+                            continue
+                        if visited_nodes + size > _INVENTORY_NODE_CAP:
+                            self._flag_uncertain("inventory_budget_exhausted")
+                            return snapshots
+                        try:
+                            pending.extend(np.ndarray.flat.__get__(value))
+                        except Exception:
+                            self._flag_uncertain("inventory_state_read_failed")
+                            continue
+                    pending.extend(self._custom_holder_children(value))
+                    pending.append(type(value))
                     continue
                 # r45 hon1_1: descend by container PROTOCOL, not a fixed concrete-type list, so a
                 # model-held generator inside a ``deque`` / ``ChainMap`` / ``UserList`` /
@@ -3396,6 +3547,18 @@ class host_nondeterminism_monitor:
         typed INCOMPLETE, never a silent leaf. Dynamic-name namespace subscripts
         (``globals()["name"]``) are witnessed by resolving the code object's
         string CONSTANTS as global roots (:meth:`_snapshot_numpy_frame_rngs`).
+        r39 (round-39 re-attack): six more executed C-holder false-VERIFIEDs closed
+        by bounded parity branches -- weakref PROXIES (fail-closed; no inert deref),
+        warm ``functools.lru_cache`` wrappers and ``MappingProxyType`` (both via
+        ``tp_traverse``), owner-thread ``ContextVar`` values (base C ``get``),
+        OBJECT-dtype ndarray elements (base getsets, budget-gated), and class-var
+        resolution through the MRO and a user METACLASS (parity with the model
+        sweep). These are STOPGAPS for found shapes, not closure: a generator
+        reachable ONLY through a C-implemented holder whose accessor path contains
+        no Python frame remains structurally outside this witness's scope on
+        numpy>=2 + CPython<3.12 (contract s11; the sys.monitoring/PEP-669 receiver
+        classifier is the py>=3.12 architectural closure, under owner review).
+
         Remaining documented residuals (contract s11): receivers in namespaces no
         in-window frame references, stdlib/internal-package namespace stashes,
         function-attribute holders, COMPUTED (non-constant) dynamic names, the
@@ -3437,6 +3600,16 @@ class host_nondeterminism_monitor:
                     self._deep_inventory_exhausted = True
                     self._flag_uncertain("deep_inventory_budget_exhausted")
                     return
+                # r39 (executed false-VERIFIED V9a): a weakref PROXY forwards EVERY
+                # read -- including ``isinstance`` (via ``__class__``) and attribute
+                # access -- through its referent's own attribute machinery, and NO
+                # inert deref exists (see :data:`_WEAKREF_PROXY_TYPES`). Match the
+                # EXACT type BEFORE any isinstance branch below can be spoofed into a
+                # forwarding read, and fail CLOSED: an unreadable C holder is a typed
+                # INCOMPLETE, never a silent leaf.
+                if value_type in _WEAKREF_PROXY_TYPES:
+                    self._flag_uncertain("inventory_opaque_container")
+                    continue
                 if isinstance(value, _NUMPY_RNG_INSTANCE_TYPES):
                     if id(value) in self._exempt_ids:
                         continue
@@ -3530,6 +3703,63 @@ class host_nondeterminism_monitor:
                         pending.extend(self._custom_holder_children(value))
                         pending.append(value_type)
                     continue
+                # r39 C-holder parity branches (executed false-VERIFIEDs V9b/V9c/V9e/
+                # V9f): a generator reached ONLY through a C-implemented holder with a
+                # C accessor path never enters a Python frame. Every read below is
+                # base-C (``tp_traverse`` / base getset / C ``Context`` lookup).
+                if _LRU_CACHE_WRAPPER_TYPE is not None and isinstance(
+                    value, _LRU_CACHE_WRAPPER_TYPE
+                ):
+                    # A cache WARMED pre-capture returns its cached generator with no
+                    # Python frame; ``tp_traverse`` exposes the cache dict (walked by
+                    # the dict branch above) plus the wrapped function (callable leaf).
+                    pending.extend(_gc_module.get_referents(value))
+                    continue
+                if value_type is MappingProxyType:
+                    # ``tp_traverse`` yields the BACKING mapping object without
+                    # invoking its (possibly user-defined) ``keys``/``values``; the
+                    # walk then descends it through its own typed branch.
+                    pending.extend(_gc_module.get_referents(value))
+                    continue
+                if value_type is _contextvars_module.ContextVar:
+                    # The VALUE lives in the per-thread ``Context``, off the reference
+                    # graph (``tp_traverse`` does not expose it); the base C ``get``
+                    # (set value or declared default, owner thread) is the only inert
+                    # edge. Pre-existing OTHER threads' contexts stay the documented
+                    # foreign-thread residual.
+                    try:
+                        pending.append(_contextvars_module.ContextVar.get(value))
+                    except LookupError:
+                        pass
+                    continue
+                if isinstance(value, np.ndarray):
+                    # An OBJECT-dtype ndarray holds ordinary Python references
+                    # (numpy's own parallel-streams idiom: arrays of spawned
+                    # Generators) and ``ARR[0]`` is a profile-silent C subscript.
+                    # Element-iterate ONLY object dtypes, through the base getsets so
+                    # a subclass property never fires; non-object dtypes stay hard
+                    # leaves. An over-cap object array exhausts the budget FIRST
+                    # (INCOMPLETE, fail-closed), never a silent partial read.
+                    try:
+                        dtype = np.ndarray.dtype.__get__(value)
+                    except Exception:
+                        self._flag_uncertain("inventory_state_read_failed")
+                        continue
+                    if dtype.hasobject:
+                        try:
+                            size = int(np.ndarray.size.__get__(value))
+                        except Exception:
+                            self._flag_uncertain("inventory_state_read_failed")
+                            continue
+                        if visited_nodes + size > _DEEP_INVENTORY_NODE_CAP:
+                            self._deep_inventory_exhausted = True
+                            self._flag_uncertain("deep_inventory_budget_exhausted")
+                            return
+                        try:
+                            pending.extend(np.ndarray.flat.__get__(value))
+                        except Exception:
+                            self._flag_uncertain("inventory_state_read_failed")
+                    continue
                 if isinstance(value, ModuleType):
                     namespace = self._module_namespace_walk_eligible(value)
                     if namespace is None:
@@ -3544,13 +3774,21 @@ class host_nondeterminism_monitor:
                         pending.append(member)
                     continue
                 if isinstance(value, type):
-                    # Direct class-attribute surface only -- NO MRO cascade: a
-                    # module-defined base class is reachable through its own defining
-                    # namespace, so re-enqueueing bases only multiplies the walk.
+                    # r39 (executed false-VERIFIEDs V9c/V9d): ``CLS.gen`` resolves
+                    # through ``CLS.__mro__`` AND ``type(CLS).__mro__`` entirely in C,
+                    # and -- unlike the model sweep -- this walk never expands a shared
+                    # module namespace, so a BASE class or user METACLASS is NOT
+                    # otherwise reachable (the r38 "reachable through its own defining
+                    # namespace" rationale was false for the frame walk). Cascade the
+                    # MRO and enqueue the metaclass, matching the model sweep; both
+                    # are dedup-bounded, and ``type`` itself plus stdlib/torch/numpy
+                    # classes stay trusted leaves on their own visit.
+                    pending.append(value_type)  # the metaclass (``type(value)``)
                     if self._is_trusted_leaf_class(value):
                         continue
                     try:
                         raw_dict = type.__dict__["__dict__"].__get__(value)
+                        mro = type.__dict__["__mro__"].__get__(value)
                     except Exception:
                         continue
                     pending.extend(
@@ -3558,6 +3796,7 @@ class host_nondeterminism_monitor:
                         for attr in raw_dict.values()
                         if self._module_namespace_class_attr_eligible(attr)
                     )
+                    pending.extend(base for base in mro if base is not value)
                     continue
                 if value_type is SimpleNamespace:
                     # ``types.SimpleNamespace`` is the idiomatic config-object shape but
@@ -3627,6 +3866,43 @@ class host_nondeterminism_monitor:
         ):
             return False
         return True
+
+    @staticmethod
+    def _class_attr_surface(klass: type) -> tuple[Any, ...]:
+        """Eligible raw class-dict values across ``klass``'s MRO plus its metaclass MRO (r39).
+
+        ``CLS.gen`` resolves through ``type(CLS).__mro__`` and then ``CLS.__mro__``
+        entirely in C -- no Python frame -- so a generator stored as a BASE-class or
+        METACLASS class-var steers user code with no profile event (executed round-39
+        false-VERIFIEDs V9c/V9d). All reads go through the base ``type`` getsets (a
+        hostile metaclass property on ``__dict__``/``__mro__`` never fires); trusted
+        stdlib/torch/numpy classes and ``type`` itself contribute nothing, so the cost
+        is bounded by the referencing code's USER classes only.
+        """
+
+        surface: list[Any] = []
+        seen: set[int] = set()
+        stack: list[type] = [klass]
+        while stack:
+            current = stack.pop()
+            if id(current) in seen or not isinstance(current, type):
+                continue
+            seen.add(id(current))
+            stack.append(type(current))
+            if host_nondeterminism_monitor._is_trusted_leaf_class(current):
+                continue
+            try:
+                raw_dict = type.__dict__["__dict__"].__get__(current)
+                mro = type.__dict__["__mro__"].__get__(current)
+            except Exception:
+                continue
+            surface.extend(
+                attr
+                for attr in raw_dict.values()
+                if host_nondeterminism_monitor._module_namespace_class_attr_eligible(attr)
+            )
+            stack.extend(base for base in mro if base is not current)
+        return tuple(surface)
 
     # -- context protocol ---------------------------------------------------------
 

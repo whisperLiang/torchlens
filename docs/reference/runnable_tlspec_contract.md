@@ -1866,8 +1866,22 @@ so the only fail-closed spelling is a blanket "pre-existing threads exist" ceili
 built (r38 draft) and REJECTED for over-ceiling every capture running alongside a benign
 DataLoader/Jupyter/pytest background thread; the moment the owner's (or any hooked thread's)
 in-window code reaches the same generator through ANY digest root, the draw IS witnessed.
-Every C-internal holder the walks REACH but cannot read is fail-closed, never silently leafed
-(frame-side parity, r38: a non-provably-empty opaque queue flags `inventory_opaque_container`).
+Every C-internal holder the walks RECOGNIZE but cannot read is fail-closed, never silently
+leafed (frame-side parity, r38: a non-provably-empty opaque queue flags
+`inventory_opaque_container`; r39: a `weakref.proxy` -- which has no inert dereference and
+forwards every other read through the referent's attribute machinery -- flags the same).
+Recognition itself is the structural boundary (r39): **a numpy
+`Generator`/`BitGenerator`/`RandomState` reachable ONLY through a C-implemented holder whose
+accessor path contains no Python frame is outside the consumption witness's scope on numpy>=2 +
+CPython<3.12** -- the holder kinds are an open set (arbitrary C-extension/Cython holders with
+C-level accessors), so a capture drawing through an unrecognized member of this class can report
+VERIFIED that a fresh oracle-1 run would not reproduce. This is the same threat-model-boundary
+family as the pre-existing-foreign-thread clause above, NOT a closure-by-enumeration claim: the
+bounded r39 parity branches below close the specific shapes found by executed re-attacks (three
+consecutive re-attack rounds each found new members), and the architectural closure -- a
+`sys.monitoring` (PEP 669) CALL-event receiver classifier, which fires for extension/Cython
+callables and restores per-draw receiver classification at the SOURCE so holder location no
+longer matters -- is a py>=3.12 follow-up under owner review, not implemented here.
 The shared-module-namespace clause of this residual is NARROWED to unreferenced namespaces (B4,
 active for the profile-silent numpy>=2 method shape; numpy 1.x owner/in-window-thread draws are
 already receiver-classified by `c_call`):
@@ -1880,8 +1894,17 @@ direct class attributes, and -- r38 frame-walk parity with the model-rooted swee
 executed V6/V7/V8 + deque frame-rooted false-VERIFIEDs -- `weakref.ref` referents (one base-C
 deref), `threading.local` per-thread namespaces (`tp_traverse`; ALL threads' dicts, so a
 per-thread generator set by any thread is reached), `functools.partial` interiors
-(`func`/`args`/`keywords` through the base member descriptors), and `deque` buffers (base
-`__iter__`) are digested at first reference and compared whole-window --
+(`func`/`args`/`keywords` through the base member descriptors), `deque` buffers (base
+`__iter__`), and -- r39 bounded C-holder parity branches, closing the executed V9a-V9f
+frame-rooted false-VERIFIEDs -- WARM `functools.lru_cache` wrappers (cache dict via
+`tp_traverse`; a warmed cache returns its generator with no Python frame),
+`types.MappingProxyType` backing mappings (`tp_traverse`, never the proxied `keys`/`values`),
+owner-thread `contextvars.ContextVar` values (base C `get`; the value lives in the per-thread
+`Context`, off the reference graph -- pre-existing OTHER threads' contexts stay in the
+foreign-thread residual above), OBJECT-dtype ndarray elements (base getsets, budget-gated;
+numpy's own parallel-streams idiom -- numeric dtypes stay hard leaves), and class-var
+resolution through the full MRO and a user METACLASS (both walks; weakref PROXIES fail closed,
+see above) are digested at first reference and compared whole-window --
 thread-independently, so a pre-existing worker's draw from a receiver the owner's in-window code
 has already referenced is witnessed (`frame_reachable_generator`; cap exhaustion flags
 `deep_inventory_budget_exhausted`, INCOMPLETE, never silent -- the r55 C6 exclusion of
