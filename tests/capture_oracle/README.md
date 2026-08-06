@@ -38,8 +38,9 @@ TORCHLENS_UPDATE_CAPTURE_ORACLE=1 PYTHONPATH="$PWD/tests:$PWD" \
   -k capture_characterization_matches_golden -q
 ```
 
-Timing and memory are retained for regression tracking as broad ratios to the committed
-baseline, not as machine-specific absolute gates. RNG, model, and input construction are
-seeded for every sample. The `followed_by` lookback case is trace-only because current
+Timing and Python memory are retained for regression tracking as broad ratios to the committed
+baseline, not as machine-specific absolute gates. CUDA peak memory is normalized to `None` so
+device visibility cannot change the oracle result. RNG, model, and input construction are seeded
+for every sample. The `followed_by` lookback case is trace-only because current
 `record(save=followed_by(...))` rejects that selector explicitly; the matrix does not weaken
 that validation.

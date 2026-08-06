@@ -879,7 +879,7 @@
             }
           },
           {
-            "label_raw": "contiguous_2_23_raw",
+            "label_raw": "reshape_1_23_raw",
             "population": {
               "_edge_uses": "defaulted_empty",
               "backend_semantics.autograd_memory": "unknown",
@@ -920,7 +920,7 @@
             }
           },
           {
-            "label_raw": "view_7_24_raw",
+            "label_raw": "linear_2_24_raw",
             "population": {
               "_edge_uses": "defaulted_empty",
               "backend_semantics.autograd_memory": "unknown",
@@ -961,7 +961,7 @@
             }
           },
           {
-            "label_raw": "linear_2_25_raw",
+            "label_raw": "view_7_25_raw",
             "population": {
               "_edge_uses": "defaulted_empty",
               "backend_semantics.autograd_memory": "unknown",
@@ -1002,7 +1002,7 @@
             }
           },
           {
-            "label_raw": "view_8_26_raw",
+            "label_raw": "transpose_6_26_raw",
             "population": {
               "_edge_uses": "defaulted_empty",
               "backend_semantics.autograd_memory": "unknown",
@@ -1043,7 +1043,7 @@
             }
           },
           {
-            "label_raw": "transpose_6_27_raw",
+            "label_raw": "dropout_1_27_raw",
             "population": {
               "_edge_uses": "defaulted_empty",
               "backend_semantics.autograd_memory": "unknown",
@@ -1084,48 +1084,7 @@
             }
           },
           {
-            "label_raw": "dropout_1_28_raw",
-            "population": {
-              "_edge_uses": "defaulted_empty",
-              "backend_semantics.autograd_memory": "unknown",
-              "backend_semantics.bytes_delta_at_call": "defaulted_zero",
-              "backend_semantics.bytes_peak_at_call": "defaulted_zero",
-              "backend_semantics.num_autograd_tensors": "unknown",
-              "equivalence_class": "unknown",
-              "function.arg_names": "defaulted_empty",
-              "function.code_context": "defaulted_empty",
-              "function.flops_backward": "unknown",
-              "function.flops_forward": "unknown",
-              "function.func_autocast_state": "unknown",
-              "function.func_config": "defaulted_empty",
-              "function.func_duration": "unknown",
-              "function.func_non_tensor_args": "defaulted_empty",
-              "function.func_rng_states": "unknown",
-              "function.is_inplace": "defaulted_false",
-              "has_internal_source_ancestor": "defaulted_false",
-              "input_ancestors": "defaulted_empty",
-              "internal_source_ancestors": "defaulted_empty",
-              "params": "defaulted_empty",
-              "parent_arg_positions": "populated",
-              "parent_params": "defaulted_empty",
-              "parents[0].arg_position": "unknown",
-              "parents[0].edge_use": "populated",
-              "root_ancestors": "defaulted_empty"
-            },
-            "values": {
-              "is_inplace": false,
-              "params_count": 0,
-              "parent_arg_positions": [
-                null
-              ],
-              "parent_edge_uses": [
-                "unknown"
-              ],
-              "parent_params_count": 0
-            }
-          },
-          {
-            "label_raw": "add_1_29_raw",
+            "label_raw": "add_1_28_raw",
             "population": {
               "_edge_uses": "defaulted_empty",
               "backend_semantics.autograd_memory": "unknown",
@@ -1170,7 +1129,7 @@
             }
           },
           {
-            "label_raw": "layernorm_1_30_raw",
+            "label_raw": "layernorm_1_29_raw",
             "population": {
               "_edge_uses": "defaulted_empty",
               "backend_semantics.autograd_memory": "unknown",
@@ -1211,7 +1170,7 @@
             }
           },
           {
-            "label_raw": "linear_3_31_raw",
+            "label_raw": "linear_3_30_raw",
             "population": {
               "_edge_uses": "defaulted_empty",
               "backend_semantics.autograd_memory": "unknown",
@@ -1252,7 +1211,7 @@
             }
           },
           {
-            "label_raw": "relu_1_32_raw",
+            "label_raw": "relu_1_31_raw",
             "population": {
               "_edge_uses": "defaulted_empty",
               "backend_semantics.autograd_memory": "unknown",
@@ -1293,7 +1252,7 @@
             }
           },
           {
-            "label_raw": "dropout_2_33_raw",
+            "label_raw": "dropout_2_32_raw",
             "population": {
               "_edge_uses": "defaulted_empty",
               "backend_semantics.autograd_memory": "unknown",
@@ -1334,7 +1293,7 @@
             }
           },
           {
-            "label_raw": "linear_4_34_raw",
+            "label_raw": "linear_4_33_raw",
             "population": {
               "_edge_uses": "defaulted_empty",
               "backend_semantics.autograd_memory": "unknown",
@@ -1375,7 +1334,7 @@
             }
           },
           {
-            "label_raw": "dropout_3_35_raw",
+            "label_raw": "dropout_3_34_raw",
             "population": {
               "_edge_uses": "defaulted_empty",
               "backend_semantics.autograd_memory": "unknown",
@@ -1416,7 +1375,7 @@
             }
           },
           {
-            "label_raw": "add_2_36_raw",
+            "label_raw": "add_2_35_raw",
             "population": {
               "_edge_uses": "defaulted_empty",
               "backend_semantics.autograd_memory": "unknown",
@@ -1461,7 +1420,7 @@
             }
           },
           {
-            "label_raw": "layernorm_2_37_raw",
+            "label_raw": "layernorm_2_36_raw",
             "population": {
               "_edge_uses": "defaulted_empty",
               "backend_semantics.autograd_memory": "unknown",
@@ -1554,6 +1513,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -1688,6 +1648,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -1823,6 +1784,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -1959,6 +1921,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -2095,6 +2058,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -2230,6 +2194,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -2365,6 +2330,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -2499,6 +2465,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -2633,6 +2600,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -2767,6 +2735,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -2901,6 +2870,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -3035,6 +3005,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -3169,6 +3140,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -3303,6 +3275,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -3437,6 +3410,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -3571,6 +3545,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -3706,6 +3681,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -3841,6 +3817,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -3976,6 +3953,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -4113,6 +4091,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -4250,6 +4229,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -4351,7 +4331,7 @@
           "identity": {
             "bool_value": null,
             "dtype": "float32",
-            "func_name": "contiguous",
+            "func_name": "reshape",
             "has_saved_activation": true,
             "intervention_fired": false,
             "intervention_replaced": false,
@@ -4359,8 +4339,8 @@
             "is_output_parent": false,
             "is_scalar_bool": null,
             "kind": "op",
-            "label_raw": "contiguous_2_23_raw",
-            "layer_type": "contiguous",
+            "label_raw": "reshape_1_23_raw",
+            "layer_type": "reshape",
             "parent_labels_raw": [
               "permute_1_22_raw"
             ],
@@ -4368,146 +4348,11 @@
             "predicate_matched": true,
             "raw_index": 23,
             "shape": [
-              3,
-              2,
-              2,
-              2
-            ],
-            "step_index": 22,
-            "type_index": 2
-          },
-          "population": {
-            "backend_semantics.aliased_output_inputs": "defaulted_empty",
-            "backend_semantics.backend_grad_handle": "populated",
-            "backend_semantics.grad_fn_class_name": "populated",
-            "backend_semantics.mutated_input_positions": "defaulted_empty",
-            "backend_semantics.unknown_aliasing": "defaulted_false",
-            "bool_value": "unknown",
-            "capture_spec": "populated",
-            "construction_done": "populated",
-            "fire_results": "defaulted_empty",
-            "func_call_id": "unknown",
-            "function.func": "populated",
-            "function.func_call_id": "populated",
-            "function.func_name": "populated",
-            "function.func_qualname": "populated",
-            "function.non_tensor_kwargs": "defaulted_empty",
-            "function.non_tensor_pos_args": "defaulted_empty",
-            "function.num_args_total": "populated",
-            "function.num_kwargs": "defaulted_zero",
-            "function.num_pos_args": "populated",
-            "grad_fn_class_qualname": "unknown",
-            "grad_fn_handle": "unknown",
-            "input_was_parameter": "defaulted_false",
-            "intervention_fired": "defaulted_false",
-            "intervention_replaced": "defaulted_false",
-            "intervention_template_ref": "unknown",
-            "is_bottom_level": "populated",
-            "is_output_parent": "defaulted_false",
-            "is_scalar_bool": "unknown",
-            "is_transform": "defaulted_false",
-            "kind": "populated",
-            "label_raw": "populated",
-            "layer_label_raw": "populated",
-            "layer_type": "populated",
-            "module_stack[0].address": "populated",
-            "module_stack[0].address_normalized": "unknown",
-            "module_stack[0].call_index": "populated",
-            "module_stack[0].entry_argnames": "defaulted_empty",
-            "module_stack[0].fx_qualpath": "unknown",
-            "module_stack[0].module_type": "populated",
-            "module_stack[1].address": "populated",
-            "module_stack[1].address_normalized": "unknown",
-            "module_stack[1].call_index": "populated",
-            "module_stack[1].entry_argnames": "defaulted_empty",
-            "module_stack[1].fx_qualpath": "unknown",
-            "module_stack[1].module_type": "populated",
-            "module_stack[2].address": "populated",
-            "module_stack[2].address_normalized": "unknown",
-            "module_stack[2].call_index": "populated",
-            "module_stack[2].entry_argnames": "defaulted_empty",
-            "module_stack[2].fx_qualpath": "unknown",
-            "module_stack[2].module_type": "populated",
-            "modules": "populated",
-            "output.activation_transform": "unknown",
-            "output.child_versions": "defaulted_empty",
-            "output.container_path": "defaulted_empty",
-            "output.container_spec": "unknown",
-            "output.detach_saved_activations": "populated",
-            "output.has_saved_activation": "populated",
-            "output.in_multi_output": "defaulted_false",
-            "output.multi_output_index": "defaulted_zero",
-            "output.output_device": "populated",
-            "output.tensor.backend_handle_id": "populated",
-            "output.tensor.blob_ref": "unknown",
-            "output.tensor.device": "populated",
-            "output.tensor.dtype": "populated",
-            "output.tensor.label_raw": "populated",
-            "output.tensor.memory": "populated",
-            "output.tensor.payload": "populated",
-            "output.tensor.requires_grad": "populated",
-            "output.tensor.shape": "populated",
-            "output.transformed_tensor": "unknown",
-            "output.visualizer_path": "unknown",
-            "parents[0].parent_label_raw": "populated",
-            "pass_index": "populated",
-            "policy.must_keep_topology": "defaulted_false",
-            "policy.requires_isolation": "defaulted_false",
-            "policy.save_args": "defaulted_false",
-            "policy.save_code": "defaulted_false",
-            "policy.save_grad": "defaulted_false",
-            "policy.save_mode": "populated",
-            "policy.save_payload": "populated",
-            "policy.save_rng": "defaulted_false",
-            "policy.stream": "defaulted_false",
-            "predicate_matched": "populated",
-            "raw_index": "populated",
-            "record_context": "populated",
-            "source_trace": "unknown",
-            "source_trace_id": "unknown",
-            "step_index": "populated",
-            "templates.args_template": "unknown",
-            "templates.has_saved_args": "defaulted_false",
-            "templates.kwargs_template": "unknown",
-            "templates.saved_args": "unknown",
-            "templates.saved_kwargs": "unknown",
-            "tracing_finished": "defaulted_false",
-            "transform_chain": "defaulted_empty",
-            "transform_config": "populated",
-            "transform_fn_name": "unknown",
-            "transform_fn_qualname": "unknown",
-            "transform_fn_source": "unknown",
-            "transform_kind": "unknown",
-            "type_index": "populated",
-            "unattributed_tensor_args": "defaulted_empty"
-          }
-        },
-        {
-          "identity": {
-            "bool_value": null,
-            "dtype": "float32",
-            "func_name": "view",
-            "has_saved_activation": true,
-            "intervention_fired": false,
-            "intervention_replaced": false,
-            "is_bottom_level": true,
-            "is_output_parent": false,
-            "is_scalar_bool": null,
-            "kind": "op",
-            "label_raw": "view_7_24_raw",
-            "layer_type": "view",
-            "parent_labels_raw": [
-              "contiguous_2_23_raw"
-            ],
-            "pass_index": 1,
-            "predicate_matched": true,
-            "raw_index": 24,
-            "shape": [
               6,
               4
             ],
-            "step_index": 23,
-            "type_index": 7
+            "step_index": 22,
+            "type_index": 1
           },
           "population": {
             "backend_semantics.aliased_output_inputs": "populated",
@@ -4518,6 +4363,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -4627,19 +4473,19 @@
             "is_output_parent": false,
             "is_scalar_bool": null,
             "kind": "op",
-            "label_raw": "linear_2_25_raw",
+            "label_raw": "linear_2_24_raw",
             "layer_type": "linear",
             "parent_labels_raw": [
-              "view_7_24_raw"
+              "reshape_1_23_raw"
             ],
             "pass_index": 1,
             "predicate_matched": true,
-            "raw_index": 25,
+            "raw_index": 24,
             "shape": [
               6,
               4
             ],
-            "step_index": 24,
+            "step_index": 23,
             "type_index": 2
           },
           "population": {
@@ -4651,6 +4497,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -4760,21 +4607,21 @@
             "is_output_parent": false,
             "is_scalar_bool": null,
             "kind": "op",
-            "label_raw": "view_8_26_raw",
+            "label_raw": "view_7_25_raw",
             "layer_type": "view",
             "parent_labels_raw": [
-              "linear_2_25_raw"
+              "linear_2_24_raw"
             ],
             "pass_index": 1,
             "predicate_matched": true,
-            "raw_index": 26,
+            "raw_index": 25,
             "shape": [
               3,
               2,
               4
             ],
-            "step_index": 25,
-            "type_index": 8
+            "step_index": 24,
+            "type_index": 7
           },
           "population": {
             "backend_semantics.aliased_output_inputs": "populated",
@@ -4785,6 +4632,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -4894,20 +4742,20 @@
             "is_output_parent": false,
             "is_scalar_bool": null,
             "kind": "op",
-            "label_raw": "transpose_6_27_raw",
+            "label_raw": "transpose_6_26_raw",
             "layer_type": "transpose",
             "parent_labels_raw": [
-              "view_8_26_raw"
+              "view_7_25_raw"
             ],
             "pass_index": 1,
             "predicate_matched": true,
-            "raw_index": 27,
+            "raw_index": 26,
             "shape": [
               2,
               3,
               4
             ],
-            "step_index": 26,
+            "step_index": 25,
             "type_index": 6
           },
           "population": {
@@ -4919,6 +4767,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -5028,20 +4877,20 @@
             "is_output_parent": false,
             "is_scalar_bool": null,
             "kind": "op",
-            "label_raw": "dropout_1_28_raw",
+            "label_raw": "dropout_1_27_raw",
             "layer_type": "dropout",
             "parent_labels_raw": [
-              "transpose_6_27_raw"
+              "transpose_6_26_raw"
             ],
             "pass_index": 1,
             "predicate_matched": true,
-            "raw_index": 28,
+            "raw_index": 27,
             "shape": [
               2,
               3,
               4
             ],
-            "step_index": 27,
+            "step_index": 26,
             "type_index": 1
           },
           "population": {
@@ -5053,6 +4902,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -5162,21 +5012,21 @@
             "is_output_parent": false,
             "is_scalar_bool": null,
             "kind": "op",
-            "label_raw": "add_1_29_raw",
+            "label_raw": "add_1_28_raw",
             "layer_type": "add",
             "parent_labels_raw": [
               "input_1_raw",
-              "dropout_1_28_raw"
+              "dropout_1_27_raw"
             ],
             "pass_index": 1,
             "predicate_matched": true,
-            "raw_index": 29,
+            "raw_index": 28,
             "shape": [
               2,
               3,
               4
             ],
-            "step_index": 28,
+            "step_index": 27,
             "type_index": 1
           },
           "population": {
@@ -5188,6 +5038,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -5292,20 +5143,20 @@
             "is_output_parent": false,
             "is_scalar_bool": null,
             "kind": "op",
-            "label_raw": "layernorm_1_30_raw",
+            "label_raw": "layernorm_1_29_raw",
             "layer_type": "layernorm",
             "parent_labels_raw": [
-              "add_1_29_raw"
+              "add_1_28_raw"
             ],
             "pass_index": 1,
             "predicate_matched": true,
-            "raw_index": 30,
+            "raw_index": 29,
             "shape": [
               2,
               3,
               4
             ],
-            "step_index": 29,
+            "step_index": 28,
             "type_index": 1
           },
           "population": {
@@ -5317,6 +5168,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -5426,20 +5278,20 @@
             "is_output_parent": false,
             "is_scalar_bool": null,
             "kind": "op",
-            "label_raw": "linear_3_31_raw",
+            "label_raw": "linear_3_30_raw",
             "layer_type": "linear",
             "parent_labels_raw": [
-              "layernorm_1_30_raw"
+              "layernorm_1_29_raw"
             ],
             "pass_index": 1,
             "predicate_matched": true,
-            "raw_index": 31,
+            "raw_index": 30,
             "shape": [
               2,
               3,
               8
             ],
-            "step_index": 30,
+            "step_index": 29,
             "type_index": 3
           },
           "population": {
@@ -5451,6 +5303,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -5560,20 +5413,20 @@
             "is_output_parent": false,
             "is_scalar_bool": null,
             "kind": "op",
-            "label_raw": "relu_1_32_raw",
+            "label_raw": "relu_1_31_raw",
             "layer_type": "relu",
             "parent_labels_raw": [
-              "linear_3_31_raw"
+              "linear_3_30_raw"
             ],
             "pass_index": 1,
             "predicate_matched": true,
-            "raw_index": 32,
+            "raw_index": 31,
             "shape": [
               2,
               3,
               8
             ],
-            "step_index": 31,
+            "step_index": 30,
             "type_index": 1
           },
           "population": {
@@ -5585,6 +5438,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -5688,20 +5542,20 @@
             "is_output_parent": false,
             "is_scalar_bool": null,
             "kind": "op",
-            "label_raw": "dropout_2_33_raw",
+            "label_raw": "dropout_2_32_raw",
             "layer_type": "dropout",
             "parent_labels_raw": [
-              "relu_1_32_raw"
+              "relu_1_31_raw"
             ],
             "pass_index": 1,
             "predicate_matched": true,
-            "raw_index": 33,
+            "raw_index": 32,
             "shape": [
               2,
               3,
               8
             ],
-            "step_index": 32,
+            "step_index": 31,
             "type_index": 2
           },
           "population": {
@@ -5713,6 +5567,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -5822,20 +5677,20 @@
             "is_output_parent": false,
             "is_scalar_bool": null,
             "kind": "op",
-            "label_raw": "linear_4_34_raw",
+            "label_raw": "linear_4_33_raw",
             "layer_type": "linear",
             "parent_labels_raw": [
-              "dropout_2_33_raw"
+              "dropout_2_32_raw"
             ],
             "pass_index": 1,
             "predicate_matched": true,
-            "raw_index": 34,
+            "raw_index": 33,
             "shape": [
               2,
               3,
               4
             ],
-            "step_index": 33,
+            "step_index": 32,
             "type_index": 4
           },
           "population": {
@@ -5847,6 +5702,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -5956,20 +5812,20 @@
             "is_output_parent": false,
             "is_scalar_bool": null,
             "kind": "op",
-            "label_raw": "dropout_3_35_raw",
+            "label_raw": "dropout_3_34_raw",
             "layer_type": "dropout",
             "parent_labels_raw": [
-              "linear_4_34_raw"
+              "linear_4_33_raw"
             ],
             "pass_index": 1,
             "predicate_matched": true,
-            "raw_index": 35,
+            "raw_index": 34,
             "shape": [
               2,
               3,
               4
             ],
-            "step_index": 34,
+            "step_index": 33,
             "type_index": 3
           },
           "population": {
@@ -5981,6 +5837,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -6090,21 +5947,21 @@
             "is_output_parent": false,
             "is_scalar_bool": null,
             "kind": "op",
-            "label_raw": "add_2_36_raw",
+            "label_raw": "add_2_35_raw",
             "layer_type": "add",
             "parent_labels_raw": [
-              "layernorm_1_30_raw",
-              "dropout_3_35_raw"
+              "layernorm_1_29_raw",
+              "dropout_3_34_raw"
             ],
             "pass_index": 1,
             "predicate_matched": true,
-            "raw_index": 36,
+            "raw_index": 35,
             "shape": [
               2,
               3,
               4
             ],
-            "step_index": 35,
+            "step_index": 34,
             "type_index": 2
           },
           "population": {
@@ -6116,6 +5973,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -6220,20 +6078,20 @@
             "is_output_parent": true,
             "is_scalar_bool": null,
             "kind": "op",
-            "label_raw": "layernorm_2_37_raw",
+            "label_raw": "layernorm_2_36_raw",
             "layer_type": "layernorm",
             "parent_labels_raw": [
-              "add_2_36_raw"
+              "add_2_35_raw"
             ],
             "pass_index": 1,
             "predicate_matched": true,
-            "raw_index": 37,
+            "raw_index": 36,
             "shape": [
               2,
               3,
               4
             ],
-            "step_index": 36,
+            "step_index": 35,
             "type_index": 2
           },
           "population": {
@@ -6245,6 +6103,7 @@
             "bool_value": "unknown",
             "capture_spec": "populated",
             "construction_done": "populated",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "fire_results": "defaulted_empty",
             "func_call_id": "unknown",
             "function.func": "populated",
@@ -6836,30 +6695,7 @@
           }
         },
         {
-          "label_raw": "contiguous_2_23_raw",
-          "pass_index": 1,
-          "tensor": {
-            "dtype": "float32",
-            "sha256_chunks": [
-              "c64035c1",
-              "4a4f3261",
-              "5eb7d25f",
-              "dac188b5",
-              "06cdee25",
-              "5bc1edf4",
-              "6d1b6f65",
-              "1049a477"
-            ],
-            "shape": [
-              3,
-              2,
-              2,
-              2
-            ]
-          }
-        },
-        {
-          "label_raw": "view_7_24_raw",
+          "label_raw": "reshape_1_23_raw",
           "pass_index": 1,
           "tensor": {
             "dtype": "float32",
@@ -6880,7 +6716,7 @@
           }
         },
         {
-          "label_raw": "linear_2_25_raw",
+          "label_raw": "linear_2_24_raw",
           "pass_index": 1,
           "tensor": {
             "dtype": "float32",
@@ -6901,7 +6737,7 @@
           }
         },
         {
-          "label_raw": "view_8_26_raw",
+          "label_raw": "view_7_25_raw",
           "pass_index": 1,
           "tensor": {
             "dtype": "float32",
@@ -6923,7 +6759,7 @@
           }
         },
         {
-          "label_raw": "transpose_6_27_raw",
+          "label_raw": "transpose_6_26_raw",
           "pass_index": 1,
           "tensor": {
             "dtype": "float32",
@@ -6945,7 +6781,7 @@
           }
         },
         {
-          "label_raw": "dropout_1_28_raw",
+          "label_raw": "dropout_1_27_raw",
           "pass_index": 1,
           "tensor": {
             "dtype": "float32",
@@ -6967,7 +6803,7 @@
           }
         },
         {
-          "label_raw": "add_1_29_raw",
+          "label_raw": "add_1_28_raw",
           "pass_index": 1,
           "tensor": {
             "dtype": "float32",
@@ -6989,7 +6825,7 @@
           }
         },
         {
-          "label_raw": "layernorm_1_30_raw",
+          "label_raw": "layernorm_1_29_raw",
           "pass_index": 1,
           "tensor": {
             "dtype": "float32",
@@ -7011,7 +6847,7 @@
           }
         },
         {
-          "label_raw": "linear_3_31_raw",
+          "label_raw": "linear_3_30_raw",
           "pass_index": 1,
           "tensor": {
             "dtype": "float32",
@@ -7033,7 +6869,7 @@
           }
         },
         {
-          "label_raw": "relu_1_32_raw",
+          "label_raw": "relu_1_31_raw",
           "pass_index": 1,
           "tensor": {
             "dtype": "float32",
@@ -7055,7 +6891,7 @@
           }
         },
         {
-          "label_raw": "dropout_2_33_raw",
+          "label_raw": "dropout_2_32_raw",
           "pass_index": 1,
           "tensor": {
             "dtype": "float32",
@@ -7077,7 +6913,7 @@
           }
         },
         {
-          "label_raw": "linear_4_34_raw",
+          "label_raw": "linear_4_33_raw",
           "pass_index": 1,
           "tensor": {
             "dtype": "float32",
@@ -7099,7 +6935,7 @@
           }
         },
         {
-          "label_raw": "dropout_3_35_raw",
+          "label_raw": "dropout_3_34_raw",
           "pass_index": 1,
           "tensor": {
             "dtype": "float32",
@@ -7121,7 +6957,7 @@
           }
         },
         {
-          "label_raw": "add_2_36_raw",
+          "label_raw": "add_2_35_raw",
           "pass_index": 1,
           "tensor": {
             "dtype": "float32",
@@ -7143,7 +6979,7 @@
           }
         },
         {
-          "label_raw": "layernorm_2_37_raw",
+          "label_raw": "layernorm_2_36_raw",
           "pass_index": 1,
           "tensor": {
             "dtype": "float32",
@@ -7234,21 +7070,21 @@
     },
     "schema_version": 1,
     "tracking": {
-      "cuda_peak_memory_median_bytes": 0,
-      "python_peak_memory_median_bytes": 560202,
+      "cuda_peak_memory_median_bytes": null,
+      "python_peak_memory_median_bytes": 757082,
       "sample_count": 3,
-      "torch_version": "2.8.0+cu128",
-      "wall_time_median_ms": 202.2988370154053
+      "torch_version": "2.13.0+cu130",
+      "wall_time_median_ms": 166.55825008638203
     }
   },
   "sha256_chunks": [
-    "b9bf0f6d",
-    "cd670462",
-    "947f7136",
-    "353f0d64",
-    "70c1c59e",
-    "64116fc7",
-    "715325a9",
-    "7c4a9eb9"
+    "2ba20000",
+    "b7b438f7",
+    "e3ffc434",
+    "fda3ceeb",
+    "9b60bd73",
+    "079a92a9",
+    "3b08ab8b",
+    "d603986a"
   ]
 }

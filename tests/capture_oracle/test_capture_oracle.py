@@ -368,7 +368,7 @@ def test_stage0_legacy_paths_pin_exactly_once_counts() -> None:
 
 
 def test_only_stateful_two_pass_case_carves_out_outcome() -> None:
-    """Only train-mode BatchNorm may treat the current two-pass failure as a wart."""
+    """Only train-mode BatchNorm may retain its fixed two-pass outcome as a wart."""
 
     for case in CASES:
         payload = json.loads((_GOLDEN_DIR / f"{case.name}.json").read_text(encoding="utf-8"))[
@@ -378,10 +378,7 @@ def test_only_stateful_two_pass_case_carves_out_outcome() -> None:
         if case.name == "train_batchnorm__two_pass_negative":
             assert "outcome" not in payload["ground_truth"]
             assert wart is not None
-            assert wart["current"]["status"] == "failed"
-            assert wart["current"]["failed"] is True
-            assert wart["current"]["error_type"] == "ValueError"
-            assert "computational graph changed" in wart["current"]["error_message"]
+            _validate_stateful_two_pass_outcome_fix(payload)
         else:
             assert "outcome" in payload["ground_truth"]
             assert wart is None

@@ -61,6 +61,7 @@
             "bool_value": "unknown",
             "capture_spec": "unknown",
             "construction_done": "defaulted_false",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "equivalence_class": "populated",
             "fire_results": "defaulted_empty",
             "func_call_id": "populated",
@@ -207,6 +208,7 @@
             "bool_value": "unknown",
             "capture_spec": "unknown",
             "construction_done": "defaulted_false",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "equivalence_class": "populated",
             "fire_results": "defaulted_empty",
             "func_call_id": "populated",
@@ -348,6 +350,7 @@
             "bool_value": "unknown",
             "capture_spec": "unknown",
             "construction_done": "defaulted_false",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "equivalence_class": "populated",
             "fire_results": "defaulted_empty",
             "func_call_id": "populated",
@@ -494,6 +497,7 @@
             "bool_value": "unknown",
             "capture_spec": "unknown",
             "construction_done": "defaulted_false",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "equivalence_class": "populated",
             "fire_results": "defaulted_empty",
             "func_call_id": "populated",
@@ -635,6 +639,7 @@
             "bool_value": "unknown",
             "capture_spec": "unknown",
             "construction_done": "defaulted_false",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "equivalence_class": "populated",
             "fire_results": "defaulted_empty",
             "func_call_id": "populated",
@@ -781,6 +786,7 @@
             "bool_value": "unknown",
             "capture_spec": "unknown",
             "construction_done": "defaulted_false",
+            "dropped_edge_tensor_args": "defaulted_empty",
             "equivalence_class": "populated",
             "fire_results": "defaulted_empty",
             "func_call_id": "populated",
@@ -1291,21 +1297,21 @@
     },
     "schema_version": 1,
     "tracking": {
-      "cuda_peak_memory_median_bytes": 0,
-      "python_peak_memory_median_bytes": 466017,
+      "cuda_peak_memory_median_bytes": null,
+      "python_peak_memory_median_bytes": 689283,
       "sample_count": 3,
-      "torch_version": "2.8.0+cu128",
-      "wall_time_median_ms": 204.33465903624892
+      "torch_version": "2.13.0+cu130",
+      "wall_time_median_ms": 308.6808458901942
     }
   },
   "sha256_chunks": [
-    "9644ba50",
-    "62cc8f65",
-    "2f0ed19d",
-    "d2909ee4",
-    "6d9e8cdc",
-    "96c0ea0f",
-    "789f2288",
-    "67b97c2f"
+    "e962bc6e",
+    "79028b6c",
+    "7cd5c983",
+    "e6ea3595",
+    "f1f95dea",
+    "d4a3cc80",
+    "22bf74ab",
+    "0205d673"
   ]
 }
