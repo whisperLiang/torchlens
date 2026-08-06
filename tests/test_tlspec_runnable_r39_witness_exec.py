@@ -20,12 +20,15 @@ from __future__ import annotations
 
 import collections
 import datetime as _datetime
+import functools
+import queue
 import shutil
 import sys
 import threading
 import time
 import types
 import warnings
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -1589,3 +1592,254 @@ def test_numpy_local_nested_holder_joins_deep_inventory() -> None:
 
     _helper({"cfg_gen": gen})
     assert any(holder is gen for holder, _ in monitor._deep_generator_states)
+
+
+# ======================================================================================
+# r38 -- frame-walk stdlib-holder parity (round-37 re-attack: V6/V7/V8 + deque + globals)
+# ======================================================================================
+#
+# The B4 deep inventory leafed four stdlib INSTANCE holders the MODEL-rooted sweep
+# already walks: ``weakref.ref`` referents, ``threading.local`` per-thread namespaces,
+# ``functools.partial`` interiors, and ``deque`` buffers. A pre-existing generator
+# reached ONLY through one of them steered a branch, replayed VERIFIED+ATTESTED, and
+# provably diverged from a fresh oracle-1 forward (executed repros, round 37 --
+# V6/V7/V8 plus the deque and ``globals()["name"]`` spellings). Closed by base-C
+# parity branches in ``_deep_inventory_frame_reachable`` plus string-constant global
+# resolution; an OPAQUE queue reachable from a frame now fails CLOSED
+# (``inventory_opaque_container``), mirroring the model sweep.
+
+
+class _R38WeakHolder:
+    """Plain holder kept alive by a module global the forward never names."""
+
+    def __init__(self) -> None:
+        self.gen: Any = None
+
+
+_R38_WEAK_STRONG = _R38WeakHolder()
+_R38_WEAKREF: Any = None
+_R38_TLS = threading.local()
+_R38_PARTIAL: Any = None
+_R38_DEQUE: collections.deque[Any] = collections.deque([None])
+_r38_hidden_gen: Any = None
+_R38_OPAQUE_QUEUE: Any = None
+
+
+class _WeakrefRngBranch(nn.Module):
+    """Branch on a draw reached only through a ``weakref.ref`` dereference (V6)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Draw through ``WR().gen`` -- the referent is named by no frame root."""
+
+        value = float(_R38_WEAKREF().gen.random())
+        return x * 2.0 if value < 0.5 else x * 3.0
+
+
+class _ThreadingLocalRngBranch(nn.Module):
+    """Branch on a draw from a ``threading.local``-held generator (V7)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Draw through the per-thread namespace of a pre-existing local."""
+
+        value = float(_R38_TLS.gen.random())
+        return x * 2.0 if value < 0.5 else x * 3.0
+
+
+class _PartialRngBranch(nn.Module):
+    """Branch on a draw through a ``functools.partial``-wrapped bound method (V8)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Call the partial: the generator is reachable only via its C slots."""
+
+        value = float(_R38_PARTIAL())
+        return x * 2.0 if value < 0.5 else x * 3.0
+
+
+class _DequeRngBranch(nn.Module):
+    """Branch on a draw from a generator inside a ``deque``'s C buffer."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Draw through ``deque[0]`` -- previously a silent walk leaf."""
+
+        value = float(_R38_DEQUE[0].random())
+        return x * 2.0 if value < 0.5 else x * 3.0
+
+
+def _r38_draw_via_globals_subscript() -> float:
+    """Draw through a dynamic-name subscript: the name is a string CONSTANT only."""
+
+    return float(globals()["_r38_hidden_gen"].random())
+
+
+class _GlobalsSubscriptRngBranch(nn.Module):
+    """Branch on a draw reached only through ``globals()["name"]``."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """The generator's global name appears in no code object's ``co_names``."""
+
+        value = _r38_draw_via_globals_subscript()
+        return x * 2.0 if value < 0.5 else x * 3.0
+
+
+def test_numpy_weakref_referent_generator_never_false_verified(tmp_path: Path) -> None:
+    """A draw through a weakref dereference is witnessed and ceilings (V6)."""
+
+    global _R38_WEAKREF
+    _R38_WEAK_STRONG.gen = np.random.default_rng()
+    _R38_WEAKREF = weakref.ref(_R38_WEAK_STRONG)
+    x = torch.randn(2, 4)
+    assert _host_rng_consumed(_WeakrefRngBranch(), x) is True
+    result = _roundtrip(_WeakrefRngBranch(), x, tmp=tmp_path, capture_seed=1, run_seed=2)
+    assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
+
+
+def test_numpy_threading_local_generator_never_false_verified(tmp_path: Path) -> None:
+    """A draw from a ``threading.local``-held generator is witnessed and ceilings (V7)."""
+
+    _R38_TLS.gen = np.random.default_rng()
+    x = torch.randn(2, 4)
+    assert _host_rng_consumed(_ThreadingLocalRngBranch(), x) is True
+    result = _roundtrip(_ThreadingLocalRngBranch(), x, tmp=tmp_path, capture_seed=1, run_seed=2)
+    assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
+
+
+@pytest.mark.skipif(
+    not rng_utils._NUMPY_RNG_METHODS_NEED_FRAME_DIGEST,
+    reason="partial-mediated draws emit no c_call; the frame digest is the only witness",
+)
+def test_numpy_partial_interior_generator_never_false_verified(tmp_path: Path) -> None:
+    """A draw through ``functools.partial(gen.random)`` is witnessed and ceilings (V8)."""
+
+    global _R38_PARTIAL
+    _R38_PARTIAL = functools.partial(np.random.default_rng().random)
+    x = torch.randn(2, 4)
+    assert _host_rng_consumed(_PartialRngBranch(), x) is True
+    result = _roundtrip(_PartialRngBranch(), x, tmp=tmp_path, capture_seed=1, run_seed=2)
+    assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
+
+
+def test_numpy_deque_interior_generator_never_false_verified(tmp_path: Path) -> None:
+    """A draw from a generator inside a ``deque`` buffer is witnessed and ceilings."""
+
+    _R38_DEQUE[0] = np.random.default_rng()
+    x = torch.randn(2, 4)
+    assert _host_rng_consumed(_DequeRngBranch(), x) is True
+    result = _roundtrip(_DequeRngBranch(), x, tmp=tmp_path, capture_seed=1, run_seed=2)
+    assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
+
+
+def test_numpy_globals_subscript_generator_never_false_verified(tmp_path: Path) -> None:
+    """A draw through a constant-name ``globals()["name"]`` subscript is witnessed."""
+
+    global _r38_hidden_gen
+    _r38_hidden_gen = np.random.default_rng()
+    x = torch.randn(2, 4)
+    assert _host_rng_consumed(_GlobalsSubscriptRngBranch(), x) is True
+    result = _roundtrip(_GlobalsSubscriptRngBranch(), x, tmp=tmp_path, capture_seed=1, run_seed=2)
+    assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
+
+
+def _reference_r38_holder_roots() -> None:
+    """Name the r38 holder roots from an in-window profiled frame WITHOUT drawing."""
+
+    _ = (_R38_WEAKREF, _R38_TLS, _R38_PARTIAL, _R38_DEQUE)
+
+
+def _reference_r38_opaque_queue() -> None:
+    """Name the opaque-queue root from an in-window profiled frame."""
+
+    _ = _R38_OPAQUE_QUEUE
+
+
+@pytest.mark.smoke
+@pytest.mark.skipif(
+    not rng_utils._NUMPY_RNG_METHODS_NEED_FRAME_DIGEST,
+    reason="NumPy build emits c_call for RNG draw methods",
+)
+def test_threading_local_generator_preexisting_thread_draw_witnessed() -> None:
+    """A per-thread generator drawn on a PRE-EXISTING (non-hooked) thread is witnessed
+    once the owner's in-window code references the shared ``threading.local`` root.
+
+    ``tp_traverse`` of a ``threading.local`` exposes EVERY thread's per-thread dict,
+    so the worker's generator joins the digest from the owner's reference alone.
+    """
+
+    ready = threading.Event()
+    go = threading.Event()
+    done = threading.Event()
+
+    def _worker() -> None:
+        _R38_TLS.gen = np.random.default_rng()
+        ready.set()
+        assert go.wait(10.0)
+        float(_R38_TLS.gen.random())
+        done.set()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+    assert ready.wait(10.0)
+    with rng_utils.host_nondeterminism_monitor(None) as result:
+        _reference_r38_holder_roots()
+        go.set()
+        assert done.wait(10.0)
+    worker.join(10.0)
+    assert "frame_reachable_generator" in result.channels
+
+
+@pytest.mark.smoke
+@pytest.mark.skipif(
+    not rng_utils._NUMPY_RNG_METHODS_NEED_FRAME_DIGEST,
+    reason="NumPy build emits c_call for RNG draw methods",
+)
+def test_frame_reachable_opaque_queue_fails_closed() -> None:
+    """A non-empty opaque queue reachable from a frame is a typed INCOMPLETE.
+
+    ``SimpleQueue`` has no non-mutating buffer snapshot (``get`` would drain), so a
+    queue-held generator cannot be digested: the walk must fail CLOSED, never leaf it
+    silently (the pre-r38 behavior was a silent VERIFIED).
+    """
+
+    global _R38_OPAQUE_QUEUE
+    _R38_OPAQUE_QUEUE = queue.SimpleQueue()
+    _R38_OPAQUE_QUEUE.put(np.random.default_rng())
+    with rng_utils.host_nondeterminism_monitor(None) as result:
+        _reference_r38_opaque_queue()
+    assert result.uncertain is True
+    assert "inventory_opaque_container" in result.uncertain_detail
+
+
+@pytest.mark.smoke
+@pytest.mark.skipif(
+    not rng_utils._NUMPY_RNG_METHODS_NEED_FRAME_DIGEST,
+    reason="NumPy build emits c_call for RNG draw methods",
+)
+def test_frame_reachable_empty_opaque_queue_no_over_ceiling() -> None:
+    """A provably-EMPTY opaque queue cannot hold a generator and never ceilings."""
+
+    global _R38_OPAQUE_QUEUE
+    _R38_OPAQUE_QUEUE = queue.SimpleQueue()
+    with rng_utils.host_nondeterminism_monitor(None) as result:
+        _reference_r38_opaque_queue()
+    assert result.uncertain is False
+    assert "frame_reachable_generator" not in result.channels
+
+
+@pytest.mark.smoke
+def test_r38_undrawn_holder_generators_no_over_trigger() -> None:
+    """Referenced-but-undrawn r38 holder generators never mark or flag uncertainty."""
+
+    global _R38_WEAKREF, _R38_PARTIAL
+    _R38_WEAK_STRONG.gen = np.random.default_rng(201)
+    _R38_WEAKREF = weakref.ref(_R38_WEAK_STRONG)
+    _R38_TLS.gen = np.random.default_rng(202)
+    _R38_PARTIAL = functools.partial(np.random.default_rng(203).random)
+    _R38_DEQUE[0] = np.random.default_rng(204)
+    with rng_utils.host_nondeterminism_monitor(None) as result:
+        _reference_r38_holder_roots()
+    assert "frame_reachable_generator" not in result.channels
+    assert result.uncertain is False

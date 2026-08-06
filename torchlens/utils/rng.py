@@ -20,8 +20,10 @@ Autocast state (``torch.amp.autocast``) is captured similarly so that
 mixed-precision ops can be replayed under the same dtype context.
 """
 
+import collections as _collections_module
 import datetime as _datetime_module
 import dis as _dis_module
+import functools as _functools_module
 import gc as _gc_module
 import os as _os_module
 import random
@@ -49,6 +51,7 @@ from types import (
 from typing import Any, Dict, List, TypeVar, cast
 
 import _random as _c_random_module
+import _thread as _c_thread_module
 
 import numpy as np
 import torch
@@ -167,6 +170,20 @@ _INERT_PRIMITIVE_LEAF_TYPES: frozenset[type] = frozenset(
     {str, bytes, bytearray, memoryview, bool, int, float, complex, type(None)}
 )
 """Exact value types that can neither be nor inertly hold an RNG receiver."""
+
+_PARTIAL_SLOT_DESCRIPTORS: tuple[Any, ...] = tuple(
+    descriptor
+    for descriptor in (
+        vars(_functools_module.partial).get(name) for name in ("func", "args", "keywords")
+    )
+    if isinstance(descriptor, (MemberDescriptorType, GetSetDescriptorType))
+)
+"""Base ``functools.partial`` C slot descriptors for ``func``/``args``/``keywords`` (r38).
+
+``partial`` interiors are C slots invisible to ``__dict__`` reads; the frame-reachable
+inventory reads them through these BASE descriptors so a hostile subclass shadow never
+executes. The ``func`` edge recovers ``partial(gen.random)``-style receivers through the
+bound-callable extraction."""
 
 
 def aten_qualname_is_seeded_rng(namespace: str | None, qualname: str | None) -> bool:
@@ -2137,6 +2154,34 @@ class host_nondeterminism_monitor:
             return (*dict.keys(value), *dict.values(value))
         if value_type in (list, tuple, set, frozenset):
             return tuple(value)
+        # r38 stdlib-instance holder edges, mirroring the deep-inventory parity
+        # branches: every read below is base-C (deref / member descriptor /
+        # ``tp_traverse`` / base ``__iter__``), so no user code can fire.
+        if isinstance(value, _weakref_module.ref):
+            try:
+                referent = _weakref_module.ref.__call__(value)
+            except Exception:
+                return ()
+            return () if referent is None else (referent,)
+        if isinstance(value, _c_thread_module._local):
+            children: list[Any] = []
+            for referent in _gc_module.get_referents(value):
+                if type(referent) is not dict:
+                    continue
+                for per_thread in dict.values(referent):
+                    if type(per_thread) is dict:
+                        children.extend(dict.values(per_thread))
+            return tuple(children)
+        if isinstance(value, _functools_module.partial):
+            interior: list[Any] = []
+            for descriptor in _PARTIAL_SLOT_DESCRIPTORS:
+                try:
+                    interior.append(descriptor.__get__(value, value_type))
+                except Exception:
+                    continue
+            return tuple(interior)
+        if isinstance(value, _collections_module.deque):
+            return tuple(_collections_module.deque.__iter__(value))
         if isinstance(
             value,
             (
@@ -2225,7 +2270,9 @@ class host_nondeterminism_monitor:
 
         This fallback is active only for the feature-detected NumPy Cython method
         shape that emits no profile ``c_call`` event. It covers every materialized
-        fast local directly plus globals named by the frame's code object, descending
+        fast local directly plus globals named by the frame's code object (its
+        ``co_names`` plus its string ``co_consts`` -- r38: the latter resolve
+        ``globals()["name"]``-style dynamic-name subscripts), descending
         one inert edge below those globals through exact built-in containers or a
         plain-object ``__dict__``. It never walks a shared module namespace and never
         expands locals edges (both are the whole-window
@@ -2247,7 +2294,22 @@ class host_nondeterminism_monitor:
         cache_key = (id(frame.f_code), id(frame.f_globals))
         cached = self._numpy_global_name_cache.get(cache_key)
         if cached is None:
-            global_names = tuple(frame.f_code.co_names)
+            # r38: string CONSTANTS join the referenced-name set. A dynamic-name
+            # namespace read -- ``globals()["name"]`` (and the ``vars()`` /
+            # ``eval("name")`` spellings) -- carries the name in ``co_consts``,
+            # not ``co_names``, so a generator reached ONLY through such a
+            # subscript steered a branch and replayed false-VERIFIED (executed
+            # repro, round 37). A string constant naming no global is one cheap
+            # dict miss per frame entry; a COMPUTED name stays the documented
+            # dynamic-name residual.
+            global_names = tuple(
+                dict.fromkeys(
+                    (
+                        *frame.f_code.co_names,
+                        *(const for const in frame.f_code.co_consts if isinstance(const, str)),
+                    )
+                )
+            )
             # Retain the code object AND globals mapping in the value so their
             # id()s cannot be reused mid-window (see the field comment); an id
             # collision would otherwise return stale co_names -> under-witness.
@@ -3320,9 +3382,25 @@ class host_nondeterminism_monitor:
         proportional to what the code can actually reach; a computed module attribute
         (``getattr(pkg, name)``) is a documented residual. Budget exhaustion flags
         ``deep_inventory_budget_exhausted`` (INCOMPLETE) -- never a silent partial
-        snapshot. Other documented residuals (contract s11): receivers in namespaces
-        no in-window frame references, stdlib/internal-package namespace stashes,
-        function-attribute holders, and the self-cleaning draw+state-restore.
+        snapshot.
+
+        r38 (round-37 re-attack): the walk now has PARITY with the model-rooted
+        sweep for the stdlib instance holders it used to leaf -- ``weakref.ref``
+        referents (base-C deref), ``threading.local`` per-thread namespaces
+        (``tp_traverse``, ALL threads' dicts), ``functools.partial`` interiors
+        (base member descriptors), and ``deque`` buffers (base ``__iter__``) --
+        each a previously executed frame-rooted false-VERIFIED (V6/V7/V8 +
+        deque). An OPAQUE queue (``SimpleQueue`` / ``mp.Queue``) reachable from a
+        frame and not non-mutatingly provably empty fails CLOSED
+        (``inventory_opaque_container``): an unreadable C-internal holder is a
+        typed INCOMPLETE, never a silent leaf. Dynamic-name namespace subscripts
+        (``globals()["name"]``) are witnessed by resolving the code object's
+        string CONSTANTS as global roots (:meth:`_snapshot_numpy_frame_rngs`).
+        Remaining documented residuals (contract s11): receivers in namespaces no
+        in-window frame references, stdlib/internal-package namespace stashes,
+        function-attribute holders, COMPUTED (non-constant) dynamic names, the
+        self-cleaning draw+state-restore, and an externally-held generator drawn
+        only on a pre-existing non-hooked thread (reachable from NO digest root).
 
         Parameters
         ----------
@@ -3399,6 +3477,59 @@ class host_nondeterminism_monitor:
                         set.__iter__(value) if isinstance(value, set) else frozenset.__iter__(value)
                     )
                     continue
+                # r38 parity branches: stdlib INSTANCE holders the MODEL-rooted sweep
+                # already walks but this frame walk leafed -- ``weakref.ref`` referents,
+                # ``threading.local`` per-thread namespaces, ``functools.partial``
+                # interiors, and ``deque`` buffers. Each was an executed frame-rooted
+                # false-VERIFIED (round 37: V6/V7/V8 + deque); every read below is
+                # base-C (deref / ``tp_traverse`` / member descriptor / base
+                # ``__iter__``), so no user code can fire.
+                if isinstance(value, _weakref_module.ref):
+                    # Mirror of the model sweep's r53 corr_2 branch: ONE base-C deref
+                    # (immune to a hostile subclass ``__call__`` override); a dead ref
+                    # contributes nothing; a deref failure fails CLOSED, never reads
+                    # as no-referent. A SUBCLASS also walks its own attribute surface.
+                    try:
+                        referent = _weakref_module.ref.__call__(value)
+                    except Exception:
+                        self._flag_uncertain("inventory_state_read_failed")
+                        continue
+                    if referent is not None:
+                        pending.append(referent)
+                    if type(value) is not _weakref_module.ref:
+                        pending.extend(self._custom_holder_children(value))
+                        pending.append(value_type)
+                    continue
+                if isinstance(value, _c_thread_module._local):
+                    # ``tp_traverse`` of a ``threading.local`` exposes its class plus
+                    # EVERY thread's per-thread attribute dict (pure C -- no
+                    # ``__getattribute__`` / property can fire), so ``TLS.gen`` set by
+                    # any thread joins the digest, not just the walking thread's view.
+                    pending.extend(_gc_module.get_referents(value))
+                    continue
+                if isinstance(value, _functools_module.partial):
+                    # ``func`` / ``args`` / ``keywords`` are C slots (no ``__dict__``
+                    # entry); read them through the BASE member descriptors so a
+                    # subclass shadow never executes. The ``func`` edge recovers a
+                    # ``partial(gen.random)`` receiver via the bound-callable branch.
+                    for descriptor in _PARTIAL_SLOT_DESCRIPTORS:
+                        try:
+                            pending.append(descriptor.__get__(value, value_type))
+                        except Exception:
+                            self._flag_uncertain("inventory_state_read_failed")
+                    if type(value) is not _functools_module.partial:
+                        pending.extend(self._custom_holder_children(value))
+                        pending.append(value_type)
+                    continue
+                if isinstance(value, _collections_module.deque):
+                    # Base-C iteration, symmetric with the set/frozenset reads above:
+                    # read-only ``deque.__iter__`` never mutates the buffer and never
+                    # dispatches to a subclass override.
+                    pending.extend(_collections_module.deque.__iter__(value))
+                    if type(value) is not _collections_module.deque:
+                        pending.extend(self._custom_holder_children(value))
+                        pending.append(value_type)
+                    continue
                 if isinstance(value, ModuleType):
                     namespace = self._module_namespace_walk_eligible(value)
                     if namespace is None:
@@ -3444,6 +3575,19 @@ class host_nondeterminism_monitor:
                     # classes are in no namespace); dedup keeps this a single filtered
                     # dict read per distinct class.
                     pending.append(value_type)
+                    continue
+                if self._exposes_queue_protocol(value):
+                    # r38 mirror of the model sweep's r45/r47 queue posture: an
+                    # inspectable queue (``queue.Queue`` family) was already walked as
+                    # a recursable holder above (its ``.queue`` deque descends via the
+                    # deque branch); an OPAQUE queue (``SimpleQueue`` / ``mp.Queue`` --
+                    # no readable buffer, ``get`` would drain) that is not
+                    # non-mutatingly provably empty fails CLOSED. A frame-reachable
+                    # queue-held generator is a typed INCOMPLETE, never a silent leaf.
+                    with self._monitor_internal_probe():
+                        provably_empty = self._opaque_queue_provably_empty(value)
+                    if not provably_empty:
+                        self._flag_uncertain("inventory_opaque_container")
         except Exception:
             self._flag_uncertain("inventory_scan_failed")
         finally:
