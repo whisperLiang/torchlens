@@ -148,11 +148,63 @@ def test_unwrap_restores_saved_tensors_hooks_init() -> None:
             torch.autograd.graph.saved_tensors_hooks.__init__
             is bwd._ORIGINAL_SAVED_TENSORS_HOOKS_INIT
         )
+        assert (
+            torch.autograd.graph.saved_tensors_hooks.__enter__
+            is bwd._ORIGINAL_SAVED_TENSORS_HOOKS_ENTER
+        )
     finally:
         # The next capture auto-rewraps; confirm the patch reinstalls cleanly.
         trace = tl.trace(OffloadModel(lambda t: t.cpu()).eval(), torch.randn(2, 4))
         assert bwd._SAVED_TENSORS_HOOKS_INIT_PATCHED
         _assert_clean_offload_graph(trace)
+
+
+class PrebuiltCtxModel(nn.Module):
+    """A hook context constructed in module ``__init__`` and reused per-forward."""
+
+    def __init__(self, ctx: torch.autograd.graph.saved_tensors_hooks) -> None:
+        super().__init__()
+        self.lin = nn.Linear(4, 4)
+        self.ctx = ctx
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with self.ctx:
+            y = self.lin(x).relu()
+        return y * 2.0
+
+
+@pytest.mark.smoke
+def test_prebuilt_hook_context_is_scoped_at_use_time() -> None:
+    """PIN (round-35 R1): a context built BEFORE the first capture is covered.
+
+    The round-5 fix scoped hooks in ``saved_tensors_hooks.__init__``, so an
+    instance constructed before ``wrap_torch()`` ran (a model storing the
+    context in its own ``__init__`` is a legal idiom) carried raw hooks
+    forever, and the same-object ``t.cpu()`` pack op re-deleted relu. The
+    ``__enter__`` patch re-scopes hooks at use time, so construction order no
+    longer matters. Simulate pre-wrap construction faithfully by building the
+    context while torch is unwrapped (the original ``__init__`` is live).
+    """
+    if not HAS_SAVED_TENSORS_HOOKS_PATCHABLE:
+        pytest.skip("saved_tensors_hooks not patchable on this torch runtime")
+    from torchlens.backends.torch.wrappers import unwrap_torch
+
+    unwrap_torch()
+    ctx = torch.autograd.graph.saved_tensors_hooks(lambda t: t.cpu(), lambda t: t)
+    assert not getattr(ctx.pack_hook, "__tl_saved_tensors_hook_scoped__", False)
+
+    torch.manual_seed(0)
+    model = PrebuiltCtxModel(ctx).eval()
+    x = torch.randn(2, 4)
+    with torch.no_grad():
+        real = model(x)
+    # The next capture auto-rewraps torch and must scope the pre-built hooks.
+    trace = tl.trace(model, x, capture=tl.options.CaptureOptions(layers_to_save="all"))
+    _assert_clean_offload_graph(trace)
+    assert torch.equal(trace["output_1"].out, real)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert tl.validate(model, x, scope="forward") is True
 
 
 def test_checkpoint_still_validates_with_hook_scope() -> None:

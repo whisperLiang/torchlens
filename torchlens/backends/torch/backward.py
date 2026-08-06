@@ -54,6 +54,7 @@ _ORIGINAL_AUTOGRAD_BACKWARD: Callable[..., Any] | None = None
 _ORIGINAL_AUTOGRAD_GRAD: Callable[..., Any] | None = None
 _AUTOGRAD_WRAPPERS_INSTALLED = False
 _ORIGINAL_SAVED_TENSORS_HOOKS_INIT: Callable[..., Any] | None = None
+_ORIGINAL_SAVED_TENSORS_HOOKS_ENTER: Callable[..., Any] | None = None
 _SAVED_TENSORS_HOOKS_INIT_PATCHED = False
 _TORCHLENS_PKG_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _INFERENCE_ONLY_BACKWARD_ERROR = (
@@ -2662,21 +2663,29 @@ def _scoped_saved_tensors_hook(hook: Callable[[Any], Any]) -> Callable[[Any], An
 
 
 def _install_saved_tensors_hooks_scope() -> None:
-    """Patch ``saved_tensors_hooks.__init__`` to scope user hooks idempotently.
+    """Patch ``saved_tensors_hooks`` to scope user hooks idempotently.
 
     Covers ``torch.autograd.graph.saved_tensors_hooks``, ``save_on_cpu``, and
     the non-reentrant checkpoint hook (both subclass it and route through
-    ``super().__init__``). When the class shape is not patchable on this
-    torch runtime (``HAS_SAVED_TENSORS_HOOKS_PATCHABLE`` is False), degrade
-    gracefully to the historical unscoped behavior.
+    ``super().__init__``). ``__init__`` scopes hooks at construction time;
+    ``__enter__`` re-scopes them at use time so a context CONSTRUCTED BEFORE
+    the first capture (e.g. stored on a model in its own ``__init__``, round-35
+    R1) is covered too -- construction-time scoping alone left such instances
+    carrying raw hooks forever. Re-scoping is idempotent through the
+    ``__tl_saved_tensors_hook_scoped__`` marker. When the class shape is not
+    patchable on this torch runtime (``HAS_SAVED_TENSORS_HOOKS_PATCHABLE`` is
+    False), degrade gracefully to the historical unscoped behavior.
     """
 
-    global _SAVED_TENSORS_HOOKS_INIT_PATCHED, _ORIGINAL_SAVED_TENSORS_HOOKS_INIT
+    global _SAVED_TENSORS_HOOKS_INIT_PATCHED
+    global _ORIGINAL_SAVED_TENSORS_HOOKS_INIT, _ORIGINAL_SAVED_TENSORS_HOOKS_ENTER
     if _SAVED_TENSORS_HOOKS_INIT_PATCHED or not HAS_SAVED_TENSORS_HOOKS_PATCHABLE:
         return
     hooks_cls = torch.autograd.graph.saved_tensors_hooks
     original_init = hooks_cls.__init__
+    original_enter = hooks_cls.__enter__
     _ORIGINAL_SAVED_TENSORS_HOOKS_INIT = original_init
+    _ORIGINAL_SAVED_TENSORS_HOOKS_ENTER = original_enter
 
     @functools.wraps(original_init)
     def patched_init(self: Any, pack_hook: Any, unpack_hook: Any) -> None:
@@ -2687,12 +2696,25 @@ def _install_saved_tensors_hooks_scope() -> None:
             _scoped_saved_tensors_hook(unpack_hook),
         )
 
+    @functools.wraps(original_enter)
+    def patched_enter(self: Any) -> Any:
+        """Re-scope hooks at use time to cover pre-wrap-constructed contexts."""
+        try:
+            self.pack_hook = _scoped_saved_tensors_hook(self.pack_hook)
+            self.unpack_hook = _scoped_saved_tensors_hook(self.unpack_hook)
+        except AttributeError:
+            # An exotic subclass without settable hook attributes degrades to
+            # the historical unscoped behavior rather than breaking entry.
+            pass
+        return original_enter(self)
+
     hooks_cls.__init__ = patched_init  # type: ignore[method-assign]
+    hooks_cls.__enter__ = patched_enter  # type: ignore[method-assign]
     _SAVED_TENSORS_HOOKS_INIT_PATCHED = True
 
 
 def _uninstall_saved_tensors_hooks_scope() -> None:
-    """Restore the original ``saved_tensors_hooks.__init__`` when patched."""
+    """Restore the original ``saved_tensors_hooks`` methods when patched."""
 
     global _SAVED_TENSORS_HOOKS_INIT_PATCHED
     if not _SAVED_TENSORS_HOOKS_INIT_PATCHED:
@@ -2700,6 +2722,10 @@ def _uninstall_saved_tensors_hooks_scope() -> None:
     if _ORIGINAL_SAVED_TENSORS_HOOKS_INIT is not None:
         torch.autograd.graph.saved_tensors_hooks.__init__ = (  # type: ignore[method-assign]
             _ORIGINAL_SAVED_TENSORS_HOOKS_INIT
+        )
+    if _ORIGINAL_SAVED_TENSORS_HOOKS_ENTER is not None:
+        torch.autograd.graph.saved_tensors_hooks.__enter__ = (  # type: ignore[method-assign]
+            _ORIGINAL_SAVED_TENSORS_HOOKS_ENTER
         )
     _SAVED_TENSORS_HOOKS_INIT_PATCHED = False
 
