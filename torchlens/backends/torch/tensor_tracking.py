@@ -92,7 +92,13 @@ def _add_tensor_backward_hook(trace: "Trace", t: torch.Tensor, tensor_label: str
             if getattr(active_trace, "save_grads", None) not in (None, False):
                 _log_tensor_grad(active_trace, grad, tensor_label)
 
-    t.register_hook(log_grad_to_model_history)  # type: ignore[no-untyped-call]
+    # TorchLens bookkeeping: torch's ``register_hook`` reads ``self.grad_fn``
+    # internally, and ``t`` can be the user's registered state receiver (an
+    # in-place op output), so the read is marked internal (r65 unread-bit).
+    from .completeness_witness import internal_scalar_read
+
+    with internal_scalar_read():
+        t.register_hook(log_grad_to_model_history)  # type: ignore[no-untyped-call]
 
 
 def _ensure_backward_event_stream(trace: "Trace") -> Any:

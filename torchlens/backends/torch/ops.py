@@ -4398,10 +4398,14 @@ def _get_autograd_saved_stats_by_output(
     seen_data_ptrs: set[int] = set()
 
     for output_index, maybe_tensor in enumerate(ensure_iterable(output)):
-        if not isinstance(maybe_tensor, torch.Tensor) or maybe_tensor.grad_fn is None:
+        # TorchLens bookkeeping ``grad_fn`` read (same r65 receiver aliasing
+        # note as _partition_output_entries_with_autograd_stats).
+        with internal_scalar_read():
+            grad_fn_handle = (
+                maybe_tensor.grad_fn if isinstance(maybe_tensor, torch.Tensor) else None
+            )
+        if grad_fn_handle is None:
             continue
-
-        grad_fn_handle = maybe_tensor.grad_fn
         grad_fn_object_id = id(grad_fn_handle)
         if grad_fn_object_id in seen_grad_fns:
             stats_by_index[output_index] = (0, 0)
@@ -4446,8 +4450,15 @@ def _partition_output_entries_with_autograd_stats(output: Any) -> list[_OutputTe
     seen_data_ptrs: set[int] = set()
     for maybe_tensor, container_path, container_spec in raw_entries:
         autograd_stats: tuple[int | None, int | None] = (None, None)
-        if isinstance(maybe_tensor, torch.Tensor) and maybe_tensor.grad_fn is not None:
-            grad_fn_handle = maybe_tensor.grad_fn
+        # TorchLens's own bookkeeping read: an in-place op's output IS its
+        # receiver, so an unmarked ``grad_fn`` read on a registered buffer
+        # (BN ``num_batches_tracked.add_(1)``) would record a phantom
+        # declared-state fact (r65 unread-bit contract).
+        with internal_scalar_read():
+            grad_fn_handle = (
+                maybe_tensor.grad_fn if isinstance(maybe_tensor, torch.Tensor) else None
+            )
+        if grad_fn_handle is not None:
             grad_fn_object_id = id(grad_fn_handle)
             if grad_fn_object_id in seen_grad_fns:
                 autograd_stats = (0, 0)
@@ -4751,7 +4762,11 @@ def _log_output_tensor_info(
         # session-scoped: a snapshot recorded by an EARLIER capture never serves as this
         # session's baseline (the tensor may have been mutated between captures -- W3 F7).
         baseline = _label_version_baseline(t)
-        current_version = tensor_version_or_none(t)
+        # TorchLens bookkeeping ``_version`` read; on an in-place op ``t`` IS
+        # the user's receiver, so an unmarked read on registered state would
+        # record a phantom read-kind (r65 unread-bit contract).
+        with internal_scalar_read():
+            current_version = tensor_version_or_none(t)
         if baseline is not None and current_version is not None:
             fields_dict["is_inplace"] = current_version != baseline
         else:
@@ -4792,7 +4807,10 @@ def _log_output_tensor_info(
             delattr(t, "tl_user_grad_fn")
         except AttributeError:
             pass
-    op_grad_fn = user_grad_fn if user_grad_fn is not None else t.grad_fn
+    # TorchLens bookkeeping ``grad_fn`` read (same r65 receiver aliasing note
+    # as the ``_version`` read above).
+    with internal_scalar_read():
+        op_grad_fn = user_grad_fn if user_grad_fn is not None else t.grad_fn
     grad_fn_cls = type(op_grad_fn) if op_grad_fn is not None else None
     fields_dict["grad_fn_class_name"] = None if grad_fn_cls is None else grad_fn_cls.__name__
     fields_dict["grad_fn_class_qualname"] = (
