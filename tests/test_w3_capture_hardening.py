@@ -224,6 +224,18 @@ def test_out_tuple_destination_edges_topk():
             assert producer in log[topk_op].parents
 
 
+def test_out_tuple_destination_sort_validates():
+    """F3 completeness pin: the tuple ``out=`` capture validates end to end.
+
+    The structural edge assertions above pin the recorded graph; this pins the
+    full forward-replay verdict, so a regression that re-drops the tuple
+    destination edges (or re-orphan-prunes the executed ``torch.empty``
+    producer) fails the public validation contract, not just edge inspection.
+    """
+
+    assert tl.validate(SortTupleOut(), torch.randn(4, 2), scope="forward") is True
+
+
 def test_out_single_destination_control_still_validates():
     """The single-tensor out= contract (edge + validation) stays intact."""
 
