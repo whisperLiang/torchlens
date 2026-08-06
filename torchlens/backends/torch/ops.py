@@ -22,6 +22,7 @@ from ..._state import pause_logging
 from torch.utils.weak import WeakIdKeyDictionary
 
 from ._tl import (
+    active_label_session_token,
     get_label_list,
     get_live_label_list,
     get_live_tensor_label,
@@ -231,7 +232,62 @@ identity-keyed side table records each labeled op output's version so a later op
 tensor can tell a genuine mutation (version bumped since it was labeled) from an identity return
 (version unchanged). It is capture-transient state, kept off the Trace field schema and dropped
 automatically on tensor GC.
+
+Entries are ``(label_session_token, version)`` pairs. A tensor that survives across captures
+(a reused ``out=`` buffer, a cached activation the user held onto) keeps its module-lifetime
+weak entry, so a baseline recorded by an EARLIER session must never be consulted by a LATER
+one: the tensor may have been mutated between captures, and a stale baseline would falsely
+classify a non-mutating identity return as in-place (W3 audit F7). Reads go through
+:func:`_label_version_baseline`, which discards any entry whose session token is not the
+active label session; writes go through :func:`_record_label_version_snapshot`.
 """
+
+
+def _record_label_version_snapshot(t: Any) -> None:
+    """Record ``t``'s current version, keyed to the active label session.
+
+    Parameters
+    ----------
+    t
+        Tensor that was just labeled (as an op output, or by live in-place /
+        alias label propagation).
+    """
+
+    if not isinstance(t, torch.Tensor):
+        return
+    # ``_version`` is a WITNESSED input-metadata property (r33): the scoped patch
+    # records a genuine USER ``x._version`` read on a model-input leaf. This snapshot is
+    # TorchLens's OWN bookkeeping read, so it must run under the internal marker or it
+    # spuriously records a ``_version`` fact for every model, falsely diverging any
+    # runtime input whose version counter differs from capture (an over-trigger).
+    with internal_scalar_read():
+        version = tensor_version_or_none(t)
+    if version is not None:
+        _LABEL_VERSION_SNAPSHOT[t] = (active_label_session_token(), version)
+
+
+def _label_version_baseline(t: Any) -> int | None:
+    """Return ``t``'s labeled-version baseline, only if the ACTIVE session recorded it.
+
+    Parameters
+    ----------
+    t
+        Tensor being logged as an op output.
+
+    Returns
+    -------
+    int | None
+        The version recorded when this session last labeled ``t``, or ``None``
+        when no baseline exists or the entry belongs to another (stale) session.
+    """
+
+    entry = _LABEL_VERSION_SNAPSHOT.get(t)
+    if entry is None:
+        return None
+    session_token, version = entry
+    if session_token is None or session_token != active_label_session_token():
+        return None
+    return version
 
 
 CaptureProducerMode = Literal["exhaustive", "predicate"]
@@ -3419,20 +3475,33 @@ def _build_graph_relationship_fields(
     out_orig: Any,
 ) -> None:
     """Populate graph structure fields: parents, children, ancestors, buffer/IO flags."""
-    out_kwarg_label = None
+    # ``out=`` destinations are pre-allocated tensors the op writes into: their
+    # producers (``empty``/``empty_like``/...) are genuine parents of this op.
+    # Tuple/list destinations (``torch.sort(x, out=(v, i))``, topk, kthvalue,
+    # cummax, ...) carry the SAME contract per element as the single-tensor
+    # spelling; handling only ``isinstance(out_kwarg, torch.Tensor)`` dropped
+    # every tuple-destination edge AND let the pre-allocated producer op get
+    # orphan-pruned — an executed op vanished silently (W3 audit F3).
     out_kwarg = kwargs.get("out")
     if isinstance(out_kwarg, torch.Tensor):
+        out_destinations: tuple[torch.Tensor, ...] = (out_kwarg,)
+    elif isinstance(out_kwarg, (list, tuple)):
+        out_destinations = tuple(item for item in out_kwarg if isinstance(item, torch.Tensor))
+    else:
+        out_destinations = ()
+    for out_destination in out_destinations:
         out_kwarg_label = get_live_tensor_label(
-            out_kwarg, self.capture_events.live_index.by_raw_label
+            out_destination, self.capture_events.live_index.by_raw_label
         )
-    if out_kwarg_label is not None and out_kwarg_label not in parent_layer_labels:
-        parent_layer_labels = [*parent_layer_labels, out_kwarg_label]
-        parent_layer_entries = [
-            *parent_layer_entries,
-            cast(
-                Op, LiveOpView(self, self.capture_events.live_index.require_event(out_kwarg_label))
-            ),
-        ]
+        if out_kwarg_label is not None and out_kwarg_label not in parent_layer_labels:
+            parent_layer_labels = [*parent_layer_labels, out_kwarg_label]
+            parent_layer_entries = [
+                *parent_layer_entries,
+                cast(
+                    Op,
+                    LiveOpView(self, self.capture_events.live_index.require_event(out_kwarg_label)),
+                ),
+            ]
     parent_arg_positions = _locate_parent_tensors_in_args(self, parent_layer_entries, args, kwargs)
     input_ancestors, internal_source_ancestors = _get_ancestors_from_parents(parent_layer_entries)
     internal_parent_layer_labels = [
@@ -3723,7 +3792,18 @@ def _build_shared_fields_dict(
     fields_dict["func_duration"] = exec_ctx.time_elapsed
     fields_dict["func_rng_states"] = exec_ctx.rng_states
     fields_dict["func_autocast_state"] = exec_ctx.autocast_state
-    fields_dict["arg_names"] = _st._arg_names.get(func_name.strip("_"), ())
+    # Exact-name lookup first (add / add_ / __add__ have distinct signatures --
+    # W3 F9). The underscore-stripped key remains a best-effort fallback for
+    # NON-dunder names whose own introspection stored nothing; a dunder whose
+    # signature is opaque stays honestly unknown (empty) rather than borrowing
+    # the namesake torch function's different signature.
+    _op_arg_names = _st._arg_names.get(func_name)
+    if _op_arg_names is None:
+        if func_name.startswith("__"):
+            _op_arg_names = ()
+        else:
+            _op_arg_names = _st._arg_names.get(func_name.strip("_"), ())
+    fields_dict["arg_names"] = _op_arg_names
     fields_dict["num_args_total"] = len(args) + len(kwargs)
     fields_dict["num_pos_args"] = len(args)
     fields_dict["num_kwargs"] = len(kwargs)
@@ -3829,16 +3909,7 @@ def _tag_tensor_and_track_variations(
     # Record the output's version at label time so a later op consuming this tensor can
     # distinguish a genuine in-place mutation (version bumped since it was labeled) from a
     # non-mutating identity return that reuses the same object (see is_inplace at capture).
-    if isinstance(out, torch.Tensor):
-        # ``_version`` is a WITNESSED input-metadata property (r33): the scoped patch
-        # records a genuine USER ``x._version`` read on a model-input leaf. This snapshot is
-        # TorchLens's OWN bookkeeping read, so it must run under the internal marker or it
-        # spuriously records a ``_version`` fact for every model, falsely diverging any
-        # runtime input whose version counter differs from capture (an over-trigger).
-        with internal_scalar_read():
-            version = tensor_version_or_none(out)
-        if version is not None:
-            _LABEL_VERSION_SNAPSHOT[out] = version
+    _record_label_version_snapshot(out)
     _add_tensor_backward_hook(self, out, out_label)
 
     child_event = self.capture_events.live_index.require_event(new_layer_entry._label_raw)
@@ -4026,11 +4097,37 @@ def _emit_exhaustive_operation_events(
         expected_output_count=expected_output_count,
     )
 
+    # Container entries that ARE an input object (broadcast_tensors(x, x) with
+    # conforming shapes, atleast_1d/2d/3d, ...) are pure pass-throughs: torch
+    # hands back the caller's own tensor inside the returned tuple. Labeling
+    # the live input directly would steal its label (last-wins for duplicated
+    # entries), leave phantom dead-end siblings, and reroute downstream direct
+    # consumers of the input through an op whose result the user may never use
+    # (W3 audit F4). Mirror the scalar pass-through machinery: log each such
+    # entry against a minted safe copy so the live input keeps its label.
+    # out= destinations are excluded -- the op genuinely WROTE into them, so
+    # the live destination must keep advancing to this op's label.
+    out_kwarg_value = kwargs.get("out") if isinstance(kwargs, dict) else None
+    if isinstance(out_kwarg_value, torch.Tensor):
+        out_destination_ids: frozenset[int] = frozenset((id(out_kwarg_value),))
+    elif isinstance(out_kwarg_value, (list, tuple)):
+        out_destination_ids = frozenset(
+            id(item) for item in out_kwarg_value if isinstance(item, torch.Tensor)
+        )
+    else:
+        out_destination_ids = frozenset()
+
     for i, output_entry in enumerate(output_entries):
         out = output_entry.value
         if not _output_should_be_logged(out, is_bottom_level_func):
             continue
         out_tensor = cast(torch.Tensor, out)
+        if (
+            output_entry.container_spec is not None
+            and id(out_tensor) not in out_destination_ids
+            and any(out_tensor is arg_tensor for arg_tensor in arg_tensors)
+        ):
+            out_tensor = safe_copy(out_tensor)
 
         fields_dict_onetensor = (
             fields_dict if use_single_output_fields else _copy_shared_fields_for_output(fields_dict)
@@ -4137,7 +4234,13 @@ def _output_should_be_logged(out: Any, is_bottom_level_func: bool) -> bool:
     """Determine whether an output value should be logged as a new graph node.
 
     Two conditions must hold:
-      1. ``out`` must be a torch.Tensor (non-tensor outputs like ints are skipped).
+      1. ``out`` must be a torch.Tensor INSTANCE — including user Tensor
+         SUBCLASSES (tv_tensors, ``__torch_function__`` wrappers, ...), whose
+         ops dispatch through the same wrapped functions and are just as real.
+         The exact-type spelling ``type(out) is not torch.Tensor`` silently
+         dropped every op in a subclass region (missing ops that still
+         validated True — W3 F5). ``nn.Parameter`` stays excluded: parameters
+         are SOURCE tensors, never op outputs.
       2. Either the tensor is genuinely new (no ``_tl.label_raw`` value),
          OR this is a bottom-level function.  Bottom-level functions are leaf
          operations in the decoration nesting — even if they return an already-
@@ -4148,7 +4251,7 @@ def _output_should_be_logged(out: Any, is_bottom_level_func: bool) -> bool:
     Returns:
         True if the output should be logged, False otherwise.
     """
-    if type(out) is not torch.Tensor:
+    if not isinstance(out, torch.Tensor) or isinstance(out, torch.nn.Parameter):
         return False
 
     if (get_tensor_label(out) is None) or is_bottom_level_func:
@@ -4641,8 +4744,10 @@ def _log_output_tensor_info(
         # ``mul_`` / ``copy_`` / ``__i*``), a setter dunder (``__setitem__`` / ``__delitem__``, which
         # mutate but do not end in ``_``), or an ``out=`` tensor kwarg -- so genuine mutation is
         # still detected while a non-mutating identity return (``x.cpu()`` / ``x.contiguous()``,
-        # which has no mutation-signature name) is not, and does not crash.
-        baseline = _LABEL_VERSION_SNAPSHOT.get(t)
+        # which has no mutation-signature name) is not, and does not crash. Baselines are
+        # session-scoped: a snapshot recorded by an EARLIER capture never serves as this
+        # session's baseline (the tensor may have been mutated between captures -- W3 F7).
+        baseline = _label_version_baseline(t)
         current_version = tensor_version_or_none(t)
         if baseline is not None and current_version is not None:
             fields_dict["is_inplace"] = current_version != baseline

@@ -64,6 +64,7 @@ from ...utils.arg_handling import copy_arg_tree
 from ...utils.tensor_utils import print_override, safe_copy
 from .ops import (
     _is_inplace_augmented_assignment_dunder,
+    _record_label_version_snapshot,
     _walk_output_tensors_with_paths,
     apply_live_hooks_to_outputs,
     log_function_output_tensors,
@@ -1075,6 +1076,120 @@ def _register_inplace_live_grad_hook(trace: Any, tensor: Any, raw_label: str) ->
     _add_tensor_backward_hook(trace, tensor, raw_label)
 
 
+def _storage_overlap_byte_interval(t: torch.Tensor) -> tuple[int, int]:
+    """Return the ``[start, end)`` byte interval ``t`` can address in its storage.
+
+    Conservative interval form (stride gaps ignored): a strided view's
+    addressable extent is treated as one contiguous byte range, so two views
+    with interleaved-but-disjoint elements inside the same range are treated
+    as overlapping. That errs toward LINKING a mutation to a possibly-affected
+    alias, never toward missing one. Negative strides do not exist in torch;
+    zero strides (``expand``) contribute nothing to the span.
+    """
+
+    element_size = t.element_size()
+    start = int(t.storage_offset()) * element_size
+    if t.numel() == 0:
+        return (start, start)
+    span = 1 + sum((int(size) - 1) * int(stride) for size, stride in zip(t.shape, t.stride()))
+    return (start, start + span * element_size)
+
+
+def _propagate_mutation_label_to_storage_aliases(
+    trace: Any, mutated: torch.Tensor, out_label: str
+) -> None:
+    """Advance live labels of storage aliases overlapping an in-place op's target.
+
+    An in-place op that mutates a VIEW (``v = y[0]; v.add_(100.)``) changes the
+    BASE tensor's content, but the base is a different Python object: only the
+    view's label used to advance, so the mutation op was a dead end and later
+    consumers of the base bound to the stale pre-mutation parent while storing
+    the post-mutation value (W3 audit F1, silent). Resolve every OTHER live
+    labeled tensor whose storage byte range overlaps the mutated target and
+    advance its label to the mutating op, exactly like the direct same-object
+    propagation. Value replay is untouched: the consumer's version-snapshot
+    machinery (``_get_parent_output_version_snapshot``) records the alias's
+    actual content per child, so replay and perturbation both see the real
+    full-tensor values.
+
+    Parameters
+    ----------
+    trace
+        Active capture trace.
+    mutated
+        The live tensor object the op actually wrote through (``args[0]`` for
+        in-place/setter ops, each destination for ``out=`` ops).
+    out_label
+        The mutating op's freshly issued raw label.
+    """
+
+    from ._tl import session_storage_alias_candidates
+    from .ops import _record_label_version_snapshot
+
+    # SCOPE (r26 reconcile): descriptor/grad-bound captures keep the HISTORICAL
+    # topology. The runnable recipe + numeric attestation key payloads PER
+    # LABEL, and advancing a base tensor's label to a view-mutation op makes
+    # one label denote two different values (the op's view-shaped output AND
+    # the full post-mutation base as the consumer's parent) -- byte-exact
+    # attestation then fails on a genuinely-verifiable run (r29 suite).
+    # Those modes stay honest without the edge: the r29 view-lineage gate
+    # fail-closes view-mediated input mutation, and validation's
+    # version-snapshot replay is green with EITHER topology. Default captures
+    # (receptive fields, influence geometry, collapse -- the W3-F1 impact
+    # surface) get the mutation edge. Follow-up: teach the runnable reader
+    # per-(label, consumer) payload keying, then lift this scope.
+    if (
+        getattr(trace, "intervention_ready", False)
+        or getattr(trace, "backward_ready", False)
+        or getattr(trace, "save_grads", None) not in (None, False)
+    ):
+        return
+
+    # ``untyped_storage()`` / ``data_ptr()`` / ``stride()`` / ``storage_offset()``
+    # are WITNESSED host-escape / metadata surfaces, and a genuine user
+    # ``data_ptr()`` read fail-closes runnable captures to UNVERIFIABLE
+    # (r15-H1). These are TorchLens's OWN bookkeeping reads, so they run under
+    # ``pause_logging`` (no spurious op capture) plus ``internal_scalar_read``
+    # (kept off the escape census / metadata patches) -- the same sanctioned
+    # pattern as ``completeness_witness``'s storage-site indexers.
+    with _state.pause_logging(), internal_scalar_read():
+        try:
+            storage_ptr = mutated.untyped_storage().data_ptr()
+        except Exception:
+            return
+        candidates = session_storage_alias_candidates(storage_ptr)
+        if not candidates or (len(candidates) == 1 and candidates[0] is mutated):
+            return
+        mutated_lo, mutated_hi = _storage_overlap_byte_interval(mutated)
+        if mutated_hi <= mutated_lo:
+            return
+        for alias in candidates:
+            if (
+                alias is mutated
+                or not isinstance(alias, torch.Tensor)
+                or isinstance(alias, torch.nn.Parameter)
+            ):
+                continue
+            # Gated read: rejects foreign-session stamps and storage-rebound
+            # objects, so a stale index entry can never act as a live alias.
+            alias_label = get_tensor_label(alias)
+            if alias_label is None or alias_label == out_label:
+                continue
+            try:
+                if (
+                    alias.untyped_storage().data_ptr() != storage_ptr
+                    or alias.device != mutated.device
+                ):
+                    continue
+                alias_lo, alias_hi = _storage_overlap_byte_interval(alias)
+            except Exception:
+                continue
+            if alias_lo < mutated_hi and mutated_lo < alias_hi:
+                set_tensor_label(alias, out_label)
+                _register_inplace_live_grad_hook(trace, alias, out_label)
+                _record_label_version_snapshot(alias)
+
+
 def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[..., Any]:
     """Wrap a single torch function with toggle-gated logging.
 
@@ -1277,7 +1392,6 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
         # matching barcode => this is the bottom-level (leaf) function.
         func_call_barcode = make_random_barcode()
         trace._current_func_barcode = func_call_barcode
-        capture_start_time = time.time()
         _save_rng = getattr(trace, "save_rng_states", False)
         rng_states = log_current_rng_states(torch_only=True) if _save_rng else {}
         autocast_state = log_current_autocast_state()
@@ -1304,6 +1418,12 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
             else False
         )
         expected_token = None
+        # W3 F8: per-op duration must measure the USER op, not TorchLens
+        # bookkeeping. The clock starts here -- after RNG/autocast snapshots
+        # and container/intervention-site registration -- and stops right
+        # after the call returns, so ``func_duration`` no longer
+        # systematically overstates cheap ops in instrumented captures.
+        func_exec_start = time.time()
         try:
             if _diagnostic_edge_armed():
                 with expected_original_call(
@@ -1318,11 +1438,12 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
                 out_orig = func(*args, **kwargs)
         finally:
             _nvtx_range_pop(nvtx_pushed)
+        func_exec_duration = time.time() - func_exec_start
         if mutates_data_alias:
             record_data_alias_mutation(trace)
         return_value = out_orig
         exec_ctx = FuncExecutionContext(
-            time_elapsed=time.time() - capture_start_time,
+            time_elapsed=func_exec_duration,
             rng_states=rng_states,
             autocast_state=autocast_state,
         )
@@ -1452,9 +1573,56 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
                     if was_inplace:
                         set_tensor_label(args[0], out_label)
                         _register_inplace_live_grad_hook(trace, args[0], out_label)
+                        # W3 F1: the write may have gone through a VIEW; every
+                        # other live labeled alias whose storage bytes overlap
+                        # the target (its base, an overlapping sibling view)
+                        # saw its content change too, so consumers of THOSE
+                        # objects must also bind to this mutation op.
+                        _propagate_mutation_label_to_storage_aliases(trace, args[0], out_label)
                     if isinstance(return_value, torch.Tensor):
                         set_tensor_label(return_value, out_label)
                         _register_inplace_live_grad_hook(trace, return_value, out_label)
+
+            # W3 F6: the module-boundary identity mint (force_distinct_return)
+            # logs against a distinct safe copy so the boundary op attaches to
+            # the module's output_ops -- but the CALLER keeps the original
+            # object. Without advancing the live original's label, every
+            # downstream consumer bound to the pre-module label and the
+            # boundary node dangled (nn.Identity / pass-through modules).
+            # Advance the live object exactly like same-object propagation;
+            # the minted copy still carries the label for module bookkeeping.
+            if (
+                force_distinct_return
+                and out_orig is out_before_hooks
+                and len(args) > 0
+                and isinstance(args[0], torch.Tensor)
+                and not isinstance(args[0], torch.nn.Parameter)
+            ):
+                boundary_label = get_tensor_label(out_orig)
+                if boundary_label is not None:
+                    set_tensor_label(args[0], boundary_label)
+                    _register_inplace_live_grad_hook(trace, args[0], boundary_label)
+                    _record_label_version_snapshot(args[0])
+
+            # W3 F1 (out= family): an ``out=`` destination may itself be a view
+            # of a larger live tensor (``torch.add(x, 1, out=y[0])``); the
+            # destination object's label advances at logging time, but its
+            # overlapping aliases need the same mutation-provenance advance.
+            out_kwarg_destinations = kwargs.get("out")
+            if isinstance(out_kwarg_destinations, torch.Tensor):
+                out_destination_tensors: tuple[torch.Tensor, ...] = (out_kwarg_destinations,)
+            elif isinstance(out_kwarg_destinations, (list, tuple)):
+                out_destination_tensors = tuple(
+                    item for item in out_kwarg_destinations if isinstance(item, torch.Tensor)
+                )
+            else:
+                out_destination_tensors = ()
+            for out_destination in out_destination_tensors:
+                destination_label = get_tensor_label(out_destination)
+                if destination_label is not None:
+                    _propagate_mutation_label_to_storage_aliases(
+                        trace, out_destination, destination_label
+                    )
 
         mark_expected_original_accounted(expected_token, captured=call_emitted_op)
         if (
@@ -1513,8 +1681,13 @@ def get_arg_names(orig_func: Callable[..., Any], func_name: str) -> None:
     Tries ``inspect.signature`` first (works for Python functions). Falls back
     to docstring parsing for C builtins whose signature isn't introspectable.
 
-    Stores under the underscore-stripped name (e.g. ``"add"`` for both ``add``
-    and ``add_``) so callers can look up via ``func_name.strip("_")`` consistently (#82).
+    Stores under the EXACT registered name: ``add``, ``add_``, and ``__add__``
+    have meaningfully different signatures (``__add__(self, other)`` is a
+    2-arg dunder; ``torch.add(input, other, *, alpha, out)`` is not), and the
+    historical underscore-stripped shared key (#82) let whichever registered
+    last overwrite the rest, recording wrong ``arg_names`` metadata (W3 audit
+    F9). Lookup falls back to the stripped key for names whose own
+    introspection stored nothing, preserving the old best-effort behavior.
 
     Skipped for property-like attributes (``real``, ``imag``, ``T``, etc.) that
     aren't callable in the normal sense.
@@ -1522,7 +1695,7 @@ def get_arg_names(orig_func: Callable[..., Any], func_name: str) -> None:
     if func_name in ["real", "imag", "T", "mT", "data", "H"]:
         return
 
-    storage_key = func_name.strip("_")
+    storage_key = func_name
 
     try:
         params = inspect.signature(orig_func).parameters
@@ -1537,8 +1710,13 @@ def get_arg_names(orig_func: Callable[..., Any], func_name: str) -> None:
                 argnames.append(f"**{name}")
             else:
                 argnames.append(name)
-        _state._arg_names[storage_key] = tuple(argnames)
-        return
+        # A purely-variadic signature ((*args, **kwargs) on opaque C dunders)
+        # names nothing; prefer the docstring parse, and store nothing when
+        # that also fails -- honest-unknown beats a wrong borrowed signature.
+        # A genuinely empty signature (zero-arg methods) still stores ().
+        if not argnames or not all(name.startswith("*") for name in argnames):
+            _state._arg_names[storage_key] = tuple(argnames)
+            return
     except (ValueError, TypeError):
         # TypeError: Python 3.14+ deferred annotation evaluation (PEP 649)
         # can fail when class-level names (e.g. Tensor.bool) shadow builtins
@@ -1680,7 +1858,11 @@ def decorate_all_once() -> None:
     # Tensor.bool first, then inspect Tensor.dim_order, the annotation
     # bool | list[...] resolves bool to our wrapper -> TypeError (#138).
     for namespace_name, func_name in get_orig_torch_funcs():
-        if func_name.strip("_") in _state._arg_names:
+        # Exact-name dedup (W3 F9): ``add``, ``add_``, and ``__add__`` have
+        # meaningfully different signatures, so each registers its own entry.
+        # The historical stripped-key dedup made whichever spelling appeared
+        # first swallow all the others' registrations.
+        if func_name in _state._arg_names:
             continue
         namespace_key = namespace_name.replace("torch.", "")
         local_func_namespace = nested_getattr(torch, namespace_key)
