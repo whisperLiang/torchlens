@@ -1857,15 +1857,31 @@ Python <= 3.11 -- or, for the profile-silent numpy>=2 Cython method shape, on AN
 reachable from NO digest root except BY EXECUTING USER CODE (a property/descriptor `__get__`
 body, `__getattr__`, or a callable's return value) or through a deliberately leafed edge: a
 FUNCTION attribute (`fn.rng = gen`), a hostile builtin-container SUBCLASS's elements, a
-`deque`/C-internal buffer, a computed module attribute (`getattr(pkg, name)`), or a stash INSIDE
-a stdlib or torch/numpy/torchlens package namespace.
+COMPUTED (non-constant) dynamic name (`getattr(pkg, name)` / `globals()[name]` where `name` is
+built at runtime -- the constant-string spellings ARE witnessed, r38 below), or a stash INSIDE
+a stdlib or torch/numpy/torchlens package namespace. The first clause is a THREAT-MODEL SCOPE
+STATEMENT, not an open detection gap with a cheaper fix pending: a generator reachable from no
+digest root and drawn only on a pre-existing non-hooked thread leaves NO capture-side artifact,
+so the only fail-closed spelling is a blanket "pre-existing threads exist" ceiling, which was
+built (r38 draft) and REJECTED for over-ceiling every capture running alongside a benign
+DataLoader/Jupyter/pytest background thread; the moment the owner's (or any hooked thread's)
+in-window code reaches the same generator through ANY digest root, the draw IS witnessed.
+Every C-internal holder the walks REACH but cannot read is fail-closed, never silently leafed
+(frame-side parity, r38: a non-provably-empty opaque queue flags `inventory_opaque_container`).
 The shared-module-namespace clause of this residual is NARROWED to unreferenced namespaces (B4,
 active for the profile-silent numpy>=2 method shape; numpy 1.x owner/in-window-thread draws are
 already receiver-classified by `c_call`):
 numpy RNG receivers deeply reachable from any IN-WINDOW PROFILED FRAME's roots (named globals
-including foreign module namespaces, fast locals, helper returns) through exact builtin
-containers, plain-object `__dict__`/`__slots__` values, name-referenced nested modules, and
-direct class attributes are digested at first reference and compared whole-window --
+including foreign module namespaces, fast locals, helper returns, and -- r38 -- globals named by
+the code object's string CONSTANTS, so the `globals()["name"]` / `eval("name")` constant-name
+subscript spellings are witnessed) through exact builtin
+containers, plain-object `__dict__`/`__slots__` values, name-referenced nested modules,
+direct class attributes, and -- r38 frame-walk parity with the model-rooted sweep, closing the
+executed V6/V7/V8 + deque frame-rooted false-VERIFIEDs -- `weakref.ref` referents (one base-C
+deref), `threading.local` per-thread namespaces (`tp_traverse`; ALL threads' dicts, so a
+per-thread generator set by any thread is reached), `functools.partial` interiors
+(`func`/`args`/`keywords` through the base member descriptors), and `deque` buffers (base
+`__iter__`) are digested at first reference and compared whole-window --
 thread-independently, so a pre-existing worker's draw from a receiver the owner's in-window code
 has already referenced is witnessed (`frame_reachable_generator`; cap exhaustion flags
 `deep_inventory_budget_exhausted`, INCOMPLETE, never silent -- the r55 C6 exclusion of
