@@ -7,9 +7,11 @@ events, and exposes Trace/Recording backward helpers.
 from __future__ import annotations
 
 import contextlib
+import functools
 import inspect
 import os
 import re
+import threading
 import time
 import weakref
 from collections import OrderedDict, deque
@@ -20,7 +22,10 @@ from typing import Any, Callable, Iterator, Literal, cast
 import torch
 
 from ... import _state
-from ...utils._torch_compat import get_accumulate_grad_class
+from ...utils._torch_compat import (
+    HAS_SAVED_TENSORS_HOOKS_PATCHABLE,
+    get_accumulate_grad_class,
+)
 from ...utils._torch_symbols import torch_attr
 
 from ..._deprecations import MISSING, MissingType
@@ -48,6 +53,8 @@ _BACKWARD_GRAD_FN_REGISTRY: dict[int, weakref.ReferenceType[Any]] = {}
 _ORIGINAL_AUTOGRAD_BACKWARD: Callable[..., Any] | None = None
 _ORIGINAL_AUTOGRAD_GRAD: Callable[..., Any] | None = None
 _AUTOGRAD_WRAPPERS_INSTALLED = False
+_ORIGINAL_SAVED_TENSORS_HOOKS_INIT: Callable[..., Any] | None = None
+_SAVED_TENSORS_HOOKS_INIT_PATCHED = False
 _TORCHLENS_PKG_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _INFERENCE_ONLY_BACKWARD_ERROR = (
     "Cannot run log_backward on a trace captured with inference_only=True: the autograd "
@@ -2616,6 +2623,87 @@ def _capture_autograd_engine_call(
     return nested_call(0)
 
 
+def _scoped_saved_tensors_hook(hook: Callable[[Any], Any]) -> Callable[[Any], Any]:
+    """Wrap a user pack/unpack hook so its torch ops stay out of the capture.
+
+    Autograd invokes pack hooks synchronously DURING the producing op's
+    dispatch, before the wrapper has logged that op. A hook-run torch op
+    therefore observes (and can label) the producer's not-yet-logged output:
+    a same-object return like ``t.cpu()`` on a CPU tensor stole the producer's
+    label slot, deleting the real user op from the graph and leaving the hook
+    op parentless, while a pack over an already-labeled input spliced the hook
+    op INTO the forward dataflow (round-34 Finding A). Hook results feed
+    autograd's saved-for-backward storage, never the forward dataflow, so the
+    honest forward-trace model is to scope hook bodies as autograd-internal
+    bookkeeping: logging is paused for the hook body on the capture-owner
+    thread, exactly like TorchLens's own internal tensor ops.
+    """
+
+    if getattr(hook, "__tl_saved_tensors_hook_scoped__", False):
+        return hook
+
+    def scoped_hook(value: Any) -> Any:
+        """Run the user hook with capture logging paused on the owner thread."""
+        if (
+            _state._logging_enabled
+            and _state._active_trace is not None
+            and _state._active_owner_thread_id == threading.get_ident()
+        ):
+            with pause_logging():
+                return hook(value)
+        return hook(value)
+
+    try:
+        functools.update_wrapper(scoped_hook, hook)
+    except (AttributeError, TypeError):
+        pass
+    scoped_hook.__tl_saved_tensors_hook_scoped__ = True  # type: ignore[attr-defined]
+    return scoped_hook
+
+
+def _install_saved_tensors_hooks_scope() -> None:
+    """Patch ``saved_tensors_hooks.__init__`` to scope user hooks idempotently.
+
+    Covers ``torch.autograd.graph.saved_tensors_hooks``, ``save_on_cpu``, and
+    the non-reentrant checkpoint hook (both subclass it and route through
+    ``super().__init__``). When the class shape is not patchable on this
+    torch runtime (``HAS_SAVED_TENSORS_HOOKS_PATCHABLE`` is False), degrade
+    gracefully to the historical unscoped behavior.
+    """
+
+    global _SAVED_TENSORS_HOOKS_INIT_PATCHED, _ORIGINAL_SAVED_TENSORS_HOOKS_INIT
+    if _SAVED_TENSORS_HOOKS_INIT_PATCHED or not HAS_SAVED_TENSORS_HOOKS_PATCHABLE:
+        return
+    hooks_cls = torch.autograd.graph.saved_tensors_hooks
+    original_init = hooks_cls.__init__
+    _ORIGINAL_SAVED_TENSORS_HOOKS_INIT = original_init
+
+    @functools.wraps(original_init)
+    def patched_init(self: Any, pack_hook: Any, unpack_hook: Any) -> None:
+        """Install scoped pack/unpack hooks in place of the raw user hooks."""
+        original_init(
+            self,
+            _scoped_saved_tensors_hook(pack_hook),
+            _scoped_saved_tensors_hook(unpack_hook),
+        )
+
+    hooks_cls.__init__ = patched_init  # type: ignore[method-assign]
+    _SAVED_TENSORS_HOOKS_INIT_PATCHED = True
+
+
+def _uninstall_saved_tensors_hooks_scope() -> None:
+    """Restore the original ``saved_tensors_hooks.__init__`` when patched."""
+
+    global _SAVED_TENSORS_HOOKS_INIT_PATCHED
+    if not _SAVED_TENSORS_HOOKS_INIT_PATCHED:
+        return
+    if _ORIGINAL_SAVED_TENSORS_HOOKS_INIT is not None:
+        torch.autograd.graph.saved_tensors_hooks.__init__ = (  # type: ignore[method-assign]
+            _ORIGINAL_SAVED_TENSORS_HOOKS_INIT
+        )
+    _SAVED_TENSORS_HOOKS_INIT_PATCHED = False
+
+
 def install_autograd_wrappers() -> None:
     """Install global autograd trigger wrappers idempotently.
 
@@ -2626,6 +2714,7 @@ def install_autograd_wrappers() -> None:
     """
 
     global _AUTOGRAD_WRAPPERS_INSTALLED, _ORIGINAL_AUTOGRAD_BACKWARD, _ORIGINAL_AUTOGRAD_GRAD
+    _install_saved_tensors_hooks_scope()
     if _AUTOGRAD_WRAPPERS_INSTALLED:
         return
     _ORIGINAL_AUTOGRAD_BACKWARD = torch.autograd.backward
@@ -2697,6 +2786,7 @@ def uninstall_autograd_wrappers() -> None:
     """
 
     global _AUTOGRAD_WRAPPERS_INSTALLED
+    _uninstall_saved_tensors_hooks_scope()
     if not _AUTOGRAD_WRAPPERS_INSTALLED:
         return
     if _ORIGINAL_AUTOGRAD_BACKWARD is not None:

@@ -38,6 +38,19 @@ from torchlens.data_classes.layer import Layer  # noqa: E402
 from torchlens.data_classes.op import Op  # noqa: E402
 from torchlens.data_classes.trace import ConditionalEvent, Trace  # noqa: E402
 from torchlens.options import CaptureOptions  # noqa: E402
+from torchlens.utils._torch_compat import HAS_CODE_POSITIONS  # noqa: E402
+
+# Same-line ternary arm attribution needs PEP 657 per-instruction columns; the
+# degraded runtime deliberately fails closed instead (see the module docstring
+# of torchlens/postprocess/ast_branches.py and the gated fail-closed pin
+# test_ternary_py310_fail_closed_model_drops_same_line_arm_attribution).
+requires_code_positions = pytest.mark.skipif(
+    not HAS_CODE_POSITIONS,
+    reason=(
+        "PEP 657 bytecode column positions unavailable; same-line ternary arm "
+        "attribution deliberately fails closed on this runtime"
+    ),
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1740,11 +1753,24 @@ def test_same_line_nested_def_model_fails_closed_when_scope_resolution_is_ambigu
         return stack
 
     def _ambiguous_file_index(filename: str) -> object:
-        """Return a file index with a duplicate helper scope for this file."""
+        """Return a file index with a duplicate helper scope for this file.
+
+        The shadow must collide with the scope the relu frame actually
+        resolves to -- SameLineNestedDefModel's OWN nested helper -- because
+        qualname-less resolution disambiguates by ``func_name`` PLUS
+        ``co_firstlineno``. Duplicating an unrelated same-named helper at a
+        different line creates no ambiguity, and attribution then correctly
+        proceeds (the original vehicle of this test was broken that way).
+        """
         index = original_get_file_index(filename)
         if index is None or filename != __file__:
             return index
-        helper_scopes = [scope for scope in index.scopes if scope.func_name == "helper"]
+        helper_scopes = [
+            scope
+            for scope in index.scopes
+            if scope.func_name == "helper"
+            and scope.qualname == "SameLineNestedDefModel.forward.<locals>.helper"
+        ]
         if helper_scopes and not any(
             scope.qualname == "shadow.<locals>.helper" for scope in index.scopes
         ):
@@ -2008,6 +2034,7 @@ def test_branch_entry_with_arg_label_keeps_semantic_and_argument_labels_separate
     )
 
 
+@requires_code_positions
 def test_basic_ternary_model_attributes_then_arm_as_ifexp() -> None:
     """A minimal ternary materialises an ``ifexp`` event and branch stack."""
     trace = _log_model(BasicTernaryModel(), torch.ones(1, 2))
@@ -2022,6 +2049,7 @@ def test_basic_ternary_model_attributes_then_arm_as_ifexp() -> None:
     assert linear_layer.conditional_branch_stack == [(event.id, "then")]
 
 
+@requires_code_positions
 def test_nested_ternary_model_records_parent_child_ifexp_events() -> None:
     """Nested ternaries keep parent-child links between ``ifexp`` events."""
     trace = _log_model(NestedTernaryModel(), torch.ones(1, 2))
@@ -2043,6 +2071,7 @@ def test_nested_ternary_model_records_parent_child_ifexp_events() -> None:
     ]
 
 
+@requires_code_positions
 def test_ternary_inside_if_model_records_mixed_if_and_ifexp_stack() -> None:
     """An inner ternary keeps both the outer ``if_chain`` and inner ``ifexp`` stack."""
     trace = _log_model(TernaryInsideIfModel(), torch.ones(1, 2))
@@ -2062,6 +2091,7 @@ def test_ternary_inside_if_model_records_mixed_if_and_ifexp_stack() -> None:
     ]
 
 
+@requires_code_positions
 def test_ternary_with_bool_cast_model_marks_conditional_wrapper_kind() -> None:
     """``bool(...)`` wrappers inside ternaries keep ``ifexp`` attribution."""
     trace = _log_model(TernaryWithBoolCastModel(), torch.ones(1, 2))

@@ -13,6 +13,7 @@ import torch.nn as nn
 
 from torchlens.data_classes.trace import Trace
 from torchlens.options import CaptureOptions
+from torchlens.utils._torch_compat import HAS_CODE_POSITIONS
 
 
 class SimpleIfElseModel(nn.Module):
@@ -335,6 +336,13 @@ def test_loop_repeated_if_condition_entries_remain_if() -> None:
         trace.cleanup()
 
 
+@pytest.mark.skipif(
+    not HAS_CODE_POSITIONS,
+    reason=(
+        "PEP 657 bytecode column positions unavailable; same-line ternary arm "
+        "attribution deliberately fails closed on this runtime"
+    ),
+)
 def test_basic_ternary_graphviz_labels_then_and_else_edges() -> None:
     """Ternary rendering uses THEN/ELSE labels for ``ifexp`` arms."""
     positive_dot, positive_log = _render_dot_source(BasicTernaryModel(), torch.ones(2, 2))

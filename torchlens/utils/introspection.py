@@ -16,6 +16,8 @@ import numpy as np
 import torch
 from torch import nn
 
+from ._torch_compat import HAS_CODE_POSITIONS, HAS_CODE_QUALNAME
+
 # Attributes to skip when crawling an object's namespace looking for tensors.
 # Two groups, matched by EXACT name:
 #   - View/deprecation properties: .T/.H/.mT (deprecation warnings on non-2D
@@ -76,7 +78,7 @@ def _build_col_offset_map(code: CodeType) -> Dict[int, Optional[int]]:
     ``None`` are stored with ``None`` so callers can distinguish "not in map"
     (unknown offset) from "no column information available" (positions absent).
     """
-    if sys.version_info < (3, 11):
+    if not HAS_CODE_POSITIONS:
         return {}
     offset_map: Dict[int, Optional[int]] = {}
     try:
@@ -149,7 +151,7 @@ def _get_code_qualname(frame: FrameType) -> Optional[str]:
     Returns:
         Qualified code object name, or None when unavailable.
     """
-    if sys.version_info < (3, 11):
+    if not HAS_CODE_QUALNAME:
         return None
     return getattr(frame.f_code, "co_qualname", None)
 
@@ -163,7 +165,7 @@ def _get_col_offset(frame: FrameType) -> Optional[int]:
     Returns:
         Column offset for the current instruction, or None when unavailable.
     """
-    if sys.version_info < (3, 11):
+    if not HAS_CODE_POSITIONS:
         return None
     offset_map = _get_or_build_col_offset_map(frame.f_code)
     if not offset_map:

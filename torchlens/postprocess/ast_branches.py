@@ -10,6 +10,18 @@ This module parses Python source files into a lightweight, cached index that can
 
 The index is structural and process-local. Dense conditional IDs are assigned
 later by postprocess integration; this module works only with ``ConditionalKey``.
+
+**Degraded mode without PEP 657 positions** (``HAS_CODE_POSITIONS`` is False,
+i.e. CPython < 3.11): runtime frames carry no per-instruction column offsets,
+so ``query_intervals`` falls back to line-only matching. Branch arms that
+occupy distinct lines still attribute exactly; same-line arms -- notably
+ternary / ``IfExp`` arms, and single-line ``if t: body`` forms -- are
+DELIBERATELY dropped, because line-only evidence cannot prove which arm
+executed and source-text heuristics (name matching) can lie under aliasing
+(``r = torch.relu; torch.relu(x) if c else r(x)``). The posture is fail-closed:
+un-attributed, never mis-attributed. Conditional events still materialize;
+only the per-op arm attribution is withheld. Pinned by
+``test_ternary_py310_fail_closed_model_drops_same_line_arm_attribution``.
 """
 
 from __future__ import annotations

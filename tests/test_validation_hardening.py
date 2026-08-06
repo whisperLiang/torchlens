@@ -564,3 +564,69 @@ def test_w35_perturbation_net_still_fails_true_insensitivity() -> None:
     )
     assert result.decision == "failed"
     assert result.reason == "perturbation_insensitive"
+
+
+# ---------------------------------------------------------------------------
+# r32-abc Fix B (round-34 Finding B): value-discretizing dead zone false-FAIL
+# ---------------------------------------------------------------------------
+
+
+class _ZeroConstIntCast(nn.Module):
+    """``(x * 0).long().float() + x`` -- correct capture that used to false-FAIL.
+
+    The all-zero float parent of ``.long()`` calibrated the perturbation draw
+    to ``[-1, 1]`` and the ULP step retries to denormals, all inside integer
+    truncation's dead zone, so the REAL mul -> long edge read as
+    ``perturbation_insensitive`` with zero diagnostic output.
+    """
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x * 0).long().float() + x
+
+
+def test_zero_const_integer_cast_chain_validates_true() -> None:
+    """PIN (round-34 Finding B): the correct capture must validate True.
+
+    The unit-step retry crosses an integer boundary, proving the edge is real.
+    """
+
+    torch.manual_seed(0)
+    assert _quiet_validate(_ZeroConstIntCast(), torch.randn(4, 5)) is True
+
+
+def test_zero_index_gather_validates_true() -> None:
+    """PIN (round-34 Finding B sibling): all-zero gather indices via a cast."""
+
+    class _ZeroGather(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.gather(x, 1, (x.abs() * 0).long())
+
+    torch.manual_seed(0)
+    assert _quiet_validate(_ZeroGather(), torch.randn(4, 5)) is True
+
+
+def test_unit_step_retry_still_fails_true_insensitivity() -> None:
+    """Armed-proof: the SAME shape with a genuinely dead edge still fails.
+
+    Freeze the ``long`` op's replay callable to return its saved out
+    regardless of inputs: no draw -- wide, ULP step, or unit step -- can
+    change the output, so the tripwire must still fire
+    ``perturbation_insensitive``. This proves Fix B narrowed the false-FAIL
+    without weakening real-bug detection.
+    """
+
+    from torchlens.validation.core import (
+        _check_whether_func_on_saved_parents_yields_saved_tensor,
+    )
+
+    trace, _ground_truth = _capture(_ZeroConstIntCast(), torch.randn(4, 5))
+    long_op = [op for op in trace.layer_list if op.func_name == "long"][0]
+    saved = long_op.out.detach().clone()
+    object.__setattr__(long_op, "func", lambda *args, **kwargs: saved.clone())
+    parent_label = long_op.parents[0]
+
+    result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+        trace, long_op.label, perturb=True, layers_to_perturb=[parent_label]
+    )
+    assert result.decision == "failed"
+    assert result.reason == "perturbation_insensitive"
