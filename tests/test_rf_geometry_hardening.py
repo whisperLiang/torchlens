@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import torchlens as tl
-from torchlens.receptive_field import ReceptiveFieldValidationStatus
+from torchlens.receptive_field import ReceptiveFieldStatus, ReceptiveFieldValidationStatus
 
 
 torch.manual_seed(0)
@@ -145,6 +145,133 @@ def assert_box_against_truth(
             assert start <= true_hull[0] and stop >= true_hull[1], (
                 f"{context}: axis {axis} bound {(start, stop)} does not contain {true_hull}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Scalar control ancestry at spatial merges
+# ---------------------------------------------------------------------------
+
+
+class _TensorDerivedShapeMerge(nn.Module):
+    """Two convolutions followed by a zero factory with input-derived dimensions."""
+
+    def __init__(self) -> None:
+        """Create deterministic positive convolutions for perturbation support."""
+
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 2, 3, bias=False)
+        self.conv2 = nn.Conv2d(2, 2, 3, bias=False)
+        with torch.no_grad():
+            self.conv1.weight.fill_(1.0)
+            self.conv2.weight.fill_(1.0)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Merge spatial activations with zeros whose shape uses a runtime scalar."""
+
+        spatial = self.conv2(torch.relu(self.conv1(inputs)))
+        extent = (inputs.sum() * 0).long() + 8
+        return spatial + torch.zeros(1, 2, extent, extent)
+
+
+class _TwoSpatialWindowMerge(nn.Module):
+    """Merge aligned spatial branches with nested three- and five-pixel windows."""
+
+    def __init__(self) -> None:
+        """Create positive convolutions whose outputs share a ten-pixel grid."""
+
+        super().__init__()
+        self.narrow = nn.Conv2d(1, 1, 3, bias=False)
+        self.wide = nn.Conv2d(1, 1, 5, padding=1, bias=False)
+        with torch.no_grad():
+            self.narrow.weight.fill_(1.0)
+            self.wide.weight.fill_(1.0)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Return the elementwise union of two genuine spatial data branches."""
+
+        return self.narrow(inputs) + self.wide(inputs)
+
+
+class _ScalarValueSpatialMerge(nn.Module):
+    """Merge a local convolution with a broadcast scalar derived from input data."""
+
+    def __init__(self) -> None:
+        """Create a deterministic local spatial branch."""
+
+        super().__init__()
+        self.spatial = nn.Conv2d(1, 1, 3, padding=1, bias=False)
+        with torch.no_grad():
+            self.spatial.weight.fill_(1.0)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Return a merge whose scalar-value branch genuinely depends on every pixel."""
+
+        spatial = self.spatial(inputs)
+        return spatial + inputs.sum()
+
+
+def test_tensor_derived_shape_control_branch_preserves_exact_rf() -> None:
+    """Keep scalar size provenance from erasing a brute-force exact spatial field."""
+
+    model = _TensorDerivedShapeMerge().eval()
+    inputs = torch.ones(1, 1, 12, 12)
+    truth = true_receptive_support(model, inputs, (0, 0, 4, 4), deltas=(1.0,))
+    assert len(truth) == 25
+    assert hull(truth, 2) == (4, 9)
+    assert hull(truth, 3) == (4, 9)
+
+    trace = capture(model, inputs)
+    target = op_named(trace, "add")
+    assert target.receptive_field.center_unit(batch_index=0) == (0, 1, 4, 4)
+    box = target.receptive_field.at((4, 4))
+    assert box.exact
+    assert_box_against_truth(box, truth, (2, 3), context="tensor-derived zero shape")
+    checked = target.receptive_field.check((0, 0, 4, 4))
+    assert checked.status is ReceptiveFieldValidationStatus.PASS
+    assert checked.n_violations == 0
+
+    verify_trace = capture(model, inputs)
+    verified = tl.receptive_field.verify(verify_trace, units="center")
+    verify_target = op_named(verify_trace, "add")
+    target_results = [
+        result for result in verified.containment if result.op_label == verify_target.label
+    ]
+    assert target_results
+    assert all(result.status is ReceptiveFieldValidationStatus.PASS for result in target_results)
+    assert verified.verdict is not ReceptiveFieldValidationStatus.FAIL
+
+
+def test_genuine_spatial_branch_union_stays_exact_against_oracle() -> None:
+    """Continue merging real spatial branches instead of discarding either branch."""
+
+    model = _TwoSpatialWindowMerge().eval()
+    inputs = torch.ones(1, 1, 12, 12)
+    truth = true_receptive_support(model, inputs, (0, 0, 4, 4), deltas=(1.0,))
+    assert len(truth) == 25
+    assert hull(truth, 2) == (3, 8)
+    assert hull(truth, 3) == (3, 8)
+
+    trace = capture(model, inputs)
+    target = op_named(trace, "add")
+    box = target.receptive_field.at((4, 4))
+    assert box.exact
+    assert_box_against_truth(box, truth, (2, 3), context="two spatial branches")
+
+
+def test_scalar_value_spatial_branch_is_not_discarded_as_control() -> None:
+    """Keep a scalar value edge as whole-input geometry because it carries global data."""
+
+    model = _ScalarValueSpatialMerge().eval()
+    inputs = torch.ones(1, 1, 8, 8)
+    truth = true_receptive_support(model, inputs, (0, 0, 4, 4), deltas=(1.0,))
+    assert len(truth) == inputs.numel()
+    assert hull(truth, 2) == (0, 8)
+    assert hull(truth, 3) == (0, 8)
+
+    trace = capture(model, inputs)
+    target = op_named(trace, "add")
+    assert target.receptive_field.status is ReceptiveFieldStatus.WHOLE_INPUT
+    assert all(axis.kind == "full" for axis in target.receptive_field.axes)
 
 
 # ---------------------------------------------------------------------------
