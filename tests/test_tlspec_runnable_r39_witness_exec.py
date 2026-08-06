@@ -1311,3 +1311,281 @@ def test_dense_interval_proof_independent_byte_oracle_fuzz() -> None:
             (lfp.shape, lfp.strides, lfp.start_byte, lfp.end_byte),
             (rfp.shape, rfp.strides, rfp.start_byte, rfp.end_byte),
         )
+
+
+# ======================================================================================
+# B4 -- module-namespace / nested-holder numpy RNG witness (durable whole-window belt)
+# ======================================================================================
+#
+# NumPy>=2 RNG draw methods emit no profile event, so a draw is witnessed only by a
+# before/after state digest of a KNOWN receiver. Pre-B4 the digest roots were the model
+# tree, frame locals (zero edges), frame-named globals (one edge), and helper return
+# values (one edge): a pre-existing generator drawn through a foreign module attribute
+# chain (``helpers.RNG.random()``), a nested plain holder (``HOLDER.inner.gen``), nested
+# builtin containers, or a class attribute steered a branch, replayed VERIFIED+ATTESTED,
+# and provably diverged from a fresh oracle-1 forward (executed repro, 2026-08-06).
+# Closed by ``_deep_inventory_frame_reachable`` (frame-triggered window-memoized deep
+# walk, digest at first reference, one whole-window compare at ``__exit__``) plus
+# one-inert-edge locals parity in the per-frame digest.
+
+_B4_MODULE_RNG_NAMESPACE = types.ModuleType("torchlens_b4_module_rng_fixture")
+_B4_MODULE_RNG_NAMESPACE.rng = None
+
+
+class _B4NestedInner:
+    """Innermost plain holder: the generator sits TWO inert edges below the root."""
+
+    def __init__(self) -> None:
+        self.gen: Any = None
+
+
+class _B4NestedOuter:
+    """Module-level plain holder whose child object holds the generator."""
+
+    def __init__(self) -> None:
+        self.inner = _B4NestedInner()
+
+
+_B4_NESTED_HOLDER = _B4NestedOuter()
+_B4_NESTED_CONTAINER: dict[str, Any] = {"bucket": [None]}
+
+
+class _B4ClassAttrHolder:
+    """User class carrying the generator as a direct class attribute."""
+
+    rng: Any = None
+
+
+class _ForeignModuleNamespaceRngBranch(nn.Module):
+    """Branch on a draw reached ONLY through a foreign module's attribute chain."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Draw from a generator no frame local or named holder global reaches."""
+
+        value = float(_B4_MODULE_RNG_NAMESPACE.rng.random())
+        return x * 2.0 if value < 0.5 else x * 3.0
+
+
+class _NestedHolderRngBranch(nn.Module):
+    """Branch on a draw two inert object edges below a module-level holder."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Draw through ``holder.inner.gen`` -- beyond the one-edge frame digest."""
+
+        value = float(_B4_NESTED_HOLDER.inner.gen.random())
+        return x * 2.0 if value < 0.5 else x * 3.0
+
+
+class _NestedContainerRngBranch(nn.Module):
+    """Branch on a draw nested inside module-level builtin containers."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Draw through ``dict -> list -> generator`` container nesting."""
+
+        value = float(_B4_NESTED_CONTAINER["bucket"][0].random())
+        return x * 2.0 if value < 0.5 else x * 3.0
+
+
+class _ClassAttributeRngBranch(nn.Module):
+    """Branch on a draw from a generator held as a user class attribute."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Draw through the class surface, invisible to instance/frame digests."""
+
+        value = float(_B4ClassAttrHolder.rng.random())
+        return x * 2.0 if value < 0.5 else x * 3.0
+
+
+def test_numpy_foreign_module_namespace_generator_never_false_verified(
+    tmp_path: Path,
+) -> None:
+    """A draw through a foreign module's attribute chain is witnessed and ceilings."""
+
+    _B4_MODULE_RNG_NAMESPACE.rng = np.random.default_rng()
+    sys.modules["torchlens_b4_module_rng_fixture"] = _B4_MODULE_RNG_NAMESPACE
+    try:
+        x = torch.randn(2, 4)
+        assert _host_rng_consumed(_ForeignModuleNamespaceRngBranch(), x) is True
+        result = _roundtrip(
+            _ForeignModuleNamespaceRngBranch(), x, tmp=tmp_path, capture_seed=1, run_seed=2
+        )
+        assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+        assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
+    finally:
+        sys.modules.pop("torchlens_b4_module_rng_fixture", None)
+
+
+def test_numpy_module_rooted_nested_holder_generator_never_false_verified(
+    tmp_path: Path,
+) -> None:
+    """A draw two inert object edges below a module-level holder is witnessed."""
+
+    _B4_NESTED_HOLDER.inner.gen = np.random.default_rng()
+    x = torch.randn(2, 4)
+    assert _host_rng_consumed(_NestedHolderRngBranch(), x) is True
+    result = _roundtrip(_NestedHolderRngBranch(), x, tmp=tmp_path, capture_seed=1, run_seed=2)
+    assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
+
+
+def test_numpy_module_rooted_nested_container_generator_never_false_verified(
+    tmp_path: Path,
+) -> None:
+    """A draw through module-level ``dict -> list -> generator`` nesting is witnessed."""
+
+    _B4_NESTED_CONTAINER["bucket"][0] = np.random.default_rng()
+    x = torch.randn(2, 4)
+    assert _host_rng_consumed(_NestedContainerRngBranch(), x) is True
+    result = _roundtrip(_NestedContainerRngBranch(), x, tmp=tmp_path, capture_seed=1, run_seed=2)
+    assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
+
+
+def test_numpy_class_attribute_generator_never_false_verified(tmp_path: Path) -> None:
+    """A draw from a user class-attribute generator is witnessed and ceilings."""
+
+    _B4ClassAttrHolder.rng = np.random.default_rng()
+    x = torch.randn(2, 4)
+    assert _host_rng_consumed(_ClassAttributeRngBranch(), x) is True
+    result = _roundtrip(_ClassAttributeRngBranch(), x, tmp=tmp_path, capture_seed=1, run_seed=2)
+    assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
+    assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
+
+
+def _reference_b4_fixture_roots() -> None:
+    """Name the B4 fixture roots from an in-window profiled frame WITHOUT drawing."""
+
+    _ = (_B4_MODULE_RNG_NAMESPACE, _B4_NESTED_HOLDER, _B4_NESTED_CONTAINER, _B4ClassAttrHolder)
+
+
+def _draw_from_b4_module_namespace() -> float:
+    """Draw through the fixture module's attribute chain from a profiled frame."""
+
+    return float(_B4_MODULE_RNG_NAMESPACE.rng.random())
+
+
+@pytest.mark.smoke
+@pytest.mark.skipif(
+    not rng_utils._NUMPY_RNG_METHODS_NEED_FRAME_DIGEST,
+    reason="NumPy build emits c_call for RNG draw methods",
+)
+def test_module_held_generator_preexisting_thread_draw_witnessed() -> None:
+    """A module-held generator drawn on a PRE-EXISTING (non-hooked) thread is witnessed
+    once the owner's in-window code references the same root.
+
+    Neither profile hook can reach a thread started before the window (py<=3.11) and
+    the model digest only covers model-held receivers, so pre-B4 this shared-generator
+    draw was the shared-module-namespace clause of the contract s11 residual. The
+    frame-reachable deep digest is thread-independent for every referenced root.
+    """
+
+    _B4_MODULE_RNG_NAMESPACE.rng = np.random.default_rng()
+    ready = threading.Event()
+    go = threading.Event()
+    done = threading.Event()
+
+    def _worker() -> None:
+        ready.set()
+        assert go.wait(10.0)
+        float(_B4_MODULE_RNG_NAMESPACE.rng.random())
+        done.set()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+    assert ready.wait(10.0)
+    with rng_utils.host_nondeterminism_monitor(None) as result:
+        _reference_b4_fixture_roots()
+        go.set()
+        assert done.wait(10.0)
+    worker.join(10.0)
+    assert "frame_reachable_generator" in result.channels
+
+
+@pytest.mark.smoke
+@pytest.mark.skipif(
+    not rng_utils._NUMPY_RNG_METHODS_NEED_FRAME_DIGEST,
+    reason="NumPy build emits c_call for RNG draw methods",
+)
+def test_module_held_generator_rebound_between_windows_still_witnessed() -> None:
+    """A generator REBOUND onto the same module attribute between windows stays witnessed.
+
+    Anti-memoization tripwire: the epoch-reseed pattern
+    (``helpers.RNG = np.random.default_rng(epoch)``) rebinds a name without changing
+    the namespace length, so any future CROSS-WINDOW inventory cache would go stale
+    here and reopen the false-VERIFIED hole. Discovery must be fresh per window.
+    """
+
+    for seed in (101, 102):
+        _B4_MODULE_RNG_NAMESPACE.rng = np.random.default_rng(seed)
+        with rng_utils.host_nondeterminism_monitor(None) as result:
+            _draw_from_b4_module_namespace()
+        assert "frame_reachable_generator" in result.channels
+
+
+@pytest.mark.smoke
+@pytest.mark.skipif(
+    not rng_utils._NUMPY_RNG_METHODS_NEED_FRAME_DIGEST,
+    reason="NumPy build emits c_call for RNG draw methods",
+)
+def test_deep_inventory_cap_exhaustion_flags_uncertain(monkeypatch: Any) -> None:
+    """Cap invariant: deep-inventory exhaustion flags INCOMPLETE, never silent."""
+
+    monkeypatch.setattr(rng_utils, "_DEEP_INVENTORY_NODE_CAP", 0)
+    with rng_utils.host_nondeterminism_monitor(None) as result:
+        _reference_b4_fixture_roots()
+    assert result.uncertain is True
+    assert "deep_inventory_budget_exhausted" in result.uncertain_detail
+
+
+@pytest.mark.smoke
+def test_deep_inventory_undrawn_generators_no_over_trigger() -> None:
+    """Referenced-but-undrawn generators never mark and never flag uncertainty."""
+
+    _B4_MODULE_RNG_NAMESPACE.rng = np.random.default_rng(103)
+    _B4_NESTED_HOLDER.inner.gen = np.random.default_rng(104)
+    _B4_NESTED_CONTAINER["bucket"][0] = np.random.default_rng(105)
+    _B4ClassAttrHolder.rng = np.random.default_rng(106)
+    with rng_utils.host_nondeterminism_monitor(None) as result:
+        _reference_b4_fixture_roots()
+    assert "frame_reachable_generator" not in result.channels
+    assert result.uncertain is False
+
+
+@pytest.mark.smoke
+def test_module_namespace_walk_eligibility_rules() -> None:
+    """Eligibility gate: internal/stdlib roots skipped, user and shadow modules walked."""
+
+    import os as _os_module
+
+    eligible = rng_utils.host_nondeterminism_monitor._module_namespace_walk_eligible
+    assert eligible(_os_module) is None  # stdlib by name AND location
+    assert eligible(np) is None  # internal package roots
+    assert eligible(torch) is None
+    assert eligible(rng_utils) is None
+    assert eligible(object()) is None  # not a module
+    assert eligible(sys.modules[__name__]) is not None  # this test module
+    synthetic = types.ModuleType("b4_synthetic_namespace_probe")
+    assert eligible(synthetic) is not None  # registered synthetics are walked
+    shadow = types.ModuleType("random")
+    shadow.__file__ = str(Path.home() / "project" / "random.py")
+    assert eligible(shadow) is not None  # user module shadowing a stdlib name
+
+
+@pytest.mark.smoke
+@pytest.mark.skipif(
+    not rng_utils._NUMPY_RNG_METHODS_NEED_FRAME_DIGEST,
+    reason="NumPy build emits c_call for RNG draw methods",
+)
+def test_numpy_local_nested_holder_joins_deep_inventory() -> None:
+    """A receiver nested below a frame LOCAL is digested by the B4 deep inventory."""
+
+    monitor = rng_utils.host_nondeterminism_monitor(None)
+    gen = np.random.default_rng(107)
+
+    def _helper(cfg: dict[str, Any]) -> None:
+        frame = sys._getframe()
+        assert monitor._deep_inventory_seeds_from(frame.f_code) is True
+        monitor._snapshot_numpy_frame_rngs(frame)
+
+    _helper({"cfg_gen": gen})
+    assert any(holder is gen for holder, _ in monitor._deep_generator_states)
