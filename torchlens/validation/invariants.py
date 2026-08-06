@@ -1915,6 +1915,88 @@ def _check_special_layer_lists(ml: "Trace") -> None:
 # ---------------------------------------------------------------------------
 
 
+def _check_capture_edge_survival(trace: "Trace") -> None:
+    """Reconcile the final graph against the sealed capture-time edge truth (r29 F3b).
+
+    The per-op identity witness (``dropped_edge_tensor_args``) is stamped at
+    CAPTURE, so an edge dropped anywhere DOWNSTREAM of it -- the 20-step
+    postprocess pipeline, a later graph mutation -- was invisible whenever the
+    payload was trivial (the value sweep's blind class): removing an edge from
+    ``parents`` + ``parent_arg_positions`` symmetrically left every
+    self-consistency check green. This invariant closes that stage gap: every
+    capture-observed (slot -> producer) pair sealed on the Trace at op-record
+    time (``_capture_parent_edge_truth``, keyed by raw label) must survive into
+    the final op's ``parents``, unless the PRODUCER itself left the graph (an
+    orphan prune / merge is visible as an absent ``raw -> final`` mapping and
+    is the accounted rewrite class).
+
+    Fail-open boundaries, deliberate and narrow: a trace with no sealed truth
+    (loaded artifacts, non-exhaustive captures) has nothing to reconcile; a
+    producer raw label with no final mapping is accounted as pruned; an op
+    whose record carries interventions is the user's deliberate rewiring.
+
+    Parameters
+    ----------
+    trace:
+        Postprocessed torch trace to validate.
+
+    Raises
+    ------
+    MetadataInvariantError
+        If a capture-witnessed parent edge between two SURVIVING ops is absent
+        from the final graph.
+    """
+
+    truth = trace.__dict__.get("_capture_parent_edge_truth")
+    if not truth:
+        return
+    # Each capture CALL keeps its unique raw label on exactly one surviving
+    # record, so the raw index resolves the producer's exact final spelling
+    # set (pass-qualified ``label`` for multi-pass ops, plain ``layer_label``
+    # otherwise) -- the many-to-one raw->layer_label map cannot.
+    ops_by_raw = {
+        getattr(op, "_label_raw", None): op
+        for op in trace.layer_list
+        if getattr(op, "_label_raw", None) is not None
+    }
+    for op in trace.layer_list:
+        raw_label = getattr(op, "_label_raw", None)
+        edges = truth.get(raw_label) if raw_label is not None else None
+        if not edges:
+            continue
+        if getattr(op, "interventions", None):
+            continue
+        recorded = set(op.parents or ())
+        recorded.update(
+            label
+            for domain in ("args", "kwargs")
+            for label in (
+                (getattr(op, "parent_arg_positions", None) or {}).get(domain) or {}
+            ).values()
+        )
+        for _arg_type, _slot, parent_raw in edges:
+            producer = ops_by_raw.get(parent_raw)
+            if producer is None:
+                continue  # producer pruned/merged out of the final graph: accounted
+            spellings = {
+                spelling
+                for spelling in (
+                    getattr(producer, "layer_label", None),
+                    getattr(producer, "label", None),
+                )
+                if spelling is not None
+            }
+            if spellings & recorded:
+                continue
+            raise MetadataInvariantError(
+                "capture_edge_survival",
+                f"capture-witnessed parent edge {producer.layer_label!r} (raw "
+                f"{parent_raw!r}) of {op.layer_label!r} (raw {raw_label!r}) is absent "
+                "from the final graph while its producer survives -- an edge was "
+                "dropped after the capture witness was stamped",
+            )
+
+
 def _check_graph_topology(ml: "Trace") -> None:
     """Check C: parent-child edge bidirectionality and stored-flag consistency.
 
@@ -5896,6 +5978,11 @@ METADATA_INVARIANT_CONTRACTS: tuple[MetadataInvariantContract, ...] = (
     MetadataInvariantContract(
         "edge_use_parent_arg_consistency",
         _check_edge_use_parent_arg_invariants,
+        "torch",
+    ),
+    MetadataInvariantContract(
+        "capture_edge_survival",
+        _check_capture_edge_survival,
         "torch",
     ),
     MetadataInvariantContract("op_log_fields", _check_op_log_fields, "torch"),

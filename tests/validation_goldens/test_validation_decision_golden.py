@@ -207,6 +207,37 @@ class TinyCholesky(nn.Module):
         return torch.linalg.cholesky(x)
 
 
+class TinyStepInvalidNarrow(nn.Module):
+    """Model whose control parent admits NO valid perturbation (r29 MED).
+
+    ``narrow(0, start, x.shape[0])`` with ``start == 0`` raises for every
+    other start value, so the wide random draw AND both +-1 step retries all
+    raise on any seed -- keeping the ``perturbation_execution_exception``
+    decision category reachable after the r28 step retry soundly converted the
+    ``TinyCholesky`` vehicle to ``validated``. The start index is a model
+    INPUT (no perturbation check of its own), so no upstream op can add a
+    seed-dependent side decision.
+    """
+
+    def forward(self, x: torch.Tensor, start: torch.Tensor) -> torch.Tensor:
+        """Narrow the full length of ``x`` from a traced zero start index.
+
+        Parameters
+        ----------
+        x:
+            One-dimensional input.
+        start:
+            Zero-dimensional long start index; must be 0.
+
+        Returns
+        -------
+        torch.Tensor
+            The narrowed (full-length) input, scaled.
+        """
+
+        return x.narrow(0, start, x.shape[0]) * 1.0
+
+
 class TinySwampedAdd(nn.Module):
     """Tiny additive model whose perturbation can be hidden by fp32 spacing."""
 
@@ -475,6 +506,14 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
         capture=full_capture,
     )
 
+    torch.manual_seed(22)
+    step_invalid = TinyStepInvalidNarrow().eval()
+    step_invalid_trace = tl.trace(
+        step_invalid,
+        [torch.tensor([-2.0, 0.5, 1.5, 2.5]), torch.tensor(0)],
+        capture=full_capture,
+    )
+
     torch.manual_seed(20)
     swamped = TinySwampedAdd().eval()
     x_swamped = torch.tensor([10000.0, 10001.0], dtype=torch.float32)
@@ -520,6 +559,13 @@ def build_validation_decision_snapshot() -> dict[str, Any]:
         ),
         "tiny_cholesky": _case_summary(
             _seeded_status_for_trace(108, cholesky_trace, [_trace_output(cholesky_trace)])
+        ),
+        "tiny_step_invalid_narrow": _case_summary(
+            _seeded_status_for_trace(
+                112,
+                step_invalid_trace,
+                [_trace_output(step_invalid_trace)],
+            )
         ),
         "tiny_swamped_add": _case_summary(
             _seeded_status_for_trace(110, swamped_trace, [_trace_output(swamped_trace)])

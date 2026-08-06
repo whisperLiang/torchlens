@@ -25,6 +25,7 @@ PRE_REFACTOR_TORCH_SEQUENCE = (
     "special_layer_lists",
     "graph_topology",
     "edge_use_parent_arg_consistency",
+    "capture_edge_survival",
     "op_log_fields",
     "payload_metadata_invariants",
     "recurrence_invariants",
