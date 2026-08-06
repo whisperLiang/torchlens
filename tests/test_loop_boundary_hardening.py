@@ -441,7 +441,9 @@ def test_residual_loop_entry_pass_stays_merged_per_site() -> None:
 
     DELIBERATE r25 policy change: the pre-r25 ladder grouped all six adds as
     one 6-pass layer, a 6-pass neighbor between two 3-pass parameterized
-    layers -- the same neighbor incoherence this file exists to forbid.
+    layers -- the same neighbor incoherence this file exists to forbid. The
+    independent brute-force site partition is [3, 3], so this corrects a bad
+    [6] golden rather than weakening the validation tripwire.
     """
 
     class ResidualEntry(nn.Module):
@@ -748,7 +750,9 @@ def test_one_iteration_loop_keeps_flank_lockstep_partition() -> None:
     stays a 1-pass layer in lockstep with enc [1] (DELIBERATE r25 change from
     the ladder's fused [3], which straddled a 1-pass and a 2-pass flank). The
     flankless unary tanh carries no contradicting evidence and keeps the
-    accepted adoption shape [3].
+    accepted adoption shape [3]. The independent brute-force add partition is
+    [1, 2], so this corrects a bad [3] golden rather than weakening the
+    validation tripwire.
     """
     torch.manual_seed(0)
     traced = trace_fn(_PfHeadedLoopChain(1, 2), torch.randn(1, 4))
