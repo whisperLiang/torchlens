@@ -312,7 +312,7 @@ def test_emit_tensor_grad_event_populates_profile_buckets() -> None:
 
 
 def test_loop_frontier_uses_deque_fifo_order() -> None:
-    """Frontier popping preserves FIFO behavior with deque-backed candidates."""
+    """Frontier popping is direction-major FIFO with deque-backed candidates."""
 
     frontier_nodes: FrontierNodes = OrderedDict(
         [
@@ -322,10 +322,13 @@ def test_loop_frontier_uses_deque_fifo_order() -> None:
     )
 
     assert isinstance(frontier_nodes["sg1"]["children"], deque)
+    # Direction-major on purpose: every subgraph's children drain before any
+    # parents so a loop-carried value shared between a child frontier and a
+    # parent frontier is absorbed through its child position first.
     assert _pop_frontier_node(frontier_nodes) == ("c1", "children", "sg1")
     assert _pop_frontier_node(frontier_nodes) == ("c2", "children", "sg1")
-    assert _pop_frontier_node(frontier_nodes) == ("p1", "parents", "sg1")
     assert _pop_frontier_node(frontier_nodes) == ("c3", "children", "sg2")
+    assert _pop_frontier_node(frontier_nodes) == ("p1", "parents", "sg1")
     assert _pop_frontier_node(frontier_nodes) == ("p2", "parents", "sg2")
     assert _pop_frontier_node(frontier_nodes) == (None, None, None)
 

@@ -1031,19 +1031,32 @@ def _warn_if_validation_trace_not_reproducible(
         # Buffer-source identity is assigned during postprocessing only when the
         # relevant activations are saved. Match the validation trace's "all"
         # selection so the structural comparison does not compare two capture modes.
-        second_trace = _run_model_and_save_specified_outs(
-            model=model,
-            input_args=input_args,
-            input_kwargs=input_kwargs,
-            layers_to_save="all",
-            activation_transform=None,
-            mark_layer_depths=False,
-            detach_saved_activations=False,
-            save_grads=False,
-            save_arg_values=False,
-            random_seed=random_seed,
-            save_rng_states=False,
-        )
+        # r33 F-2: the first trace is captured under a FORCED "shadow"
+        # completeness-witness mode (validate_forward_pass), so the re-trace
+        # must run under the same mode -- comparing a shadow capture against an
+        # ambient-mode capture is exactly the two-capture-modes comparison this
+        # check must not make, and it deterministically false-FAILED every
+        # witness-mode-sensitive model as "stateful/non-reproducible".
+        from . import _state
+
+        prior_witness_mode = _state._completeness_witness_mode
+        _state._completeness_witness_mode = "shadow"
+        try:
+            second_trace = _run_model_and_save_specified_outs(
+                model=model,
+                input_args=input_args,
+                input_kwargs=input_kwargs,
+                layers_to_save="all",
+                activation_transform=None,
+                mark_layer_depths=False,
+                detach_saved_activations=False,
+                save_grads=False,
+                save_arg_values=False,
+                random_seed=random_seed,
+                save_rng_states=False,
+            )
+        finally:
+            _state._completeness_witness_mode = prior_witness_mode
         first_hash = compute_graph_shape_hash(first_trace, include_module_address=False)
         second_hash = compute_graph_shape_hash(second_trace, include_module_address=False)
         if first_hash == second_hash:

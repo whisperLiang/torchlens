@@ -1690,7 +1690,12 @@ def torch_func_decorator(
             # the safe copy's grad_fn is TorchLens's own ``CloneBackward``
             # bookkeeping, and it must never replace the operation's recorded
             # autograd metadata (``grad_fn_class_*`` / handle).
-            live_user_grad_fn = out_orig.grad_fn if isinstance(out_orig, torch.Tensor) else None
+            # TorchLens bookkeeping read: for a same-object in-place return the
+            # output IS the user's receiver (a registered buffer for BN's
+            # ``num_batches_tracked.add_(1)``), so an unmarked ``grad_fn`` read
+            # would record a phantom declared-state fact (r65 unread-bit).
+            with internal_scalar_read():
+                live_user_grad_fn = out_orig.grad_fn if isinstance(out_orig, torch.Tensor) else None
             out_orig = safe_copy(out_orig)
             if live_user_grad_fn is not None and isinstance(out_orig, torch.Tensor):
                 try:

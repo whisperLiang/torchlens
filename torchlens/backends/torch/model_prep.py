@@ -10,7 +10,7 @@ import itertools
 import math
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from collections import defaultdict, deque
 from dataclasses import replace
 from functools import wraps
@@ -2528,11 +2528,17 @@ def _clear_session_tensor_metadata(value: Any, seen: set[int], depth: int = 0) -
     if isinstance(value, ModuleType):
         # r81 (r80 F1 root B): a stamped tensor stashed as a DIRECT attribute of
         # a ``types.ModuleType`` escaped the belt entirely (this walk returned
-        # immediately for modules). Sweep the module namespace SHALLOWLY for
-        # plain tensors only -- deep recursion into arbitrary imported modules
-        # (``torch``, ``numpy``) would be unbounded; deeper stashes are covered
-        # by the session identity belt, which never trusts an unregistered
-        # stamp anyway.
+        # immediately for modules). r33/r83: a stamp nested inside a plain
+        # CONTAINER in the module namespace escaped the shallow sweep too and
+        # laundered provenance across sessions, so namespace containers now get
+        # a dedicated PURE container-tree descent (tensors + plain containers
+        # only). The descent deliberately never enters objects or nested
+        # modules: this walk reaches broadly-imported modules (``torch``,
+        # ``math``) through model-owned helper objects, and generic recursion
+        # from a module namespace would explode through ``sys.modules`` into
+        # every imported module in the process. Object stashes inside module
+        # namespaces stay covered by the session identity belt, which never
+        # trusts an unregistered stamp anyway.
         obj_id = id(value)
         if obj_id in seen or depth >= 12:
             return
@@ -2542,6 +2548,8 @@ def _clear_session_tensor_metadata(value: Any, seen: set[int], depth: int = 0) -
             for item in list(namespace.values()):
                 if isinstance(item, torch.Tensor) and not isinstance(item, torch.nn.Parameter):
                     clear_meta(item)
+                elif isinstance(item, (dict, list, tuple, set, frozenset, deque)):
+                    _clear_container_tree_tensor_metadata(item, seen, depth + 1)
         return
     if isinstance(value, torch.Tensor):
         if not isinstance(value, torch.nn.Parameter):
@@ -2567,6 +2575,49 @@ def _clear_session_tensor_metadata(value: Any, seen: set[int], depth: int = 0) -
         return
     for item in namespace.values():
         _clear_session_tensor_metadata(item, seen, depth + 1)
+
+
+def _clear_container_tree_tensor_metadata(value: Any, seen: set[int], depth: int) -> None:
+    """Clear tensor metadata from a pure container tree (no object descent).
+
+    Restricted companion to ``_clear_session_tensor_metadata`` for
+    ``types.ModuleType`` namespaces: walks plain containers and clears
+    non-Parameter tensors, but never descends into objects, ``nn.Module``
+    instances, or nested modules, so sweeping a broadly-imported module's
+    namespace cannot fan out through the whole process object graph.
+
+    Parameters
+    ----------
+    value
+        Container member reached from a module-namespace container.
+    seen
+        Object ids already visited during this cleanup scan.
+    depth
+        Current recursion depth, shared with the main walk's bound.
+
+    Returns
+    -------
+    None
+        Mutates reachable tensors in place by removing TorchLens metadata.
+    """
+
+    if isinstance(value, torch.Tensor):
+        if not isinstance(value, torch.nn.Parameter):
+            clear_meta(value)
+        return
+    if not isinstance(value, (dict, list, tuple, set, frozenset, deque)):
+        return
+    obj_id = id(value)
+    if obj_id in seen or depth >= 12:
+        return
+    seen.add(obj_id)
+    items: Iterable[Any]
+    if isinstance(value, dict):
+        items = [item for pair in value.items() for item in pair]
+    else:
+        items = list(value)
+    for item in items:
+        _clear_container_tree_tensor_metadata(item, seen, depth + 1)
 
 
 def _clear_callable_session_tensor_metadata(callable_obj: Any, seen: set[int]) -> None:

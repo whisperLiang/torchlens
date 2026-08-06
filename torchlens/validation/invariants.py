@@ -1966,15 +1966,21 @@ def _check_capture_edge_survival(trace: "Trace") -> None:
             continue
         if getattr(op, "interventions", None):
             continue
+        positions = getattr(op, "parent_arg_positions", None) or {}
         recorded = set(op.parents or ())
         recorded.update(
             label
             for domain in ("args", "kwargs")
-            for label in (
-                (getattr(op, "parent_arg_positions", None) or {}).get(domain) or {}
-            ).values()
+            for label in (positions.get(domain) or {}).values()
         )
-        for _arg_type, _slot, parent_raw in edges:
+        # r33 F-1: reconcile each sealed triplet AT ITS EXACT SLOT, not by
+        # label-set membership. Set membership let two corruptions through:
+        # a slot PERMUTATION between value-identical surviving producers (the
+        # swapped labels are both still "present somewhere"), and an argpos
+        # entry DROP with parents intact (the label survives via ``parents``).
+        # Positional truth for args/kwargs slots is the sealed slot itself;
+        # plain-parent truth (slot ``None``) keeps the membership check.
+        for arg_type, slot, parent_raw in edges:
             producer = ops_by_raw.get(parent_raw)
             if producer is None:
                 continue  # producer pruned/merged out of the final graph: accounted
@@ -1986,6 +1992,18 @@ def _check_capture_edge_survival(trace: "Trace") -> None:
                 )
                 if spelling is not None
             }
+            if arg_type in ("args", "kwargs"):
+                final_slot_label = (positions.get(arg_type) or {}).get(slot)
+                if final_slot_label in spellings:
+                    continue
+                raise MetadataInvariantError(
+                    "capture_edge_survival",
+                    f"capture-witnessed parent edge {producer.layer_label!r} (raw "
+                    f"{parent_raw!r}) of {op.layer_label!r} (raw {raw_label!r}) at "
+                    f"{arg_type}[{slot!r}] resolves to {final_slot_label!r} in the "
+                    "final graph while its producer survives -- the slot's edge was "
+                    "dropped or rewired after the capture witness was stamped",
+                )
             if spellings & recorded:
                 continue
             raise MetadataInvariantError(

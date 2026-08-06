@@ -1213,6 +1213,58 @@ def test_validate_forward_pass_pristine_replay_catches_mutation_masked_bug(
     monkeypatch.setattr(user_public_impls, "_restore_validation_replay_state", original_restore)
 
 
+def test_validate_forward_pass_nonreentrant_checkpoint_validates_true() -> None:
+    """r33 F-2 pin: a non-reentrant torch.utils.checkpoint model validates True.
+
+    Two independent defects previously made this deterministically False with
+    a MISLEADING "stateful/non-reproducible model" warning: (1) capture-time
+    stats reads of grad_fn ``_saved_*`` values ran the checkpoint unpack hook
+    -- a TL-induced RECOMPUTE recorded as a phantom op, but only outside the
+    "shadow" witness mode; (2) validate captured its main trace under forced
+    "shadow" witness mode while the reproducibility re-trace ran at ambient
+    mode, so the structural hashes compared two capture modes and mismatched
+    by construction. Neither the recompute-op phantom nor the cross-mode
+    comparison may return; the cd516819 mismatch downgrade itself stays.
+    """
+
+    import torch.utils.checkpoint as torch_checkpoint
+
+    from torchlens import _state
+
+    class CheckpointedBlock(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(4, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch_checkpoint.checkpoint(lambda t: self.lin(t).relu(), x, use_reentrant=False)
+
+    torch.manual_seed(0)
+    x = torch.randn(2, 4)
+
+    def op_names_under(mode: str) -> list[str]:
+        prior = _state._completeness_witness_mode
+        _state._completeness_witness_mode = mode
+        try:
+            trace = tl.trace(CheckpointedBlock(), x)
+            names = [getattr(layer, "func_name", None) for layer in trace.layer_list]
+            trace.cleanup()
+            return names
+        finally:
+            _state._completeness_witness_mode = prior
+
+    # The captured graph must match the unobserved execution in BOTH witness
+    # modes: exactly one linear (no TL-induced recompute phantom).
+    names_off = op_names_under("off")
+    names_shadow = op_names_under("shadow")
+    assert names_off == names_shadow
+    assert names_off.count("linear") == 1
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", TraceNotReproducibleWarning)
+        assert validate_forward_pass(CheckpointedBlock(), x) is True
+
+
 def test_validate_forward_pass_deepcopy_fallback_warns_for_registered_state() -> None:
     """Un-deepcopyable models fall back to state_dict restore with warning."""
 

@@ -351,6 +351,10 @@ def test_torch_capability_snapshot_contract() -> None:
         # CVE-2025-32434 fix presence (feature-detected; version-dependent, so mirror
         # the live capability like AUTOCAST rather than hardcoding a boolean).
         "HAS_SAFE_WEIGHTS_ONLY_LOAD": tc.HAS_SAFE_WEIGHTS_ONLY_LOAD,
+        # r33 F-2: whether autograd default saved-tensors hooks can be peeked
+        # (needed to know grad_fn saved-value reads are side-effect-free);
+        # feature-detected, so mirror the live capability like AUTOCAST.
+        "HAS_SAVED_TENSORS_HOOK_INTROSPECTION": tc.HAS_SAVED_TENSORS_HOOK_INTROSPECTION,
         "HAS_TENSOR_SEQUENCE_SLOT_FIX": True,
         # r35 decision E: ambient execution-context knobs are feature-detected and
         # surfaced in the capability snapshot (values are runtime-dependent).
