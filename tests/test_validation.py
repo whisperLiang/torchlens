@@ -6291,6 +6291,12 @@ def test_corruption_connectivity_parentless_layer():
                 parent.children = [c for c in parent.children if c != lpl.layer_label]
                 parent.has_children = len(parent.children) > 0
             lpl.parents = []
+            # Scrub the arg map consistently as well, so the r26 graph_topology
+            # arg-map/graph cross-check (which fires on a parent_arg_positions
+            # entry naming a non-parent) does not preempt the connectivity
+            # invariant this test exists to exercise.
+            for arg_domain in ("args", "kwargs"):
+                lpl.parent_arg_positions.get(arg_domain, {}).clear()
             # has_parents is a read-only property derived from parents
             break
     with pytest.raises(MetadataInvariantError, match="graph_connectivity"):

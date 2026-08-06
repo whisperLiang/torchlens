@@ -1337,6 +1337,53 @@ def _copy_field_value_for_replacement(value: Any) -> Any:
     return value
 
 
+def _note_replacement_event(trace: "Trace", raw_label: str | None) -> None:
+    """Record positive trace-level evidence of a genuine replacement event.
+
+    The validation exemptions for ``intervention_replacement`` ops used to key
+    ENTIRELY on per-op attributes (``func_name``/``intervention_replaced``/
+    ``is_internal_source``) that the placeholder synthesizer itself writes --
+    so a placeholder minted during PLAIN capture (a capture gap, or forged
+    attributes) was indistinguishable from a genuine user intervention and
+    passed validation, defeating the 2026-06-02 lesson ("a placeholder op
+    appearing during PLAIN capture must STILL fail"). This ledger is the
+    trace-level ground truth those exemptions now require: an entry is added
+    ONLY at the sites that directly observe the replacement event itself (a
+    raw ``register_forward_hook`` returning a new object, or a live-fire
+    intervention hook reporting ``replaced=True`` while an intervention spec
+    or hook plan is actually armed for this capture).
+
+    Parameters
+    ----------
+    trace:
+        Active model log.
+    raw_label:
+        Raw label of the op whose value was genuinely replaced.
+    """
+
+    if trace is None or not isinstance(raw_label, str):
+        return
+    trace.__dict__.setdefault("_replacement_event_labels", set()).add(raw_label)
+
+
+def _live_intervention_machinery_armed() -> bool:
+    """Return whether live-fire intervention dispatch is armed for this capture.
+
+    ``_tl_live_fire_results`` is a plain Python attribute on tensor OBJECTS and
+    can survive across traces on user-retained tensors (a cross-trace leak). A
+    fire result observed while NO intervention spec or hook plan is armed is
+    therefore definitionally stale and must not mint replacement-event
+    evidence for the current (plain) capture.
+
+    Returns
+    -------
+    bool
+        True when the current capture has intervention machinery armed.
+    """
+
+    return _state._active_intervention_spec is not None or _state._active_hook_plan is not None
+
+
 def _ensure_module_output_tensor_logged(
     trace: "Trace",
     tensor: torch.Tensor,
@@ -1653,6 +1700,13 @@ def _ensure_module_output_tensor_logged(
             result.fire_record for result in fire_results if result.fire_record is not None
         ]
         fields_dict["intervention_replaced"] = any(result.replaced for result in fire_results)
+        # Fire results only mint replacement-event evidence when the live-fire
+        # machinery is actually armed for THIS capture; a stale
+        # ``_tl_live_fire_results`` attribute leaked from an earlier intervened
+        # trace stays unledgered, so validation refuses the placeholder it
+        # would otherwise launder into a plain capture.
+        if fields_dict["intervention_replaced"] and _live_intervention_machinery_armed():
+            _note_replacement_event(trace, raw_label)
     trace.op_equivalence_classes[raw_label].add(raw_label)
     new_entry = _make_layer_log_entry(
         trace, tensor, fields_dict, (), {}, trace.activation_transform
@@ -1722,10 +1776,15 @@ def _make_user_forward_hook_wrapper(
             )
             if replacement_label is not None:
                 replace_op_event(trace, replacement_label, intervention_replaced=True)
+                # This frame directly observed the genuine replacement (the raw
+                # user hook returned a new object), so it is the authority that
+                # mints trace-level replacement-event evidence for validation.
+                _note_replacement_event(trace, replacement_label)
             else:
                 boundary_label = _ensure_module_output_tensor_logged(
                     trace, replacement, module, parent_labels
                 )
+                _note_replacement_event(trace, boundary_label)
                 replacement_boundaries.append((replacement, boundary_label))
         mark_expected_original_accounted(
             expected_token,
@@ -1834,6 +1893,10 @@ def _record_module_exit_metadata(
                 parent_labels=intervention_parent_labels,
                 kind="intervention_replacement" if fire_results else "internal_source",
             )
+            # NOTE: the replacement-event ledger entry for a genuine live-fire
+            # replacement is minted inside ``_ensure_module_output_tensor_logged``
+            # (gated on the intervention machinery being armed); a stale
+            # ``_tl_live_fire_results`` leak in a plain capture stays unledgered.
             untraceable_output_boundaries.append((t, boundary_label))
             tensor_label = get_tensor_label(t)
         if tensor_label is None:
@@ -1843,13 +1906,16 @@ def _record_module_exit_metadata(
 
             remaining_fire_results = _pop_tensor_live_fire_results(t)
             if remaining_fire_results:
+                any_replaced = any(result.replaced for result in remaining_fire_results)
                 replace_op_event(
                     trace,
                     tensor_label,
                     intervention_fired=True,
-                    intervention_replaced=any(result.replaced for result in remaining_fire_results),
+                    intervention_replaced=any_replaced,
                     fire_results=remaining_fire_results,
                 )
+                if any_replaced and _live_intervention_machinery_armed():
+                    _note_replacement_event(trace, tensor_label)
         is_atomic_module = _is_bottom_level_submodule_exit(trace, t, module)
         atomic_module_call = (address, module_call_index) if is_atomic_module else None
         output_tensor_labels_raw.append(tensor_label)
