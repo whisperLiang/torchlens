@@ -408,6 +408,27 @@ def test_resize_shrink_declares_no_uninit_source(tmp_path: Path) -> None:
         assert report is None
 
 
+def _materialized_aten_op_names() -> set[str]:
+    """Return the complete live ATen packet namespace after eager materialization.
+
+    Returns
+    -------
+    set[str]
+        Names exposed by ``torch.ops.aten`` after every dispatcher-registered
+        ATen base name has been resolved once.
+    """
+
+    dispatch_names = getattr(torch._C, "_dispatch_get_all_op_names")()
+    aten_base_names = {
+        name.removeprefix("aten::").split(".", maxsplit=1)[0]
+        for name in dispatch_names
+        if name.startswith("aten::")
+    }
+    for name in aten_base_names:
+        getattr(torch.ops.aten, name)
+    return set(dir(torch.ops.aten))
+
+
 def test_uninit_family_table_matches_live_aten_registry() -> None:
     """Family-drift immunizer: torch gives uninit allocation NO Tag, so the
     closed name table is defended by enumeration -- an ``empty*``/``resize*``
@@ -422,16 +443,24 @@ def test_uninit_family_table_matches_live_aten_registry() -> None:
     # Justified NON-family names matching the patterns:
     # - ``_resize_output``/``_resize_output_``: internal ``out=`` plumbing whose
     #   destination is always fully overwritten by the kernel (out= sanitizer).
-    # - sparse resizes: sparse layout metadata growth materializes implicit
-    #   zeros (``and_clear_`` zeroes), never dense stale bytes.
+    # - ``_copy_from_and_resize``: internal copy plumbing that resizes only to
+    #   copy the complete source value; it does not expose the destination tail.
+    # - sparse resizes (functional packet and in-place spellings): they mutate
+    #   sparse sizes/indices metadata; stored values remain explicit, absent
+    #   coordinates are implicit zeros, and ``and_clear`` removes stored values.
+    #   None exposes newly allocated dense bytes as tensor values.
     allowlist = {
+        "_copy_from_and_resize",
         "_resize_output",
         "_resize_output_",
+        "sparse_resize",
         "sparse_resize_",
+        "sparse_resize_and_clear",
         "sparse_resize_and_clear_",
+        "resize_as_sparse",
         "resize_as_sparse_",
     }
-    aten_names = set(dir(torch.ops.aten))
+    aten_names = _materialized_aten_op_names()
     empty_pattern = {
         name
         for name in aten_names
