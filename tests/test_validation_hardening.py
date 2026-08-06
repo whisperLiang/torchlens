@@ -696,3 +696,38 @@ def test_geometric_ladder_still_fails_spurious_discretizing_edge() -> None:
     )
     assert result.decision == "failed"
     assert result.reason == "perturbation_insensitive"
+
+
+def test_geometric_ladder_scoped_to_value_discretizing_children() -> None:
+    """PIN (round-35 R2 refinement): the ladder must not defeat fp swamping.
+
+    The geometric magnitudes exist to cross TRUNCATION dead zones (finite
+    quantization steps). An fp-SWAMPED child -- ``x + 1e8`` in fp32 -- is
+    numerically inert at realistic step sizes, and escalating to +-1e3 would
+    falsely "confirm" influence the actual forward never transmits. So the
+    ladder runs only for value-discretizing children; everything else keeps
+    the plain minimal/unit steps and the ``ulp_swamped_perturbation``
+    exemption.
+    """
+
+    from torchlens.validation.core import _perturbation_retry_strategies
+
+    bucketize_trace, _ = _capture(_WideBucketize(), torch.randn(4, 5))
+    bucketize_op = [op for op in bucketize_trace.layer_list if op.func_name == "bucketize"][0]
+    ladder = _perturbation_retry_strategies(bucketize_op)
+    assert any(strategy.startswith("unit_step_up:") for strategy in ladder)
+
+    class _SwampedAdd(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x + torch.full_like(x, 1.0e8)
+
+    swamped_trace, _ = _capture(
+        _SwampedAdd(), torch.tensor([10000.0, 10001.0], dtype=torch.float32)
+    )
+    add_op = [op for op in swamped_trace.layer_list if op.func_name == "__add__"][0]
+    assert _perturbation_retry_strategies(add_op) == [
+        "step_up",
+        "step_down",
+        "unit_step_up",
+        "unit_step_down",
+    ]

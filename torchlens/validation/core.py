@@ -3122,7 +3122,12 @@ def _check_whether_func_on_saved_parents_yields_saved_tensor(
         # zones WIDER than one unit -- bucketize with wide bins, round with
         # negative decimals, and kin -- so any FINITE discretization step up to
         # the bounded cap is eventually crossed and the real edge registers.
-        for retry_strategy in _perturbation_retry_strategies():
+        # The ladder is SCOPED to value-discretizing children: for fp-swamping
+        # cases (a large co-addend absorbing small steps in float precision)
+        # an unrealistically large step would falsely "confirm" a numerically
+        # inert edge, so those keep the plain unit steps and route to the
+        # ``ulp_swamped_perturbation`` exemption below.
+        for retry_strategy in _perturbation_retry_strategies(layer):
             retry_args, _retry_reason = _prepare_input_args_for_validating_layer(
                 self, layer, layers_to_perturb, perturb_strategy=retry_strategy
             )
@@ -3677,14 +3682,16 @@ def _floating_step_distinct_from(tensor: torch.Tensor) -> torch.Tensor:
 
 
 # Geometric perturbation-magnitude ladder for the dead-zone retry (round-35
-# R2). Every value-discretizing child has a FINITE quantization step -- 1 for
-# integer casts, the bin width for ``bucketize``, ``10**-decimals`` for
-# ``round(decimals<0)`` -- so growing the excursion x10 per rung crosses any
-# such dead zone up to the bounded 1e9 cap. The cap keeps the retry loop
-# bounded; per-element steps a dtype cannot represent fall back to the
-# minimal representable step inside ``_directional_step_perturb``.
+# R2, scoped in the R2 refinement). Every value-DISCRETIZING child has a
+# FINITE quantization step -- 1 for integer casts, the bin width for
+# ``bucketize``, ``10**-decimals`` for ``round(decimals<0)`` -- so growing
+# the excursion x10 per rung crosses any such dead zone up to the bounded
+# 1e9 cap. The +-1.0 rung is the plain unit step and runs unconditionally
+# (round-34 Finding B); the larger rungs run ONLY for value-discretizing
+# children. The cap keeps the retry loop bounded; per-element steps a dtype
+# cannot represent fall back to the minimal representable step inside
+# ``_directional_step_perturb``.
 _DEAD_ZONE_RETRY_MAGNITUDES: tuple[float, ...] = (
-    1.0,
     10.0,
     100.0,
     1e3,
@@ -3697,21 +3704,86 @@ _DEAD_ZONE_RETRY_MAGNITUDES: tuple[float, ...] = (
 )
 
 
-def _perturbation_retry_strategies() -> list[str]:
+# Child ops whose output quantizes a continuous parent onto a grid with a
+# FINITE, crossable truncation boundary (the geometric ladder's legitimate
+# target). fp-SWAMPING children -- e.g. an ``add`` whose large co-addend
+# absorbs small parent steps in floating-point precision -- are deliberately
+# NOT classified here: their dead zone is a precision artifact of the actual
+# forward's magnitudes, so an unrealistically large step would "confirm"
+# influence the real computation never transmits. Those cases stay with the
+# ``ulp_swamped_perturbation`` exemption.
+_VALUE_DISCRETIZING_FUNC_NAMES: frozenset[str] = frozenset(
+    {
+        "floor",
+        "ceil",
+        "round",
+        "trunc",
+        "fix",
+        "floor_divide",
+        "bucketize",
+        "searchsorted",
+        "quantize_per_tensor",
+        "quantize_per_channel",
+    }
+)
+
+
+def _op_is_value_discretizing(layer: Op) -> bool:
+    """Return whether a child op quantizes values with crossable dead zones.
+
+    Parameters
+    ----------
+    layer:
+        Child op whose perturbed replay output stayed unchanged.
+
+    Returns
+    -------
+    bool
+        True for explicit quantizers (``floor``/``ceil``/``round``/``trunc``/
+        ``bucketize``/``searchsorted`` and kin, including in-place variants)
+        and for ops with a non-bool integer output (integer casts such as
+        ``.long()``/``.int()``). False otherwise -- in particular for float
+        arithmetic whose insensitivity is fp swamping, which must keep
+        routing to the ``ulp_swamped_perturbation`` exemption.
+    """
+
+    func_name = str(getattr(layer, "func_name", "") or "").rstrip("_")
+    if func_name in _VALUE_DISCRETIZING_FUNC_NAMES:
+        return True
+    out = getattr(layer, "out", None)
+    return (
+        isinstance(out, torch.Tensor)
+        and not out.dtype.is_floating_point
+        and not out.dtype.is_complex
+        and out.dtype is not torch.bool
+    )
+
+
+def _perturbation_retry_strategies(layer: Op) -> list[str]:
     """Return the ordered deterministic retry strategies for perturbation.
+
+    Parameters
+    ----------
+    layer:
+        Child op being validated; gates the geometric magnitude ladder.
 
     Returns
     -------
     list of str
         Minimal representable steps first (least likely to violate a child
-        op's input domain), then paired up/down unit steps at geometrically
-        growing magnitudes so any finite discretization dead zone is
-        eventually crossed. The retry loop returns on the first strategy that
-        changes the child output, so later rungs only run while the edge
-        still looks non-influential.
+        op's input domain), then the paired up/down unit steps (round-34
+        Finding B). Only when the child is a value-discretizing op does the
+        ladder continue to geometrically growing magnitudes, so any finite
+        TRUNCATION dead zone is eventually crossed while fp-swamped float
+        arithmetic keeps its realistic-step behavior and the
+        ``ulp_swamped_perturbation`` exemption. The retry loop returns on the
+        first strategy that changes the child output, so later rungs only
+        run while the edge still looks non-influential.
     """
 
-    strategies = ["step_up", "step_down"]
+    strategies = ["step_up", "step_down", "unit_step_up", "unit_step_down"]
+    if not _op_is_value_discretizing(layer):
+        return strategies
     for magnitude in _DEAD_ZONE_RETRY_MAGNITUDES:
         strategies.append(f"unit_step_up:{magnitude:g}")
         strategies.append(f"unit_step_down:{magnitude:g}")
