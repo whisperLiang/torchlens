@@ -168,7 +168,9 @@ class RunnableTorchAlias:
     replay safety). This resolver additionally probes that an entry's *target*
     exists in the current runtime (:func:`_runtime_alias_target_exists`) and
     never hands back an alias whose target is absent -- so an unbounded/legacy
-    version key can never manufacture a dead alias.
+    version key can never manufacture a dead alias. A ``None`` maximum leaves
+    a monotonic alias open above its minimum; target existence remains the
+    capability gate in that case.
     """
 
     source: str
@@ -176,7 +178,7 @@ class RunnableTorchAlias:
     target_qualname: str | None
     provenance: str
     recorded_min_version: tuple[int, int]
-    recorded_max_version: tuple[int, int]
+    recorded_max_version: tuple[int, int] | None
     strip_target_prefix: str = ""
 
 
@@ -347,7 +349,7 @@ _RUNNABLE_TORCH_ALIASES: tuple[RunnableTorchAlias, ...] = (
         None,
         "private_to_public:torch._C._VariableFunctionsClass->torch",
         (2, 1),
-        (2, 12),
+        None,
     ),
     RunnableTorchAlias(
         "torch._VariableFunctionsClass.*",
@@ -355,7 +357,7 @@ _RUNNABLE_TORCH_ALIASES: tuple[RunnableTorchAlias, ...] = (
         None,
         "private_to_public:torch._VariableFunctionsClass->torch",
         (2, 1),
-        (2, 12),
+        None,
     ),
     RunnableTorchAlias(
         "_VariableFunctionsClass.*",
@@ -363,7 +365,7 @@ _RUNNABLE_TORCH_ALIASES: tuple[RunnableTorchAlias, ...] = (
         None,
         "private_to_public:_VariableFunctionsClass->torch",
         (2, 1),
-        (2, 12),
+        None,
     ),
 )
 
@@ -418,9 +420,11 @@ def resolve_runnable_torch_alias(
     source_qualname:
         Fully qualified recorded callable path.
     recorded_version:
-        Torch version that produced the registry key. Aliases are bounded to
-        supported minor releases. Unknown versions retain the compatibility
-        behavior for legacy descriptors that predate this metadata.
+        Torch version that produced the registry key. Aliases may be bounded
+        to supported minor releases; monotonic moves with an open upper bound
+        rely on the live target-existence capability probe. Unknown versions
+        retain compatibility behavior for descriptors that predate this
+        metadata.
 
     Returns
     -------
@@ -431,8 +435,12 @@ def resolve_runnable_torch_alias(
 
     parsed_version = _torch_minor_version(recorded_version)
     for alias in _RUNNABLE_TORCH_ALIASES:
-        if parsed_version is not None and not (
-            alias.recorded_min_version <= parsed_version <= alias.recorded_max_version
+        if parsed_version is not None and (
+            parsed_version < alias.recorded_min_version
+            or (
+                alias.recorded_max_version is not None
+                and parsed_version > alias.recorded_max_version
+            )
         ):
             continue
         target_qualname: str | None

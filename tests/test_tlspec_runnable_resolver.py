@@ -29,7 +29,11 @@ from torchlens.runnable import (
     RunnableErrorCode,
     SparseRunDescriptor,
 )
-from torchlens.utils._torch_compat import resolve_runnable_torch_alias
+from torchlens.utils._torch_compat import (
+    _RUNNABLE_TORCH_ALIASES,
+    _torch_minor_version,
+    resolve_runnable_torch_alias,
+)
 
 
 class ResolverModel(nn.Module):
@@ -172,6 +176,29 @@ def test_cross_version_alias_fixture_and_bounds() -> None:
 
     assert resolve_runnable_torch_alias("Tensor.add", "2.0.1") is None
     assert resolve_runnable_torch_alias("Tensor.add", "2.13.0") is None
+
+
+def test_variable_functions_aliases_cover_running_torch_minor() -> None:
+    """Lock VariableFunctionsClass aliases open across the running torch minor."""
+
+    running_minor = _torch_minor_version(torch.__version__)
+    assert running_minor is not None
+    aliases = tuple(
+        alias for alias in _RUNNABLE_TORCH_ALIASES if "_VariableFunctionsClass" in alias.source
+    )
+    assert aliases
+    assert all(
+        alias.recorded_min_version <= running_minor
+        and (alias.recorded_max_version is None or running_minor <= alias.recorded_max_version)
+        for alias in aliases
+    )
+    assert resolve_runnable_torch_alias(
+        "torch._VariableFunctionsClass.relu", torch.__version__
+    ) == (
+        "torch",
+        "relu",
+        "private_to_public:torch._VariableFunctionsClass->torch",
+    )
 
 
 def test_resolver_namespace_table_and_exact_binding_monotonicity() -> None:
