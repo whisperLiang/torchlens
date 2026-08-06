@@ -403,21 +403,26 @@ def test_moduletype_nested_stale_label_cannot_launder(tmp_path: Path) -> None:
 
     Pre-fix: ``VERIFIED``, ``poisoned=False``, no witness-coverage gap, replay
     vs fresh-oracle max-diff 100.15 -- and it falsified the shipped contract's
-    claim that deeper stashes are harmless because the belt gates them.
+    claim that deeper stashes are harmless because the belt gates them. r33
+    closed the leak AT SOURCE: the ModuleType sweep descends namespace
+    container trees, so the stale stamp no longer survives the donor capture,
+    and a layout launder through the nested stash ceils exactly like the
+    fresh-foreign no-stamp control.
     """
 
     stash = types.ModuleType("r83_stash")
     x = _nchw()
     with _allow_break_marker():
         tl.trace(_StashDonor(stash), x, capture=_CAPTURE)
-    # r81's ModuleType sweep is shallow and never reaches a tensor nested one
-    # container deep, so the stamp survives the donor capture.
-    assert raw_tensor_label(stash.box[0]) is not None
+    # r33: the deepened ModuleType sweep reaches a tensor nested one container
+    # deep, so the cross-session stamp is cleared when the donor capture ends
+    # -- the launder vehicle dies at the source.
+    assert raw_tensor_label(stash.box[0]) is None
 
     run_input = _twin(_nchw())
-    model = _StashConsumer(stash)
+    model = _InjectLaunder(stash.box[0])
     with torch.no_grad():
-        oracle = _StashConsumer(stash)(run_input.clone())
+        oracle = _InjectLaunder(stash.box[0])(run_input.clone())
 
     try:
         result = _run_artifact(model, x, run_input, tmp_path / "sol.tlspec")
@@ -425,6 +430,64 @@ def test_moduletype_nested_stale_label_cannot_launder(tmp_path: Path) -> None:
         return
     assert result.report.path_faithfulness is not PathFaithfulness.VERIFIED
     _assert_not_falsely_verified(result, oracle)
+
+
+def test_moduletype_nested_stale_label_survivor_still_ceils(tmp_path: Path) -> None:
+    """Belt half of the r33 closure: a SURVIVING nested stale stamp still ceils.
+
+    The sweep is the source fix; this pins the launder outcome itself against
+    any future leak vehicle by re-injecting the donor's stale label on the
+    nested tensor AFTER the sweep cleared it (as if a deeper route had
+    preserved it). The label-anchoring belt must refuse the retired-session
+    stamp: the layout launder ceils, never ``VERIFIED``.
+    """
+
+    stash = types.ModuleType("r83_stash_survivor")
+    x = _nchw()
+    with _allow_break_marker():
+        tl.trace(_StashDonor(stash), x, capture=_CAPTURE)
+    assert raw_tensor_label(stash.box[0]) is None
+    # Re-inject the donor's stale current-session-looking label text, the
+    # exact stamp the pre-fix shallow sweep left behind.
+    set_tensor_label(stash.box[0], "add_1_2_raw")
+
+    run_input = _twin(_nchw())
+    model = _InjectLaunder(stash.box[0])
+    with torch.no_grad():
+        oracle = _InjectLaunder(stash.box[0])(run_input.clone())
+
+    try:
+        result = _run_artifact(model, x, run_input, tmp_path / "sol_survivor.tlspec")
+    except RunnablePreflightError:
+        return
+    assert result.report.path_faithfulness is not PathFaithfulness.VERIFIED
+    _assert_not_falsely_verified(result, oracle)
+
+
+def test_moduletype_nested_honest_rebind_consumer_not_overceiled(tmp_path: Path) -> None:
+    """No over-ceil: the swept nested stash's VALUE-honest consumer replays true.
+
+    The original Sol consumer discards the foreign tensor's incoming bytes
+    (``.data=`` rebind to input-derived data) before any read, so with the
+    stale stamp swept at source its replay is fully input-determined. The
+    deepened sweep must not push this honest-by-construction flow into a
+    ceiling; if it reports ``VERIFIED`` the value must match oracle 1 exactly.
+    """
+
+    stash = types.ModuleType("r83_stash_honest")
+    x = _nchw()
+    with _allow_break_marker():
+        tl.trace(_StashDonor(stash), x, capture=_CAPTURE)
+    assert raw_tensor_label(stash.box[0]) is None
+
+    run_input = _twin(_nchw())
+    model = _StashConsumer(stash)
+    with torch.no_grad():
+        oracle = _StashConsumer(stash)(run_input.clone())
+
+    result = _run_artifact(model, x, run_input, tmp_path / "sol_honest.tlspec")
+    _assert_not_falsely_verified(result, oracle)
+    assert not result.report.poisoned
 
 
 # --------------------------------------------------------------------------- #
