@@ -10,6 +10,7 @@ from torchlens.capture.arg_positions import (
     ArgSpec,
     _cache_dynamic_spec,
     _normalize_func_name,
+    extract_tensors_and_params,
 )
 from torchlens.constants import get_orig_torch_funcs
 
@@ -389,6 +390,29 @@ def test_high_confidence_static_fills_remain_covered() -> None:
     assert _HIGH_CONFIDENCE_STATIC_NAMES <= decorated_names
     assert _HIGH_CONFIDENCE_STATIC_NAMES <= set(FUNC_ARG_SPECS)
     assert not (_HIGH_CONFIDENCE_STATIC_NAMES & _KNOWN_UNSUPPORTED_ARG_SPECS)
+
+
+def test_full_specs_extract_tensor_fill_values_but_not_literal_scalars() -> None:
+    """Record tensor-valued fill slots without changing literal factory calls."""
+
+    fill_value = torch.tensor(3.0)
+    template = torch.ones(2)
+    full_spec = FUNC_ARG_SPECS["full"]
+    full_like_spec = FUNC_ARG_SPECS["fulllike"]
+
+    assert extract_tensors_and_params(full_spec, ((2,), fill_value), {}) == ([fill_value], [])
+    assert extract_tensors_and_params(
+        full_spec,
+        (),
+        {"size": (2,), "fill_value": fill_value},
+    ) == ([fill_value], [])
+    assert extract_tensors_and_params(full_spec, ((2,), 3.0), {}) == ([], [])
+
+    assert extract_tensors_and_params(full_like_spec, (template, fill_value), {}) == (
+        [template, fill_value],
+        [],
+    )
+    assert extract_tensors_and_params(full_like_spec, (template, 3.0), {}) == ([template], [])
 
 
 @pytest.mark.parametrize("func_name,expected_kwargs", sorted(_EXPECTED_KWARGS.items()))

@@ -1303,6 +1303,11 @@ _FACTORY_FUNCS = [
 for _name in _FACTORY_FUNCS:
     FUNC_ARG_SPECS[_name] = _NONE
 
+# ``fill_value`` is schema-typed as ``Scalar``, but PyTorch also accepts a scalar
+# tensor there.  When it is a tensor its runtime value is a real data dependency;
+# extraction's type checks leave ordinary Python scalar calls parentless.
+FUNC_ARG_SPECS["full"] = ArgSpec(positions=(1,), tensor_kwargs=("fill_value",))
+
 # Guardrail: a normalized name must not be claimed by BOTH the binary-op and factory-func
 # tables -- they assign conflicting arg-specs (tensor parents at positions 0,1 vs. NO tensor
 # parents), and dict last-writer-wins would silently corrupt whichever loses. A collision means
