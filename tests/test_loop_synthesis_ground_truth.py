@@ -18,6 +18,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+import example_models
 from torchlens import trace as trace_fn
 from torchlens.validation.invariants import check_metadata_invariants
 
@@ -488,6 +489,35 @@ def test_boundary_partition_matches_brute_force_truth(
 ) -> None:
     """Pin disputed, F1-F5, parallel, reuse, nested, and chained partitions."""
     _trace_and_check(case, first, second, truth)
+
+
+@pytest.mark.parametrize(
+    ("model_type", "truth"),
+    [
+        pytest.param(
+            example_models.NestedParamFreeLoops,
+            {"sin": ("inner-site",) * 12},
+            id="pure-nested-4x3",
+        ),
+        pytest.param(
+            example_models.SequentialParamFreeLoops,
+            {
+                "sin": ("first-loop",) * 3 + ("second-loop",) * 3,
+                "cos": ("first-loop",) * 3 + ("second-loop",) * 3,
+            },
+            id="pure-sequential-3-plus-3",
+        ),
+    ],
+)
+def test_pure_param_free_partition_matches_brute_force_truth(
+    model_type: type[nn.Module], truth: Mapping[str, Sequence[Hashable]]
+) -> None:
+    """Pin A's historical nested/sequential pure-op topology at exact membership."""
+    torch.manual_seed(0)
+    traced = trace_fn(model_type(), torch.randn(1, 4))
+    for stem, truth_sites in truth.items():
+        _assert_brute_force_partition(traced, stem, truth_sites)
+    assert check_metadata_invariants(traced)
 
 
 @pytest.mark.parametrize(

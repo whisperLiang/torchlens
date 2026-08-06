@@ -18,6 +18,7 @@ FrontierNodes = OrderedDict[str, dict[str, deque[str]]]
 # are never recurrent passes of anything -- a user input or model output executes once
 # by definition -- so the topological param-free grouping pass excludes them outright.
 _PSEUDO_FUNC_NAME = "none"
+_MIN_PARAM_FREE_LOOP_BODY_OPS = 2
 
 # A slot color is the site identity a parent contributes to a param-free op's
 # signature: ``("param", call_identity)`` for parameterized calls, ``("anchor",
@@ -1046,6 +1047,70 @@ def _param_call_identity(node: _MutableRecurrenceNode) -> _ParamCallIdentity:
     )
 
 
+def _topology_anchor_ancestry(workspace: _GroupingWorkspace) -> dict[str, bool]:
+    """Return whether each node descends from a parameterized or anchored site.
+
+    Parameters
+    ----------
+    workspace:
+        Mutable grouping workspace in topological capture order.
+
+    Returns
+    -------
+    dict[str, bool]
+        Node label to whether its upstream data topology contains a persistent
+        parameterized or anchored site.
+    """
+    has_anchor: dict[str, bool] = {}
+    for label in workspace.raw_labels:
+        node = workspace.nodes[label]
+        has_anchor[label] = (
+            (node.uses_params and bool(node.param_barcodes))
+            or node.recurrence_anchored
+            or any(has_anchor.get(parent, False) for parent in node.data_parents)
+        )
+    return has_anchor
+
+
+def _param_free_adjacency_merge_allowed(
+    workspace: _GroupingWorkspace,
+    node1_label: str,
+    node2_label: str,
+    subgraph_a: SubgraphInfo,
+    subgraph_b: SubgraphInfo,
+) -> bool:
+    """Return whether an adjacency-only, parameter-free merge is a real loop.
+
+    Parameters
+    ----------
+    workspace:
+        Mutable grouping workspace.
+    node1_label:
+        Seed label of the first candidate subgraph.
+    node2_label:
+        Seed label of the second candidate subgraph.
+    subgraph_a:
+        First candidate loop-body subgraph.
+    subgraph_b:
+        Structurally isomorphic partner subgraph.
+
+    Returns
+    -------
+    bool
+        ``True`` for a reused persistent identity or when both repeated bodies
+        span at least two operations. The size floor rejects a straight chain
+        of adjacent same-function calls as false single-op recurrence.
+    """
+    if (
+        workspace.nodes[node1_label].recurrence_anchored
+        or workspace.nodes[node2_label].recurrence_anchored
+    ):
+        return True
+    return min(len(subgraph_a.node_set), len(subgraph_b.node_set)) >= (
+        _MIN_PARAM_FREE_LOOP_BODY_OPS
+    )
+
+
 # ---------------------------------------------------------------------------
 # Topological parameter-free grouping
 # ---------------------------------------------------------------------------
@@ -1606,6 +1671,7 @@ def _assign_param_free_layers(workspace: _GroupingWorkspace) -> None:
     None
         Mutates each bare op's ``layer_label``.
     """
+    anchor_ancestry = _topology_anchor_ancestry(workspace)
     universe: dict[tuple[str, Optional[int]], list[str]] = OrderedDict()
     for label in workspace.raw_labels:
         node = workspace.nodes[label]
@@ -1615,8 +1681,15 @@ def _assign_param_free_layers(workspace: _GroupingWorkspace) -> None:
             continue
         if node.func_name == _PSEUDO_FUNC_NAME:
             continue
+        if not anchor_ancestry[label]:
+            # Pure parameter-free graphs retain the historical isomorphic-
+            # subgraph grouping path. Their topology has no persistent site
+            # colors for the direct-site fixpoint to propagate, and forcing
+            # them through it fragments nested motifs or fuses sequential ones.
+            continue
         universe.setdefault((node.equivalence_key, node.output_slot), []).append(label)
 
+    universe_labels = {label for labels in universe.values() for label in labels}
     realizations = _pf_realization_counts(workspace)
     direct_site_passes = _pf_direct_site_passes(workspace)
     consumer_site_frames = {
@@ -1641,7 +1714,15 @@ def _assign_param_free_layers(workspace: _GroupingWorkspace) -> None:
 
     classes: "OrderedDict[str, list[str]]" = OrderedDict()
     class_key: dict[str, tuple[str, Optional[int]]] = {}
-    class_of: dict[str, str] = {}
+    fixed_class_of = {
+        label: workspace.nodes[label].layer_label
+        for label in workspace.raw_labels
+        if label not in universe_labels
+        and not (workspace.nodes[label].uses_params and workspace.nodes[label].param_barcodes)
+        and not workspace.nodes[label].recurrence_anchored
+        and workspace.nodes[label].func_name != _PSEUDO_FUNC_NAME
+    }
+    class_of: dict[str, str] = dict(fixed_class_of)
     for key, labels in universe.items():
         leader = labels[0]
         classes[leader] = list(labels)
@@ -1691,7 +1772,10 @@ def _assign_param_free_layers(workspace: _GroupingWorkspace) -> None:
         if changed:
             classes = new_classes
             class_key = new_class_key
-            class_of = {label: leader for leader, members in classes.items() for label in members}
+            class_of = dict(fixed_class_of)
+            class_of.update(
+                {label: leader for leader, members in classes.items() for label in members}
+            )
             continue
 
         dissolved = False
@@ -1775,6 +1859,7 @@ def _merge_iso_groups_to_layers(
                 )
 
     reach_memo: dict[tuple[str, str], bool] = {}
+    anchor_ancestry = _topology_anchor_ancestry(workspace)
 
     for iso_group_label, iso_nodes_orig in iso_node_groups.items():
         iso_nodes = sorted(
@@ -1808,12 +1893,26 @@ def _merge_iso_groups_to_layers(
                 continue
             pair_anchored = node1.recurrence_anchored or node2.recurrence_anchored
             if not (node1.uses_params or node2.uses_params or pair_anchored):
-                # Bare (unanchored, parameter-free) ops are never grouped through
-                # iso-subgraph adjacency: their layer membership is DERIVED from
-                # their parents' already-solved grouping by the dedicated
-                # topological pass (:func:`_assign_param_free_layers`), which runs
-                # after all iso rounds. Deciding them here from local subgraph
-                # evidence is exactly what let bridges straddle loop boundaries.
+                if (
+                    not anchor_ancestry[node1_label]
+                    and not anchor_ancestry[node2_label]
+                    and subgraphs_are_adjacent
+                    and _param_free_adjacency_merge_allowed(
+                        workspace,
+                        node1_label,
+                        node2_label,
+                        node_to_subgraph[node1_label],
+                        node_to_subgraph[node2_label],
+                    )
+                ):
+                    # With no persistent topology anchor anywhere upstream,
+                    # retain the historical whole-body isomorphism rule. This
+                    # is the only evidence available for pure nested/chained
+                    # motifs and is insulated from parameterized boundaries.
+                    union(node1_label, node2_label)
+                # Anchored-descendant bare ops are never decided by local
+                # subgraph adjacency; the two-sided fixpoint assigns them after
+                # all parameterized/anchored groups are final.
                 continue
             overlapping_param_types = (
                 sg_param_types[node1_subgraph_label] & sg_param_types[node2_subgraph_label]
