@@ -151,10 +151,46 @@ class AtomicExitNet(nn.Module):
         return torch.sigmoid(x)
 
 
+class MultiPassInner(nn.Module):
+    """Three linear children plus a surfaced atomic-exit own op."""
+
+    def __init__(self, width: int = 8) -> None:
+        super().__init__()
+        self.ls = nn.ModuleList([nn.Linear(width, width) for _ in range(3)])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for layer in self.ls:
+            x = layer(x)
+        return torch.relu(x)
+
+
+class MultiPassBoxNet(nn.Module):
+    """Calls ``inner`` three times: a rolled box whose layers are multi-pass.
+
+    Rolled remainder accounting runs on bare layer labels; a multi-pass layer
+    base is an AMBIGUOUS op-accessor key, so the surfaced-exit scan must
+    qualify it explicitly (round-27 follow-up: the first rolled remainder cut
+    raised ``AmbiguousOpLookupError`` on every rolled box with reused
+    layers). The box must also subtract its exit once per layer BASE, not
+    once per pass.
+    """
+
+    def __init__(self, width: int = 8) -> None:
+        super().__init__()
+        self.inner = MultiPassInner(width)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = torch.tanh(x)
+        for _ in range(3):
+            x = self.inner(x)
+        return torch.sigmoid(x)
+
+
 FIXTURES = {
     "child_seg": ChildSegNet,
     "op_seg": OpSegNet,
     "atomic_exit": AtomicExitNet,
+    "multipass_box": MultiPassBoxNet,
 }
 
 LEVELS = ["max", "auto", 1.0, 0.5]
@@ -386,6 +422,31 @@ def test_rolled_box_subtracts_surfaced_exit(tmp_path):
     assert exit_nodes, "surfaced atomic exit must render as its own node"
     assert "5 ops" in " ".join(box_texts), box_texts
     assert "6 ops" not in " ".join(box_texts)
+
+
+def test_rolled_multipass_box_subtracts_exit_in_layer_currency(tmp_path):
+    """A multi-pass rolled box must subtract its exit once per layer BASE.
+
+    Also guards the op-accessor ambiguity: rolled remainder accounting feeds
+    bare layer labels to the surfaced-exit scan, and a reused layer base is
+    an ambiguous accessor key unless qualified to its first pass.
+    """
+
+    trace = tl.trace(MultiPassBoxNet().eval(), torch.randn(2, 8))
+    svg_path = _rolled_draw(trace, tmp_path, "multipass_box", "max")
+    nodes = _svg_nodes(svg_path)
+
+    box_texts = next(texts for title, texts, _, _ in nodes if title == "inner")
+    joined = " ".join(box_texts)
+    assert "(x3)" in joined, joined
+    assert "3 ops" in joined, joined
+    assert "4 ops" not in joined
+    exit_nodes = [
+        (title, texts)
+        for title, texts, _, _ in nodes
+        if title.startswith("relu") and "@inner" in " ".join(texts)
+    ]
+    assert exit_nodes, "surfaced multi-pass exit must render as its own rolled node"
 
 
 def test_rolled_owner_keys_are_pass_free():

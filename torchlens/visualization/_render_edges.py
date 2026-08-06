@@ -660,7 +660,11 @@ def _surfaced_own_output_ops(
     address:
         Pass-free owner module address.
     op_labels:
-        Pass-qualified operation labels in this module call.
+        Pass-qualified operation labels in this module call, or pass-free
+        layer labels for a rolled box (each resolved to its first pass; the
+        surfaced-exit predicate fields are per-layer invariants, and rolled
+        remainder accounting is in layer currency, so one op per layer base
+        is exactly right).
 
     Returns
     -------
@@ -671,7 +675,15 @@ def _surfaced_own_output_ops(
 
     surfaced: list[Op] = []
     for label in op_labels:
-        op = trace.ops[label]
+        # A bare multi-pass layer label is ambiguous for the op accessor;
+        # qualify pass-free labels to their first pass explicitly.
+        if ":" not in label:
+            try:
+                op = trace.ops[f"{label}:1"]
+            except (KeyError, IndexError):
+                op = trace.ops[label]
+        else:
+            op = trace.ops[label]
         if getattr(op, "is_buffer", False):
             continue
         if not getattr(op, "is_atomic_module", False):
