@@ -3114,8 +3114,11 @@ def _check_whether_func_on_saved_parents_yields_saved_tensor(
         # recorded edge influences the op, while a genuine spurious edge stays
         # unchanged under every draw and still falls through to the posthoc
         # excuses and the failure below -- the tripwire's failure condition is
-        # untouched, only its evidence collection got more attempts.
-        for retry_strategy in ("step_up", "step_down"):
+        # untouched, only its evidence collection got more attempts. The unit
+        # steps close the value-discretizing dead zone (round-34 Finding B): a
+        # near-constant float parent feeding an integer cast needs an excursion
+        # that crosses an integer boundary before truncation can transmit it.
+        for retry_strategy in ("step_up", "step_down", "unit_step_up", "unit_step_down"):
             retry_args, _retry_reason = _prepare_input_args_for_validating_layer(
                 self, layer, layers_to_perturb, perturb_strategy=retry_strategy
             )
@@ -3677,12 +3680,24 @@ def _directional_step_perturb(tensor: torch.Tensor, strategy: str) -> torch.Tens
     dim or a ``view`` size): the adjacent value is the smallest excursion
     that still guarantees a different input.
 
+    The ``unit_step_up``/``unit_step_down`` strategies move floating parents
+    by a full +-1.0 instead of one representable step. A value-DISCRETIZING
+    child (an integer cast such as ``.long()``, ``floor``/``round``/``trunc``)
+    has a truncation dead zone around every integer, so a near-constant parent
+    (e.g. an all-zero ``x * 0``) whose calibrated random draw and ULP steps
+    all land inside ``(-1, 1)`` reads as non-influential even though the edge
+    is real (round-34 Finding B). A unit step is guaranteed to cross an
+    integer boundary; elements too large for ``+-1.0`` to be representable
+    fall back to the minimal step. Non-float dtypes already step by a full
+    unit, so the unit strategies delegate to the minimal ones.
+
     Parameters
     ----------
     tensor:
         Saved parent tensor values.
     strategy:
-        ``"step_up"`` or ``"step_down"``.
+        ``"step_up"``, ``"step_down"``, ``"unit_step_up"``, or
+        ``"unit_step_down"``.
 
     Returns
     -------
@@ -3690,6 +3705,16 @@ def _directional_step_perturb(tensor: torch.Tensor, strategy: str) -> torch.Tens
         Perturbed tensor of the same shape/dtype, every element guaranteed to
         differ from the original where the dtype permits it.
     """
+
+    if strategy in ("unit_step_up", "unit_step_down"):
+        minimal_strategy = "step_up" if strategy == "unit_step_up" else "step_down"
+        if not tensor.is_floating_point():
+            return _directional_step_perturb(tensor, minimal_strategy)
+        offset = 1.0 if strategy == "unit_step_up" else -1.0
+        stepped = tensor + offset
+        minimal = _directional_step_perturb(tensor, minimal_strategy)
+        finite_and_moved = torch.isfinite(stepped) & (stepped != tensor)
+        return torch.where(finite_and_moved, stepped, minimal).to(tensor.dtype)
 
     if tensor.dtype == torch.bool:
         return torch.logical_not(tensor)

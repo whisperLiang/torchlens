@@ -44,6 +44,7 @@ import importlib
 import inspect
 import os
 import sys
+import types
 from typing import Any
 import warnings
 
@@ -84,6 +85,9 @@ __all__ = [
     "HAS_ROLL_TENSOR_SHIFTS",
     "HAS_SAFE_WEIGHTS_ONLY_LOAD",
     "HAS_SAVED_TENSORS_HOOK_INTROSPECTION",
+    "HAS_SAVED_TENSORS_HOOKS_PATCHABLE",
+    "HAS_CODE_POSITIONS",
+    "HAS_CODE_QUALNAME",
     "HAS_CACHED_UNTYPED_STORAGE_WRAPPER",
     "HAS_TENSOR_SEQUENCE_SLOT_FIX",
     "HAS_TORCH_FUNC",
@@ -981,6 +985,78 @@ def saved_tensors_default_hooks_active() -> bool | None:
         return None
 
 
+def _probe_code_positions() -> bool:
+    """Return whether code objects expose PEP 657 fine-grained positions.
+
+    ``co_positions()`` (CPython 3.11+) yields per-instruction column offsets.
+    Conditional-branch attribution uses them to tell same-line ternary /
+    ``IfExp`` arms apart; without them the branch indexer degrades to
+    line-only matching, which deliberately FAILS CLOSED (un-attributed, never
+    mis-attributed) on same-line arms. Probe the capability behaviorally.
+
+    Returns
+    -------
+    bool
+        ``True`` when per-instruction position introspection is available.
+    """
+
+    positions = getattr(_probe_code_positions.__code__, "co_positions", None)
+    if not callable(positions):
+        return False
+    try:
+        next(iter(positions()), None)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _probe_code_qualname() -> bool:
+    """Return whether code objects expose ``co_qualname`` (CPython 3.11+).
+
+    Frame-to-scope resolution for branch attribution prefers qualified names;
+    without them, same-named nested functions resolve by name plus first line
+    only and ambiguous matches fail closed.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``co_qualname`` is available on code objects.
+    """
+
+    return isinstance(getattr(_probe_code_qualname.__code__, "co_qualname", None), str)
+
+
+def _probe_saved_tensors_hooks_patchable() -> bool:
+    """Return whether the saved-tensors-hooks context class accepts an init patch.
+
+    ``torch.autograd.graph.saved_tensors_hooks`` is the public context manager
+    that installs user pack/unpack hooks (``save_on_cpu`` and the non-reentrant
+    checkpoint hook subclass it). TorchLens scopes user hook bodies as
+    autograd-internal during an active capture by patching the class
+    ``__init__`` at wrap time, so the patch needs a plain-Python ``__init__``
+    with the ``(self, pack_hook, unpack_hook)`` shape. Probe the shape
+    behaviorally; never parse ``torch.__version__``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the class exists and its ``__init__`` is a patchable
+        Python function taking exactly the pack/unpack hook pair.
+    """
+
+    hooks_cls = getattr(getattr(torch.autograd, "graph", None), "saved_tensors_hooks", None)
+    if not isinstance(hooks_cls, type):
+        return False
+    init = hooks_cls.__dict__.get("__init__")
+    if not isinstance(init, types.FunctionType):
+        return False
+    try:
+        params = list(inspect.signature(init).parameters)
+    except (TypeError, ValueError):
+        return False
+    return params == ["self", "pack_hook", "unpack_hook"]
+
+
 HAS_VARIABLE_FUNCTIONS: bool = _probe_variable_functions()
 HAS_TORCH_VF: bool = _probe_torch_vf()
 HAS_TORCH_FUNC: bool = _probe_torch_func()
@@ -1005,6 +1081,9 @@ HAS_TENSOR_SEQUENCE_SLOT_FIX: bool = _probe_tensor_sequence_slot_fix()
 HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE: bool = _probe_parameter_as_subclass_in_dispatch_mode()
 HAS_ROLL_TENSOR_SHIFTS: bool = _probe_roll_tensor_shifts()
 HAS_SAVED_TENSORS_HOOK_INTROSPECTION: bool = _probe_saved_tensors_hook_introspection()
+HAS_SAVED_TENSORS_HOOKS_PATCHABLE: bool = _probe_saved_tensors_hooks_patchable()
+HAS_CODE_POSITIONS: bool = _probe_code_positions()
+HAS_CODE_QUALNAME: bool = _probe_code_qualname()
 _DYNAMO_OPTIMIZED_MODULE_TYPE: type[Any] | None = None
 _DYNAMO_OPTIMIZED_MODULE_PROBED: bool = False
 _DYNAMO_ORIG_CALLABLE_MARKER_PROBED: bool = False
@@ -1035,6 +1114,9 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE",
     "HAS_ROLL_TENSOR_SHIFTS",
     "HAS_SAVED_TENSORS_HOOK_INTROSPECTION",
+    "HAS_SAVED_TENSORS_HOOKS_PATCHABLE",
+    "HAS_CODE_POSITIONS",
+    "HAS_CODE_QUALNAME",
     "HAS_FLOAT32_MATMUL_PRECISION",
     "HAS_DETERMINISTIC_ALGORITHMS_QUERY",
     "HAS_CUDA_MATMUL_TF32",

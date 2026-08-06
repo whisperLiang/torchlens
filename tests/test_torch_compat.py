@@ -355,6 +355,15 @@ def test_torch_capability_snapshot_contract() -> None:
         # (needed to know grad_fn saved-value reads are side-effect-free);
         # feature-detected, so mirror the live capability like AUTOCAST.
         "HAS_SAVED_TENSORS_HOOK_INTROSPECTION": tc.HAS_SAVED_TENSORS_HOOK_INTROSPECTION,
+        # r32-abc Fix A: whether saved_tensors_hooks.__init__ can be patched to
+        # scope user pack/unpack hook bodies as autograd-internal during capture;
+        # feature-detected class shape, so mirror the live capability.
+        "HAS_SAVED_TENSORS_HOOKS_PATCHABLE": tc.HAS_SAVED_TENSORS_HOOKS_PATCHABLE,
+        # r32-abc Fix C: PEP 657 per-instruction columns and co_qualname gate
+        # same-line ternary arm attribution and qualname scope resolution;
+        # runtime capabilities of the interpreter, so mirror the live values.
+        "HAS_CODE_POSITIONS": tc.HAS_CODE_POSITIONS,
+        "HAS_CODE_QUALNAME": tc.HAS_CODE_QUALNAME,
         "HAS_TENSOR_SEQUENCE_SLOT_FIX": True,
         # r35 decision E: ambient execution-context knobs are feature-detected and
         # surfaced in the capability snapshot (values are runtime-dependent).
