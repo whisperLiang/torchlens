@@ -83,12 +83,14 @@ __all__ = [
     "HAS_DYNAMO_ORIG_CALLABLE_MARKER",
     "HAS_ROLL_TENSOR_SHIFTS",
     "HAS_SAFE_WEIGHTS_ONLY_LOAD",
+    "HAS_SAVED_TENSORS_HOOK_INTROSPECTION",
     "HAS_CACHED_UNTYPED_STORAGE_WRAPPER",
     "HAS_TENSOR_SEQUENCE_SLOT_FIX",
     "HAS_TORCH_FUNC",
     "HAS_TORCH_VF",
     "HAS_VARIABLE_FUNCTIONS",
     "TorchCapabilitySnapshot",
+    "saved_tensors_default_hooks_active",
     "RunnableTorchAlias",
     "autocast_get_dtype",
     "autocast_is_enabled",
@@ -922,6 +924,63 @@ def _probe_roll_tensor_shifts() -> bool:
     return True
 
 
+_TOP_SAVED_TENSORS_DEFAULT_HOOKS_ARGS: tuple[bool, ...] | None = None
+
+
+def _probe_saved_tensors_hook_introspection() -> bool:
+    """Return whether autograd default saved-tensors hooks can be peeked.
+
+    ``torch._C._autograd._top_saved_tensors_default_hooks`` returns the
+    innermost installed default pack/unpack hook pair (or ``None``) without
+    popping it. Non-reentrant ``torch.utils.checkpoint`` regions install such
+    hooks, and any value they packed re-runs user code (the checkpoint
+    RECOMPUTE) when read back, so capture-time stats collection needs this
+    peek to know reading saved values is side-effect-free. The call signature
+    gained an ``ignore_is_tracing`` argument over torch history; probe both
+    spellings behaviorally, never a version parse.
+
+    Returns
+    -------
+    bool
+        ``True`` when the peek is callable outside any hooks context.
+    """
+
+    global _TOP_SAVED_TENSORS_DEFAULT_HOOKS_ARGS
+    peek = getattr(getattr(torch._C, "_autograd", None), "_top_saved_tensors_default_hooks", None)
+    if peek is None:
+        return False
+    for call_args in ((True,), ()):
+        try:
+            peek(*call_args)
+        except (TypeError, RuntimeError):
+            continue
+        _TOP_SAVED_TENSORS_DEFAULT_HOOKS_ARGS = call_args
+        return True
+    return False
+
+
+def saved_tensors_default_hooks_active() -> bool | None:
+    """Return whether autograd default saved-tensors hooks are installed now.
+
+    Returns
+    -------
+    bool | None
+        ``True`` when a default pack/unpack hook pair is installed (values a
+        grad_fn saved for backward may be hook-packed, so reading them runs
+        the user's unpack hook -- e.g. a non-reentrant checkpoint recompute),
+        ``False`` when none is installed, and ``None`` when the runtime cannot
+        answer (introspection API absent).
+    """
+
+    if not HAS_SAVED_TENSORS_HOOK_INTROSPECTION:
+        return None
+    try:
+        peek = torch._C._autograd._top_saved_tensors_default_hooks
+        return peek(*(_TOP_SAVED_TENSORS_DEFAULT_HOOKS_ARGS or ())) is not None
+    except (RuntimeError, TypeError):
+        return None
+
+
 HAS_VARIABLE_FUNCTIONS: bool = _probe_variable_functions()
 HAS_TORCH_VF: bool = _probe_torch_vf()
 HAS_TORCH_FUNC: bool = _probe_torch_func()
@@ -945,6 +1004,7 @@ HAS_SAFE_WEIGHTS_ONLY_LOAD: bool = _probe_safe_weights_only_load()
 HAS_TENSOR_SEQUENCE_SLOT_FIX: bool = _probe_tensor_sequence_slot_fix()
 HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE: bool = _probe_parameter_as_subclass_in_dispatch_mode()
 HAS_ROLL_TENSOR_SHIFTS: bool = _probe_roll_tensor_shifts()
+HAS_SAVED_TENSORS_HOOK_INTROSPECTION: bool = _probe_saved_tensors_hook_introspection()
 _DYNAMO_OPTIMIZED_MODULE_TYPE: type[Any] | None = None
 _DYNAMO_OPTIMIZED_MODULE_PROBED: bool = False
 _DYNAMO_ORIG_CALLABLE_MARKER_PROBED: bool = False
@@ -974,6 +1034,7 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_TENSOR_SEQUENCE_SLOT_FIX",
     "HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE",
     "HAS_ROLL_TENSOR_SHIFTS",
+    "HAS_SAVED_TENSORS_HOOK_INTROSPECTION",
     "HAS_FLOAT32_MATMUL_PRECISION",
     "HAS_DETERMINISTIC_ALGORITHMS_QUERY",
     "HAS_CUDA_MATMUL_TF32",

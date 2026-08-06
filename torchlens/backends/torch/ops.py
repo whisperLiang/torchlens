@@ -46,7 +46,11 @@ from .buffer_writes import resolve_registered_buffer_address, session_validated_
 from . import module_stack as _mstack
 from ...fastlog._halt import HaltSignal
 from ...utils._callable_safety import _PURE_TENSOR_PROPERTY_NAMES
-from ...utils._torch_compat import tensor_version_or_none, torch_structseq_field_names
+from ...utils._torch_compat import (
+    saved_tensors_default_hooks_active,
+    tensor_version_or_none,
+    torch_structseq_field_names,
+)
 from ...utils.introspection import (
     _get_code_context,
     _get_tensors_and_params_from_obj,
@@ -4272,20 +4276,46 @@ def _iter_autograd_saved_candidates(grad_fn_handle: Any) -> list[Any]:
         Values exposed through ``saved_tensors`` and ``_saved_*`` attributes.
         Attribute access failures are ignored because PyTorch may release or
         guard some saved values.
-    """
-    saved_values: list[Any] = []
-    try:
-        saved_values.extend(getattr(grad_fn_handle, "saved_tensors", ()))
-    except Exception:
-        pass
 
-    for attr_name in grad_fn_handle.__class__.__dict__:
-        if not attr_name.startswith(_AUTOGRAD_SAVED_ATTR_PREFIX):
-            continue
+    Notes
+    -----
+    When default saved-tensors hooks are installed (a non-reentrant
+    ``torch.utils.checkpoint`` region, a user offload context), the grad_fn's
+    saved values are HOOK-PACKED: reading them runs the user's unpack hook --
+    for checkpoint, a full RECOMPUTE of the checkpointed region inside the
+    traced forward, which both records phantom ops in the captured graph and
+    overcounts memory the checkpoint deliberately does not retain. Packed
+    values are therefore skipped (r33 F-2). When the runtime cannot answer the
+    hooks-installed question, the reads run under ``pause_logging`` so a
+    triggered recompute can never corrupt the captured graph.
+    """
+    hooks_active = saved_tensors_default_hooks_active()
+    if hooks_active:
+        return []
+
+    saved_values: list[Any] = []
+
+    def _read_saved_values() -> None:
         try:
-            saved_values.append(getattr(grad_fn_handle, attr_name))
+            saved_values.extend(getattr(grad_fn_handle, "saved_tensors", ()))
         except Exception:
-            continue
+            pass
+
+        for attr_name in grad_fn_handle.__class__.__dict__:
+            if not attr_name.startswith(_AUTOGRAD_SAVED_ATTR_PREFIX):
+                continue
+            try:
+                saved_values.append(getattr(grad_fn_handle, attr_name))
+            except Exception:
+                continue
+
+    if hooks_active is None:
+        from ... import _state
+
+        with _state.pause_logging():
+            _read_saved_values()
+    else:
+        _read_saved_values()
     return saved_values
 
 
