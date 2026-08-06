@@ -977,14 +977,18 @@ def _parameter_mutation_output_for_logging(
 def _canonical_capture_callable(
     func: Callable[..., Any],
     func_name: str,
+    property_accessor: str | None = None,
 ) -> tuple[Callable[..., Any], str]:
     """Return the replay-safe callable identity for one wrapped operation.
 
-    ``Tensor.data`` is a C descriptor whose getter dispatches ``aten.detach`` and
+    ``Tensor.data`` is a C descriptor whose GETTER dispatches ``aten.detach`` and
     returns the same storage-sharing, autograd-detached value as ``Tensor.detach``.
     Record that operation under the canonical detach callable so live validation
     and portable replay agree without admitting the unsafe ``data`` descriptor
-    through the callable resolver.
+    through the callable resolver. The SETTER (``t.data = rhs``, round-31 M6) is
+    a receiver-rebinding mutation with a completely different call shape
+    ``(receiver, rhs)``; it keeps its own descriptor-``__set__`` identity so the
+    emitted op replays as a setter, never as a bogus two-argument ``detach``.
 
     Parameters
     ----------
@@ -992,6 +996,8 @@ def _canonical_capture_callable(
         Original wrapped callable.
     func_name:
         TorchLens name associated with the wrapped namespace entry.
+    property_accessor:
+        Accessor kind when ``func`` came from a wrapped getset property.
 
     Returns
     -------
@@ -999,7 +1005,7 @@ def _canonical_capture_callable(
         Callable and operation name to persist for capture/replay.
     """
 
-    if func_name != "data":
+    if func_name != "data" or property_accessor in ("set", "del"):
         return func, func_name
     decorated_detach = torch.Tensor.detach
     original_detach = _state._decorated_to_orig.get(id(decorated_detach), decorated_detach)
@@ -1095,6 +1101,117 @@ def _storage_overlap_byte_interval(t: torch.Tensor) -> tuple[int, int]:
     return (start, start + span * element_size)
 
 
+# Exact element-overlap scans are vectorized O(min(n1, n2)); above this bound
+# fall back to the conservative byte-interval answer instead of a large scan.
+_EXACT_OVERLAP_SCAN_LIMIT = 65536
+
+
+def _effective_1d_element_layout(t: torch.Tensor) -> tuple[int, int, int] | None:
+    """Return ``(start_byte, stride_bytes, count)`` when element starts form one
+    arithmetic progression.
+
+    Size-1 and stride-0 (``expand``) dims contribute no distinct addresses and
+    are dropped. A single remaining strided dim maps directly; a dense
+    (memory-contiguous) multi-dim block telescopes to stride ``element_size``.
+    Anything else (genuinely multi-strided ``as_strided`` lattices) returns
+    ``None`` so the caller keeps the conservative interval answer.
+
+    Parameters
+    ----------
+    t:
+        Live view whose element addresses are being described.
+
+    Returns
+    -------
+    tuple[int, int, int] | None
+        Progression of element start addresses in storage bytes, or ``None``
+        when the layout is not a single progression.
+    """
+
+    element_size = t.element_size()
+    start_byte = int(t.storage_offset()) * element_size
+    if t.numel() == 0:
+        return (start_byte, element_size, 0)
+    dims = [
+        (int(size), int(stride))
+        for size, stride in zip(t.shape, t.stride())
+        if size > 1 and stride != 0
+    ]
+    if not dims:
+        return (start_byte, element_size, 1)
+    if len(dims) == 1:
+        size, stride = dims[0]
+        return (start_byte, stride * element_size, size)
+    expected_stride = 1
+    total = 1
+    for size, stride in sorted(dims, key=lambda dim: dim[1]):
+        if stride != expected_stride:
+            return None
+        expected_stride = stride * size
+        total *= size
+    return (start_byte, element_size, total)
+
+
+def _strided_views_share_storage_elements(mutated: torch.Tensor, alias: torch.Tensor) -> bool:
+    """Return whether two same-storage views share at least one element's bytes.
+
+    The byte-interval intersection is kept as the exact NEGATIVE test (disjoint
+    intervals can never share bytes) and as the conservative fallback for
+    layouts the exact test cannot express. For the common case -- both views
+    reducible to one arithmetic progression of equal-width element starts --
+    the answer is computed exactly, so element-DISJOINT interleaved views
+    (``base[::2]`` vs ``base[1::2]``) no longer receive an invented mutation
+    edge (round-31 M4), while genuinely overlapping views keep theirs.
+
+    Parameters
+    ----------
+    mutated:
+        The live tensor the op wrote through.
+    alias:
+        Another live labeled tensor on the same storage.
+
+    Returns
+    -------
+    bool
+        True when the views provably or possibly share storage bytes; False
+        only on proof of disjointness.
+    """
+
+    mutated_lo, mutated_hi = _storage_overlap_byte_interval(mutated)
+    alias_lo, alias_hi = _storage_overlap_byte_interval(alias)
+    if not (alias_lo < mutated_hi and mutated_lo < alias_hi):
+        return False
+    if mutated.element_size() != alias.element_size():
+        # Different element widths break the shared start-address grid; the
+        # windows can partially overlap without equal starts. Stay conservative.
+        return True
+    mutated_layout = _effective_1d_element_layout(mutated)
+    alias_layout = _effective_1d_element_layout(alias)
+    if mutated_layout is None or alias_layout is None:
+        return True
+    start_a, stride_a, count_a = mutated_layout
+    start_b, stride_b, count_b = alias_layout
+    if count_a == 0 or count_b == 0:
+        return False
+    if count_a > count_b:
+        start_a, stride_a, count_a, start_b, stride_b, count_b = (
+            start_b,
+            stride_b,
+            count_b,
+            start_a,
+            stride_a,
+            count_a,
+        )
+    if count_a > _EXACT_OVERLAP_SCAN_LIMIT:
+        return True
+    scan_starts = start_a + torch.arange(count_a, dtype=torch.long) * stride_a
+    relative = scan_starts - start_b
+    if stride_b <= 0:
+        return True
+    hits = (relative >= 0) & (relative < count_b * stride_b) & (relative % stride_b == 0)
+    return bool(hits.any())
+
+
 def _propagate_mutation_label_to_storage_aliases(
     trace: Any, mutated: torch.Tensor, out_label: str
 ) -> None:
@@ -1181,16 +1298,37 @@ def _propagate_mutation_label_to_storage_aliases(
                     or alias.device != mutated.device
                 ):
                     continue
-                alias_lo, alias_hi = _storage_overlap_byte_interval(alias)
+                # Element-exact where provable (round-31 M4): interleaved
+                # element-disjoint views must not inherit the mutation edge.
+                shares_elements = _strided_views_share_storage_elements(mutated, alias)
             except Exception:
                 continue
-            if alias_lo < mutated_hi and mutated_lo < alias_hi:
+            if shares_elements:
                 set_tensor_label(alias, out_label)
                 _register_inplace_live_grad_hook(trace, alias, out_label)
                 _record_label_version_snapshot(alias)
 
 
-def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[..., Any]:
+# Tensor getset properties whose SETTER mutates the receiver's forward data:
+# ``t.real = rhs`` / ``t.imag = rhs`` write through the receiver's storage,
+# ``t.data = rhs`` REBINDS the receiver onto ``rhs``'s storage. These execute
+# real dataflow yet return ``None``, so without receiver reconstruction no op
+# is ever emitted and consumers keep stale/absent parents (round-31 M6).
+# ``requires_grad`` / ``grad`` and similar setters change autograd bookkeeping,
+# not forward values, and are deliberately NOT listed.
+_MUTATING_TENSOR_PROPERTY_SETTERS = frozenset({"real", "imag", "data"})
+
+# Setters that rebind the receiver to the RHS's storage instead of writing in
+# place. The mutation label must NOT propagate to other tensors on that (RHS)
+# storage: their bytes were never written.
+_STORAGE_REBINDING_PROPERTY_SETTERS = frozenset({"data"})
+
+
+def torch_func_decorator(
+    func: Callable[..., Any],
+    func_name: str,
+    property_accessor: str | None = None,
+) -> Callable[..., Any]:
     """Wrap a single torch function with toggle-gated logging.
 
     When ``_state._logging_enabled`` is ``False``, the wrapper is a near-noop
@@ -1222,10 +1360,19 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
     Args:
         func: The original (unwrapped) torch function.
         func_name: The attribute name of the function (e.g. ``"cos"``, ``"__add__"``).
+        property_accessor: ``"set"`` / ``"del"`` / ``"get"`` when ``func`` is one
+            accessor of a wrapped getset property (``Tensor.real`` and friends),
+            else ``None``. Mutating property SETTERS return ``None`` from a call
+            that rewrites the receiver, so the wrapper reconstructs the receiver
+            as the logged output for names in
+            ``_MUTATING_TENSOR_PROPERTY_SETTERS``.
 
     Returns:
         The wrapped function.
     """
+    is_mutating_property_setter = (
+        property_accessor == "set" and func_name in _MUTATING_TENSOR_PROPERTY_SETTERS
+    )
 
     @wraps(func)
     def wrapped_func(*args: Any, **kwargs: Any) -> Any:
@@ -1450,8 +1597,15 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
         is_bottom_level_func = trace._current_func_barcode == func_call_barcode
 
         # __setitem__, zero_, __delitem__ modify in-place and return None;
-        # treat the first arg (the modified tensor) as the output.
-        if func_name in ["__setitem__", "zero_", "__delitem__"]:
+        # treat the first arg (the modified tensor) as the output. Mutating
+        # property setters (``t.real = rhs`` and friends, round-31 M6) have the
+        # exact same shape: real dataflow, ``None`` return, mutated receiver.
+        if func_name in ["__setitem__", "zero_", "__delitem__"] or (
+            is_mutating_property_setter
+            and out_orig is None
+            and len(args) > 0
+            and isinstance(args[0], torch.Tensor)
+        ):
             out_orig = args[0]
 
         # ---- In-place detection and safe copy ----
@@ -1466,6 +1620,7 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
             func_name.endswith("_")
             or func_name.startswith("__i")
             or func_name in {"__setitem__", "__delitem__"}
+            or is_mutating_property_setter
         )
         # The internal identity-forcing decorator (_state._decorated_identity)
         # exists precisely to MINT a distinct logged tensor at module boundaries
@@ -1477,7 +1632,17 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
         if same_object_returned:
             # Create a distinct tensor object for logging — otherwise attaching
             # _tl.label_raw on the output would clobber the input's label.
+            # Snapshot the USER op's live autograd node first (round-31 M5):
+            # the safe copy's grad_fn is TorchLens's own ``CloneBackward``
+            # bookkeeping, and it must never replace the operation's recorded
+            # autograd metadata (``grad_fn_class_*`` / handle).
+            live_user_grad_fn = out_orig.grad_fn if isinstance(out_orig, torch.Tensor) else None
             out_orig = safe_copy(out_orig)
+            if live_user_grad_fn is not None and isinstance(out_orig, torch.Tensor):
+                try:
+                    setattr(out_orig, "tl_user_grad_fn", live_user_grad_fn)
+                except AttributeError:
+                    pass
             out_orig = _parameter_mutation_output_for_logging(
                 trace,
                 out_orig,
@@ -1485,7 +1650,9 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
                 was_inplace=was_inplace,
             )
 
-        capture_func, capture_func_name = _canonical_capture_callable(func, func_name)
+        capture_func, capture_func_name = _canonical_capture_callable(
+            func, func_name, property_accessor
+        )
         out_before_hooks = out_orig
         out_orig = apply_live_hooks_to_outputs(
             trace,
@@ -1577,8 +1744,16 @@ def torch_func_decorator(func: Callable[..., Any], func_name: str) -> Callable[.
                         # other live labeled alias whose storage bytes overlap
                         # the target (its base, an overlapping sibling view)
                         # saw its content change too, so consumers of THOSE
-                        # objects must also bind to this mutation op.
-                        _propagate_mutation_label_to_storage_aliases(trace, args[0], out_label)
+                        # objects must also bind to this mutation op. A
+                        # storage-REBINDING setter (``t.data = rhs``) wrote no
+                        # bytes: after the rebind the receiver shares RHS's
+                        # storage, and advancing RHS-side aliases would invent
+                        # mutation edges for values that never changed.
+                        if not (
+                            is_mutating_property_setter
+                            and func_name in _STORAGE_REBINDING_PROPERTY_SETTERS
+                        ):
+                            _propagate_mutation_label_to_storage_aliases(trace, args[0], out_label)
                     if isinstance(return_value, torch.Tensor):
                         set_tensor_label(return_value, out_label)
                         _register_inplace_live_grad_hook(trace, return_value, out_label)
@@ -1925,9 +2100,9 @@ def decorate_all_once() -> None:
                 orig_descriptor.__set__,
                 orig_descriptor.__delete__,
             )
-            getter_dec = torch_func_decorator(getter_orig, func_name)
-            setter_dec = torch_func_decorator(setter_orig, func_name)
-            deleter_dec = torch_func_decorator(deleter_orig, func_name)
+            getter_dec = torch_func_decorator(getter_orig, func_name, property_accessor="get")
+            setter_dec = torch_func_decorator(setter_orig, func_name, property_accessor="set")
+            deleter_dec = torch_func_decorator(deleter_orig, func_name, property_accessor="del")
             mark_decorated_function(getter_dec)
             mark_decorated_function(setter_dec)
             mark_decorated_function(deleter_dec)

@@ -1251,6 +1251,7 @@ class PaddleBackend:
             transform_fn_qualname=None,
             transform_fn_source=None,
             unattributed_tensor_args=(),
+            dropped_edge_tensor_args=(),
             is_output_parent=False,
             has_internal_source_ancestor=not is_input and not parents,
             internal_source_ancestors=frozenset(),

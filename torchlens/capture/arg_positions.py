@@ -136,8 +136,14 @@ def extract_tensors_and_params(
         if pos < len(args):
             _append_tensor_or_param(args[pos])
 
+    # An index present in BOTH ``positions`` and ``sequence_positions`` (e.g.
+    # ``_foreach_add`` arg 1: a single Tensor in the ``.Tensor`` overload, a
+    # Tensor list in ``.List``) was already fully extracted above --
+    # ``_append_tensor_or_param`` walks shallow sequences -- so re-walking it
+    # here would duplicate every member's parent edge (round-31 M3).
+    position_set = set(spec.positions)
     for pos in spec.sequence_positions:
-        if pos < len(args):
+        if pos < len(args) and pos not in position_set:
             seq = args[pos]
             if isinstance(seq, (list, tuple)):
                 for item in seq:

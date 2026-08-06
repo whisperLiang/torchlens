@@ -457,6 +457,7 @@ class OpEvent:
     record_context: object | None = None
     capture_spec: object | None = None
     unattributed_tensor_args: tuple[str, ...] = ()
+    dropped_edge_tensor_args: tuple[str, ...] = ()
     input_was_parameter: bool = False
 
 
