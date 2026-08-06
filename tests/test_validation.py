@@ -60,6 +60,7 @@ from torchlens.validation.core import (
     completeness_backstop_counts,
     DEEP_NUMERIC_REPLAY_MIN_REDUCTION_DEPTH,
     ValidationDecisionRecorder,
+    _check_whether_func_on_saved_parents_yields_saved_tensor,
     validate_parents_of_saved_layer,
 )
 from torchlens.validation.status import (
@@ -2911,7 +2912,6 @@ def test_full_is_not_exempt_and_skip_perturbation_registry_is_pinned() -> None:
         "expand_as",
         "exponential_",
         "fill_",
-        "full_like",
         "meshgrid",
         "new_ones",
         "new_zeros",
@@ -3676,6 +3676,62 @@ class _InputDerivedFullModel(nn.Module):
         return torch.full(x.shape, x[0])
 
 
+class _TensorFillFactoryModel(nn.Module):
+    """Create ``full``/``full_like`` outputs from a runtime tensor scalar."""
+
+    def __init__(self, factory_name: str, fill_source: str, use_keyword: bool) -> None:
+        """Store the factory and tensor-scalar source selected by a test case.
+
+        Parameters
+        ----------
+        factory_name:
+            ``"full"`` or ``"full_like"``.
+        fill_source:
+            Runtime tensor-scalar computation to use as the fill value.
+        use_keyword:
+            Whether to pass the tensor through the ``fill_value`` keyword.
+        """
+
+        super().__init__()
+        self.factory_name = factory_name
+        self.fill_source = fill_source
+        self.use_keyword = use_keyword
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return a factory tensor whose values depend on a captured scalar tensor.
+
+        Parameters
+        ----------
+        x:
+            Input tensor supplying both shape/template metadata and fill data.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor filled from the selected runtime tensor scalar.
+        """
+
+        if self.fill_source == "sum":
+            fill_value = x.sum()
+        elif self.fill_source == "max":
+            fill_value = x.max()
+        elif self.fill_source == "intermediate":
+            intermediate = x * 2 + 1
+            fill_value = intermediate.reshape(-1)[-1]
+        else:
+            raise ValueError(f"Unknown fill source: {self.fill_source}")
+
+        if self.factory_name == "full":
+            if self.use_keyword:
+                return torch.full(size=x.shape, fill_value=fill_value)
+            return torch.full(x.shape, fill_value)
+        if self.factory_name == "full_like":
+            if self.use_keyword:
+                return torch.full_like(x, fill_value=fill_value)
+            return torch.full_like(x, fill_value)
+        raise ValueError(f"Unknown factory: {self.factory_name}")
+
+
 def _only_layer_with_func_name(trace: Trace, func_name: str) -> Any:
     """Return the only layer in ``trace`` with the requested function name.
 
@@ -3754,8 +3810,108 @@ def test_input_derived_full_validates_without_an_exemption() -> None:
                 "phase": "replay",
                 "decision": "validated",
                 "reason": "replay_matched",
-            }
+            },
+            {
+                "op_label": _only_layer_with_func_name(trace, "full").layer_label + ":1",
+                "func_name": "full",
+                "phase": "perturbation",
+                "decision": "validated",
+                "reason": "perturbation_changed",
+            },
         ]
+    finally:
+        trace.cleanup()
+
+
+@pytest.mark.parametrize(
+    "factory_name,fill_source,dtype,shape,use_keyword",
+    [
+        ("full", "sum", torch.float32, (2, 3), False),
+        ("full", "max", torch.int64, (4,), True),
+        ("full", "intermediate", torch.float64, (2, 2), False),
+        ("full_like", "sum", torch.float32, (3,), True),
+        ("full_like", "max", torch.int64, (2, 2), False),
+        ("full_like", "intermediate", torch.float64, (2, 3), True),
+    ],
+)
+def test_runtime_tensor_fill_value_is_replayed_and_perturbation_sensitive(
+    factory_name: str,
+    fill_source: str,
+    dtype: torch.dtype,
+    shape: tuple[int, ...],
+    use_keyword: bool,
+) -> None:
+    """Pin runtime tensor fill values as replayable, value-sensitive parents.
+
+    Parameters
+    ----------
+    factory_name:
+        Factory API exercised by the case.
+    fill_source:
+        Tensor-scalar computation supplying the fill value.
+    dtype:
+        Input dtype used by the case.
+    shape:
+        Input and output shape used by the case.
+    use_keyword:
+        Whether the fill tensor is passed by keyword.
+    """
+
+    numel = 1
+    for dimension in shape:
+        numel *= dimension
+    x = torch.arange(1, numel + 1, dtype=dtype).reshape(shape)
+    model = _TensorFillFactoryModel(factory_name, fill_source, use_keyword)
+    trace = trace_fn(model, x, save_arg_values=True, random_seed=123)
+    try:
+        factory_layer = _only_layer_with_func_name(trace, factory_name)
+        fill_domain = "kwargs" if use_keyword else "args"
+        fill_position: str | int = "fill_value" if use_keyword else 1
+        fill_parent = factory_layer.parent_arg_positions[fill_domain][fill_position]
+
+        assert fill_parent in factory_layer.parents
+        assert factory_layer.unattributed_tensor_args == ()
+        if factory_name == "full":
+            assert factory_layer.parents == [fill_parent]
+        else:
+            assert set(factory_layer.parent_arg_positions["args"]) >= {0}
+            assert len(factory_layer.parents) == 2
+
+        expected_output = model(x).detach().clone()
+        assert trace.validate_forward_pass([expected_output]) is True
+
+        replay_result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+            trace,
+            factory_layer.label,
+            perturb=False,
+        )
+        fill_perturbation_result = _check_whether_func_on_saved_parents_yields_saved_tensor(
+            trace,
+            factory_layer.label,
+            perturb=True,
+            layers_to_perturb=[fill_parent],
+        )
+        assert (replay_result.decision, replay_result.reason) == ("validated", "replay_matched")
+        assert (fill_perturbation_result.decision, fill_perturbation_result.reason) == (
+            "validated",
+            "perturbation_changed",
+        )
+
+        factory_decisions = [
+            decision
+            for decision in trace.validation_replay_status.decisions
+            if decision.get("func_name") == factory_name
+        ]
+        assert not any(
+            str(decision.get("reason", "")).startswith("skip_perturbation_entirely")
+            for decision in factory_decisions
+        )
+        assert any(
+            decision.get("phase") == "perturbation"
+            and decision.get("decision") == "validated"
+            and decision.get("reason") == "perturbation_changed"
+            for decision in factory_decisions
+        )
     finally:
         trace.cleanup()
 

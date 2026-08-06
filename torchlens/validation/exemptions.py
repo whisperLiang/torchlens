@@ -72,7 +72,6 @@ SKIP_PERTURBATION_ENTIRELY: Set[str] = {
     "fill_",
     "zeros_like",
     "ones_like",
-    "full_like",
     "rand_like",
     "randn_like",
     "meshgrid",
