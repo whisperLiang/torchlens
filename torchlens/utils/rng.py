@@ -43,6 +43,7 @@ from types import (
     MethodType,
     MethodWrapperType,
     ModuleType,
+    SimpleNamespace,
     TracebackType,
 )
 from typing import Any, Dict, List, TypeVar, cast
@@ -148,6 +149,24 @@ _NUMPY_FRAME_DIGEST_INTERNAL_PATH_PREFIXES = (
     f"{_os_module.path.dirname(torch.__file__)}{_os_module.sep}",
 )
 """Package roots whose internal frames cannot originate user-owned NumPy RNG draws."""
+
+_STDLIB_PATH_PREFIX = f"{_os_module.path.dirname(_os_module.__file__)}{_os_module.sep}"
+"""Filesystem root of the running interpreter's standard library."""
+
+_DEEP_INVENTORY_NODE_CAP = 1_000_000
+"""Defensive per-window walk budget for the frame-reachable RNG inventory (B4).
+
+Matches :data:`_INVENTORY_NODE_CAP` semantics exactly: exhaustion flags
+``deep_inventory_budget_exhausted`` (INCOMPLETE, fail-closed), never a silent
+partial snapshot. Realistic captures walk at most a few thousand nodes (only
+roots the profiled code actually references are expanded); the cap only exists
+so a pathological object graph terminates.
+"""
+
+_INERT_PRIMITIVE_LEAF_TYPES: frozenset[type] = frozenset(
+    {str, bytes, bytearray, memoryview, bool, int, float, complex, type(None)}
+)
+"""Exact value types that can neither be nor inertly hold an RNG receiver."""
 
 
 def aten_qualname_is_seeded_rng(namespace: str | None, qualname: str | None) -> bool:
@@ -1764,6 +1783,18 @@ class host_nondeterminism_monitor:
       thread, including a pre-existing worker. Exhaustion of the defensive
       :data:`_INVENTORY_NODE_CAP` flags ``inventory_budget_exhausted`` (INCOMPLETE),
       never a silent truncation.
+    * **Frame-reachable deep state digest (whole-window belt, B4).** The same
+      before/after digest for numpy RNG receivers DEEPLY reachable from profiled
+      user-frame roots -- named globals including module namespaces, fast locals,
+      helper returns -- through exact builtin containers, plain-object
+      ``__dict__``/``__slots__`` values, nested name-referenced modules, and direct
+      class attributes (:meth:`_deep_inventory_frame_reachable`) -- so a
+      profile-silent numpy>=2 draw through a foreign module attribute chain
+      (``helpers.RNG.random()``) or a nested holder (``HOLDER.inner.gen``) is
+      witnessed. Digest at first reference, ONE compare at ``__exit__`` --
+      thread-independent for every receiver the window's code reaches. Cap
+      exhaustion flags ``deep_inventory_budget_exhausted`` (INCOMPLETE), never a
+      silent truncation.
     * **Class patches (thread-independent belt).** ``random.Random`` / ``random.SystemRandom``
       / ``_random.Random`` draw primitives (the bare-``_random.Random()`` channel; measured
       E1 patchable), plus the ``os.urandom`` / ``os.getrandom`` / ``random._urandom`` entropy
@@ -1796,16 +1827,22 @@ class host_nondeterminism_monitor:
     REALISTIC pre-existing-thread RNG use (a background worker drawing from a MODEL-HELD
     Generator/RandomState/BitGenerator -- held anywhere the inert-reachability walk can
     follow WITHOUT executing user code, incl. class descriptors, weakrefs, and callable
-    interiors; r53 corr/F1) is witnessed thread-independently by the state digest, and an
-    unseeded construction on any thread by the module/class patches. The residual is only
-    an EXTERNALLY-HELD generator drawn on a pre-existing (non-hooked) thread that is
-    reachable ONLY BY EXECUTING USER CODE (a property/descriptor ``__get__`` body,
-    ``__getattr__``, or a callable's return value), of the same class as the adversarial
-    draw+``state`` RESTORE (E4) -- a self-cleaning sequence no py<=3.11 mechanism can
-    witness -- documented in contract s11, NOT a blanket ceiling: the r38 draft's
-    thread-presence INCOMPLETE over-triggered every capture running alongside a benign
-    background thread (DataLoader/Jupyter/pytest), so it is intentionally not applied.
-    Future all-thread coverage is ``sys.monitoring`` (PEP 669, 3.12+, interpreter-wide).
+    interiors; r53 corr/F1 -- or reachable from an in-window profiled frame's roots; B4)
+    is witnessed thread-independently by the state digests, and an unseeded construction
+    on any thread by the module/class patches. The residual is only an EXTERNALLY-HELD
+    generator drawn on a pre-existing (non-hooked) thread -- or, for the profile-silent
+    numpy>=2 method shape, on ANY thread -- that is reachable from NO digest root (the
+    model, or any in-window profiled frame's locals/named globals/returns and their deep
+    inert closure) except BY EXECUTING USER CODE (a property/descriptor ``__get__`` body,
+    ``__getattr__``, or a callable's return value) or through a leafed edge (a function
+    attribute, a hostile container subclass's elements, a stdlib/internal-package
+    namespace stash, a computed module attribute, a ``deque``'s C buffer), of the
+    same class as the adversarial draw+``state`` RESTORE (E4) -- a self-cleaning sequence
+    no py<=3.11 mechanism can witness -- documented in contract s11, NOT a blanket
+    ceiling: the r38 draft's thread-presence INCOMPLETE over-triggered every capture
+    running alongside a benign background thread (DataLoader/Jupyter/pytest), so it is
+    intentionally not applied. Future all-thread coverage is ``sys.monitoring`` (PEP 669,
+    3.12+, interpreter-wide).
     """
 
     def __init__(self, model: Any = None) -> None:
@@ -1822,6 +1859,19 @@ class host_nondeterminism_monitor:
         self._sys_profile_installed = False
         self._threading_profile_installed = False
         self._generator_states: list[tuple[Any, str]] = []
+        # B4: whole-window digests of numpy RNG receivers DEEPLY reachable from
+        # profiled-frame roots (named globals incl. module namespaces, fast locals,
+        # helper returns), digested at first reference and compared at ``__exit__``.
+        # This is the belt for a pre-existing generator the model does NOT hold:
+        # numpy>=2 draw methods emit no profile event, and the per-frame digest only
+        # reaches receivers the drawing frame names directly (plus one inert edge),
+        # so a draw through a foreign module attribute chain
+        # (``helpers.RNG.random()``) or a nested holder (``HOLDER.inner.gen``) was
+        # otherwise unwitnessed -> false VERIFIED.
+        self._deep_generator_states: list[tuple[Any, str]] = []
+        self._deep_walk_seen_ids: set[int] = set()
+        self._deep_inventory_visited: int = 0
+        self._deep_inventory_exhausted: bool = False
         self._tl_globals_ids: frozenset[int] = frozenset()
         self._exempt_ids: frozenset[int] = frozenset()
         self._clock_ccall_keys: dict[tuple[int, str], str] = {}
@@ -2177,10 +2227,12 @@ class host_nondeterminism_monitor:
         shape that emits no profile ``c_call`` event. It covers every materialized
         fast local directly plus globals named by the frame's code object, descending
         one inert edge below those globals through exact built-in containers or a
-        plain-object ``__dict__``. It never walks a shared module namespace or invokes
-        user attribute/iteration hooks. Referenced global names, rather than resolved
-        objects, are cached per code/globals identity so a rebound global cannot evade
-        a later snapshot.
+        plain-object ``__dict__``. It never walks a shared module namespace and never
+        expands locals edges (both are the whole-window
+        :meth:`_deep_inventory_frame_reachable` belt's job -- B4) or invokes user
+        attribute/iteration hooks. Referenced global names, rather than resolved
+        objects, are cached per code/globals identity so a rebound global cannot
+        evade a later snapshot.
 
         Parameters
         ----------
@@ -2226,7 +2278,12 @@ class host_nondeterminism_monitor:
                     snapshots.append((holder, self._digest_rng_instance(holder)))
                 except Exception:
                     self._flag_uncertain("profile_rng_state_read_failed")
-        for candidate in frame.f_locals.values():
+        local_candidates = list(frame.f_locals.values())
+        for candidate in local_candidates:
+            # Locals stay DIRECT-only here (any per-local edge expansion costs ~25%
+            # of a small capture across the thousands of stdlib helper frames the
+            # capture machinery enters); a receiver NESTED below a local is covered
+            # by the B4 window-level deep inventory seeded right below.
             receiver = _numpy_rng_receiver(candidate)
             holder = receiver if receiver is not None else candidate
             if (
@@ -2242,6 +2299,13 @@ class host_nondeterminism_monitor:
                 self._flag_uncertain("profile_rng_state_read_failed")
         if snapshots:
             self._numpy_frame_rng_states[id(frame)] = snapshots
+        # B4: window-level deep inventory of everything this frame can reach (module
+        # namespaces, nested holders, class attributes) -- first reference walks and
+        # digests, repeats cost only set lookups, comparison happens once at __exit__.
+        if self._deep_inventory_seeds_from(frame.f_code):
+            self._deep_inventory_frame_reachable(
+                (*global_candidates, *local_candidates), frame.f_code
+            )
 
     def _compare_numpy_frame_rngs(self, frame: FrameType) -> None:
         """Mark a NumPy RNG receiver whose state changed within a profiled frame.
@@ -2303,6 +2367,10 @@ class host_nondeterminism_monitor:
                 self._flag_uncertain("profile_rng_state_read_failed")
         if not snapshots:
             self._numpy_frame_rng_states.pop(id(caller), None)
+        # B4: a returned holder's nested receivers join the window-level deep
+        # inventory (the one-edge transfer above only reaches direct children).
+        if self._deep_inventory_seeds_from(caller.f_code):
+            self._deep_inventory_frame_reachable((returned,), caller.f_code)
 
     def _classify_c_call(self, frame: Any, arg: Any) -> None:
         # r41 hon1_1: held-reference identity FIRST. A pre-window ``from time import
@@ -3164,6 +3232,258 @@ class host_nondeterminism_monitor:
             return repr(state)
         raise _NotADigestableRng
 
+    @staticmethod
+    def _module_namespace_walk_eligible(module: Any) -> Dict[str, Any] | None:
+        """Return a loaded module's raw namespace when the B4 deep inventory may walk it.
+
+        Eligibility is decided from RAW reads only (the base ``ModuleType`` getset and
+        plain ``dict.get``), so a lazy-loading module ``__getattr__`` (PEP 562) never
+        fires. Skipped namespaces: the three internal package roots
+        (:data:`_NUMPY_FRAME_DIGEST_INTERNAL_PATH_PREFIXES` -- their held engines are
+        exempt singletons or replayable state, and numpy's own namespace is
+        implementation noise), and standard-library modules matched by BOTH name
+        (``sys.stdlib_module_names``) and location (:data:`_STDLIB_PATH_PREFIX`), so a
+        user module that merely SHADOWS a stdlib name stays walked. ``__main__`` is
+        never skipped -- scripts and notebooks hold their generators there.
+        """
+
+        if not isinstance(module, ModuleType):
+            return None
+        try:
+            namespace = vars(ModuleType)["__dict__"].__get__(module)
+        except Exception:
+            return None
+        if not isinstance(namespace, dict):
+            return None
+        name = namespace.get("__name__")
+        top = name.split(".", 1)[0] if isinstance(name, str) else ""
+        filename = namespace.get("__file__")
+        if top != "__main__" and top in _sys_module.stdlib_module_names:
+            if not isinstance(filename, str) or filename.startswith(_STDLIB_PATH_PREFIX):
+                return None
+        if isinstance(filename, str) and filename.startswith(
+            _NUMPY_FRAME_DIGEST_INTERNAL_PATH_PREFIXES
+        ):
+            return None
+        return namespace
+
+    @staticmethod
+    def _deep_inventory_seeds_from(code: CodeType) -> bool:
+        """Return whether a profiled frame's code may seed the B4 deep inventory.
+
+        Stdlib-source frames (``contextlib``/``warnings``/``typing``/... invoked by
+        capture machinery thousands of times per forward) and synthetic-source frames
+        (``<string>`` dataclass shims, ``<eval_with_key>`` fx codegen) never seed it:
+        no realistic numpy receiver chain is WRITTEN in stdlib source (stdlib
+        ``random`` draws are class-patch witnessed and the global engines are
+        replayable state), and exec'd-from-string user code is the documented
+        exec-namespace residual. Without this gate the walk crawls the in-progress
+        capture graph through stdlib helper frames' locals -- measured +230 ms on a
+        400 ms capture with zero coverage gained. The per-frame one-edge digest keeps
+        running for these frames unchanged.
+        """
+
+        filename = code.co_filename
+        return not filename.startswith(_STDLIB_PATH_PREFIX) and not filename.startswith("<")
+
+    def _deep_inventory_frame_reachable(self, candidates: tuple[Any, ...], code: CodeType) -> None:
+        """Digest numpy RNG receivers deeply reachable from profiled-frame roots (B4).
+
+        NumPy>=2 binds its RNG draw methods as profile-silent Cython callables, so a
+        draw is witnessed ONLY by a before/after state digest of a known receiver.
+        The per-frame digest reaches receivers the drawing frame names directly (plus
+        one inert edge) and the model sweep reaches receivers the MODEL holds -- but a
+        pre-existing generator held in a foreign module's namespace
+        (``helpers.RNG.random()``), behind a nested plain holder
+        (``HOLDER.inner.gen``), inside nested builtin containers, or as a direct user
+        class attribute was reachable by user code yet witnessed by NEITHER belt: a
+        provably wrong capture validated VERIFIED+ATTESTED (the B4 false-VERIFIED
+        class). This inventory closes it: every receiver reachable from a profiled
+        user frame's fast locals, named globals, or helper return values through
+        exact builtin containers (subclasses read via the base C implementations, so
+        a hostile override never executes), plain-object ``__dict__``/``__slots__``
+        values (:meth:`_custom_holder_children` -- slot reads through the member
+        descriptor, never ``getattr``), eligible module namespaces, and direct
+        class-attribute values of non-trusted-leaf classes (raw mappingproxy reads;
+        the descriptor protocol never fires on a ``values()`` read) is digested at
+        FIRST REFERENCE and compared once at ``__exit__``; any net state change marks
+        the ceiling channel ``frame_reachable_generator``. The compare itself is
+        thread-independent: a pre-existing worker's draw from a receiver the OWNER's
+        in-window code also reaches is witnessed.
+
+        Frame-triggered (never an unconditional ``sys.modules`` sweep -- measured at
+        ~150 ms/capture in a bare torch env, dominated by torch's own dependency
+        stack) and window-memoized by root id, so a capture that never references an
+        RNG-bearing namespace pays only set lookups. Nested MODULE values descend
+        only when their binding name appears in the referencing code object's
+        ``co_names`` (``pkg.sub.RNG`` names ``sub``), keeping package fan-out
+        proportional to what the code can actually reach; a computed module attribute
+        (``getattr(pkg, name)``) is a documented residual. Budget exhaustion flags
+        ``deep_inventory_budget_exhausted`` (INCOMPLETE) -- never a silent partial
+        snapshot. Other documented residuals (contract s11): receivers in namespaces
+        no in-window frame references, stdlib/internal-package namespace stashes,
+        function-attribute holders, and the self-cleaning draw+state-restore.
+
+        Parameters
+        ----------
+        candidates:
+            Frame-visible root values (fast locals, resolved named globals, or a
+            helper return value).
+        code:
+            Code object of the referencing frame (its ``co_names`` guide nested
+            module descent).
+        """
+
+        if self._deep_inventory_exhausted:
+            return
+        snapshots = self._deep_generator_states
+        seen_ids = self._deep_walk_seen_ids
+        visited_nodes = self._deep_inventory_visited
+        try:
+            pending = [
+                value
+                for value in candidates
+                if type(value) not in _INERT_PRIMITIVE_LEAF_TYPES and id(value) not in seen_ids
+            ]
+            if not pending:
+                return
+            co_names: frozenset[str] | None = None
+            while pending:
+                value = pending.pop()
+                value_type = type(value)
+                if value_type in _INERT_PRIMITIVE_LEAF_TYPES or id(value) in seen_ids:
+                    continue
+                seen_ids.add(id(value))
+                visited_nodes += 1
+                if visited_nodes > _DEEP_INVENTORY_NODE_CAP:
+                    self._deep_inventory_exhausted = True
+                    self._flag_uncertain("deep_inventory_budget_exhausted")
+                    return
+                if isinstance(value, _NUMPY_RNG_INSTANCE_TYPES):
+                    if id(value) in self._exempt_ids:
+                        continue
+                    try:
+                        snapshots.append((value, self._digest_rng_instance(value)))
+                    except Exception:
+                        self._flag_uncertain("inventory_state_read_failed")
+                    continue
+                if value_type in (BuiltinFunctionType, MethodType):
+                    receiver = _numpy_rng_receiver(value)
+                    if (
+                        receiver is not None
+                        and id(receiver) not in seen_ids
+                        and id(receiver) not in self._exempt_ids
+                    ):
+                        seen_ids.add(id(receiver))
+                        try:
+                            snapshots.append((receiver, self._digest_rng_instance(receiver)))
+                        except Exception:
+                            self._flag_uncertain("inventory_state_read_failed")
+                    continue
+                # Container SUBCLASSES read through the base C implementations, so a
+                # hostile override never executes (a ``UserDict``'s ``.data`` arrives
+                # via the recursable-holder branch instead).
+                if isinstance(value, dict):
+                    pending.extend(dict.keys(value))
+                    pending.extend(dict.values(value))
+                    if value_type is not dict and self._is_recursable_custom_holder(value):
+                        pending.extend(self._custom_holder_children(value))
+                    continue
+                if isinstance(value, (list, tuple)):
+                    pending.extend(
+                        list.__iter__(value) if isinstance(value, list) else tuple.__iter__(value)
+                    )
+                    continue
+                if isinstance(value, (set, frozenset)):
+                    pending.extend(
+                        set.__iter__(value) if isinstance(value, set) else frozenset.__iter__(value)
+                    )
+                    continue
+                if isinstance(value, ModuleType):
+                    namespace = self._module_namespace_walk_eligible(value)
+                    if namespace is None:
+                        continue
+                    if co_names is None:
+                        co_names = frozenset(code.co_names)
+                    for name, member in namespace.items():
+                        # A nested module descends only when the referencing code can
+                        # actually reach it by name; everything else walks normally.
+                        if isinstance(member, ModuleType) and name not in co_names:
+                            continue
+                        pending.append(member)
+                    continue
+                if isinstance(value, type):
+                    # Direct class-attribute surface only -- NO MRO cascade: a
+                    # module-defined base class is reachable through its own defining
+                    # namespace, so re-enqueueing bases only multiplies the walk.
+                    if self._is_trusted_leaf_class(value):
+                        continue
+                    try:
+                        raw_dict = type.__dict__["__dict__"].__get__(value)
+                    except Exception:
+                        continue
+                    pending.extend(
+                        attr
+                        for attr in raw_dict.values()
+                        if self._module_namespace_class_attr_eligible(attr)
+                    )
+                    continue
+                if value_type is SimpleNamespace:
+                    # ``types.SimpleNamespace`` is the idiomatic config-object shape but
+                    # its type roots in the stdlib leaf set, so the holder gate below
+                    # would leaf it; its plain ``__dict__`` is inert to read.
+                    pending.extend(object.__getattribute__(value, "__dict__").values())
+                    continue
+                if isinstance(value, (FunctionType, MethodWrapperType)):
+                    # Callable leaf (documented residual: function-ATTRIBUTE-held
+                    # receivers). RNG-bound callables were already extracted above.
+                    continue
+                if self._is_recursable_custom_holder(value):
+                    pending.extend(self._custom_holder_children(value))
+                    # An instance's CLASS is a holder surface too (dynamically created
+                    # classes are in no namespace); dedup keeps this a single filtered
+                    # dict read per distinct class.
+                    pending.append(value_type)
+        except Exception:
+            self._flag_uncertain("inventory_scan_failed")
+        finally:
+            self._deep_inventory_visited = visited_nodes
+
+    @staticmethod
+    def _module_namespace_class_attr_eligible(value: Any) -> bool:
+        """Return whether a raw class-dict value can be or inertly hold a receiver.
+
+        Methods, descriptors, properties, nested classes, and module references are
+        implementation noise on the class surface (nested classes and modules are
+        reached through their own roots); receivers, RNG-bound callables, exact
+        builtin containers, and plain holder objects stay walked.
+        """
+
+        value_type = type(value)
+        if value_type in _INERT_PRIMITIVE_LEAF_TYPES:
+            return False
+        if isinstance(value, _NUMPY_RNG_INSTANCE_TYPES) or _numpy_rng_receiver(value) is not None:
+            return True
+        if value_type in (dict, list, tuple, set, frozenset):
+            return True
+        if isinstance(
+            value,
+            (
+                type,
+                ModuleType,
+                FunctionType,
+                BuiltinFunctionType,
+                MethodType,
+                MethodWrapperType,
+                staticmethod,
+                classmethod,
+                property,
+                GetSetDescriptorType,
+            ),
+        ):
+            return False
+        return True
+
     # -- context protocol ---------------------------------------------------------
 
     def __enter__(self) -> HostRngMonitorResult:
@@ -3352,5 +3672,11 @@ class host_nondeterminism_monitor:
             try:
                 if self._digest_rng_instance(holder) != before:
                     self._mark("model_attribute_generator")
+            except Exception:
+                self._flag_uncertain("inventory_compare_failed")
+        for holder, before in self._deep_generator_states:
+            try:
+                if self._digest_rng_instance(holder) != before:
+                    self._mark("frame_reachable_generator")
             except Exception:
                 self._flag_uncertain("inventory_compare_failed")

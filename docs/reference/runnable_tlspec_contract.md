@@ -1830,7 +1830,14 @@ positives mark on ANY COVERED thread (thread-independent module/class patches; t
 model-attribute generator digest; and every profile-hooked thread -- the owner plus threads
 started in-window). An IN-WINDOW cross-thread external-generator draw (hon1_1/corr2_2) is caught
 by `threading.setprofile`; an owner-thread numpy instance draw and the immutable `datetime`
-readers by `sys.setprofile`; a model-held generator on any thread by its state digest; unseeded
+readers by `sys.setprofile`; a model-held generator on any thread by its state digest; a
+generator DEEPLY reachable from any in-window profiled frame's roots -- named globals including
+foreign MODULE namespaces (`helpers.RNG`), fast locals, helper returns, behind nested plain
+holders/builtin containers/name-referenced nested modules, or as a direct class attribute -- on
+any thread by the whole-window frame-reachable deep digest (B4 -- digest at first reference, one
+compare at exit; frame-triggered and window-memoized, never a process-wide `gc` or `sys.modules`
+scan; module-namespace expansion skips stdlib and the torch/numpy/torchlens package roots; cap
+exhaustion fails closed as `deep_inventory_budget_exhausted`); unseeded
 construction and Python `random` by the construction/class patches. Held-reference spellings of
 the module-attr channels mark on the owner and every in-window hooked thread by original-builtin
 identity; module-attr patched spellings remain thread-independent. The monitor does NOT ceiling a
@@ -1846,10 +1853,28 @@ call surface, including C-mediated indirect calls of held builtins (a
 builtin); (iii) legacy `RandomState()` C-level CONSTRUCTION entropy (its DRAWS stay
 digest/profile-witnessed); (iv) a generator drawn on a PRE-EXISTING
 (already-running, non-owner, non-hooked) thread -- which `threading.setprofile` cannot reach on
-Python <= 3.11 -- that is reachable only BY EXECUTING USER CODE (a property/descriptor `__get__`
-body, `__getattr__`, or a callable's return value) or held ONLY in a SHARED module-global
-namespace (the r55 C6 shared-namespace exclusion, explicit: loaded-module `__dict__` identities
-are never expanded). Every INERTLY-followable model-rooted reference edge IS
+Python <= 3.11 -- or, for the profile-silent numpy>=2 Cython method shape, on ANY thread, that is
+reachable from NO digest root except BY EXECUTING USER CODE (a property/descriptor `__get__`
+body, `__getattr__`, or a callable's return value) or through a deliberately leafed edge: a
+FUNCTION attribute (`fn.rng = gen`), a hostile builtin-container SUBCLASS's elements, a
+`deque`/C-internal buffer, a computed module attribute (`getattr(pkg, name)`), or a stash INSIDE
+a stdlib or torch/numpy/torchlens package namespace.
+The shared-module-namespace clause of this residual is NARROWED to unreferenced namespaces (B4,
+active for the profile-silent numpy>=2 method shape; numpy 1.x owner/in-window-thread draws are
+already receiver-classified by `c_call`):
+numpy RNG receivers deeply reachable from any IN-WINDOW PROFILED FRAME's roots (named globals
+including foreign module namespaces, fast locals, helper returns) through exact builtin
+containers, plain-object `__dict__`/`__slots__` values, name-referenced nested modules, and
+direct class attributes are digested at first reference and compared whole-window --
+thread-independently, so a pre-existing worker's draw from a receiver the owner's in-window code
+has already referenced is witnessed (`frame_reachable_generator`; cap exhaustion flags
+`deep_inventory_budget_exhausted`, INCOMPLETE, never silent -- the r55 C6 exclusion of
+loaded-module `__dict__` identities remains in force for the MODEL-rooted `gc.get_referents`
+walk, whose explosion it prevents; a namespace NO in-window frame references stays residual; a
+stdlib-source or synthetic-source (`<string>`/fx-codegen) frame never seeds the deep inventory --
+exec'd-from-string user code remains the documented exec-namespace residual). Fast LOCALS stay
+direct-only in the per-frame digest; a receiver nested below a local is covered by the same deep
+inventory. Every INERTLY-followable model-rooted reference edge IS
 walked by the model inventory (the r55 authoritative `gc.get_referents` enumeration in item 2
 above -- CPython `tp_traverse`, complete by construction), so descriptor-held, weakref-held,
 class-attribute, closure/default/kwdefault/annotation/partial/property-interior,
