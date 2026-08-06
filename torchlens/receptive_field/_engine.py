@@ -14,7 +14,13 @@ from fractions import Fraction
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from ..capture.arg_positions import _normalize_func_name
+import torch
+
+from ..capture.arg_positions import (
+    VARIADIC_TENSOR_ARG_FUNCS,
+    _normalize_func_name,
+    _schema_arg_is_parent_candidate,
+)
 from ._engine_descriptor import _descriptor
 from ._engine_geometry import (
     _Affine,
@@ -62,6 +68,45 @@ class _ReceptiveFieldSolution:
     descriptors: Mapping[tuple[str, str], ReceptiveField]
     per_op: Mapping[str, Mapping[str, ReceptiveField]]
     states: Mapping[tuple[str, str], _InputState]
+
+
+@dataclass(frozen=True)
+class _BranchState:
+    """Geometry state plus whether ancestry reaches only through a control edge."""
+
+    state: _InputState
+    geometry_neutral: bool
+
+
+@dataclass(frozen=True)
+class _SchemaOperandSlots:
+    """ATen schema slots partitioned into data operands and metadata-only positions."""
+
+    operand_positions: frozenset[int]
+    operand_names: frozenset[str]
+    seen_positions: frozenset[int]
+    seen_names: frozenset[str]
+    int_list_positions: frozenset[int]
+
+
+_SCHEMA_OPERAND_SLOTS_CACHE: dict[str, _SchemaOperandSlots | None] = {}
+_SCHEMA_METADATA_ONLY_BASE_TYPES = frozenset(
+    {
+        "int",
+        "SymInt",
+        "bool",
+        "str",
+        "Device",
+        "Generator",
+        "AnyEnumType",
+        "ScalarType",
+        "Layout",
+        "MemoryFormat",
+        "Dimname",
+        "QScheme",
+        "Stream",
+    }
+)
 
 
 def _is_input_seed(op: Op) -> bool:
@@ -198,24 +243,33 @@ def _solve_uncached(
         for op in operations
         for reference in (op.label, op.layer_label, op._layer_label_raw)
     }
-    states_by_op: dict[str, dict[str, _InputState]] = {}
+    states_by_op: dict[str, dict[str, _BranchState]] = {}
 
     for op in _topological_operations(operations, by_reference):
         if seed_predicate(op):
             seed = _seed_input(op)
-            states_by_op[op.label] = {seed.io_role: seed}
+            states_by_op[op.label] = {
+                seed.io_role: _BranchState(state=seed, geometry_neutral=False)
+            }
             continue
 
         parents = tuple(by_reference[label] for label in op.parents if label in by_reference)
         parent_states = tuple(states_by_op.get(parent.label, {}) for parent in parents)
         result, rule_name = _rule_result(op)
-        branches: dict[str, list[_InputState]] = defaultdict(list)
+        branches: dict[str, list[_BranchState]] = defaultdict(list)
         for parent, states in zip(parents, parent_states):
-            for role, state in states.items():
-                branches[role].append(_apply_rule(op, parent, state, result, rule_name))
+            for role, branch in states.items():
+                branches[role].append(
+                    _BranchState(
+                        state=_apply_rule(op, parent, branch.state, result, rule_name),
+                        geometry_neutral=(
+                            branch.geometry_neutral or _edge_is_geometry_neutral(op, parent)
+                        ),
+                    )
+                )
 
         states_by_op[op.label] = {
-            role: _merge_states(op, role_states, rule_name)
+            role: _merge_branch_states(op, role_states, rule_name)
             for role, role_states in branches.items()
         }
 
@@ -223,8 +277,14 @@ def _solve_uncached(
     per_op: dict[str, Mapping[str, ReceptiveField]] = {}
     flattened_states: dict[tuple[str, str], _InputState] = {}
     for op in operations:
+        op_branches = states_by_op.get(op.label, {})
+        if op_branches and all(branch.geometry_neutral for branch in op_branches.values()):
+            continue
         op_descriptors: dict[str, ReceptiveField] = {}
-        for role, state in states_by_op.get(op.label, {}).items():
+        for role, branch in op_branches.items():
+            if branch.geometry_neutral:
+                continue
+            state = branch.state
             descriptor = _descriptor(op, state)
             descriptors[(op.label, role)] = descriptor
             flattened_states[(op.label, role)] = state
@@ -854,48 +914,232 @@ def _apply_axis_map(
     return replace(state, axes=tuple(axes), notes=notes, rule=rule_name)
 
 
-def _merge_states(op: Op, branches: Sequence[_InputState], rule_name: str) -> _InputState:
-    """Union all parent branches for one model input at a merge operation."""
+def _schema_type_base(type_text: str) -> str:
+    """Strip optional/list wrappers from a rendered backend schema type."""
+
+    text = type_text.strip()
+    while True:
+        if text.endswith("?"):
+            text = text[:-1].strip()
+            continue
+        if text.endswith("[]"):
+            text = text[:-2].strip()
+            continue
+        for wrapper in ("Optional[", "List["):
+            if text.startswith(wrapper) and text.endswith("]"):
+                text = text[len(wrapper) : -1].strip()
+                break
+        else:
+            return text
+
+
+def _schema_type_is_metadata_only(type_text: str) -> bool:
+    """Return whether a schema type can carry only shape/control metadata."""
+
+    return _schema_type_base(type_text) in _SCHEMA_METADATA_ONLY_BASE_TYPES
+
+
+def _schema_type_is_int_list(type_text: str) -> bool:
+    """Return whether a schema type is a variadic integer size list."""
+
+    text = type_text.strip()
+    if text.startswith("Optional[") and text.endswith("]"):
+        text = text[len("Optional[") : -1].strip()
+    if text.endswith("?"):
+        text = text[:-1].strip()
+    return text in {"List[int]", "List[SymInt]", "int[]", "SymInt[]"}
+
+
+def _compute_schema_operand_slots(canonical: str) -> _SchemaOperandSlots | None:
+    """Derive conservative data-versus-metadata slots from an ATen packet."""
+
+    packet = getattr(torch.ops.aten, canonical, None)
+    if packet is None:
+        return None
+    operand_positions: set[int] = set()
+    operand_names: set[str] = set()
+    seen_positions: set[int] = set()
+    seen_names: set[str] = set()
+    int_list_positions: set[int] = set()
+    found_schema = False
+    for overload_name in packet.overloads():
+        schema = getattr(getattr(packet, overload_name, None), "_schema", None)
+        if schema is None:
+            continue
+        found_schema = True
+        for index, schema_arg in enumerate(getattr(schema, "arguments", ()) or ()):
+            arg_name = getattr(schema_arg, "name", None)
+            seen_positions.add(index)
+            if isinstance(arg_name, str):
+                seen_names.add(arg_name)
+            if not _schema_arg_is_parent_candidate(schema_arg):
+                continue
+            type_text = str(getattr(schema_arg, "type", ""))
+            if _schema_type_is_int_list(type_text):
+                int_list_positions.add(index)
+            if not _schema_type_is_metadata_only(type_text):
+                operand_positions.add(index)
+                if isinstance(arg_name, str):
+                    operand_names.add(arg_name)
+    if not found_schema:
+        return None
+    return _SchemaOperandSlots(
+        operand_positions=frozenset(operand_positions),
+        operand_names=frozenset(operand_names),
+        seen_positions=frozenset(seen_positions),
+        seen_names=frozenset(seen_names),
+        int_list_positions=frozenset(int_list_positions),
+    )
+
+
+def _schema_edge_is_metadata_only(func_name: str, arg_kind: str, arg_path: object) -> bool:
+    """Return whether an edge is schema-proven shape/control metadata, failing closed."""
+
+    if _normalize_func_name(func_name) in VARIADIC_TENSOR_ARG_FUNCS:
+        return False
+    canonical = func_name.strip("_")
+    if canonical not in _SCHEMA_OPERAND_SLOTS_CACHE:
+        _SCHEMA_OPERAND_SLOTS_CACHE[canonical] = _compute_schema_operand_slots(canonical)
+    slots = _SCHEMA_OPERAND_SLOTS_CACHE[canonical]
+    if slots is None or not isinstance(arg_path, tuple) or not arg_path:
+        return False
+    top = arg_path[0]
+    if arg_kind == "keyword" and isinstance(top, str):
+        normalized = _normalize_func_name(top)
+        if any(_normalize_func_name(name) == normalized for name in slots.operand_names):
+            return False
+        return any(_normalize_func_name(name) == normalized for name in slots.seen_names)
+    if arg_kind != "positional" or not isinstance(top, int):
+        return False
+    if top in slots.operand_positions:
+        return False
+    if top in slots.seen_positions:
+        return True
+    return any(position <= top for position in slots.int_list_positions)
+
+
+def _edge_record_parent_label(record: object) -> str | None:
+    """Return one edge record's parent label across current and legacy shapes."""
+
+    label = getattr(record, "parent_label", None)
+    if isinstance(label, str):
+        return label
+    if isinstance(record, tuple) and record and isinstance(record[0], str):
+        return record[0]
+    return None
+
+
+def _edge_is_geometry_neutral(op: Op, parent: Op) -> bool:
+    """Return whether one parent reaches ``op`` only through scalar control metadata."""
+
+    parent_references = {parent.label, parent.layer_label, parent._layer_label_raw}
+    records = tuple(
+        record
+        for record in getattr(op, "edge_uses", ())
+        if _edge_record_parent_label(record) in parent_references
+    )
+    if not records:
+        return False
+    edge_kinds = tuple(getattr(record, "edge_use", None) for record in records)
+    if all(kind == "control" for kind in edge_kinds):
+        return True
+    if tuple(parent.shape) or getattr(op.source_trace, "backend", None) != "torch":
+        return False
+    for record, edge_kind in zip(records, edge_kinds):
+        if edge_kind == "control":
+            continue
+        arg_kind = getattr(record, "arg_kind", None)
+        arg_path = getattr(record, "arg_path", None)
+        if not isinstance(arg_kind, str) or not _schema_edge_is_metadata_only(
+            op.func_name, arg_kind, arg_path
+        ):
+            return False
+    return True
+
+
+def _merge_branch_states(op: Op, branches: Sequence[_BranchState], rule_name: str) -> _BranchState:
+    """Union data-bearing branches without letting scalar control ancestry erase them."""
 
     if len(branches) == 1:
         return branches[0]
-    taints = [branch.taint for branch in branches if branch.taint is not None]
-    notes = _unique_notes(*(branch.notes for branch in branches))
-    if taints:
-        taint = max(taints, key=lambda status: _TAINT_ORDER[status])
-        return replace(
-            branches[0], axes=None, taint=taint, notes=notes, rule=rule_name, merge_seen=True
-        )
-    if any(branch.axes is None for branch in branches):
-        return replace(
-            branches[0],
-            axes=None,
-            taint=ReceptiveFieldStatus.UNKNOWN,
-            notes=notes,
-            rule=rule_name,
-            merge_seen=True,
+
+    data_branches = [branch.state for branch in branches if not branch.geometry_neutral]
+    geometry_neutral = not data_branches
+    if geometry_neutral:
+        data_branches = [branch.state for branch in branches]
+    elif len(data_branches) == 1:
+        state = data_branches[0]
+        neutral_note = f"{op.label}: scalar/control-only ancestry contributes no spatial geometry"
+        return _BranchState(
+            state=replace(
+                state,
+                notes=_unique_notes(state.notes, (neutral_note,)),
+                rule=rule_name,
+                merge_seen=True,
+            ),
+            geometry_neutral=False,
         )
 
-    axis_count = len(branches[0].input_shape)
+    taints = [branch.taint for branch in data_branches if branch.taint is not None]
+    notes = _unique_notes(*(branch.notes for branch in data_branches))
+    if taints:
+        taint = max(taints, key=lambda status: _TAINT_ORDER[status])
+        return _BranchState(
+            state=replace(
+                data_branches[0],
+                axes=None,
+                taint=taint,
+                notes=notes,
+                rule=rule_name,
+                merge_seen=True,
+            ),
+            geometry_neutral=geometry_neutral,
+        )
+    if any(branch.axes is None for branch in data_branches):
+        return _BranchState(
+            state=replace(
+                data_branches[0],
+                axes=None,
+                taint=ReceptiveFieldStatus.UNKNOWN,
+                notes=notes,
+                rule=rule_name,
+                merge_seen=True,
+            ),
+            geometry_neutral=geometry_neutral,
+        )
+
+    axis_count = len(data_branches[0].input_shape)
     merged_axes: list[_AxisState] = []
     merge_notes: list[str] = []
     for axis_index in range(axis_count):
-        axis_branches = [branch.axes[axis_index] for branch in branches if branch.axes is not None]
+        axis_branches = [
+            branch.axes[axis_index] for branch in data_branches if branch.axes is not None
+        ]
         merged_axis, note = _merge_axes(op, axis_branches)
         merged_axes.append(merged_axis)
         if note is not None:
             merge_notes.append(note)
-    batch_axes = {branch.batch_axis for branch in branches}
+    batch_axes = {branch.batch_axis for branch in data_branches}
     batch_axis = batch_axes.pop() if len(batch_axes) == 1 else None
-    return replace(
-        branches[0],
-        axes=tuple(merged_axes),
-        taint=None,
-        notes=notes + tuple(merge_notes),
-        rule=rule_name,
-        batch_axis=batch_axis,
-        merge_seen=True,
+    return _BranchState(
+        state=replace(
+            data_branches[0],
+            axes=tuple(merged_axes),
+            taint=None,
+            notes=notes + tuple(merge_notes),
+            rule=rule_name,
+            batch_axis=batch_axis,
+            merge_seen=True,
+        ),
+        geometry_neutral=geometry_neutral,
     )
+
+
+def _merge_states(op: Op, branches: Sequence[_InputState], rule_name: str) -> _InputState:
+    """Union ordinary geometry branches for receptive and projective solvers."""
+
+    wrapped = tuple(_BranchState(state=branch, geometry_neutral=False) for branch in branches)
+    return _merge_branch_states(op, wrapped, rule_name).state
 
 
 def _merge_axes(op: Op, branches: Sequence[_AxisState]) -> tuple[_AxisState, str | None]:
@@ -1035,6 +1279,12 @@ def _geometry_args_snapshot(op: Op) -> tuple[object, ...]:
     )
 
 
+def _edge_uses_snapshot(op: Op) -> tuple[str, ...]:
+    """Snapshot semantic edge records consumed by control-branch classification."""
+
+    return tuple(_snapshot_value(record) for record in getattr(op, "edge_uses", ()) or ())
+
+
 def _graph_revision(trace: Trace) -> tuple[object, ...]:
     """Build a stable structural fingerprint that invalidates cache after graph edits.
 
@@ -1052,6 +1302,7 @@ def _graph_revision(trace: Trace) -> tuple[object, ...]:
             op.io_role,
             op.func_name,
             _geometry_args_snapshot(op),
+            _edge_uses_snapshot(op),
         )
         for op in trace.layer_list
         if _operation_is_live(op)
