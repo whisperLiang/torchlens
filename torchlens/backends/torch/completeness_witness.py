@@ -1198,6 +1198,50 @@ on deep chains stay O(1). Taint is never cached: it fails the read closed immedi
 is rare by construction. Weak-keyed off the schema; dropped with the Trace."""
 
 
+_STORAGE_REBIND_BARRIER_LABELS: "weakref.WeakKeyDictionary[Any, set[str]]" = (
+    weakref.WeakKeyDictionary()
+)
+"""Per-trace raw labels of storage-SWAPPING ``.data=`` rebind ops (r28 reconcile).
+
+A ``t.data = rhs`` whose RHS lives on a DIFFERENT storage object swaps the
+receiver's storage pointer -- the exact laundering primitive the r79/r81/r85
+session belts refuse to attribute verdict-steering facts across (stale/forged
+stamp launders, plain-attr and registered-buffer rebind layout branches). The
+capture graph legitimately threads consumers through the emitted rebind op
+(round-31 M6), but ancestry rooted through one of these labels must FAIL CLOSED
+for layout/witness attribution exactly as the pre-M6 unattributed break did:
+:func:`_layout_ancestry_tainted` treats a barrier label like an op with
+``unattributed_tensor_args``. A pointer-PRESERVING rebind (``y.data =
+y.view(...)``) is never registered here, so honest same-storage siblings keep
+their attribution (r85) and input-strided same-storage rebinds keep honest
+divergence semantics (hon1 V6)."""
+
+
+def record_storage_rebind_barrier(trace: Any, raw_label: str) -> None:
+    """Register one storage-swapping rebind op label as an ancestry barrier.
+
+    Parameters
+    ----------
+    trace:
+        Active capture Trace.
+    raw_label:
+        The rebind op's raw capture label (e.g. ``"data_1_3_raw"``).
+    """
+
+    labels = _STORAGE_REBIND_BARRIER_LABELS.get(trace)
+    if labels is None:
+        labels = set()
+        _STORAGE_REBIND_BARRIER_LABELS[trace] = labels
+    labels.add(raw_label)
+
+
+def storage_rebind_barrier_labels(trace: Any) -> frozenset[str]:
+    """Return the storage-swapping rebind barrier labels recorded for one trace."""
+
+    labels = _STORAGE_REBIND_BARRIER_LABELS.get(trace)
+    return frozenset(labels) if labels else frozenset()
+
+
 def _layout_ancestry_tainted(trace: Any, by_raw_label: "Mapping[str, Any]", label: str) -> bool:
     """Return whether a logged event's transitive traced ancestry is BROKEN (r75 F1).
 
@@ -1219,6 +1263,7 @@ def _layout_ancestry_tainted(trace: Any, by_raw_label: "Mapping[str, Any]", labe
         _LAYOUT_ANCESTRY_CLEAN[trace] = clean
     if label in clean:
         return False
+    rebind_barriers = _STORAGE_REBIND_BARRIER_LABELS.get(trace)
     stack = [label]
     visited: set[str] = set()
     while stack:
@@ -1230,6 +1275,12 @@ def _layout_ancestry_tainted(trace: Any, by_raw_label: "Mapping[str, Any]", labe
         if event is None:
             return True
         if getattr(event, "unattributed_tensor_args", None):
+            return True
+        # r28 reconcile: a storage-SWAPPING ``.data=`` rebind op is an ancestry
+        # barrier -- the r79/r81 belt posture never attributes verdict-steering
+        # facts across a storage-pointer swap, even though the capture graph
+        # honestly threads the rebind's consumers to its RHS producer.
+        if rebind_barriers and current in rebind_barriers:
             return True
         stack.extend(edge.parent_label_raw for edge in (getattr(event, "parents", None) or ()))
     clean.update(visited)

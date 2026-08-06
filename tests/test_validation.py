@@ -2909,9 +2909,7 @@ def test_full_is_not_exempt_and_skip_perturbation_registry_is_pinned() -> None:
     assert sorted(SKIP_PERTURBATION_ENTIRELY) == [
         "broadcast_tensors",
         "deform_conv2d",
-        "expand_as",
         "exponential_",
-        "fill_",
         "meshgrid",
         "new_ones",
         "new_zeros",
@@ -2930,6 +2928,10 @@ def test_full_is_not_exempt_and_skip_perturbation_registry_is_pinned() -> None:
     assert "full" not in SKIP_PERTURBATION_ENTIRELY
     assert "full" not in CUSTOM_EXEMPTION_CHECKS
     assert "full" not in STRUCTURAL_ARG_POSITIONS
+    # Round-31 narrowing: fill_/expand_as keep their VALUE edges tested; only
+    # the genuinely structural slots are exempt.
+    assert STRUCTURAL_ARG_POSITIONS["fill_"] == {0}
+    assert STRUCTURAL_ARG_POSITIONS["expand_as"] == {1}
 
 
 def test_copy_source_is_value_sensitive_and_destination_is_structural() -> None:

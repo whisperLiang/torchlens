@@ -1365,6 +1365,17 @@ def _callable_registry_contradiction(
         recorded = _normalized_callable_name(raw_recorded)
         if recorded is None or recorded == authority:
             continue
+        # Sanctioned canonicalization pair (round-31 M6, r28 reconcile): the
+        # ``Tensor.data`` surface records the canonical ``detach`` callable as
+        # its execution authority -- the getter under the ``detach`` op name,
+        # the setter (``t.data = rhs``, logged over the RHS only) under the
+        # user-facing ``"data"`` op name. A ``data``-named op whose authority
+        # is ``detach`` is therefore the artifact's own documented recording,
+        # not a self-contradiction. One direction only: any OTHER authority for
+        # a ``data`` op, and a ``detach``-named op with a non-detach authority,
+        # still refuse.
+        if recorded == "data" and authority == "detach":
+            continue
         return str(raw_recorded), op_label
     return None
 

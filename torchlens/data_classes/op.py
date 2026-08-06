@@ -179,6 +179,7 @@ _LAYER_PASS_LOG_CONTAINER_DEFAULTS: dict[str, Any] = {
     "transform_chain": (),
     "transform_config": {},
     "unattributed_tensor_args": (),
+    "dropped_edge_tensor_args": (),
     "parent_params": [],
     "_param_barcodes": [],
     "parent_param_ops": {},
@@ -1040,6 +1041,7 @@ class Op:
         "transform_fn_qualname": FieldPolicy.KEEP,
         "transform_fn_source": FieldPolicy.KEEP,
         "unattributed_tensor_args": FieldPolicy.KEEP,
+        "dropped_edge_tensor_args": FieldPolicy.KEEP,
         "parent_params": FieldPolicy.KEEP,
         "_param_barcodes": FieldPolicy.KEEP,
         "parent_param_ops": FieldPolicy.KEEP,
@@ -1436,6 +1438,7 @@ class Op:
         self.transform_fn_qualname = fields_dict["transform_fn_qualname"]
         self.transform_fn_source = fields_dict["transform_fn_source"]
         self.unattributed_tensor_args = fields_dict["unattributed_tensor_args"]
+        self.dropped_edge_tensor_args = fields_dict["dropped_edge_tensor_args"]
 
         # Param info:
         self.parent_params = fields_dict["parent_params"]

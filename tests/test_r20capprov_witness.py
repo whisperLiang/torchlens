@@ -17,12 +17,15 @@ recorded parents, so branch (2) wrongly promoted it to an error. This broke
 ``test_packed_sequence`` (LSTM internal ``h0``/``c0`` allocation) and
 ``test_longformer`` (windowed-attention dynamic dims).
 
-The fix narrows branch (2) so it suppresses a provenanced tensor ONLY at a
-schema-confirmed non-operand (size/shape) position. The authority is the ATen
-**schema** (ground truth), not the local ``FUNC_ARG_SPECS`` -- so a dropped edge
-at a genuine Tensor-operand position (including one caused by an under-specified
-spec) still fires. An UN-provenanced tensor at any position is caught earlier by
-branch (1) and is unaffected by the narrowing, so no capture gap can be masked.
+Round-31 H2 superseded the schema classifier that used to narrow branch (2):
+a runtime TENSOR at any input slot -- including schema-typed ``int``/``Scalar``
+control slots such as factory size dims -- is a real data dependency, and the
+extraction coverage guard now records it as a graph PARENT. The dynamic-shape
+families that motivated the old narrowing therefore no longer produce
+unattributed provenanced tensors at all (the size producer is an attributed
+parent), and branch (2) stays armed at EVERY slot: a provenanced tensor missing
+from the recorded parents is a dropped edge wherever it sits. An UN-provenanced
+tensor at any position is caught earlier by branch (1), unchanged.
 """
 
 import warnings
@@ -32,7 +35,6 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
-from torchlens.backends.torch.ops import _arg_position_is_tensor_operand
 
 _PROVENANCE_MATCH = "no graph/source provenance"
 
@@ -151,35 +153,19 @@ def test_foreign_unprovenanced_operand_arg_still_flags() -> None:
         tl.trace(_ForeignOperand().eval(), torch.randn(2, 3, 4))
 
 
-def test_arg_position_operand_classifier_contract() -> None:
-    """The schema-authoritative operand classifier separates the two classes.
+def test_provenanced_dynamic_size_arg_becomes_recorded_parent() -> None:
+    """Round-31 H2: a traced tensor consumed as a size arg IS a graph parent.
 
-    This is the exact new condition gating branch (2). Data-operand slots must
-    classify as operand (``True`` -> keep flagging); schema-confirmed size/shape
-    slots must classify as non-operand (``False`` -> suppress). ``polygamma``
-    arg1 is the incomplete-spec guard: the ATen schema types it ``Tensor`` even
-    though a corrupted ``FUNC_ARG_SPECS`` could drop it, so the witness still
-    fires there. Uncertain authority (variadic ops, no ATen schema) fails safe.
+    The old schema classifier suppressed the witness at size/shape slots
+    because the graph builder deliberately excluded them from parents. That
+    premise is gone: extraction's runtime coverage guard records the traced
+    size producer as a real parent (its value determines the output), so the
+    benign case that motivated the suppression no longer exists and the
+    witness can stay armed at every slot.
     """
 
-    # Data-operand positions -> keep flagging.
-    assert _arg_position_is_tensor_operand("reshape", "arg0") is True
-    assert _arg_position_is_tensor_operand("view", "arg0") is True
-    assert _arg_position_is_tensor_operand("new_zeros", "arg0") is True
-    assert _arg_position_is_tensor_operand("as_strided", "arg0") is True
-    assert _arg_position_is_tensor_operand("add", "arg1") is True
-    assert _arg_position_is_tensor_operand("cat", "arg0.1") is True
-    # Incomplete-spec guard: schema types polygamma self (arg1) as Tensor.
-    assert _arg_position_is_tensor_operand("polygamma", "arg1") is True
-
-    # Schema-confirmed size/shape positions -> suppress benign false positive.
-    assert _arg_position_is_tensor_operand("reshape", "arg2") is False
-    assert _arg_position_is_tensor_operand("view", "arg2") is False
-    assert _arg_position_is_tensor_operand("zeros", "arg0") is False
-    assert _arg_position_is_tensor_operand("zeros", "arg1") is False
-    assert _arg_position_is_tensor_operand("new_zeros", "arg1.1") is False
-    assert _arg_position_is_tensor_operand("as_strided", "kw:size.1") is False
-
-    # Uncertain authority -> fail safe (keep flagging).
-    assert _arg_position_is_tensor_operand("__getitem__", "arg1") is True
-    assert _arg_position_is_tensor_operand("einsum", "arg2") is True
+    trace = tl.trace(_ProvenancedDynamicSize().eval(), torch.randn(2, 3, 4))
+    reshape_op = next(op for op in trace.ops if op.func_name == "reshape")
+    getitem_labels = [op.layer_label for op in trace.ops if op.func_name == "__getitem__"]
+    assert any(parent in getitem_labels for parent in reshape_op.parents)
+    assert reshape_op.unattributed_tensor_args == ()

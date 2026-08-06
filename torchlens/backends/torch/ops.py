@@ -13,7 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from math import prod
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Iterator, Literal, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
 
 import torch
 
@@ -142,7 +142,6 @@ from ...capture.arg_positions import (
     extract_tensors_and_params,
     _cache_dynamic_spec,
     _normalize_func_name,
-    _schema_arg_is_parent_candidate,
 )
 from ...capture.session import capture_session_for
 
@@ -804,6 +803,7 @@ def _op_event_from_log(
         transform_fn_qualname=fields_dict.get("transform_fn_qualname"),
         transform_fn_source=fields_dict.get("transform_fn_source"),
         unattributed_tensor_args=tuple(fields_dict.get("unattributed_tensor_args") or ()),
+        dropped_edge_tensor_args=tuple(fields_dict.get("dropped_edge_tensor_args") or ()),
         is_output_parent=fields_dict["is_output_parent"],
         has_internal_source_ancestor=fields_dict["has_internal_source_ancestor"],
         internal_source_ancestors=frozenset(fields_dict["internal_source_ancestors"]),
@@ -1931,287 +1931,13 @@ def _tensor_has_known_provenance(trace: "Trace", value: torch.Tensor) -> bool:
     return False
 
 
-class _SchemaOperandSlots(NamedTuple):
-    """Schema-derived slot classification for one ATen operator packet.
-
-    Attributes:
-        operand_positions: Indices that can carry DATA provenance in some overload.
-        operand_names: Argument names that can carry data provenance.
-        seen_positions: Every index present in any overload (authority scope).
-        seen_names: Every argument name present in any overload (authority scope).
-        int_list_positions: Parent-candidate indices typed as an int/SymInt list in
-            some overload -- Python variadic-size bindings (``view(a, b, c)``,
-            ``zeros(d0, d1, ...)``) spread MULTIPLE positional args into one such
-            schema slot, so later python indices map into it, not past it.
-    """
-
-    operand_positions: frozenset[int]
-    operand_names: frozenset[str]
-    seen_positions: frozenset[int]
-    seen_names: frozenset[str]
-    int_list_positions: frozenset[int]
-
-
-_SCHEMA_TENSOR_OPERAND_SLOTS_CACHE: dict[str, "_SchemaOperandSlots | None"] = {}
-
-# Schema base types that can NEVER carry tensor-data provenance: shape/dim/flag/
-# config metadata. Everything OUTSIDE this closed vocabulary (Tensor, number/Scalar,
-# float, complex, generic ``t``, Storage, Dict[...], unknown future types) is treated
-# as a potential DATA operand -- fail-closed: an unrecognized type keeps the witness
-# armed rather than silently suppressing a real operand.
-_SCHEMA_METADATA_ONLY_BASE_TYPES = frozenset(
-    {
-        "int",
-        "SymInt",
-        "bool",
-        "str",
-        "Device",
-        "Generator",
-        "AnyEnumType",
-        "ScalarType",
-        "Layout",
-        "MemoryFormat",
-        "Dimname",
-        "QScheme",
-        "Stream",
-    }
-)
-
-
-def _schema_type_base(type_text: str) -> str:
-    """Strip ``Optional[...]``/``List[...]``/``?``/``[]`` wrappers to the base type.
-
-    Parameters
-    ----------
-    type_text:
-        ``str(schema_arg.type)`` rendering, e.g. ``"Optional[List[int]]"``.
-
-    Returns
-    -------
-    str
-        Innermost base type token, e.g. ``"int"``.
-    """
-
-    text = type_text.strip()
-    while True:
-        if text.endswith("?"):
-            text = text[:-1].strip()
-            continue
-        if text.endswith("[]"):
-            text = text[:-2].strip()
-            continue
-        for wrapper in ("Optional[", "List["):
-            if text.startswith(wrapper) and text.endswith("]"):
-                text = text[len(wrapper) : -1].strip()
-                break
-        else:
-            return text
-
-
-def _schema_type_is_metadata_only(type_text: str) -> bool:
-    """Return whether a schema type can never carry tensor-data provenance."""
-
-    return _schema_type_base(type_text) in _SCHEMA_METADATA_ONLY_BASE_TYPES
-
-
-def _schema_type_is_int_list(type_text: str) -> bool:
-    """Return whether a schema type is an int/SymInt list (variadic-size slot)."""
-
-    text = type_text.strip()
-    if text.startswith("Optional[") and text.endswith("]"):
-        text = text[len("Optional[") : -1].strip()
-    if text.endswith("?"):
-        text = text[:-1].strip()
-    return text in ("List[int]", "List[SymInt]", "int[]", "SymInt[]")
-
-
-def _compute_schema_tensor_operand_slots(canonical: str) -> "_SchemaOperandSlots | None":
-    """Derive operand/metadata slot classification from ``canonical``'s ATen schemas.
-
-    Parameters
-    ----------
-    canonical:
-        Underscore-preserving operator name (``func_name.strip("_")``) used to
-        resolve ``torch.ops.aten.<canonical>``.
-
-    Returns
-    -------
-    _SchemaOperandSlots | None
-        Slot classification unioned across every overload, or ``None`` when no
-        authoritative schema exists. A slot is an OPERAND when it is an input
-        (not a write-only ``out=`` destination) and its type is outside the
-        closed metadata vocabulary (so ``Tensor``, ``Scalar``/``number``,
-        ``float``, ``complex``, and generic list types all count -- a tensor
-        passed at such a slot feeds its VALUE into the op). ``seen_*`` records
-        the packet's full authority scope: a path outside it cannot be
-        classified by this packet at all.
-    """
-
-    packet = getattr(torch.ops.aten, canonical, None)
-    if packet is None:
-        return None
-    operand_positions: set[int] = set()
-    operand_names: set[str] = set()
-    seen_positions: set[int] = set()
-    seen_names: set[str] = set()
-    int_list_positions: set[int] = set()
-    found_schema = False
-    for overload_name in packet.overloads():
-        schema = getattr(getattr(packet, overload_name, None), "_schema", None)
-        if schema is None:
-            continue
-        found_schema = True
-        for index, schema_arg in enumerate(getattr(schema, "arguments", ()) or ()):
-            arg_name = getattr(schema_arg, "name", None)
-            seen_positions.add(index)
-            if isinstance(arg_name, str):
-                seen_names.add(arg_name)
-            if not _schema_arg_is_parent_candidate(schema_arg):
-                # Write-only ``out=`` destination: seen (the packet KNOWS the
-                # slot) but never a data parent.
-                continue
-            type_text = str(getattr(schema_arg, "type", ""))
-            if _schema_type_is_int_list(type_text):
-                int_list_positions.add(index)
-            if not _schema_type_is_metadata_only(type_text):
-                operand_positions.add(index)
-                if isinstance(arg_name, str):
-                    operand_names.add(arg_name)
-    if not found_schema:
-        return None
-    return _SchemaOperandSlots(
-        operand_positions=frozenset(operand_positions),
-        operand_names=frozenset(operand_names),
-        seen_positions=frozenset(seen_positions),
-        seen_names=frozenset(seen_names),
-        int_list_positions=frozenset(int_list_positions),
-    )
-
-
-def _arg_position_is_tensor_operand(func_name: str, path: str) -> bool:
-    """Return whether ``path`` names a DATA-operand (tensor) slot for ``func_name``.
-
-    The unattributed-tensor witness's branch (2) fires only for a tensor that
-    already HAS known TorchLens provenance (a fully-traced producer) but whose
-    producer label is absent from the recorded parent edges. There are two very
-    different reasons a provenanced tensor lands in that state:
-
-    * **Data-operand slot with a dropped edge** -- e.g. ``add`` position 1, or a
-      tensor operand whose parent edge was dropped because its ``FUNC_ARG_SPECS``
-      entry is under-specified. The tensor's value flows into the op, so it MUST
-      become a graph parent; a provenanced operand missing from
-      ``recorded_parent_labels`` is a genuine missing-edge capture bug and the
-      witness MUST keep firing on it.
-    * **Size / shape / metadata slot** -- e.g. a dynamic-shape scalar tensor
-      passed as a ``torch.zeros`` size dim, a ``view``/``reshape``/``as_strided``
-      size arg, or a ``new_zeros`` size element. The graph builder deliberately
-      does NOT treat these positions as tensor operands, so they are correctly
-      absent from ``recorded_parent_labels``. A *provenanced* tensor here is
-      benign -- it is recomputed deterministically by its own traced producer --
-      and flagging it is a FALSE POSITIVE that breaks exotic families
-      (RNN/packed-sequence internal ``h0``/``c0`` allocation, Longformer
-      windowed-attention dynamic dims).
-
-    The authority for operand-ness is the ATen **schema** (ground truth), NOT the
-    local ``FUNC_ARG_SPECS`` that produced the parent edges. Deriving it from the
-    schema keeps the witness an independent cross-check: a dropped edge caused by
-    an under-specified/corrupted ``FUNC_ARG_SPECS`` entry (the incomplete-spec bug
-    class) still fires, because the schema still types that position as a Tensor.
-    Returning ``True`` (operand) keeps the witness armed; returning ``False``
-    (non-operand) suppresses ONLY the benign provenanced size-arg case.
-
-    Authority boundary (round-22 F6 hardening): a same-named ``torch.ops.aten``
-    packet may describe a NARROWER binding than the wrapped Python callable
-    (``torch.tensor`` vs the scalar-only ``aten::tensor`` overloads). The packet is
-    therefore trusted to confirm a non-operand ONLY inside its own scope:
-
-    * A slot is suppressed only when some overload KNOWS it (``seen``) and every
-      overload that knows it types it inside the closed metadata vocabulary
-      (int/SymInt/bool/str/Device/... -- shape, dim, flag, config). Value-typed
-      slots (``Scalar``/``number``, ``float``, ``complex``, generic lists) count
-      as DATA operands: a tensor passed there feeds its value into the op.
-    * A kwarg name or positional index UNKNOWN to every overload means the packet
-      is not authority for that path -- fail OPEN (keep the witness armed). One
-      carve-out keeps the capprov false-positive fix intact: python variadic-size
-      bindings (``view(a, b, c)``, ``zeros(d0, d1, ...)``) spread multiple python
-      positional args into ONE ``int[]``/``SymInt[]`` schema slot, so an index at
-      or past such a slot maps INTO it (benign size dim), not past the schema.
-
-    Tripwire safety: this narrowing can NEVER open a capture-gap hole. A real
-    capture gap means the tensor is UN-provenanced, which is caught earlier by
-    branch (1) (``not _tensor_has_known_provenance``) at ANY position, before this
-    classifier is consulted. It fails SAFE (returns ``True``, keep flagging)
-    whenever authority is uncertain: variadic-arity transform ops (whose Tensor
-    operands are extracted by a fresh crawl and whose positional-to-schema mapping
-    is call-dependent), ops with no resolvable ATen schema, and paths outside the
-    resolved packet's scope. The union over overloads can only ADD operand slots,
-    and unknown types classify as operands, so a real data operand is never turned
-    into a schema-"confirmed" non-operand.
-
-    Parameters
-    ----------
-    func_name:
-        Raw wrapped callable name for the current op.
-    path:
-        Stable argument-position string such as ``"arg1"``, ``"arg1.1"``, or
-        ``"kw:size.1"`` produced by the witness's ``visit`` walk.
-
-    Returns
-    -------
-    bool
-        ``True`` when the path's top-level slot is a data-operand position (or
-        authority is uncertain); ``False`` for a schema-confirmed non-operand
-        size/shape/metadata slot.
-    """
-
-    if _normalize_func_name(func_name) in VARIADIC_TENSOR_ARG_FUNCS:
-        return True
-    canonical = func_name.strip("_")
-    if canonical not in _SCHEMA_TENSOR_OPERAND_SLOTS_CACHE:
-        _SCHEMA_TENSOR_OPERAND_SLOTS_CACHE[canonical] = _compute_schema_tensor_operand_slots(
-            canonical
-        )
-    slots = _SCHEMA_TENSOR_OPERAND_SLOTS_CACHE[canonical]
-    if slots is None:
-        return True
-    if path.startswith("kw:"):
-        top_key = path[len("kw:") :].split(".", 1)[0]
-        normalized_key = _normalize_func_name(top_key)
-        if any(_normalize_func_name(name) == normalized_key for name in slots.operand_names):
-            return True
-        if any(_normalize_func_name(name) == normalized_key for name in slots.seen_names):
-            return False
-        # Kwarg unknown to every overload: the packet does not describe this
-        # binding's keyword surface (name-collision / narrower packet) -- fail open.
-        return True
-    if path.startswith("arg"):
-        index_text = path[len("arg") :].split(".", 1)[0]
-        try:
-            index = int(index_text)
-        except ValueError:
-            return True
-        if index in slots.operand_positions:
-            return True
-        if index in slots.seen_positions:
-            return False
-        if any(position <= index for position in slots.int_list_positions):
-            # Beyond every overload's arity but at/past a variadic int-list slot:
-            # the python binding spreads size dims positionally into that slot
-            # (``x.view(b, s, h, d)``), so this index is a benign size dim.
-            return False
-        # Beyond the packet's entire positional scope with no variadic-size slot
-        # to absorb it: the packet is not authority for this binding -- fail open.
-        return True
-    return True
-
-
 def _unattributed_tensor_arg_positions(
     trace: "Trace",
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
     func_name: str,
     parent_arg_positions: dict[str, dict[Any, str]],
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Find tensor arguments that will not become graph parents or known sources.
 
     Parameters
@@ -2229,11 +1955,20 @@ def _unattributed_tensor_arg_positions(
 
     Returns
     -------
-    tuple[str, ...]
-        Stable argument-position strings such as ``"arg1"`` or ``"kw:mask.0"``.
+    tuple[tuple[str, ...], tuple[str, ...]]
+        ``(all_positions, dropped_edge_positions)``. The first tuple carries
+        every witness marker (stable position strings such as ``"arg1"`` or
+        ``"kw:mask.0"``). The second is the branch-(2) subset: slots whose
+        tensor has a LIVE traced producer that is absent from the recorded
+        parent edges -- an identity-witnessed dropped edge, independent of the
+        slot value (round-31 FN-1..6: a dropped bool/all-zero/all-one edge is
+        invisible to value evidence, and a wrong-parent swap between
+        value-identical producers is invisible by construction; the live-label
+        identity witness catches both).
     """
 
     positions: list[str] = []
+    dropped_edge_positions: list[str] = []
     mutates_receiver = (
         _is_inplace_augmented_assignment_dunder(func_name)
         or func_name in _SETTER_MUTATION_FUNC_NAMES
@@ -2319,24 +2054,29 @@ def _unattributed_tensor_arg_positions(
             # position when an input-derived RHS would otherwise appear fully
             # represented, while the independent data-alias witness ceilings replay.
             unsafe_data_alias_receiver = path == "arg0" and unsafe_receiver_with_graph_rhs
+            # ``t.data = rhs`` (round-31 M6, r28 reconcile): the setter is
+            # logged as the canonical single-argument ``detach(rhs)`` call, so
+            # the rebound receiver never appears as a recorded argument and no
+            # receiver-slot exemption exists here -- ``arg0`` IS the RHS and is
+            # fully witnessed like any other operand.
             if unsafe_data_alias_receiver or not _tensor_has_known_provenance(trace, value):
                 positions.append(path)
                 return
             provenance_labels = tensor_session_parent_labels(value)
             # Branch (2): a fully-provenanced tensor whose producer label is not a
-            # recorded parent edge. This is only a real missing-edge bug at a DATA
-            # operand slot; at a size/shape/metadata slot (factory size dims,
-            # view/reshape/as_strided size args) the graph builder deliberately
-            # excludes the position from parents, so a provenanced tensor there is
-            # benign and flagging it is a false positive. Un-provenanced tensors
-            # never reach here -- branch (1) already caught them at every position
-            # -- so this narrowing cannot mask any capture gap.
-            if (
-                provenance_labels
-                and recorded_parent_labels.isdisjoint(provenance_labels)
-                and _arg_position_is_tensor_operand(func_name, path)
-            ):
+            # recorded parent edge. A RUNTIME tensor at ANY input slot is a data
+            # dependency -- including schema-typed ``int``/``Scalar`` control slots
+            # (``roll`` shifts, ``softmax`` dim, factory size dims), whose values
+            # change the op's result (round-31 H2). Extraction's runtime coverage
+            # guard parents every shallow tensor slot, so a provenanced tensor
+            # missing from the recorded edges is a dropped edge, never a benign
+            # metadata slot; the former ATen-schema metadata-slot suppression is
+            # gone because its "deliberately excluded from parents" premise no
+            # longer holds anywhere. Un-provenanced tensors never reach here --
+            # branch (1) already caught them at every position.
+            if provenance_labels and recorded_parent_labels.isdisjoint(provenance_labels):
                 positions.append(path)
+                dropped_edge_positions.append(path)
             return
         if isinstance(value, (list, tuple)):
             for index, item in enumerate(value):
@@ -2349,7 +2089,7 @@ def _unattributed_tensor_arg_positions(
         visit(arg, f"arg{index}")
     for key, value in kwargs.items():
         visit(value, f"kw:{key}")
-    return tuple(positions)
+    return tuple(positions), tuple(dropped_edge_positions)
 
 
 def log_function_output_tensors(
@@ -3583,23 +3323,36 @@ def _extract_arg_tensors_and_params(
     tensor-RHS parent of a later call (round-22 F3). Names whose crawled tensors
     exceed ArgSpec's representable shapes are marked ``DYNAMIC_SPEC_UNCACHEABLE``
     and re-crawl every call.
+
+    Tier-1 STATIC specs get the same runtime coverage guard (round-31 H2):
+    PyTorch accepts scalar tensors in many schema-level ``int``/``int[]``/
+    ``Scalar`` control slots (``roll(x, shifts=t)``, ``softmax(x, dim=t)``,
+    ``arange(t)``, factory size dims), and a runtime tensor's VALUE there is a
+    real data dependency the static spec deliberately does not enumerate. When
+    the live call carries a shallow tensor at any slot the static spec does not
+    extract, fall through to the BFS crawl so that operand becomes a parent
+    instead of a silently dropped edge. Static-spec names never populate the
+    Tier-2 cache: the static entry stays authoritative for covered calls.
     """
     is_variadic_transform = normalized_name in VARIADIC_TENSOR_ARG_FUNCS
+    spec = None
     if not is_variadic_transform:
         spec = FUNC_ARG_SPECS.get(normalized_name)
-        if spec is not None:
+        if spec is not None and dynamic_spec_covers_call(spec, args, kwargs):
             return extract_tensors_and_params(spec, args, kwargs)
-        cached = _st._dynamic_arg_specs.get(normalized_name)
-        if isinstance(cached, ArgSpec) and dynamic_spec_covers_call(cached, args, kwargs):
-            return extract_tensors_and_params(cached, args, kwargs)
+        if spec is None:
+            cached = _st._dynamic_arg_specs.get(normalized_name)
+            if isinstance(cached, ArgSpec) and dynamic_spec_covers_call(cached, args, kwargs):
+                return extract_tensors_and_params(cached, args, kwargs)
 
     # Tier 3 fallback: BFS crawl. Cache/union-merge the derived spec only for
-    # fixed-arity functions; variadic transform ops and uncacheable names must
-    # re-crawl every call.
+    # fixed-arity functions with no static entry; variadic transform ops,
+    # static-spec fall-throughs, and uncacheable names must re-crawl every call.
     all_args = list(args) + list(kwargs.values())
     arg_tensors, arg_parameters = _get_tensors_and_params_from_obj(all_args)
     if (
         not is_variadic_transform
+        and spec is None
         and _st._dynamic_arg_specs.get(normalized_name) is not DYNAMIC_SPEC_UNCACHEABLE
     ):
         _cache_dynamic_spec(normalized_name, args, kwargs, arg_tensors, arg_parameters)
@@ -3828,7 +3581,10 @@ def _build_shared_fields_dict(
     fields_dict["transform_fn_name"] = getattr(func, "__tl_transform_fn_name__", None)
     fields_dict["transform_fn_qualname"] = getattr(func, "__tl_transform_fn_qualname__", None)
     fields_dict["transform_fn_source"] = getattr(func, "__tl_transform_fn_source__", None)
-    fields_dict["unattributed_tensor_args"] = _unattributed_tensor_arg_positions(
+    (
+        fields_dict["unattributed_tensor_args"],
+        fields_dict["dropped_edge_tensor_args"],
+    ) = _unattributed_tensor_arg_positions(
         self,
         args,
         kwargs,
@@ -4117,6 +3873,32 @@ def _emit_exhaustive_operation_events(
     else:
         out_destination_ids = frozenset()
 
+    # ``torch._foreach_*`` semantics are ZIPPED: output ``i`` is computed from
+    # member ``i`` of each tensor-list argument (plus any whole-call scalar or
+    # single-tensor operand). Sharing the call-level parent set across every
+    # output invented all-to-all dependencies (round-31 M3), corrupting
+    # influence geometry for every consumer.
+    is_foreach_call = func_name.startswith("_foreach_")
+
+    # List-returning in-place ops (``torch._foreach_add_`` and family) return a
+    # NEW list whose members ARE the mutated receiver tensors from ``args[0]``.
+    # Whole-return identity (``id(out) == id(args[0])``) never fires for them,
+    # so the live members kept their pre-mutation labels and every downstream
+    # consumer bypassed the mutation node (round-31 H1). Detect the receiver
+    # members here and thread each member's freshly minted label back onto the
+    # live tensor after logging, exactly like the scalar in-place path.
+    is_inplace_list_return = (
+        func_name.endswith("_")
+        and not func_name.startswith("__")
+        and bool(args)
+        and isinstance(args[0], (list, tuple))
+    )
+    receiver_member_ids: frozenset[int] = (
+        frozenset(id(item) for item in args[0] if isinstance(item, torch.Tensor))
+        if is_inplace_list_return
+        else frozenset()
+    )
+
     for i, output_entry in enumerate(output_entries):
         out = output_entry.value
         if not _output_should_be_logged(out, is_bottom_level_func):
@@ -4127,7 +3909,15 @@ def _emit_exhaustive_operation_events(
             and id(out_tensor) not in out_destination_ids
             and any(out_tensor is arg_tensor for arg_tensor in arg_tensors)
         ):
+            # Round-31 M5: preserve the live member's real autograd node; the
+            # minted copy's ``CloneBackward`` is bookkeeping, not op metadata.
+            live_member_grad_fn = out_tensor.grad_fn
             out_tensor = safe_copy(out_tensor)
+            if live_member_grad_fn is not None:
+                try:
+                    setattr(out_tensor, "tl_user_grad_fn", live_member_grad_fn)
+                except AttributeError:
+                    pass
 
         fields_dict_onetensor = (
             fields_dict if use_single_output_fields else _copy_shared_fields_for_output(fields_dict)
@@ -4136,6 +3926,15 @@ def _emit_exhaustive_operation_events(
         fields_dict_onetensor["container_spec"] = output_entry.container_spec
         if output_entry.container_spec is not None:
             fields_dict_onetensor["in_multi_output"] = True
+        if is_foreach_call and output_entry.container_spec is not None:
+            _project_foreach_member_parent_fields(
+                self,
+                fields_dict_onetensor,
+                output_entry,
+                args,
+                kwargs,
+                out_orig,
+            )
         _log_output_tensor_info(
             self,
             out_tensor,
@@ -4203,10 +4002,105 @@ def _emit_exhaustive_operation_events(
             arg_copies,
             kwarg_copies,
         )
+        # Round-31 H1: the member entry was logged against a minted safe copy
+        # (pass-through protection), but for a list-returning in-place op the
+        # LIVE member is the mutated receiver the caller keeps using. Advance
+        # its label to this mutation op, hook its gradient, and propagate to
+        # overlapping storage aliases -- the exact same repair the scalar
+        # same-object in-place path performs -- so consumers bind to the
+        # mutation instead of the stale pre-mutation producer.
+        live_member = output_entry.value
+        if (
+            id(live_member) in receiver_member_ids
+            and live_member is not out_tensor
+            and isinstance(live_member, torch.Tensor)
+            and not isinstance(live_member, torch.nn.Parameter)
+        ):
+            from .wrappers import _propagate_mutation_label_to_storage_aliases
+
+            set_tensor_label(live_member, new_tensor_label)
+            _add_tensor_backward_hook(self, live_member, new_tensor_label)
+            _propagate_mutation_label_to_storage_aliases(self, live_member, new_tensor_label)
         options = getattr(self, "_predicate_save_options", None)
         if options is not None and options.halt is not None:
             halt_ctx = _build_trace_predicate_context(self, fields_dict_onetensor, out_tensor)
             evaluate_halt_stop(self, halt_ctx, options, frontier_output=out_tensor)
+
+
+def _project_foreach_member_parent_fields(
+    self: "Trace",
+    fields_dict_onetensor: dict[str, Any],
+    output_entry: "_OutputTensorEntry",
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    out_orig: Any,
+) -> None:
+    """Restrict a foreach member's parent fields to its zipped operands.
+
+    ``torch._foreach_*`` applies the op element-wise across its tensor-list
+    arguments: output ``i`` depends on member ``i`` of each list operand and
+    on every whole-call operand (a single tensor or scalar applied to all
+    members). The shared call-level relationship fields parent EVERY output on
+    EVERY list member; this projection keeps, for the current member, exactly
+    the parents recorded at a zipped ``(arg, i)`` position plus every parent
+    at a non-zipped position, then rebuilds the derived relationship fields
+    (ancestors, internal-source flags, argument positions) for that subset.
+    Parents that never resolved to an argument position are kept for every
+    member -- dropping an edge on uncertainty is never acceptable.
+
+    Parameters
+    ----------
+    self:
+        Active capture Trace.
+    fields_dict_onetensor:
+        Per-output copy of the shared fields, mutated in place.
+    output_entry:
+        Output partition entry for the current member.
+    args:
+        Positional arguments of the foreach call.
+    kwargs:
+        Keyword arguments of the foreach call.
+    out_orig:
+        Full original output container.
+    """
+
+    container_path = output_entry.container_path
+    if not container_path:
+        return
+    first_step = container_path[0]
+    member_index = first_step if isinstance(first_step, int) else getattr(first_step, "index", None)
+    if not isinstance(member_index, int):
+        return
+    positions = fields_dict_onetensor.get("parent_arg_positions") or {}
+    positioned_labels: set[str] = set()
+    kept_positioned_labels: set[str] = set()
+    for domain in ("args", "kwargs"):
+        for key, label in (positions.get(domain) or {}).items():
+            positioned_labels.add(label)
+            zipped_member_slot = (
+                isinstance(key, tuple) and len(key) == 2 and isinstance(key[1], int)
+            )
+            if not zipped_member_slot or key[1] == member_index:
+                kept_positioned_labels.add(label)
+    original_parents = list(fields_dict_onetensor.get("parents") or ())
+    kept_labels: list[str] = []
+    seen: set[str] = set()
+    for label in original_parents:
+        if label in seen:
+            continue
+        if label in positioned_labels and label not in kept_positioned_labels:
+            continue
+        seen.add(label)
+        kept_labels.append(label)
+    if kept_labels == original_parents:
+        return
+    kept_entries = [
+        cast(Op, LiveOpView(self, self.capture_events.live_index.require_event(label)))
+        for label in kept_labels
+    ]
+    _build_graph_relationship_fields(
+        self, fields_dict_onetensor, kept_labels, kept_entries, args, kwargs, out_orig
+    )
 
 
 def _get_parent_contents(
@@ -4757,6 +4651,10 @@ def _log_output_tensor_info(
                 _is_inplace_augmented_assignment_dunder(name)
                 or name in _SETTER_MUTATION_FUNC_NAMES
                 or (name.endswith("_") and not name.startswith("__"))
+                # Mutating property setters (``t.real = rhs``, round-31 M6)
+                # keep the property's plain name; their descriptor ``__set__``
+                # callable is the mutation signature.
+                or str(getattr(fields_dict.get("func"), "__name__", "")) == "__set__"
             )
             out_kwarg = kwargs.get("out") if isinstance(kwargs, dict) else None
             has_out_tensor = isinstance(out_kwarg, torch.Tensor) or (
@@ -4775,16 +4673,27 @@ def _log_output_tensor_info(
         # and is replayed normally.
         if fields_dict["is_inplace"]:
             record_alias_mutation_candidate(self, _label_raw)
-    grad_fn_cls = type(t.grad_fn) if t.grad_fn is not None else None
+    # Round-31 M5: same-object in-place returns and pass-through container
+    # members are logged against a safe copy whose ``grad_fn`` is TorchLens's
+    # own ``CloneBackward`` node. The wrapper stamped the USER op's live
+    # autograd node on the copy; that snapshot is the operation's metadata.
+    user_grad_fn = getattr(t, "tl_user_grad_fn", None)
+    if user_grad_fn is not None:
+        try:
+            delattr(t, "tl_user_grad_fn")
+        except AttributeError:
+            pass
+    op_grad_fn = user_grad_fn if user_grad_fn is not None else t.grad_fn
+    grad_fn_cls = type(op_grad_fn) if op_grad_fn is not None else None
     fields_dict["grad_fn_class_name"] = None if grad_fn_cls is None else grad_fn_cls.__name__
     fields_dict["grad_fn_class_qualname"] = (
         None if grad_fn_cls is None else f"{grad_fn_cls.__module__}.{grad_fn_cls.__qualname__}"
     )
-    fields_dict["grad_fn_object_id"] = id(t.grad_fn) if t.grad_fn is not None else None
+    fields_dict["grad_fn_object_id"] = id(op_grad_fn) if op_grad_fn is not None else None
     # Autograd Function objects do not consistently support weak references.
     # Keep the object only until explicit backward capture has registered hooks;
     # the backward finalizer clears these strong refs to avoid pinning graphs.
-    fields_dict["grad_fn_handle"] = t.grad_fn
+    fields_dict["grad_fn_handle"] = op_grad_fn
     fields_dict["grad_fn"] = None
 
     if fields_dict["in_multi_output"]:

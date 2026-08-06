@@ -5515,18 +5515,14 @@ def _consumed_unattributed_data_operand(layer: "Op") -> bool:
     Returns
     -------
     bool
-        True when at least one witness position is a data-operand slot per the
-        ATen schema classifier (fails toward "operand" on uncertainty, keeping
-        the tripwire armed; size/shape/metadata slots are excluded).
+        True when the capture-side witness recorded any unattributed tensor
+        argument. A runtime tensor at ANY input slot is a data dependency
+        (round-31 H2) -- including schema-typed ``int``/``Scalar`` control
+        slots -- so every witness position counts; the former ATen-schema
+        metadata-slot exclusion is gone.
     """
 
-    positions = tuple(getattr(layer, "unattributed_tensor_args", ()) or ())
-    if not positions:
-        return False
-    func_name = str(getattr(layer, "func_name", ""))
-    from ..backends.torch.ops import _arg_position_is_tensor_operand
-
-    return any(_arg_position_is_tensor_operand(func_name, position) for position in positions)
+    return bool(tuple(getattr(layer, "unattributed_tensor_args", ()) or ()))
 
 
 def _check_graph_connectivity(ml: "Trace") -> None:

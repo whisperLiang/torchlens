@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import warnings
 
-import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -23,7 +22,6 @@ import torch.nn.functional as F
 import torchlens as tl
 import torchlens._state as _state
 from torchlens.backends.torch.ops import (
-    _arg_position_is_tensor_operand,
     _extract_arg_tensors_and_params,
 )
 from torchlens.capture.arg_positions import (
@@ -621,48 +619,45 @@ def test_torch_tensor_scalar_factory_stays_clean() -> None:
     assert not [w for w in caught if _PROVENANCE_MATCH in str(w.message)]
 
 
-def test_witness_not_disarmed_by_narrower_same_named_packet() -> None:
-    """Schema authority is scoped: a narrower packet cannot suppress operands.
+def test_runtime_tensor_control_slots_become_parents() -> None:
+    """Round-31 H2: runtime tensors at schema int/Scalar control slots are parents.
 
-    ``aten::tensor``'s overloads are scalar-only, yet the Python ``torch.tensor``
-    binding accepts a tensor ``data`` argument. The classifier must keep the
-    witness ARMED for slots the packet types as VALUES (float/complex/Scalar)
-    or does not know at all -- while still suppressing the schema-confirmed
-    size/shape metadata slots that motivated the capprov narrowing.
+    Supersedes the deleted ATen-schema operand classifier pins: the extraction
+    coverage guard now records EVERY shallow runtime tensor slot as a data
+    parent (``roll`` shifts, ``softmax`` dim, factory size dims), so there is
+    no "schema-confirmed non-operand slot" left to suppress and the witness
+    stays armed everywhere.
     """
 
-    # F6 core: torch.tensor's data slot stays armed in both spellings.
-    assert _arg_position_is_tensor_operand("tensor", "arg0") is True
-    assert _arg_position_is_tensor_operand("tensor", "kw:data") is True
-    # Unknown-to-packet paths fail OPEN (packet is not authority there).
-    assert _arg_position_is_tensor_operand("searchsorted", "kw:notinschema") is True
-    # Value-typed (Scalar) slots are data operands: a tensor there feeds its value.
-    assert _arg_position_is_tensor_operand("full", "arg1") is True
-    # The capprov suppressions stay suppressed (no-false-fire direction).
-    assert _arg_position_is_tensor_operand("zeros", "arg0") is False
-    assert _arg_position_is_tensor_operand("zeros", "arg1") is False
-    assert _arg_position_is_tensor_operand("view", "arg2") is False
-    assert _arg_position_is_tensor_operand("reshape", "arg2") is False
-    assert _arg_position_is_tensor_operand("as_strided", "kw:size.1") is False
+    fallback_tensors, _ = _extract_arg_tensors_and_params(
+        "roll", (torch.ones(3), torch.tensor(1)), {}
+    )
+    assert len(fallback_tensors) == 2
+
+    covered_tensors, _ = _extract_arg_tensors_and_params("roll", (torch.ones(3), 1), {})
+    assert len(covered_tensors) == 1
 
 
-def test_witness_fires_when_tensor_factory_spec_regresses() -> None:
-    """Mutation proof: re-narrowing the ``tensor`` spec now trips the witness.
+def test_spec_regression_is_healed_by_runtime_coverage_guard() -> None:
+    """Mutation proof: a re-narrowed static spec can no longer drop the edge.
 
     Reinstalls the pre-fix under-specified factory spec (no positions) for
-    ``torch.tensor`` and asserts the strengthened witness FIRES on the dropped
-    provenanced parent instead of staying silent (the F6 hole). Restores the
-    real spec afterwards. This locks the tripwire direction: even if the spec
-    fix regresses, the drop can never be silent again.
+    ``torch.tensor``. Round-31 H2 made Tier-1 static specs subject to the
+    runtime coverage guard, so the live tensor argument the narrow spec would
+    have dropped is extracted through the BFS fallback anyway: the parent edge
+    is recorded, no witness marker appears, and the F6 silent-drop hole cannot
+    even be REACHED through a spec regression. Restores the real spec after.
     """
 
     real_spec = FUNC_ARG_SPECS["tensor"]
     try:
         FUNC_ARG_SPECS["tensor"] = ArgSpec()
-        with pytest.warns(UserWarning, match=_PROVENANCE_MATCH):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             trace = tl.trace(_TensorOfTensor().eval(), torch.randn(3))
         op = next(o for o in trace.ops if o.type == "tensor")
-        assert op.parents == []
-        assert "arg0" in op.unattributed_tensor_args
+        assert len(op.parents) == 1
+        assert op.unattributed_tensor_args == ()
+        assert not [w for w in caught if _PROVENANCE_MATCH in str(w.message)]
     finally:
         FUNC_ARG_SPECS["tensor"] = real_spec

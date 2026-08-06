@@ -313,6 +313,7 @@ def _add_output_layers(
         new_output_node.transform_fn_qualname = None
         new_output_node.transform_fn_source = None
         new_output_node.unattributed_tensor_args = ()
+        new_output_node.dropped_edge_tensor_args = ()
 
         # Fix layer equivalence information:
         new_output_node.pass_index = 1

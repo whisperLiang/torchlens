@@ -664,6 +664,7 @@ def _event_from_record(
         transform_fn_qualname=None,
         transform_fn_source=None,
         unattributed_tensor_args=(),
+        dropped_edge_tensor_args=(),
         is_output_parent=ctx.is_output_parent,
         has_internal_source_ancestor=False,
         internal_source_ancestors=frozenset(),

@@ -6,9 +6,9 @@ Four registries control which operations are exempt from validation, and why:
    with identical inputs and RNG state (e.g., ``empty_like`` returns
    uninitialized memory).  Both forward replay AND perturbation are skipped.
 
-2. ``SKIP_PERTURBATION_ENTIRELY`` -- ops where ALL args are structural (shape,
-   type template) so perturbation can never change the output.  Forward
-   replay still runs to verify correctness.
+2. ``SKIP_PERTURBATION_ENTIRELY`` -- ops where no perturbable parent VALUE can
+   change the output (shape/type templates, RNG-determined outputs, native
+   ops unsafe to perturb).  Forward replay still runs to verify correctness.
 
 3. ``STRUCTURAL_ARG_POSITIONS`` -- ops where SPECIFIC arg positions are
    structural (e.g., the index tensor in ``embedding``).  If the perturbed
@@ -62,14 +62,20 @@ SKIP_VALIDATION_ENTIRELY: Dict[str, str] = {
 
 # ---------------------------------------------------------------------------
 # Registry 2: Skip perturbation only (forward replay still runs).
-# All args are structural — output doesn't depend on input values.
+# Ops whose output values do not depend on any perturbable parent VALUE.
+# Round-31 registry narrowing: ``fill_`` (tensor fill VALUE at arg 1) and
+# ``expand_as`` (arg 0 values flow into the output) moved to
+# ``STRUCTURAL_ARG_POSITIONS`` so their genuine value edges stay
+# perturbation-tested. ``meshgrid`` / ``broadcast_tensors`` outputs DO carry
+# input values, but their per-call parent fields are shared across zipped
+# outputs, so cross-member value perturbation is legitimately insensitive;
+# they stay whole-op-skipped until per-output parent projection covers them
+# (their value edges remain guarded by replay and the orphan/identity sweeps).
 # ---------------------------------------------------------------------------
 SKIP_PERTURBATION_ENTIRELY: Set[str] = {
-    "expand_as",
     "new_zeros",
     "new_ones",
     "zero_",
-    "fill_",
     "zeros_like",
     "ones_like",
     "rand_like",
@@ -94,6 +100,9 @@ SKIP_PERTURBATION_ENTIRELY: Set[str] = {
 # ---------------------------------------------------------------------------
 STRUCTURAL_ARG_POSITIONS: Dict[str, Set[int]] = {
     "copy_": {0},  # destination values are overwritten; source values determine output
+    "fill_": {0},  # destination values are overwritten; the fill VALUE (arg 1) stays tested
+    "expand_as": {1},  # shape template only; arg 0 values flow into the output
+    "expandas": {1},  # canonicalized spelling
     "cross_entropy": {1},  # target labels (LongTensor)
     "embedding": {1},  # index tensor — random indices cause CUDA OOB
     "gather": {2},  # index tensor

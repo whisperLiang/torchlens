@@ -75,6 +75,7 @@
       "transform_fn_name",
       "transform_fn_qualname",
       "unattributed_tensor_args",
+      "dropped_edge_tensor_args",
       "parent_params",
       "param_shapes",
       "num_params",
@@ -489,6 +490,7 @@
       "transform_fn_qualname",
       "transform_fn_source",
       "unattributed_tensor_args",
+      "dropped_edge_tensor_args",
       "parent_params",
       "_param_barcodes",
       "parent_param_ops",
@@ -621,6 +623,7 @@
       "container_spec",
       "detach_saved_activations",
       "device_ref",
+      "dropped_edge_tensor_args",
       "dtype",
       "dtype_ref",
       "equivalence_class",
@@ -1199,13 +1202,13 @@
     ]
   },
   "sha256_chunks": [
-    "dd257b5d",
-    "2506cbfd",
-    "89e6b9dd",
-    "7c5e82de",
-    "f0707df9",
-    "dae66ff8",
-    "f3fcfa65",
-    "a491570d"
+    "03b1b25e",
+    "8a661b58",
+    "779d194e",
+    "6221a7e8",
+    "f181a59f",
+    "1be23a30",
+    "02ce3ec6",
+    "76a7400f"
   ]
 }

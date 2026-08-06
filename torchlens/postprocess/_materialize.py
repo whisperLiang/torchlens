@@ -475,6 +475,7 @@ def _fields_from_event(
             "transform_fn_qualname": event.transform_fn_qualname,
             "transform_fn_source": event.transform_fn_source,
             "unattributed_tensor_args": tuple(event.unattributed_tensor_args),
+            "dropped_edge_tensor_args": tuple(getattr(event, "dropped_edge_tensor_args", ()) or ()),
             "parent_params": parent_params,
             "_param_barcodes": [param.barcode for param in resolved_params],
             "parent_param_ops": parent_param_ops,
