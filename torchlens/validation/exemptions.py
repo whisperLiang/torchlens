@@ -100,6 +100,12 @@ SKIP_PERTURBATION_ENTIRELY: Set[str] = {
 # ---------------------------------------------------------------------------
 STRUCTURAL_ARG_POSITIONS: Dict[str, Set[int]] = {
     "copy_": {0},  # destination values are overwritten; source values determine output
+    # Zipped foreach spelling of ``copy_`` (r29 F5): each destination member is
+    # TOTALLY overwritten by its zipped source member, so the destination list
+    # (arg 0, matched per zipped slot ``(0, j)``) is value-irrelevant by
+    # construction; source members (arg 1) stay strictly tested.
+    "_foreach_copy_": {0},
+    "foreachcopy": {0},  # canonicalized spelling
     "fill_": {0},  # destination values are overwritten; the fill VALUE (arg 1) stays tested
     "expand_as": {1},  # shape template only; arg 0 values flow into the output
     "expandas": {1},  # canonicalized spelling
@@ -1098,9 +1104,17 @@ def perturbed_layer_at_structural_position(
     alias_by_position = (
         STRUCTURAL_ARG_KWARG_ALIASES.get(func_name, {}) if isinstance(func_name, str) else {}
     )
+    recorded_args = parent_arg_positions.get("args", {}) or {}
     for pos in exempt_positions:
-        if parent_arg_positions.get("args", {}).get(pos) == perturbed_label:
+        if recorded_args.get(pos) == perturbed_label:
             return True
+        # A CONTAINER at a structural position: its members carry zipped/nested
+        # tuple keys ``(pos, j)`` (e.g. the ``_foreach_copy_`` destination
+        # list). Value-irrelevance of the position covers its members; slots at
+        # other positions are unaffected.
+        for key, label in recorded_args.items():
+            if isinstance(key, tuple) and key and key[0] == pos and label == perturbed_label:
+                return True
         aliases = alias_by_position.get(pos, set())
         for alias in aliases:
             if parent_arg_positions.get("kwargs", {}).get(alias) == perturbed_label:

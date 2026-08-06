@@ -81,6 +81,7 @@ __all__ = [
     "HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE",
     "HAS_DYNAMO_OPTIMIZED_MODULE",
     "HAS_DYNAMO_ORIG_CALLABLE_MARKER",
+    "HAS_ROLL_TENSOR_SHIFTS",
     "HAS_SAFE_WEIGHTS_ONLY_LOAD",
     "HAS_CACHED_UNTYPED_STORAGE_WRAPPER",
     "HAS_TENSOR_SEQUENCE_SLOT_FIX",
@@ -900,6 +901,27 @@ def _probe_parameter_as_subclass_in_dispatch_mode() -> bool:
     return type(plain_tensor) is torch.Tensor
 
 
+def _probe_roll_tensor_shifts() -> bool:
+    """Return whether ``torch.roll`` accepts a bare 0-dim tensor ``shifts``.
+
+    Older torch (verified: 2.8 rejects with ``RuntimeError: shifts required``;
+    2.13 accepts) does not unpack a 0-dim tensor passed as the ``shifts``
+    argument itself; the tuple spelling ``shifts=(tensor,)`` is accepted
+    everywhere. Behavioral probe on a 1-element tensor, never a version parse.
+
+    Returns
+    -------
+    bool
+        ``True`` when the bare tensor ``shifts`` spelling executes.
+    """
+
+    try:
+        torch.roll(torch.zeros(2), shifts=torch.zeros((), dtype=torch.long))  # type: ignore[arg-type]
+    except (RuntimeError, TypeError):
+        return False
+    return True
+
+
 HAS_VARIABLE_FUNCTIONS: bool = _probe_variable_functions()
 HAS_TORCH_VF: bool = _probe_torch_vf()
 HAS_TORCH_FUNC: bool = _probe_torch_func()
@@ -922,6 +944,7 @@ HAS_GENERATOR_GRAPHSAFE_SET_STATE: bool = hasattr(torch.Generator, "graphsafe_se
 HAS_SAFE_WEIGHTS_ONLY_LOAD: bool = _probe_safe_weights_only_load()
 HAS_TENSOR_SEQUENCE_SLOT_FIX: bool = _probe_tensor_sequence_slot_fix()
 HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE: bool = _probe_parameter_as_subclass_in_dispatch_mode()
+HAS_ROLL_TENSOR_SHIFTS: bool = _probe_roll_tensor_shifts()
 _DYNAMO_OPTIMIZED_MODULE_TYPE: type[Any] | None = None
 _DYNAMO_OPTIMIZED_MODULE_PROBED: bool = False
 _DYNAMO_ORIG_CALLABLE_MARKER_PROBED: bool = False
@@ -950,6 +973,7 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_SAFE_WEIGHTS_ONLY_LOAD",
     "HAS_TENSOR_SEQUENCE_SLOT_FIX",
     "HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE",
+    "HAS_ROLL_TENSOR_SHIFTS",
     "HAS_FLOAT32_MATMUL_PRECISION",
     "HAS_DETERMINISTIC_ALGORITHMS_QUERY",
     "HAS_CUDA_MATMUL_TF32",

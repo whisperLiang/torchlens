@@ -2085,22 +2085,34 @@ def _candidate_payload_for_target(candidate: Op, target_layer: Op) -> torch.Tens
     return _saved_out_payload(candidate)
 
 
-def _candidate_attributed_at_same_slot_of_sibling(
+def _foreach_sibling_attributes_slot(
     self: "Trace",
     target_layer: Op,
     arg_type: str,
     argloc_key: Any,
-    candidate_labels: set[Any],
 ) -> bool:
-    """Return whether a sibling foreach output attributes this exact slot.
+    """Return whether a sibling foreach output attributes this exact zipped slot.
 
     Narrow companion to the zipped foreach parent projection (round-31 M3):
     for ``torch._foreach_*`` calls, each output's parents are restricted to
     its own zipped list members, so sibling members' operands legitimately
     appear unattributed in every other output's saved args. The exemption
     requires ALL of: a ``_foreach_`` op, a zipped tuple slot key, and a
-    sibling output of the SAME call attributing the matched candidate at the
-    SAME slot. A zipped edge dropped from every member therefore still fails.
+    sibling output of the SAME call attributing SOME parent at the SAME slot
+    -- proof the slot is a sibling-OWNED member slot rather than a dropped
+    edge. r29 F5: the check is SLOT-keyed, not candidate-keyed. The former
+    version required the sibling's attributed label to EQUAL the value-matched
+    candidate, so an honest in-place ``_foreach_*_`` capture false-FAILED
+    whenever a zipped member's producer had a value-identical twin anywhere in
+    the trace (``clone``/``* 1.0``/``detach`` guarantee one): the sweep's
+    matched candidate was the twin ORPHAN, never the sibling's attributed
+    producer, and the exemption declined. Ownership of the slot by a sibling
+    is the honest fact; WHICH producer the sweep's value match found is noise.
+    A zipped edge dropped from every member still fails -- no sibling
+    attributes that slot, so the sweep runs and the drop is caught (pinned by
+    ``test_m3_dropped_zipped_edge_still_fails_validation``); a wrong producer
+    AT an attributed slot is the capture witness's per-slot identity job
+    (r29 F3c), not the value sweep's.
 
     Parameters
     ----------
@@ -2112,13 +2124,11 @@ def _candidate_attributed_at_same_slot_of_sibling(
         ``"args"`` or ``"kwargs"``.
     argloc_key:
         Slot key of the matched value in the target op's saved args.
-    candidate_labels:
-        Label spellings of the matched candidate producer.
 
     Returns
     -------
     bool
-        True when a same-call sibling attributes the candidate at this slot.
+        True when a same-call sibling attributes any parent at this slot.
     """
 
     if not str(getattr(target_layer, "func_name", "")).startswith("_foreach_"):
@@ -2136,7 +2146,7 @@ def _candidate_attributed_at_same_slot_of_sibling(
         if getattr(sibling, "func_call_id", None) != call_id:
             continue
         sibling_positions = getattr(sibling, "parent_arg_positions", None) or {}
-        if (sibling_positions.get(arg_type) or {}).get(argloc_key) in candidate_labels:
+        if (sibling_positions.get(arg_type) or {}).get(argloc_key) is not None:
             return True
     return False
 
@@ -2253,6 +2263,15 @@ def _check_unattributed_arg_slots(self: "Trace", target_layer: Op) -> Validation
                 continue
             if _matches_own_parameter(target_layer, value):
                 continue
+            # ``torch._foreach_*`` outputs are ZIPPED (round-31 M3): member
+            # ``i`` depends only on member ``i`` of each list operand, so a
+            # sibling member's operand legitimately sits in this op's saved
+            # list args without an edge. Exempt the slot ONLY when a SIBLING
+            # output of the SAME call attributes a parent at this exact zipped
+            # slot (slot ownership, r29 F5) -- a genuinely dropped zipped edge
+            # (nobody attributes the slot) still fails.
+            if _foreach_sibling_attributes_slot(self, target_layer, arg_type, argloc_key):
+                continue
             # ``t.data = rhs`` (round-31 M6, r28 reconcile): the setter is
             # captured as the canonical single-argument ``detach(rhs)`` call,
             # so the pre-rebind receiver never appears as a recorded argument
@@ -2278,17 +2297,6 @@ def _check_unattributed_arg_slots(self: "Trace", target_layer: Op) -> Validation
                 # Mirror of ``_parent_logged_for_any_arg_alias``: a producer
                 # attributed at ANY slot of this op is not a dropped edge.
                 if candidate_labels & attributed_labels:
-                    continue
-                # ``torch._foreach_*`` outputs are ZIPPED (round-31 M3): member
-                # ``i`` depends only on member ``i`` of each list operand, so a
-                # sibling member's operand legitimately sits in this op's saved
-                # list args without an edge. Exempt ONLY when the exact same
-                # zipped slot is attributed to this candidate on a SIBLING
-                # output of the SAME call -- a genuinely dropped zipped edge
-                # (nobody attributes the slot) still fails.
-                if _candidate_attributed_at_same_slot_of_sibling(
-                    self, target_layer, arg_type, argloc_key, candidate_labels
-                ):
                     continue
                 payload = _candidate_payload_for_target(candidate, target_layer)
                 if payload is None or not tensor_nanequal(value, payload, allow_tolerance=False):

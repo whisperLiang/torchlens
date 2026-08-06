@@ -1821,6 +1821,39 @@ def _build_edge_use_records(
     return _edge_uses
 
 
+def _session_validated_parameter(trace: "Trace", value: torch.Tensor) -> bool:
+    """Return whether ``value`` is a CURRENT-SESSION prep-stamped model Parameter.
+
+    The r77/r79 param provenance rung, factored for reuse: a non-empty prep
+    :class:`ParamMeta` address that resolves in THIS capture's ``param_logs``
+    with EXACT object identity. A fresh in-forward ``nn.Parameter``, a foreign
+    model's parameter, or a stale leaked stamp never validates here.
+
+    Parameters
+    ----------
+    trace:
+        Active capture Trace whose session the prep stamp must belong to.
+    value:
+        Parameter argument to inspect.
+
+    Returns
+    -------
+    bool
+        True when the prep stamp resolves session-validly for this object.
+    """
+
+    param_meta = get_param_meta(value)
+    if param_meta is None or not param_meta.param_address:
+        return False
+    addr = param_meta.param_address
+    param_logs = getattr(trace, "param_logs", None)
+    return (
+        param_logs is not None
+        and addr in param_logs
+        and getattr(param_logs[addr], "_param_ref", None) is value
+    )
+
+
 def _tensor_has_known_provenance(trace: "Trace", value: torch.Tensor) -> bool:
     """Return whether a tensor carries TorchLens input/op/buffer provenance.
 
@@ -1888,17 +1921,8 @@ def _tensor_has_known_provenance(trace: "Trace", value: torch.Tensor) -> bool:
     provenance and the break marker stands.
     """
 
-    if isinstance(value, torch.nn.Parameter):
-        param_meta = get_param_meta(value)
-        if param_meta is not None and param_meta.param_address:
-            addr = param_meta.param_address
-            param_logs = getattr(trace, "param_logs", None)
-            if (
-                param_logs is not None
-                and addr in param_logs
-                and getattr(param_logs[addr], "_param_ref", None) is value
-            ):
-                return True
+    if isinstance(value, torch.nn.Parameter) and _session_validated_parameter(trace, value):
+        return True
     meta = get_tensor_meta(value)
     if meta is None:
         return False
@@ -1937,6 +1961,7 @@ def _unattributed_tensor_arg_positions(
     kwargs: dict[str, Any],
     func_name: str,
     parent_arg_positions: dict[str, dict[Any, str]],
+    recorded_parent_params: list[torch.nn.Parameter],
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Find tensor arguments that will not become graph parents or known sources.
 
@@ -1952,6 +1977,9 @@ def _unattributed_tensor_arg_positions(
         Wrapped callable name used to identify receiver mutations.
     parent_arg_positions:
         Recorded parent-edge locations for the current call.
+    recorded_parent_params:
+        The call's resolved ``parent_params`` (r29 F3a): the recorded param
+        edge set a session-validated Parameter slot must appear in.
 
     Returns
     -------
@@ -1964,7 +1992,13 @@ def _unattributed_tensor_arg_positions(
         slot value (round-31 FN-1..6: a dropped bool/all-zero/all-one edge is
         invisible to value evidence, and a wrong-parent swap between
         value-identical producers is invisible by construction; the live-label
-        identity witness catches both).
+        identity witness catches both). r29 F3a/F3c extend the branch: a
+        session-validated PARAMETER slot missing from ``parent_params`` is a
+        dropped param edge, and a slot whose RECORDED parent label disagrees
+        with the live tensor's own provenance labels is a permuted/wrong edge
+        (the former set-membership check was blind to slot permutations
+        between value-identical producers, which corrupts the runnable call
+        recipe, not merely a verdict).
     """
 
     positions: list[str] = []
@@ -2043,8 +2077,23 @@ def _unattributed_tensor_arg_positions(
         )
     )
 
-    def visit(value: Any, path: str) -> None:
-        """Append unattributed tensor positions under ``path``."""
+    def child_slot(slot: tuple[str, Any] | None, inner_key: Any) -> tuple[str, Any] | None:
+        """Return the recorder slot key for a container member, or ``None`` past depth 2."""
+
+        if slot is None:
+            return None
+        arg_type, outer_key = slot
+        if isinstance(outer_key, tuple):
+            return None  # recorder's 2-level ceiling: deeper slots have no key
+        return (arg_type, (outer_key, inner_key))
+
+    def visit(value: Any, path: str, slot: tuple[str, Any] | None) -> None:
+        """Append unattributed tensor positions under ``path``.
+
+        ``slot`` is the recorder-vocabulary key for this position (``("args",
+        0)``, ``("kwargs", ("mask", 1))``) or ``None`` past the recorder's
+        2-level nesting ceiling.
+        """
 
         if isinstance(value, torch.Tensor):
             # A ``.data`` getter now has a canonical detach graph node, but a
@@ -2062,6 +2111,22 @@ def _unattributed_tensor_arg_positions(
             if unsafe_data_alias_receiver or not _tensor_has_known_provenance(trace, value):
                 positions.append(path)
                 return
+            if isinstance(value, torch.nn.Parameter):
+                # r29 F3a: the parameter rung. A Parameter never appears in
+                # ``parent_arg_positions`` (the recorder skips it) and
+                # ``tensor_session_parent_labels`` returns ``()`` for it, so a
+                # dropped PARAM edge was invisible to both witness branches.
+                # For a session-validated prep-stamped Parameter the recorded
+                # edge set is ``parent_params``: absence by exact identity is a
+                # dropped param edge. Unprepped / in-forward / foreign
+                # Parameters keep their existing paths (branch (1), or the
+                # label-rung exemption for activation-derived params).
+                if _session_validated_parameter(trace, value) and not any(
+                    value is recorded for recorded in recorded_parent_params
+                ):
+                    positions.append(path)
+                    dropped_edge_positions.append(path)
+                return
             provenance_labels = tensor_session_parent_labels(value)
             # Branch (2): a fully-provenanced tensor whose producer label is not a
             # recorded parent edge. A RUNTIME tensor at ANY input slot is a data
@@ -2074,21 +2139,34 @@ def _unattributed_tensor_arg_positions(
             # gone because its "deliberately excluded from parents" premise no
             # longer holds anywhere. Un-provenanced tensors never reach here --
             # branch (1) already caught them at every position.
-            if provenance_labels and recorded_parent_labels.isdisjoint(provenance_labels):
-                positions.append(path)
-                dropped_edge_positions.append(path)
+            if provenance_labels:
+                recorded_at_slot = (
+                    parent_arg_positions[slot[0]].get(slot[1]) if slot is not None else None
+                )
+                if recorded_at_slot is not None:
+                    # r29 F3c: ORDERED per-slot identity. The recorder stamped a
+                    # parent label AT this exact slot; it must be one of the live
+                    # tensor's own provenance labels, else the call recipe binds
+                    # the WRONG producer here (a slot permutation between
+                    # value-identical producers passed the former set check).
+                    if recorded_at_slot not in provenance_labels:
+                        positions.append(path)
+                        dropped_edge_positions.append(path)
+                elif recorded_parent_labels.isdisjoint(provenance_labels):
+                    positions.append(path)
+                    dropped_edge_positions.append(path)
             return
         if isinstance(value, (list, tuple)):
             for index, item in enumerate(value):
-                visit(item, f"{path}.{index}")
+                visit(item, f"{path}.{index}", child_slot(slot, index))
         elif isinstance(value, dict):
             for key, item in value.items():
-                visit(item, f"{path}.{key}")
+                visit(item, f"{path}.{key}", child_slot(slot, key))
 
     for index, arg in enumerate(args):
-        visit(arg, f"arg{index}")
+        visit(arg, f"arg{index}", ("args", index))
     for key, value in kwargs.items():
-        visit(value, f"kw:{key}")
+        visit(value, f"kw:{key}", ("kwargs", key))
     return tuple(positions), tuple(dropped_edge_positions)
 
 
@@ -3590,6 +3668,7 @@ def _build_shared_fields_dict(
         kwargs,
         func_name,
         fields_dict["parent_arg_positions"],
+        fields_dict["parent_params"],
     )
 
     # Function config — lightweight hyperparameter extraction, always on.
@@ -5571,6 +5650,27 @@ def _make_layer_log_entry(
         fields_dict["saved_kwargs"] = {
             key: _recursive_safe_copy(value) for key, value in t_kwargs.items()
         }
+    # r29 F3b: seal this record's capture-time (slot -> producer) truth on the
+    # Trace, keyed by raw label. The witness (``dropped_edge_tensor_args``) is
+    # stamped at CAPTURE, so an edge dropped DOWNSTREAM of it -- anywhere in the
+    # 20-step postprocess pipeline or later -- was invisible whenever the
+    # payload was trivial. The post-pipeline metadata invariant
+    # (``validation/invariants.py::_check_capture_edges_survive_postprocess``)
+    # reconciles the final graph against this sealed truth. Runtime-only
+    # bookkeeping (same class as ``_validation_orphan_candidate_index``): never
+    # persisted, absent on loaded traces.
+    _capture_edge_truth = self.__dict__.setdefault("_capture_parent_edge_truth", {})
+    _positions = fields_dict["parent_arg_positions"]
+    _capture_edge_truth[fields_dict["_label_raw"]] = (
+        tuple(("args", key, label) for key, label in _positions["args"].items())
+        + tuple(("kwargs", key, label) for key, label in _positions["kwargs"].items())
+        + tuple(
+            ("parent", None, label)
+            for label in fields_dict["parents"]
+            if label not in _positions["args"].values()
+            and label not in _positions["kwargs"].values()
+        )
+    )
     op_event = _op_event_from_log(self, fields_dict, t, fire_results)
     self.capture_events.append(op_event)
     if op_event.grad_fn_handle is not None:

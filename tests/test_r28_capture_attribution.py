@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
+from torchlens.utils._torch_compat import HAS_ROLL_TENSOR_SHIFTS
 
 
 def _ops_by_func(trace: object, func_name: str) -> list:
@@ -105,6 +106,10 @@ class _ArangeTensorEnd(nn.Module):
         return torch.arange(n) + x.sum() * 0
 
 
+@pytest.mark.skipif(
+    not HAS_ROLL_TENSOR_SHIFTS,
+    reason="torch.roll rejects a bare 0-dim tensor shifts on this torch (capability probe)",
+)
 def test_h2_roll_tensor_shift_is_parent() -> None:
     """``roll(x, shifts=tensor)`` records the shift producer as a data parent."""
 

@@ -1405,8 +1405,69 @@ def test_replay_mismatch_with_missing_nonperturbed_parent_still_fails() -> None:
     assert any(decision["reason"] == "replay_mismatch" for decision in status.decisions)
 
 
+class StepInvalidNarrowModel(nn.Module):
+    """Model whose control parent is invalid under EVERY perturbation.
+
+    ``narrow(0, start, x.shape[0])`` with ``start == 0`` admits NO other valid
+    start value: the wide random draw, ``step_up`` (+1), and ``step_down`` (-1,
+    which wraps to ``size - 1``) all overrun the dimension and raise -- on any
+    seed, by construction. r29 MED: the r28 step-retry made the former
+    ``CholeskyModel`` vehicle soundly ``validated`` (a +-1-ULP step keeps the
+    input positive-definite and changes the output), silently emptying the
+    ``perturbation_execution_exception`` tripwire category across every armed
+    vehicle; this model keeps the category reachable, retry included. The
+    start index is a model INPUT (input ops carry no perturbation check of
+    their own), so no upstream op can add a seed-dependent side decision.
+    """
+
+    def forward(self, x: torch.Tensor, start: torch.Tensor) -> torch.Tensor:
+        """Narrow the full length of ``x`` from a traced zero start index.
+
+        Parameters
+        ----------
+        x:
+            One-dimensional input.
+        start:
+            Zero-dimensional long start index; must be 0.
+
+        Returns
+        -------
+        torch.Tensor
+            The narrowed (full-length) input, scaled.
+        """
+
+        return x.narrow(0, start, x.shape[0]) * 1.0
+
+
 def test_perturbation_exception_yields_reason_coded_unverified() -> None:
     """Invalid perturbed inputs should be unverified rather than exempted."""
+
+    trace = tl.trace(
+        StepInvalidNarrowModel(),
+        [torch.tensor([-2.0, 0.5, 1.5, 2.5]), torch.tensor(0)],
+        layers_to_save="all",
+        save_arg_values=True,
+    )
+
+    torch.manual_seed(108)
+    result = trace.validate_forward_pass([_first_output(trace)], validate_metadata=False)
+
+    assert isinstance(result, ValidationReplayStatus)
+    assert result.state == "unverified"
+    assert result.unverified_reason_counts["perturbation_execution_exception"] >= 1
+
+
+def test_step_retry_soundly_validates_domain_constrained_perturbation() -> None:
+    """The r28 step retry converts the old cholesky vehicle into evidence.
+
+    A wide random perturbation of the ``cholesky`` parent leaves the
+    positive-definite domain and raises; the +-1-ULP step retry stays inside it
+    and CHANGES the output, so the edge is now proven real
+    (``validated``/``perturbation_changed``) instead of reason-coded
+    ``unverified``. Pinned so the retry benefit cannot silently regress; the
+    ``perturbation_execution_exception`` category itself stays armed through
+    :class:`StepInvalidNarrowModel` above.
+    """
 
     trace = tl.trace(
         CholeskyModel(),
@@ -1418,9 +1479,10 @@ def test_perturbation_exception_yields_reason_coded_unverified() -> None:
     torch.manual_seed(108)
     result = trace.validate_forward_pass([_first_output(trace)], validate_metadata=False)
 
-    assert isinstance(result, ValidationReplayStatus)
-    assert result.state == "unverified"
-    assert result.unverified_reason_counts["perturbation_execution_exception"] >= 1
+    assert result is True
+    status = trace.validation_replay_status
+    assert status.state == "passed"
+    assert not status.unverified_reason_counts
 
 
 def test_fully_saved_vanilla_model_has_zero_unverified_decisions() -> None:

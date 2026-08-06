@@ -6432,9 +6432,15 @@ def test_corruption_distance_ancestor_flag():
 # -- P. Graph connectivity corruption --
 
 
-def test_corruption_connectivity_parentless_layer():
-    """Removing all parents from a computational layer triggers error."""
-    log = _make_clean_log()
+def _corrupt_first_computational_layer_parentless(log) -> "object":
+    """Symmetrically strip all parent edges from the first eligible op.
+
+    Scrubs the parent's ``children``, the op's ``parents``, and the
+    ``parent_arg_positions`` arg map together so no self-consistency check
+    (graph_topology's arg-map cross-check) trips on an asymmetric edit; the
+    corruption is exactly the post-witness silent edge-drop class. Returns the
+    corrupted op.
+    """
     for lpl in log.layer_list:
         if (
             not lpl.is_input
@@ -6443,20 +6449,57 @@ def test_corruption_connectivity_parentless_layer():
             and not lpl.is_internal_source
             and lpl.parents
         ):
-            # Also fix the parent's child list to avoid graph_topology catching it first
             for p_label in lpl.parents:
                 parent = log.layer_dict_all_keys[p_label]
                 parent.children = [c for c in parent.children if c != lpl.layer_label]
                 parent.has_children = len(parent.children) > 0
             lpl.parents = []
-            # Scrub the arg map consistently as well, so the r26 graph_topology
-            # arg-map/graph cross-check (which fires on a parent_arg_positions
-            # entry naming a non-parent) does not preempt the connectivity
-            # invariant this test exists to exercise.
             for arg_domain in ("args", "kwargs"):
                 lpl.parent_arg_positions.get(arg_domain, {}).clear()
             # has_parents is a read-only property derived from parents
-            break
+            return lpl
+    raise AssertionError("fixture produced no eligible computational layer")
+
+
+def test_corruption_connectivity_parentless_layer():
+    """Removing all parents from a computational layer triggers error.
+
+    On a live capture the sealed capture-time edge truth (r29 F3b,
+    ``capture_edge_survival``) is the correct FIRST-LINE detector for this
+    corruption: parents + arg map were scrubbed symmetrically AFTER the
+    capture witness was stamped, which is precisely the post-witness
+    edge-drop class that invariant exists to reconcile. Pin that layering
+    here; the ``graph_connectivity`` parentless-layer check keeps its own
+    end-to-end coverage in
+    ``test_corruption_connectivity_parentless_layer_without_edge_witness``.
+    """
+    log = _make_clean_log()
+    _corrupt_first_computational_layer_parentless(log)
+    with pytest.raises(MetadataInvariantError, match="capture_edge_survival"):
+        check_metadata_invariants(log)
+    log.cleanup()
+
+
+def test_corruption_connectivity_parentless_layer_without_edge_witness():
+    """graph_connectivity still catches a parentless layer with no edge witness.
+
+    ``capture_edge_survival`` deliberately fails open when an op has no entry
+    in the sealed ``_capture_parent_edge_truth`` (loaded artifacts and
+    non-exhaustive captures have nothing to reconcile). A parentless
+    computational layer in that witness-free class must still be caught, and
+    ``graph_connectivity`` is the invariant that owns it -- this pins the
+    defense-in-depth layer end-to-end through ``check_metadata_invariants``,
+    not by calling the checker directly.
+    """
+    log = _make_clean_log()
+    lpl = _corrupt_first_computational_layer_parentless(log)
+    truth = log.__dict__.get("_capture_parent_edge_truth")
+    raw_label = getattr(lpl, "_label_raw", None)
+    # The fixture must actually have sealed a witness for this op, so removing
+    # it is what makes capture_edge_survival fail open (fails loudly if the
+    # witness plumbing ever stops covering this op).
+    assert truth and raw_label in truth
+    del truth[raw_label]
     with pytest.raises(MetadataInvariantError, match="graph_connectivity"):
         check_metadata_invariants(log)
     log.cleanup()

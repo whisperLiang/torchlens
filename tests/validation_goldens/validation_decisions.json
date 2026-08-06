@@ -140,21 +140,19 @@
         "reason": "replay_matched"
       },
       {
-        "decision": "unverified",
+        "decision": "validated",
         "func_name": "cholesky",
         "op_label": "cholesky_1_1:1",
         "phase": "perturbation",
-        "reason": "perturbation_execution_exception"
+        "reason": "perturbation_changed"
       }
     ],
     "exempted_reason_counts": {},
     "failed_node_count": 0,
     "replayed_node_count": 3,
-    "state": "unverified",
-    "unverified_node_count": 1,
-    "unverified_reason_counts": {
-      "perturbation_execution_exception": 1
-    }
+    "state": "passed",
+    "unverified_node_count": 0,
+    "unverified_reason_counts": {}
   },
   "tiny_corrupted_replay": {
     "decisions": [
@@ -730,6 +728,74 @@
       "missing_saved_args": 1
     }
   },
+  "tiny_step_invalid_narrow": {
+    "decisions": [
+      {
+        "decision": "validated",
+        "func_name": "none",
+        "op_label": "output_1",
+        "phase": "ground_truth",
+        "reason": "ground_truth_matched"
+      },
+      {
+        "decision": "validated",
+        "func_name": "none",
+        "op_label": "output_1:1",
+        "phase": "replay",
+        "reason": "replay_matched"
+      },
+      {
+        "decision": "validated",
+        "func_name": "none",
+        "op_label": "output_1:1",
+        "phase": "perturbation",
+        "reason": "perturbation_changed"
+      },
+      {
+        "decision": "validated",
+        "func_name": "__mul__",
+        "op_label": "mul_1_2:1",
+        "phase": "replay",
+        "reason": "replay_matched"
+      },
+      {
+        "decision": "validated",
+        "func_name": "__mul__",
+        "op_label": "mul_1_2:1",
+        "phase": "perturbation",
+        "reason": "perturbation_changed"
+      },
+      {
+        "decision": "validated",
+        "func_name": "narrow",
+        "op_label": "narrow_1_1:1",
+        "phase": "replay",
+        "reason": "replay_matched"
+      },
+      {
+        "decision": "validated",
+        "func_name": "narrow",
+        "op_label": "narrow_1_1:1",
+        "phase": "perturbation",
+        "reason": "perturbation_changed"
+      },
+      {
+        "decision": "unverified",
+        "func_name": "narrow",
+        "op_label": "narrow_1_1:1",
+        "phase": "perturbation",
+        "reason": "perturbation_execution_exception"
+      }
+    ],
+    "exempted_reason_counts": {},
+    "failed_node_count": 0,
+    "replayed_node_count": 4,
+    "state": "unverified",
+    "unverified_node_count": 1,
+    "unverified_reason_counts": {
+      "perturbation_execution_exception": 1
+    }
+  },
   "tiny_swamped_add": {
     "decisions": [
       {
@@ -786,11 +852,11 @@
         "func_name": "full_like",
         "op_label": "fulllike_1_1:1",
         "phase": "perturbation",
-        "reason": "skip_perturbation_entirely:full_like"
+        "reason": "structural_output_template"
       }
     ],
     "exempted_reason_counts": {
-      "skip_perturbation_entirely:full_like": 1,
+      "structural_output_template": 1,
       "ulp_swamped_perturbation": 1
     },
     "failed_node_count": 0,

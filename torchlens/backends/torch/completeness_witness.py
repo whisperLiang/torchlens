@@ -1133,7 +1133,12 @@ def _resolve_layout_rooting_labels(
       taints fail closed (layout attribution through nondeterminism would launder it);
       ``unknown`` falls through to the storage rung. A pure ``state:``/empty leaf set
       resolves to ZERO labels -- a positive state-rooted/literal-only signal the caller
-      maps to "record nothing" (residual (3)), never a silent fail-open.
+      maps to "record nothing" (residual (3)), never a silent fail-open. r29 F1: that
+      positive reading is honored only for an UNLABELED receiver; a labeled receiver
+      that reached this rung through a TAINTED rung 1 fails closed instead (its
+      identity-keyed ledger entry may predate the taint event), and a receiver whose
+      current label is a storage-rebind BARRIER resolves ``unknown`` at the ledger
+      itself (:func:`_operand_leaf_origins`).
     * STORAGE IDENTITY (r31 leaf / r63 state precedent): the receiver's true-original
       storage pointer matched against live captured producer tensors
       (``_CAPTURED_STORAGE_PTRS``) -- an alias mechanism the dispatch interpose never saw
@@ -1151,11 +1156,22 @@ def _resolve_layout_rooting_labels(
     if _ORIGIN_RNG in leaf_origins or _ORIGIN_UNINIT in leaf_origins:
         return None
     if _ORIGIN_UNKNOWN not in leaf_origins:
-        return {
+        rooting = {
             origin[len(_ORIGIN_LABEL_PREFIX) :]
             for origin in leaf_origins
             if origin.startswith(_ORIGIN_LABEL_PREFIX)
         }
+        if not rooting and label is not None:
+            # r29 F1 (defense in depth): the receiver HAS a label but its traced
+            # ancestry is TAINTED, and the ledger resolved a pure-``state:``/
+            # literal (empty-label) basis. The identity-keyed ledger entry may
+            # predate the taint event (a non-dispatch mutation of the same
+            # object), so "positively state-rooted" cannot be trusted here --
+            # returning the empty set would fail OPEN in the caller (record
+            # nothing). Only an UNLABELED receiver's ledger resolution, or a
+            # clean-chain rung-1 label, may positively claim state rooting.
+            return None
+        return rooting
     if label is None:
         return _layout_storage_rooting_labels(trace, source)
     return None
@@ -3179,6 +3195,21 @@ def _operand_leaf_origins(trace: Any, operand: torch.Tensor) -> frozenset[str]:
     if registry is not None:
         entry = registry.get(operand)
         if entry is not None:
+            # r29 F1: a ledger entry is identity-keyed, so it survives a
+            # storage-SWAPPING ``.data=`` rebind of the SAME object and then
+            # describes the PRE-rebind value -- the exact staleness that let a
+            # rebound receiver's leaf basis resolve pure-``state:`` and launder
+            # an input-layout read (sec1 false VERIFIED). A receiver currently
+            # labeled by a barrier op resolves ``unknown`` (explicit taint):
+            # the taint then propagates through every downstream registration,
+            # so products of the rebound tensor fail closed too. Pointer-
+            # preserving rebinds never register a barrier (r85 siblings keep
+            # their attribution).
+            rebind_barriers = _STORAGE_REBIND_BARRIER_LABELS.get(trace)
+            if rebind_barriers:
+                label = get_tensor_label(operand)
+                if isinstance(label, str) and label in rebind_barriers:
+                    return frozenset({_ORIGIN_UNKNOWN})
             return entry[1]
     param_storage_addresses = getattr(trace, "_param_storage_addresses", None)
     if param_storage_addresses:
