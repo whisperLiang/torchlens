@@ -1069,7 +1069,14 @@ def _param_call_identity(node: _MutableRecurrenceNode) -> _ParamCallIdentity:
 # * The one honest same-site signature difference is the LOOP ENTRY: pass 1 reads
 #   state produced before the loop, later passes read it through the feedback
 #   wire. Entry pairs are re-admitted through a guarded carry-slot exemption
-#   (:func:`_pf_entry_union_allowed`) instead of context-set heuristics.
+#   (:func:`_pf_entry_union_allowed`) instead of context-set heuristics. Entry
+#   matching is stream-local: a connected equal-signature cohort is already a
+#   realized site, while disconnected identical entries may each pair with the
+#   one continuation whose carry they reach.
+# * Direct parameterized/anchored consumers provide the second side of topology
+#   when a multi-parent view is ambiguous. Only complete consumer sites (every
+#   pass fed by the same-key universe) can decide a boundary, preventing a
+#   terminal next-loop consumer from stealing the preceding loop's last call.
 # * Loop-invariant-fed repeats (a factory op or a recompute of a pre-loop value
 #   inside the body) carry no sequencing evidence on the parent side; they are
 #   sequenced through their CONSUMERS (:func:`_pf_child_route_allows`).
@@ -1178,6 +1185,103 @@ def _pf_realization_counts(workspace: _GroupingWorkspace) -> dict[_SlotColor, in
     return dict(counts)
 
 
+def _pf_direct_site_passes(
+    workspace: _GroupingWorkspace,
+) -> dict[str, tuple[_SlotColor, int]]:
+    """Return the site color and pass rank of every direct topology anchor.
+
+    Parameters
+    ----------
+    workspace:
+        Mutable grouping workspace.
+
+    Returns
+    -------
+    dict[str, tuple[_SlotColor, int]]
+        Parameterized and anchored node labels mapped to their pass-blind site
+        color and one-based capture-order rank within that site.
+    """
+    site_members: dict[_SlotColor, list[str]] = defaultdict(list)
+    for label in workspace.raw_labels:
+        node = workspace.nodes[label]
+        if node.uses_params and node.param_barcodes:
+            site_members[("param", _param_call_identity(node))].append(label)
+        elif node.recurrence_anchored:
+            site_members[("anchor", (node.equivalence_key, node.output_slot))].append(label)
+    return {
+        label: (color, pass_index)
+        for color, members in site_members.items()
+        for pass_index, label in enumerate(members, start=1)
+    }
+
+
+def _pf_consumer_site_frame(
+    workspace: _GroupingWorkspace,
+    label: str,
+    direct_site_passes: dict[str, tuple[_SlotColor, int]],
+) -> dict[_SlotColor, tuple[int, ...]]:
+    """Return direct parameterized/anchored consumer sites with pass ranks.
+
+    Parameters
+    ----------
+    workspace:
+        Mutable grouping workspace.
+    label:
+        Bare-op label whose consumer flank should be described.
+    direct_site_passes:
+        Direct topology anchors from :func:`_pf_direct_site_passes`.
+
+    Returns
+    -------
+    dict[_SlotColor, tuple[int, ...]]
+        Consumer-site colors mapped to their sorted pass ranks. Bare and pseudo
+        consumers are omitted because only persistent direct sites provide an
+        independent boundary witness.
+    """
+    ranks: dict[_SlotColor, list[int]] = defaultdict(list)
+    for child in workspace.nodes[label].data_children:
+        site_pass = direct_site_passes.get(child)
+        if site_pass is None:
+            continue
+        color, pass_index = site_pass
+        ranks[color].append(pass_index)
+    return {color: tuple(sorted(pass_indices)) for color, pass_indices in ranks.items()}
+
+
+def _pf_consumer_sites_advance(
+    earlier: dict[_SlotColor, tuple[int, ...]],
+    later: dict[_SlotColor, tuple[int, ...]],
+) -> bool:
+    """Return whether equal direct consumer sites advance pass-wise.
+
+    Parameters
+    ----------
+    earlier:
+        Consumer-site frame of the earlier bare call.
+    later:
+        Consumer-site frame of the later bare call.
+
+    Returns
+    -------
+    bool
+        ``True`` when both calls feed the same non-empty direct consumer-site
+        multiset, no consumer pass regresses, and at least one pass advances.
+    """
+    if not earlier or earlier.keys() != later.keys():
+        return False
+    if any(len(earlier[color]) != len(later[color]) for color in earlier):
+        return False
+    paired_ranks = (
+        (earlier_rank, later_rank)
+        for color in earlier
+        for earlier_rank, later_rank in zip(earlier[color], later[color])
+    )
+    comparisons = list(paired_ranks)
+    return all(later_rank >= earlier_rank for earlier_rank, later_rank in comparisons) and any(
+        later_rank > earlier_rank for earlier_rank, later_rank in comparisons
+    )
+
+
 def _pf_child_route_allows(
     workspace: _GroupingWorkspace,
     node1_label: str,
@@ -1242,8 +1346,9 @@ def _pf_entry_union_allowed(
     target_label: str,
     signatures: dict[str, Counter],
     parent_colors: dict[str, list[tuple[str, _SlotColor]]],
+    consumer_site_frames: dict[str, dict[_SlotColor, tuple[int, ...]]],
+    complete_consumer_sites: set[_SlotColor],
     cohort_sizes: dict[frozenset, int],
-    global_signature_counts: dict[frozenset, int],
     realizations: dict[_SlotColor, int],
     reach_memo: dict[tuple[str, str], bool],
 ) -> bool:
@@ -1257,14 +1362,12 @@ def _pf_entry_union_allowed(
     * **Single-slot difference.** Signatures agreeing on all but one matched
       slot. Two differing slots mean a differing FLANK as well -- positive
       evidence of a different site (the n1=1 peeled chain), never an entry.
-    * **One-shot odd parent.** The entry-side odd color, when parameterized or
-      anchored, must be realized exactly once. A realized (multi-call) odd
-      parent marks a recurring neighbor site: the candidate sits at a loop
-      boundary, not at a loop entry (the r22 tied chain, the r24 straddle).
-    * **Globally unique entry signature.** No other same-key candidate anywhere
-      carries the entry's signature (the r24 global-census doctrine): a
-      multi-carrier signature class is a realized site of its own, merely
-      fragmented, never a dangling entry.
+    * **One-shot odd parent or consumer continuation.** A recurring entry-side
+      odd color normally marks a neighboring site, not an entry. The exception
+      is independent consumer-side proof that both calls feed advancing passes
+      of the same direct parameterized/anchored site while retaining a shared
+      direct flank. The flank requirement keeps unary post-operations attached
+      to the site that produced them.
     * **Carry certificate.** The target's odd parent is computed FROM the entry
       (reflexively): the differing slot really is the loop feedback, not an
       unrelated topology change.
@@ -1287,10 +1390,12 @@ def _pf_entry_union_allowed(
         Current signature (parent color multiset) per candidate label.
     parent_colors:
         Per-label ``(parent_label, color)`` pairs backing the signatures.
+    consumer_site_frames:
+        Direct parameterized/anchored consumer sites and pass ranks per label.
+    complete_consumer_sites:
+        Direct consumer sites whose every pass is fed by this same-key universe.
     cohort_sizes:
         Class-local member count per signature.
-    global_signature_counts:
-        Same-key-universe-wide carrier count per signature.
     realizations:
         Parameterized/anchored color realization counts.
     reach_memo:
@@ -1309,9 +1414,19 @@ def _pf_entry_union_allowed(
         return False
     entry_odd_color = next(iter(odd_entry))
     target_odd_color = next(iter(odd_target))
-    if entry_odd_color[0] in ("param", "anchor") and realizations.get(entry_odd_color, 0) != 1:
-        return False
-    if global_signature_counts.get(frozenset(signature_entry.items()), 0) != 1:
+    agreeing_remainder = signature_entry & signature_target
+    consumer_continuation = (
+        any(color[0] in ("param", "anchor") for color in agreeing_remainder)
+        and set(consumer_site_frames[entry_label]) <= complete_consumer_sites
+        and set(consumer_site_frames[target_label]) <= complete_consumer_sites
+        and _pf_consumer_sites_advance(
+            consumer_site_frames[entry_label], consumer_site_frames[target_label]
+        )
+    )
+    entry_site_is_recurring = entry_odd_color[0] in ("param", "anchor") and (
+        realizations.get(entry_odd_color, 0) != 1
+    )
+    if entry_site_is_recurring and not consumer_continuation:
         return False
     carry_certified = any(
         parent_label in workspace.nodes
@@ -1321,7 +1436,6 @@ def _pf_entry_union_allowed(
     )
     if not carry_certified:
         return False
-    agreeing_remainder = signature_entry & signature_target
     if any(color[0] in ("param", "anchor") for color in agreeing_remainder):
         return True
     if cohort_sizes.get(frozenset(signature_target.items()), 0) >= 2:
@@ -1334,8 +1448,9 @@ def _pf_partition_class(
     members: list[str],
     signatures: dict[str, Counter],
     parent_colors: dict[str, list[tuple[str, _SlotColor]]],
+    consumer_site_frames: dict[str, dict[_SlotColor, tuple[int, ...]]],
+    complete_consumer_sites: set[_SlotColor],
     class_of: dict[str, str],
-    global_signature_counts: dict[frozenset, int],
     realizations: dict[_SlotColor, int],
     reach_memo: dict[tuple[str, str], bool],
 ) -> list[list[str]]:
@@ -1344,9 +1459,12 @@ def _pf_partition_class(
     Members with EQUAL signatures union when data flow connects them (loop
     iterations always connect through the carry; parallel streams never do) or,
     for loop-invariant-fed repeats, when consumer topology certifies sequencing.
-    Entry calls union with their EARLIEST admissible target only -- adoption
-    edges with out-degree one form an in-forest, so one entry can never bridge
-    two mutually split sites (the r23 at-most-one guard, preserved).
+    Entry calls that are not already members of a connected equal-signature
+    cohort union with their EARLIEST reachable admissible target only. This is
+    stream-local rather than a global signature census: disconnected identical
+    entries can each pair with their own continuation, while a realized cohort
+    cannot bridge a later site. Adoption edges with out-degree one form an
+    in-forest, so one entry can never bridge two mutually split sites.
 
     Parameters
     ----------
@@ -1358,10 +1476,12 @@ def _pf_partition_class(
         Current signature per candidate label.
     parent_colors:
         Per-label ``(parent_label, color)`` pairs backing the signatures.
+    consumer_site_frames:
+        Direct parameterized/anchored consumer sites and pass ranks per label.
+    complete_consumer_sites:
+        Direct consumer sites whose every pass is fed by this same-key universe.
     class_of:
         Current bare-op class assignment.
-    global_signature_counts:
-        Same-key-universe-wide carrier count per signature.
     realizations:
         Parameterized/anchored color realization counts.
     reach_memo:
@@ -1400,6 +1520,17 @@ def _pf_partition_class(
         for member1, member2 in pair_iter:
             if find(member1) == find(member2):
                 continue
+            consumers1 = consumer_site_frames[member1]
+            consumers2 = consumer_site_frames[member2]
+            if (
+                sum(count for _, count in signature) >= 2
+                and consumers1
+                and consumers2
+                and set(consumers1) <= complete_consumer_sites
+                and set(consumers2) <= complete_consumer_sites
+                and consumers1.keys() != consumers2.keys()
+            ):
+                continue
             if _reaches_forward(workspace, member1, member2, reach_memo):
                 union(member1, member2)
             elif invariant_fed and _pf_child_route_allows(
@@ -1407,7 +1538,13 @@ def _pf_partition_class(
             ):
                 union(member1, member2)
 
+    equal_component_sizes = Counter(find(member) for member in members)
+    realized_equal_members = {
+        member for member in members if equal_component_sizes[find(member)] > 1
+    }
     for index, entry in enumerate(members):
+        if entry in realized_equal_members:
+            continue
         entry_signature = frozenset(signatures[entry].items())
         for target in members[index + 1 :]:
             if frozenset(signatures[target].items()) == entry_signature:
@@ -1420,8 +1557,9 @@ def _pf_partition_class(
                 target,
                 signatures,
                 parent_colors,
+                consumer_site_frames,
+                complete_consumer_sites,
                 cohort_sizes,
-                global_signature_counts,
                 realizations,
                 reach_memo,
             ):
@@ -1480,6 +1618,25 @@ def _assign_param_free_layers(workspace: _GroupingWorkspace) -> None:
         universe.setdefault((node.equivalence_key, node.output_slot), []).append(label)
 
     realizations = _pf_realization_counts(workspace)
+    direct_site_passes = _pf_direct_site_passes(workspace)
+    consumer_site_frames = {
+        label: _pf_consumer_site_frame(workspace, label, direct_site_passes)
+        for labels in universe.values()
+        for label in labels
+    }
+    complete_consumer_sites_by_key: dict[tuple[str, Optional[int]], set[_SlotColor]] = defaultdict(
+        set
+    )
+    for key, labels in universe.items():
+        observed_passes: dict[_SlotColor, set[int]] = defaultdict(set)
+        for label in labels:
+            for color, pass_indices in consumer_site_frames[label].items():
+                observed_passes[color].update(pass_indices)
+        complete_consumer_sites_by_key[key] = {
+            color
+            for color, pass_indices in observed_passes.items()
+            if pass_indices == set(range(1, realizations[color] + 1))
+        }
     reach_memo: dict[tuple[str, str], bool] = {}
 
     classes: "OrderedDict[str, list[str]]" = OrderedDict()
@@ -1495,7 +1652,6 @@ def _assign_param_free_layers(workspace: _GroupingWorkspace) -> None:
     while True:
         signatures: dict[str, Counter] = {}
         parent_colors: dict[str, list[tuple[str, _SlotColor]]] = {}
-        key_signature_counts: dict[tuple[str, Optional[int]], Counter] = defaultdict(Counter)
         for leader, members in classes.items():
             for member in members:
                 pairs = [
@@ -1505,7 +1661,6 @@ def _assign_param_free_layers(workspace: _GroupingWorkspace) -> None:
                 parent_colors[member] = pairs
                 signature = Counter(color for _, color in pairs)
                 signatures[member] = signature
-                key_signature_counts[class_key[leader]][frozenset(signature.items())] += 1
 
         changed = False
         new_classes: "OrderedDict[str, list[str]]" = OrderedDict()
@@ -1520,8 +1675,9 @@ def _assign_param_free_layers(workspace: _GroupingWorkspace) -> None:
                 members,
                 signatures,
                 parent_colors,
+                consumer_site_frames,
+                complete_consumer_sites_by_key[class_key[leader]],
                 class_of,
-                dict(key_signature_counts[class_key[leader]]),
                 realizations,
                 reach_memo,
             )
