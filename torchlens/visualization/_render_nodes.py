@@ -1287,6 +1287,21 @@ def _build_collapsed_module_node(
         module_num_tensors = ml.num_layers
         module_num_buffers = sum(self[layer].is_buffer for layer in ml.layer_labels)
         module_has_input_ancestor = any(self[layer].has_input_ancestor for layer in ml.layer_labels)  # type: ignore[union-attr]
+        # Rolled boxes need the same surfaced-exit remainder belt as the
+        # unrolled branch (round-25): the atomic-exit drop in
+        # ``_collapse_address_for_node`` is vis_mode-independent, so the exit
+        # op renders separately in rolled mode too and counting it inside the
+        # box double-represents it (round-27). ``ml.layer_labels`` is already
+        # in pass-free layer currency, matching ``ml.num_layers``.
+        if (
+            _collapsed_module_should_show_remainder(self, address, ml.layer_labels, collapse_fn)
+            and fold is None
+        ):
+            remainder_stats = _collapsed_module_remainder_stats(self, address, ml.layer_labels)
+            module_num_tensors = remainder_stats["num_layers"]
+            module_nparams = remainder_stats["num_params"]
+            module_nparams_trainable = remainder_stats["num_params_trainable"]
+            module_nparams_frozen = remainder_stats["num_params_frozen"]
 
     # Deduplicate: multiple layers in the same collapsed module will each
     # trigger this function, but the node should only be added once.
