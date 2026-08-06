@@ -356,7 +356,13 @@ def _exotic_sources() -> dict[str, torch.Tensor]:
     if HAS_NAMED_TENSOR_API:
         sources["named"] = _named_source()
     try:
-        sources["quantized"] = torch.quantize_per_tensor(torch.ones(2, 3), 0.1, 0, torch.qint8)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"torch\.quantize_per_tensor, torch\.quantize_per_channel.*",
+                category=UserWarning,
+            )
+            sources["quantized"] = torch.quantize_per_tensor(torch.ones(2, 3), 0.1, 0, torch.qint8)
     except (RuntimeError, NotImplementedError):
         pass
     try:
