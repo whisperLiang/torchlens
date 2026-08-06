@@ -400,6 +400,7 @@ def _add_node_to_graphviz(
             module_edge_dict,
             emitted_segment_nodes,
             segment,
+            vis_mode,
         )
     is_collapsed_module = collapse_address is not None
     is_hidden_run_member = (
@@ -651,8 +652,15 @@ def _queue_segment_node(
     module_edge_dict: Dict[str, Any],
     emitted_segment_nodes: set[str] | None,
     segment: SegmentDescriptor,
+    vis_mode: str = "unrolled",
 ) -> None:
     """Queue one dashed segment node if it has not already been emitted.
+
+    The owner is projected into the active cluster keyspace before posting
+    (``_segment_owner_for_mode``): rolled clusters drain pass-free buckets,
+    so a pass-qualified owner would orphan the labeled node and Graphviz
+    would materialize an unlabeled default ellipse from its edges instead
+    (round-27).
 
     Parameters
     ----------
@@ -664,6 +672,8 @@ def _queue_segment_node(
         Mutable set of emitted segment node names.
     segment:
         Segment descriptor to render.
+    vis_mode:
+        ``"unrolled"`` or ``"rolled"`` visualization mode.
     """
 
     if emitted_segment_nodes is None:
@@ -681,10 +691,11 @@ def _queue_segment_node(
         "fontcolor": "#222222",
         "ordering": "out",
     }
-    if segment.owner is None:
+    owner = _segment_owner_for_mode(segment.owner, vis_mode)
+    if owner is None:
         graphviz_graph.node(**node_args)
     else:
-        module_edge_dict[segment.owner].setdefault("nodes", []).append(node_args)
+        module_edge_dict[owner].setdefault("nodes", []).append(node_args)
 
 
 def _render_raw_input(
@@ -1276,6 +1287,21 @@ def _build_collapsed_module_node(
         module_num_tensors = ml.num_layers
         module_num_buffers = sum(self[layer].is_buffer for layer in ml.layer_labels)
         module_has_input_ancestor = any(self[layer].has_input_ancestor for layer in ml.layer_labels)  # type: ignore[union-attr]
+        # Rolled boxes need the same surfaced-exit remainder belt as the
+        # unrolled branch (round-25): the atomic-exit drop in
+        # ``_collapse_address_for_node`` is vis_mode-independent, so the exit
+        # op renders separately in rolled mode too and counting it inside the
+        # box double-represents it (round-27). ``ml.layer_labels`` is already
+        # in pass-free layer currency, matching ``ml.num_layers``.
+        if (
+            _collapsed_module_should_show_remainder(self, address, ml.layer_labels, collapse_fn)
+            and fold is None
+        ):
+            remainder_stats = _collapsed_module_remainder_stats(self, address, ml.layer_labels)
+            module_num_tensors = remainder_stats["num_layers"]
+            module_nparams = remainder_stats["num_params"]
+            module_nparams_trainable = remainder_stats["num_params_trainable"]
+            module_nparams_frozen = remainder_stats["num_params_frozen"]
 
     # Deduplicate: multiple layers in the same collapsed module will each
     # trigger this function, but the node should only be added once.

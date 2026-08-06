@@ -660,7 +660,11 @@ def _surfaced_own_output_ops(
     address:
         Pass-free owner module address.
     op_labels:
-        Pass-qualified operation labels in this module call.
+        Pass-qualified operation labels in this module call, or pass-free
+        layer labels for a rolled box (each resolved to its first pass; the
+        surfaced-exit predicate fields are per-layer invariants, and rolled
+        remainder accounting is in layer currency, so one op per layer base
+        is exactly right).
 
     Returns
     -------
@@ -671,7 +675,15 @@ def _surfaced_own_output_ops(
 
     surfaced: list[Op] = []
     for label in op_labels:
-        op = trace.ops[label]
+        # A bare multi-pass layer label is ambiguous for the op accessor;
+        # qualify pass-free labels to their first pass explicitly.
+        if ":" not in label:
+            try:
+                op = trace.ops[f"{label}:1"]
+            except (KeyError, IndexError):
+                op = trace.ops[label]
+        else:
+            op = trace.ops[label]
         if getattr(op, "is_buffer", False):
             continue
         if not getattr(op, "is_atomic_module", False):
@@ -747,6 +759,37 @@ def _run_fold_ellipsis_owner_key(
     return _collapsed_module_owner_key(trace, fold.representative, "1", vis_mode)
 
 
+def _segment_owner_for_mode(owner: str | None, vis_mode: str) -> str | None:
+    """Project a segment descriptor owner into the active cluster keyspace.
+
+    Rolled clusters are keyed by pass-free module address while unrolled
+    clusters are keyed per call, exactly as ``_raw_render_node_owner_key``
+    projects raw node owners. Segment owners must go through the same
+    projection at every render boundary (node queueing and edge endpoint
+    ownership): a pass-qualified owner in rolled mode names a bucket the
+    rolled cluster flush never drains, so its queued content is silently
+    dropped and Graphviz materializes an unlabeled default node instead
+    (round-27 fail-soft belt; the descriptor builders emit pass-free rolled
+    owners at the source).
+
+    Parameters
+    ----------
+    owner:
+        Segment descriptor owner cluster key, or ``None`` for top level.
+    vis_mode:
+        ``"unrolled"`` or ``"rolled"`` visualization mode.
+
+    Returns
+    -------
+    str | None
+        Owner key valid in the active cluster keyspace.
+    """
+
+    if owner is None or vis_mode != "rolled":
+        return owner
+    return owner.rsplit(":", 1)[0]
+
+
 def _raw_render_node_owner_key(node: GraphNode, vis_mode: str) -> str | None:
     """Return the innermost cluster that owns an unprojected render node.
 
@@ -805,7 +848,7 @@ def _rendered_endpoint_owner_key(
     """
 
     if segment is not None:
-        return segment.owner
+        return _segment_owner_for_mode(segment.owner, vis_mode)
     if hidden_fold is not None:
         return _run_fold_ellipsis_owner_key(trace, hidden_fold, vis_mode)
     if collapsed_address is not None:
@@ -2109,6 +2152,7 @@ __all__ = [
     "_run_fold_ellipsis_owner_key",
     "_run_fold_hidden_endpoint",
     "_segment_for_node",
+    "_segment_owner_for_mode",
     "_self_loop_is_single_op_module",
     "_set_argument_edge_label",
     "_should_mark_arguments_on_edge",

@@ -1588,7 +1588,7 @@ def _make_child_segment_descriptor(
     num_params = sum(
         int(getattr(trace.modules[address], "num_params", 0) or 0) for address in addresses
     )
-    owner = _segment_owner_key(trace, addresses)
+    owner = _segment_owner_key(trace, addresses, context.vis_mode)
     label = _child_segment_label(addresses, num_layers, num_buffers, num_params)
     name = (
         f"{_encode_segment_address(addresses[0])}__segment__"
@@ -1705,7 +1705,11 @@ def _op_segment_owner_key(
     one reused module has no common call-level entry and owns the honest LCA
     (the shared parent call, or ``None`` for top level) instead of falsely
     claiming the first call (round-24 C1). Rolled clusters merge passes per
-    address, so rolled commonality stays pass-free.
+    address, so rolled commonality stays pass-free AND the returned owner
+    must be the pass-free address itself: the rolled cluster flush drains
+    buckets by pass-free address, so a pass-qualified owner posts the labeled
+    segment node into a bucket no rolled cluster ever drains and Graphviz
+    materializes an unlabeled default ellipse instead (round-27).
     """
 
     module_stacks: list[tuple[str, ...]] = []
@@ -1722,7 +1726,7 @@ def _op_segment_owner_key(
             keys = set(values)
         if len(keys) != 1:
             break
-        common = values[0]
+        common = next(iter(keys))
     return common
 
 
@@ -1775,7 +1779,11 @@ def _op_segment_label(
     return f"{first} ... {last} -- {len(labels)} ops"
 
 
-def _segment_owner_key(trace: "Trace", addresses: tuple[str, ...]) -> str | None:
+def _segment_owner_key(
+    trace: "Trace",
+    addresses: tuple[str, ...],
+    vis_mode: str = "unrolled",
+) -> str | None:
     """Return the lowest rendered module cluster that owns ``addresses``.
 
     Child segments replace consecutive single-call child BOXES (multi-call
@@ -1785,11 +1793,19 @@ def _segment_owner_key(trace: "Trace", addresses: tuple[str, ...]) -> str | None
     segment owner mirrors that exact box rule so a segment always renders in
     the same cluster the boxes it replaces would have; deriving it from call
     nesting instead would split a segment from its unabsorbed sibling boxes.
+
+    Rolled clusters are keyed by pass-FREE address (mirroring
+    ``_collapsed_module_owner_key``'s rolled branch), so the rolled owner is
+    the bare parent address: a pass-qualified owner lands in a bucket the
+    rolled cluster flush never drains and the labeled segment node is
+    silently dropped (round-27).
     """
 
     parent = addresses[0].rsplit(".", 1)[0] if "." in addresses[0] else "self"
     if parent == "self" or parent not in trace.modules:
         return None
+    if vis_mode == "rolled":
+        return parent
     parent_key = f"{parent}:1"
     return parent_key if parent_key in trace.modules else parent
 
