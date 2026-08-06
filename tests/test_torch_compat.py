@@ -338,6 +338,10 @@ def test_torch_capability_snapshot_contract() -> None:
         "HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE": (
             tc.HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE
         ),
+        # r29 F4: whether torch.roll accepts a bare 0-dim tensor `shifts`
+        # (2.8 rejects, 2.13 accepts); behavioral probe, version-dependent, so
+        # mirror the live capability like AUTOCAST.
+        "HAS_ROLL_TENSOR_SHIFTS": tc.HAS_ROLL_TENSOR_SHIFTS,
         "HAS_DYNAMO_OPTIMIZED_MODULE": True,
         "HAS_DYNAMO_ORIG_CALLABLE_MARKER": tc.HAS_DYNAMO_ORIG_CALLABLE_MARKER,
         "HAS_DYNAMO_EXPLAIN": tc.HAS_DYNAMO_EXPLAIN,
