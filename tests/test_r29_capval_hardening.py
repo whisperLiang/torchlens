@@ -430,6 +430,71 @@ def test_f3b_honest_capture_passes_invariants() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# r33 F-1 -- capture_edge_survival must reconcile PER-SLOT, not by label-set
+# membership. Two postprocess-stage corruptions passed the set reduction: a
+# slot PERMUTATION between value-identical surviving producers (P1) and an
+# argpos entry DROP with parents intact (P2).
+# --------------------------------------------------------------------------- #
+
+
+def _final_twin_sub_trace() -> Any:
+    """Return a postprocessed _TwinSub trace plus its final ``__sub__`` op."""
+
+    torch.manual_seed(0)
+    trace = tl.trace(_TwinSub().eval(), torch.randn(4), layers_to_save="all", save_arg_values=True)
+    sub_op = next(o for o in trace.ops if o.func_name == "__sub__")
+    return trace, sub_op
+
+
+def test_f1_final_slot_permutation_fails_invariants() -> None:
+    """P1: permuting final argpos slots between value-identical survivors raises.
+
+    Both producers survive and both labels stay present on the op, so the old
+    label-SET reduction passed; the sealed per-record triplets pin each label
+    to its exact slot.
+    """
+
+    from torchlens.validation.invariants import (
+        MetadataInvariantError,
+        check_metadata_invariants,
+    )
+
+    trace, sub_op = _final_twin_sub_trace()
+    positions = sub_op.parent_arg_positions["args"]
+    slots = sorted(positions, key=str)
+    assert len(slots) >= 2, "twin consumer lost its two positional slots -- inconclusive"
+    first, second = slots[0], slots[1]
+    assert positions[first] != positions[second]
+    positions[first], positions[second] = positions[second], positions[first]
+    with pytest.raises(MetadataInvariantError, match="capture_edge_survival"):
+        check_metadata_invariants(trace)
+
+
+def test_f1_final_argpos_entry_drop_fails_invariants() -> None:
+    """P2: dropping one final argpos entry with parents intact raises.
+
+    The producer label survives via ``parents`` (and the producer itself
+    survives), so the old set reduction passed while the user-facing slot
+    metadata silently lost an edge.
+    """
+
+    from torchlens.validation.invariants import (
+        MetadataInvariantError,
+        check_metadata_invariants,
+    )
+
+    trace, sub_op = _final_twin_sub_trace()
+    positions = sub_op.parent_arg_positions["args"]
+    assert len(positions) >= 2, "twin consumer lost its two positional slots -- inconclusive"
+    victim_slot = sorted(positions, key=str)[0]
+    victim_label = positions[victim_slot]
+    del positions[victim_slot]
+    assert victim_label in sub_op.parents, "parents no longer hold the label -- inconclusive"
+    with pytest.raises(MetadataInvariantError, match="capture_edge_survival"):
+        check_metadata_invariants(trace)
+
+
+# --------------------------------------------------------------------------- #
 # F5 -- honest in-place foreach captures must validate.
 # --------------------------------------------------------------------------- #
 
