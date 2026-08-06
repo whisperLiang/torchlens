@@ -1033,28 +1033,33 @@ def _probe_saved_tensors_hooks_patchable() -> bool:
     that installs user pack/unpack hooks (``save_on_cpu`` and the non-reentrant
     checkpoint hook subclass it). TorchLens scopes user hook bodies as
     autograd-internal during an active capture by patching the class
-    ``__init__`` at wrap time, so the patch needs a plain-Python ``__init__``
-    with the ``(self, pack_hook, unpack_hook)`` shape. Probe the shape
-    behaviorally; never parse ``torch.__version__``.
+    ``__init__`` (construction-time scoping) AND ``__enter__`` (use-time
+    re-scoping, covering contexts constructed before the first capture) at
+    wrap time, so the patch needs a plain-Python ``__init__`` with the
+    ``(self, pack_hook, unpack_hook)`` shape and a plain-Python ``__enter__``
+    taking only ``self``. Probe the shape behaviorally; never parse
+    ``torch.__version__``.
 
     Returns
     -------
     bool
-        ``True`` when the class exists and its ``__init__`` is a patchable
-        Python function taking exactly the pack/unpack hook pair.
+        ``True`` when the class exists and both ``__init__`` and ``__enter__``
+        are patchable Python functions with the expected shapes.
     """
 
     hooks_cls = getattr(getattr(torch.autograd, "graph", None), "saved_tensors_hooks", None)
     if not isinstance(hooks_cls, type):
         return False
     init = hooks_cls.__dict__.get("__init__")
-    if not isinstance(init, types.FunctionType):
+    enter = hooks_cls.__dict__.get("__enter__")
+    if not isinstance(init, types.FunctionType) or not isinstance(enter, types.FunctionType):
         return False
     try:
-        params = list(inspect.signature(init).parameters)
+        init_params = list(inspect.signature(init).parameters)
+        enter_params = list(inspect.signature(enter).parameters)
     except (TypeError, ValueError):
         return False
-    return params == ["self", "pack_hook", "unpack_hook"]
+    return init_params == ["self", "pack_hook", "unpack_hook"] and enter_params == ["self"]
 
 
 HAS_VARIABLE_FUNCTIONS: bool = _probe_variable_functions()

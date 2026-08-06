@@ -3118,7 +3118,16 @@ def _check_whether_func_on_saved_parents_yields_saved_tensor(
         # steps close the value-discretizing dead zone (round-34 Finding B): a
         # near-constant float parent feeding an integer cast needs an excursion
         # that crosses an integer boundary before truncation can transmit it.
-        for retry_strategy in ("step_up", "step_down", "unit_step_up", "unit_step_down"):
+        # The geometric magnitude ladder (round-35 R2) extends that to dead
+        # zones WIDER than one unit -- bucketize with wide bins, round with
+        # negative decimals, and kin -- so any FINITE discretization step up to
+        # the bounded cap is eventually crossed and the real edge registers.
+        # The ladder is SCOPED to value-discretizing children: for fp-swamping
+        # cases (a large co-addend absorbing small steps in float precision)
+        # an unrealistically large step would falsely "confirm" a numerically
+        # inert edge, so those keep the plain unit steps and route to the
+        # ``ulp_swamped_perturbation`` exemption below.
+        for retry_strategy in _perturbation_retry_strategies(layer):
             retry_args, _retry_reason = _prepare_input_args_for_validating_layer(
                 self, layer, layers_to_perturb, perturb_strategy=retry_strategy
             )
@@ -3672,6 +3681,115 @@ def _floating_step_distinct_from(tensor: torch.Tensor) -> torch.Tensor:
     return torch.where(unchanged, fallback, candidate).to(tensor.dtype)
 
 
+# Geometric perturbation-magnitude ladder for the dead-zone retry (round-35
+# R2, scoped in the R2 refinement). Every value-DISCRETIZING child has a
+# FINITE quantization step -- 1 for integer casts, the bin width for
+# ``bucketize``, ``10**-decimals`` for ``round(decimals<0)`` -- so growing
+# the excursion x10 per rung crosses any such dead zone up to the bounded
+# 1e9 cap. The +-1.0 rung is the plain unit step and runs unconditionally
+# (round-34 Finding B); the larger rungs run ONLY for value-discretizing
+# children. The cap keeps the retry loop bounded; per-element steps a dtype
+# cannot represent fall back to the minimal representable step inside
+# ``_directional_step_perturb``.
+_DEAD_ZONE_RETRY_MAGNITUDES: tuple[float, ...] = (
+    10.0,
+    100.0,
+    1e3,
+    1e4,
+    1e5,
+    1e6,
+    1e7,
+    1e8,
+    1e9,
+)
+
+
+# Child ops whose output quantizes a continuous parent onto a grid with a
+# FINITE, crossable truncation boundary (the geometric ladder's legitimate
+# target). fp-SWAMPING children -- e.g. an ``add`` whose large co-addend
+# absorbs small parent steps in floating-point precision -- are deliberately
+# NOT classified here: their dead zone is a precision artifact of the actual
+# forward's magnitudes, so an unrealistically large step would "confirm"
+# influence the real computation never transmits. Those cases stay with the
+# ``ulp_swamped_perturbation`` exemption.
+_VALUE_DISCRETIZING_FUNC_NAMES: frozenset[str] = frozenset(
+    {
+        "floor",
+        "ceil",
+        "round",
+        "trunc",
+        "fix",
+        "floor_divide",
+        "bucketize",
+        "searchsorted",
+        "quantize_per_tensor",
+        "quantize_per_channel",
+    }
+)
+
+
+def _op_is_value_discretizing(layer: Op) -> bool:
+    """Return whether a child op quantizes values with crossable dead zones.
+
+    Parameters
+    ----------
+    layer:
+        Child op whose perturbed replay output stayed unchanged.
+
+    Returns
+    -------
+    bool
+        True for explicit quantizers (``floor``/``ceil``/``round``/``trunc``/
+        ``bucketize``/``searchsorted`` and kin, including in-place variants)
+        and for ops with a non-bool integer output (integer casts such as
+        ``.long()``/``.int()``). False otherwise -- in particular for float
+        arithmetic whose insensitivity is fp swamping, which must keep
+        routing to the ``ulp_swamped_perturbation`` exemption.
+    """
+
+    func_name = str(getattr(layer, "func_name", "") or "").rstrip("_")
+    if func_name in _VALUE_DISCRETIZING_FUNC_NAMES:
+        return True
+    out = getattr(layer, "out", None)
+    return (
+        isinstance(out, torch.Tensor)
+        and not out.dtype.is_floating_point
+        and not out.dtype.is_complex
+        and out.dtype is not torch.bool
+    )
+
+
+def _perturbation_retry_strategies(layer: Op) -> list[str]:
+    """Return the ordered deterministic retry strategies for perturbation.
+
+    Parameters
+    ----------
+    layer:
+        Child op being validated; gates the geometric magnitude ladder.
+
+    Returns
+    -------
+    list of str
+        Minimal representable steps first (least likely to violate a child
+        op's input domain), then the paired up/down unit steps (round-34
+        Finding B). Only when the child is a value-discretizing op does the
+        ladder continue to geometrically growing magnitudes, so any finite
+        TRUNCATION dead zone is eventually crossed while fp-swamped float
+        arithmetic keeps its realistic-step behavior and the
+        ``ulp_swamped_perturbation`` exemption. The retry loop returns on the
+        first strategy that changes the child output, so later rungs only
+        run while the edge still looks non-influential.
+    """
+
+    strategies = ["step_up", "step_down", "unit_step_up", "unit_step_down"]
+    if not _op_is_value_discretizing(layer):
+        return strategies
+    for magnitude in _DEAD_ZONE_RETRY_MAGNITUDES:
+        strategies.append(f"unit_step_up:{magnitude:g}")
+        strategies.append(f"unit_step_down:{magnitude:g}")
+    return strategies
+
+
 def _directional_step_perturb(tensor: torch.Tensor, strategy: str) -> torch.Tensor:
     """Return a minimal deterministic step perturbation of a saved parent.
 
@@ -3681,15 +3799,18 @@ def _directional_step_perturb(tensor: torch.Tensor, strategy: str) -> torch.Tens
     that still guarantees a different input.
 
     The ``unit_step_up``/``unit_step_down`` strategies move floating parents
-    by a full +-1.0 instead of one representable step. A value-DISCRETIZING
-    child (an integer cast such as ``.long()``, ``floor``/``round``/``trunc``)
-    has a truncation dead zone around every integer, so a near-constant parent
+    by a full magnitude (default +-1.0, or ``unit_step_up:<magnitude>`` for
+    the geometric ladder) instead of one representable step. A
+    value-DISCRETIZING child (an integer cast such as ``.long()``,
+    ``floor``/``round``/``trunc``, ``bucketize``, ``round(decimals<0)``) has
+    a dead zone around every quantization point, so a near-constant parent
     (e.g. an all-zero ``x * 0``) whose calibrated random draw and ULP steps
-    all land inside ``(-1, 1)`` reads as non-influential even though the edge
-    is real (round-34 Finding B). A unit step is guaranteed to cross an
-    integer boundary; elements too large for ``+-1.0`` to be representable
-    fall back to the minimal step. Non-float dtypes already step by a full
-    unit, so the unit strategies delegate to the minimal ones.
+    all land inside the zone reads as non-influential even though the edge is
+    real (round-34 Finding B, round-35 R2). A magnitude step is guaranteed to
+    cross the corresponding quantization boundary; elements the dtype cannot
+    move by the magnitude fall back to the minimal step. Integer parents step
+    by the integral magnitude where the dtype range permits; bool parents and
+    unrepresentable integer magnitudes delegate to the minimal strategies.
 
     Parameters
     ----------
@@ -3697,7 +3818,8 @@ def _directional_step_perturb(tensor: torch.Tensor, strategy: str) -> torch.Tens
         Saved parent tensor values.
     strategy:
         ``"step_up"``, ``"step_down"``, ``"unit_step_up"``, or
-        ``"unit_step_down"``.
+        ``"unit_step_down"``, the latter two optionally suffixed with
+        ``:<magnitude>`` (e.g. ``"unit_step_up:100"``).
 
     Returns
     -------
@@ -3706,12 +3828,29 @@ def _directional_step_perturb(tensor: torch.Tensor, strategy: str) -> torch.Tens
         differ from the original where the dtype permits it.
     """
 
-    if strategy in ("unit_step_up", "unit_step_down"):
-        minimal_strategy = "step_up" if strategy == "unit_step_up" else "step_down"
-        if not tensor.is_floating_point():
+    if strategy.startswith(("unit_step_up", "unit_step_down")):
+        base_strategy, _, magnitude_text = strategy.partition(":")
+        magnitude = float(magnitude_text) if magnitude_text else 1.0
+        step_up = base_strategy == "unit_step_up"
+        minimal_strategy = "step_up" if step_up else "step_down"
+        if tensor.dtype == torch.bool:
             return _directional_step_perturb(tensor, minimal_strategy)
-        offset = 1.0 if strategy == "unit_step_up" else -1.0
-        stepped = tensor + offset
+        if tensor.is_complex():
+            return tensor + (magnitude if step_up else -magnitude)
+        if not tensor.is_floating_point():
+            info = torch.iinfo(tensor.dtype)
+            step = int(magnitude)
+            if step <= 1 or step > int(info.max):
+                return _directional_step_perturb(tensor, minimal_strategy)
+            step_values = torch.full_like(tensor, step)
+            if step_up:
+                return torch.where(
+                    tensor <= int(info.max) - step, tensor + step_values, tensor - step_values
+                ).to(tensor.dtype)
+            return torch.where(
+                tensor >= int(info.min) + step, tensor - step_values, tensor + step_values
+            ).to(tensor.dtype)
+        stepped = tensor + (magnitude if step_up else -magnitude)
         minimal = _directional_step_perturb(tensor, minimal_strategy)
         finite_and_moved = torch.isfinite(stepped) & (stepped != tensor)
         return torch.where(finite_and_moved, stepped, minimal).to(tensor.dtype)
