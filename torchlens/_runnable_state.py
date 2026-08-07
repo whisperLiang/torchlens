@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from hashlib import sha256
 import math
+import sys
 from types import MappingProxyType
 from typing import Any
 import warnings
@@ -1571,6 +1572,25 @@ embedding) is three orders of magnitude below it.
 
 def _host_memory_budget_bytes() -> int | None:
     """Return available host memory plus free swap, or ``None`` when unprobeable."""
+
+    if sys.platform.startswith("linux"):
+        try:
+            proc_fields: dict[str, int] = {}
+            with open("/proc/meminfo", encoding="ascii") as handle:
+                for line in handle:
+                    name, separator, rest = line.partition(":")
+                    if name not in {"MemAvailable", "SwapFree"}:
+                        continue
+                    parts = rest.split()
+                    if separator != ":" or len(parts) != 2 or not parts[0].isdigit():
+                        break
+                    if parts[1] != "kB":
+                        break
+                    proc_fields[name] = int(parts[0]) * 1024
+                    if len(proc_fields) == 2:
+                        return proc_fields["MemAvailable"] + proc_fields["SwapFree"]
+        except (OSError, UnicodeError):  # pragma: no cover - missing/malformed Linux procfs
+            pass
 
     try:
         import psutil
