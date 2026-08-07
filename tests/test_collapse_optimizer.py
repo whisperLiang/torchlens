@@ -7,8 +7,9 @@ import multiprocessing
 import os
 from pathlib import Path
 import queue
+import random
 import time
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -40,7 +41,9 @@ from torchlens.visualization.collapse_optimizer import (
     _prune_frontier,
     _rendered_own_unit_map,
     _rendered_module_hidden_counts,
+    _same_role,
     _structural_digest_map,
+    RoleComponent,
     build_role_components,
     collapse_schedule,
     select_collapse_plan,
@@ -800,6 +803,108 @@ def test_role_components_split_heterogeneous_same_class_sequentials() -> None:
         assert tuple(component.members for component in components) == (("encoder",), ("head",))
     finally:
         trace.cleanup()
+
+
+def _pairwise_role_components(
+    trace: Any,
+    child_addresses: tuple[str, ...],
+    analysis: Any,
+    hidden_counts: Mapping[str, int] | None,
+) -> tuple[RoleComponent, ...]:
+    """Reference all-pairs union-find role partition driven by ``_same_role``."""
+
+    children = tuple(child for child in child_addresses if child in trace.modules)
+    parent_index = {child: index for index, child in enumerate(children)}
+    parent = {child: child for child in children}
+
+    def find(address: str) -> str:
+        current = address
+        while parent[current] != current:
+            parent[current] = parent[parent[current]]
+            current = parent[current]
+        return current
+
+    def union(left: str, right: str) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root == right_root:
+            return
+        if parent_index[left_root] <= parent_index[right_root]:
+            parent[right_root] = left_root
+        else:
+            parent[left_root] = right_root
+
+    for left_index, left in enumerate(children):
+        for right in children[left_index + 1 :]:
+            if _same_role(trace, left, right, analysis, hidden_counts or {}):
+                union(left, right)
+    grouped: dict[str, list[str]] = {}
+    for child in children:
+        grouped.setdefault(find(child), []).append(child)
+    return tuple(
+        RoleComponent(tuple(members))
+        for _, members in sorted(
+            grouped.items(),
+            key=lambda item: min(parent_index[member] for member in item[1]),
+        )
+    )
+
+
+def _role_stub_inputs(
+    labeled_counts: Mapping[str, tuple[str, int]],
+) -> tuple[Any, Any]:
+    """Return (trace, analysis) stubs for role-component inputs."""
+
+    modules = {
+        address: SimpleNamespace(class_name=class_name)
+        for address, (class_name, _) in labeled_counts.items()
+    }
+    signals = {
+        address: SimpleNamespace(address=address, hidden_ops=hidden_ops)
+        for address, (_, hidden_ops) in labeled_counts.items()
+    }
+    return SimpleNamespace(modules=modules), SimpleNamespace(signals=signals)
+
+
+@pytest.mark.smoke
+def test_role_components_match_pairwise_union_property() -> None:
+    """Sorted-run role components byte-match the all-pairs ``_same_role`` union."""
+
+    for trial in range(200):
+        rng = random.Random(trial)
+        n_children = rng.randint(0, 32)
+        labels = ["Block", "Stage", "Head", "Stem"][: rng.randint(1, 4)]
+        scale = rng.choice([3, 40, 500, 100_000])
+        labeled_counts = {
+            f"m{index}": (rng.choice(labels), rng.randint(0, scale)) for index in range(n_children)
+        }
+        trace, analysis = _role_stub_inputs(labeled_counts)
+        children = list(labeled_counts)
+        rng.shuffle(children)
+        # Unknown addresses must be filtered out identically by both paths.
+        children.insert(rng.randint(0, len(children) or 1), "not_a_module")
+        hidden_counts: Mapping[str, int] | None = None
+        if rng.random() < 0.5:
+            hidden_counts = {
+                address: rng.randint(-2, scale) for address in labeled_counts if rng.random() < 0.5
+            }
+        fast = build_role_components(trace, "self", tuple(children), analysis, hidden_counts)
+        reference = _pairwise_role_components(trace, tuple(children), analysis, hidden_counts)
+        assert fast == reference, f"trial={trial}"
+
+
+@pytest.mark.smoke
+def test_role_components_chain_connects_beyond_tolerance() -> None:
+    """Adjacent-in-mass siblings chain one component past the 1.5 pair tolerance."""
+
+    # Masses log2(1+n) = 0,1,2,3,4: each adjacent gap is 1.0 <= 1.5, but the
+    # extremes differ by 4.0, so connectivity must come from chaining.
+    labeled_counts = {f"m{index}": ("Block", 2**index - 1) for index in range(5)}
+    trace, analysis = _role_stub_inputs(labeled_counts)
+    children = tuple(labeled_counts)
+    fast = build_role_components(trace, "self", children, analysis)
+    assert fast == _pairwise_role_components(trace, children, analysis, None)
+    assert fast == (RoleComponent(children),)
 
 
 def test_default_routes_v2_and_rolled_auto() -> None:
