@@ -39,6 +39,7 @@ import warnings
 
 from ..capture.session import capture_session_for_events
 from ..capture.projectors import TraceProjector
+from ..backends.torch.ops import _compact_ancestor_sets
 from ..utils.tensor_utils import _is_cuda_available
 from ..utils.hashing import (
     compute_graph_shape_hash,
@@ -646,6 +647,8 @@ def postprocess(
     with _vtimed(self, "  Step 20: Release param refs"):
         self.release_param_refs(allow_iter_rehydrate=True)
     _assert_postprocess_contract(self, "20")
+
+    _compact_ancestor_sets(self)
 
     if getattr(self, "verbose", False):
         print(f"[torchlens] Postprocessing complete ({time.time() - _post_t0:.2f}s)")
