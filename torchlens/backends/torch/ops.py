@@ -198,6 +198,40 @@ is_inplace fallback). They mutate their target but log a reconstructed output te
 version-baseline signal is unavailable and the operator name is the honest mutation signature.
 """
 
+_BULK_ALIAS_FREE_TORCH_FUNCTIONS = frozenset(
+    {
+        "__add__",
+        "__eq__",
+        "__iadd__",
+        "__mul__",
+        "__ne__",
+        "__radd__",
+        "__rmul__",
+        "__sub__",
+        "adaptive_avg_pool2d",
+        "addmm",
+        "all",
+        "arange",
+        "batch_norm",
+        "conv2d",
+        "cumsum",
+        "diff",
+        "embedding",
+        "layer_norm",
+        "linear",
+        "max_pool2d",
+        "pow",
+        "relu_",
+        "scaled_dot_product_attention",
+        "tanh",
+    }
+)
+"""Built-ins with exact empty alias/mutation contracts in the bulk default-RAM projection.
+
+The two in-place names are accepted only when the wrapper supplied live arguments as their own
+"copies"; the wrapper has already cloned their same-object return for logging in that regime.
+"""
+
 _INPLACE_AUGMENTED_ASSIGNMENT_DUNDER_EXCLUSIONS = frozenset(
     {"__index__", "__init__", "__init_subclass__", "__int__", "__invert__", "__iter__"}
 )
@@ -2933,12 +2967,15 @@ def _record_predicate_output(
     transformed_ram_payload = None
     transformed_disk_payload = None
     if spec.save_out:
-        (
-            ram_payload,
-            disk_payload,
-            transformed_ram_payload,
-            transformed_disk_payload,
-        ) = state.resolve_storage(out, spec, ctx=ctx)
+        if _is_default_ram_payload(state, spec):
+            ram_payload = safe_copy(out, detach_tensor=True)
+        else:
+            (
+                ram_payload,
+                disk_payload,
+                transformed_ram_payload,
+                transformed_disk_payload,
+            ) = state.resolve_storage(out, spec, ctx=ctx)
     if state.storage_intent.on_disk:
         state.add_record(
             ActivationRecord(
@@ -2951,6 +2988,35 @@ def _record_predicate_output(
             )
         )
     return ram_payload, transformed_ram_payload
+
+
+def _is_default_ram_payload(state: Any, spec: CaptureSpec) -> bool:
+    """Return whether a payload can use the fused default RAM projection.
+
+    Parameters
+    ----------
+    state
+        Active recording state and its resolved storage options.
+    spec
+        Capture decision for the current tensor.
+
+    Returns
+    -------
+    bool
+        ``True`` when generic storage resolution would only perform one detached
+        in-memory copy with no transform, dtype, device, or save-mode work.
+    """
+
+    return bool(
+        not state.no_tensor_capture
+        and state.storage_intent.in_ram
+        and not state.storage_intent.on_disk
+        and state.options.activation_transform is None
+        and not spec.keep_grad
+        and spec.device is None
+        and spec.dtype is None
+        and spec.save_mode == "copy"
+    )
 
 
 def _predicate_function_ref(
@@ -3046,6 +3112,8 @@ def _predicate_backend_semantics(
     is_bottom_level_func: bool,
     func_call_id: int,
     expected_output_count: int,
+    *,
+    bulk_default_ram: bool = False,
 ) -> BackendSemantics:
     """Compute demanded backend semantics for one predicate output.
 
@@ -3075,6 +3143,9 @@ def _predicate_backend_semantics(
         Stable capture-time function-call identifier.
     expected_output_count
         Number of loggable outputs from the call.
+    bulk_default_ram
+        Whether the save-all default-RAM projection may use proven eager
+        semantics shortcuts.
 
     Returns
     -------
@@ -3083,6 +3154,16 @@ def _predicate_backend_semantics(
     """
 
     grad_fn_handle = out.grad_fn
+    keep_alias_mutation_contract = _should_keep_alias_mutation_contract(trace)
+    if bulk_default_ram and _has_proven_alias_free_output(
+        func_name,
+        args,
+        kwargs,
+        out_orig,
+        arg_copies=arg_copies,
+        kwarg_copies=kwarg_copies,
+    ):
+        return _alias_free_backend_semantics(grad_fn_handle)
     func_event_input = FunctionEventInput(
         func=func,
         func_name=func_name,
@@ -3099,7 +3180,7 @@ def _predicate_backend_semantics(
     )
     detect_backend_semantics = (
         detect_torch_alias_contract
-        if _should_keep_alias_mutation_contract(trace)
+        if keep_alias_mutation_contract
         else detect_torch_output_alias_contract
     )
     # Mutation/alias detection compares input copies via ``tensor_nanequal``
@@ -3116,6 +3197,110 @@ def _predicate_backend_semantics(
             autograd_memory=None,
             num_autograd_tensors=None,
         )
+
+
+def _has_proven_alias_free_output(
+    func_name: str,
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    raw_output: Any,
+    *,
+    arg_copies: tuple[Any, ...],
+    kwarg_copies: Mapping[str, Any],
+) -> bool:
+    """Return whether a built-in call is guaranteed to allocate its output.
+
+    Parameters
+    ----------
+    func_name
+        Recorded callable name.
+    args
+        Live positional inputs.
+    kwargs
+        Live keyword inputs.
+    raw_output
+        Complete original call output.
+    arg_copies
+        Pre-call positional snapshots or the live argument tuple.
+    kwarg_copies
+        Pre-call keyword snapshots or the live keyword mapping.
+
+    Returns
+    -------
+    bool
+        ``True`` only for an allowlisted allocating operator on ordinary torch
+        tensors, with no subclass dispatch or ``out=`` destination.
+    """
+
+    if (
+        func_name not in _BULK_ALIAS_FREE_TORCH_FUNCTIONS
+        or "out" in kwargs
+        or type(raw_output) is not torch.Tensor
+    ):
+        return False
+    if func_name == "batch_norm":
+        training = kwargs.get("training", args[5] if len(args) > 5 else False)
+        if training:
+            return False
+    if func_name == "embedding":
+        max_norm = kwargs.get("max_norm", args[3] if len(args) > 3 else None)
+        if max_norm is not None:
+            return False
+    if func_name in {"relu_", "__iadd__"} and (
+        arg_copies is not args or kwarg_copies is not kwargs
+    ):
+        return False
+    return all(_has_only_builtin_tensor_leaves(value) for value in (*args, *kwargs.values()))
+
+
+def _has_only_builtin_tensor_leaves(value: Any) -> bool:
+    """Return whether tensor leaves cannot override built-in alias semantics.
+
+    Parameters
+    ----------
+    value
+        One positional or keyword argument.
+
+    Returns
+    -------
+    bool
+        ``False`` when any tensor leaf is a user-defined subclass.
+    """
+
+    if isinstance(value, torch.Tensor):
+        return type(value) in {torch.Tensor, torch.nn.Parameter}
+    if isinstance(value, Mapping):
+        return all(_has_only_builtin_tensor_leaves(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return all(_has_only_builtin_tensor_leaves(item) for item in value)
+    return True
+
+
+def _alias_free_backend_semantics(grad_fn_handle: Any) -> BackendSemantics:
+    """Build exact semantics for a proven allocating torch operation.
+
+    Parameters
+    ----------
+    grad_fn_handle
+        Backend autograd handle for the output, when applicable.
+
+    Returns
+    -------
+    BackendSemantics
+        Empty mutation and alias contracts with live autograd metadata.
+    """
+
+    return BackendSemantics(
+        backend_grad_handle=grad_fn_handle,
+        grad_fn_class_name=(type(grad_fn_handle).__name__ if grad_fn_handle is not None else None),
+        autograd_memory=None,
+        num_autograd_tensors=None,
+        mutated_input_positions=(),
+        aliased_output_inputs=(),
+        unknown_aliasing=False,
+        bytes_delta_at_call=0,
+        bytes_peak_at_call=0,
+    )
 
 
 def _normalize_predicate_observation(current: OpObservation) -> None:
@@ -3335,6 +3520,9 @@ def _emit_predicate_operation_events(
                     demanded = EnrichmentLevel.METADATA
                 else:
                     demanded = EnrichmentLevel.SHELL
+                bulk_default_ram = bool(
+                    demanded is EnrichmentLevel.PAYLOAD and _is_default_ram_payload(state, spec)
+                )
                 if demanded is not EnrichmentLevel.SHELL:
                     kernel.mark_metadata()
                     backend_semantics = _predicate_backend_semantics(
@@ -3350,6 +3538,7 @@ def _emit_predicate_operation_events(
                         is_bottom_level_func,
                         func_call_id,
                         expected_output_count,
+                        bulk_default_ram=bulk_default_ram,
                     )
                 else:
                     backend_semantics = None
