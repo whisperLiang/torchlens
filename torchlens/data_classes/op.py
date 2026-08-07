@@ -111,6 +111,15 @@ _DIRECT_WRITE_GUARDED_FIELDS = frozenset(
         "interventions",
     }
 )
+# ``Op.__getattribute__``/``__setattr__`` run on EVERY attribute touch during
+# capture, so the plain ``object.__getattribute__`` global lookup (globals miss
+# -> builtins hit -> type attribute resolution) was itself measurable. Bind the
+# unbound slot accessors once at import.
+_object_getattribute = object.__getattribute__
+_object_setattr = object.__setattr__
+# Fields whose reads go through the lazy-materialization path in
+# ``Op.__getattribute__``; every other name short-circuits straight to the slot.
+_LAZY_READ_FIELDS = frozenset({"grad", "out"})
 _WARNED_REFERENCE_SAVE_MODE = False
 _LAYER_PASS_LOG_DEFAULT_FILL: dict[str, Any] = {
     "_source_trace_ref": None,
@@ -1145,15 +1154,17 @@ class Op:
         """Return one physical slot value, or ``default`` when it is unset."""
 
         try:
-            return object.__getattribute__(self, name)
+            return _object_getattribute(self, name)
         except AttributeError:
             return default
 
     def __getattribute__(self, name: str) -> Any:
         """Materialize lazy grads and reject finalized unsaved predicate outs."""
 
+        if name not in _LAZY_READ_FIELDS:
+            return _object_getattribute(self, name)
         if name == "grad":
-            slot = object.__getattribute__(self, "_slot")
+            slot = _object_getattribute(self, "_slot")
             records = slot("_grad_records")
             if records:
                 saved = [record for record in records if record.grad is not None]
@@ -1174,7 +1185,7 @@ class Op:
                 return object.__getattribute__(self, "materialize_grad")()
             return grad
         if name == "out":
-            slot = object.__getattribute__(self, "_slot")
+            slot = _object_getattribute(self, "_slot")
             out = slot("out")
             source_ref = slot("_source_trace_ref")
             source_trace = None if source_ref is None else source_ref()
@@ -1205,7 +1216,7 @@ class Op:
                     "_label_raw": slot("_label_raw"),
                 }
                 _validate_reference_out_not_mutated(state)
-        return object.__getattribute__(self, name)
+        return _object_getattribute(self, name)
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Mark owning logs dirty when user code directly writes guarded fields.
@@ -1218,8 +1229,10 @@ class Op:
             New attribute value.
         """
 
-        construction_done = self._slot("_construction_done", False)
-        if construction_done and name in _DIRECT_WRITE_GUARDED_FIELDS:
+        # Guarded-name test first: it is a pure frozenset probe that is False for
+        # almost every write, so the (side-effect-free) construction-done slot
+        # read is skipped entirely on the hot path.
+        if name in _DIRECT_WRITE_GUARDED_FIELDS and self._slot("_construction_done", False):
             owner = self._slot("_source_trace_ref")
             trace = owner() if owner is not None else None
             if trace is not None:
@@ -1233,7 +1246,7 @@ class Op:
                         stacklevel=2,
                     )
                     object.__setattr__(trace, "_warned_direct_write", True)
-        object.__setattr__(self, name, value)
+        _object_setattr(self, name, value)
 
     def _internal_set(self, attr: str, value: Any) -> None:
         """Set an attribute without marking the owner dirty.
@@ -1246,7 +1259,7 @@ class Op:
             Value to assign.
         """
 
-        object.__setattr__(self, attr, value)
+        _object_setattr(self, attr, value)
 
     def _append_tensor_from(self, other: "Op", field_name: str) -> None:
         """Append one tensor field from another pass along batch dimension 0.

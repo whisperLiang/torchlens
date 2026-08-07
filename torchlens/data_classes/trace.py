@@ -340,6 +340,31 @@ _MODEL_LOG_DEFAULT_FILL = {
 }
 _MODEL_LOG_DEFAULT_FILL["tlspec_version"] = TLSPEC_VERSION
 
+# Legacy transient capture attribute name -> ``TraceBuildState`` field name.
+# Built ONCE at import: ``Trace.__getattr__`` / ``__setattr__`` / ``__delattr__``
+# consult it on every attribute miss/write during capture, so rebuilding it per
+# call showed up as ~1.3% of trace() self-time.
+_BUILD_STATE_ATTR_MAP: dict[str, str] = {
+    "_raw_layer_dict": "raw_layer_dict",
+    "_raw_layer_labels_list": "raw_layer_labels_list",
+    "_layer_counter": "layer_counter",
+    "_raw_layer_type_counter": "raw_layer_type_counter",
+    "_current_func_barcode": "current_func_barcode",
+    "_mod_call_index": "mod_call_index",
+    "_mod_call_labels": "mod_call_labels",
+    "_mod_entered": "mod_entered",
+    "_mod_exited": "mod_exited",
+    "_module_build_data": "module_build_data",
+    "_module_metadata": "module_metadata",
+    "_module_forward_args": "module_forward_args",
+    "_grad_fn_strong_refs": "grad_fn_strong_refs",
+    "_in_exhaustive_pass": "in_exhaustive_pass",
+    "_module_containment_engine": "module_containment_engine",
+    "_exhaustive_module_stack": "exhaustive_module_stack",
+    "_input_tensor_addresses": "input_tensor_addresses",
+}
+_BUILD_STATE_ATTR_MAP_GET = _BUILD_STATE_ATTR_MAP.get
+
 
 def _legacy_save_grads_from_state(state: dict[str, Any]) -> Any:
     """Return the canonical ``save_grads`` value for legacy trace state.
@@ -910,25 +935,7 @@ class Trace(
     def _build_state_attr_map() -> dict[str, str]:
         """Map legacy transient attribute names to build-state field names."""
 
-        return {
-            "_raw" + "_layer_dict": "raw_layer_dict",
-            "_raw" + "_layer_labels_list": "raw_layer_labels_list",
-            "_layer" + "_counter": "layer_counter",
-            "_raw" + "_layer_type_counter": "raw_layer_type_counter",
-            "_current" + "_func_barcode": "current_func_barcode",
-            "_mod" + "_call_index": "mod_call_index",
-            "_mod" + "_call_labels": "mod_call_labels",
-            "_mod" + "_entered": "mod_entered",
-            "_mod" + "_exited": "mod_exited",
-            "_module" + "_build_data": "module_build_data",
-            "_module" + "_metadata": "module_metadata",
-            "_module" + "_forward_args": "module_forward_args",
-            "_grad" + "_fn_strong_refs": "grad_fn_strong_refs",
-            "_in" + "_exhaustive_pass": "in_exhaustive_pass",
-            "_module" + "_containment_engine": "module_containment_engine",
-            "_exhaustive" + "_module_stack": "exhaustive_module_stack",
-            "_input" + "_tensor_addresses": "input_tensor_addresses",
-        }
+        return dict(_BUILD_STATE_ATTR_MAP)
 
     def __getattr__(self, name: str) -> Any:
         """Route transient capture attributes through private build state."""
@@ -937,7 +944,7 @@ class Trace(
             events = self.event_stream
             if events is not None:
                 return events
-        state_field = self._build_state_attr_map().get(name)
+        state_field = _BUILD_STATE_ATTR_MAP_GET(name)
         if state_field is None:
             raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
         if (
@@ -951,7 +958,7 @@ class Trace(
     def __setattr__(self, name: str, value: Any) -> None:
         """Route transient capture attribute writes through private build state."""
 
-        state_field = self._build_state_attr_map().get(name)
+        state_field = _BUILD_STATE_ATTR_MAP_GET(name)
         if state_field is None:
             super().__setattr__(name, value)
             return
@@ -972,7 +979,7 @@ class Trace(
             self.__dict__.pop(name, None)
             forget_event_stream(self)
             return
-        state_field = self._build_state_attr_map().get(name)
+        state_field = _BUILD_STATE_ATTR_MAP_GET(name)
         if state_field is None:
             super().__delattr__(name)
             return
