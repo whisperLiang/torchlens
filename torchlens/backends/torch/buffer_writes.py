@@ -815,12 +815,39 @@ class BufferWriteTracker:
         written_key = self.storage_key(written_tensor)
         if written_key is None:
             return
+        # PERF (w9a): this stays a FULL scan on purpose. Serving candidates from
+        # ``storage_key_to_addresses`` would be O(aliases) instead of O(registered
+        # buffers), but that index goes STALE under a mid-forward storage rebind and
+        # both vectors have live repros: ``buf.data = other`` fires no hook and bumps
+        # no version, and ``buf.set_(other)`` is dropped by ``record_op_writes``'
+        # storage-key guard, so neither re-registers the address. The old full scan
+        # is what still catches the resulting alias, and a journaled write must not
+        # silently stop refreshing it.
+        #
+        # What changes is the per-candidate COST. ``storage_key`` is ~3.7us (over half
+        # of it the ``pause_logging`` context manager), and the sweep pays it for every
+        # registered buffer on every journaled write -- O(writes x buffers), i.e.
+        # quadratic in model size, which TRAIN mode pays on every BatchNorm
+        # running-stat update. The raw storage pointer is the same identity component
+        # read wrapper-free, observer-free and pause-free (~0.3us), so it prefilters
+        # the sweep at ~1/12 the cost. Selection is provably unchanged: ``storage_key``
+        # equality REQUIRES equal storage ``data_ptr``, so a pointer mismatch can only
+        # skip a tensor the verbatim check below would reject anyway, and an
+        # unreadable pointer (``None``) falls through to that check rather than being
+        # skipped.
+        from .completeness_witness import _raw_storage_ptr_no_observe
+
+        written_ptr = _raw_storage_ptr_no_observe(written_tensor)
         written_range = self.storage_range(written_tensor)
         for address, tensor in tuple(self.address_to_tensor.items()):
             if address == written_address:
                 continue
             if tensor is None:
                 continue
+            if written_ptr is not None:
+                candidate_ptr = _raw_storage_ptr_no_observe(tensor)
+                if candidate_ptr is not None and candidate_ptr != written_ptr:
+                    continue
             if self.storage_key(tensor) != written_key:
                 continue
             if not _ranges_overlap(written_range, self.storage_range(tensor)):
