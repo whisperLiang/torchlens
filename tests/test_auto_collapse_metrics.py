@@ -1018,6 +1018,93 @@ def _clear_collapse_caches(trace: tl.Trace) -> None:
     collapse_optimizer._SCHEDULE_CACHE.pop(trace, None)
 
 
+def _reference_flow_interval_flags(
+    trace: tl.Trace,
+    flow_children: tuple[str, ...],
+    child_sets: Mapping[str, set[str]],
+    edges: tuple[tuple[str, str], ...],
+) -> dict[tuple[str, str], auto_collapse.FlowIntervalFlags]:
+    """Return the pre-optimization interval flags for equality checks.
+
+    Parameters
+    ----------
+    trace:
+        Trace owning the operation graph.
+    flow_children:
+        Direct children in flow order.
+    child_sets:
+        Child subtree operation labels.
+    edges:
+        Condensed graph edges.
+
+    Returns
+    -------
+    dict[tuple[str, str], FlowIntervalFlags]
+        Reference flags keyed by adjacent child pairs.
+    """
+
+    if len(flow_children) < 2:
+        return {}
+    child_index = {child: index for index, child in enumerate(flow_children)}
+    edge_set = set(edges)
+    flags: dict[tuple[str, str], auto_collapse.FlowIntervalFlags] = {}
+    for left, right in zip(flow_children[:-1], flow_children[1:], strict=True):
+        left_index = child_index[left]
+        right_index = child_index[right]
+        crossing_edges = [
+            edge
+            for edge in edge_set
+            if edge[0] in child_index
+            and edge[1] in child_index
+            and child_index[edge[0]] <= left_index
+            and child_index[edge[1]] >= right_index
+        ]
+        passthrough = any(
+            (edge[0] not in child_index or edge[1] not in child_index)
+            and (
+                child_index.get(edge[0]) in {left_index, right_index}
+                or child_index.get(edge[1]) in {left_index, right_index}
+            )
+            for edge in edge_set
+        )
+        landmark = any(
+            auto_collapse._child_has_junction_op(trace, child_sets.get(child, set()))
+            for child in flow_children[left_index : right_index + 1]
+        ) or bool(crossing_edges)
+        flags[(left, right)] = auto_collapse.FlowIntervalFlags(
+            landmark=landmark,
+            passthrough=passthrough,
+        )
+    return flags
+
+
+def _uncached_output_shape_tuple(
+    state: Any,
+    address: str,
+    source: str,
+) -> tuple[int, ...] | None:
+    """Return the historical uncached optimizer shape lookup.
+
+    Parameters
+    ----------
+    state:
+        Optimizer state containing the trace.
+    address:
+        Pass-free module address.
+    source:
+        Shape metadata view required by the caller.
+
+    Returns
+    -------
+    tuple[int, ...] | None
+        Historical shape result without memoization.
+    """
+
+    if source == "module":
+        return collapse_optimizer._module_output_shape_tuple(state.trace, address)
+    return collapse_optimizer._output_shape_tuple_for_address(state.trace, address)
+
+
 def _empty_op_adjacency_index(trace: tl.Trace) -> Mapping[str, str]:
     """Return an empty index to force the pre-optimization accessor path.
 
@@ -1154,6 +1241,34 @@ def _collapse_artifact_snapshot(trace: tl.Trace, tmp_path: Path, stem: str) -> t
         auto_dot,
         max_dot,
     )
+
+
+def _all_mode_collapse_snapshot(trace: tl.Trace, tmp_path: Path, stem: str) -> tuple[Any, ...]:
+    """Return collapse-plan and DOT bytes for every frozen public mode.
+
+    Parameters
+    ----------
+    trace:
+        Trace to plan and render.
+    tmp_path:
+        Directory for Graphviz outputs.
+    stem:
+        Unique output-file stem.
+
+    Returns
+    -------
+    tuple[Any, ...]
+        Plans and DOT bytes for ``none``, ``auto``, ``max``, and ``0.5``.
+    """
+
+    modes: tuple[Any, ...] = ("none", "auto", "max", 0.5)
+    _clear_collapse_caches(trace)
+    plans = (
+        collapse_plan_for_trace(trace, None, None, RenderContext()),
+        *(trace.collapse_plan(mode=mode) for mode in modes[1:]),
+    )
+    dots = tuple(_draw_source(trace, tmp_path, f"{stem}_{mode}", mode).encode() for mode in modes)
+    return plans, dots
 
 
 def _add_reference_fallback_collision(trace: tl.Trace) -> str:
@@ -1653,6 +1768,105 @@ def test_collapse_plan_parity_fast_synthetic_models(tmp_path: Path) -> None:
                 _assert_plan_svg_parity(trace, tmp_path, f"{case_name}_{mode}", mode)
         finally:
             trace.cleanup()
+
+
+def test_flow_interval_flags_match_reference_with_linear_helper_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Interval flags preserve directed semantics while visiting each child once."""
+
+    trace = _trace(torch.nn.Identity(), torch.randn(1, 4))
+    children = tuple(f"child_{index}" for index in range(80))
+    child_sets = {child: {child} for child in children}
+    edges = (
+        (children[0], children[50]),
+        (children[70], children[10]),
+        ("external_source:input", children[7]),
+        (children[8], "external_sink:output"),
+        ("external_source:a", "external_sink:b"),
+    )
+    junction_calls = 0
+
+    def no_junction(_trace: tl.Trace, _op_labels: set[str]) -> bool:
+        """Count junction classifications while returning a fixed result."""
+
+        nonlocal junction_calls
+        junction_calls += 1
+        return False
+
+    monkeypatch.setattr(auto_collapse, "_child_has_junction_op", no_junction)
+    try:
+        optimized = auto_collapse._flow_interval_flags(trace, children, child_sets, edges)
+        assert junction_calls == len(children)
+        reference_start = junction_calls
+        reference = _reference_flow_interval_flags(trace, children, child_sets, edges)
+        assert junction_calls - reference_start == 2 * (len(children) - 1)
+        assert optimized == reference
+    finally:
+        trace.cleanup()
+
+
+def test_optimizer_shape_lookup_runs_once_per_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One cold auto plan computes each optimizer module shape at most once."""
+
+    model = torch.nn.Sequential(*(torch.nn.ReLU() for _ in range(80)))
+    trace = _trace(model, torch.randn(2, 8))
+    original = collapse_optimizer._module_output_shape_tuple
+    calls: dict[str, int] = {}
+
+    def counted_shape(trace_arg: tl.Trace, address: str) -> tuple[int, ...] | None:
+        """Count and delegate one module output-shape lookup."""
+
+        calls[address] = calls.get(address, 0) + 1
+        return original(trace_arg, address)
+
+    monkeypatch.setattr(collapse_optimizer, "_module_output_shape_tuple", counted_shape)
+    try:
+        _clear_collapse_caches(trace)
+        select_collapse_plan(trace, RenderContext(), mode="auto")
+        assert calls
+        assert max(calls.values()) == 1
+        optimized_calls = sum(calls.values())
+
+        calls.clear()
+        monkeypatch.setattr(
+            collapse_optimizer,
+            "_cached_output_shape_tuple",
+            _uncached_output_shape_tuple,
+        )
+        _clear_collapse_caches(trace)
+        select_collapse_plan(trace, RenderContext(), mode="auto")
+        assert sum(calls.values()) > optimized_calls
+    finally:
+        trace.cleanup()
+
+
+def test_cold_collapse_optimizations_are_byte_identical_across_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Linear interval flags and shape caching preserve every public mode byte-for-byte."""
+
+    trace = _trace(RepeatedResidual(depth=8), torch.randn(2, 8))
+    try:
+        optimized = _all_mode_collapse_snapshot(trace, tmp_path, "optimized")
+        with monkeypatch.context() as reference_patch:
+            reference_patch.setattr(
+                auto_collapse,
+                "_flow_interval_flags",
+                _reference_flow_interval_flags,
+            )
+            reference_patch.setattr(
+                collapse_optimizer,
+                "_cached_output_shape_tuple",
+                _uncached_output_shape_tuple,
+            )
+            reference = _all_mode_collapse_snapshot(trace, tmp_path, "reference")
+        assert optimized == reference
+    finally:
+        trace.cleanup()
 
 
 @pytest.mark.parametrize(

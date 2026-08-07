@@ -2175,61 +2175,35 @@ def _flow_interval_flags(
     if len(flow_children) < 2:
         return {}
     child_index = {child: index for index, child in enumerate(flow_children)}
-    edge_set = set(edges)
+    crossing_deltas = [0] * len(flow_children)
+    external_touches = [False] * len(flow_children)
+    for source, target in set(edges):
+        source_index = child_index.get(source)
+        target_index = child_index.get(target)
+        if source_index is not None and target_index is not None:
+            if source_index < target_index:
+                crossing_deltas[source_index] += 1
+                crossing_deltas[target_index] -= 1
+            continue
+        if source_index is not None:
+            external_touches[source_index] = True
+        if target_index is not None:
+            external_touches[target_index] = True
+    junction_children = {
+        child: _child_has_junction_op(trace, child_sets.get(child, set()))
+        for child in flow_children
+    }
     flags: dict[tuple[str, str], FlowIntervalFlags] = {}
-    for left, right in zip(flow_children[:-1], flow_children[1:], strict=True):
-        left_index = child_index[left]
-        right_index = child_index[right]
-        crossing_edges = [
-            edge
-            for edge in edge_set
-            if edge[0] in child_index
-            and edge[1] in child_index
-            and child_index[edge[0]] <= left_index
-            and child_index[edge[1]] >= right_index
-        ]
-        passthrough = any(
-            edge[0] not in child_index or edge[1] not in child_index
-            for edge in edge_set
-            if _edge_touches_interval(edge, child_index, left_index, right_index)
-        )
-        landmark = any(
-            _child_has_junction_op(trace, child_sets.get(child, set()))
-            for child in flow_children[left_index : right_index + 1]
-        ) or bool(crossing_edges)
+    crossing_count = 0
+    for left_index, (left, right) in enumerate(
+        zip(flow_children[:-1], flow_children[1:], strict=True)
+    ):
+        right_index = left_index + 1
+        crossing_count += crossing_deltas[left_index]
+        passthrough = external_touches[left_index] or external_touches[right_index]
+        landmark = junction_children[left] or junction_children[right] or crossing_count > 0
         flags[(left, right)] = FlowIntervalFlags(landmark=landmark, passthrough=passthrough)
     return flags
-
-
-def _edge_touches_interval(
-    edge: tuple[str, str],
-    child_index: Mapping[str, int],
-    left_index: int,
-    right_index: int,
-) -> bool:
-    """Return whether a condensed edge touches an interval boundary.
-
-    Parameters
-    ----------
-    edge:
-        Condensed edge.
-    child_index:
-        Child address to flow index.
-    left_index:
-        Left child index of the interval.
-    right_index:
-        Right child index of the interval.
-
-    Returns
-    -------
-    bool
-        True when the edge is adjacent to the interval.
-    """
-
-    source, target = edge
-    source_index = child_index.get(source)
-    target_index = child_index.get(target)
-    return source_index in {left_index, right_index} or target_index in {left_index, right_index}
 
 
 def _child_has_junction_op(trace: "Trace", op_labels: set[str]) -> bool:

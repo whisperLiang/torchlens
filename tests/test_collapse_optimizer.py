@@ -516,6 +516,7 @@ def _optimizer_state_for_floor(trace: tl.Trace, context: RenderContext) -> _Opti
         single_member_expanded_cache={},
         box_cost_cache={},
         branch_salience_cache={},
+        output_shape_cache={},
         weights=OptimizerWeights(),
         g_star=1.0,
         total_ops=_optimizer_total_units(trace, context),

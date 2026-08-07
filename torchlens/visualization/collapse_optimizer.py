@@ -38,13 +38,12 @@ from .auto_collapse import (
     _flow_ordered_child_addresses,
     _is_trunk_collapse,
     _make_run_fold,
-    _module_output_shapes_equal,
+    _module_output_shape_tuple,
     _readable_band_high,
     _rendered_module_hidden_counts,
     _run_fold_hidden_members_uniform,
     _run_fold_is_chain_interval,
     _run_fold_is_legal,
-    _run_span_allows_fold,
     _shape_channel_dim,
     _shape_spatial_dims,
     analyze_collapse,
@@ -258,6 +257,7 @@ class _OptimizerState:
     single_member_expanded_cache: dict[_MemoKey, tuple[_DecisionPoint, ...]]
     box_cost_cache: dict[str, float]
     branch_salience_cache: dict[str, float]
+    output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None]
     weights: OptimizerWeights
     g_star: float
     total_ops: int
@@ -335,6 +335,7 @@ def select_collapse_plan(
         str,
         tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]],
     ] = {}
+    output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None] = {}
     best = _select_best_decision(
         trace=trace,
         context=context,
@@ -343,6 +344,7 @@ def select_collapse_plan(
         hidden_counts=hidden_counts,
         structural_digests=structural_digests,
         expanded_cache=expanded_cache,
+        output_shape_cache=output_shape_cache,
         weights=resolved_weights,
         allow_folds=False,
     )
@@ -357,6 +359,7 @@ def select_collapse_plan(
             hidden_counts=hidden_counts,
             structural_digests=structural_digests,
             expanded_cache=expanded_cache,
+            output_shape_cache=output_shape_cache,
             best=best,
         )
     if first_pass_plan is None or count(first_pass_plan) > _readable_band_high(trace):
@@ -368,6 +371,7 @@ def select_collapse_plan(
             hidden_counts=hidden_counts,
             structural_digests=structural_digests,
             expanded_cache=expanded_cache,
+            output_shape_cache=output_shape_cache,
             weights=replace(resolved_weights, fold_intrinsic=0.05),
             allow_folds=True,
         )
@@ -396,6 +400,7 @@ def select_collapse_plan(
             hidden_counts=hidden_counts,
             structural_digests=structural_digests,
             expanded_cache=expanded_cache,
+            output_shape_cache=output_shape_cache,
             best=best,
         )
     else:
@@ -416,6 +421,7 @@ def select_collapse_plan(
             hidden_counts=hidden_counts,
             structural_digests=structural_digests,
             expanded_cache=expanded_cache,
+            output_shape_cache=output_shape_cache,
             weights=replace(resolved_weights, fold_intrinsic=0.05),
             band_high=band_high,
         )
@@ -730,6 +736,7 @@ def _schedule_ordered_addresses(
         single_member_expanded_cache={},
         box_cost_cache={},
         branch_salience_cache={},
+        output_shape_cache={},
         weights=OptimizerWeights(),
         g_star=max_result.g_star or 1.0,
         total_ops=_optimizer_total_units(trace, context),
@@ -781,6 +788,7 @@ def _select_max_plan(
         str,
         tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]],
     ] = {}
+    output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None] = {}
     total_ops = _optimizer_total_units(trace, context)
     auto_count = count(auto.plan)
     levels = (
@@ -802,6 +810,7 @@ def _select_max_plan(
             hidden_counts=hidden_counts,
             structural_digests=structural_digests,
             expanded_cache=expanded_cache,
+            output_shape_cache=output_shape_cache,
             weights=replace(resolved_weights, fold_intrinsic=0.05),
             allow_folds=True,
             allow_segments=True,
@@ -819,6 +828,7 @@ def _select_max_plan(
                 hidden_counts=hidden_counts,
                 structural_digests=structural_digests,
                 expanded_cache=expanded_cache,
+                output_shape_cache=output_shape_cache,
                 best=best,
                 prefer_instantiated_nodes=True,
             )
@@ -829,6 +839,7 @@ def _select_max_plan(
                 child_addresses=child_addresses,
                 hidden_counts=hidden_counts,
                 structural_digests=structural_digests,
+                output_shape_cache=output_shape_cache,
                 weights=replace(resolved_weights, fold_intrinsic=0.05),
                 g_star=best[1],
                 point=point,
@@ -919,11 +930,41 @@ def _repair_max_salience_floor(
     child_addresses: Mapping[str, tuple[str, ...]],
     hidden_counts: Mapping[str, int],
     structural_digests: Mapping[str, str],
+    output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None],
     weights: OptimizerWeights,
     g_star: float,
     point: _FrontierPoint,
 ) -> tuple[_FrontierPoint, CollapsePlan]:
-    """Expand selected max boxes that hide unique wide parallel fans."""
+    """Expand selected max boxes that hide unique wide parallel fans.
+
+    Parameters
+    ----------
+    trace:
+        Trace being optimized.
+    context:
+        Rendering context.
+    analysis:
+        Shared collapse analysis.
+    child_addresses:
+        Renderer-tree child addresses.
+    hidden_counts:
+        Renderer-faithful hidden counts.
+    structural_digests:
+        Structural memo digests.
+    output_shape_cache:
+        Plan-local cache shared by optimizer states.
+    weights:
+        Optimizer weights for the repair pass.
+    g_star:
+        Winning target hidden-mass grain.
+    point:
+        Instantiated max-plan frontier point.
+
+    Returns
+    -------
+    tuple[_FrontierPoint, CollapsePlan]
+        Repaired point and its renderer-faithful plan.
+    """
 
     state = _OptimizerState(
         trace=trace,
@@ -938,6 +979,7 @@ def _repair_max_salience_floor(
         single_member_expanded_cache={},
         box_cost_cache={},
         branch_salience_cache={},
+        output_shape_cache=output_shape_cache,
         weights=weights,
         g_star=g_star,
         total_ops=_optimizer_total_units(trace, context),
@@ -1897,6 +1939,7 @@ def _instantiate_best_point(
         str,
         tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]],
     ],
+    output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None],
     best: tuple[
         float,
         float,
@@ -1926,6 +1969,8 @@ def _instantiate_best_point(
         Structural memo digests.
     expanded_cache:
         Shared expanded-structure cache.
+    output_shape_cache:
+        Plan-local cache shared by optimizer states.
     best:
         Winner tuple from :func:`_select_best_decision`.
 
@@ -1950,6 +1995,7 @@ def _instantiate_best_point(
         single_member_expanded_cache={},
         box_cost_cache={},
         branch_salience_cache={},
+        output_shape_cache=output_shape_cache,
         weights=winning_weights,
         g_star=winning_g,
         total_ops=_optimizer_total_units(trace, context),
@@ -1990,6 +2036,7 @@ def _select_best_decision(
         str,
         tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]],
     ],
+    output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None],
     weights: OptimizerWeights,
     allow_folds: bool,
     allow_segments: bool = False,
@@ -2030,6 +2077,8 @@ def _select_best_decision(
         Structural memo digests.
     expanded_cache:
         Shared expanded-structure cache.
+    output_shape_cache:
+        Plan-local cache shared by optimizer states.
     weights:
         Optimizer weights for this pass.
     allow_folds:
@@ -2069,6 +2118,7 @@ def _select_best_decision(
             single_member_expanded_cache={},
             box_cost_cache={},
             branch_salience_cache={},
+            output_shape_cache=output_shape_cache,
             weights=weights,
             g_star=g_star,
             total_ops=total_units,
@@ -2110,6 +2160,7 @@ def _frontier_can_reach_band(
         str,
         tuple["ChildCondensedFlowGraph | None", tuple[str, ...], tuple[str, ...]],
     ],
+    output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None],
     weights: OptimizerWeights,
     band_high: int,
 ) -> bool:
@@ -2131,6 +2182,8 @@ def _frontier_can_reach_band(
         Structural memo digests.
     expanded_cache:
         Shared expanded-structure cache.
+    output_shape_cache:
+        Plan-local cache shared by optimizer states.
     weights:
         Optimizer weights for the fold-enabled pass.
     band_high:
@@ -2159,6 +2212,7 @@ def _frontier_can_reach_band(
             single_member_expanded_cache={},
             box_cost_cache={},
             branch_salience_cache={},
+            output_shape_cache=output_shape_cache,
             weights=weights,
             g_star=g_star,
             total_ops=total_units,
@@ -2853,7 +2907,7 @@ def _maximal_legal_runs(
                 break
             if not _eligible_module_box(state, address, state.analysis.signals[address]):
                 break
-            if candidate and not _module_output_shapes_equal(state.trace, candidate[-1], address):
+            if candidate and not _cached_module_output_shapes_equal(state, candidate[-1], address):
                 break
             candidate.append(address)
             run = tuple(candidate)
@@ -3901,7 +3955,7 @@ def _child_segments_for_parent(
         return cached_segments
     segment_lists: list[list[str]] = [[]]
     for child in child_key:
-        if segment_lists[-1] and _boundary_cliff(state.trace, segment_lists[-1][-1], child):
+        if segment_lists[-1] and _boundary_cliff(state, segment_lists[-1][-1], child):
             segment_lists.append([])
         segment_lists[-1].append(child)
     result = tuple(tuple(segment) for segment in segment_lists if segment)
@@ -3909,13 +3963,111 @@ def _child_segments_for_parent(
     return result
 
 
-def _boundary_cliff(trace: "Trace", left: str, right: str) -> bool:
+def _cached_output_shape_tuple(
+    state: _OptimizerState,
+    address: str,
+    source: Literal["module", "boundary"],
+) -> tuple[int, ...] | None:
+    """Return one cached output-shape view for an optimizer run.
+
+    Parameters
+    ----------
+    state:
+        Optimizer state owning the plan-local cache.
+    address:
+        Pass-free module address.
+    source:
+        Shape metadata view required by the consuming classifier.
+
+    Returns
+    -------
+    tuple[int, ...] | None
+        Output shape as integers, or ``None`` when unavailable.
+    """
+
+    key = (source, address)
+    if key not in state.output_shape_cache:
+        shape = (
+            _module_output_shape_tuple(state.trace, address)
+            if source == "module"
+            else _output_shape_tuple_for_address(state.trace, address)
+        )
+        state.output_shape_cache[key] = shape
+    return state.output_shape_cache[key]
+
+
+def _cached_module_output_shapes_equal(
+    state: _OptimizerState,
+    left: str,
+    right: str,
+) -> bool:
+    """Return whether two cached primary module output shapes are equal.
+
+    Parameters
+    ----------
+    state:
+        Optimizer state owning the plan-local cache.
+    left:
+        First module address.
+    right:
+        Second module address.
+
+    Returns
+    -------
+    bool
+        True only when both shapes are known and exactly equal.
+    """
+
+    left_shape = _cached_output_shape_tuple(state, left, "module")
+    right_shape = _cached_output_shape_tuple(state, right, "module")
+    return left_shape is not None and left_shape == right_shape
+
+
+def _cached_run_span_allows_fold(
+    state: _OptimizerState,
+    addresses: tuple[str, ...],
+) -> bool:
+    """Return whether a cached first-to-last shape span is safe to fold.
+
+    Parameters
+    ----------
+    state:
+        Optimizer state owning the plan-local cache.
+    addresses:
+        Consecutive sibling addresses in the candidate run.
+
+    Returns
+    -------
+    bool
+        True when the run preserves the existing shape-span constraints.
+    """
+
+    first = _cached_output_shape_tuple(state, addresses[0], "module")
+    last = _cached_output_shape_tuple(state, addresses[-1], "module")
+    if first is None or last is None:
+        return True
+    if len(first) != len(last):
+        return False
+    first_spatial = _shape_spatial_dims(first)
+    last_spatial = _shape_spatial_dims(last)
+    if first_spatial is not None and last_spatial is not None and first_spatial != last_spatial:
+        return False
+    first_channels = _shape_channel_dim(first)
+    last_channels = _shape_channel_dim(last)
+    if first_channels is None or last_channels is None:
+        return True
+    smaller = min(first_channels, last_channels)
+    larger = max(first_channels, last_channels)
+    return smaller > 0 and larger <= smaller * 2
+
+
+def _boundary_cliff(state: _OptimizerState, left: str, right: str) -> bool:
     """Return whether adjacent children should split a long-parent segment."""
 
-    if not _run_span_allows_fold(trace, (left, right)):
+    if not _cached_run_span_allows_fold(state, (left, right)):
         return True
-    left_shape = _output_shape_tuple_for_address(trace, left)
-    right_shape = _output_shape_tuple_for_address(trace, right)
+    left_shape = _cached_output_shape_tuple(state, left, "boundary")
+    right_shape = _cached_output_shape_tuple(state, right, "boundary")
     if left_shape is None or right_shape is None:
         return False
     left_spatial = _shape_spatial_dims(left_shape)
