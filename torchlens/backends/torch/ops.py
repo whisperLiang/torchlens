@@ -192,6 +192,201 @@ if TYPE_CHECKING:
     from ...data_classes.trace import Trace
 
 
+@dataclass(frozen=True, slots=True)
+class _AncestorBitset:
+    """Compact immutable storage for one finished Op ancestor set.
+
+    Parameters
+    ----------
+    labels
+        Trace-local dense-index-to-label table shared by every ancestor bitmap.
+    bits
+        Integer bitmap whose set bits select entries from ``labels``.
+    """
+
+    labels: tuple[str, ...]
+    bits: int
+
+    def materialize(self) -> set[str]:
+        """Return the exact public set represented by this bitmap.
+
+        Returns
+        -------
+        set[str]
+            Mutable set of ancestor labels.
+        """
+
+        labels = self.labels
+        bits = self.bits
+        result: set[str] = set()
+        while bits:
+            lowest_bit = bits & -bits
+            result.add(labels[lowest_bit.bit_length() - 1])
+            bits ^= lowest_bit
+        return result
+
+
+_ANCESTOR_FIELD_NAMES = ("root_ancestors", "internal_source_ancestors")
+_ANCESTOR_SLOT_DESCRIPTORS = {
+    field_name: vars(Op)[field_name] for field_name in _ANCESTOR_FIELD_NAMES
+}
+
+
+def _get_ancestor_field(op: Op, field_name: str) -> set[str]:
+    """Return one public ancestor set, materializing compact storage lazily.
+
+    Parameters
+    ----------
+    op
+        Operation whose field is being read.
+    field_name
+        Ancestor field name backed by an original ``Op`` slot descriptor.
+
+    Returns
+    -------
+    set[str]
+        The mutable, exact-type public field value.
+    """
+
+    descriptor = _ANCESTOR_SLOT_DESCRIPTORS[field_name]
+    value = descriptor.__get__(op, type(op))
+    if isinstance(value, _AncestorBitset):
+        value = value.materialize()
+        descriptor.__set__(op, value)
+    return cast(set[str], value)
+
+
+def _set_ancestor_field(op: Op, field_name: str, value: set[str]) -> None:
+    """Store one ancestor field through its original ``Op`` slot.
+
+    Parameters
+    ----------
+    op
+        Operation whose field is being assigned.
+    field_name
+        Ancestor field name backed by an original ``Op`` slot descriptor.
+    value
+        Mutable public set to retain.
+    """
+
+    _ANCESTOR_SLOT_DESCRIPTORS[field_name].__set__(op, value)
+
+
+def _delete_ancestor_field(op: Op, field_name: str) -> None:
+    """Delete one ancestor field through its original ``Op`` slot.
+
+    Parameters
+    ----------
+    op
+        Operation whose field is being deleted during cleanup.
+    field_name
+        Ancestor field name backed by an original ``Op`` slot descriptor.
+    """
+
+    _ANCESTOR_SLOT_DESCRIPTORS[field_name].__delete__(op)
+
+
+def _get_root_ancestors(op: Op) -> set[str]:
+    """Return ``op.root_ancestors`` as its public mutable set type."""
+
+    return _get_ancestor_field(op, "root_ancestors")
+
+
+def _set_root_ancestors(op: Op, value: set[str]) -> None:
+    """Assign ``op.root_ancestors`` through its preserved slot descriptor."""
+
+    _set_ancestor_field(op, "root_ancestors", value)
+
+
+def _delete_root_ancestors(op: Op) -> None:
+    """Delete ``op.root_ancestors`` through its preserved slot descriptor."""
+
+    _delete_ancestor_field(op, "root_ancestors")
+
+
+def _get_internal_source_ancestors(op: Op) -> set[str]:
+    """Return ``op.internal_source_ancestors`` as its public mutable set type."""
+
+    return _get_ancestor_field(op, "internal_source_ancestors")
+
+
+def _set_internal_source_ancestors(op: Op, value: set[str]) -> None:
+    """Assign ``op.internal_source_ancestors`` through its preserved slot descriptor."""
+
+    _set_ancestor_field(op, "internal_source_ancestors", value)
+
+
+def _delete_internal_source_ancestors(op: Op) -> None:
+    """Delete ``op.internal_source_ancestors`` through its preserved slot descriptor."""
+
+    _delete_ancestor_field(op, "internal_source_ancestors")
+
+
+setattr(
+    Op,
+    "root_ancestors",
+    property(_get_root_ancestors, _set_root_ancestors, _delete_root_ancestors),
+)
+setattr(
+    Op,
+    "internal_source_ancestors",
+    property(
+        _get_internal_source_ancestors,
+        _set_internal_source_ancestors,
+        _delete_internal_source_ancestors,
+    ),
+)
+
+
+def _compact_ancestor_sets(trace: "Trace") -> None:
+    """Replace finished Ops' two large ancestor sets with interned integer bitmaps.
+
+    The original slot descriptors remain the storage authority. Public attribute
+    reads lazily restore and cache a real mutable ``set``, preserving the declared
+    API, ordinary mutation behavior, pickling, and serialization. Ops whose fields
+    remain unread share one trace-local label table and one immutable bitmap object
+    per distinct closure.
+
+    Parameters
+    ----------
+    trace
+        Finished trace whose retained Op metadata should be compacted.
+    """
+
+    ops = getattr(trace, "layer_list", None)
+    if not ops:
+        return
+
+    raw_fields: list[tuple[Op, str, set[str] | _AncestorBitset]] = []
+    labels_by_first_use: dict[str, None] = {}
+    for op in ops:
+        for field_name in _ANCESTOR_FIELD_NAMES:
+            descriptor = _ANCESTOR_SLOT_DESCRIPTORS[field_name]
+            value = descriptor.__get__(op, type(op))
+            raw_fields.append((op, field_name, value))
+            if isinstance(value, _AncestorBitset):
+                labels_by_first_use.update(dict.fromkeys(value.materialize()))
+            else:
+                labels_by_first_use.update(dict.fromkeys(value))
+
+    labels = tuple(labels_by_first_use)
+    label_indices = {label: index for index, label in enumerate(labels)}
+    bitset_pool: dict[int, _AncestorBitset] = {}
+    for op, field_name, value in raw_fields:
+        if isinstance(value, _AncestorBitset) and value.labels == labels:
+            bits = value.bits
+        else:
+            values = value.materialize() if isinstance(value, _AncestorBitset) else value
+            bits = 0
+            for label in values:
+                bits |= 1 << label_indices[label]
+        bitset = bitset_pool.get(bits)
+        if bitset is None:
+            bitset = _AncestorBitset(labels, bits)
+            bitset_pool[bits] = bitset
+        _ANCESTOR_SLOT_DESCRIPTORS[field_name].__set__(op, bitset)
+
+
 _SETTER_MUTATION_FUNC_NAMES = frozenset({"__setitem__", "__delitem__"})
 """Setter-style in-place ops whose names do NOT end in ``_`` (used only as the no-baseline
 is_inplace fallback). They mutate their target but log a reconstructed output tensor, so the
