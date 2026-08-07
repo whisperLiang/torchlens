@@ -285,6 +285,8 @@ class FileIndex:
         Source filename for the parsed module.
     mtime_ns:
         File modification timestamp used for cache invalidation.
+    source:
+        Source text the module was parsed from.
     module:
         Parsed AST module.
     scopes:
@@ -299,11 +301,28 @@ class FileIndex:
 
     filename: str
     mtime_ns: int
+    source: str
     module: ast.Module
     scopes: List[ScopeEntry]
     conditionals: List[ConditionalRecord]
     bool_consumers: List[BoolConsumer]
     parent_map: Dict[ast.AST, ast.AST]
+    _source_lines: Optional[List[str]] = field(default=None, repr=False, compare=False)
+
+    def source_lines(self) -> List[str]:
+        """Return ``source`` split into parser-style lines, computed once.
+
+        Returns
+        -------
+        List[str]
+            Lines with terminators kept, split exactly as the CPython parser
+            splits source (``\\n``, ``\\r\\n``, ``\\r`` only), so byte-offset
+            slicing against AST positions matches ``ast.get_source_segment``.
+        """
+
+        if self._source_lines is None:
+            self._source_lines = _split_source_lines(self.source)
+        return self._source_lines
 
     def resolve_scope(
         self, code_firstlineno: int, func_name: str, func_qualname: Optional[str]
@@ -430,6 +449,7 @@ def get_file_index(filename: str) -> Optional[FileIndex]:
     file_index = FileIndex(
         filename=filename,
         mtime_ns=mtime_ns,
+        source=source,
         module=module,
         scopes=scopes,
         conditionals=conditionals,
@@ -723,10 +743,6 @@ def _resolve_frame_arg_expressions(frame: FuncCallLocation, func_name: Optional[
     if frame.file.startswith("<") or frame.file.endswith(">"):
         return []
 
-    source = _read_source_file(frame.file)
-    if source is None:
-        return []
-
     file_index = get_file_index(frame.file)
     if file_index is None:
         return []
@@ -742,18 +758,19 @@ def _resolve_frame_arg_expressions(frame: FuncCallLocation, func_name: Optional[
     candidates = _find_candidate_calls(scope.node, frame.line_number, frame.col_offset, func_name)
     if len(candidates) != 1:
         return []
-    return _call_arg_expressions(candidates[0], source)
+    return _call_arg_expressions(candidates[0], file_index.source_lines())
 
 
-def _call_arg_expressions(call_node: ast.Call, source: str) -> list[str]:
+def _call_arg_expressions(call_node: ast.Call, source_lines: List[str]) -> list[str]:
     """Return source expressions for a matched call's arguments.
 
     Parameters
     ----------
     call_node:
         AST call matched to the captured operation.
-    source:
-        Source text containing ``call_node``.
+    source_lines:
+        Parser-style split lines of the source containing ``call_node``
+        (``FileIndex.source_lines()``).
 
     Returns
     -------
@@ -763,12 +780,12 @@ def _call_arg_expressions(call_node: ast.Call, source: str) -> list[str]:
 
     expressions: list[str] = []
     for arg_node in call_node.args:
-        segment = ast.get_source_segment(source, arg_node)
+        segment = _node_source_segment(source_lines, arg_node)
         if segment is None:
             return []
         expressions.append(segment.strip())
     for keyword in call_node.keywords:
-        value_segment = ast.get_source_segment(source, keyword.value)
+        value_segment = _node_source_segment(source_lines, keyword.value)
         if value_segment is None:
             return []
         if keyword.arg is None:
@@ -776,6 +793,79 @@ def _call_arg_expressions(call_node: ast.Call, source: str) -> list[str]:
         else:
             expressions.append(f"{keyword.arg}={value_segment.strip()}")
     return expressions
+
+
+def _split_source_lines(source: str) -> List[str]:
+    """Split source into lines exactly as the CPython parser does.
+
+    Parameters
+    ----------
+    source:
+        Source text to split.
+
+    Returns
+    -------
+    List[str]
+        Lines with terminators kept. Only ``\\n``, ``\\r\\n``, and ``\\r``
+        terminate lines; characters ``str.splitlines`` also breaks on (form
+        feed, ``\\x0b``, ``\\u2028``, ...) stay inside their line, matching
+        ``ast._splitlines_no_ff`` so AST byte offsets index correctly.
+    """
+
+    lines: List[str] = []
+    pending = ""
+    for part in source.splitlines(keepends=True):
+        pending += part
+        if pending[-1] in "\r\n":
+            lines.append(pending)
+            pending = ""
+    if pending:
+        lines.append(pending)
+    return lines
+
+
+def _node_source_segment(source_lines: List[str], node: ast.AST) -> Optional[str]:
+    """Return a node's source segment from pre-split lines.
+
+    Byte-identical replica of ``ast.get_source_segment(source, node)``
+    (``padded=False``) that reuses the per-file line split instead of
+    re-splitting the whole source character by character on every call --
+    the line split dominates ``to_pandas()``/``arg_expressions`` cost when
+    resolved per argument (S1).
+
+    Parameters
+    ----------
+    source_lines:
+        Parser-style split lines of the node's source
+        (``FileIndex.source_lines()``).
+    node:
+        AST node to extract.
+
+    Returns
+    -------
+    Optional[str]
+        Source segment, or ``None`` when end positions are missing. Column
+        offsets are byte offsets into the UTF-8 encoding of each line, hence
+        the encode/decode round-trips.
+    """
+
+    try:
+        end_lineno = node.end_lineno  # type: ignore[attr-defined]
+        end_col_offset = node.end_col_offset  # type: ignore[attr-defined]
+        if end_lineno is None or end_col_offset is None:
+            return None
+        lineno = node.lineno - 1  # type: ignore[attr-defined]
+        end_lineno -= 1
+        col_offset = node.col_offset  # type: ignore[attr-defined]
+    except AttributeError:
+        return None
+
+    if end_lineno == lineno:
+        return source_lines[lineno].encode()[col_offset:end_col_offset].decode()
+
+    first = source_lines[lineno].encode()[col_offset:].decode()
+    last = source_lines[end_lineno].encode()[:end_col_offset].decode()
+    return "".join([first, *source_lines[lineno + 1 : end_lineno], last])
 
 
 def _find_candidate_calls(
