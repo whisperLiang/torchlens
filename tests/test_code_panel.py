@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import gc
 import getpass
 import html
+import inspect
 import os
 import re
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +16,10 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens.visualization import code_panel
 from torchlens.visualization.code_panel import (
     MAX_CODE_PANEL_LINE_CHARS,
+    capture_model_source_code,
     _wrap_source_line,
     render_code_panel_svg,
 )
@@ -414,3 +419,118 @@ def test_wrap_source_line_pathological_indent_still_wraps() -> None:
 
     assert all(len(piece) <= MAX_CODE_PANEL_LINE_CHARS for piece in pieces)
     assert sum(piece.count("token") for piece in pieces) == 30
+
+
+def _count_source_reads(monkeypatch: Any) -> dict[str, int]:
+    """Count ``inspect.getsourcelines`` calls made by the code-panel module.
+
+    Parameters
+    ----------
+    monkeypatch:
+        Pytest monkeypatch fixture used to install the counting wrapper.
+
+    Returns
+    -------
+    dict[str, int]
+        Mutable counter updated under the ``"n"`` key on every call.
+    """
+
+    counter = {"n": 0}
+    real = inspect.getsourcelines
+
+    def counting(obj: Any) -> Any:
+        counter["n"] += 1
+        return real(obj)
+
+    monkeypatch.setattr(code_panel.inspect, "getsourcelines", counting)
+    return counter
+
+
+class _MemoProbe(nn.Module):
+    """Model whose class/init/forward source the memo tests read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the linear projection of ``x``."""
+
+        return self.linear(x)
+
+
+def test_source_capture_is_memoized_per_class(monkeypatch: Any) -> None:
+    """Repeat captures of one class read the source files exactly once each."""
+
+    baseline = capture_model_source_code(_MemoProbe())  # warm the memo
+    counter = _count_source_reads(monkeypatch)
+
+    for _ in range(5):
+        # Fresh instances too: the memo keys on the class, not the instance.
+        assert capture_model_source_code(_MemoProbe()) == baseline
+
+    assert counter["n"] == 0
+
+
+def test_source_capture_memo_is_byte_identical_to_fresh_reads(monkeypatch: Any) -> None:
+    """Memoized source text and metadata match an unmemoized capture exactly."""
+
+    monkeypatch.setattr(code_panel, "_SOURCE_MEMO", weakref.WeakKeyDictionary())
+    fresh = capture_model_source_code(_MemoProbe())
+    cached = capture_model_source_code(_MemoProbe())
+
+    assert cached.keys() == fresh.keys()
+    for key in fresh:
+        assert cached[key] == fresh[key]
+        assert type(cached[key]) is type(fresh[key])
+        assert cached[key].file_path == fresh[key].file_path  # type: ignore[union-attr]
+        assert cached[key].line_number == fresh[key].line_number  # type: ignore[union-attr]
+
+
+def test_source_capture_memo_respects_instance_forward_override() -> None:
+    """An instance-level ``forward`` is never collapsed to the class source."""
+
+    def replacement_forward(x: torch.Tensor) -> torch.Tensor:
+        """Return ``x`` unchanged."""
+
+        return x
+
+    class_source = capture_model_source_code(_MemoProbe())["forward"]
+    overridden = _MemoProbe()
+    overridden.forward = replacement_forward  # type: ignore[method-assign]
+    instance_source = capture_model_source_code(overridden)["forward"]
+
+    assert "replacement_forward" in instance_source
+    assert instance_source != class_source
+    # ...and the class source is still intact for an unmodified instance.
+    assert capture_model_source_code(_MemoProbe())["forward"] == class_source
+
+
+def test_source_capture_memo_does_not_extend_model_lifetime() -> None:
+    """Memo entries for a locally defined class evict with the class."""
+
+    class Local(nn.Module):
+        """Locally defined model whose class dies at the end of this test."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return ``x`` unchanged."""
+
+            return x
+
+    model = Local()
+    capture_model_source_code(model)
+    class_ref = weakref.ref(Local)
+    model_ref = weakref.ref(model)
+
+    del model, Local
+    gc.collect()
+
+    assert model_ref() is None
+    assert class_ref() is None
+
+
+def test_source_capture_tolerates_unmemoizable_targets() -> None:
+    """Targets that cannot be weakly referenced still resolve, uncached."""
+
+    for target in (len, object.__init__, 5, None, "text"):
+        assert code_panel._get_source_or_empty(target) == ""

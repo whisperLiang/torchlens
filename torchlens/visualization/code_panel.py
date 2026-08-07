@@ -52,6 +52,17 @@ _CODE_PANEL_WRAP_INDENT = "    "
 # pathologically deep indents fall back to a shallow hanging indent instead.
 _CODE_PANEL_MIN_WRAP_CONTENT_CHARS = 16
 
+# Memo for captured source text, keyed on the *resolved* class/function object
+# that ``inspect`` actually reads (see ``_source_memo_key``). Source capture is
+# a pure function of that object -- ``inspect.getsourcelines`` reads the file
+# and tokenizes to find the object's extent, which costs ~1.7ms for a small
+# model and ~22ms for a torchvision class, paid again on every trace of the
+# same class. Keys are held weakly so locally-defined classes (tests, REPLs)
+# evict with their definition and the memo stays bounded by the set of live
+# model classes. Empty (introspection-failed) results are memoized too, since
+# the failure is equally class-pure and equally repeated.
+_SOURCE_MEMO: weakref.WeakKeyDictionary[Any, str] = weakref.WeakKeyDictionary()
+
 
 class SourceText(str):
     """Source text with optional file-line metadata for clickable renderers."""
@@ -434,8 +445,37 @@ def compose_graph_with_code_panel(
     return compose_svgs_horizontally(code_svg, graph_svg)
 
 
+def _source_memo_key(obj: object) -> Any:
+    """Return the canonical object whose source ``obj`` resolves to.
+
+    ``inspect.getsourcelines`` unwraps ``functools.wraps`` chains and reads a
+    bound method's underlying function, so a bound method, that same method
+    wrapped by TorchLens' forward decorator, and the plain class function all
+    produce byte-identical source. Collapsing them to one key means repeated
+    instances of a class -- decorated or not -- share a single memo entry
+    instead of one per instance.
+
+    Parameters
+    ----------
+    obj:
+        Object about to be passed to ``inspect``.
+
+    Returns
+    -------
+    Any
+        Unwrapped function or class object to key the memo on.
+    """
+
+    unwrapped = inspect.unwrap(cast(Any, obj))
+    return getattr(unwrapped, "__func__", unwrapped)
+
+
 def _get_source_or_empty(obj: object) -> str:
     """Return inspect source text for an object or an empty string.
+
+    The result is memoized per resolved class/function object (see
+    ``_source_memo_key``); captured source is a pure function of that object
+    and does not change within a process.
 
     Parameters
     ----------
@@ -449,15 +489,30 @@ def _get_source_or_empty(obj: object) -> str:
     """
 
     try:
+        key = _source_memo_key(obj)
+        cached = _SOURCE_MEMO.get(key)
+    except (TypeError, ValueError):
+        # Unhashable / non-weak-referenceable target, or a ``__wrapped__`` loop:
+        # capture without memoizing so ``inspect`` raises exactly as it always did.
+        key = None
+        cached = None
+    if cached is not None:
+        return cached
+
+    try:
         source_lines, line_number = inspect.getsourcelines(cast(Any, obj))
         source = textwrap.dedent("".join(source_lines)).rstrip()
-        return SourceText(
+        captured: str = SourceText(
             source,
             file_path=inspect.getsourcefile(cast(Any, obj)),
             line_number=line_number,
         )
     except (OSError, TypeError):
-        return ""
+        captured = ""
+
+    if key is not None:
+        _SOURCE_MEMO[key] = captured
+    return captured
 
 
 def _wrap_source_line(line: str, max_chars: int = MAX_CODE_PANEL_LINE_CHARS) -> list[str]:
