@@ -22,7 +22,7 @@ Step 11 (_build_lookup_keys_and_finalize_retained_layers): Builds lookup key map
 
 from collections import defaultdict
 from dataclasses import fields, is_dataclass, replace
-from typing import Any, Dict, List, TYPE_CHECKING
+from typing import Any, Dict, List, Tuple, TYPE_CHECKING
 
 from .._errors import AmbiguousOpLookupError
 from ..data_classes.cleanup import _project_conditional_child_views
@@ -144,6 +144,10 @@ def _log_final_info_for_layers(self: "Trace") -> None:
         "module_ops": set(),
     }
 
+    # One rename per equivalence class instead of one per pass; see
+    # ``_replace_layer_names_for_layer_entry`` for why the shared result is safe.
+    equivalent_ops_memo: Dict[int, Tuple[Any, Any]] = {}
+
     for t, layer_entry in enumerate(self):
         _normalize_io_role_flags(layer_entry)
         if layer_entry.layer_type in ["input", "buffer"]:
@@ -156,7 +160,7 @@ def _log_final_info_for_layers(self: "Trace") -> None:
             step_index += 1
 
         # Replace any layer names with their final names:
-        _replace_layer_names_for_layer_entry(self, layer_entry)
+        _replace_layer_names_for_layer_entry(self, layer_entry, equivalent_ops_memo)
 
         # Log the module hierarchy information:
         _log_module_hierarchy_info_for_layer(self, layer_entry, _shadow_sets)
@@ -339,7 +343,11 @@ def _rename_children_by_cond(
     }
 
 
-def _replace_layer_names_for_layer_entry(self: "Trace", layer_entry: Op) -> None:
+def _replace_layer_names_for_layer_entry(
+    self: "Trace",
+    layer_entry: Op,
+    equivalent_ops_memo: Dict[int, Tuple[Any, Any]] | None = None,
+) -> None:
     """Replace all raw labels in a Op's fields with final labels.
 
     Handles three categories of fields:
@@ -348,12 +356,30 @@ def _replace_layer_names_for_layer_entry(self: "Trace", layer_entry: Op) -> None
     2. parent_arg_positions dict: renames values in-place.
     3. out_versions_by_child dict: renames keys.
 
+    ``equivalent_ops`` is the one exception to "new object per Op". Capture hands
+    every member of an equivalence class the SAME trace-level set (see
+    ``backends/torch/ops.py``), so renaming per Op both re-did identical work and
+    turned one N-label group into N copies of itself: on a 512-step loop that was
+    524k rename lookups and 33.8 MB retained for FOUR distinct groups. The rename
+    is memoized on the identity of the incoming shared object, so each group is
+    renamed once and its members keep pointing at one canonical set. That is safe
+    only because ``Op.equivalent_ops`` reads hand back a private copy
+    (``_COPY_ON_READ_SET_FIELDS`` in ``data_classes/op.py``), so no holder of the
+    shared group can alias-corrupt a sibling Op.
+
     Args:
         layer_entry: Op to rename labels for.
+        equivalent_ops_memo: Cross-Op ``id(raw group) -> (raw group, renamed
+            group)`` table for the current rename sweep. Keeping the raw group
+            alive in the value is what makes keying on ``id`` sound: the key
+            object cannot be freed, so its address cannot be reused. ``None``
+            builds a throwaway table (single-Op callers, test doubles).
     """
     mapping = self._raw_to_final_layer_labels
     layer_mapping = self._raw_to_final_parent_layer_labels
     op_mapping = self._raw_to_final_op_labels
+    if equivalent_ops_memo is None:
+        equivalent_ops_memo = {}
 
     def set_entry_field(field_name: str, value: Any) -> None:
         """Set a renamed entry field on real Ops or lightweight test doubles."""
@@ -365,12 +391,27 @@ def _replace_layer_names_for_layer_entry(self: "Trace", layer_entry: Op) -> None
         setattr(layer_entry, field_name, value)
 
     for field in _LIST_FIELDS_TO_RENAME:
+        if field == "equivalent_ops":
+            # Read the RAW slot: the public read is copy-on-read, and a copy has
+            # a fresh identity that would defeat the memo on every Op.
+            slot_read = getattr(layer_entry, "_slot", None)
+            orig = slot_read(field) if slot_read is not None else getattr(layer_entry, field, None)
+            if not orig:
+                continue
+            cached = equivalent_ops_memo.get(id(orig))
+            if cached is None:
+                renamed = type(orig)(op_mapping[raw] for raw in orig)
+                equivalent_ops_memo[id(orig)] = (orig, renamed)
+            else:
+                renamed = cached[1]
+            set_entry_field(field, renamed)
+            continue
         orig = getattr(layer_entry, field, None)
         if not orig:
             continue
         if field.startswith("conditional_"):
             field_mapping = layer_mapping
-        elif field in {"equivalent_ops", "recurrent_ops"}:
+        elif field == "recurrent_ops":
             field_mapping = op_mapping
         else:
             field_mapping = mapping

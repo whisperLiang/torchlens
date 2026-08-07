@@ -129,6 +129,16 @@ _object_setattr = object.__setattr__
 # Fields whose reads go through the lazy-materialization path in
 # ``Op.__getattribute__``; every other name short-circuits straight to the slot.
 _LAZY_READ_FIELDS = frozenset({"grad", "out"})
+# Set-valued fields whose slot holds ONE canonical object shared by every Op of
+# an equivalence class (see ``_LIST_FIELDS_TO_RENAME`` handling in
+# ``postprocess/labeling.py``).  Sharing is what keeps a many-pass graph from
+# storing the same N-label group N times -- a 512-step loop retained 33.8 MB of
+# per-op duplicates -- but a shared MUTABLE set could be alias-corrupted by any
+# holder.  Reads therefore hand back a fresh copy, so the object a caller sees is
+# private to that read and mutating it can never reach a sibling Op.  Writes are
+# unaffected: assigning rebinds the slot exactly as before.
+_COPY_ON_READ_SET_FIELDS = frozenset({"equivalent_ops"})
+_INTERCEPTED_READ_FIELDS = _LAZY_READ_FIELDS | _COPY_ON_READ_SET_FIELDS
 _WARNED_REFERENCE_SAVE_MODE = False
 _LAYER_PASS_LOG_DEFAULT_FILL: dict[str, Any] = {
     "_source_trace_ref": None,
@@ -338,6 +348,15 @@ _UNPOOLED_SLOTS = frozenset(
         "_receptive_field_cache",
         "_projective_field_cache",
         "_arg_expressions_cache",
+        # One canonical set object is shared by every Op of an equivalence class,
+        # so walking it per Op would re-pool the SAME N labels N times (a 512-step
+        # loop: 524k member visits for 4 distinct groups) and would mutate one
+        # shared container from N owners.  Nothing is lost: a group's members are
+        # the very ``op.label`` strings the rename pass read out of
+        # ``_raw_to_final_op_labels``, and those slots ARE pooled, so no distinct
+        # duplicate of a label survives this skip.  Pooling is a cost choice, not
+        # a correctness one (see the pooling block above).
+        "equivalent_ops",
     }
 )
 _POOLED_SLOTS = tuple(name for name in _OP_SLOT_NAMES if name not in _UNPOOLED_SLOTS)
@@ -1395,12 +1414,18 @@ class Op:
         # read (150-200k per trace), so even the cached LOAD_GLOBAL for these
         # two names was measurable; LOAD_FAST via default args is cheaper.
         _getattribute: Callable[[Any, str], Any] = _object_getattribute,
-        _lazy_fields: frozenset = _LAZY_READ_FIELDS,
+        _lazy_fields: frozenset = _INTERCEPTED_READ_FIELDS,
     ) -> Any:
-        """Materialize lazy grads and reject finalized unsaved predicate outs."""
+        """Materialize lazy grads, copy shared sets, reject unsaved predicate outs."""
 
         if name not in _lazy_fields:
             return _getattribute(self, name)
+        if name == "equivalent_ops":
+            # One canonical set object backs every Op of an equivalence class;
+            # hand out a private copy so no holder can alias-corrupt the group.
+            # Non-set legacy/loaded values (e.g. a list) pass through untouched.
+            value = _getattribute(self, name)
+            return set(value) if value.__class__ is set else value
         if name == "grad":
             slot = _object_getattribute(self, "_slot")
             records = slot("_grad_records")

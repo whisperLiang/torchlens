@@ -676,7 +676,13 @@ def _scrub_op_label_collections(op: "Op", labels_to_remove: Set[str]) -> None:
         if isinstance(value, list):
             setattr(op, field_name, [label for label in value if label not in labels_to_remove])
         elif isinstance(value, set):
-            setattr(op, field_name, value - labels_to_remove)
+            # Only rebind when a dead label is actually present. ``equivalent_ops``
+            # shares ONE set object across every Op of an equivalence class, and
+            # the Trace-level group behind it is scrubbed in place by the caller,
+            # so an unconditional ``value - labels_to_remove`` would hand every Op
+            # its own equal-but-distinct copy and undo that sharing for nothing.
+            if not value.isdisjoint(labels_to_remove):
+                setattr(op, field_name, value - labels_to_remove)
 
 
 def _scrub_parent_arg_positions(op: "Op", labels_to_remove: Set[str]) -> None:
