@@ -17,6 +17,7 @@ uses to permanently wrap every torch function at import time.
 
 import __future__
 import functools
+import sys
 import types
 import warnings
 
@@ -1168,24 +1169,33 @@ ORIG_TORCH_FUNCS = OVERRIDABLE_FUNCS + IGNORED_FUNCS
 
 
 def _get_torchvision_funcs() -> list[tuple[str, str]]:
-    """Return torchvision torch.ops targets if torchvision is installed.
+    """Return torchvision torch.ops targets if torchvision is already imported.
+
+    TorchLens never imports torchvision itself: importing it costs ~2 s and
+    ~150 MB RSS, and a model cannot call a torchvision custom op unless the
+    user's process has already imported torchvision (the ops only register
+    with the torch dispatcher during ``import torchvision``). The
+    not-yet-imported answer is deliberately uncached so a later user import
+    is picked up by ``wrap_torch()`` on the next capture.
 
     Returns
     -------
     list[tuple[str, str]]
         Torchvision operation targets for wrapper decoration, or an empty list
-        when torchvision is not installed.
+        while torchvision has not (finished) being imported.
     """
 
     global _TORCHVISION_FUNCS_CACHE
     if _TORCHVISION_FUNCS_CACHE is not None:
         return _TORCHVISION_FUNCS_CACHE
-    try:
-        import torchvision  # noqa: F401
-    except ModuleNotFoundError:
-        _TORCHVISION_FUNCS_CACHE = []
-    else:
-        _TORCHVISION_FUNCS_CACHE = list(TORCHVISION_FUNCS)
+    torchvision_module = sys.modules.get("torchvision")
+    if torchvision_module is None:
+        return []
+    spec = getattr(torchvision_module, "__spec__", None)
+    if spec is not None and getattr(spec, "_initializing", False):
+        # Mid-import (circular import): the C ops may not be registered yet.
+        return []
+    _TORCHVISION_FUNCS_CACHE = list(TORCHVISION_FUNCS)
     return _TORCHVISION_FUNCS_CACHE
 
 
