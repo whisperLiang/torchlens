@@ -655,6 +655,7 @@ def _op_event_from_log(
     fields_dict: dict[str, Any],
     tensor: torch.Tensor,
     fire_results: tuple[FireResult, ...] = (),
+    module_stack: tuple[ModuleFrame, ...] | None = None,
 ) -> OpEvent:
     """Build an ``OpEvent`` that mirrors a just-constructed ``Op``.
 
@@ -666,6 +667,8 @@ def _op_event_from_log(
         Live output tensor for backend metadata.
     fire_results
         Live intervention fire results associated with this output.
+    module_stack
+        Precomputed immutable module frames shared by outputs from the call.
 
     Returns
     -------
@@ -674,6 +677,8 @@ def _op_event_from_log(
     """
 
     tensor_ref = _tensor_ref_from_fields(tensor, fields_dict)
+    if module_stack is None:
+        module_stack = _module_frames_from_fields(fields_dict)
     transformed_ref = (
         None
         if fields_dict["transformed_out"] is None
@@ -777,7 +782,7 @@ def _op_event_from_log(
         ),
         params=_param_refs_from_fields(fields_dict),
         parent_params=tuple(fields_dict["parent_params"]),
-        module_stack=_module_frames_from_fields(fields_dict),
+        module_stack=module_stack,
         modules=tuple(fields_dict["modules"]),
         backend_semantics=backend_semantics,
         policy=CapturePolicy(
@@ -3028,28 +3033,56 @@ def _select_predicate_observation(current: OpObservation) -> EnrichmentLevel:
     return EnrichmentLevel.SHELL
 
 
-def _normalize_predicate_observation(current: OpObservation) -> None:
-    """Compute backend semantics for a predicate-mode observation on demand.
+def _predicate_backend_semantics(
+    trace: "Trace",
+    out: torch.Tensor,
+    func: Callable[..., Any],
+    func_name: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    out_orig: Any,
+    arg_copies: tuple[Any, ...],
+    kwarg_copies: dict[str, Any],
+    is_bottom_level_func: bool,
+    func_call_id: int,
+    expected_output_count: int,
+) -> BackendSemantics:
+    """Compute demanded backend semantics for one predicate output.
 
     Parameters
     ----------
-    current:
-        Predicate-mode observation whose ``facts`` map holds the trace context.
+    trace
+        Active predicate capture trace.
+    out
+        Live tensor output being recorded.
+    func
+        Decorated torch callable.
+    func_name
+        Recorded callable name.
+    args
+        Live positional inputs.
+    kwargs
+        Live keyword inputs.
+    out_orig
+        Complete original call output.
+    arg_copies
+        Pre-call positional snapshots.
+    kwarg_copies
+        Pre-call keyword snapshots.
+    is_bottom_level_func
+        Whether this is a bottom-level decorated call.
+    func_call_id
+        Stable capture-time function-call identifier.
+    expected_output_count
+        Number of loggable outputs from the call.
+
+    Returns
+    -------
+    BackendSemantics
+        Alias and mutation semantics for the projected event.
     """
 
-    trace = current.facts["trace"]
-    out = current.facts["out"]
-    func = current.facts["func"]
-    func_name = cast(str, current.facts["func_name"])
-    args = cast(tuple[Any, ...], current.facts["args"])
-    kwargs = cast(dict[str, Any], current.facts["kwargs"])
-    out_orig = current.facts["out_orig"]
-    arg_copies = cast(tuple[Any, ...], current.facts["arg_copies"])
-    kwarg_copies = cast(dict[str, Any], current.facts["kwarg_copies"])
-    is_bottom_level_func = cast(bool, current.facts["is_bottom_level_func"])
-    func_call_id = cast(int, current.facts["func_call_id"])
-    expected_output_count = cast(int, current.facts["expected_output_count"])
-    grad_fn_handle = out.grad_fn if isinstance(out, torch.Tensor) else None
+    grad_fn_handle = out.grad_fn
     func_event_input = FunctionEventInput(
         func=func,
         func_name=func_name,
@@ -3074,15 +3107,52 @@ def _normalize_predicate_observation(current: OpObservation) -> None:
     # capture-internal read so the completeness witness does not record it as
     # a user host escape.
     with internal_scalar_read():
-        current.facts["backend_semantics"] = detect_backend_semantics(
+        return detect_backend_semantics(
             func_event_input,
             backend_grad_handle=grad_fn_handle,
-            grad_fn_class_name=type(grad_fn_handle).__name__
-            if grad_fn_handle is not None
-            else None,
+            grad_fn_class_name=(
+                type(grad_fn_handle).__name__ if grad_fn_handle is not None else None
+            ),
             autograd_memory=None,
             num_autograd_tensors=None,
         )
+
+
+def _normalize_predicate_observation(current: OpObservation) -> None:
+    """Compute backend semantics for a predicate-mode observation on demand.
+
+    Parameters
+    ----------
+    current:
+        Predicate-mode observation whose ``facts`` map holds the trace context.
+    """
+
+    trace = current.facts["trace"]
+    out = current.facts["out"]
+    func = current.facts["func"]
+    func_name = cast(str, current.facts["func_name"])
+    args = cast(tuple[Any, ...], current.facts["args"])
+    kwargs = cast(dict[str, Any], current.facts["kwargs"])
+    out_orig = current.facts["out_orig"]
+    arg_copies = cast(tuple[Any, ...], current.facts["arg_copies"])
+    kwarg_copies = cast(dict[str, Any], current.facts["kwarg_copies"])
+    is_bottom_level_func = cast(bool, current.facts["is_bottom_level_func"])
+    func_call_id = cast(int, current.facts["func_call_id"])
+    expected_output_count = cast(int, current.facts["expected_output_count"])
+    current.facts["backend_semantics"] = _predicate_backend_semantics(
+        trace,
+        out,
+        func,
+        func_name,
+        args,
+        kwargs,
+        out_orig,
+        arg_copies,
+        kwarg_copies,
+        is_bottom_level_func,
+        func_call_id,
+        expected_output_count,
+    )
 
 
 def _retain_predicate_observation_payload(current: OpObservation) -> None:
@@ -3167,6 +3237,8 @@ def _emit_predicate_operation_events(
     arg_tensors, _ = _extract_arg_tensors_and_params(layer_type, args, kwargs)
     parent_labels = tuple(get_label_list(arg_tensors))
     out_iter = list(_iter_loggable_live_outputs(out_orig, is_bottom_level_func))
+    expected_output_count = len(out_iter)
+    function_ref: FunctionCallRef | None = None
 
     for output_index, (out, container_path, _container_spec) in enumerate(out_iter):
         self._layer_counter += 1
@@ -3216,45 +3288,90 @@ def _emit_predicate_operation_events(
                 continue
             if out.grad_fn is not None:
                 state.grad_fn_to_context[out.grad_fn] = ctx
-            observation = OpObservation(
-                operation_key=func_name,
-                value=out,
-                facts={
-                    "trace": self,
-                    "ctx": ctx,
-                    "state": state,
-                    "func": func,
-                    "func_name": func_name,
-                    "args": args,
-                    "kwargs": kwargs,
-                    "out_orig": out_orig,
-                    "arg_copies": arg_copies,
-                    "kwarg_copies": kwarg_copies,
-                    "is_bottom_level_func": is_bottom_level_func,
-                    "func_call_id": func_call_id,
-                    "expected_output_count": len(out_iter),
-                    "out": out,
-                    "container_path": container_path,
-                    "function": _predicate_function_ref(
+            if function_ref is None:
+                function_ref = _predicate_function_ref(func, func_name, args, kwargs, func_call_id)
+            capture_session = capture_session_for(self)
+            if capture_session is None:
+                observation = OpObservation(
+                    operation_key=func_name,
+                    value=out,
+                    facts={
+                        "trace": self,
+                        "ctx": ctx,
+                        "state": state,
+                        "func": func,
+                        "func_name": func_name,
+                        "args": args,
+                        "kwargs": kwargs,
+                        "out_orig": out_orig,
+                        "arg_copies": arg_copies,
+                        "kwarg_copies": kwarg_copies,
+                        "is_bottom_level_func": is_bottom_level_func,
+                        "func_call_id": func_call_id,
+                        "expected_output_count": expected_output_count,
+                        "out": out,
+                        "container_path": container_path,
+                        "function": function_ref,
+                    },
+                )
+                observation.select = _select_predicate_observation
+                observation.normalize_metadata = _normalize_predicate_observation
+                observation.retain_payload = _retain_predicate_observation_payload
+                observation.append = _append_predicate_observation
+                observation.evaluate_nonfinite_halt = _evaluate_predicate_observation_halt
+                demanded = _select_predicate_observation(observation)
+                _run_observation_stages(observation, demanded)
+            else:
+                kernel = capture_session.kernel
+                kernel.begin_observation(func_name)
+                spec = _evaluate_keep_op(ctx, state.options)
+                if isinstance(spec, RetroactiveCaptureDecision):
+                    raise PredicateError(
+                        "tl.followed_by(...) retroactive save is only supported by trace"
+                    )
+                if spec.save_out:
+                    demanded = EnrichmentLevel.PAYLOAD
+                elif spec.save_metadata:
+                    demanded = EnrichmentLevel.METADATA
+                else:
+                    demanded = EnrichmentLevel.SHELL
+                if demanded is not EnrichmentLevel.SHELL:
+                    kernel.mark_metadata()
+                    backend_semantics = _predicate_backend_semantics(
+                        self,
+                        out,
                         func,
                         func_name,
                         args,
                         kwargs,
+                        out_orig,
+                        arg_copies,
+                        kwarg_copies,
+                        is_bottom_level_func,
                         func_call_id,
-                    ),
-                },
-            )
-            observation.select = _select_predicate_observation
-            observation.normalize_metadata = _normalize_predicate_observation
-            observation.retain_payload = _retain_predicate_observation_payload
-            observation.append = _append_predicate_observation
-            observation.evaluate_nonfinite_halt = _evaluate_predicate_observation_halt
-            capture_session = capture_session_for(self)
-            if capture_session is None:
-                demanded = _select_predicate_observation(observation)
-                _run_observation_stages(observation, demanded)
-            else:
-                capture_session.kernel.process(observation)
+                        expected_output_count,
+                    )
+                else:
+                    backend_semantics = None
+                if demanded is EnrichmentLevel.PAYLOAD:
+                    kernel.mark_payload()
+                    ram_payload, transformed_ram_payload = _record_predicate_output(ctx, out, spec)
+                else:
+                    ram_payload = None
+                    transformed_ram_payload = None
+                append_projected_event(
+                    self,
+                    ctx,
+                    spec,
+                    tensor=out,
+                    ram_payload=ram_payload,
+                    transformed_ram_payload=transformed_ram_payload,
+                    predicate_matched=spec.save_out or spec.save_metadata,
+                    backend_semantics=backend_semantics,
+                    function=function_ref,
+                    container_path=container_path,
+                )
+                evaluate_halt_stop(self, ctx, state.options, frontier_output=out)
         except HaltSignal:
             raise
         except (TorchLensPostfuncError, TrainingModeConfigError):
@@ -3921,6 +4038,7 @@ def _emit_exhaustive_operation_events(
         and len(output_entries) == 1
         and output_entries[0].container_spec is None
     )
+    event_module_stack = _module_frames_from_fields(fields_dict)
     shared_func_event_input = FunctionEventInput(
         func=func,
         func_name=func_name,
@@ -3930,7 +4048,7 @@ def _emit_exhaustive_operation_events(
         raw_output=out_orig,
         arg_copies=arg_copies,
         kwarg_copies=kwarg_copies,
-        module_stack=tuple(_module_frames_from_fields(fields_dict)),
+        module_stack=event_module_stack,
         is_bottom_level_func=is_bottom_level_func,
         func_call_id=func_call_id,
         expected_output_count=expected_output_count,
@@ -4072,6 +4190,7 @@ def _emit_exhaustive_operation_events(
                 t_args=arg_copies,
                 t_kwargs=kwarg_copies,
                 activation_transform=self.activation_transform,
+                event_module_stack=event_module_stack,
             ),
         )
         new_tensor_label = new_layer_entry._label_raw
@@ -5630,6 +5749,7 @@ def _make_layer_log_entry(
     t_args: tuple[Any, ...] | None = None,
     t_kwargs: dict[str, Any] | None = None,
     activation_transform: Callable[..., Any] | None = None,
+    event_module_stack: tuple[ModuleFrame, ...] | None = None,
 ) -> Any:
     """Create a Op (or Buffer) entry and register it in Trace.
 
@@ -5643,6 +5763,7 @@ def _make_layer_log_entry(
         t_args: Positional arguments to the function that created the tensor.
         t_kwargs: Keyword arguments to the function that created the tensor.
         activation_transform: Optional transform applied to outs before saving.
+        event_module_stack: Optional precomputed immutable module frames.
     """
     if t_args is None:
         t_args = ()
@@ -5719,7 +5840,13 @@ def _make_layer_log_entry(
             and label not in _positions["kwargs"].values()
         )
     )
-    op_event = _op_event_from_log(self, fields_dict, t, fire_results)
+    op_event = _op_event_from_log(
+        self,
+        fields_dict,
+        t,
+        fire_results,
+        module_stack=event_module_stack,
+    )
     self.capture_events.append(op_event)
     if op_event.grad_fn_handle is not None:
         self.capture_events.grad_fn_handles_by_label_raw[op_event.label_raw] = (
