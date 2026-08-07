@@ -31,7 +31,7 @@ import os
 import tokenize
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal, Optional, Sequence, Tuple, TypeAlias, cast
+from typing import Dict, List, Literal, NamedTuple, Optional, Sequence, Tuple, TypeAlias, cast
 
 from torchlens.data_classes.func_call_location import FuncCallLocation
 
@@ -275,6 +275,25 @@ class ScopeEntry:
         ]
 
 
+class _ScopeCall(NamedTuple):
+    """One ``ast.Call`` in a function scope with its precomputed source span.
+
+    Attributes
+    ----------
+    node:
+        The call node itself.
+    span:
+        ``_node_span(node)``, precomputed once instead of per query.
+    visible_name:
+        The call's visible callee name (``ast.Name.id`` or ``ast.Attribute.attr``),
+        or ``None`` for any other callee form.
+    """
+
+    node: ast.Call
+    span: SourceRange
+    visible_name: Optional[str]
+
+
 @dataclass
 class FileIndex:
     """Parsed AST index for one source file.
@@ -308,6 +327,48 @@ class FileIndex:
     bool_consumers: List[BoolConsumer]
     parent_map: Dict[ast.AST, ast.AST]
     _source_lines: Optional[List[str]] = field(default=None, repr=False, compare=False)
+    _scope_calls: Optional[Dict[ast.AST, List[_ScopeCall]]] = field(
+        default=None, repr=False, compare=False
+    )
+
+    def scope_calls(self, scope_node: ast.AST) -> List[_ScopeCall]:
+        """Return every ``ast.Call`` under ``scope_node``, computed once per scope.
+
+        Parameters
+        ----------
+        scope_node:
+            Function scope node owned by this index's ``module``.
+
+        Returns
+        -------
+        List[_ScopeCall]
+            Call nodes in ``ast.walk`` order, each with its precomputed span and
+            visible callee name.
+
+        Notes
+        -----
+        Call-site resolution queries the same handful of scopes hundreds of times
+        per capture, so the ``ast.walk`` is done once per touched scope instead of
+        once per query. ``ast.walk`` order is preserved because the downstream
+        width sort is stable and callers depend on the pre-sort order for ties.
+        Entries stay valid for the index's lifetime: the AST is never mutated, and
+        the existing ``mtime_ns`` check plus the file-cache LRU already govern
+        invalidation, so this adds no new invalidation surface.
+        """
+
+        cache = self._scope_calls
+        if cache is None:
+            cache = {}
+            self._scope_calls = cache
+        entries = cache.get(scope_node)
+        if entries is None:
+            entries = [
+                _ScopeCall(node, _node_span(node), _call_visible_name(node))
+                for node in ast.walk(scope_node)
+                if isinstance(node, ast.Call)
+            ]
+            cache[scope_node] = entries
+        return entries
 
     def source_lines(self) -> List[str]:
         """Return ``source`` split into parser-style lines, computed once.
@@ -713,7 +774,9 @@ def _resolve_frame_var_names(frame: FuncCallLocation, func_name: Optional[str]) 
     if scope is None:
         return []
 
-    candidates = _find_candidate_calls(scope.node, frame.line_number, frame.col_offset, func_name)
+    candidates = _find_candidate_calls(
+        file_index, scope.node, frame.line_number, frame.col_offset, func_name
+    )
     resolved = [
         target_names
         for call_node in candidates
@@ -755,7 +818,9 @@ def _resolve_frame_arg_expressions(frame: FuncCallLocation, func_name: Optional[
     if scope is None:
         return []
 
-    candidates = _find_candidate_calls(scope.node, frame.line_number, frame.col_offset, func_name)
+    candidates = _find_candidate_calls(
+        file_index, scope.node, frame.line_number, frame.col_offset, func_name
+    )
     if len(candidates) != 1:
         return []
     return _call_arg_expressions(candidates[0], file_index.source_lines())
@@ -869,12 +934,18 @@ def _node_source_segment(source_lines: List[str], node: ast.AST) -> Optional[str
 
 
 def _find_candidate_calls(
-    scope_node: FunctionNode, line: int, col: Optional[int], func_name: Optional[str]
+    file_index: FileIndex,
+    scope_node: FunctionNode,
+    line: int,
+    col: Optional[int],
+    func_name: Optional[str],
 ) -> list[ast.Call]:
     """Find candidate calls matching a runtime source location.
 
     Parameters
     ----------
+    file_index:
+        Index owning ``scope_node``, which supplies the cached per-scope call list.
     scope_node:
         Function scope containing the runtime frame.
     line:
@@ -892,51 +963,44 @@ def _find_candidate_calls(
     """
 
     matches = [
-        node
-        for node in ast.walk(scope_node)
-        if isinstance(node, ast.Call)
-        and _call_name_matches(node, func_name)
+        entry
+        for entry in file_index.scope_calls(scope_node)
+        if (func_name is None or entry.visible_name == func_name)
         and (
-            _range_contains_line(_node_span(node), line)
+            _range_contains_line(entry.span, line)
             if col is None
-            else _range_contains_point(_node_span(node), line, col)
+            else _range_contains_point(entry.span, line, col)
         )
     ]
     if not matches:
         return []
 
-    matches.sort(key=lambda node: _source_range_width(_node_span(node)))
-    if len(matches) > 1 and _node_span(matches[0]) == _node_span(matches[1]):
+    matches.sort(key=lambda entry: _source_range_width(entry.span))
+    if len(matches) > 1 and matches[0].span == matches[1].span:
         return []
-    return matches
+    return [entry.node for entry in matches]
 
 
-def _call_name_matches(call_node: ast.Call, func_name: Optional[str]) -> bool:
-    """Return whether an AST call can represent a captured function name.
+def _call_visible_name(call_node: ast.Call) -> Optional[str]:
+    """Return the visible callee name for an AST call.
 
     Parameters
     ----------
     call_node:
         Candidate call node.
-    func_name:
-        Captured runtime function name.
 
     Returns
     -------
-    bool
-        ``True`` when the AST call's visible name matches ``func_name``.
+    Optional[str]
+        ``ast.Name.id`` or ``ast.Attribute.attr`` for the callee, or ``None`` for
+        any other callee form.
     """
 
-    if func_name is None:
-        return True
-    visible_name: Optional[str]
     if isinstance(call_node.func, ast.Name):
-        visible_name = call_node.func.id
-    elif isinstance(call_node.func, ast.Attribute):
-        visible_name = call_node.func.attr
-    else:
-        visible_name = None
-    return visible_name == func_name
+        return call_node.func.id
+    if isinstance(call_node.func, ast.Attribute):
+        return call_node.func.attr
+    return None
 
 
 def _source_range_width(span: SourceRange) -> tuple[int, int]:
