@@ -595,6 +595,16 @@ def build_sparse_run_descriptor(trace: Any) -> SparseRunDescriptor:
         # prove its own installation/chain/restoration, so channel coverage for
         # this forward is unknowable -- INCOMPLETE, never "no consumption".
         _gap(WitnessGapKind.RNG_MONITOR_UNCERTAIN, "capture")
+    from ..backends.torch.buffer_writes import param_byte_witness_not_armed
+
+    if param_byte_witness_not_armed(trace):
+        # W6 witness gating, the param-byte twin of the ``monitor_not_armed`` RNG
+        # stamp above: the whole-storage param/state byte-witness (r18/r19-A
+        # snapshot + reconcile) is armed only for runnable-capable captures. A
+        # disarmed capture reaching descriptor build has UNKNOWABLE state-writeback
+        # coverage for its forward, so it ceilings through the observer-uncertain
+        # gap (unverifiable), never a silent false VERIFIED.
+        _gap(WitnessGapKind.ESCAPE_OBSERVER_UNCERTAIN, "capture")
     if getattr(trace, "capture_verified", None) is False:
         # r35 I2 completion: a capture whose own verification tripwire fired
         # (unaccounted dispatches, escaped callables, unverified transform
