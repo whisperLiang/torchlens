@@ -1581,6 +1581,13 @@ def _pf_partition_class(
         if len(cohort) < 2:
             continue
         invariant_fed = all(color[0] == "ext" for color, _ in signature)
+        # Live distinct-root counter: every union below merges two roots that both
+        # belong to this cohort, so it lowers the cohort's distinct-root count by
+        # exactly one. Once a single root remains, every remaining pair can only
+        # hit the root-equality short-circuit (whose sole effect is idempotent
+        # path compression), so breaking out is output-identical while avoiding
+        # the O(len(cohort)^2) tail of already-unified pairs.
+        distinct_roots = len({find(member) for member in cohort})
         pair_iter = it.chain(zip(cohort, cohort[1:]), it.combinations(cohort, 2))
         for member1, member2 in pair_iter:
             if find(member1) == find(member2):
@@ -1598,10 +1605,16 @@ def _pf_partition_class(
                 continue
             if _reaches_forward(workspace, member1, member2, reach_memo):
                 union(member1, member2)
+                distinct_roots -= 1
+                if distinct_roots == 1:
+                    break
             elif invariant_fed and _pf_child_route_allows(
                 workspace, member1, member2, class_of, reach_memo
             ):
                 union(member1, member2)
+                distinct_roots -= 1
+                if distinct_roots == 1:
+                    break
 
     equal_component_sizes = Counter(find(member) for member in members)
     realized_equal_members = {
@@ -1868,6 +1881,28 @@ def _merge_iso_groups_to_layers(
         # Consecutive pairs first: in a genuine loop they carry the unions, so the
         # full pairwise sweep afterwards short-circuits on shared union-find roots
         # instead of re-deriving (and re-checking reachability for) distant pairs.
+        # Live distinct-root counter: every union below merges two roots that both
+        # belong to this iso group, lowering the group's distinct-root count by
+        # exactly one. Once a single root remains, every remaining pair can only
+        # hit the root-equality short-circuit (whose sole effect is idempotent
+        # path compression), so breaking out is output-identical while avoiding
+        # the O(len(iso_nodes)^2) tail of already-unified pairs. Groups arriving
+        # fully unified (from earlier groups' unions) skip the sweep outright.
+        distinct_roots = len({find(node_label) for node_label in iso_nodes})
+        if distinct_roots == 1:
+            continue
+        if all(
+            not workspace.nodes[node_label].uses_params
+            and not workspace.nodes[node_label].recurrence_anchored
+            and anchor_ancestry[node_label]
+            for node_label in iso_nodes
+        ):
+            # Every member is a bare param-free op with an anchored ancestor, so
+            # every pair deterministically falls into the bare branch below and
+            # `continue`s without a union (`not anchor_ancestry[...]` fails).
+            # These nodes belong to the two-sided param-free fixpoint; skipping
+            # their O(len(iso_nodes)^2) no-op sweep is output-identical.
+            continue
         pair_iter = it.chain(zip(iso_nodes, iso_nodes[1:]), it.combinations(iso_nodes, 2))
         for node1_label, node2_label in pair_iter:
             if find(node1_label) == find(node2_label):
@@ -1910,6 +1945,9 @@ def _merge_iso_groups_to_layers(
                     # is the only evidence available for pure nested/chained
                     # motifs and is insulated from parameterized boundaries.
                     union(node1_label, node2_label)
+                    distinct_roots -= 1
+                    if distinct_roots == 1:
+                        break
                 # Anchored-descendant bare ops are never decided by local
                 # subgraph adjacency; the two-sided fixpoint assigns them after
                 # all parameterized/anchored groups are final.
@@ -1930,6 +1968,9 @@ def _merge_iso_groups_to_layers(
                     workspace, node1_label, node2_label, reach_memo
                 ):
                     union(node1_label, node2_label)
+                    distinct_roots -= 1
+                    if distinct_roots == 1:
+                        break
             elif subgraphs_are_adjacent and pair_anchored:
                 # A reused persistent identity -- a submodule call repeated across
                 # iterations (one ``nn.ReLU`` invoked four times) or a stateful
@@ -1937,6 +1978,9 @@ def _merge_iso_groups_to_layers(
                 # single-op body. Bare param-free pairs never reach this branch
                 # (they are skipped above for the topological pass).
                 union(node1_label, node2_label)
+                distinct_roots -= 1
+                if distinct_roots == 1:
+                    break
 
     param_barcode_groups: dict[_ParamCallIdentity, list[str]] = defaultdict(list)
     for node_label in all_iso_nodes:
