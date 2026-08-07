@@ -35,7 +35,72 @@ from .op import Op
 from ._state_adapter import state_items, state_new, state_restore
 
 
-def _deep_copy_fork_container(value: Any) -> Any:
+class _ForkMemo(dict):
+    """The single ``copy.deepcopy`` memo shared by every field copy of ONE fork.
+
+    Forking used to give each field its own memo, which made the fork N
+    independent structural copies instead of one. Two Trace fields carry a
+    STRONG back-reference to their owning Trace -- ``ConditionalArm._trace`` and
+    ``Module._source_trace`` -- so ``conditionals`` and ``_module_logs`` each
+    re-cloned the entire object graph, on top of the separate clones made for
+    ``layer_list``/``layer_dict_*``/``layer_logs``. On a GPT-2 capture that is
+    roughly five redundant copies of the same ~120k-object graph per fork, and
+    it also left the fork's own back-references pointing at orphan clones of the
+    parent rather than at the fork.
+
+    Sharing one memo (pre-seeded with parent-object -> fork-object identity)
+    collapses that to one copy and makes the fork internally self-consistent. It
+    can never introduce parent aliasing: every seeded mapping points at a
+    fork-owned object, never at a parent-owned one.
+
+    ``journal`` records insertion order so a field copy that raises partway
+    through can roll its partially built entries back out. A half-constructed
+    object must never survive in the memo to be reused by a later field.
+    """
+
+    __slots__ = ("journal",)
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize the memo and its empty rollback journal."""
+
+        super().__init__(*args, **kwargs)
+        self.journal: list[Any] = []
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        """Record first-time insertions so they can be rolled back."""
+
+        if key not in self:
+            self.journal.append(key)
+        super().__setitem__(key, value)
+
+    def mark(self) -> int:
+        """Return a rollback token for the current memo contents."""
+
+        return len(self.journal)
+
+    def rollback(self, mark: int) -> None:
+        """Drop every entry inserted since ``mark``.
+
+        Entries seeded through ``dict.update`` bypass the journal on purpose:
+        the parent-to-fork identity seeds are permanent and must survive any
+        per-field rollback. ``copy``'s keep-alive list entry is journaled like
+        any other key, so rolling back never leaves a copied object whose
+        source has been freed (and whose ``id`` could be recycled).
+        """
+
+        journal = self.journal
+        for key in journal[mark:]:
+            self.pop(key, None)
+        del journal[mark:]
+
+
+def _seed_fork_memo(memo: _ForkMemo, mapping: dict[Any, Any]) -> None:
+    """Install permanent (non-rollbackable) identity seeds into ``memo``."""
+
+    dict.update(memo, mapping)
+
+
+def _deep_copy_fork_container(value: Any, memo: dict[Any, Any] | None = None) -> Any:
     """Deep-copy a container for a shallow fork, preserving tensor/callable identity.
 
     Recurses through dict/list/set/tuple structures so that mutable nested
@@ -47,6 +112,10 @@ def _deep_copy_fork_container(value: Any) -> Any:
     ----------
     value:
         Container (or leaf) value to copy.
+    memo:
+        Optional shared fork memo. Threading it through the generic-object
+        fallback keeps a shallow-forked Op field from cloning the whole parent
+        Trace when it happens to hold a back-reference to it.
 
     Returns
     -------
@@ -57,22 +126,66 @@ def _deep_copy_fork_container(value: Any) -> Any:
     if isinstance(value, torch.Tensor) or callable(value):
         return value
     if isinstance(value, dict):
-        return {key: _deep_copy_fork_container(item) for key, item in value.items()}
+        return {key: _deep_copy_fork_container(item, memo) for key, item in value.items()}
     if isinstance(value, list):
-        return [_deep_copy_fork_container(item) for item in value]
+        return [_deep_copy_fork_container(item, memo) for item in value]
     if isinstance(value, set):
-        return {_deep_copy_fork_container(item) for item in value}
+        return {_deep_copy_fork_container(item, memo) for item in value}
     if isinstance(value, tuple):
-        return tuple(_deep_copy_fork_container(item) for item in value)
+        return tuple(_deep_copy_fork_container(item, memo) for item in value)
     if isinstance(value, (str, bytes, int, float, bool, type(None))):
         return value
+    return _memoized_deep_copy(value, memo, on_failure=copy.copy, fallback=value)
+
+
+_PROPAGATE = object()
+
+
+def _memoized_deep_copy(
+    value: Any,
+    memo: dict[Any, Any] | None,
+    *,
+    on_failure: Any,
+    fallback: Any = _PROPAGATE,
+) -> Any:
+    """Deep-copy ``value`` under the shared fork memo, rolling back on failure.
+
+    Parameters
+    ----------
+    value:
+        Value to deep-copy.
+    memo:
+        Shared fork memo, or ``None`` for an isolated copy.
+    on_failure:
+        Callable applied to ``value`` when the deep copy raises.
+    fallback:
+        Value returned when ``on_failure`` also raises. Left at ``_PROPAGATE``
+        the secondary failure is re-raised, matching the pre-memo behavior of
+        each call site.
+
+    Returns
+    -------
+    Any
+        The deep copy, or the degraded fallback copy.
+    """
+
+    if memo is None:
+        memo = _ForkMemo()
+    mark = memo.mark() if isinstance(memo, _ForkMemo) else None
     try:
-        return copy.deepcopy(value)
+        return copy.deepcopy(value, memo)
     except Exception:
+        # A raised deepcopy can leave half-populated objects behind in the memo
+        # (``copy._reconstruct`` memoizes before it restores state), so those
+        # entries are discarded rather than handed to the next field.
+        if mark is not None:
+            cast(_ForkMemo, memo).rollback(mark)
+        if fallback is _PROPAGATE:
+            return on_failure(value)
         try:
-            return copy.copy(value)
+            return on_failure(value)
         except Exception:
-            return value
+            return fallback
 
 
 class TraceInterventionMixin(_TraceMixinBase):
@@ -813,16 +926,36 @@ class TraceInterventionMixin(_TraceMixinBase):
         """
 
         fork = state_new(type(self))
+        # ONE structural copy per fork. Every child object the fork owns gets an
+        # empty shell up front, and those shells plus parent-Trace -> fork
+        # identity seed a single shared deepcopy memo (see ``_ForkMemo``). The
+        # field passes below then walk the parent graph exactly once instead of
+        # once per field, and every internal back-reference in the fork resolves
+        # to the FORK's objects rather than to orphan clones of the parent's.
+        # Shells are filled after the Trace-field pass; a memo hit only rebinds a
+        # reference, so an as-yet-empty shell is safe to hand out.
+        memo = _ForkMemo()
+        _seed_fork_memo(memo, {id(self): fork})
+        layer_map: dict[int, Op] = {
+            id(parent_pass): state_new(Op) for parent_pass in self.layer_list
+        }
+        _seed_fork_memo(memo, layer_map)
+        layer_log_map: dict[int, Layer] = {
+            id(parent_layer): state_new(type(parent_layer))
+            for parent_layer in self.layer_logs.values()
+        }
+        _seed_fork_memo(memo, layer_log_map)
+
         fork_state = {
-            field_name: self._fork_model_field(field_name, value)
+            field_name: self._fork_model_field(field_name, value, memo)
             for field_name, value in state_items(self)
         }
         state_restore(fork, fork_state)
         fork.parent_run = weakref.ref(self)
         fork.trace_label = name or self._next_fork_name()
-        fork._intervention_spec = copy.deepcopy(self._ensure_intervention_spec())
-        fork.state_history = copy.deepcopy(self.state_history)
-        fork.relationship_evidence = copy.deepcopy(self.relationship_evidence)
+        fork._intervention_spec = copy.deepcopy(self._ensure_intervention_spec(), memo)
+        fork.state_history = copy.deepcopy(self.state_history, memo)
+        fork.relationship_evidence = copy.deepcopy(self.relationship_evidence, memo)
         fork._out_recipe_revision = self._out_recipe_revision
         fork._spec_revision = self._spec_revision
         fork.state = self.state
@@ -830,11 +963,18 @@ class TraceInterventionMixin(_TraceMixinBase):
         fork._warned_direct_write = False
         fork.__dict__.pop("_validation_replay_status", None)
 
-        layer_map = fork._fork_layer_ops_from(
+        fork._fork_layer_ops_from(
             self,
             deep_copy_layer_labels=deep_copy_layer_labels,
+            layer_map=layer_map,
+            memo=memo,
         )
-        fork._rebuild_fork_layer_collections(self, layer_map)
+        fork._rebuild_fork_layer_collections(
+            self,
+            layer_map,
+            layer_log_map=layer_log_map,
+            memo=memo,
+        )
         fork._rebind_fork_owner_refs()
         _state._register_log(fork)
         return fork
@@ -850,7 +990,9 @@ class TraceInterventionMixin(_TraceMixinBase):
         )
         return f"{base_name}_fork_{fork_count + 1}"
 
-    def _fork_model_field(self: "Trace", field_name: str, value: Any) -> Any:
+    def _fork_model_field(
+        self: "Trace", field_name: str, value: Any, memo: dict[Any, Any] | None = None
+    ) -> Any:
         """Apply the Trace fork policy to a single field.
 
         Parameters
@@ -859,6 +1001,9 @@ class TraceInterventionMixin(_TraceMixinBase):
             Field being copied.
         value:
             Current field value.
+        memo:
+            Shared fork memo, so every field contributes to (and reuses) the one
+            structural copy of the parent graph.
 
         Returns
         -------
@@ -880,13 +1025,15 @@ class TraceInterventionMixin(_TraceMixinBase):
             return value
         if policy is ForkFieldPolicy.FORK_RECONSTRUCT:
             return None
-        return self._copy_fork_value(value)
+        return self._copy_fork_value(value, memo)
 
     def _fork_layer_ops_from(
         self: "Trace",
         parent: "Trace",
         *,
         deep_copy_layer_labels: Set[str] | None = None,
+        layer_map: dict[int, Op] | None = None,
+        memo: dict[Any, Any] | None = None,
     ) -> dict[int, Op]:
         """Fork every Op and return an old-object-id map.
 
@@ -897,6 +1044,12 @@ class TraceInterventionMixin(_TraceMixinBase):
         deep_copy_layer_labels:
             Optional layer labels that require normal fork policy copies. Ops
             outside this set receive distinct shells with shallow-copied fields.
+        layer_map:
+            Optional pre-created ``id(parent_pass) -> fork Op`` shell map. The
+            shells are created by ``_fork_trace`` before any field copy so they
+            can seed the shared memo; this call only fills them.
+        memo:
+            Shared fork memo.
 
         Returns
         -------
@@ -904,10 +1057,15 @@ class TraceInterventionMixin(_TraceMixinBase):
             Mapping from ``id(parent_pass)`` to forked pass.
         """
 
-        layer_map: dict[int, Op] = {}
+        if memo is None:
+            memo = _ForkMemo()
+            _seed_fork_memo(cast(_ForkMemo, memo), {id(parent): self})
+        if layer_map is None:
+            layer_map = {id(parent_pass): state_new(Op) for parent_pass in parent.layer_list}
+            _seed_fork_memo(cast(_ForkMemo, memo), layer_map)
         fork_equivalent_ops = self.op_equivalence_classes
         for parent_pass in parent.layer_list:
-            fork_pass = state_new(Op)
+            fork_pass = layer_map[id(parent_pass)]
             deep_copy_fields = (
                 deep_copy_layer_labels is None or parent_pass.layer_label in deep_copy_layer_labels
             )
@@ -918,6 +1076,7 @@ class TraceInterventionMixin(_TraceMixinBase):
                         field_name,
                         value,
                         deep_copy=deep_copy_fields,
+                        memo=memo,
                     )
                     for field_name, value in state_items(parent_pass)
                 },
@@ -927,11 +1086,15 @@ class TraceInterventionMixin(_TraceMixinBase):
             if eq_type in fork_equivalent_ops:
                 fork_pass.equivalent_ops = fork_equivalent_ops[eq_type]
             object.__setattr__(fork_pass, "_construction_done", True)
-            layer_map[id(parent_pass)] = fork_pass
         return layer_map
 
     def _fork_layer_pass_field(
-        self: "Trace", field_name: str, value: Any, *, deep_copy: bool = True
+        self: "Trace",
+        field_name: str,
+        value: Any,
+        *,
+        deep_copy: bool = True,
+        memo: dict[Any, Any] | None = None,
     ) -> Any:
         """Apply the Op fork policy to a single field.
 
@@ -945,6 +1108,8 @@ class TraceInterventionMixin(_TraceMixinBase):
             Whether to honor the normal copy policy. False shares field values
             for untouched differentiable-replay ops while still creating a
             distinct Op shell.
+        memo:
+            Shared fork memo.
 
         Returns
         -------
@@ -955,16 +1120,21 @@ class TraceInterventionMixin(_TraceMixinBase):
         if field_name == "_source_trace_ref":
             return None
         if not deep_copy:
-            return self._copy_shallow_fork_value(value)
+            return self._copy_shallow_fork_value(value, memo)
         policy = Op.FIELD_FORK_POLICY.get(field_name, self._default_fork_policy(value))
         if policy is ForkFieldPolicy.FORK_SHARE:
             return value
         if policy is ForkFieldPolicy.FORK_RECONSTRUCT:
             return None
-        return self._copy_fork_value(value)
+        return self._copy_fork_value(value, memo)
 
     def _rebuild_fork_layer_collections(
-        self: "Trace", parent: "Trace", layer_map: dict[int, Op]
+        self: "Trace",
+        parent: "Trace",
+        layer_map: dict[int, Op],
+        *,
+        layer_log_map: dict[int, Layer] | None = None,
+        memo: dict[Any, Any] | None = None,
     ) -> None:
         """Rebuild layer lookup containers so they point at forked ops.
 
@@ -974,6 +1144,11 @@ class TraceInterventionMixin(_TraceMixinBase):
             Parent log whose containers are being mirrored.
         layer_map:
             Mapping from parent pass object id to forked pass.
+        layer_log_map:
+            Optional pre-created ``id(parent_layer) -> fork Layer`` shell map,
+            seeded into the shared memo by ``_fork_trace``.
+        memo:
+            Shared fork memo.
         """
 
         def remap_pass(value: Any) -> Any:
@@ -999,11 +1174,24 @@ class TraceInterventionMixin(_TraceMixinBase):
             (key, remap_pass(layer)) for key, layer in parent.layer_dict_all_keys.items()
         )
         fork_layer_logs: dict[str, Layer] = OrderedDict()
+        # A pre-seeded shell is consumed at most once: were one parent Layer ever
+        # registered under two labels, reusing its single shell would collapse
+        # two fork Layers into one, so the repeat falls back to a fresh shell
+        # (matching the pre-seeding behavior of one new object per label).
+        consumed_shells: set[int] = set()
         for label, parent_layer in parent.layer_logs.items():
-            fork_layer_log = state_new(type(parent_layer))
+            parent_layer_id = id(parent_layer)
+            if layer_log_map is None or parent_layer_id in consumed_shells:
+                fork_layer_log = state_new(type(parent_layer))
+            else:
+                fork_layer_log = layer_log_map[parent_layer_id]
+                consumed_shells.add(parent_layer_id)
             state_restore(
                 fork_layer_log,
-                {key: self._copy_fork_value(value) for key, value in state_items(parent_layer)},
+                {
+                    key: self._copy_fork_value(value, memo)
+                    for key, value in state_items(parent_layer)
+                },
             )
             fork_layer_log.source_trace = self
             fork_layer_log.ops = OpAccessor(
@@ -1034,13 +1222,16 @@ class TraceInterventionMixin(_TraceMixinBase):
                 module_call._source_trace = self
 
     @staticmethod
-    def _copy_fork_value(value: Any) -> Any:
+    def _copy_fork_value(value: Any, memo: dict[Any, Any] | None = None) -> Any:
         """Copy a fork field while preserving tensor and callable identity.
 
         Parameters
         ----------
         value:
             Value to copy.
+        memo:
+            Shared fork memo, so this field reuses (and contributes to) the one
+            structural copy of the parent graph rather than cloning it again.
 
         Returns
         -------
@@ -1050,19 +1241,18 @@ class TraceInterventionMixin(_TraceMixinBase):
 
         if isinstance(value, torch.Tensor) or callable(value):
             return value
-        try:
-            return copy.deepcopy(value)
-        except Exception:
-            return copy.copy(value)
+        return _memoized_deep_copy(value, memo, on_failure=copy.copy)
 
     @staticmethod
-    def _copy_shallow_fork_value(value: Any) -> Any:
+    def _copy_shallow_fork_value(value: Any, memo: dict[Any, Any] | None = None) -> Any:
         """Shallow-copy a fork field while preserving tensor and callable identity.
 
         Parameters
         ----------
         value:
             Value to copy.
+        memo:
+            Shared fork memo, threaded into the deep-copy fallbacks.
 
         Returns
         -------
@@ -1083,7 +1273,7 @@ class TraceInterventionMixin(_TraceMixinBase):
         # tensor/callable identity so the perf intent of shallow fork -- not cloning
         # large immutable payloads -- is preserved.
         if isinstance(value, (dict, list, set, tuple)):
-            return _deep_copy_fork_container(value)
+            return _deep_copy_fork_container(value, memo)
         try:
             return copy.copy(value)
         except Exception:
