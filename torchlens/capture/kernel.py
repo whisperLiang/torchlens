@@ -69,7 +69,7 @@ def _run_observation_stages(
         Optional bookkeeping callback for the non-finite/halt stage.
     """
 
-    metadata_enabled = demanded in {EnrichmentLevel.METADATA, EnrichmentLevel.PAYLOAD}
+    metadata_enabled = demanded is not EnrichmentLevel.SHELL
     payload_enabled = demanded is EnrichmentLevel.PAYLOAD
     if metadata_enabled and observation.normalize_metadata is not None:
         if mark_metadata is not None:
@@ -184,6 +184,32 @@ class CaptureKernel:
             mark_update_indexes_history=self._update_indexes_history,
             mark_nonfinite_halt=self._evaluate_nonfinite_halt,
         )
+
+    def begin_observation(self, operation_key: str) -> None:
+        """Reserve one observation without allocating a callback carrier.
+
+        Parameters
+        ----------
+        operation_key
+            Backend-normalized operation name.
+
+        Notes
+        -----
+        Backend-specialized hot paths call this before their selector so the
+        observation counter retains the generic kernel's exception boundary.
+        """
+
+        self._reserve_identity_context(operation_key)
+
+    def mark_metadata(self) -> None:
+        """Mark entry into carrier-free metadata normalization."""
+
+        self._normalize_metadata()
+
+    def mark_payload(self) -> None:
+        """Mark entry into carrier-free payload retention."""
+
+        self._retain_payload()
 
     def _reserve_identity_context(self, operation_key: str) -> None:
         """Mark entry into identity/context reservation without allocating sidecars."""
