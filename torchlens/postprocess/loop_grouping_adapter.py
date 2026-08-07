@@ -956,11 +956,128 @@ def _finalize_layer_assignments(
             node.equivalence_key = canonical_equiv_type
 
 
+class _ReachabilityCache:
+    """Per-grouping-run reachability cache backing :func:`_seed_reaches`.
+
+    The bare-op fixpoint's entry-admission and cohort sweeps issue O(N^2)
+    reachability queries drawn from only O(N) distinct sources, so a per-pair
+    memo still runs one bounded BFS per query and the sweep degenerates to
+    O(N^3) interpreter work on explicit recurrence chains. This cache instead
+    materializes the FULL descendant set once per distinct source (lazily, on
+    first query) and answers every later query for that source with an O(1)
+    membership test. Descendant sets are stored as per-node-index bitmask ints,
+    not label sets, keeping the whole cache in the hundreds-of-kilobytes range
+    at 512-step traces.
+
+    The historical query bounds its search window by the destination's
+    ``raw_order``; the unbounded per-source set gives the identical answer only
+    because capture order is topological, which makes the bound pure pruning
+    (every node on a directed path to the destination finishes at or below the
+    destination's ``raw_order``). That premise is verified once per run with a
+    single O(E) edge scan; a workspace carrying any raw-order-violating edge
+    falls back to the exact historical bounded per-pair BFS.
+
+    Workspace topology (the node set, ``data_children`` tuples, and
+    ``raw_order``) is frozen once :meth:`_GroupingWorkspace.from_graph` builds
+    the workspace -- grouping only mutates label/assignment fields -- so cached
+    descendant sets can never go stale within the run that owns the cache.
+    """
+
+    __slots__ = ("_workspace", "_order_monotone", "_bit_index", "_descendant_bits", "_pair_memo")
+
+    def __init__(self, workspace: _GroupingWorkspace) -> None:
+        self._workspace = workspace
+        self._order_monotone: Optional[bool] = None
+        self._bit_index: dict[str, int] = {}
+        self._descendant_bits: dict[str, int] = {}
+        self._pair_memo: dict[tuple[str, str], bool] = {}
+
+    def reaches_from_earlier(self, src_label: str, dst_label: str) -> bool:
+        """Return whether ``src_label`` reaches ``dst_label`` along data edges.
+
+        Parameters
+        ----------
+        src_label:
+            Source label; callers orient the pair so this is the seed whose
+            ``raw_order`` does not exceed the destination's.
+        dst_label:
+            Destination label.
+
+        Returns
+        -------
+        bool
+            ``True`` when ``dst_label`` is ``src_label`` or lies downstream
+            of it.
+        """
+        if src_label == dst_label:
+            return True
+        if self._order_monotone is None:
+            self._prepare()
+        if not self._order_monotone:
+            return self._bounded_pair_query(src_label, dst_label)
+        mask = self._descendant_bits.get(src_label)
+        if mask is None:
+            mask = self._build_descendant_mask(src_label)
+        return (mask >> self._bit_index[dst_label]) & 1 == 1
+
+    def _prepare(self) -> None:
+        """Index the frozen node set and verify the raw-order edge invariant."""
+        nodes = self._workspace.nodes
+        self._bit_index = {label: index for index, label in enumerate(nodes)}
+        self._order_monotone = all(
+            child not in nodes or nodes[child].raw_order >= node.raw_order
+            for node in nodes.values()
+            for child in node.data_children
+        )
+
+    def _build_descendant_mask(self, src_label: str) -> int:
+        """Run one full BFS from ``src_label`` and cache its descendant bitmask."""
+        nodes = self._workspace.nodes
+        bit_index = self._bit_index
+        mask = 0
+        stack = [src_label]
+        seen = {src_label}
+        while stack:
+            for child in nodes[stack.pop()].data_children:
+                if child in seen or child not in nodes:
+                    continue
+                seen.add(child)
+                stack.append(child)
+                mask |= 1 << bit_index[child]
+        self._descendant_bits[src_label] = mask
+        return mask
+
+    def _bounded_pair_query(self, src_label: str, dst_label: str) -> bool:
+        """Answer one query with the historical raw-order-bounded per-pair BFS."""
+        key = (src_label, dst_label)
+        cached = self._pair_memo.get(key)
+        if cached is not None:
+            return cached
+        nodes = self._workspace.nodes
+        dst_order = nodes[dst_label].raw_order
+        stack = [src_label]
+        seen = {src_label}
+        found = False
+        while stack:
+            current = stack.pop()
+            if current == dst_label:
+                found = True
+                break
+            for child in nodes[current].data_children:
+                child_node = nodes.get(child)
+                if child_node is None or child in seen or child_node.raw_order > dst_order:
+                    continue
+                seen.add(child)
+                stack.append(child)
+        self._pair_memo[key] = found
+        return found
+
+
 def _seed_reaches(
     workspace: _GroupingWorkspace,
     node1_label: str,
     node2_label: str,
-    memo: dict[tuple[str, str], bool],
+    memo: _ReachabilityCache,
 ) -> bool:
     """Return whether one seed reaches the other along directed data edges.
 
@@ -987,27 +1104,7 @@ def _seed_reaches(
     src_label, dst_label = node1_label, node2_label
     if workspace.nodes[src_label].raw_order > workspace.nodes[dst_label].raw_order:
         src_label, dst_label = dst_label, src_label
-    key = (src_label, dst_label)
-    cached = memo.get(key)
-    if cached is not None:
-        return cached
-    dst_order = workspace.nodes[dst_label].raw_order
-    stack = [src_label]
-    seen = {src_label}
-    found = False
-    while stack:
-        current = stack.pop()
-        if current == dst_label:
-            found = True
-            break
-        for child in workspace.nodes[current].data_children:
-            child_node = workspace.nodes.get(child)
-            if child_node is None or child in seen or child_node.raw_order > dst_order:
-                continue
-            seen.add(child)
-            stack.append(child)
-    memo[key] = found
-    return found
+    return memo.reaches_from_earlier(src_label, dst_label)
 
 
 def _param_call_identity(node: _MutableRecurrenceNode) -> _ParamCallIdentity:
@@ -1151,7 +1248,7 @@ def _reaches_forward(
     workspace: _GroupingWorkspace,
     src_label: str,
     dst_label: str,
-    memo: dict[tuple[str, str], bool],
+    memo: _ReachabilityCache,
 ) -> bool:
     """Return whether ``src_label`` reaches ``dst_label`` along directed data edges.
 
@@ -1352,7 +1449,7 @@ def _pf_child_route_allows(
     node1_label: str,
     node2_label: str,
     class_of: dict[str, str],
-    reach_memo: dict[tuple[str, str], bool],
+    reach_memo: _ReachabilityCache,
 ) -> bool:
     """Return whether two loop-invariant-fed calls sequence through their consumers.
 
@@ -1415,7 +1512,7 @@ def _pf_entry_union_allowed(
     complete_consumer_sites: set[_SlotColor],
     cohort_sizes: dict[frozenset, int],
     realizations: dict[_SlotColor, int],
-    reach_memo: dict[tuple[str, str], bool],
+    reach_memo: _ReachabilityCache,
 ) -> bool:
     """Return whether a loop-entry call may join a later same-key call's site.
 
@@ -1517,7 +1614,7 @@ def _pf_partition_class(
     complete_consumer_sites: set[_SlotColor],
     class_of: dict[str, str],
     realizations: dict[_SlotColor, int],
-    reach_memo: dict[tuple[str, str], bool],
+    reach_memo: _ReachabilityCache,
 ) -> list[list[str]]:
     """Partition one same-key candidate class into topological site groups.
 
@@ -1723,7 +1820,7 @@ def _assign_param_free_layers(workspace: _GroupingWorkspace) -> None:
             for color, pass_indices in observed_passes.items()
             if pass_indices == set(range(1, realizations[color] + 1))
         }
-    reach_memo: dict[tuple[str, str], bool] = {}
+    reach_memo = _ReachabilityCache(workspace)
 
     classes: "OrderedDict[str, list[str]]" = OrderedDict()
     class_key: dict[str, tuple[str, Optional[int]]] = {}
@@ -1871,7 +1968,7 @@ def _merge_iso_groups_to_layers(
                     workspace.nodes[pnode].equivalence_key for pnode in sg.param_nodes
                 )
 
-    reach_memo: dict[tuple[str, str], bool] = {}
+    reach_memo = _ReachabilityCache(workspace)
     anchor_ancestry = _topology_anchor_ancestry(workspace)
 
     for iso_group_label, iso_nodes_orig in iso_node_groups.items():
