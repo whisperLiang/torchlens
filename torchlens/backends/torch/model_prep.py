@@ -59,6 +59,7 @@ from ...utils.tensor_utils import (
 )
 from ...utils.introspection import (
     _get_code_context,
+    get_arg_tensors_for_resolution,
     get_vars_of_type_from_obj,
 )
 from ...utils.hashing import make_random_barcode
@@ -1127,9 +1128,7 @@ def _record_module_entry_metadata(
     )
 
     # Find all tensor arguments (excluding Parameters, which are source tensors).
-    input_tensors = get_vars_of_type_from_obj(
-        [args, kwargs], torch.Tensor, [torch.nn.Parameter], search_depth=5
-    )
+    input_tensors = get_arg_tensors_for_resolution(args, kwargs)
     input_tensor_labels = set()
     input_tensor_labels_at_entry = []
     for t in input_tensors:

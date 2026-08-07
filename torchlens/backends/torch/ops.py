@@ -54,6 +54,7 @@ from ...utils._torch_compat import (
 from ...utils.introspection import (
     _get_code_context,
     _get_tensors_and_params_from_obj,
+    get_arg_tensors_for_resolution,
     get_vars_of_type_from_obj,
 )
 from ...utils.display import _timed_phase
@@ -4041,12 +4042,7 @@ def _build_shared_fields_dict(
 
     # O(1) tensor/param extraction via lookup table (replaces BFS crawl)
     arg_tensors, arg_parameters = _extract_arg_tensors_and_params(layer_type, args, kwargs)
-    tensors_to_resolve = get_vars_of_type_from_obj(
-        [args, kwargs],
-        torch.Tensor,
-        [torch.nn.Parameter],
-        search_depth=5,
-    )
+    tensors_to_resolve = get_arg_tensors_for_resolution(args, kwargs)
     for tensor in tensors_to_resolve:
         if isinstance(tensor, torch.nn.Parameter) or get_tensor_label(tensor) is not None:
             continue
