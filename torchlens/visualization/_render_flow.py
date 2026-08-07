@@ -291,6 +291,7 @@ def _build_skip_filtered_edge_map(
             skipped_labels.add(_render_node_label(node, vis_mode))
 
     edge_map: dict[str, list[RenderEdge]] = {}
+    visible_entries_by_layer = {node.layer_label: node for node in visible_entries.values()}
     for node in visible_entries.values():
         if _render_node_label(node, vis_mode) in skipped_labels:
             continue
@@ -298,6 +299,7 @@ def _build_skip_filtered_edge_map(
             trace,
             node,
             visible_entries,
+            visible_entries_by_layer,
             skipped_labels,
             vis_mode,
         )
@@ -308,6 +310,7 @@ def _is_hidden_buffer_update_node(
     trace: "Trace",
     node: GraphNode,
     entries_to_plot: Mapping[str, GraphNode],
+    entries_by_layer_label: Mapping[str, GraphNode],
     show_buffer_layers: BufferVisibilityLiteral,
     vis_mode: str,
 ) -> bool:
@@ -321,6 +324,8 @@ def _is_hidden_buffer_update_node(
         Candidate non-buffer update operation.
     entries_to_plot:
         Nodes visible before buffer filtering.
+    entries_by_layer_label:
+        Render entries indexed by their canonical layer labels.
     show_buffer_layers:
         Active buffer visibility mode.
     vis_mode:
@@ -337,7 +342,6 @@ def _is_hidden_buffer_update_node(
     endpoint_labels = list(node.parents) + list(node.children)
     if not endpoint_labels:
         return False
-    entries_by_layer_label = {entry.layer_label: entry for entry in entries_to_plot.values()}
     endpoints: list[GraphNode] = []
     for label in endpoint_labels:
         endpoint = entries_to_plot.get(label) or entries_by_layer_label.get(label)
@@ -424,6 +428,7 @@ def _enumerate_base_rendered_node_emissions(
 
     emitted_names: set[str] = set()
     emissions: list[RenderedNodeEmission] = []
+    entries_by_layer_label = {entry.layer_label: entry for entry in entries_to_plot.values()}
     for node in entries_to_plot.values():
         if _render_node_label(node, vis_mode) in skipped_labels:
             continue
@@ -433,6 +438,7 @@ def _enumerate_base_rendered_node_emissions(
             trace,
             node,
             entries_to_plot,
+            entries_by_layer_label,
             show_buffer_layers,
             vis_mode,
         ):
@@ -1550,7 +1556,8 @@ def _render_edge_occurrences(
 def _expand_edges_through_skipped(
     trace: "Trace",
     parent_node: GraphNode,
-    visible_entries: dict[str, GraphNode],
+    visible_entries: Mapping[str, GraphNode],
+    visible_entries_by_layer: Mapping[str, GraphNode],
     skipped_labels: set[str],
     vis_mode: str,
 ) -> list[RenderEdge]:
@@ -1564,6 +1571,8 @@ def _expand_edges_through_skipped(
         Source node whose outgoing edges should be expanded.
     visible_entries:
         Visible nodes before applying ``skip_fn``.
+    visible_entries_by_layer:
+        Visible entries indexed by their canonical layer labels.
     skipped_labels:
         Labels elided by ``skip_fn``.
     vis_mode:
@@ -1575,7 +1584,6 @@ def _expand_edges_through_skipped(
         Deduplicated non-skipped targets.
     """
 
-    visible_entries_by_layer = {node.layer_label: node for node in visible_entries.values()}
     by_target: dict[tuple[str, tuple[Any, ...]], RenderEdge] = {}
     for child_label in parent_node.children:
         child_node = visible_entries.get(child_label) or visible_entries_by_layer.get(child_label)
@@ -1592,6 +1600,7 @@ def _expand_edges_through_skipped(
                 trace,
                 child_node,
                 visible_entries,
+                visible_entries_by_layer,
                 skipped_labels,
                 vis_mode,
                 seen={parent_label},
@@ -1621,7 +1630,8 @@ def _expand_edges_through_skipped(
 def _walk_skipped_successors(
     trace: "Trace",
     node: GraphNode,
-    visible_entries: dict[str, GraphNode],
+    visible_entries: Mapping[str, GraphNode],
+    visible_entries_by_layer: Mapping[str, GraphNode],
     skipped_labels: set[str],
     vis_mode: str,
     seen: set[str],
@@ -1636,6 +1646,8 @@ def _walk_skipped_successors(
         Current node in the traversal.
     visible_entries:
         Visible nodes before applying ``skip_fn``.
+    visible_entries_by_layer:
+        Visible entries indexed by their canonical layer labels.
     skipped_labels:
         Labels elided by ``skip_fn``.
     vis_mode:
@@ -1656,7 +1668,6 @@ def _walk_skipped_successors(
     if node_label not in skipped_labels:
         return [node]
     reached: list[GraphNode] = []
-    visible_entries_by_layer = {entry.layer_label: entry for entry in visible_entries.values()}
     for child_label in node.children:
         child_node = visible_entries.get(child_label) or visible_entries_by_layer.get(child_label)
         if child_node is None and vis_mode == "unrolled":
@@ -1668,6 +1679,7 @@ def _walk_skipped_successors(
                 trace,
                 child_node,
                 visible_entries,
+                visible_entries_by_layer,
                 skipped_labels,
                 vis_mode,
                 seen=set(seen),
