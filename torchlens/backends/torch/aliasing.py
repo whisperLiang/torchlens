@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from ... import _state
 from ...ir.intervention import FunctionEventInput
 from ...ir.semantics import BackendSemantics
 from ...utils.collections import index_nested
@@ -334,8 +335,24 @@ def _tensors_alias(left: torch.Tensor, right: torch.Tensor) -> bool:
 
     if id(left) == id(right):
         return True
+    # W8C internal-caller dispatch bypass: ``untyped_storage`` is a wrapped tensor
+    # method, so an unpaused read here pays the full per-op logging dispatch
+    # (barcode/autocast/container+intervention snapshots) yet emits no op. Every
+    # caller holds ``internal_scalar_read``, so the storage-bridge belt already
+    # excludes these reads; pausing only skips the op-capture dispatch. Each
+    # bypassed wrapped call still consumes its ``next_func_call_id()`` so the
+    # session id sequence stamped on real ops stays identical to the unbypassed
+    # path (``op.func_call_id`` persists into runnable descriptors).
+    logging_enabled = _state._logging_enabled
     try:
-        return left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr()
+        with _state.pause_logging():
+            if logging_enabled:
+                _state.next_func_call_id()
+            left_ptr = left.untyped_storage().data_ptr()
+            if logging_enabled:
+                _state.next_func_call_id()
+            right_ptr = right.untyped_storage().data_ptr()
+        return left_ptr == right_ptr
     except RuntimeError:
         return False
 

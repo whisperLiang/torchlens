@@ -4867,8 +4867,14 @@ def _add_autograd_saved_tensor(
     try:
         # TorchLens-internal autograd-saved-tensor dedup read: mark it as an internal read so
         # the r14-H3 storage-bridge host-write watch (which patches ``Tensor.data_ptr``) does not
-        # mistake this bookkeeping pointer read for a user storage-alias exposure.
-        with internal_scalar_read():
+        # mistake this bookkeeping pointer read for a user storage-alias exposure. W8C: also
+        # pause logging -- ``data_ptr`` is a wrapped tensor method and an unpaused read pays the
+        # full per-op dispatch while emitting no op. The bypassed wrapped call still consumes
+        # its ``next_func_call_id()`` so the id sequence stamped on real ops is unchanged.
+        logging_enabled = _st._logging_enabled
+        with pause_logging(), internal_scalar_read():
+            if logging_enabled:
+                _st.next_func_call_id()
             data_ptr = tensor.data_ptr()
     except Exception:
         return 0, 0
