@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import cProfile
 from collections import OrderedDict, deque
 from pathlib import Path
+from typing import Any, Callable
 
 import pytest
 import torch
@@ -18,6 +21,11 @@ from benchmarks.perf_suite import (
     _validate_baseline_status_args,
 )
 from torchlens.backends.torch.model_prep import _traverse_model_modules
+from torchlens.data_classes._trace_accessors import (
+    TraceModuleCallAccessor,
+    _TRACE_MODULE_CALL_ACCESSOR_CACHE,
+)
+from torchlens.data_classes.trace import Trace
 from torchlens.postprocess import ast_branches
 from torchlens.postprocess.loop_grouping_adapter import FrontierNodes, _pop_frontier_node
 from torchlens.utils.tensor_utils import get_memory_amount
@@ -114,6 +122,135 @@ def _write_perf_source(tmp_path: Path, index: int) -> Path:
     path = tmp_path / f"perf_cache_{index}.py"
     path.write_text(f"def forward():\n    return {index}\n", encoding="utf-8")
     return path
+
+
+class _RepeatedModuleCallModel(nn.Module):
+    """Model that repeatedly invokes one shared module."""
+
+    def __init__(self, repeats: int) -> None:
+        """Initialize the repeated-call model.
+
+        Parameters
+        ----------
+        repeats:
+            Number of calls to the shared module.
+        """
+
+        super().__init__()
+        self.repeats = repeats
+        self.shared = nn.ReLU()
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Invoke the shared module repeatedly.
+
+        Parameters
+        ----------
+        value:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor produced by the final module call.
+        """
+
+        for _ in range(self.repeats):
+            value = self.shared(value)
+        return value
+
+
+def _fresh_module_calls(trace: Trace) -> TraceModuleCallAccessor:
+    """Reconstruct the pre-cache module-call accessor.
+
+    Parameters
+    ----------
+    trace:
+        Trace whose ModuleCalls should be flattened.
+
+    Returns
+    -------
+    TraceModuleCallAccessor
+        Fresh accessor matching the original property implementation.
+    """
+
+    calls: OrderedDict[str, Any] = OrderedDict()
+    for module in trace._module_logs:
+        for call in module.calls.values():
+            calls[call.call_label] = call
+    return TraceModuleCallAccessor(calls)
+
+
+def _profile_call_count(callback: Callable[[], object]) -> int:
+    """Return deterministic Python call count for one callback.
+
+    Parameters
+    ----------
+    callback:
+        Workload to profile.
+
+    Returns
+    -------
+    int
+        Total profiled function calls.
+    """
+
+    profiler = cProfile.Profile()
+    profiler.runcall(callback)
+    return sum(entry.callcount for entry in profiler.getstats())
+
+
+@pytest.mark.smoke
+def test_module_calls_accessor_is_cached_with_profiled_rebuild_reduction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ModuleCall flattening happens once and cuts profiled call count sharply."""
+
+    trace = tl.trace(_RepeatedModuleCallModel(repeats=64), torch.ones(1))
+    expected = _fresh_module_calls(trace)
+    _TRACE_MODULE_CALL_ACCESSOR_CACHE.pop(trace, None)
+
+    from torchlens.data_classes import _trace_stats
+
+    original_accessor = _trace_stats.TraceModuleCallAccessor
+    rebuild_count = 0
+
+    def counting_accessor(calls: OrderedDict[str, Any]) -> TraceModuleCallAccessor:
+        """Count construction while preserving the production accessor type."""
+
+        nonlocal rebuild_count
+        rebuild_count += 1
+        return original_accessor(calls)
+
+    monkeypatch.setattr(_trace_stats, "TraceModuleCallAccessor", counting_accessor)
+    cached = trace.module_calls
+    for _ in range(128):
+        assert trace.module_calls is cached
+
+    assert rebuild_count == 1
+    assert type(cached) is type(expected)
+    assert cached.keys() == expected.keys()
+    assert all(cached[key] is expected[key] for key in expected.keys())
+
+    cold_calls = _profile_call_count(lambda: [_fresh_module_calls(trace) for _ in range(64)])
+    hot_calls = _profile_call_count(lambda: [trace.module_calls for _ in range(64)])
+    assert cold_calls * 2 >= hot_calls * 7
+
+
+def test_module_calls_cache_invalidates_on_supported_call_mutation() -> None:
+    """Mutating a scoped ModuleCall accessor refreshes the Trace-level cache."""
+
+    trace = tl.trace(_RepeatedModuleCallModel(repeats=2), torch.ones(1))
+    cached = trace.module_calls
+    module = trace.modules["shared"]
+    replacement = copy.copy(module.calls[0])
+    replacement.call_label = "shared:replacement"
+
+    module.calls[1] = replacement
+
+    refreshed = trace.module_calls
+    assert refreshed is not cached
+    assert "shared:1" not in refreshed
+    assert refreshed["shared:replacement"] is replacement
 
 
 @pytest.mark.parametrize(

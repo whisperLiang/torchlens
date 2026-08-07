@@ -180,8 +180,18 @@ class ModuleCallAccessor(Accessor["ModuleCall"]):
     def __setitem__(self, key: int, value: "ModuleCall") -> None:
         """Set a ModuleCall by 1-based call index."""
 
+        previous = self._dict.get(key)
         self._dict[key] = value
         self._list = [call for _, call in sorted(self._dict.items())]
+        from ._trace_accessors import _invalidate_trace_module_call_accessor_cache
+
+        traces = {
+            trace
+            for call in (previous, value)
+            if call is not None and (trace := call._source_trace) is not None
+        }
+        for trace in traces:
+            _invalidate_trace_module_call_accessor_cache(trace)
 
     def __contains__(self, key: object) -> bool:
         """Return whether key resolves to a ModuleCall."""

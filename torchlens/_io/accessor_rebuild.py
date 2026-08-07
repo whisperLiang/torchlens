@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ..data_classes._trace_accessors import _invalidate_trace_module_call_accessor_cache
 from ..data_classes.buffer import Buffer, BufferAccessor
 from ..data_classes.module import ModuleAccessor
 
@@ -48,6 +49,7 @@ def rebuild_trace_accessors(
         for module_call in module_ops._dict.values():
             module_call._source_trace = trace
 
+    _invalidate_trace_module_call_accessor_cache(trace)
     trace._module_logs = ModuleAccessor(module_dict, module_order, pass_dict)
 
     buffer_versions: dict[str, list["Op"]] = {}

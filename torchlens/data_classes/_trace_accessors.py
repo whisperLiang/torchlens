@@ -225,3 +225,18 @@ _TRACE_OP_ACCESSOR_CACHE: weakref.WeakKeyDictionary[Any, tuple[int, TraceOpAcces
 _TRACE_LAYER_ACCESSOR_CACHE: weakref.WeakKeyDictionary[Any, tuple[int, Any]] = (
     weakref.WeakKeyDictionary()
 )
+_TRACE_MODULE_CALL_ACCESSOR_CACHE: weakref.WeakKeyDictionary[Any, TraceModuleCallAccessor] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _invalidate_trace_module_call_accessor_cache(trace: Any) -> None:
+    """Drop the cached flattened ModuleCall accessor for one Trace.
+
+    Parameters
+    ----------
+    trace:
+        Trace whose module-call hierarchy changed.
+    """
+
+    _TRACE_MODULE_CALL_ACCESSOR_CACHE.pop(trace, None)
