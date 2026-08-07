@@ -6,6 +6,7 @@ nested attribute traversal and call-stack capture.
 """
 
 import dis
+import os
 import sys
 import warnings
 from collections.abc import Callable, Iterator
@@ -57,6 +58,17 @@ _CodeContextCacheKey: TypeAlias = tuple[
 ]
 _CodeContextCache: TypeAlias = dict[_CodeContextCacheKey, tuple[Any, ...]]
 _CodeContextQualnames: TypeAlias = dict[int, Optional[str]]
+
+# Directory-based stack filter for ``_get_code_context``. Resolved ONCE at import
+# rather than per captured op: ``os.path.abspath`` calls ``getcwd`` + ``normpath``,
+# which is not free when it runs thousands of times per forward pass. Using the
+# package directory (instead of hardcoded module suffixes) keeps the filter
+# correct across package-layout refactors.
+_TORCHLENS_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# ``FuncCallLocation`` lives in ``..data_classes``, which imports this module, so
+# it cannot be imported at module scope. Resolve it on first use and memoize.
+_FUNC_CALL_LOCATION: Any = None
 
 
 def _build_col_offset_map(code: CodeType) -> Dict[int, Optional[int]]:
@@ -765,59 +777,52 @@ def _get_code_context(
     Returns:
         List[FuncCallLocation] ordered shallow-to-deep.
     """
-    import os
+    global _FUNC_CALL_LOCATION
 
-    from ..data_classes import FuncCallLocation  # type: ignore[attr-defined]
+    FuncCallLocation = _FUNC_CALL_LOCATION
+    if FuncCallLocation is None:
+        from ..data_classes import FuncCallLocation  # type: ignore[attr-defined]
 
-    # Use directory-based check instead of hardcoded suffixes so that
-    # refactoring the package layout doesn't break stack filtering.
-    _TORCHLENS_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        _FUNC_CALL_LOCATION = FuncCallLocation
 
-    def _is_torchlens_internal(filename: str) -> bool:
-        """Return whether ``filename`` is inside the TorchLens package.
-
-        Parameters
-        ----------
-        filename:
-            Frame filename to test.
-
-        Returns
-        -------
-        bool
-            Whether the frame should be filtered as TorchLens internals.
-        """
-
-        return filename.startswith(_TORCHLENS_PKG_DIR)
+    pkg_dir = _TORCHLENS_PKG_DIR
 
     # Phase 1: Collect lightweight frame data — only co_filename, co_name, f_lineno.
     # Do NOT do f_locals/f_globals dict lookups or bytecode walks yet.
-    raw_frames = []
-    frame = sys._getframe(0)
+    # This loop runs over the WHOLE stack for every captured op, so it reads
+    # ``f_code`` once per frame and binds ``append`` locally.
+    raw_frames: list[tuple[str, str, int, int, FrameType]] = []
+    append_frame = raw_frames.append
+    frame: FrameType | None = sys._getframe(0)
     while frame is not None:
-        raw_frames.append(
+        code = frame.f_code
+        append_frame(
             (
-                frame.f_code.co_filename,
-                frame.f_code.co_name,
+                code.co_filename,
+                code.co_name,
                 frame.f_lineno,
-                frame.f_code.co_firstlineno,
+                code.co_firstlineno,
                 frame,  # keep reference for phase 2 func_obj lookup
             )
         )
-        frame = frame.f_back  # type: ignore[assignment]
+        frame = frame.f_back
 
     # Walk bottom-up (deepest caller last → first in output) and collect
     # non-internal frames.  Start tracking once we hit a ``forward`` frame,
     # but also include the frame *before* the first ``forward`` (the user's
-    # script that called ``trace``).
+    # script that called ``trace``).  The torchlens-internals test is inlined
+    # (``startswith`` against the package dir) to avoid a Python call per frame.
     tracking = False
     pre_forward_frame_idx = None
     filtered_indices = []
 
     for idx in range(len(raw_frames) - 1, -1, -1):
-        filename, func_name, lineno, _, frame_ref = raw_frames[idx]
+        row = raw_frames[idx]
+        filename = row[0]
+        func_name = row[1]
 
         # Skip torchlens internals and PyTorch _call_impl
-        if _is_torchlens_internal(filename):
+        if filename.startswith(pkg_dir):
             continue
         if "_call_impl" in func_name:
             continue
@@ -826,8 +831,8 @@ def _get_code_context(
             tracking = True
             # Look for the user-script frame that called trace
             for j in range(idx + 1, len(raw_frames)):
-                j_filename, j_func_name, _, _, _ = raw_frames[j]
-                if not _is_torchlens_internal(j_filename) and "_call_impl" not in j_func_name:
+                j_row = raw_frames[j]
+                if not j_row[0].startswith(pkg_dir) and "_call_impl" not in j_row[1]:
                     pre_forward_frame_idx = j
                     break
 
