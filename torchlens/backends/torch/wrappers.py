@@ -756,6 +756,11 @@ print_funcs = ["__repr__", "__str__", "_str"]
 # wrappers bypass that dispatch, so we must inject it ourselves.
 _DEVICE_CONSTRUCTOR_NAMES: set[str] = set()
 
+# Argument leaf types that never require the recursive object crawler. Keeping
+# these tuples module-local avoids rebuilding the isinstance chains for every op.
+_SIMPLE_ARG_TYPES = (int, float, bool, str, type(None))
+_FLAT_ARG_TYPES = (*_SIMPLE_ARG_TYPES, torch.dtype, torch.device)
+
 # Lazy imports cached at first use.
 _torch_function_mode_len = None
 _DeviceContext = None
@@ -841,6 +846,13 @@ def _collect_tensor_args(args: tuple[Any, ...], kwargs: dict[str, Any]) -> list[
     This avoids the full BFS crawl of get_vars_of_type_from_obj for the
     common case. Falls back to BFS only when nested containers are found.
     """
+    if not kwargs and len(args) == 1:
+        arg = args[0]
+        if isinstance(arg, torch.Tensor):
+            return [arg]
+        if isinstance(arg, _FLAT_ARG_TYPES):
+            return []
+
     tensors = []
     needs_bfs = False
     for arg in args:
@@ -850,13 +862,13 @@ def _collect_tensor_args(args: tuple[Any, ...], kwargs: dict[str, Any]) -> list[
             for item in arg:
                 if isinstance(item, torch.Tensor):
                     tensors.append(item)
-                elif not isinstance(item, (int, float, bool, str, type(None))):
+                elif not isinstance(item, _SIMPLE_ARG_TYPES):
                     needs_bfs = True
         elif isinstance(arg, dict):
             for val in arg.values():
                 if isinstance(val, torch.Tensor):
                     tensors.append(val)
-        elif not isinstance(arg, (int, float, bool, str, type(None), torch.dtype, torch.device)):
+        elif not isinstance(arg, _FLAT_ARG_TYPES):
             needs_bfs = True
     for val in kwargs.values():
         if isinstance(val, torch.Tensor):
@@ -1403,6 +1415,24 @@ def torch_func_decorator(
     is_mutating_property_setter = (
         property_accessor == "set" and func_name in _MUTATING_TENSOR_PROPERTY_SETTERS
     )
+    is_storage_rebinding_setter = (
+        is_mutating_property_setter and func_name in _STORAGE_REBINDING_PROPERTY_SETTERS
+    )
+    needs_device_injection = func_name in _DEVICE_CONSTRUCTOR_NAMES
+    is_unlogged_func = func_name in funcs_not_to_log
+    is_print_func = func_name in print_funcs
+    mutates_receiver = _func_mutates_receiver(func_name)
+    reconstructs_receiver_output = func_name in {"__setitem__", "zero_", "__delitem__"}
+    has_inplace_signature = (
+        func_name.endswith("_")
+        or func_name.startswith("__i")
+        or func_name in {"__setitem__", "__delitem__"}
+        or is_mutating_property_setter
+    )
+    force_distinct_return = func_name == "identity"
+    canonical_capture_callable = None
+    if func_name != "data" or property_accessor == "del":
+        canonical_capture_callable = (func, func_name)
 
     @wraps(func)
     def wrapped_func(*args: Any, **kwargs: Any) -> Any:
@@ -1417,23 +1447,9 @@ def torch_func_decorator(
         # (a false cross-thread ceiling) and corrupts owner-op attribution (an observed crash).
         # Cross-thread tensor->host escapes are still observed by the mode-independent belt
         # (tensor-method patches), which is independent of this wrapper.
-        if (
-            not _state._logging_enabled
-            or _state._active_trace is None
-            or _state._active_owner_thread_id != threading.get_ident()
-        ):
-            # r45 hon2_1: while a runnable capture is armed, a NON-owner thread's op that consumes
-            # a captured tensor as an operand ceilings replay proof to ``unverifiable`` (the
-            # worker-DERIVED cross-thread escape sibling: fresh worker-side storage the
-            # owner-only census never registered). ``_nonowner_belt_armed`` is False for every
-            # plain trace and the whole steady state, so the disarmed hot path pays one bool read.
-            if (
-                _state._nonowner_belt_armed
-                and _state._active_trace is not None
-                and _state._active_owner_thread_id != threading.get_ident()
-            ):
-                observe_nonowner_operands(args, kwargs)
-            kwargs = _maybe_inject_device_kwarg(func_name, kwargs)
+        if not _state._logging_enabled:
+            if needs_device_injection:
+                kwargs = _maybe_inject_device_kwarg(func_name, kwargs)
             out = func(*args, **kwargs)
             if has_detached_saved_activations():
                 propagate_detached_saved_activation(
@@ -1443,8 +1459,35 @@ def torch_func_decorator(
                 )
             return out
 
-        trace = cast(Any, _state._active_trace)
-        kwargs = _maybe_inject_device_kwarg(func_name, kwargs)
+        active_trace = _state._active_trace
+        owner_thread_id = _state._active_owner_thread_id
+        current_thread_id = threading.get_ident()
+        if active_trace is None or owner_thread_id != current_thread_id:
+            # r45 hon2_1: while a runnable capture is armed, a NON-owner thread's op that consumes
+            # a captured tensor as an operand ceilings replay proof to ``unverifiable`` (the
+            # worker-DERIVED cross-thread escape sibling: fresh worker-side storage the
+            # owner-only census never registered). ``_nonowner_belt_armed`` is False for every
+            # plain trace and the whole steady state, so the disarmed hot path pays one bool read.
+            if (
+                _state._nonowner_belt_armed
+                and active_trace is not None
+                and owner_thread_id != current_thread_id
+            ):
+                observe_nonowner_operands(args, kwargs)
+            if needs_device_injection:
+                kwargs = _maybe_inject_device_kwarg(func_name, kwargs)
+            out = func(*args, **kwargs)
+            if has_detached_saved_activations():
+                propagate_detached_saved_activation(
+                    func_name,
+                    _collect_tensor_args(args, kwargs),
+                    _collect_output_tensors(out),
+                )
+            return out
+
+        trace = cast(Any, active_trace)
+        if needs_device_injection:
+            kwargs = _maybe_inject_device_kwarg(func_name, kwargs)
 
         # Skip logging inside vmap/functorch transforms — internal TorchLens
         # operations (safe_copy, torch.equal, .item()) don't have vmap batching
@@ -1490,7 +1533,7 @@ def torch_func_decorator(
 
         # Reset barcode; skip metadata-only functions that would cause recursion.
         trace._current_func_barcode = 0
-        if func_name in funcs_not_to_log:
+        if is_unlogged_func:
             if _diagnostic_edge_armed():
                 wrapper_name = f"torch_func:{func_name}:not_logged"
                 with expected_original_call(
@@ -1512,7 +1555,7 @@ def torch_func_decorator(
             args
             and isinstance(args[0], torch.Tensor)
             and is_tensor_data_alias(args[0])
-            and _func_mutates_receiver(func_name)
+            and mutates_receiver
         )
 
         # Register buffer tensors on first encounter. Buffers are tagged with
@@ -1533,7 +1576,7 @@ def torch_func_decorator(
                 log_source_tensor(trace, t, "buffer", address)
 
         # Intercept print functions to show TorchLens label info in repr.
-        if (func_name in print_funcs) and (len(arg_tensorlike) > 0):
+        if is_print_func and arg_tensorlike:
             # r39 hon2_1: stringifying a captured tensor extracts its VALUES into the returned
             # string (a genuine tensor->host value escape the user can fold back into control
             # flow -- a string NaN guard). ``print_override`` runs that extraction under
@@ -1568,9 +1611,6 @@ def torch_func_decorator(
         # rebind SWAPS the storage object (rhs on foreign storage) or PRESERVES
         # it (rhs a view of the receiver's own storage) decides the ancestry
         # barrier below, and is only observable BEFORE the setter runs.
-        is_storage_rebinding_setter = (
-            is_mutating_property_setter and func_name in _STORAGE_REBINDING_PROPERTY_SETTERS
-        )
         rebind_setter_swaps_storage = False
         if (
             is_storage_rebinding_setter
@@ -1654,7 +1694,7 @@ def torch_func_decorator(
         # treat the first arg (the modified tensor) as the output. Mutating
         # property setters (``t.real = rhs`` and friends, round-31 M6) have the
         # exact same shape: real dataflow, ``None`` return, mutated receiver.
-        if func_name in ["__setitem__", "zero_", "__delitem__"] or (
+        if reconstructs_receiver_output or (
             is_mutating_property_setter
             and out_orig is None
             and len(args) > 0
@@ -1670,19 +1710,13 @@ def torch_func_decorator(
         # also return self but don't modify anything.
         # Both cases need safe_copy so logging doesn't overwrite the original's
         # label, but only true in-place ops should propagate the new label back.
-        was_inplace = same_object_returned and (
-            func_name.endswith("_")
-            or func_name.startswith("__i")
-            or func_name in {"__setitem__", "__delitem__"}
-            or is_mutating_property_setter
-        )
+        was_inplace = same_object_returned and has_inplace_signature
         # The internal identity-forcing decorator (_state._decorated_identity)
         # exists precisely to MINT a distinct logged tensor at module boundaries
         # (nn.Identity / pass-through outputs). Unlike user-visible no-ops such as
         # x.contiguous(), it must NOT preserve the input's Python object identity,
         # otherwise the module exit re-reads the input's label and the boundary
         # node (e.g. identity_1_2) never attaches to the module's output_ops.
-        force_distinct_return = func_name == "identity"
         if same_object_returned:
             # Create a distinct tensor object for logging — otherwise attaching
             # _tl.label_raw on the output would clobber the input's label.
@@ -1709,9 +1743,12 @@ def torch_func_decorator(
                 was_inplace=was_inplace,
             )
 
-        capture_func, capture_func_name = _canonical_capture_callable(
-            func, func_name, property_accessor
-        )
+        if canonical_capture_callable is None:
+            capture_func, capture_func_name = _canonical_capture_callable(
+                func, func_name, property_accessor
+            )
+        else:
+            capture_func, capture_func_name = canonical_capture_callable
         # r28 reconcile: a storage-rebinding setter is RECORDED as the canonical
         # single-argument ``detach(rhs)`` call -- the receiver's OLD value has
         # zero dataflow into the result (the rebind replaces every value), so
@@ -1831,10 +1868,7 @@ def torch_func_decorator(
                         # bytes: after the rebind the receiver shares RHS's
                         # storage, and advancing RHS-side aliases would invent
                         # mutation edges for values that never changed.
-                        if not (
-                            is_mutating_property_setter
-                            and func_name in _STORAGE_REBINDING_PROPERTY_SETTERS
-                        ):
+                        if not is_storage_rebinding_setter:
                             _propagate_mutation_label_to_storage_aliases(trace, args[0], out_label)
                     if isinstance(return_value, torch.Tensor):
                         set_tensor_label(return_value, out_label)
@@ -1922,7 +1956,7 @@ def torch_func_decorator(
 
     setattr(wrapped_func, "__tl_original_id__", id(func))
     setattr(wrapped_func, "__tl_wrapper_name__", f"torch_func:{func_name}")
-    setattr(wrapped_func, "__tl_detector_excluded__", func_name in funcs_not_to_log)
+    setattr(wrapped_func, "__tl_detector_excluded__", is_unlogged_func)
 
     return wrapped_func
 
@@ -2128,6 +2162,22 @@ def decorate_all_once() -> None:
         orig_func = getattr(local_func_namespace, func_name)
         get_arg_names(orig_func, func_name)
 
+    # Collect immutable device-constructor names before creating wrappers so each
+    # closure can hoist the membership test out of its per-call dispatch path.
+    device_constructors = get_device_constructors()
+    if device_constructors is not None:
+        try:
+            device_constructors.cache_clear()
+            for ctor in device_constructors():
+                name = getattr(ctor, "__name__", None)
+                if name:
+                    _DEVICE_CONSTRUCTOR_NAMES.add(name)
+        except (AttributeError, TypeError):
+            mark_torch_capability_missing(
+                "HAS_DEVICE_CONSTRUCTORS",
+                "factory-function device injection inventory could not be evaluated",
+            )
+
     # --- Pass 2: Decorate all functions ---
     for namespace_name, func_name in get_orig_torch_funcs():
         namespace_key = namespace_name.replace("torch.", "")
@@ -2212,7 +2262,6 @@ def decorate_all_once() -> None:
     # Collect names of factory functions (zeros, ones, empty, etc.) that accept
     # a device kwarg. The lru_cache must be cleared first so _device_constructors()
     # re-evaluates with our wrapped functions (otherwise it returns stale refs).
-    device_constructors = get_device_constructors()
     if device_constructors is not None:
         try:
             device_constructors.cache_clear()
@@ -2758,9 +2807,9 @@ def patch_detached_references(
         return PatchReport(effective_policy, _state._detached_patch_epoch)
 
     live_modules = _distinct_live_modules()
-    new_modules = [
-        (key, module) for key, module in live_modules if not _module_identity_was_crawled(module)
-    ]
+    new_module_ids = {
+        id(module) for _, module in live_modules if not _module_identity_was_crawled(module)
+    }
     counters = {
         "module_identities_scanned": 0,
         "deep_modules_scanned": 0,
@@ -2769,13 +2818,13 @@ def patch_detached_references(
     }
     source_open_counter = [0]
     deep_candidates: dict[int, tuple[str, types.ModuleType]] = {}
-    scoped_hot_ids = _scoped_hot_module_ids(model, module_names)
+    scoped_hot_ids = _scoped_hot_module_ids(model, module_names, live_modules)
     force_full_scan = requested_policy == "full"
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         for mod_key, mod in live_modules:
-            should_scan = force_full_scan or (mod_key, mod) in new_modules
+            should_scan = force_full_scan or id(mod) in new_module_ids
             if effective_policy == "scoped" and id(mod) in scoped_hot_ids:
                 should_scan = True
             if not should_scan:
@@ -2850,9 +2899,12 @@ def _distinct_live_modules() -> list[tuple[str, types.ModuleType]]:
     result: list[tuple[str, types.ModuleType]] = []
     seen: set[int] = set()
     for key, module in list(sys.modules.items()):
-        if not isinstance(module, types.ModuleType) or id(module) in seen:
+        if not isinstance(module, types.ModuleType):
             continue
-        seen.add(id(module))
+        module_id = id(module)
+        if module_id in seen:
+            continue
+        seen.add(module_id)
         result.append((key, module))
     return result
 
@@ -2895,9 +2947,31 @@ def _module_matches_allowlist(name: str, modules: Collection[str]) -> bool:
     return any(name == prefix or name.startswith(f"{prefix}.") for prefix in modules)
 
 
-def _scoped_hot_module_ids(model: Any | None, modules: Collection[str]) -> set[int]:
-    """Return current scoped deep/shallow hot module identities."""
+def _scoped_hot_module_ids(
+    model: Any | None,
+    modules: Collection[str],
+    live_modules: list[tuple[str, types.ModuleType]] | None = None,
+) -> set[int]:
+    """Return current scoped deep/shallow hot module identities.
 
+    Parameters
+    ----------
+    model:
+        Prepared model whose module provenance contributes hot module names.
+    modules:
+        Explicit module names or package prefixes to include.
+    live_modules:
+        Stable live-module snapshot already collected for the patching pass. A
+        fresh snapshot is collected when called independently.
+
+    Returns
+    -------
+    set[int]
+        Identities of live modules requiring scoped shallow or deep scanning.
+    """
+
+    if live_modules is None:
+        live_modules = _distinct_live_modules()
     names = set(modules) | set(_state._detached_patch_modules)
     if model is not None:
         try:
@@ -2924,7 +2998,7 @@ def _scoped_hot_module_ids(model: Any | None, modules: Collection[str]) -> set[i
     _state._detached_positive_modules[:] = live_positive_refs
     _state._detached_positive_module_ids.clear()
     _state._detached_positive_module_ids.update(hot_ids)
-    for key, module in _distinct_live_modules():
+    for key, module in live_modules:
         name = _safe_module_name(module, key)
         if _module_matches_allowlist(name, names):
             hot_ids.add(id(module))
