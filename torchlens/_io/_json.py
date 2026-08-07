@@ -21,6 +21,7 @@ below the depth ceiling.
 from __future__ import annotations
 
 import json
+import re
 from typing import IO, Any
 
 # Manifests for large models carry many tensor entries but are shallow (nesting is
@@ -37,6 +38,18 @@ _MAX_JSON_BYTES = 512 * 1024 * 1024
 _OPEN_BRACKETS = frozenset("[{")
 _CLOSE_BRACKETS = frozenset("]}")
 
+# The prescan's state machine only ever transitions on a quote, a backslash, or a
+# bracket; every other character is inert. Both patterns below let the C regex
+# engine skip the inert bulk (a multi-MB manifest is >90% inert) instead of paying
+# one Python loop iteration per character.
+_QUOTE_OR_BRACKET = re.compile(r'["\[\]{}]')
+_ESCAPE_RELEVANT = re.compile(r'["\\\[\]{}]')
+
+# Reduce/scan in bounded slices so a nesting bomb is still refused after roughly
+# one chunk rather than after a full-payload reduction (the original per-character
+# loop bailed within ~``max_depth`` characters).
+_PRESCAN_CHUNK_CHARS = 1 << 20
+
 
 def _refuse(detail: str, text: str) -> json.JSONDecodeError:
     """Build a ``JSONDecodeError`` so existing JSON-boundary handlers catch it."""
@@ -51,17 +64,53 @@ def _prescan_depth(text: str, *, max_depth: int) -> None:
     decoder. Quote/escape aware so brackets inside string literals do not count.
     Bails as soon as the depth ceiling is exceeded, so a nesting bomb is refused
     after ~``max_depth`` characters rather than scanning the whole payload.
+
+    The scan is the same state machine as a naive per-character loop, but the
+    inert characters are skipped by the regex engine. When the payload carries no
+    backslash at all the escape branch is unreachable, so each chunk is reduced to
+    just its quotes/brackets before the Python loop runs; otherwise the scan walks
+    only the escape-relevant character positions (a backslash's effect on the very
+    next character is recovered from the match offsets).
     """
 
     depth = 0
     in_string = False
-    escaped = False
-    for char in text:
+    if "\\" not in text:
+        for start in range(0, len(text) or 1, _PRESCAN_CHUNK_CHARS):
+            for char in _QUOTE_OR_BRACKET.findall(text[start : start + _PRESCAN_CHUNK_CHARS]):
+                if in_string:
+                    if char == '"':
+                        in_string = False
+                    continue
+                if char == '"':
+                    in_string = True
+                elif char in _OPEN_BRACKETS:
+                    depth += 1
+                    if depth > max_depth:
+                        raise _refuse(
+                            f"manifest JSON nesting exceeds the maximum depth of {max_depth}",
+                            text,
+                        )
+                elif depth > 0:
+                    depth -= 1
+        return
+
+    # ``escaped_at`` is the absolute offset of the character a backslash escapes.
+    # Reaching an escape-relevant character at that exact offset consumes the
+    # escape; reaching a later one means the escaped character was inert and the
+    # escape has already been consumed. Either way the flag clears, which is
+    # exactly what a per-character loop does.
+    escaped_at = -1
+    for match in _ESCAPE_RELEVANT.finditer(text):
+        char = match[0]
         if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
+            position = match.start()
+            if position == escaped_at:
+                escaped_at = -1
+                continue
+            escaped_at = -1
+            if char == "\\":
+                escaped_at = position + 1
             elif char == '"':
                 in_string = False
             continue

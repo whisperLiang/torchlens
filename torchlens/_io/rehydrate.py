@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from collections import OrderedDict, defaultdict
 import dataclasses
-import inspect
 import types
 from io import BytesIO
 from pathlib import Path
@@ -27,6 +26,7 @@ from .lazy import LazyActivationRef
 from .manifest import Manifest, TensorEntry, sha256_of_file
 from .payload_codec import materialize_transport_tensor
 from .paths import resolve_bundle_blob_path
+from .state_keys import invalidate_static_class_attr_cache, static_class_attr
 from .scrub import (
     _RAW_IMAGE_SENTINEL,
     _RAW_INPUT_IMAGE_BYTES_LIMIT,
@@ -94,6 +94,9 @@ def rehydrate_trace(
         Rehydrated model log.
     """
 
+    # Load boundary: force every memoized class-owned static lookup to re-validate
+    # its class-definition fingerprint before this artifact's fields are assigned.
+    invalidate_static_class_attr_cache()
     state_for_load = dict(scrubbed_state)
     source_version = _source_io_format_version(state_for_load, manifest)
     state_for_load = _normalize_legacy_trace_state(state_for_load, source_version)
@@ -378,9 +381,43 @@ def _build_manifest_index(
     return index
 
 
+_REHYDRATE_LEAF = 0
+_REHYDRATE_TUPLE = 1
+_REHYDRATE_LIST = 2
+_REHYDRATE_MAPPING = 3
+_REHYDRATE_SET = 4
+_REHYDRATE_OBJECT = 5
+
+_REHYDRATE_LEAF_TYPES = (str, int, float, bool, type(None), torch.dtype, torch.device, BlobRef)
+_REHYDRATE_KINDS: dict[type, int] = {}
+
+
+def _rehydrate_node_kind(value_type: type) -> int:
+    """Classify one node type for :func:`_rehydrate_object`, memoized per type.
+
+    Same branch order as the ``isinstance`` chain it replaces: leaf types (which
+    include ``BlobRef``, resolved by the caller, not walked) first, then ``tuple``,
+    ``list``, mappings, and ``set``.
+    """
+
+    if issubclass(value_type, _REHYDRATE_LEAF_TYPES):
+        kind = _REHYDRATE_LEAF
+    elif issubclass(value_type, tuple):
+        kind = _REHYDRATE_TUPLE
+    elif issubclass(value_type, list):
+        kind = _REHYDRATE_LIST
+    elif issubclass(value_type, dict):
+        kind = _REHYDRATE_MAPPING
+    elif issubclass(value_type, set):
+        kind = _REHYDRATE_SET
+    else:
+        kind = _REHYDRATE_OBJECT
+    _REHYDRATE_KINDS[value_type] = kind
+    return kind
+
+
 def _rehydrate_object(
     value: Any,
-    *,
     manifest_index: Mapping[str, dict[str, Any] | TensorEntry],
     bundle_path: Path,
     lazy: bool,
@@ -393,102 +430,81 @@ def _rehydrate_object(
 ) -> Any:
     """Walk a rehydrated object graph and materialize blob refs in place."""
 
-    if isinstance(value, (str, int, float, bool, type(None), torch.dtype, torch.device, BlobRef)):
+    # One cached type lookup replaces the eight-way ``isinstance`` chain this branch
+    # table re-ran for every one of the ~226k nodes a ResNet load walks. The three
+    # former mapping branches (``OrderedDict`` / ``defaultdict`` / ``dict``) had
+    # byte-identical in-place bodies and are one branch; ``frozenset`` still falls
+    # through to the portable-state path exactly as before.
+    value_type = type(value)
+    kind = _REHYDRATE_KINDS.get(value_type)
+    if kind is None:
+        kind = _rehydrate_node_kind(value_type)
+    if kind == _REHYDRATE_LEAF:
         return value
-    if isinstance(value, tuple):
+    if kind == _REHYDRATE_TUPLE:
         return tuple(
             _rehydrate_object(
                 item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                lazy=lazy,
-                map_location=map_location,
-                materialize_nested=materialize_nested,
-                payload_hints=payload_hints,
-                audit_only_payloads=audit_only_payloads,
-                payload_statuses=payload_statuses,
-                seen=seen,
+                manifest_index,
+                bundle_path,
+                lazy,
+                map_location,
+                materialize_nested,
+                payload_hints,
+                audit_only_payloads,
+                payload_statuses,
+                seen,
             )
             for item in value
         )
-    if isinstance(value, list):
+    if kind == _REHYDRATE_LIST:
         for index, item in enumerate(value):
             value[index] = _rehydrate_object(
                 item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                lazy=lazy,
-                map_location=map_location,
-                materialize_nested=materialize_nested,
-                payload_hints=payload_hints,
-                audit_only_payloads=audit_only_payloads,
-                payload_statuses=payload_statuses,
-                seen=seen,
+                manifest_index,
+                bundle_path,
+                lazy,
+                map_location,
+                materialize_nested,
+                payload_hints,
+                audit_only_payloads,
+                payload_statuses,
+                seen,
             )
         return value
-    if isinstance(value, OrderedDict):
+    if kind == _REHYDRATE_MAPPING:
         for key, item in list(value.items()):
             value[key] = _rehydrate_object(
                 item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                lazy=lazy,
-                map_location=map_location,
-                materialize_nested=materialize_nested,
-                payload_hints=payload_hints,
-                audit_only_payloads=audit_only_payloads,
-                payload_statuses=payload_statuses,
-                seen=seen,
+                manifest_index,
+                bundle_path,
+                lazy,
+                map_location,
+                materialize_nested,
+                payload_hints,
+                audit_only_payloads,
+                payload_statuses,
+                seen,
             )
         return value
-    if isinstance(value, defaultdict):
-        for key, item in list(value.items()):
-            value[key] = _rehydrate_object(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                lazy=lazy,
-                map_location=map_location,
-                materialize_nested=materialize_nested,
-                payload_hints=payload_hints,
-                audit_only_payloads=audit_only_payloads,
-                payload_statuses=payload_statuses,
-                seen=seen,
-            )
-        return value
-    if isinstance(value, dict):
-        for key, item in list(value.items()):
-            value[key] = _rehydrate_object(
-                item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                lazy=lazy,
-                map_location=map_location,
-                materialize_nested=materialize_nested,
-                payload_hints=payload_hints,
-                audit_only_payloads=audit_only_payloads,
-                payload_statuses=payload_statuses,
-                seen=seen,
-            )
-        return value
-    if isinstance(value, set):
+    if kind == _REHYDRATE_SET:
         return {
             _rehydrate_object(
                 item,
-                manifest_index=manifest_index,
-                bundle_path=bundle_path,
-                lazy=lazy,
-                map_location=map_location,
-                materialize_nested=materialize_nested,
-                payload_hints=payload_hints,
-                audit_only_payloads=audit_only_payloads,
-                payload_statuses=payload_statuses,
-                seen=seen,
+                manifest_index,
+                bundle_path,
+                lazy,
+                map_location,
+                materialize_nested,
+                payload_hints,
+                audit_only_payloads,
+                payload_statuses,
+                seen,
             )
             for item in value
         }
 
-    spec = getattr(type(value), "PORTABLE_STATE_SPEC", None)
+    spec = getattr(value_type, "PORTABLE_STATE_SPEC", None)
     if spec is None:
         return value
 
@@ -573,15 +589,15 @@ def _rehydrate_object(
                 field_name,
                 _rehydrate_object(
                     field_value,
-                    manifest_index=manifest_index,
-                    bundle_path=bundle_path,
-                    lazy=lazy,
-                    map_location=map_location,
-                    materialize_nested=materialize_nested,
-                    payload_hints=payload_hints,
-                    audit_only_payloads=audit_only_payloads,
-                    payload_statuses=payload_statuses,
-                    seen=seen,
+                    manifest_index,
+                    bundle_path,
+                    lazy,
+                    map_location,
+                    materialize_nested,
+                    payload_hints,
+                    audit_only_payloads,
+                    payload_statuses,
+                    seen,
                 ),
             )
     return value
@@ -608,7 +624,7 @@ def _assign_rehydrated_field(value: Any, field_name: str, field_value: Any) -> N
     # ``Op._internal_set``) is bound and invoked; non-slotted classes have no
     # ``_internal_set`` on the class and fall through to the frozen/``setattr``
     # branch exactly as before.
-    internal_set = inspect.getattr_static(type(value), "_internal_set", None)
+    internal_set = static_class_attr(type(value), "_internal_set", None)
     if isinstance(internal_set, types.FunctionType):
         internal_set.__get__(value, type(value))(field_name, field_value)
     elif dataclasses.is_dataclass(value) and getattr(type(value), "__dataclass_params__").frozen:

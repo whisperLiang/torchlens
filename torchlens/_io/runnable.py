@@ -993,6 +993,63 @@ def detach_sparse_core_nested_trace_backrefs(value: Any) -> None:
         detach_conditional_trace_backrefs(value)
 
 
+_NODE_PAYLOAD = -1
+_NODE_SKIP = 0
+_NODE_DATACLASS = 1
+_NODE_MAPPING = 2
+_NODE_SEQUENCE = 3
+_NODE_PORTABLE = 4
+
+# The sparse-core invariant walk dispatches on node type for over a million nodes
+# per save. The dispatch is a pure function of the type, so it is resolved once per
+# type instead of re-running an ABC ``isinstance`` chain (and ``dataclasses.fields``)
+# per node. Branch order below mirrors the original per-node chain exactly.
+_SPARSE_CORE_NODE_KINDS: dict[type, int] = {}
+_DATACLASS_FIELD_NAMES: dict[type, tuple[str, ...]] = {}
+
+
+def _sparse_core_node_kind(node_type: type) -> int:
+    """Classify one node type for the sparse-core tensor-payload invariant walk."""
+
+    from . import BlobRef
+
+    if issubclass(node_type, (torch.Tensor, BlobRef)):
+        kind = _NODE_PAYLOAD
+    elif node_type is type(None) or issubclass(node_type, (str, bytes, bool, int, float, Enum)):
+        kind = _NODE_SKIP
+    elif is_dataclass(node_type) and not issubclass(node_type, type):
+        kind = _NODE_DATACLASS
+    elif issubclass(node_type, Mapping):
+        kind = _NODE_MAPPING
+    elif issubclass(node_type, (list, tuple, set, frozenset)):
+        kind = _NODE_SEQUENCE
+    else:
+        kind = _NODE_PORTABLE
+    _SPARSE_CORE_NODE_KINDS[node_type] = kind
+    return kind
+
+
+def _dataclass_field_names(node_type: type) -> tuple[str, ...]:
+    """Return the cached declared field names of a dataclass type."""
+
+    names = _DATACLASS_FIELD_NAMES.get(node_type)
+    if names is None:
+        names = tuple(field.name for field in fields(node_type))
+        _DATACLASS_FIELD_NAMES[node_type] = names
+    return names
+
+
+def _dotted_node_path(path: tuple[Any, ...] | None) -> str:
+    """Render a parent-linked walk path as the dotted path used in refusals."""
+
+    labels: list[str] = []
+    while path is not None:
+        label, path = path
+        labels.append(label if type(label) is str else str(label))
+    labels.reverse()
+    return ".".join(labels) or "<root>"
+
+
 def assert_sparse_core_has_no_tensor_payload(value: Any) -> None:
     """Assert that a sparse core contains no tensor or tensor-blob value.
 
@@ -1007,8 +1064,6 @@ def assert_sparse_core_has_no_tensor_payload(value: Any) -> None:
         If a tensor, parameter, or portable tensor blob reference is present.
     """
 
-    from . import BlobRef
-
     # Detach runtime-only nested-Trace back-references (conditional arm ``_trace``)
     # from the scrub product BEFORE the value-free invariant is enforced. These are
     # not sparse-core payload; leaving them bound would drag the live trace's
@@ -1017,40 +1072,50 @@ def assert_sparse_core_has_no_tensor_payload(value: Any) -> None:
     detach_sparse_core_nested_trace_backrefs(value)
 
     seen: set[int] = set()
+    kinds = _SPARSE_CORE_NODE_KINDS
+    classify = _sparse_core_node_kind
 
-    def visit(node: Any, path: tuple[str, ...]) -> None:
-        """Visit one node in the sparse-core invariant walk."""
+    def visit(node: Any, path: tuple[Any, ...] | None) -> None:
+        """Visit one node in the sparse-core invariant walk.
 
-        if isinstance(node, (torch.Tensor, BlobRef)):
-            dotted_path = ".".join(path) or "<root>"
-            raise AssertionError(f"Sparse core tensor payload at {dotted_path}.")
-        if node is None or isinstance(node, (str, bytes, bool, int, float, Enum)):
+        ``path`` is a parent-linked ``(label, parent_path)`` pair rather than a
+        flat tuple: the dotted path is only ever needed to describe a refusal, so
+        building it eagerly cost one O(depth) tuple copy (plus a ``str()``) per
+        visited node on a walk that visits over a million nodes.
+        """
+
+        kind = kinds.get(type(node))
+        if kind is None:
+            kind = classify(type(node))
+        if kind == _NODE_PAYLOAD:
+            raise AssertionError(f"Sparse core tensor payload at {_dotted_node_path(path)}.")
+        if kind == _NODE_SKIP:
             return
         node_id = id(node)
         if node_id in seen:
             return
         seen.add(node_id)
-        if is_dataclass(node) and not isinstance(node, type):
-            for field in fields(node):
+        if kind == _NODE_DATACLASS:
+            for field_name in _dataclass_field_names(type(node)):
                 try:
-                    field_value = getattr(node, field.name)
+                    field_value = getattr(node, field_name)
                 except AttributeError:
                     continue
-                visit(field_value, (*path, field.name))
+                visit(field_value, (field_name, path))
             return
-        if isinstance(node, Mapping):
+        if kind == _NODE_MAPPING:
             for key, item in node.items():
-                visit(key, (*path, "<key>"))
-                visit(item, (*path, str(key)))
+                visit(key, ("<key>", path))
+                visit(item, (key, path))
             return
-        if isinstance(node, (list, tuple, set, frozenset)):
+        if kind == _NODE_SEQUENCE:
             for index, item in enumerate(node):
-                visit(item, (*path, str(index)))
+                visit(item, (index, path))
             return
         for field_name, field_value in state_items(node):
-            visit(field_value, (*path, str(field_name)))
+            visit(field_value, (field_name, path))
 
-    visit(value, ())
+    visit(value, None)
 
 
 def _build_op_slot_drafts(
@@ -4475,19 +4540,47 @@ def _literal_sequence_to_python(value: LiteralSequence) -> tuple[Any, ...]:
     return tuple(result)
 
 
+_TORCH_SYMBOL_NAMES: dict[int, tuple[Any, str]] = {}
+_TORCH_SYMBOL_NAMESPACE_SIZE = -1
+
+
+def _torch_symbol_index() -> dict[int, tuple[Any, str]]:
+    """Return the identity index of allowlisted non-callable ``torch`` symbols.
+
+    Built once from ``vars(torch)`` in iteration order (so the first binding of a
+    shared singleton wins, exactly as the linear scan this replaces did) and
+    rebuilt if the ``torch`` namespace grows, which it can when a lazily exposed
+    submodule attribute is first touched. Values are held in the index so an entry
+    can never be a recycled ``id()``.
+    """
+
+    global _TORCH_SYMBOL_NAMESPACE_SIZE
+    namespace = vars(torch)
+    if len(namespace) != _TORCH_SYMBOL_NAMESPACE_SIZE:
+        index: dict[int, tuple[Any, str]] = {}
+        for name, candidate in list(namespace.items()):
+            if callable(candidate):
+                continue
+            if not isinstance(candidate, (torch.dtype, torch.layout, torch.memory_format)):
+                continue
+            index.setdefault(id(candidate), (candidate, f"torch.{name}"))
+        _TORCH_SYMBOL_NAMES.clear()
+        _TORCH_SYMBOL_NAMES.update(index)
+        _TORCH_SYMBOL_NAMESPACE_SIZE = len(namespace)
+    return _TORCH_SYMBOL_NAMES
+
+
 def _torch_symbol_qualname(value: Any) -> str | None:
     """Return an allowlisted torch symbolic name for a non-callable value."""
 
     if isinstance(value, torch.device):
         return f"torch.device({value})"
-    for name, candidate in vars(torch).items():
-        if callable(candidate):
-            continue
-        if candidate is value and isinstance(
-            value, (torch.dtype, torch.layout, torch.memory_format)
-        ):
-            return f"torch.{name}"
-    return None
+    if not isinstance(value, (torch.dtype, torch.layout, torch.memory_format)):
+        return None
+    entry = _torch_symbol_index().get(id(value))
+    if entry is None or entry[0] is not value:
+        return None
+    return entry[1]
 
 
 def _runtime_fingerprint(

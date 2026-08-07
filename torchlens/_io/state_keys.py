@@ -56,6 +56,119 @@ class PortableStateKeyError(TorchLensError, ValueError):
         self.shadowed = tuple(sorted(shadowed))
 
 
+_MISSING = object()
+# Cached "this name does not exist on the class" answer. Distinct from _MISSING so a
+# cached absence is a HIT, not an indistinguishable miss that re-resolves forever.
+_ABSENT = object()
+
+# ``inspect.getattr_static`` is the execution-free resolver every load-integrity
+# static lookup routes through, and it is expensive: it re-walks the class and
+# metaclass MROs and re-checks ``__dict__`` shadowing on every call. One portable
+# load asks the same (class, name) question hundreds of thousands of times, so the
+# answer is memoized per class.
+#
+# Memoization is only sound while the class DEFINITION is unchanged, so an entry is
+# validated against a definition fingerprint -- the entry count of every ``__dict__``
+# the resolver consults -- at every cache-validation boundary (see
+# :func:`invalidate_static_class_attr_cache`). An attribute added to, or removed
+# from, any class in either MRO invalidates that class's entry. What memoization can
+# never weaken is the property these lookups exist for: the answer is still derived
+# from the CLASS, never from an attacker-controllable instance ``__dict__``.
+_STATIC_ATTR_MEMO: dict[type, list[Any]] = {}
+
+# Same discipline one level up: the shadow VERDICT per (class, key), so each key of
+# an incoming state dict costs a plain dict lookup.
+_SHADOW_VERDICT_MEMO: dict[type, list[Any]] = {}
+
+# Bumped at every load boundary; a memo entry re-validates its fingerprint the first
+# time it is used in a new generation, so the per-lookup cost is one int comparison
+# instead of a fresh fingerprint.
+_CACHE_GENERATION = 0
+
+
+def invalidate_static_class_attr_cache() -> None:
+    """Require every memoized static lookup to re-validate its class fingerprint.
+
+    Called at the load boundaries (:func:`torchlens._io.bundle.load` and
+    :func:`torchlens._io.rehydrate.rehydrate_trace`) so a class redefined between
+    loads can never be answered from a stale entry.
+    """
+
+    global _CACHE_GENERATION
+    _CACHE_GENERATION += 1
+
+
+def _class_definition_fingerprint(cls: type) -> tuple[int, ...] | None:
+    """Return a fingerprint of every ``__dict__`` a static lookup consults.
+
+    Returns ``None`` for an exotic class whose MRO cannot be read, which disables
+    memoization for that class rather than trusting a stale answer.
+    """
+
+    try:
+        return tuple(len(klass.__dict__) for klass in inspect.getmro(cls)) + tuple(
+            len(klass.__dict__) for klass in inspect.getmro(type(cls))
+        )
+    except (AttributeError, TypeError):  # pragma: no cover - exotic metaclass
+        return None
+
+
+def _validated_memo_entry(cls: type, memo: dict[type, list[Any]]) -> dict[str, Any] | None:
+    """Return ``cls``'s memo dict, resetting it when the class definition changed.
+
+    Entries are ``[generation, fingerprint, answers]``. The fingerprint is rebuilt
+    only on the first use of an entry in a new cache generation. Returns ``None``
+    when ``cls`` has no readable fingerprint, which disables memoization for it.
+    """
+
+    entry = memo.get(cls)
+    if entry is not None and entry[0] == _CACHE_GENERATION:
+        return entry[2]
+    fingerprint = _class_definition_fingerprint(cls)
+    if fingerprint is None:  # pragma: no cover - exotic metaclass
+        return None
+    if entry is None or entry[1] != fingerprint:
+        entry = [_CACHE_GENERATION, fingerprint, {}]
+        memo[cls] = entry
+    else:
+        entry[0] = _CACHE_GENERATION
+    return entry[2]
+
+
+def static_class_attr(cls: type, name: str, default: Any = _MISSING) -> Any:
+    """Memoized :func:`inspect.getattr_static` for a class-owned attribute.
+
+    Semantically identical to ``inspect.getattr_static(cls, name[, default])``:
+    the class MRO is walked WITHOUT triggering any descriptor ``__get__``, so a
+    planted instance attribute can never substitute for a class-owned one. The
+    only difference is that the answer is cached per class behind a definition
+    fingerprint (see :data:`_STATIC_ATTR_MEMO`).
+    """
+
+    answers = _validated_memo_entry(cls, _STATIC_ATTR_MEMO)
+    if answers is None:  # pragma: no cover - exotic metaclass, never memoized
+        resolved = _resolve_static_class_attr(cls, name)
+    else:
+        resolved = answers.get(name, _MISSING)
+        if resolved is _MISSING:
+            resolved = _resolve_static_class_attr(cls, name)
+            answers[name] = resolved
+    if resolved is _ABSENT:
+        if default is _MISSING:
+            raise AttributeError(name)
+        return default
+    return resolved
+
+
+def _resolve_static_class_attr(cls: type, name: str) -> Any:
+    """Resolve one static class attribute, returning ``_ABSENT`` when absent."""
+
+    try:
+        return inspect.getattr_static(cls, name)
+    except AttributeError:
+        return _ABSENT
+
+
 def _is_descriptor(attr: Any) -> bool:
     """Return whether ``attr`` implements the descriptor protocol on its type."""
 
@@ -77,7 +190,7 @@ def _key_shadows_class_method(cls: type, key: str) -> bool:
     """
 
     try:
-        attr = inspect.getattr_static(cls, key)
+        attr = static_class_attr(cls, key)
     except AttributeError:
         return False
     if isinstance(attr, _METHOD_SHADOW_TYPES):
@@ -97,8 +210,21 @@ def refuse_callable_shadowing_state_keys(cls: type, state: Mapping[str, Any]) ->
     once without touching the ``@property``-backed real state keys.
     """
 
-    shadowed = [
-        key for key in state if isinstance(key, str) and _key_shadows_class_method(cls, key)
-    ]
+    verdicts = _validated_memo_entry(cls, _SHADOW_VERDICT_MEMO)
+    if verdicts is None:  # pragma: no cover - exotic metaclass, resolve every key
+        shadowed = [
+            key for key in state if isinstance(key, str) and _key_shadows_class_method(cls, key)
+        ]
+    else:
+        shadowed = []
+        for key in state:
+            if not isinstance(key, str):
+                continue
+            verdict = verdicts.get(key)
+            if verdict is None:
+                verdict = _key_shadows_class_method(cls, key)
+                verdicts[key] = verdict
+            if verdict:
+                shadowed.append(key)
     if shadowed:
         raise PortableStateKeyError(cls, shadowed)
