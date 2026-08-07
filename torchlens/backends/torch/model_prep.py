@@ -2623,6 +2623,21 @@ def _clear_container_tree_tensor_metadata(value: Any, seen: set[int], depth: int
 def _clear_callable_session_tensor_metadata(callable_obj: Any, seen: set[int]) -> None:
     """Clear TorchLens tensor metadata captured by a callable object.
 
+    The globals scan targets the callable that actually runs USER code, so
+    TorchLens's own ``module_forward_decorator`` wrapper is unwrapped first (via
+    ``functools.wraps``' ``__wrapped__``, the same link
+    :func:`_restore_undecorated_forward` uses). The wrapper is defined in THIS
+    module, so scanning ITS ``__code__.co_names`` against ITS ``__globals__``
+    describes TorchLens internals -- ``_state``'s decoration registries and
+    ``sys.modules`` -- and never the user's forward. That was both a coverage gap
+    (every decorated submodule's real globals went unscanned) and the whole cost
+    of the per-capture namespace sweep: those two roots alone accounted for
+    ~33.7 k of the 33.7 k container visits on a 3-op model and ~35.1 k of 35.1 k
+    on resnet50, reaching zero tensors. Only the globals scan moves inward;
+    defaults, keyword defaults and closures are still swept at EVERY link of the
+    chain, so nothing a wrapper legitimately captures is skipped. A callable that
+    is not a TorchLens forward wrapper is inspected exactly as before.
+
     Parameters
     ----------
     callable_obj
@@ -2637,21 +2652,35 @@ def _clear_callable_session_tensor_metadata(callable_obj: Any, seen: set[int]) -
     """
 
     raw_callable = getattr(callable_obj, "__func__", callable_obj)
-    defaults = getattr(raw_callable, "__defaults__", None) or ()
-    _clear_session_tensor_metadata(defaults, seen)
-    kwdefaults = getattr(raw_callable, "__kwdefaults__", None) or {}
-    _clear_session_tensor_metadata(kwdefaults, seen)
-    closure = getattr(raw_callable, "__closure__", None) or ()
-    for cell in closure:
-        try:
-            cell_value = cell.cell_contents
-        except ValueError:
-            continue
-        _clear_session_tensor_metadata(cell_value, seen)
-    globals_dict = getattr(raw_callable, "__globals__", None)
+    chain: list[Any] = []
+    chain_ids: set[int] = set()
+    current = raw_callable
+    while current is not None and id(current) not in chain_ids:
+        chain_ids.add(id(current))
+        chain.append(current)
+        if not is_forward_call_decorated(current):
+            break
+        wrapped = getattr(current, "__wrapped__", None)
+        current = None if wrapped is None else getattr(wrapped, "__func__", wrapped)
+
+    for link in chain:
+        defaults = getattr(link, "__defaults__", None) or ()
+        _clear_session_tensor_metadata(defaults, seen)
+        kwdefaults = getattr(link, "__kwdefaults__", None) or {}
+        _clear_session_tensor_metadata(kwdefaults, seen)
+        closure = getattr(link, "__closure__", None) or ()
+        for cell in closure:
+            try:
+                cell_value = cell.cell_contents
+            except ValueError:
+                continue
+            _clear_session_tensor_metadata(cell_value, seen)
+
+    user_callable = chain[-1]
+    globals_dict = getattr(user_callable, "__globals__", None)
     if not isinstance(globals_dict, dict):
         return
-    code = getattr(raw_callable, "__code__", None)
+    code = getattr(user_callable, "__code__", None)
     if code is None:
         return
     for name in code.co_names:
