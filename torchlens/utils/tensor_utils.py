@@ -15,8 +15,12 @@ to wrapped versions.
 """
 
 import copy
+import os
+import threading
+import weakref
+from contextlib import contextmanager
 from math import prod
-from typing import Any, Callable, Literal, Optional, cast
+from typing import Any, Callable, Iterable, Iterator, Literal, Optional, cast
 
 import torch
 
@@ -429,6 +433,290 @@ def _safe_get_memory_format(t: torch.Tensor) -> torch.memory_format:
     return torch.preserve_format
 
 
+# ---------------------------------------------------------------------------
+# Deferred payload clones (clone-on-write)
+# ---------------------------------------------------------------------------
+# Eagerly cloning every captured activation payload is a large slice of plain
+# capture wall time, and most of those clones are never needed: the source
+# storage is never written again. When the wrapper arms the payload window
+# (plain torch exhaustive captures only), ``_clone_tensor_payload`` returns a
+# detached ALIAS of the source instead of a clone and registers it here, keyed
+# by storage identity. The alias stays zero-copy FOREVER unless something is
+# about to write its storage. Byte-identity of the saved value is guaranteed
+# by two cooperating mechanisms:
+#
+#   1. INTERCEPTION (authoritative, permanent): torch wrappers stay installed
+#      for the process lifetime, so EVERY wrapped call — during the capture
+#      and after it — is seen BEFORE execution. Calls that can write through
+#      tensor arguments (in-place signatures, ``out=``, ``inplace=True``,
+#      mutating property setters, ``__setitem__``) first materialize pending
+#      aliases sharing those storages via :func:`materialize_deferred_for_call`.
+#      This also reproduces eager isolation for the user's own post-hoc edits:
+#      ``log[...].out.add_(1)`` rebinds every co-resident saved alias onto
+#      exclusive fresh storage before the write lands.
+#   2. VERSION BELT (redundant tripwire): each pending alias records its
+#      autograd ``_version`` at defer time (detached aliases share the source's
+#      version counter). Materialization refuses — loudly — if the version
+#      moved without interception, so an unforeseen torch-side mutation path
+#      becomes a hard error instead of a silently corrupted saved activation.
+#
+# Known residual (documented; the same class as untraced ops): a host-level
+# write that bypasses torch dispatch entirely (raw ``data_ptr()``/numpy buffer
+# writes, ctypes) neither triggers interception nor bumps the version counter.
+# Eager cloning was immune to that case; deferral is therefore gated to plain
+# captures where none of the honesty machinery (runnable witnesses, backward
+# capture, transforms) is armed.
+
+# Kill switch: TORCHLENS_EAGER_PAYLOAD_CLONE=1 restores unconditional eager
+# clones (also used by the perf harness for A/B runs).
+_DEFER_ENABLED: bool = os.environ.get("TORCHLENS_EAGER_PAYLOAD_CLONE", "0") != "1"
+
+# storage key -> list of pending aliases. NEVER rebound (only mutated), so the
+# wrapper can bind the dict object once and use plain truthiness on its hot
+# path. Keys are (storage_data_ptr, storage_nbytes, device_str): unique among
+# live storages, and every pending alias keeps its storage alive. Dead entries
+# (payloads the capture discarded, dropped traces) are pruned lazily on lookup
+# and at every window arm.
+_DEFER_PENDING: dict[tuple[int, int, str], list["_PendingPayloadAlias"]] = {}
+
+# Window state, armed by the torch wrapper strictly around the payload-saving
+# call for eligible captures. Single-threaded by design, like all capture
+# state; the arming side stores the excluded state-storage pointers.
+_DEFER_WINDOW_DEPTH: int = 0
+_DEFER_STATE_PTRS: Optional[frozenset[int]] = None
+_DEFER_BUSY: bool = False
+
+
+class _PendingPayloadAlias:
+    """One deferred payload copy: a weakly-referenced alias plus its belt state."""
+
+    __slots__ = ("ref", "version")
+
+    def __init__(self, ref: "weakref.ref[torch.Tensor]", version: int) -> None:
+        self.ref = ref
+        self.version = version
+
+
+@contextmanager
+def _paused_internal_reads() -> Iterator[None]:
+    """Pause logging and mark storage-identity reads as TorchLens bookkeeping.
+
+    Mirrors the sanctioned ``set_tensor_label`` pattern: ``untyped_storage()``
+    / ``data_ptr()`` are witnessed host-escape surfaces, so bookkeeping reads
+    must run under ``pause_logging`` plus ``internal_scalar_read`` or they
+    would register as user raw-pointer escapes on witness-armed captures.
+    """
+    from .._state import pause_logging
+    from ..backends.torch.completeness_witness import internal_scalar_read
+
+    with pause_logging(), internal_scalar_read():
+        yield
+
+
+def _deferred_storage_key(x: torch.Tensor) -> Optional[tuple[int, int, str]]:
+    """Return the pending-registry key for ``x``'s storage, or ``None``.
+
+    Callers must hold ``_paused_internal_reads()``. Any failure (exotic layout,
+    storageless tensor) reads as ineligible rather than raising.
+    """
+    try:
+        storage = x.untyped_storage()
+        ptr = storage.data_ptr()
+        nbytes = storage.nbytes()
+    except Exception:
+        return None
+    if ptr == 0 or nbytes == 0:
+        return None
+    return (ptr, nbytes, str(x.device))
+
+
+def _try_defer_payload_alias(x: torch.Tensor) -> Optional[torch.Tensor]:
+    """Return a registered clone-on-write alias for ``x``, or ``None``.
+
+    Only called from ``_clone_tensor_payload`` (already under
+    ``pause_logging``) for the plain ``save_mode="copy"`` + ``detach_tensor``
+    path while the wrapper's payload window is armed. Ineligible tensors fall
+    back to the historical eager clone.
+    """
+    if isinstance(x, torch.nn.Parameter):
+        return None
+    if x.layout is not torch.strided or x.is_quantized:
+        return None
+    if x.device.type == "meta" or x.numel() == 0:
+        return None
+    try:
+        if x.is_conj() or x.is_neg() or x.is_inference():
+            return None
+    except Exception:
+        return None
+    state_ptrs = _DEFER_STATE_PTRS
+    if state_ptrs is None:
+        return None
+    from ..backends.torch.completeness_witness import internal_scalar_read
+
+    with internal_scalar_read():
+        key = _deferred_storage_key(x)
+    if key is None or key[0] in state_ptrs:
+        # Model param/buffer storages (and views of them) stay eager: their
+        # bytes can move through C++ side effects (train-mode batch_norm
+        # running stats) that no wrapped-call signature announces.
+        return None
+    if not _alias_covers_whole_storage(x, key[1]):
+        # Partial-coverage outputs (slices, chunks) stay eager: an alias would
+        # pin the WHOLE backing storage, where the eager clone compacts.
+        return None
+    try:
+        alias = x.detach()
+        version = int(alias._version)
+    except Exception:
+        return None
+    _DEFER_PENDING.setdefault(key, []).append(_PendingPayloadAlias(weakref.ref(alias), version))
+    return alias
+
+
+def _belt_check_pending_alias(entry: _PendingPayloadAlias, alias: torch.Tensor) -> None:
+    """Refuse — loudly — if a pending alias was mutated without interception."""
+    if int(alias._version) != entry.version:
+        raise RuntimeError(
+            "torchlens deferred-clone tripwire: a captured activation's source "
+            "storage was mutated through a path the capture wrapper did not "
+            "intercept (autograd version moved between defer and materialize). "
+            "The saved payload bytes can no longer be proven identical to the "
+            "capture-time value. Set TORCHLENS_EAGER_PAYLOAD_CLONE=1 to restore "
+            "eager payload clones, and please report the model/op that "
+            "triggered this."
+        )
+
+
+def _rebind_alias_to_fresh_clone(alias: torch.Tensor) -> None:
+    """Copy a pending alias's bytes into fresh exclusive storage, in place.
+
+    Callers must hold ``pause_logging``. The alias keeps its Python identity
+    (it is already stored in capture fields); ``set_`` rebinds it onto the
+    fresh clone, which carries exactly the metadata the historical eager
+    clone would have had (same clone call on identical layout/bytes).
+
+    IMPORTANT ordering contract: ``set_`` bumps the autograd version counter,
+    which detached aliases of one source SHARE — so within a pending group
+    every :func:`_belt_check_pending_alias` must run BEFORE the first rebind,
+    or a sibling's legitimate materialization reads as a belt violation.
+    """
+    fmt = _safe_get_memory_format(alias)
+    try:
+        fresh = alias.clone(memory_format=fmt)
+    except (TypeError, RuntimeError):
+        fresh = alias.clone()
+    alias.set_(fresh.untyped_storage(), 0, fresh.size(), fresh.stride())
+
+
+def materialize_deferred_for_call(tensors: Iterable[Any]) -> None:
+    """Materialize pending payload aliases before a mutating wrapped call.
+
+    Called by the torch wrapper pre-execution — during capture AND on the
+    post-capture fast path — for any call that can write through its tensor
+    arguments. For each argument whose storage has pending aliases, every
+    pending alias is copied out onto exclusive fresh storage BEFORE the
+    mutation runs.
+    """
+    global _DEFER_BUSY
+    if not _DEFER_PENDING or _DEFER_BUSY:
+        return
+    from .. import _state
+
+    if (
+        _state._active_trace is not None
+        and _state._active_owner_thread_id is not None
+        and threading.get_ident() != _state._active_owner_thread_id
+    ):
+        # Never toggle the global logging pause from a non-owner thread while
+        # a capture is live (r43: it blinds owner op capture). Cross-thread
+        # mutation of a pending storage is outside the single-threaded capture
+        # claim; the version belt still reports it loudly at the next touch.
+        return
+    _DEFER_BUSY = True
+    try:
+        with _paused_internal_reads():
+            for t in tensors:
+                if not isinstance(t, torch.Tensor):
+                    continue
+                key = _deferred_storage_key(t)
+                if key is None:
+                    continue
+                entries = _DEFER_PENDING.pop(key, None)
+                if not entries:
+                    continue
+                group = [(e, e.ref()) for e in entries]
+                # All belt checks BEFORE the first rebind: group members share
+                # one version counter, and ``set_`` bumps it.
+                for entry, alias in group:
+                    if alias is not None:
+                        _belt_check_pending_alias(entry, alias)
+                for entry, alias in group:
+                    if alias is not None:
+                        _rebind_alias_to_fresh_clone(alias)
+    finally:
+        _DEFER_BUSY = False
+
+
+def _alias_covers_whole_storage(alias: torch.Tensor, storage_nbytes: int) -> bool:
+    """Return whether ``alias`` spans its storage end to end (offset 0)."""
+    try:
+        if alias.storage_offset() != 0:
+            return False
+        span_elems = 1
+        for size, stride in zip(alias.shape, alias.stride()):
+            if size == 0:
+                return False
+            span_elems += (size - 1) * abs(stride)
+        return span_elems * alias.element_size() == storage_nbytes
+    except Exception:
+        return False
+
+
+# Dead registry entries are FUNCTIONALLY harmless — materialization skips
+# dead weakrefs, and a reused (ptr, nbytes, device) key simply appends fresh
+# entries after the dead ones — so pruning is memory hygiene only, gated on
+# this threshold to keep window arming O(1) per op.
+_DEFER_PRUNE_THRESHOLD = 2048
+
+
+def prune_dead_deferred_entries() -> None:
+    """Drop registry entries whose aliases were garbage-collected.
+
+    Discarded payload copies and dropped traces leave dead weakrefs behind;
+    this bounded sweep keeps the registry sized to the live pending
+    population.
+    """
+    for key in list(_DEFER_PENDING.keys()):
+        entries = _DEFER_PENDING.get(key)
+        if not entries:
+            _DEFER_PENDING.pop(key, None)
+            continue
+        live = [e for e in entries if e.ref() is not None]
+        if len(live) != len(entries):
+            if live:
+                _DEFER_PENDING[key] = live
+            else:
+                _DEFER_PENDING.pop(key, None)
+
+
+def arm_deferred_payload_window(state_storage_ptrs: frozenset[int]) -> None:
+    """Arm the clone-on-write payload window (wrapper-managed, nestable)."""
+    global _DEFER_WINDOW_DEPTH, _DEFER_STATE_PTRS
+    if _DEFER_WINDOW_DEPTH == 0 and len(_DEFER_PENDING) > _DEFER_PRUNE_THRESHOLD:
+        prune_dead_deferred_entries()
+    _DEFER_WINDOW_DEPTH += 1
+    _DEFER_STATE_PTRS = state_storage_ptrs
+
+
+def disarm_deferred_payload_window() -> None:
+    """Disarm one nesting level of the clone-on-write payload window."""
+    global _DEFER_WINDOW_DEPTH, _DEFER_STATE_PTRS
+    _DEFER_WINDOW_DEPTH = max(0, _DEFER_WINDOW_DEPTH - 1)
+    if _DEFER_WINDOW_DEPTH == 0:
+        _DEFER_STATE_PTRS = None
+
+
 def _copy_tensor_payload(
     x: torch.Tensor | torch.nn.Parameter,
     *,
@@ -535,11 +823,25 @@ def _clone_tensor_payload(
     with pause_logging():
         if save_mode not in {"copy", "reference", "view", "cpu_async"}:
             raise ValueError("save_mode must be one of 'copy', 'reference', 'view', or 'cpu_async'")
-        vals_tensor = _copy_tensor_payload(
-            x,
-            detach_tensor=detach_tensor,
-            save_mode=save_mode,
-        )
+        vals_tensor = None
+        # Deferral is legal only when the eager clone would carry NO autograd
+        # state either — an alias is ``detach()``-flavored (requires_grad
+        # False, no grad_fn), so it may only stand in for a clone taken with
+        # ``detach_tensor=True``, from a ``requires_grad=False`` source, or
+        # under disabled grad mode (where ``clone`` outputs are detached too,
+        # e.g. the common ``torch.no_grad()`` activation-extraction pattern).
+        if (
+            _DEFER_WINDOW_DEPTH
+            and save_mode == "copy"
+            and (detach_tensor or not x.requires_grad or not torch.is_grad_enabled())
+        ):
+            vals_tensor = _try_defer_payload_alias(x)
+        if vals_tensor is None:
+            vals_tensor = _copy_tensor_payload(
+                x,
+                detach_tensor=detach_tensor,
+                save_mode=save_mode,
+            )
         label = None if isinstance(x, torch.nn.Parameter) else get_tensor_label(x)
         if label is not None:
             set_tensor_label(vals_tensor, label)

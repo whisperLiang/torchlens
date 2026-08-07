@@ -61,7 +61,15 @@ from ...utils.display import identity
 from ...utils.rng import log_current_autocast_state, log_current_rng_states
 from ...utils.hashing import make_random_barcode
 from ...utils.arg_handling import copy_arg_tree
-from ...utils.tensor_utils import print_override, safe_copy
+from ...utils.tensor_utils import (
+    _DEFER_ENABLED as _COW_ENABLED,
+    _DEFER_PENDING as _COW_PENDING,
+    arm_deferred_payload_window,
+    disarm_deferred_payload_window,
+    materialize_deferred_for_call,
+    print_override,
+    safe_copy,
+)
 from .ops import (
     _is_inplace_augmented_assignment_dunder,
     _record_label_version_snapshot,
@@ -1054,6 +1062,67 @@ def _untyped_storage_key(t: torch.Tensor) -> tuple[int, int, str] | None:
         return None
 
 
+# Per-trace cache for the clone-on-write eligibility decision. Keyed weakly:
+# a Trace attribute would trip the portable-state completeness scrub
+# (PORTABLE_STATE_SPEC), and the decision is wrapper-internal state anyway.
+_COW_STATE_PTRS_CACHE: "weakref.WeakKeyDictionary[Any, Any]" = weakref.WeakKeyDictionary()
+_COW_UNSET = object()
+
+
+def _cow_payload_state_ptrs(trace: Any) -> Any:
+    """Return the clone-on-write payload window state for one capture trace.
+
+    Computed once per trace and cached weakly: ``None`` when deferred payload
+    clones must stay disabled for this capture, else the frozenset of model
+    param/buffer storage pointers that must never be deferred (their bytes can
+    move through C++ side effects no wrapped-call signature announces, e.g.
+    train-mode ``batch_norm`` running-stat updates).
+
+    Eligibility is deliberately narrow — the plain default capture only. Every
+    mode where saved payloads interact with other machinery (runnable
+    witnesses, backward capture, gradient saving, inference-mode tensors,
+    user activation transforms that may mutate the payload in place, predicate
+    recording, streaming writers, non-copy save modes) keeps the historical
+    eager clone.
+    """
+    try:
+        cached = _COW_STATE_PTRS_CACHE.get(trace, _COW_UNSET)
+    except TypeError:
+        cached = _COW_UNSET
+    if cached is not _COW_UNSET:
+        return cached
+    ptrs: Any = None
+    if (
+        _COW_ENABLED
+        and not getattr(trace, "intervention_ready", False)
+        and not getattr(trace, "backward_ready", False)
+        and not getattr(trace, "inference_only", False)
+        and getattr(trace, "save_grads", None) in (None, False)
+        and getattr(trace, "activation_transform", None) is None
+        and getattr(trace, "capture_mode", None) != "predicate"
+        and getattr(trace, "save_mode", "copy") == "copy"
+        and getattr(trace, "_out_writer", None) is None
+    ):
+        model_ref = getattr(trace, "_source_model_ref", None)
+        model = model_ref() if callable(model_ref) else None
+        if model is not None and hasattr(model, "parameters"):
+            try:
+                with _state.pause_logging(), internal_scalar_read():
+                    collected: set[int] = set()
+                    for p in model.parameters():
+                        collected.add(p.untyped_storage().data_ptr())
+                    for b in model.buffers():
+                        collected.add(b.untyped_storage().data_ptr())
+                ptrs = frozenset(collected)
+            except Exception:
+                ptrs = None
+    try:
+        _COW_STATE_PTRS_CACHE[trace] = ptrs
+    except TypeError:
+        pass
+    return ptrs
+
+
 def _func_mutates_receiver(func_name: str) -> bool:
     """Return whether a wrapped function mutates its first tensor argument.
 
@@ -1448,6 +1517,21 @@ def torch_func_decorator(
         # Cross-thread tensor->host escapes are still observed by the mode-independent belt
         # (tensor-method patches), which is independent of this wrapper.
         if not _state._logging_enabled:
+            # Deferred payload clones: pending aliases stay zero-copy for the
+            # process lifetime, so the fast path carries the SAME pre-execution
+            # interception as the logging path — any wrapped call that can
+            # write through a tensor argument first copies out pending aliases
+            # sharing those storages. Disarmed cost is one dict-truthiness
+            # check; with pending aliases, only mutation-signature calls pay
+            # the storage lookups.
+            if _COW_PENDING and (
+                mutates_receiver
+                or is_mutating_property_setter
+                or reconstructs_receiver_output
+                or "out" in kwargs
+                or kwargs.get("inplace") is True
+            ):
+                materialize_deferred_for_call(_collect_tensor_args(args, kwargs))
             if needs_device_injection:
                 kwargs = _maybe_inject_device_kwarg(func_name, kwargs)
             out = func(*args, **kwargs)
@@ -1627,6 +1711,30 @@ def torch_func_decorator(
                 or receiver_storage_key != rhs_storage_key
             )
 
+        # ---- Deferred-clone interception (clone-on-write) ----
+        # Any wrapped call that can WRITE through a tensor argument must first
+        # copy out pending deferred payload aliases sharing those storages —
+        # this runs BEFORE the mutation, so saved bytes stay capture-time
+        # exact. Triggers cover every wrapped mutation surface: in-place
+        # methods and augmented-assignment dunders (``mutates_receiver``),
+        # ``__setitem__``/``zero_``/``__delitem__``, mutating property setters,
+        # ``out=`` destinations, and ``inplace=True`` conveniences (``F.relu``
+        # / ``F.dropout``) whose actual underscore mutation may run below this
+        # wrapper. NOT ``has_inplace_signature`` — that flag is true for EVERY
+        # dunder (``"__add__".endswith("_")``) and is only ever meaningful
+        # gated behind a same-object return. Storage-rebinding ``.data=``
+        # writes no bytes but rides along via its property-setter signature —
+        # a spurious materialization is merely a wasted clone, never a
+        # correctness risk.
+        if _COW_PENDING and (
+            mutates_receiver
+            or is_mutating_property_setter
+            or reconstructs_receiver_output
+            or "out" in kwargs
+            or kwargs.get("inplace") is True
+        ):
+            materialize_deferred_for_call(arg_tensorlike)
+
         # ---- Execute the original function ----
         # Write a unique barcode BEFORE the call. If any inner wrapped functions
         # execute during this call, they will overwrite it. After the call,
@@ -1785,9 +1893,33 @@ def torch_func_decorator(
 
         call_emitted_op = False
         if len(output_tensors) > 0:
-            # Hide TorchLens bookkeeping dispatches only from the opt-in user-op census.
-            if _state._completeness_witness_mode == "shadow":
-                with _state.pause_logging():
+            # Deferred payload clones (clone-on-write): for eligible plain
+            # captures, payload ``safe_copy`` calls issued while this window is
+            # armed return registered aliases instead of eager clones. The
+            # window is scoped strictly to the payload-saving call so buffer
+            # snapshots, arg copies, and every other capture-time copy keep
+            # their historical eager semantics.
+            cow_state_ptrs = _cow_payload_state_ptrs(trace)
+            if cow_state_ptrs is not None:
+                arm_deferred_payload_window(cow_state_ptrs)
+            try:
+                # Hide TorchLens bookkeeping dispatches only from the opt-in user-op census.
+                if _state._completeness_witness_mode == "shadow":
+                    with _state.pause_logging():
+                        call_emitted_op = log_function_output_tensors(
+                            trace,
+                            capture_func,
+                            capture_func_name,
+                            log_args,
+                            log_kwargs,
+                            log_arg_copies,
+                            log_kwarg_copies,
+                            out_orig,
+                            exec_ctx,
+                            is_bottom_level_func,
+                            func_call_id,
+                        )
+                else:
                     call_emitted_op = log_function_output_tensors(
                         trace,
                         capture_func,
@@ -1801,20 +1933,9 @@ def torch_func_decorator(
                         is_bottom_level_func,
                         func_call_id,
                     )
-            else:
-                call_emitted_op = log_function_output_tensors(
-                    trace,
-                    capture_func,
-                    capture_func_name,
-                    log_args,
-                    log_kwargs,
-                    log_arg_copies,
-                    log_kwarg_copies,
-                    out_orig,
-                    exec_ctx,
-                    is_bottom_level_func,
-                    func_call_id,
-                )
+            finally:
+                if cow_state_ptrs is not None:
+                    disarm_deferred_payload_window()
 
             _propagate_data_alias_provenance(
                 func_name,
