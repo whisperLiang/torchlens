@@ -54,10 +54,18 @@ _CodeContextCacheKey: TypeAlias = tuple[
     int,
     bool,
     bool,
-    tuple[tuple[str, str, int, int, Optional[str], int], ...],
+    tuple[tuple[CodeType, int, int], ...],
 ]
-_CodeContextCache: TypeAlias = dict[_CodeContextCacheKey, tuple[Any, ...]]
-_CodeContextQualnames: TypeAlias = dict[int, Optional[str]]
+_CodeContextCache: TypeAlias = dict[Any, tuple[Any, ...]]
+
+# Reserved key holding the per-capture call-site anchor inside a
+# ``context_cache`` dict (see ``_get_code_context``). The cache dict itself is
+# created fresh per ``Trace`` and reset on fork/``__setstate__``, so the anchor
+# inherits exactly the capture-scoped lifetime it needs. The value is
+# ``(id(frame), code_object, f_lasti, f_lineno)`` -- ints plus an immutable
+# code object, never the frame itself (a retained frame would pin its
+# ``f_locals`` and therefore the user's model/input tensors).
+_CODE_CONTEXT_ANCHOR_KEY = "__torchlens_code_context_anchor__"
 
 # Directory-based stack filter for ``_get_code_context``. Resolved ONCE at import
 # rather than per captured op: ``os.path.abspath`` calls ``getcwd`` + ``normpath``,
@@ -285,6 +293,82 @@ def get_vars_of_type_from_obj(
         return list(zip(found_items, found_addresses, found_addresses_full))
     else:
         return found_items
+
+
+def get_arg_tensors_for_resolution(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> list[Any]:
+    """Return non-Parameter tensors in ``args``/``kwargs`` for source resolution.
+
+    Exact fast path for the per-op / per-module-entry pattern
+    ``get_vars_of_type_from_obj([args, kwargs], torch.Tensor,
+    [torch.nn.Parameter], search_depth=5)``. When every argument value is a
+    tensor, a known non-container leaf, or an exact ``list``/``tuple``/``set``
+    or dict(-subclass) whose members are all tensors or known leaves, the BFS
+    is provably equivalent to two linear passes: level order guarantees every
+    top-level tensor is matched before any container member, both passes share
+    one ``id()`` dedup set, and ``nn.Parameter`` entries are skipped without
+    entering the dedup set (exactly as ``subclass_exceptions`` does). Any value
+    outside that shape (nested containers, namedtuples, arbitrary objects)
+    falls back to the full BFS so deeply nested tensors keep their historical
+    discovery behavior byte-for-byte.
+    """
+    tensor_type = torch.Tensor
+    param_type = torch.nn.Parameter
+    found: list[Any] = []
+    found_ids: set[int] = set()
+    containers: list[Any] = []
+    flat = True
+    for value in args if not kwargs else (*args, *kwargs.values()):
+        value_class = type(value)
+        if issubclass(value_class, tensor_type):
+            if issubclass(value_class, param_type):
+                continue
+            value_id = id(value)
+            if value_id in found_ids:
+                continue
+            found_ids.add(value_id)
+            found.append(value)
+            continue
+        if value_class in _NON_CONTAINER_LEAF_TYPES:
+            continue
+        if value_class in (list, tuple, set):
+            containers.append(value)
+            continue
+        if value_class is dict:
+            # Exact dict only: the BFS *also* attribute-crawls dict SUBCLASSES
+            # (an ``OrderedDict`` can carry instance attributes holding
+            # tensors), so anything but a plain dict takes the full BFS.
+            containers.append(value.values())
+            continue
+        flat = False
+        break
+    if flat:
+        for container in containers:
+            for item in container:
+                item_class = type(item)
+                if issubclass(item_class, tensor_type):
+                    if issubclass(item_class, param_type):
+                        continue
+                    item_id = id(item)
+                    if item_id in found_ids:
+                        continue
+                    found_ids.add(item_id)
+                    found.append(item)
+                elif item_class not in _NON_CONTAINER_LEAF_TYPES:
+                    flat = False
+                    break
+            if not flat:
+                break
+    if flat:
+        return found
+    return get_vars_of_type_from_obj(
+        [args, kwargs],
+        torch.Tensor,
+        [torch.nn.Parameter],
+        search_depth=5,
+    )
 
 
 def _get_tensors_and_params_from_obj(
@@ -762,6 +846,26 @@ def _get_code_context(
     expensive per-frame source file I/O.  Source context is loaded lazily
     by ``FuncCallLocation`` on first access via ``linecache``.
 
+    The walk is a single innermost-to-outermost pass that keeps only
+    surviving (non-internal, non-``_call_impl``) frames. The historical
+    outermost-first scan is recovered from the survivor list: the outermost
+    ``forward``-named survivor starts the context, every deeper survivor
+    follows, and the first survivor above that ``forward`` (the user's
+    ``trace`` call site) is appended last.
+
+    When a ``context_cache`` is supplied, the walk also maintains a
+    per-capture *anchor* -- the identity of the call-site frame -- under
+    :data:`_CODE_CONTEXT_ANCHOR_KEY`. The call-site frame is suspended at the
+    ``trace(...)`` call for the entire capture and every code-context request
+    happens (transitively) beneath it, so it is alive at every lookup: an
+    ``id`` + code-object + ``f_lasti`` + ``f_lineno`` match therefore proves
+    object identity, and because a live frame's caller chain is immutable and
+    contained no ``forward``-named survivor at anchor establishment, nothing
+    above the anchor can influence the result. The walk then stops at the
+    anchor instead of traversing the (potentially deep) harness stack above
+    the call site. The stored anchor holds ints plus an immutable code object,
+    never the frame, so no locals (and no activation tensors) are pinned.
+
     Args:
         num_context_lines: Number of source lines to show on each side of
             the call line.  The total context window is
@@ -787,84 +891,88 @@ def _get_code_context(
 
     pkg_dir = _TORCHLENS_PKG_DIR
 
-    # Phase 1: Collect lightweight frame data — only co_filename, co_name, f_lineno.
-    # Do NOT do f_locals/f_globals dict lookups or bytecode walks yet.
-    # This loop runs over the WHOLE stack for every captured op, so it reads
-    # ``f_code`` once per frame and binds ``append`` locally.
-    raw_frames: list[tuple[str, str, int, int, FrameType]] = []
-    append_frame = raw_frames.append
+    anchor: tuple[int, CodeType, int, int] | None = None
+    if context_cache is not None:
+        anchor = context_cache.get(_CODE_CONTEXT_ANCHOR_KEY)  # type: ignore[assignment]
+
+    # Single pass, innermost -> outermost. Survivors keep (frame, code,
+    # lineno, lasti); internal frames are skipped without building tuples.
+    survivors: list[tuple[FrameType, CodeType, int, int]] = []
+    append_survivor = survivors.append
+    last_forward_pos = -1
+    anchor_frame: FrameType | None = None
     frame: FrameType | None = sys._getframe(0)
     while frame is not None:
         code = frame.f_code
-        append_frame(
-            (
-                code.co_filename,
-                code.co_name,
-                frame.f_lineno,
-                code.co_firstlineno,
-                frame,  # keep reference for phase 2 func_obj lookup
-            )
-        )
+        if (
+            anchor is not None
+            and id(frame) == anchor[0]
+            and code is anchor[1]
+            and frame.f_lasti == anchor[2]
+            and frame.f_lineno == anchor[3]
+        ):
+            # Verified call-site frame: the stack above it is capture-constant
+            # and was forward-free at anchor establishment.
+            anchor_frame = frame
+            break
+        name = code.co_name
+        if not code.co_filename.startswith(pkg_dir) and "_call_impl" not in name:
+            if name == "forward":
+                last_forward_pos = len(survivors)
+            append_survivor((frame, code, frame.f_lineno, frame.f_lasti))
         frame = frame.f_back
 
-    # Walk bottom-up (deepest caller last → first in output) and collect
-    # non-internal frames.  Start tracking once we hit a ``forward`` frame,
-    # but also include the frame *before* the first ``forward`` (the user's
-    # script that called ``trace``).  The torchlens-internals test is inlined
-    # (``startswith`` against the package dir) to avoid a Python call per frame.
-    tracking = False
-    pre_forward_frame_idx = None
-    filtered_indices = []
+    # Reconstruct the historical selection from the survivor list. With no
+    # ``forward`` frame, tracking never starts and the context is empty; the
+    # call site is only ever appended when a ``forward`` frame exists.
+    selected: list[tuple[FrameType, CodeType, int, int]] = []
+    if last_forward_pos >= 0:
+        selected = survivors[last_forward_pos::-1]
+        if last_forward_pos + 1 < len(survivors):
+            call_site = survivors[last_forward_pos + 1]
+            selected.append(call_site)
+        elif anchor_frame is not None:
+            call_site = (
+                anchor_frame,
+                anchor_frame.f_code,
+                anchor_frame.f_lineno,
+                anchor_frame.f_lasti,
+            )
+            selected.append(call_site)
+        else:
+            call_site = None
+        if context_cache is not None and anchor is None and call_site is not None:
+            # Establish the anchor: ``call_site`` is the first survivor above
+            # the OUTERMOST ``forward`` frame, so no ``forward``-named survivor
+            # exists anywhere above it -- the invariant the early-stop relies on.
+            cs_frame = call_site[0]
+            context_cache[_CODE_CONTEXT_ANCHOR_KEY] = (  # type: ignore[assignment]
+                id(cs_frame),
+                cs_frame.f_code,
+                cs_frame.f_lasti,
+                cs_frame.f_lineno,
+            )
 
-    for idx in range(len(raw_frames) - 1, -1, -1):
-        row = raw_frames[idx]
-        filename = row[0]
-        func_name = row[1]
-
-        # Skip torchlens internals and PyTorch _call_impl
-        if filename.startswith(pkg_dir):
-            continue
-        if "_call_impl" in func_name:
-            continue
-
-        if func_name == "forward" and not tracking:
-            tracking = True
-            # Look for the user-script frame that called trace
-            for j in range(idx + 1, len(raw_frames)):
-                j_row = raw_frames[j]
-                if not j_row[0].startswith(pkg_dir) and "_call_impl" not in j_row[1]:
-                    pre_forward_frame_idx = j
-                    break
-
-        if tracking:
-            filtered_indices.append(idx)
-
-    # Prepend the trace call-site frame if found and not already included
-    if pre_forward_frame_idx is not None and pre_forward_frame_idx not in filtered_indices:
-        filtered_indices.append(pre_forward_frame_idx)
-
+    cache_key: _CodeContextCacheKey | None = None
     if context_cache is not None:
-        cache_key, qualnames_by_index = _code_context_cache_key_and_qualnames(
-            raw_frames,
-            filtered_indices,
+        cache_key = (
             num_context_lines,
             source_loading_enabled,
             disable_col_offset,
+            tuple((code, lineno, lasti) for _frame, code, lineno, lasti in selected),
         )
         cached = context_cache.get(cache_key)
         if cached is not None:
             return list(cached)
-    else:
-        cache_key = None
-        qualnames_by_index = {}
 
-    # Phase 2: Build FuncCallLocation objects only for surviving frames (~5-10).
-    # Do expensive f_locals/f_globals lookups and bytecode walks only here.
+    # Build FuncCallLocation objects only for surviving frames (~5-10) and
+    # only on a cache miss. f_locals/f_globals lookups, qualname reads, and
+    # bytecode walks happen exclusively here.
     result = []
-    for idx in filtered_indices:
-        filename, func_name, lineno, code_firstlineno, frame_ref = raw_frames[idx]
+    for frame_ref, code, lineno, _lasti in selected:
+        func_name = code.co_name
         loc = FuncCallLocation(
-            file=filename,
+            file=code.co_filename,
             line_number=lineno,
             func_name=func_name,
             num_context_lines_requested=num_context_lines,
@@ -873,12 +981,8 @@ def _get_code_context(
                 if source_loading_enabled
                 else None
             ),
-            code_firstlineno=code_firstlineno,
-            func_qualname=(
-                qualnames_by_index[idx]
-                if idx in qualnames_by_index
-                else _get_code_qualname(frame_ref)
-            ),
+            code_firstlineno=code.co_firstlineno,
+            func_qualname=_get_code_qualname(frame_ref),
             col_offset=None if disable_col_offset else _get_col_offset(frame_ref),
             source_loading_enabled=source_loading_enabled,
         )
@@ -887,59 +991,3 @@ def _get_code_context(
     if context_cache is not None and cache_key is not None:
         context_cache[cache_key] = tuple(result)
     return result
-
-
-def _code_context_cache_key_and_qualnames(
-    raw_frames: list[tuple[str, str, int, int, FrameType]],
-    filtered_indices: list[int],
-    num_context_lines: int,
-    source_loading_enabled: bool,
-    disable_col_offset: bool,
-) -> tuple[_CodeContextCacheKey, _CodeContextQualnames]:
-    """Return a code-context cache key and per-frame qualnames used to build it.
-
-    Parameters
-    ----------
-    raw_frames:
-        Lightweight frame tuples collected by ``_get_code_context``.
-    filtered_indices:
-        Indices of user-visible frames retained for the context.
-    num_context_lines:
-        Requested source context radius.
-    source_loading_enabled:
-        Whether source text should load lazily on returned locations.
-    disable_col_offset:
-        Whether bytecode column-offset inspection is disabled.
-
-    Returns
-    -------
-    tuple
-        Cache key plus a mapping from filtered frame index to the qualname
-        computed for that frame.
-    """
-
-    qualnames_by_index: _CodeContextQualnames = {}
-    frame_parts = []
-    for idx in filtered_indices:
-        filename, func_name, lineno, code_firstlineno, frame_ref = raw_frames[idx]
-        func_qualname = _get_code_qualname(frame_ref)
-        qualnames_by_index[idx] = func_qualname
-        frame_parts.append(
-            (
-                filename,
-                func_name,
-                lineno,
-                code_firstlineno,
-                func_qualname,
-                frame_ref.f_lasti,
-            )
-        )
-    return (
-        (
-            num_context_lines,
-            source_loading_enabled,
-            disable_col_offset,
-            tuple(frame_parts),
-        ),
-        qualnames_by_index,
-    )

@@ -33,6 +33,7 @@ from ... import _state
 from ...constants import _get_torchvision_funcs, get_orig_torch_funcs
 from ...data_classes.func_call_location import FuncCallLocation
 from ._tl import (
+    _DETACHED_ACTIVATION_PROPAGATION_FUNCS,
     get_param_meta,
     get_tensor_label,
     has_detached_saved_activations,
@@ -768,6 +769,14 @@ _DEVICE_CONSTRUCTOR_NAMES: set[str] = set()
 # these tuples module-local avoids rebuilding the isinstance chains for every op.
 _SIMPLE_ARG_TYPES = (int, float, bool, str, type(None))
 _FLAT_ARG_TYPES = (*_SIMPLE_ARG_TYPES, torch.dtype, torch.device)
+# Exact callable types that the BFS provably yields no tensors for when the
+# instance ``__dict__`` is empty: plain/builtin function attribute crawls see
+# only dunder (filtered) class attributes, so expanding one finds nothing.
+# ``tensor.register_hook(fn)`` — TorchLens's own per-output gradient hook —
+# is the hot case: without this, every such call took the full BFS fall-back.
+# Bound methods are deliberately NOT listed: ``dir()`` on a method surfaces the
+# underlying function's attributes, so they keep the BFS.
+_LEAF_CALLABLE_TYPES = (types.FunctionType, types.BuiltinFunctionType)
 
 # Lazy imports cached at first use.
 _torch_function_mode_len = None
@@ -876,6 +885,10 @@ def _collect_tensor_args(args: tuple[Any, ...], kwargs: dict[str, Any]) -> list[
             for val in arg.values():
                 if isinstance(val, torch.Tensor):
                     tensors.append(val)
+        elif type(arg) in _LEAF_CALLABLE_TYPES and not getattr(arg, "__dict__", None):
+            # A plain function with no instance attributes cannot hold tensors
+            # (the BFS crawl of it provably finds nothing) — not a BFS trigger.
+            pass
         elif not isinstance(arg, _FLAT_ARG_TYPES):
             needs_bfs = True
     for val in kwargs.values():
@@ -908,6 +921,10 @@ def _collect_output_tensors(out: Any) -> list[torch.Tensor]:
                 tensors.append(item)
         return tensors
     if out is None:
+        return []
+    if type(out) is torch.utils.hooks.RemovableHandle:
+        # ``register_hook``-family output: holds only ints and weakrefs
+        # (weakrefs are callable, so the BFS skips them) — provably tensor-free.
         return []
     # Rare: dict, custom object, etc. — fall back to BFS.
     return get_vars_of_type_from_obj(
@@ -1499,6 +1516,13 @@ def torch_func_decorator(
         or is_mutating_property_setter
     )
     force_distinct_return = func_name == "identity"
+    # Decoration-time constant: ``propagate_detached_saved_activation`` is a
+    # guaranteed no-op for any name outside the propagation allowlist, but its
+    # ARGUMENTS (two tensor collections, each with a BFS fall-back for nested
+    # args such as ``register_hook``'s callable) were evaluated eagerly on
+    # every paused internal call. Gating on the closure constant skips exactly
+    # the calls the allowlist check inside the helper would discard.
+    is_detached_propagation_func = func_name in _DETACHED_ACTIVATION_PROPAGATION_FUNCS
     canonical_capture_callable = None
     if func_name != "data" or property_accessor == "del":
         canonical_capture_callable = (func, func_name)
@@ -1535,7 +1559,7 @@ def torch_func_decorator(
             if needs_device_injection:
                 kwargs = _maybe_inject_device_kwarg(func_name, kwargs)
             out = func(*args, **kwargs)
-            if has_detached_saved_activations():
+            if is_detached_propagation_func and has_detached_saved_activations():
                 propagate_detached_saved_activation(
                     func_name,
                     _collect_tensor_args(args, kwargs),
@@ -1561,7 +1585,7 @@ def torch_func_decorator(
             if needs_device_injection:
                 kwargs = _maybe_inject_device_kwarg(func_name, kwargs)
             out = func(*args, **kwargs)
-            if has_detached_saved_activations():
+            if is_detached_propagation_func and has_detached_saved_activations():
                 propagate_detached_saved_activation(
                     func_name,
                     _collect_tensor_args(args, kwargs),

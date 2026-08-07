@@ -217,6 +217,19 @@ def log_source_tensor_predicate(
         state.append_context(ctx)
 
 
+def _source_code_context_cache(self: "Trace") -> dict[Any, tuple[Any, ...]]:
+    """Return the per-capture code-context cache, creating it on first use.
+
+    Source records share the same cache the per-op path uses (a source logged
+    from an op call site reuses that op's filtered-stack entry).
+    """
+    code_context_cache = getattr(self, "_code_context_cache", None)
+    if code_context_cache is None:
+        code_context_cache = {}
+        self._code_context_cache = code_context_cache
+    return code_context_cache
+
+
 def log_source_tensor_exhaustive(
     self: "Trace", t: torch.Tensor, source: str, extra_addr: str | None = None
 ) -> None:
@@ -356,6 +369,7 @@ def log_source_tensor_exhaustive(
             self.num_context_lines,
             source_loading_enabled=self.save_code_context,
             disable_col_offset=False,
+            context_cache=_source_code_context_cache(self),
         ),
         "func_duration": 0,
         "flops_forward": 0,

@@ -1174,6 +1174,12 @@ def run_and_log_inputs_through_model(
     if random_seed is None:
         random_seed = random.randint(1, 4294967294)
     self.random_seed = random_seed  # type: ignore[assignment]
+    # The per-capture code-context cache (and the call-site anchor stored
+    # inside it) is only valid for the stack of ONE capture run: the anchor
+    # frame is proven alive by identity for the duration of a single capture,
+    # but a re-capture on a carried-over Trace state (e.g. a live-refresh
+    # fork) must never consult a prior run's anchor or locations.
+    self._code_context_cache = {}
     backend = _capture_backend_from_registry(
         _backend_name_for_trace(self),
         model,
