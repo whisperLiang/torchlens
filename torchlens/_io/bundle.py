@@ -9,7 +9,6 @@ by partial saves. The bundle format is intentionally a plain directory with
 
 from __future__ import annotations
 
-from collections import OrderedDict, defaultdict
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 import json
@@ -41,6 +40,7 @@ from .payload_codec import (
 from .paths import reject_symlink_path as _reject_symlink_path, resolve_bundle_blob_path
 from .rehydrate import rehydrate_trace
 from .scrub import BlobSpec, scrub_for_save
+from .state_keys import invalidate_static_class_attr_cache
 from .tensor_policy import FailReason, Ok
 from .tlspec import _TlSpecWriter, coerce_tlspec_save_level
 from .. import __version__ as TORCHLENS_VERSION
@@ -990,6 +990,9 @@ def load(
     sources. Loading an untrusted bundle can execute arbitrary code.
     """
 
+    # Load boundary: force every memoized class-owned static lookup to re-validate
+    # its class-definition fingerprint before this artifact is decoded.
+    invalidate_static_class_attr_cache()
     bundle_path = Path(path)
     if bundle_path.is_dir():
         from ..io import detect_tlspec_format
@@ -3151,16 +3154,47 @@ def _raise_for_unmaterialized_nested_blob_refs(
         If any nested portable blob refs remain in blob-recursive fields.
     """
 
-    if _contains_nested_blob_refs(value, seen=set(), allowed_blob_ids=allowed_blob_ids):
+    if _contains_nested_blob_refs(value, set(), allowed_blob_ids):
         raise TorchLensIOError(
             "Trace contains unmaterialized nested blob references. "
             "Call torchlens.rehydrate_nested(trace) before saving."
         )
 
 
+_NESTED_BLOB_SCALARS = (str, int, float, bool, type(None), torch.dtype, torch.device)
+
+_NESTED_BLOB_SCALAR = 0
+_NESTED_BLOB_REF = 1
+_NESTED_BLOB_DICT = 2
+_NESTED_BLOB_SEQUENCE = 3
+_NESTED_BLOB_OBJECT = 4
+
+_NESTED_BLOB_KINDS: dict[type, int] = {}
+
+
+def _nested_blob_node_kind(value_type: type) -> int:
+    """Classify one node type for the nested-``BlobRef`` walk, memoized per type.
+
+    Same branch order as the ``isinstance`` chain it replaces. ``frozenset`` is
+    deliberately NOT a container kind here, matching the original chain.
+    """
+
+    if issubclass(value_type, _NESTED_BLOB_SCALARS):
+        kind = _NESTED_BLOB_SCALAR
+    elif issubclass(value_type, BlobRef):
+        kind = _NESTED_BLOB_REF
+    elif issubclass(value_type, dict):
+        kind = _NESTED_BLOB_DICT
+    elif issubclass(value_type, (list, tuple, set)):
+        kind = _NESTED_BLOB_SEQUENCE
+    else:
+        kind = _NESTED_BLOB_OBJECT
+    _NESTED_BLOB_KINDS[value_type] = kind
+    return kind
+
+
 def _contains_nested_blob_refs(
     value: Any,
-    *,
     seen: set[int],
     allowed_blob_ids: set[str],
 ) -> bool:
@@ -3179,42 +3213,31 @@ def _contains_nested_blob_refs(
         ``True`` when a nested ``BlobRef`` is still present in a blob-recursive field.
     """
 
-    if isinstance(value, (str, int, float, bool, type(None), torch.dtype, torch.device)):
+    # ``OrderedDict``/``defaultdict`` were three identical ``.values()`` branches and
+    # ``list``/``tuple``/``set`` three identical direct-iteration branches; they are
+    # collapsed, the ``any(genexpr)`` wrappers are plain loops (this walk visits
+    # hundreds of thousands of nodes per save and paid a generator frame per
+    # container), and the branch chain itself is one cached type lookup.
+    value_type = type(value)
+    kind = _NESTED_BLOB_KINDS.get(value_type)
+    if kind is None:
+        kind = _nested_blob_node_kind(value_type)
+    if kind == _NESTED_BLOB_SCALAR:
         return False
-    if isinstance(value, BlobRef):
+    if kind == _NESTED_BLOB_REF:
         return value.blob_id not in allowed_blob_ids
-    if isinstance(value, list):
-        return any(
-            _contains_nested_blob_refs(item, seen=seen, allowed_blob_ids=allowed_blob_ids)
-            for item in value
-        )
-    if isinstance(value, tuple):
-        return any(
-            _contains_nested_blob_refs(item, seen=seen, allowed_blob_ids=allowed_blob_ids)
-            for item in value
-        )
-    if isinstance(value, OrderedDict):
-        return any(
-            _contains_nested_blob_refs(item, seen=seen, allowed_blob_ids=allowed_blob_ids)
-            for item in value.values()
-        )
-    if isinstance(value, defaultdict):
-        return any(
-            _contains_nested_blob_refs(item, seen=seen, allowed_blob_ids=allowed_blob_ids)
-            for item in value.values()
-        )
-    if isinstance(value, dict):
-        return any(
-            _contains_nested_blob_refs(item, seen=seen, allowed_blob_ids=allowed_blob_ids)
-            for item in value.values()
-        )
-    if isinstance(value, set):
-        return any(
-            _contains_nested_blob_refs(item, seen=seen, allowed_blob_ids=allowed_blob_ids)
-            for item in value
-        )
+    if kind == _NESTED_BLOB_DICT:
+        for item in value.values():
+            if _contains_nested_blob_refs(item, seen, allowed_blob_ids):
+                return True
+        return False
+    if kind == _NESTED_BLOB_SEQUENCE:
+        for item in value:
+            if _contains_nested_blob_refs(item, seen, allowed_blob_ids):
+                return True
+        return False
 
-    spec = getattr(type(value), "PORTABLE_STATE_SPEC", None)
+    spec = getattr(value_type, "PORTABLE_STATE_SPEC", None)
     if spec is None:
         return False
 
@@ -3226,20 +3249,17 @@ def _contains_nested_blob_refs(
     for field_name, field_value in state_items(value):
         policy = spec.get(field_name)
         if policy == FieldPolicy.BLOB_RECURSIVE and _container_contains_blob_ref(
-            field_value,
-            allowed_blob_ids=allowed_blob_ids,
+            field_value, allowed_blob_ids
         ):
             return True
         if policy == FieldPolicy.KEEP and _contains_nested_blob_refs(
-            field_value,
-            seen=seen,
-            allowed_blob_ids=allowed_blob_ids,
+            field_value, seen, allowed_blob_ids
         ):
             return True
     return False
 
 
-def _container_contains_blob_ref(value: Any, *, allowed_blob_ids: set[str]) -> bool:
+def _container_contains_blob_ref(value: Any, allowed_blob_ids: set[str]) -> bool:
     """Return whether a nested container still contains a ``BlobRef`` leaf.
 
     Parameters
@@ -3255,33 +3275,16 @@ def _container_contains_blob_ref(value: Any, *, allowed_blob_ids: set[str]) -> b
 
     if isinstance(value, BlobRef):
         return value.blob_id not in allowed_blob_ids
-    if isinstance(value, list):
-        return any(
-            _container_contains_blob_ref(item, allowed_blob_ids=allowed_blob_ids) for item in value
-        )
-    if isinstance(value, tuple):
-        return any(
-            _container_contains_blob_ref(item, allowed_blob_ids=allowed_blob_ids) for item in value
-        )
-    if isinstance(value, OrderedDict):
-        return any(
-            _container_contains_blob_ref(item, allowed_blob_ids=allowed_blob_ids)
-            for item in value.values()
-        )
-    if isinstance(value, defaultdict):
-        return any(
-            _container_contains_blob_ref(item, allowed_blob_ids=allowed_blob_ids)
-            for item in value.values()
-        )
-    if isinstance(value, dict):
-        return any(
-            _container_contains_blob_ref(item, allowed_blob_ids=allowed_blob_ids)
-            for item in value.values()
-        )
-    if isinstance(value, set):
-        return any(
-            _container_contains_blob_ref(item, allowed_blob_ids=allowed_blob_ids) for item in value
-        )
+    if isinstance(value, dict):  # covers OrderedDict / defaultdict
+        for item in value.values():
+            if _container_contains_blob_ref(item, allowed_blob_ids):
+                return True
+        return False
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            if _container_contains_blob_ref(item, allowed_blob_ids):
+                return True
+        return False
     return False
 
 

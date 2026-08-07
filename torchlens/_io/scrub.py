@@ -279,13 +279,58 @@ def _reject_payload_mapping_keys(mapping: Mapping[Any, Any], options: _ScrubOpti
             )
 
 
+_SCRUB_SIMPLE = 0
+_SCRUB_SIZE = 1
+_SCRUB_BLOBREF = 2
+_SCRUB_LIST = 3
+_SCRUB_TUPLE = 4
+_SCRUB_SET = 5
+_SCRUB_OBJECT = 6
+# The two mapping kinds sort ABOVE _SCRUB_OBJECT so one ``>=`` test selects "is a
+# mapping" (which shares the key-payload refusal) before splitting on flavour.
+_SCRUB_ORDERED_DICT = 7
+_SCRUB_MAPPING = 8
+
+_SCRUB_VALUE_KINDS: dict[type, int] = {}
+
+
+def _scrub_value_kind(value_type: type) -> int:
+    """Classify one node type for :func:`_scrub_value`, memoized per type.
+
+    The branch order below is exactly the ``isinstance`` chain it replaces:
+    ``torch.Size`` before ``tuple`` (it is a tuple subclass), and
+    ``OrderedDict``/``defaultdict`` before plain ``dict`` (both are dict
+    subclasses, and ``defaultdict`` rebuilds as a plain dict just as before).
+    """
+
+    if issubclass(value_type, _SIMPLE_KEEP_TYPES):
+        kind = _SCRUB_SIMPLE
+    elif issubclass(value_type, torch.Size):
+        kind = _SCRUB_SIZE
+    elif issubclass(value_type, BlobRef):
+        kind = _SCRUB_BLOBREF
+    elif issubclass(value_type, list):
+        kind = _SCRUB_LIST
+    elif issubclass(value_type, tuple):
+        kind = _SCRUB_TUPLE
+    elif issubclass(value_type, set):
+        kind = _SCRUB_SET
+    elif issubclass(value_type, OrderedDict):
+        kind = _SCRUB_ORDERED_DICT
+    elif issubclass(value_type, dict):
+        kind = _SCRUB_MAPPING
+    else:
+        kind = _SCRUB_OBJECT
+    _SCRUB_VALUE_KINDS[value_type] = kind
+    return kind
+
+
 def _scrub_value(
     value: Any,
     options: _ScrubOptions,
     memo: dict[int, Any],
     blob_specs: list[BlobSpec],
     blob_counter: list[int],
-    *,
     stringify_unknown: bool = False,
 ) -> Any:
     """Recursively scrub a value while preserving shared object identity.
@@ -304,65 +349,56 @@ def _scrub_value(
         the rest of the ``Trace`` object graph.
     """
 
-    if isinstance(value, _SIMPLE_KEEP_TYPES):
+    # One cached type lookup replaces the up-to-ten ``isinstance`` chain this
+    # branch table used to re-run for every one of the ~225k nodes a ResNet scrub
+    # visits. :func:`_scrub_value_kind` resolves the branches in the identical
+    # order, so the selected branch is unchanged.
+    kind = _SCRUB_VALUE_KINDS.get(type(value))
+    if kind is None:
+        kind = _scrub_value_kind(type(value))
+    if kind == _SCRUB_SIMPLE:
         return value
-    if isinstance(value, torch.Size):
+    if kind == _SCRUB_SIZE:
         return tuple(value)
-    if isinstance(value, BlobRef):
+    if kind == _SCRUB_BLOBREF:
         return value
-    if isinstance(value, list):
+    if kind == _SCRUB_LIST:
         return [
-            _scrub_value(
-                item, options, memo, blob_specs, blob_counter, stringify_unknown=stringify_unknown
-            )
+            _scrub_value(item, options, memo, blob_specs, blob_counter, stringify_unknown)
             for item in value
         ]
-    if isinstance(value, tuple):
+    if kind == _SCRUB_TUPLE:
         return tuple(
-            _scrub_value(
-                item, options, memo, blob_specs, blob_counter, stringify_unknown=stringify_unknown
-            )
+            _scrub_value(item, options, memo, blob_specs, blob_counter, stringify_unknown)
             for item in value
         )
-    if isinstance(value, set):
+    if kind == _SCRUB_SET:
         return {
-            _scrub_value(
-                item, options, memo, blob_specs, blob_counter, stringify_unknown=stringify_unknown
-            )
+            _scrub_value(item, options, memo, blob_specs, blob_counter, stringify_unknown)
             for item in value
         }
-    if isinstance(value, dict):
-        # ``dict`` covers ``OrderedDict`` / ``defaultdict``; refuse tensor-payload
-        # keys before the type-specific branches rebuild the mapping so a payload
-        # cannot slip into ``metadata.pkl`` unscrubbed and un-inventoried.
+    if kind >= _SCRUB_ORDERED_DICT:
+        # Every mapping kind: refuse tensor-payload keys before the type-specific
+        # branches rebuild the mapping so a payload cannot slip into
+        # ``metadata.pkl`` unscrubbed and un-inventoried.
         _reject_payload_mapping_keys(value, options)
-    if isinstance(value, OrderedDict):
-        return OrderedDict(
-            (
-                key,
-                _scrub_value(
-                    item,
-                    options,
-                    memo,
-                    blob_specs,
-                    blob_counter,
-                    stringify_unknown=stringify_unknown,
-                ),
+        if kind == _SCRUB_ORDERED_DICT:
+            return OrderedDict(
+                (
+                    key,
+                    _scrub_value(
+                        item,
+                        options,
+                        memo,
+                        blob_specs,
+                        blob_counter,
+                        stringify_unknown,
+                    ),
+                )
+                for key, item in value.items()
             )
-            for key, item in value.items()
-        )
-    if isinstance(value, defaultdict):
         return {
-            key: _scrub_value(
-                item, options, memo, blob_specs, blob_counter, stringify_unknown=stringify_unknown
-            )
-            for key, item in value.items()
-        }
-    if isinstance(value, dict):
-        return {
-            key: _scrub_value(
-                item, options, memo, blob_specs, blob_counter, stringify_unknown=stringify_unknown
-            )
+            key: _scrub_value(item, options, memo, blob_specs, blob_counter, stringify_unknown)
             for key, item in value.items()
         }
 
@@ -378,8 +414,9 @@ def _scrub_value(
     scrubbed_obj = state_new(type(value))
     memo[obj_id] = scrubbed_obj
     scrubbed_state: dict[str, Any] = {}
+    owner_is_trace = isinstance(value, Trace)
     for field_name, field_value in _state_items_for_scrub(value, spec):
-        if isinstance(value, Trace) and _is_runtime_only_trace_field(field_name):
+        if owner_is_trace and _is_runtime_only_trace_field(field_name):
             continue
         if field_name not in spec:
             raise TorchLensIOError(
@@ -388,6 +425,23 @@ def _scrub_value(
         if field_name == "_is_in_conditional_body" and field_value is None:
             field_value = False
         policy = _effective_policy(value, field_name, spec[field_name], options)
+        # The two overwhelmingly common policies are resolved here instead of
+        # through :func:`_scrub_field`, which is one Python call per field on a walk
+        # that scrubs ~160k fields per ResNet save. Both shortcuts reproduce
+        # ``_scrub_field``'s own branch order exactly: its DROP/WEAKREF_STRIP test
+        # runs first, and KEEP falls through every field-specific serializer to the
+        # generic ``_scrub_value`` -- except for a Trace raw input/output field,
+        # which keeps routing through the full function.
+        if policy is FieldPolicy.DROP or policy is FieldPolicy.WEAKREF_STRIP:
+            scrubbed_state[field_name] = None
+            continue
+        if policy is FieldPolicy.KEEP and not (
+            owner_is_trace and (field_name == "raw_input" or field_name == "raw_output")
+        ):
+            scrubbed_state[field_name] = _scrub_value(
+                field_value, options, memo, blob_specs, blob_counter
+            )
+            continue
         scrubbed_state[field_name] = _scrub_field(
             owner=value,
             field_name=field_name,
