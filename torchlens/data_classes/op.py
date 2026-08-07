@@ -75,7 +75,16 @@ from ..intervention.types import (
 )
 from ..ir.refs import DeviceRef, DtypeRef
 from ..intervention.errors import DirectActivationWriteWarning
-from ..quantities import Bytes, Flops, Macs, as_bytes, as_duration, as_flops, as_macs
+from ..quantities import (
+    Bytes,
+    Duration,
+    Flops,
+    Macs,
+    as_bytes,
+    as_duration,
+    as_flops,
+    as_macs,
+)
 from .._state import pause_logging
 from ..backends.torch._tl import mark_detached_saved_activation
 from ._accessor_base import Accessor
@@ -267,6 +276,227 @@ _OP_SLOT_NAMES = tuple(
         ]
     )
 )
+
+# ---------------------------------------------------------------------------
+# Post-capture metadata pooling (RAM)
+#
+# A finished graph stores the SAME immutable metadata value over and over: one
+# ``"torch.float32"`` dtype name per op, one ``Bytes(0)`` per unused memory
+# counter, the same module address in every op of a module, the same ancestor
+# label in hundreds of ancestor sets.  Each of those is a separate Python
+# object, so per-node footprint grows with (#ops x #repeated facts) instead of
+# with the number of DISTINCT facts.
+#
+# ``Trace._compact_op_metadata`` runs one pass at the end of postprocessing and
+# replaces each such value with a single pooled instance.  The pool is local to
+# that pass and dropped afterwards, so nothing leaks process-wide the way
+# ``sys.intern`` would.
+#
+# The pass is VALUE-PRESERVING by construction:
+#   * only exact-class IMMUTABLE values are pooled (str/bytes, the frozen
+#     DtypeRef/DeviceRef refs, the int/float quantity subclasses, and tuples /
+#     frozensets built purely out of those).  Sharing an immutable object can
+#     never alias-corrupt an owner.
+#   * mutable containers (list/set/dict) keep their own identity and
+#     mutability; only their ELEMENTS are swapped for pooled equals.
+#   * anything else -- tensors, Ops, arbitrary user objects -- is returned
+#     untouched and never enters the pool.
+# ---------------------------------------------------------------------------
+
+# Exact classes that are safe to share.  Exact-class (not isinstance) matching
+# keeps subclasses out, so a pooled value always has the original's type.
+_POOLED_CLASSES = frozenset({str, bytes, DtypeRef, DeviceRef, Bytes, Flops, Macs, Duration})
+_NONE_POOL_KEY = (type(None), None)
+# Slots skipped by the pass: tensor payloads, replay/attestation raw values,
+# live handles, and lazily rebuilt caches.  Skipping is a cost/robustness
+# choice, not a correctness one -- the pooling helpers already refuse every
+# value in them.
+_UNPOOLED_SLOTS = frozenset(
+    {
+        "out",
+        "transformed_out",
+        "grad",
+        "transformed_grad",
+        "saved_args",
+        "saved_kwargs",
+        "args_template",
+        "kwargs_template",
+        "out_versions_by_child",
+        "func_rng_states",
+        "activation_transform",
+        "interventions",
+        "parent_params",
+        "_param_logs",
+        "_grad_records",
+        "func",
+        "grad_fn",
+        "grad_fn_handle",
+        "out_ref",
+        "grad_ref",
+        "_source_trace_ref",
+        "_facets_cache",
+        "_receptive_field_cache",
+        "_projective_field_cache",
+        "_arg_expressions_cache",
+    }
+)
+_POOLED_SLOTS = tuple(name for name in _OP_SLOT_NAMES if name not in _UNPOOLED_SLOTS)
+# Depth of container nesting the pass descends into.  Every field that carries
+# real repetition (ancestor sets, label lists, config dicts) is at depth 0-1.
+_POOL_MAX_DEPTH = 2
+
+
+def _pool_key(value: Any) -> Any:
+    """Return an injective hashable pool key for ``value``, or ``None``.
+
+    Injectivity is what keeps the pass value-preserving: two values share a key
+    if and only if they are indistinguishable. The class is always part of the
+    key (so ``True`` never collapses into ``1``, nor ``Bytes(0)`` into ``0``),
+    and floats key on their exact bit pattern (so ``-0.0`` never collapses into
+    ``0.0``).
+
+    Parameters
+    ----------
+    value:
+        Candidate immutable value.
+
+    Returns
+    -------
+    Any
+        A hashable key, or ``None`` when ``value`` is not a poolable immutable.
+    """
+
+    cls = value.__class__
+    if cls is str or cls is bytes or cls is int or cls is bool:
+        return (cls, value)
+    if cls is float:
+        return (cls, value.hex())
+    if cls in _POOLED_CLASSES:
+        return (cls, value.hex()) if cls is Duration else (cls, value)
+    if value is None:
+        return _NONE_POOL_KEY
+    if cls is tuple or cls is frozenset:
+        member_keys = []
+        for member in value:
+            member_key = _pool_key(member)
+            if member_key is None:
+                return None
+            member_keys.append(member_key)
+        return (cls, tuple(member_keys) if cls is tuple else frozenset(member_keys))
+    return None
+
+
+def _pool_value(value: Any, pool: Dict[Any, Any]) -> Any:
+    """Return the pooled twin of an immutable ``value``, or ``value`` itself.
+
+    Parameters
+    ----------
+    value:
+        Candidate value from an Op slot or from inside one of its containers.
+    pool:
+        Pass-local ``pool key -> canonical instance`` table.
+
+    Returns
+    -------
+    Any
+        An object of the same exact class that is ``==`` to ``value``, or
+        ``value`` unchanged when it is not a poolable immutable.
+    """
+
+    cls = value.__class__
+    if cls in _POOLED_CLASSES:
+        key = (cls, value.hex()) if cls is Duration else (cls, value)
+    elif (cls is tuple or cls is frozenset) and value:
+        key = _pool_key(value)
+        if key is None:
+            return value
+    else:
+        return value
+    pooled = pool.get(key)
+    if pooled is not None:
+        return pooled
+    if cls is tuple or cls is frozenset:
+        # Rebuild so nested immutables are shared too; the rebuilt collection
+        # is the canonical one from here on.
+        value = cls(_pool_value(member, pool) for member in value)
+    pool[key] = value
+    return value
+
+
+def _pool_container_members(container: Any, pool: Dict[Any, Any], depth: int) -> None:
+    """Swap poolable members of a mutable container for their pooled twins.
+
+    The container object itself is never replaced, so its identity, class,
+    mutability, and (for lists/dicts) ordering are preserved exactly.
+
+    Parameters
+    ----------
+    container:
+        A ``list``, ``set``, or mapping owned by one Op.
+    pool:
+        Pass-local pooling table.
+    depth:
+        Current nesting depth; recursion stops at ``_POOL_MAX_DEPTH``.
+    """
+
+    cls = container.__class__
+    recurse = depth < _POOL_MAX_DEPTH
+    pooled_classes = _POOLED_CLASSES
+    pool_get = pool.get
+    if cls is list:
+        for index, member in enumerate(container):
+            member_cls = member.__class__
+            # Inline the common case (a pooled string) so the vast majority of
+            # members never pay a Python call.
+            if member_cls is str:
+                key = (str, member)
+                pooled = pool_get(key)
+                if pooled is None:
+                    pool[key] = member
+                elif pooled is not member:
+                    container[index] = pooled
+            elif member_cls in pooled_classes or member_cls is tuple or member_cls is frozenset:
+                pooled = _pool_value(member, pool)
+                if pooled is not member:
+                    container[index] = pooled
+            elif recurse and (
+                member_cls is list
+                or member_cls is set
+                or member_cls is dict
+                or isinstance(member, dict)
+            ):
+                _pool_container_members(member, pool, depth + 1)
+    elif cls is set:
+        # Rebuilding through clear()/update() also drops the over-allocation
+        # left behind by the discard/remove calls postprocessing makes.
+        pooled_members = {_pool_value(member, pool) for member in container}
+        container.clear()
+        container.update(pooled_members)
+    elif isinstance(container, dict):
+        # Keys are dict-literal constants in the producers and are already
+        # shared by the compiler, so only values are pooled -- which also keeps
+        # insertion order untouched.  Rebinding an existing key never resizes a
+        # dict, so iterating ``items()`` directly is safe.
+        for key, member in container.items():
+            member_cls = member.__class__
+            if member_cls is str:
+                pool_key = (str, member)
+                pooled = pool_get(pool_key)
+                if pooled is None:
+                    pool[pool_key] = member
+                elif pooled is not member:
+                    container[key] = pooled
+            elif member_cls in pooled_classes or member_cls is tuple or member_cls is frozenset:
+                pooled = _pool_value(member, pool)
+                if pooled is not member:
+                    container[key] = pooled
+            elif recurse and (
+                member_cls is list
+                or member_cls is set
+                or member_cls is dict
+                or isinstance(member, dict)
+            ):
+                _pool_container_members(member, pool, depth + 1)
 
 
 def _clear_property_backed_state_fields(state: dict[str, Any]) -> None:
@@ -1260,6 +1490,50 @@ class Op:
         """
 
         _object_setattr(self, attr, value)
+
+    def _compact_metadata(self, pool: Dict[Any, Any]) -> None:
+        """Replace repeated immutable metadata with pooled shared instances.
+
+        Called once per Op by :meth:`Trace._compact_op_metadata` after
+        postprocessing. Every field keeps a value that is ``==`` to, and of the
+        same exact class as, the one it had before; only the object identity of
+        immutable values is collapsed. See the pooling block near the top of
+        this module for the safety argument.
+
+        Parameters
+        ----------
+        pool:
+            Pass-local pooling table shared by every Op of one Trace.
+        """
+
+        getattribute = _object_getattribute
+        pooled_classes = _POOLED_CLASSES
+        pool_get = pool.get
+        for name in _POOLED_SLOTS:
+            try:
+                value = getattribute(self, name)
+            except AttributeError:
+                continue
+            # Most slots hold None or a plain scalar; the class ladder below is
+            # ordered so those fall through without a single Python call.
+            if value is None:
+                continue
+            cls = value.__class__
+            if cls in pooled_classes:
+                key = (cls, value.hex()) if cls is Duration else (cls, value)
+                pooled = pool_get(key)
+                if pooled is None:
+                    pool[key] = value
+                elif pooled is not value:
+                    _object_setattr(self, name, pooled)
+            elif cls is list or cls is set or cls is dict:
+                _pool_container_members(value, pool, 0)
+            elif cls is tuple or cls is frozenset:
+                pooled = _pool_value(value, pool)
+                if pooled is not value:
+                    _object_setattr(self, name, pooled)
+            elif isinstance(value, dict):
+                _pool_container_members(value, pool, 0)
 
     def _append_tensor_from(self, other: "Op", field_name: str) -> None:
         """Append one tensor field from another pass along batch dimension 0.

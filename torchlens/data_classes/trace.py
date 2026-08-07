@@ -364,6 +364,10 @@ _BUILD_STATE_ATTR_MAP: dict[str, str] = {
     "_input_tensor_addresses": "input_tensor_addresses",
 }
 _BUILD_STATE_ATTR_MAP_GET = _BUILD_STATE_ATTR_MAP.get
+# Traces whose Op metadata has already been pooled by ``_compact_op_metadata``.
+# Held weakly and OFF the Trace itself so no new field enters ``__dict__``,
+# pickle state, or a portable artifact.
+_COMPACTED_TRACES: "weakref.WeakSet[Trace]" = weakref.WeakSet()
 
 
 def _legacy_save_grads_from_state(state: dict[str, Any]) -> Any:
@@ -961,6 +965,12 @@ class Trace(
         state_field = _BUILD_STATE_ATTR_MAP_GET(name)
         if state_field is None:
             super().__setattr__(name, value)
+            # The flip to finished is the one moment where op metadata is final
+            # but the Trace is still ours; pool repeated immutables there. The
+            # ``value is True`` identity probe keeps this off the capture-time
+            # attribute-write hot path.
+            if value is True and name == "_tracing_finished":
+                self._compact_op_metadata()
             return
         if (
             name != "_in_exhaustive_pass"
@@ -969,6 +979,35 @@ class Trace(
         ):
             raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
         setattr(self._ensure_build_state(), state_field, value)
+
+    def _compact_op_metadata(self) -> None:
+        """Collapse repeated immutable Op metadata onto shared instances.
+
+        A finished graph stores the same dtype name, module address, ancestor
+        label, and zero-valued quantity once per op, so Python metadata grows
+        with ``#ops x #repeated facts`` rather than with the number of distinct
+        facts. One pass at the end of postprocessing pools those values; the
+        pool is dropped on return, so nothing is retained process-wide.
+
+        Field values are unchanged -- see :func:`~torchlens.data_classes.op._pool_key`
+        for why pooling is injective, and ``Op._compact_metadata`` for the
+        per-field walk. Running it more than once is a no-op beyond the first.
+        """
+
+        if self in _COMPACTED_TRACES:
+            return
+        ops = self.__dict__.get("layer_list")
+        if not ops:
+            return
+        _COMPACTED_TRACES.add(self)
+        pool: Dict[Any, Any] = {}
+        seen_ops: set[int] = set()
+        for op in ops:
+            op_id = id(op)
+            if op_id in seen_ops:
+                continue
+            seen_ops.add(op_id)
+            op._compact_metadata(pool)
 
     def __delattr__(self, name: str) -> None:
         """Delete transient capture attributes from private build state."""
