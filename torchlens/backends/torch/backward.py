@@ -1954,6 +1954,7 @@ def _walk_and_hook_backward_graph(trace: Any, loss: torch.Tensor) -> list[Any]:
     seen: set[int] = set()
     handles: list[Any] = []
     type_counter: dict[str, int] = {}
+    source_metadata_by_class: dict[type[Any], dict[str, Any]] = {}
     # Keep strong refs to every discovered grad_fn_handle for the trace's lifetime so
     # Python cannot recycle their memory addresses. ``id()`` is used as the
     # primary key for ``grad_fn_logs`` and ``next_grad_fn_ids``; if leaf nodes
@@ -1995,6 +1996,10 @@ def _walk_and_hook_backward_graph(trace: Any, loss: torch.Tensor) -> list[Any]:
                 step_index,
             )
             grad_fn_cls = type(grad_fn_handle)
+            source_metadata = source_metadata_by_class.get(grad_fn_cls)
+            if source_metadata is None:
+                source_metadata = _grad_fn_source_metadata(grad_fn_cls)
+                source_metadata_by_class[grad_fn_cls] = source_metadata
             grad_fn_record = GradFn(
                 grad_fn_object_id=grad_fn_object_id,
                 class_name=grad_fn_cls.__name__,
@@ -2008,7 +2013,7 @@ def _walk_and_hook_backward_graph(trace: Any, loss: torch.Tensor) -> list[Any]:
                 has_op=layer_label is not None,
                 op_label=layer_label,
                 next_grad_fn_ids=[id(next_fn) for next_fn in next_grad_fns],
-                **_grad_fn_source_metadata(grad_fn_cls),
+                **source_metadata,
             )
             grad_fn_record.source_trace = trace
             trace.grad_fn_logs[grad_fn_object_id] = grad_fn_record
@@ -2059,15 +2064,16 @@ def _walk_and_hook_backward_graph(trace: Any, loss: torch.Tensor) -> list[Any]:
             if parent_layer is not None:
                 parent_layer.grad_fn = grad_fn_record
         try:
-            handles.append(
-                grad_fn_handle.register_hook(
-                    _make_grad_fn_hook(
-                        trace,
-                        grad_fn_object_id,
-                        is_accumulate_grad=is_accumulate_grad,
+            with pause_logging():
+                handles.append(
+                    grad_fn_handle.register_hook(
+                        _make_grad_fn_hook(
+                            trace,
+                            grad_fn_object_id,
+                            is_accumulate_grad=is_accumulate_grad,
+                        )
                     )
                 )
-            )
             if is_accumulate_grad:
                 handles.append(
                     grad_fn_handle.register_prehook(_make_grad_fn_prehook(trace, grad_fn_object_id))
