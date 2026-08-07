@@ -15,11 +15,13 @@ from ..ir.events import OpEvent
 from ..utils.tensor_utils import safe_copy
 from .kernel import CaptureKernel
 from .ledgers import (
+    DecisionMapping,
     DecisionLedger,
     DecisionRecord,
-    EventFact,
+    EventFactSequence,
     EventId,
     EventJournal,
+    PayloadMapping,
     PayloadLedger,
     PayloadRecord,
 )
@@ -59,18 +61,28 @@ class CapturedRunCore:
 
     Parameters
     ----------
+    events
+        Canonical immutable operation event spine in producer order.
     event_facts
-        Immutable operation facts in producer order.
+        Derived immutable operation-fact sequence.
     decisions
-        Selection and intervention sidecars keyed by stable event identity.
+        Derived selection and intervention view keyed by stable event identity.
     payloads
-        Payload leases keyed by stable event identity.
+        Derived payload view keyed by stable event identity.
     """
 
-    event_facts: tuple[EventFact, ...]
-    decisions: Mapping[EventId, DecisionRecord]
-    payloads: Mapping[EventId, PayloadRecord]
+    events: tuple[OpEvent, ...]
     projection_facts: Mapping[str, Any]
+    event_facts: EventFactSequence = field(init=False)
+    decisions: Mapping[EventId, DecisionRecord] = field(init=False)
+    payloads: Mapping[EventId, PayloadRecord] = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Bind all compatibility views to the single sealed event tuple."""
+
+        object.__setattr__(self, "event_facts", EventFactSequence(self.events))
+        object.__setattr__(self, "decisions", DecisionMapping(self.events))
+        object.__setattr__(self, "payloads", PayloadMapping(self.events))
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +181,24 @@ class CaptureSession:
     def __post_init__(self) -> None:
         """Compile the session's fixed-order capture kernel."""
 
+        self.decision_ledger.bind(self.event_journal)
+        self.payload_ledger.bind(self.event_journal)
         self.kernel = CaptureKernel(self)
+
+    def bind_event_spine(self, events: list[OpEvent]) -> None:
+        """Bind session views to the active ``CaptureEvents`` operation list.
+
+        Parameters
+        ----------
+        events
+            Canonical mutable operation-event list for this capture run.
+        """
+
+        if self._sealed_core is not None:
+            raise RuntimeError("Cannot bind a capture spine after the run core is sealed.")
+        self.event_journal.bind(events)
+        self.decision_ledger.bind(self.event_journal)
+        self.payload_ledger.bind(self.event_journal)
 
     def release(self) -> None:
         """Release all run-local compatibility sidecars.
@@ -447,7 +476,7 @@ class CaptureSession:
         trace.__dict__.pop("_deferred_gradient_selector", None)
 
     def observe_event(self, event: OpEvent) -> None:
-        """Populate stage-2 sidecars from an existing producer event.
+        """Validate a compatibility observation against the canonical spine.
 
         Parameters
         ----------
@@ -459,10 +488,12 @@ class CaptureSession:
 
         if self._sealed_core is not None:
             raise RuntimeError("Cannot append capture facts after the run core is sealed.")
-        event_id = self.event_journal.append(event)
-        self.decision_ledger.append_from_event(event_id, event)
-        self.payload_ledger.append_from_event(event_id, event)
-        self.counters["events"] = self.counters.get("events", 0) + 1
+        event_id = EventId.from_event(event)
+        if self.event_journal.events and self.event_journal.events[-1] is event:
+            return
+        existing = self.event_journal.by_id.get(event_id)
+        if existing is None or existing.event is not event:
+            raise ValueError(f"Observed event is absent from the canonical spine: {event_id!r}")
 
     def note_legacy_emission(self) -> None:
         """Record entry through the Stage-1 producer compatibility seam.
@@ -474,7 +505,7 @@ class CaptureSession:
             remains solely responsible for capture behavior.
         """
 
-        self.counters["producer_emissions"] = self.counters.get("producer_emissions", 0) + 1
+        return
 
     def replace_event(self, event: OpEvent) -> None:
         """Mirror an existing immutable producer-event replacement.
@@ -487,9 +518,10 @@ class CaptureSession:
 
         if self._sealed_core is not None:
             raise RuntimeError("Cannot replace capture facts after the run core is sealed.")
-        event_id = self.event_journal.replace(event)
-        self.decision_ledger.append_from_event(event_id, event)
-        self.payload_ledger.append_from_event(event_id, event)
+        event_id = EventId.from_event(event)
+        existing = self.event_journal.by_id.get(event_id)
+        if existing is None or existing.event is not event:
+            raise ValueError(f"Replacement is absent from the canonical spine: {event_id!r}")
 
     def seal(self) -> CapturedRunCore:
         """Seal and return the repeatedly readable projection source.
@@ -502,10 +534,11 @@ class CaptureSession:
         """
 
         if self._sealed_core is None:
+            events = tuple(self.event_journal.events)
+            self.counters["events"] = len(events)
+            self.counters["producer_emissions"] = len(events)
             self._sealed_core = CapturedRunCore(
-                event_facts=self.event_journal.facts,
-                decisions=MappingProxyType(dict(self.decision_ledger.records)),
-                payloads=MappingProxyType(dict(self.payload_ledger.records)),
+                events=events,
                 projection_facts=MappingProxyType(dict(self.projection_facts)),
             )
         return self._sealed_core
@@ -893,6 +926,10 @@ def attach_capture_events_session(events: object, session: CaptureSession) -> No
         Stage-2 run owner that mirrors producer facts into its ledgers.
     """
 
+    op_events = getattr(events, "op_events", None)
+    if not isinstance(op_events, list):
+        raise TypeError("Capture event buffers must expose a mutable op_events list.")
+    session.bind_event_spine(op_events)
     event_id = id(events)
 
     def discard_events(

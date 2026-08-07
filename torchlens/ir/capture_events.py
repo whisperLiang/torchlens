@@ -85,8 +85,6 @@ class CaptureEvents:
     recent_events: deque[RecordContext] = field(default_factory=deque)
     backend_session: object | None = None
     live_by_raw_label: dict[str, "LiveOpRecord"] = field(default_factory=dict)
-    op_event_by_label_raw: dict[str, OpEvent] = field(default_factory=dict)
-    op_event_index_by_label_raw: dict[str, int] = field(default_factory=dict)
     live_index: LiveIndex = field(default_factory=LiveIndex)
     parent_op_label_raws: dict[str, list[str]] = field(default_factory=dict)
     child_op_label_raws: dict[str, list[str]] = field(default_factory=dict)
@@ -96,6 +94,97 @@ class CaptureEvents:
     module_stack_by_label_raw: dict[str, tuple[str, ...]] = field(default_factory=dict)
     grad_fn_handles_by_label_raw: dict[str, Any] = field(default_factory=dict)
     backward_event_seq: int = 0
+
+    @property
+    def op_event_by_label_raw(self) -> dict[str, OpEvent]:
+        """Return the label lookup derived from the shared live index.
+
+        Returns
+        -------
+        dict[str, OpEvent]
+            Canonical live label-to-event mapping.
+        """
+
+        return self.live_index.by_raw_label
+
+    @op_event_by_label_raw.setter
+    def op_event_by_label_raw(self, events_by_label: dict[str, OpEvent]) -> None:
+        """Replace the canonical label lookup and synchronize live edges.
+
+        Parameters
+        ----------
+        events_by_label
+            Replacement mapping, normally derived from ``op_events`` by a
+            compatibility projector.
+        """
+
+        self.live_index.by_raw_label = events_by_label
+        self.live_index.labels = list(events_by_label)
+        self.live_index.rebuild_edges()
+
+    @property
+    def op_event_index_by_label_raw(self) -> dict[str, int]:
+        """Derive the legacy label-to-position view from the canonical spine.
+
+        Returns
+        -------
+        dict[str, int]
+            Event positions keyed by raw label.
+        """
+
+        return {event.label_raw: index for index, event in enumerate(self.op_events)}
+
+    @op_event_index_by_label_raw.setter
+    def op_event_index_by_label_raw(self, indexes: dict[str, int]) -> None:
+        """Accept a legacy derived-index assignment without retaining it.
+
+        Parameters
+        ----------
+        indexes
+            Derived positions supplied by compatibility projectors. The
+            canonical ``op_events`` order remains authoritative.
+
+        Raises
+        ------
+        ValueError
+            If the supplied view disagrees with the canonical event order.
+        """
+
+        expected = {event.label_raw: index for index, event in enumerate(self.op_events)}
+        if indexes != expected:
+            raise ValueError("Operation event indexes must match the canonical event spine.")
+
+    def _event_position(self, event: OpEvent) -> int | None:
+        """Return one event's canonical list position without a retained index.
+
+        Parameters
+        ----------
+        event
+            Existing operation event to locate.
+
+        Returns
+        -------
+        int | None
+            Producer-order position, or ``None`` when absent.
+        """
+
+        if self.op_events:
+            position = event.raw_index - self.op_events[0].raw_index
+            if 0 <= position < len(self.op_events):
+                candidate = self.op_events[position]
+                if (
+                    candidate.raw_index == event.raw_index
+                    and candidate.label_raw == event.label_raw
+                ):
+                    return position
+        return next(
+            (
+                index
+                for index, candidate in enumerate(self.op_events)
+                if candidate.raw_index == event.raw_index and candidate.label_raw == event.label_raw
+            ),
+            None,
+        )
 
     def copy_for_replay(self) -> "CaptureEvents":
         """Return a structural working projection for postprocess mutation.
@@ -149,11 +238,6 @@ class CaptureEvents:
             recent_events=deque(self.recent_events),
             backend_session=self.backend_session,
             live_by_raw_label=dict(self.live_by_raw_label),
-            op_event_by_label_raw={
-                label: cloned_by_label.get(label, _clone_op_event_for_replay(event))
-                for label, event in self.op_event_by_label_raw.items()
-            },
-            op_event_index_by_label_raw=dict(self.op_event_index_by_label_raw),
             live_index=projected_index,
             parent_op_label_raws={
                 key: list(value) for key, value in self.parent_op_label_raws.items()
@@ -191,8 +275,6 @@ class CaptureEvents:
         self.conditional_events.clear()
         self.output_version_events.clear()
         self.live_by_raw_label.clear()
-        self.op_event_by_label_raw.clear()
-        self.op_event_index_by_label_raw.clear()
         self.live_index.clear()
         self.grad_fn_handles_by_label_raw.clear()
 
@@ -250,7 +332,6 @@ class CaptureEvents:
                 )
             )
         self.op_events = structural_events
-        self.op_event_by_label_raw = {event.label_raw: event for event in structural_events}
         self.module_events = [
             replace(event, forward_args=None, forward_kwargs=None) for event in self.module_events
         ]
@@ -290,6 +371,7 @@ class CaptureEvents:
         ]
         self.live_by_raw_label.clear()
         self.live_index.clear()
+        self.live_index.by_raw_label = {event.label_raw: event for event in structural_events}
         self.backend_session = None
         self.grad_fn_handles_by_label_raw.clear()
         self.recent_events.clear()
@@ -302,15 +384,8 @@ class CaptureEvents:
 
     def append(self, event: OpEvent) -> None:
         """Append a single operation event."""
-        self.op_event_index_by_label_raw[event.label_raw] = len(self.op_events)
         self.op_events.append(event)
-        self.op_event_by_label_raw[event.label_raw] = event
         self.live_index.append(event)
-        from ..capture.session import capture_session_for_events
-
-        session = capture_session_for_events(self)
-        if session is not None:
-            session.observe_event(event)
 
     def append_backward(
         self,
@@ -452,27 +527,11 @@ def replace_op_event(trace: Any, label_raw: str, **updates: Any) -> OpEvent | No
     if event is None:
         return None
     updated_event = replace(event, **updates)
-    events.op_event_by_label_raw[label_raw] = updated_event
-    index = events.op_event_index_by_label_raw.get(label_raw)
+    index = events._event_position(event)
     if index is None:
-        index = next(
-            (
-                candidate_index
-                for candidate_index, candidate in enumerate(events.op_events)
-                if candidate.label_raw == label_raw
-            ),
-            None,
-        )
-        if index is None:
-            return updated_event
-        events.op_event_index_by_label_raw[label_raw] = index
+        return updated_event
     events.op_events[index] = updated_event
     events.live_index.replace(updated_event)
-    from ..capture.session import capture_session_for_events
-
-    session = capture_session_for_events(events)
-    if session is not None:
-        session.replace_event(updated_event)
     return updated_event
 
 
