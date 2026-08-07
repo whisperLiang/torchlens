@@ -1388,11 +1388,19 @@ class Op:
         except AttributeError:
             return default
 
-    def __getattribute__(self, name: str) -> Any:
+    def __getattribute__(
+        self,
+        name: str,
+        # Bound once at definition time: this method runs on EVERY attribute
+        # read (150-200k per trace), so even the cached LOAD_GLOBAL for these
+        # two names was measurable; LOAD_FAST via default args is cheaper.
+        _getattribute: Callable[[Any, str], Any] = _object_getattribute,
+        _lazy_fields: frozenset = _LAZY_READ_FIELDS,
+    ) -> Any:
         """Materialize lazy grads and reject finalized unsaved predicate outs."""
 
-        if name not in _LAZY_READ_FIELDS:
-            return _object_getattribute(self, name)
+        if name not in _lazy_fields:
+            return _getattribute(self, name)
         if name == "grad":
             slot = _object_getattribute(self, "_slot")
             records = slot("_grad_records")
@@ -1446,9 +1454,18 @@ class Op:
                     "_label_raw": slot("_label_raw"),
                 }
                 _validate_reference_out_not_mutated(state)
-        return _object_getattribute(self, name)
+        return _getattribute(self, name)
 
-    def __setattr__(self, name: str, value: Any) -> None:
+    def __setattr__(
+        self,
+        name: str,
+        value: Any,
+        # Same definition-time binding as ``__getattribute__``: capture writes
+        # every Op field through here, so the two globals are hoisted to
+        # LOAD_FAST default args.
+        _setattr: Callable[[Any, str, Any], None] = _object_setattr,
+        _guarded_fields: frozenset = _DIRECT_WRITE_GUARDED_FIELDS,
+    ) -> None:
         """Mark owning logs dirty when user code directly writes guarded fields.
 
         Parameters
@@ -1462,7 +1479,7 @@ class Op:
         # Guarded-name test first: it is a pure frozenset probe that is False for
         # almost every write, so the (side-effect-free) construction-done slot
         # read is skipped entirely on the hot path.
-        if name in _DIRECT_WRITE_GUARDED_FIELDS and self._slot("_construction_done", False):
+        if name in _guarded_fields and self._slot("_construction_done", False):
             owner = self._slot("_source_trace_ref")
             trace = owner() if owner is not None else None
             if trace is not None:
@@ -1476,7 +1493,7 @@ class Op:
                         stacklevel=2,
                     )
                     object.__setattr__(trace, "_warned_direct_write", True)
-        _object_setattr(self, name, value)
+        _setattr(self, name, value)
 
     def _internal_set(self, attr: str, value: Any) -> None:
         """Set an attribute without marking the owner dirty.

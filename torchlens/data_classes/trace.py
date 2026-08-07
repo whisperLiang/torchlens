@@ -951,6 +951,15 @@ class Trace(
         state_field = _BUILD_STATE_ATTR_MAP_GET(name)
         if state_field is None:
             raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
+        # Hot path: during capture every mapped-attribute read lands here
+        # (30-40k misses per trace), and the build state is already the healthy
+        # object ``_ensure_build_state`` would return unchanged. Read it inline
+        # to skip that call's frame and its repeated dict/isinstance checks.
+        # Any other state (absent, wrong type, empty module_build_data,
+        # subclass) falls through to the original slow path unchanged.
+        build_state = self.__dict__.get("_build_state")
+        if build_state.__class__ is TraceBuildState and build_state.module_build_data:
+            return getattr(build_state, state_field)
         if (
             name != "_in_exhaustive_pass"
             and "_build_state" not in self.__dict__

@@ -725,8 +725,33 @@ def active_logging(trace: "Trace") -> Iterator[None]:
         _active_owner_thread_id = None
 
 
-@contextmanager
-def pause_logging() -> Iterator[None]:
+class _PauseLogging:
+    """One-shot context manager that pauses the logging toggle.
+
+    A plain ``__slots__`` class instead of a ``@contextmanager`` generator:
+    ``pause_logging()`` is entered tens of thousands of times per trace, and the
+    generator machinery (``_GeneratorContextManager.__init__`` + ``next``/throw
+    dispatch in ``__enter__``/``__exit__``) was several percent of capture wall
+    time. Semantics are identical: the toggle state is saved at ``__enter__``
+    (not at construction), restored unconditionally on exit — including on
+    exception, matching the generator's ``finally`` — and exceptions are never
+    suppressed. Nesting works because every ``pause_logging()`` call returns a
+    fresh instance with its own saved state.
+    """
+
+    __slots__ = ("_prev",)
+
+    def __enter__(self) -> None:
+        global _logging_enabled
+        self._prev = _logging_enabled  # save current state (True or False)
+        _logging_enabled = False
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        global _logging_enabled
+        _logging_enabled = self._prev  # restore — enables nesting without corruption
+
+
+def pause_logging() -> _PauseLogging:
     """Temporarily disable logging so internal torch ops don't get recorded.
 
     Nestable via save/restore: if already paused, restoring ``prev`` (False)
@@ -740,10 +765,4 @@ def pause_logging() -> Iterator[None]:
         - ``safe_copy``: copies tensors without logging the copy op
         - ``activation_transform``: applies user post-processing without logging
     """
-    global _logging_enabled
-    prev = _logging_enabled  # save current state (True or False)
-    _logging_enabled = False
-    try:
-        yield
-    finally:
-        _logging_enabled = prev  # restore — enables nesting without corruption
+    return _PauseLogging()
