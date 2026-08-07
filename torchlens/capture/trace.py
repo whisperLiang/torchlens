@@ -1406,39 +1406,68 @@ def run_and_log_inputs_through_model(
                             # frozen vocabulary. Any touch is permanently unreplayable
                             # (no identifiable seed); monitor uncertainty downgrades
                             # completeness, never reads as no-consumption.
-                            from ..utils.rng import host_nondeterminism_monitor
-
+                            #
+                            # The channel monitor is armed ONLY for runnable-capable
+                            # captures: ``intervention_ready`` is the exact predicate
+                            # for "this capture can produce a passing sparse runnable
+                            # descriptor" (the same predicate that gates the ambient
+                            # execution-context snapshot above), and the descriptor
+                            # builder is the witness verdict's only consumer. A
+                            # disarmed capture stamps ``monitor_uncertain`` fail-closed
+                            # so any unforeseen descriptor build ceilings through the
+                            # existing RNG_MONITOR_UNCERTAIN witness gap
+                            # (unverifiable, never a silent false VERIFIED) -- channel
+                            # coverage on the disarmed lane is unknowable, not absent.
                             _host_rng_before = snapshot_host_rng()
-                            with host_nondeterminism_monitor(model) as _rng_channels:
+                            if bool(getattr(self, "intervention_ready", False)):
+                                from ..utils.rng import host_nondeterminism_monitor
+
+                                with host_nondeterminism_monitor(model) as _rng_channels:
+                                    outputs = cast(Callable[..., Any], model)(
+                                        *input_args, **input_kwargs
+                                    )
+                            else:
+                                _rng_channels = None
                                 outputs = cast(Callable[..., Any], model)(
                                     *input_args, **input_kwargs
                                 )
                             _global_advanced = host_rng_advanced(
                                 _host_rng_before, snapshot_host_rng()
                             )
-                            # r65 CLUSTER Z stamping split: a torch RNG
-                            # ``replayable_read`` (the ``initial_seed`` family --
-                            # a host scalar fully determined by the capture seed)
-                            # sets CONSUMED without poisoning the capture seed, so
-                            # a run at the capture seed stays verified while any
-                            # other/absent seed ceilings; ceiling ``channels``
-                            # alone decide UNREPLAYABLE.
-                            self._runnable_host_rng_consumed = (
-                                _global_advanced
-                                or bool(_rng_channels.channels)
-                                or bool(_rng_channels.replayable_reads)
-                            )
-                            self._runnable_host_rng_unreplayable = bool(_rng_channels.channels)
-                            self._runnable_host_rng_channels = tuple(sorted(_rng_channels.channels))
-                            self._runnable_host_rng_replayable_reads = tuple(
-                                sorted(_rng_channels.replayable_reads)
-                            )
-                            self._runnable_rng_monitor_uncertain = bool(_rng_channels.uncertain)
-                            # r39 CLASS A: name the offending threads / coverage failure so
-                            # the INCOMPLETE ceiling's readiness diagnostic is actionable.
-                            self._runnable_rng_monitor_uncertain_detail = tuple(
-                                _rng_channels.uncertain_detail
-                            )
+                            if _rng_channels is not None:
+                                # r65 CLUSTER Z stamping split: a torch RNG
+                                # ``replayable_read`` (the ``initial_seed`` family --
+                                # a host scalar fully determined by the capture seed)
+                                # sets CONSUMED without poisoning the capture seed, so
+                                # a run at the capture seed stays verified while any
+                                # other/absent seed ceilings; ceiling ``channels``
+                                # alone decide UNREPLAYABLE.
+                                self._runnable_host_rng_consumed = (
+                                    _global_advanced
+                                    or bool(_rng_channels.channels)
+                                    or bool(_rng_channels.replayable_reads)
+                                )
+                                self._runnable_host_rng_unreplayable = bool(_rng_channels.channels)
+                                self._runnable_host_rng_channels = tuple(
+                                    sorted(_rng_channels.channels)
+                                )
+                                self._runnable_host_rng_replayable_reads = tuple(
+                                    sorted(_rng_channels.replayable_reads)
+                                )
+                                self._runnable_rng_monitor_uncertain = bool(_rng_channels.uncertain)
+                                # r39 CLASS A: name the offending threads / coverage
+                                # failure so the INCOMPLETE ceiling's readiness
+                                # diagnostic is actionable.
+                                self._runnable_rng_monitor_uncertain_detail = tuple(
+                                    _rng_channels.uncertain_detail
+                                )
+                            else:
+                                # Global engines are still bracketed (cheap); the
+                                # channel verdict was never observed, so it must
+                                # read as UNKNOWABLE, never as no-consumption.
+                                self._runnable_host_rng_consumed = _global_advanced
+                                self._runnable_rng_monitor_uncertain = True
+                                self._runnable_rng_monitor_uncertain_detail = ("monitor_not_armed",)
 
         backend.finalize_forward_session(self)
 
