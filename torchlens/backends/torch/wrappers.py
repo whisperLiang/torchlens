@@ -12,7 +12,7 @@ import time
 import types
 import weakref
 import warnings
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Callable, Collection, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial, wraps
@@ -30,7 +30,7 @@ import torch
 from torch.overrides import handle_torch_function, has_torch_function_unary  # noqa: F401
 
 from ... import _state
-from ...constants import get_orig_torch_funcs
+from ...constants import _get_torchvision_funcs, get_orig_torch_funcs
 from ...data_classes.func_call_location import FuncCallLocation
 from ._tl import (
     get_param_meta,
@@ -2136,32 +2136,6 @@ def decorate_all_once() -> None:
     # decoration. Using _is_decorated (set at end of this function) ensures
     # retry after partial failure (#138).
 
-    # Pre-compute type objects for efficient isinstance-like checks below.
-    function_class = type(lambda: 0)  # <class 'function'>
-    builtin_class = type(torch.mean)  # <class 'builtin_function_or_method'>
-    method_class = type(torch.Tensor.__add__)  # <class 'method_descriptor'>
-    wrapper_class = type(torch.Tensor.__getitem__)  # <class 'method-wrapper'>
-    getset_class = type(torch.Tensor.real)  # <class 'getset_descriptor'> (properties)
-
-    # --- Pass 1: Collect argument names before any decoration ---
-    # inspect.signature() must run against the pristine torch namespace.
-    # Python 3.14+ (PEP 649) evaluates annotations lazily; if we decorate
-    # Tensor.bool first, then inspect Tensor.dim_order, the annotation
-    # bool | list[...] resolves bool to our wrapper -> TypeError (#138).
-    for namespace_name, func_name in get_orig_torch_funcs():
-        # Exact-name dedup (W3 F9): ``add``, ``add_``, and ``__add__`` have
-        # meaningfully different signatures, so each registers its own entry.
-        # The historical stripped-key dedup made whichever spelling appeared
-        # first swallow all the others' registrations.
-        if func_name in _state._arg_names:
-            continue
-        namespace_key = namespace_name.replace("torch.", "")
-        local_func_namespace = nested_getattr(torch, namespace_key)
-        if not hasattr(local_func_namespace, func_name):
-            continue
-        orig_func = getattr(local_func_namespace, func_name)
-        get_arg_names(orig_func, func_name)
-
     # Collect immutable device-constructor names before creating wrappers so each
     # closure can hoist the membership test out of its per-call dispatch path.
     device_constructors = get_device_constructors()
@@ -2178,8 +2152,91 @@ def decorate_all_once() -> None:
                 "factory-function device injection inventory could not be evaluated",
             )
 
+    _decorate_torch_func_pairs(get_orig_torch_funcs())
+
+    # ---- JIT builtin table registration ----
+    # torch.jit._builtins._builtin_table maps id(func) -> ATen op name.
+    # We must register our wrappers so JIT recognizes them as the same ops.
+    # Without this, torch.jit.script fails on any code using wrapped functions.
+    _register_jit_builtin_wrappers()
+
+    # ---- DeviceContext bypass setup ----
+    # Collect names of factory functions (zeros, ones, empty, etc.) that accept
+    # a device kwarg. The lru_cache must be cleared first so _device_constructors()
+    # re-evaluates with our wrapped functions (otherwise it returns stale refs).
+    if device_constructors is not None:
+        try:
+            device_constructors.cache_clear()
+            for ctor in device_constructors():
+                name = getattr(ctor, "__name__", None)
+                if name:
+                    _DEVICE_CONSTRUCTOR_NAMES.add(name)
+        except (AttributeError, TypeError):
+            mark_torch_capability_missing(
+                "HAS_DEVICE_CONSTRUCTORS",
+                "factory-function device injection inventory could not be evaluated",
+            )
+
+    # Create the decorated identity — a no-op that forces a new log entry at
+    # module boundaries (nn.Identity, pass-through outputs).  Stored on _state
+    # instead of monkey-patching torch.identity (which doesn't exist in PyTorch
+    # type stubs and causes mypy errors).
+    _state._decorated_identity = torch_func_decorator(identity, "identity")
+    _decorate_transform_builders()
+    _decorate_direct_transforms()
+    _state._is_decorated = True
+
+    # Wrapping __getitem__ on torch.Tensor pollutes the C-level sq_item slot,
+    # making PySequence_Check(tensor) return True.  Clear it so torch.tensor()
+    # doesn't try to iterate 0-d tensor elements as sequences.
+    _fix_tensor_sequence_slot()
+
+
+def _decorate_torch_func_pairs(func_pairs: list[tuple[str, str]]) -> None:
+    """Collect argument names, then decorate one batch of torch func targets.
+
+    Shared by ``decorate_all_once`` (the full inventory) and
+    ``_ensure_torchvision_ops_decorated`` (torchvision custom ops imported
+    after the first wrap). Idempotent per pair: already-registered arg names
+    and already-decorated functions are skipped.
+
+    Parameters
+    ----------
+    func_pairs:
+        ``(namespace, func_name)`` targets to decorate.
+    """
+    # Pre-compute type objects for efficient isinstance-like checks below.
+    # These MUST come from ``types`` constants, not live torch attributes
+    # (e.g. ``type(torch.mean)``): when this helper runs after decoration
+    # (late torchvision import), the torch attributes are already wrappers and
+    # probing them would misclassify every pristine C callable.
+    function_class = types.FunctionType  # <class 'function'>
+    builtin_class = types.BuiltinFunctionType  # <class 'builtin_function_or_method'>
+    method_class = types.MethodDescriptorType  # <class 'method_descriptor'>
+    wrapper_class = types.WrapperDescriptorType  # <class 'wrapper_descriptor'>
+    getset_class = types.GetSetDescriptorType  # <class 'getset_descriptor'> (properties)
+
+    # --- Pass 1: Collect argument names before any decoration ---
+    # inspect.signature() must run against the pristine torch namespace.
+    # Python 3.14+ (PEP 649) evaluates annotations lazily; if we decorate
+    # Tensor.bool first, then inspect Tensor.dim_order, the annotation
+    # bool | list[...] resolves bool to our wrapper -> TypeError (#138).
+    for namespace_name, func_name in func_pairs:
+        # Exact-name dedup (W3 F9): ``add``, ``add_``, and ``__add__`` have
+        # meaningfully different signatures, so each registers its own entry.
+        # The historical stripped-key dedup made whichever spelling appeared
+        # first swallow all the others' registrations.
+        if func_name in _state._arg_names:
+            continue
+        namespace_key = namespace_name.replace("torch.", "")
+        local_func_namespace = nested_getattr(torch, namespace_key)
+        if not hasattr(local_func_namespace, func_name):
+            continue
+        orig_func = getattr(local_func_namespace, func_name)
+        get_arg_names(orig_func, func_name)
+
     # --- Pass 2: Decorate all functions ---
-    for namespace_name, func_name in get_orig_torch_funcs():
+    for namespace_name, func_name in func_pairs:
         namespace_key = namespace_name.replace("torch.", "")
         local_func_namespace = nested_getattr(torch, namespace_key)
         if not hasattr(local_func_namespace, func_name):
@@ -2252,42 +2309,36 @@ def decorate_all_once() -> None:
             except (AttributeError, TypeError):
                 pass
 
-    # ---- JIT builtin table registration ----
-    # torch.jit._builtins._builtin_table maps id(func) -> ATen op name.
-    # We must register our wrappers so JIT recognizes them as the same ops.
-    # Without this, torch.jit.script fails on any code using wrapped functions.
+
+_torchvision_ops_ensured = False
+"""Whether torchvision custom ops are confirmed decorated (or confirmed no-op)."""
+
+
+def _ensure_torchvision_ops_decorated() -> None:
+    """Decorate torchvision custom ops when torchvision appears after first wrap.
+
+    TorchLens never imports torchvision itself (the eager probe cost ~1.9 s
+    and ~150 MB RSS on the first capture of ANY model). ``decorate_all_once``
+    therefore only covers ``torch.ops.torchvision.*`` targets when torchvision
+    was already imported by the user at first-wrap time. A user may import
+    torchvision *after* the first capture; this per-wrap re-check decorates
+    those ops before the next capture begins, so torchvision models wrap
+    exactly as they did under the eager probe. A model cannot call a
+    torchvision op without torchvision imported (the ops only register with
+    the dispatcher during ``import torchvision``), so checking at wrap time is
+    exact, not heuristic. Once confirmed, this reduces to one flag check.
+    """
+    global _torchvision_ops_ensured
+    if _torchvision_ops_ensured or not _state._is_decorated:
+        return
+    torchvision_pairs = _get_torchvision_funcs()
+    if not torchvision_pairs:
+        return  # torchvision absent or mid-import; re-check on the next wrap
+    _decorate_torch_func_pairs(torchvision_pairs)
+    # Idempotent re-registration keeps parity with the imported-before-wrap
+    # path, where these pairs were present during the one-time registration.
     _register_jit_builtin_wrappers()
-
-    # ---- DeviceContext bypass setup ----
-    # Collect names of factory functions (zeros, ones, empty, etc.) that accept
-    # a device kwarg. The lru_cache must be cleared first so _device_constructors()
-    # re-evaluates with our wrapped functions (otherwise it returns stale refs).
-    if device_constructors is not None:
-        try:
-            device_constructors.cache_clear()
-            for ctor in device_constructors():
-                name = getattr(ctor, "__name__", None)
-                if name:
-                    _DEVICE_CONSTRUCTOR_NAMES.add(name)
-        except (AttributeError, TypeError):
-            mark_torch_capability_missing(
-                "HAS_DEVICE_CONSTRUCTORS",
-                "factory-function device injection inventory could not be evaluated",
-            )
-
-    # Create the decorated identity — a no-op that forces a new log entry at
-    # module boundaries (nn.Identity, pass-through outputs).  Stored on _state
-    # instead of monkey-patching torch.identity (which doesn't exist in PyTorch
-    # type stubs and causes mypy errors).
-    _state._decorated_identity = torch_func_decorator(identity, "identity")
-    _decorate_transform_builders()
-    _decorate_direct_transforms()
-    _state._is_decorated = True
-
-    # Wrapping __getitem__ on torch.Tensor pollutes the C-level sq_item slot,
-    # making PySequence_Check(tensor) return True.  Clear it so torch.tensor()
-    # doesn't try to iterate 0-d tensor elements as sequences.
-    _fix_tensor_sequence_slot()
+    _torchvision_ops_ensured = True
 
 
 def _weak_owner_ref(owner: Any) -> Callable[[], Any | None]:
@@ -2386,6 +2437,7 @@ def _reset_detached_patch_epoch_state() -> None:
     _state._crawled_module_identities.clear()
     _state._detached_positive_module_ids.clear()
     _state._detached_positive_modules.clear()
+    _invalidate_live_modules_derived_caches()
 
 
 def unwrap_torch() -> None:
@@ -2640,6 +2692,10 @@ def wrap_torch(
     _configure_escape_detector(escape_detector)
     _configure_completeness_witness(completeness_witness)
 
+    # Torchvision is probed lazily (never imported by TorchLens); a user import
+    # that landed after the first wrap gets its custom ops decorated here.
+    _ensure_torchvision_ops_decorated()
+
     if _state._is_decorated:
         install_autograd_wrappers()
         if patch_policy is not None or patch_modules:
@@ -2683,6 +2739,9 @@ def wrap_torch(
     # Recreate decorated identity in case wrapper references shifted
     _state._decorated_identity = torch_func_decorator(identity, "identity")
     _state._is_decorated = True
+    # A torchvision import that landed while torch was unwrapped is invisible
+    # to the reinstall loop above (its ops were never in the wrapper maps).
+    _ensure_torchvision_ops_decorated()
     install_autograd_wrappers()
     patch_detached_references(policy=effective_policy, modules=patch_modules)
 
@@ -2790,6 +2849,7 @@ def patch_detached_references(
     PatchReport
         Structured discovery and mutation counts.
     """
+    global _live_modules_all_crawled
     if full is not None and policy is not None:
         raise ValueError("full and policy cannot be supplied together.")
     requested_policy: DetachedPatchPolicy | Literal["default"] | None = policy
@@ -2807,9 +2867,14 @@ def patch_detached_references(
         return PatchReport(effective_policy, _state._detached_patch_epoch)
 
     live_modules = _distinct_live_modules()
-    new_module_ids = {
-        id(module) for _, module in live_modules if not _module_identity_was_crawled(module)
-    }
+    if _live_modules_all_crawled:
+        # A completed pass already crawled every identity in this exact
+        # snapshot during this epoch, so no module can be new.
+        new_module_ids: frozenset[int] | set[int] = frozenset()
+    else:
+        new_module_ids = {
+            id(module) for _, module in live_modules if not _module_identity_was_crawled(module)
+        }
     counters = {
         "module_identities_scanned": 0,
         "deep_modules_scanned": 0,
@@ -2821,14 +2886,31 @@ def patch_detached_references(
     scoped_hot_ids = _scoped_hot_module_ids(model, module_names, live_modules)
     force_full_scan = requested_policy == "full"
 
+    # Precompute the exact scan set (identical membership and order to the
+    # historical per-module should_scan test) so the steady-state pass touches
+    # only hot/new modules instead of iterating every live module.
+    scan_list: Sequence[tuple[str, types.ModuleType]]
+    if force_full_scan:
+        scan_list = live_modules
+    elif effective_policy == "scoped":
+        if new_module_ids:
+            scan_list = [
+                entry
+                for entry in live_modules
+                if id(entry[1]) in new_module_ids or id(entry[1]) in scoped_hot_ids
+            ]
+        elif scoped_hot_ids:
+            scan_list = [entry for entry in live_modules if id(entry[1]) in scoped_hot_ids]
+        else:
+            scan_list = ()
+    elif new_module_ids:
+        scan_list = [entry for entry in live_modules if id(entry[1]) in new_module_ids]
+    else:
+        scan_list = ()
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        for mod_key, mod in live_modules:
-            should_scan = force_full_scan or id(mod) in new_module_ids
-            if effective_policy == "scoped" and id(mod) in scoped_hot_ids:
-                should_scan = True
-            if not should_scan:
-                continue
+        for mod_key, mod in scan_list:
             _state._crawled_module_keys.add(mod_key)
             _remember_crawled_module_identity(mod)
             if _should_skip_detached_module_key(mod_key, effective_policy):
@@ -2882,6 +2964,11 @@ def patch_detached_references(
                 if not is_type and _safe_is_callable(attr_val):
                     counters["slots_patched"] += _patch_function_defaults(attr_val, mapping)
 
+    # Pass completed without raising: every identity in the cached snapshot is
+    # now crawled for this epoch (previously-known + freshly-scanned), so the
+    # next unchanged-snapshot capture can skip the was-crawled scan entirely.
+    _live_modules_all_crawled = True
+
     return PatchReport(
         policy=effective_policy,
         epoch=_state._detached_patch_epoch,
@@ -2893,12 +2980,46 @@ def patch_detached_references(
     )
 
 
-def _distinct_live_modules() -> list[tuple[str, types.ModuleType]]:
-    """Return one stable sys.modules entry per live module identity."""
+# --- Per-capture sys.modules crawl cache (S3) ---
+# Rebuilding the distinct-live-module snapshot and re-deriving per-snapshot
+# work cost ~20 ms per capture in a fat env (~3k modules) — the dominant fixed
+# floor for cheap models. The snapshot is a pure function of sys.modules
+# items, so it is cached and revalidated EXACTLY each call: the raw items are
+# compared against the previous call's items with C-level identity-shortcut
+# list equality, catching any import, deletion, reload, or manual assignment.
+_live_modules_items: list[tuple[str, types.ModuleType]] | None = None
+_live_modules_snapshot: list[tuple[str, types.ModuleType]] = []
+_live_modules_all_crawled = False
+"""True once a completed patch pass has crawled every identity in the cached
+snapshot for the current wrapper epoch; lets steady-state captures skip the
+per-module was-crawled scan. Reset on snapshot rebuild and epoch/cache clears."""
+_allowlist_match_ids: dict[frozenset[str], frozenset[int]] = {}
+"""Per-snapshot cache of scoped allowlist matches: names -> live module ids."""
 
+
+def _invalidate_live_modules_derived_caches() -> None:
+    """Drop snapshot-derived caches (was-crawled flag, allowlist matches)."""
+
+    global _live_modules_all_crawled
+    _live_modules_all_crawled = False
+    _allowlist_match_ids.clear()
+
+
+def _distinct_live_modules() -> list[tuple[str, types.ModuleType]]:
+    """Return one stable sys.modules entry per live module identity.
+
+    Cached: the snapshot is reused while ``sys.modules`` items are unchanged
+    (exact identity-level comparison), and rebuilt — invalidating derived
+    caches — on any mutation.
+    """
+
+    global _live_modules_items, _live_modules_snapshot
+    items = list(sys.modules.items())
+    if items == _live_modules_items:
+        return _live_modules_snapshot
     result: list[tuple[str, types.ModuleType]] = []
     seen: set[int] = set()
-    for key, module in list(sys.modules.items()):
+    for key, module in items:
         if not isinstance(module, types.ModuleType):
             continue
         module_id = id(module)
@@ -2906,6 +3027,9 @@ def _distinct_live_modules() -> list[tuple[str, types.ModuleType]]:
             continue
         seen.add(module_id)
         result.append((key, module))
+    _live_modules_items = items
+    _live_modules_snapshot = result
+    _invalidate_live_modules_derived_caches()
     return result
 
 
@@ -2998,10 +3122,22 @@ def _scoped_hot_module_ids(
     _state._detached_positive_modules[:] = live_positive_refs
     _state._detached_positive_module_ids.clear()
     _state._detached_positive_module_ids.update(hot_ids)
-    for key, module in live_modules:
-        name = _safe_module_name(module, key)
-        if _module_matches_allowlist(name, names):
-            hot_ids.add(id(module))
+    # The allowlist-name match over every live module is pure in (snapshot,
+    # names); cache it per snapshot so steady-state captures skip the ~N-module
+    # name walk. Only the canonical cached snapshot uses the cache.
+    names_key = frozenset(names)
+    matched: frozenset[int] | None = None
+    if live_modules is _live_modules_snapshot:
+        matched = _allowlist_match_ids.get(names_key)
+    if matched is None:
+        matched = frozenset(
+            id(module)
+            for key, module in live_modules
+            if _module_matches_allowlist(_safe_module_name(module, key), names)
+        )
+        if live_modules is _live_modules_snapshot:
+            _allowlist_match_ids[names_key] = matched
+    hot_ids |= matched
     return hot_ids
 
 
@@ -3201,12 +3337,18 @@ def clear_patch_detached_references_cache() -> None:
         Cache state is cleared in place.
     """
 
+    global _live_modules_items, _live_modules_snapshot
     _state._crawled_module_keys.clear()
     _state._crawled_module_identities.clear()
     _state._detached_positive_module_ids.clear()
     _state._detached_positive_modules.clear()
     _state._dir_cache.clear()
     _state._detached_source_has_torch.clear()
+    # Drop the snapshot itself too: the cache holds strong references, and
+    # explicit cache clears (tests, diagnostics) expect no module pinning.
+    _live_modules_items = None
+    _live_modules_snapshot = []
+    _invalidate_live_modules_derived_caches()
 
 
 def _patch_function_defaults(func: Any, mapping: dict[int, Any]) -> int:
