@@ -10,6 +10,28 @@ from ._accessor_base import Accessor
 from .op import Op
 
 
+def _group_by_attr(items: Sequence[Any], attr: str) -> dict[Any, list[Any]]:
+    """Group items by one attribute value, preserving accessor list order.
+
+    Parameters
+    ----------
+    items:
+        Ordered accessor items.
+    attr:
+        Attribute name to group by; missing attributes group under ``None``.
+
+    Returns
+    -------
+    dict[Any, list[Any]]
+        Mapping from attribute value to items in list order.
+    """
+
+    index: dict[Any, list[Any]] = {}
+    for item in items:
+        index.setdefault(getattr(item, attr, None), []).append(item)
+    return index
+
+
 class OrphanAccessor(Accessor[Op]):
     """Dict-like accessor for retained orphan ``Op`` records."""
 
@@ -103,6 +125,15 @@ class TraceOpAccessor(Accessor[Op]):
             self._raw_index_lookup[op.raw_index] = op
         super().__init__(op_lookup, item_list=list(ops))
         self._layer_num_calls = dict(layer_num_calls)
+        # Lazily built reverse indexes for ``_resolve_substring``; see
+        # ``_ensure_alias_indexes``. Lifetime is this accessor instance, whose
+        # ``_list`` is immutable post-finalization and already rebuilt through the
+        # existing ``_TRACE_OP_ACCESSOR_CACHE`` invalidation, so this adds no new
+        # invalidation surface.
+        self._alias_index: dict[Any, Op] | None = None
+        self._layer_alias_index: dict[Any, list[Op]] | None = None
+        self._alias_index_unavailable = False
+        self._resolved_op_cache: dict[str, Op] = {}
 
     def by_raw_index(self, raw_index: int) -> Op:
         """Return an Op by its realtime raw capture index.
@@ -149,8 +180,56 @@ class TraceOpAccessor(Accessor[Op]):
             return [direct]
         return [op for op in self._list if key in {op.layer_label, op.layer_label_short}]
 
-    def _resolve_substring(self, key: str) -> Op | None:
-        """Resolve exact long/short Op labels or unique bare parent labels."""
+    def _ensure_alias_indexes(self) -> tuple[dict[Any, Op], dict[Any, list[Op]]] | None:
+        """Build the alias reverse indexes once, or report them unavailable.
+
+        The scanning form of ``_resolve_substring`` returns the FIRST Op in list
+        order any of whose aliases equals the key, where the alias set is the union
+        of the two per-Op match conditions. ``setdefault`` over both conditions in
+        list order therefore stores exactly that minimum-index winner for every
+        alias, and the second index reproduces the bare-parent-label match list in
+        the same order -- so the indexed lookup is result-identical to the scan,
+        ``AmbiguousOpLookupError`` message included.
+
+        Building touches label attributes on every Op, which the early-returning
+        scan may never have reached. If any read fails (e.g. an unfinished Op whose
+        label slot is unset mid-capture), the indexes are abandoned and the scan is
+        used instead, which reproduces the original raise-or-return behavior exactly.
+
+        Returns
+        -------
+        tuple[dict[Any, Op], dict[Any, list[Op]]] | None
+            The ``(alias -> Op, layer alias -> Ops)`` index pair, or ``None`` when
+            the indexes could not be built and the scan must be used.
+        """
+
+        if self._alias_index is not None and self._layer_alias_index is not None:
+            return self._alias_index, self._layer_alias_index
+        if self._alias_index_unavailable:
+            return None
+        alias_index: dict[Any, Op] = {}
+        layer_alias_index: dict[Any, list[Op]] = {}
+        layer_num_calls = self._layer_num_calls
+        try:
+            for op in self._list:
+                layer_label = op.layer_label
+                layer_label_short = op.layer_label_short
+                for alias in (op.label, op.label_short, op._label_raw, op.raw_label):
+                    alias_index.setdefault(alias, op)
+                if layer_num_calls.get(layer_label, 0) == 1:
+                    for alias in (layer_label, layer_label_short):
+                        alias_index.setdefault(alias, op)
+                for alias in {layer_label, layer_label_short}:
+                    layer_alias_index.setdefault(alias, []).append(op)
+        except Exception:
+            self._alias_index_unavailable = True
+            return None
+        self._alias_index = alias_index
+        self._layer_alias_index = layer_alias_index
+        return alias_index, layer_alias_index
+
+    def _resolve_substring_by_scan(self, key: str) -> Op | None:
+        """Resolve by linear scan, used when the alias indexes are unavailable."""
 
         for op in self._list:
             if key in {op.label, op.label_short, op._label_raw, op.raw_label}:
@@ -161,6 +240,12 @@ class TraceOpAccessor(Accessor[Op]):
             }:
                 return op
         parent_matches = [op for op in self._list if key in {op.layer_label, op.layer_label_short}]
+        return self._resolve_parent_matches(parent_matches)
+
+    @staticmethod
+    def _resolve_parent_matches(parent_matches: Sequence[Op]) -> Op | None:
+        """Return the unique bare-parent-label match, or raise when ambiguous."""
+
         if len(parent_matches) == 1:
             return parent_matches[0]
         if len(parent_matches) > 1:
@@ -174,6 +259,33 @@ class TraceOpAccessor(Accessor[Op]):
             )
         return None
 
+    def _resolve_substring(self, key: str) -> Op | None:
+        """Resolve exact long/short Op labels or unique bare parent labels."""
+
+        indexes = self._ensure_alias_indexes()
+        if indexes is None:
+            return self._resolve_substring_by_scan(key)
+        alias_index, layer_alias_index = indexes
+        direct = alias_index.get(key)
+        if direct is not None:
+            return direct
+        return self._resolve_parent_matches(layer_alias_index.get(key, ()))
+
+    def _resolved_op(self, key: str) -> Op:
+        """Return ``self[key]``, memoized per lookup key.
+
+        Callers that resolve the same stored child/parent label once per graph edge
+        (the ``_trace_stats`` edge counters) would otherwise repeat one full
+        ``__getitem__`` per edge. Failed lookups are never memoized, so a missing or
+        ambiguous key raises exactly as ``self[key]`` does on every call.
+        """
+
+        cached = self._resolved_op_cache.get(key)
+        if cached is None:
+            cached = self[key]
+            self._resolved_op_cache[key] = cached
+        return cached
+
 
 class TraceModuleCallAccessor(Accessor[Any]):
     """Trace-level accessor for type-strict ModuleCall lookups."""
@@ -182,11 +294,16 @@ class TraceModuleCallAccessor(Accessor[Any]):
         """Initialize from call-label keyed ModuleCalls."""
 
         super().__init__(calls)
+        self._address_index: dict[Any, list[Any]] | None = None
 
     def _resolve_substring(self, key: str) -> Any | None:
         """Resolve unique bare Module address to its only ModuleCall."""
 
-        parent_matches = [call for call in self._list if key == getattr(call, "address", None)]
+        if self._address_index is None:
+            # Grouping by address in list order reproduces the per-lookup filter
+            # exactly; lifetime is this accessor instance's immutable ``_list``.
+            self._address_index = _group_by_attr(self._list, "address")
+        parent_matches = self._address_index.get(key, ())
         if len(parent_matches) == 1:
             return parent_matches[0]
         if len(parent_matches) > 1:
@@ -204,11 +321,16 @@ class TraceGradFnCallAccessor(Accessor[Any]):
         """Initialize from call-label keyed GradFnCalls."""
 
         super().__init__(calls)
+        self._label_index: dict[Any, list[Any]] | None = None
 
     def _resolve_substring(self, key: str) -> Any | None:
         """Resolve unique bare GradFn label to its only GradFnCall."""
 
-        parent_matches = [call for call in self._list if key == getattr(call, "label", None)]
+        if self._label_index is None:
+            # Grouping by label in list order reproduces the per-lookup filter
+            # exactly; lifetime is this accessor instance's immutable ``_list``.
+            self._label_index = _group_by_attr(self._list, "label")
+        parent_matches = self._label_index.get(key, ())
         if len(parent_matches) == 1:
             return parent_matches[0]
         if len(parent_matches) > 1:

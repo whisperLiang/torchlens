@@ -902,9 +902,13 @@ class TraceStatsMixin(_TraceMixinBase):
     def num_edges(self: "Trace") -> int:
         """Distinct edges in the per-pass Op graph, including boundary edges."""
 
+        # ``_resolved_op`` is the memoized form of ``self.ops[child_label]``: a
+        # stored child label is not an Op-accessor dict key, so resolving it per
+        # edge otherwise repeats one full accessor lookup for every edge.
+        resolve = self.ops._resolved_op
         return len(
             {
-                (op.label, self.ops[child_label].label)
+                (op.label, resolve(child_label).label)
                 for op in self.ops
                 for child_label in op.children
             }
@@ -914,13 +918,15 @@ class TraceStatsMixin(_TraceMixinBase):
     def num_compute_edges(self: "Trace") -> int:
         """Distinct Op graph edges whose endpoints are both compute Ops."""
 
-        compute_labels = {op.label for op in self.compute_ops}
+        resolve = self.ops._resolved_op
+        compute_ops = self.compute_ops
+        compute_labels = {op.label for op in compute_ops}
         return len(
             {
-                (op.label, self.ops[child_label].label)
-                for op in self.compute_ops
+                (op.label, resolve(child_label).label)
+                for op in compute_ops
                 for child_label in op.children
-                if self.ops[child_label].label in compute_labels
+                if resolve(child_label).label in compute_labels
             }
         )
 
@@ -928,12 +934,13 @@ class TraceStatsMixin(_TraceMixinBase):
     def num_buffer_edges(self: "Trace") -> int:
         """Distinct Op graph edges with at least one buffer endpoint."""
 
+        resolve = self.ops._resolved_op
         return len(
             {
-                (op.label, self.ops[child_label].label)
+                (op.label, resolve(child_label).label)
                 for op in self.ops
                 for child_label in op.children
-                if op.is_buffer or self.ops[child_label].is_buffer
+                if op.is_buffer or resolve(child_label).is_buffer
             }
         )
 
