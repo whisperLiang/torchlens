@@ -2213,43 +2213,36 @@ def build_role_components(
 
     resolved_analysis = analyze_collapse(trace) if analysis is None else analysis
     children = tuple(child for child in child_addresses if child in trace.modules)
-    parent_index = {child: index for index, child in enumerate(children)}
-    parent = {child: child for child in children}
-
-    def find(address: str) -> str:
-        """Return the union-find representative for ``address``."""
-
-        current = address
-        while parent[current] != current:
-            parent[current] = parent[parent[current]]
-            current = parent[current]
-        return current
-
-    def union(left: str, right: str) -> None:
-        """Union two child addresses, preserving earliest flow representative."""
-
-        left_root = find(left)
-        right_root = find(right)
-        if left_root == right_root:
-            return
-        if parent_index[left_root] <= parent_index[right_root]:
-            parent[right_root] = left_root
-        else:
-            parent[left_root] = right_root
-
-    for left_index, left in enumerate(children):
-        for right in children[left_index + 1 :]:
-            if _same_role(trace, left, right, resolved_analysis, hidden_counts or {}):
-                union(left, right)
-    grouped: dict[str, list[str]] = {}
-    for child in children:
-        grouped.setdefault(find(child), []).append(child)
-    return tuple(
-        RoleComponent(tuple(members))
-        for _, members in sorted(
-            grouped.items(),
-            key=lambda item: min(parent_index[member] for member in item[1]),
+    resolved_hidden = hidden_counts or {}
+    # The _same_role relation depends only on per-child data: same class_name
+    # and |log2(1 + n_left) - log2(1 + n_right)| <= 1.5. The connected
+    # components of a within-tolerance relation on a line are exactly the
+    # maximal sorted runs with consecutive gap <= 1.5 (IEEE subtraction is
+    # monotone, so no pair straddling a gap > 1.5 can be within tolerance),
+    # so this O(N log N) partition matches the all-pairs union sweep exactly.
+    buckets: dict[str, list[tuple[float, int]]] = {}
+    for index, child in enumerate(children):
+        module = cast("Module", trace.modules[child])
+        class_name = str(getattr(module, "class_name", ""))
+        mass = math.log2(
+            1 + _faithful_hidden_count(resolved_analysis.signals[child], resolved_hidden)
         )
+        buckets.setdefault(class_name, []).append((mass, index))
+    component_indices: list[list[int]] = []
+    for entries in buckets.values():
+        entries.sort()
+        run = [entries[0][1]]
+        previous_mass = entries[0][0]
+        for mass, index in entries[1:]:
+            if mass - previous_mass > 1.5:
+                component_indices.append(run)
+                run = []
+            run.append(index)
+            previous_mass = mass
+        component_indices.append(run)
+    return tuple(
+        RoleComponent(tuple(children[index] for index in sorted(indices)))
+        for indices in sorted(component_indices, key=min)
     )
 
 
