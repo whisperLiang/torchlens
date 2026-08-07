@@ -129,17 +129,24 @@ def _event_from_core(core: CapturedRunCore, fact_index: int) -> OpEvent:
     event = fact.event
     decision = core.decisions.get(fact.event_id)
     payload = core.payloads.get(fact.event_id)
-    if decision is not None:
-        event = replace(
-            event,
-            predicate_matched=decision.predicate_matched,
-            intervention_fired=decision.intervention_fired,
-            intervention_replaced=decision.intervention_replaced,
-            fire_results=decision.fire_results,
-        )
-    if payload is not None:
-        event = replace(event, output=payload.output)
-    return event
+    return replace(
+        event,
+        predicate_matched=(
+            event.predicate_matched if decision is None else decision.predicate_matched
+        ),
+        intervention_fired=(
+            event.intervention_fired if decision is None else decision.intervention_fired
+        ),
+        intervention_replaced=(
+            event.intervention_replaced if decision is None else decision.intervention_replaced
+        ),
+        fire_results=event.fire_results if decision is None else decision.fire_results,
+        output=event.output if payload is None else payload.output,
+        parent_arg_positions={
+            domain: dict(positions) for domain, positions in event.parent_arg_positions.items()
+        },
+        transform_config=dict(event.transform_config),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -556,12 +563,7 @@ class RecordingProjector:
             None,
         )
         if capture_events is not None:
-            capture_events = capture_events.copy_for_replay()
-            capture_events.op_events = list(all_events)
-            capture_events.op_event_by_label_raw = {event.label_raw: event for event in all_events}
-            capture_events.op_event_index_by_label_raw = {
-                event.label_raw: index for index, event in enumerate(all_events)
-            }
+            capture_events = capture_events.copy_for_replay(projected_op_events=all_events)
             capture_events.raw_layer_counter = max(
                 (event.raw_index for event in all_events), default=0
             )
