@@ -28,6 +28,7 @@ from ..ir import CaptureEvents
 from ..intervention.predicates import InterventionPredicate
 from ..options import StreamingOptions
 from ..types import ActivationPostfunc, GradientPostfunc
+from ..utils._torch_compat import get_fsdp_wrapper_type
 from ._halt import HaltSignal
 from ._validation import validate_recording_options
 from .exceptions import RecorderStateError
@@ -152,16 +153,13 @@ def _unwrap_ddp_for_fastlog(
         The model to execute and possibly rewritten streaming options.
     """
 
-    try:
-        from torch.distributed.fsdp import FullyShardedDataParallel
-    except ImportError:
-        pass
-    else:
-        if isinstance(model, FullyShardedDataParallel):
-            raise RuntimeError(
-                "torchlens.fastlog does not support FullyShardedDataParallel (FSDP): "
-                "parameters are sharded across ranks and there is no unsharded module to log."
-            )
+    # The lazy probe never imports torch.distributed.fsdp on plain captures.
+    fsdp_wrapper_type = get_fsdp_wrapper_type()
+    if fsdp_wrapper_type is not None and isinstance(model, fsdp_wrapper_type):
+        raise RuntimeError(
+            "torchlens.fastlog does not support FullyShardedDataParallel (FSDP): "
+            "parameters are sharded across ranks and there is no unsharded module to log."
+        )
 
     try:
         from torch.nn.parallel import DistributedDataParallel

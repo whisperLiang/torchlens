@@ -21,7 +21,7 @@ from torch import nn
 
 from . import _state
 from .data_classes.trace import Trace
-from .utils._torch_compat import get_dynamo_optimized_module_type
+from .utils._torch_compat import get_dynamo_optimized_module_type, get_fsdp_wrapper_type
 
 
 def _clone_state_dict_with_metadata(model: nn.Module) -> OrderedDict[str, torch.Tensor]:
@@ -1404,19 +1404,16 @@ def _unwrap_data_parallel(model: nn.Module) -> nn.Module:
     family.
     """
     # FSDP: fail loudly rather than silently mis-attributing sharded params.
-    try:
-        from torch.distributed.fsdp import FullyShardedDataParallel
-    except ImportError:
-        pass
-    else:
-        if isinstance(model, FullyShardedDataParallel):
-            raise RuntimeError(
-                "torchlens.trace does not support "
-                "FullyShardedDataParallel (FSDP): parameters are sharded "
-                "across ranks and there is no unsharded module to log. "
-                "Run trace on a rank-local copy of the underlying "
-                "module (before FSDP wrapping) instead."
-            )
+    # The lazy probe never imports torch.distributed.fsdp on plain captures.
+    fsdp_wrapper_type = get_fsdp_wrapper_type()
+    if fsdp_wrapper_type is not None and isinstance(model, fsdp_wrapper_type):
+        raise RuntimeError(
+            "torchlens.trace does not support "
+            "FullyShardedDataParallel (FSDP): parameters are sharded "
+            "across ranks and there is no unsharded module to log. "
+            "Run trace on a rank-local copy of the underlying "
+            "module (before FSDP wrapping) instead."
+        )
 
     # DistributedDataParallel: unwrap via ``.module`` (same layout as DataParallel).
     try:
@@ -1455,20 +1452,17 @@ def _reject_opaque_wrappers(model: nn.Module) -> None:
     In these cases the fix is the same: call ``trace`` on the
     *un-wrapped* model before scripting, exporting, or sharding.
     """
-    # FullyShardedDataParallel
-    try:
-        from torch.distributed.fsdp import FullyShardedDataParallel
-    except (ImportError, RuntimeError):
-        pass
-    else:
-        if isinstance(model, FullyShardedDataParallel):
-            raise RuntimeError(
-                "torchlens.trace does not support "
-                "FullyShardedDataParallel models: FSDP controls parameter "
-                "materialization and sharding around forward execution in ways "
-                "TorchLens cannot validate. Call trace on the "
-                "underlying unwrapped nn.Module."
-            )
+    # FullyShardedDataParallel; the lazy probe never imports
+    # torch.distributed.fsdp on plain captures.
+    fsdp_wrapper_type = get_fsdp_wrapper_type()
+    if fsdp_wrapper_type is not None and isinstance(model, fsdp_wrapper_type):
+        raise RuntimeError(
+            "torchlens.trace does not support "
+            "FullyShardedDataParallel models: FSDP controls parameter "
+            "materialization and sharding around forward execution in ways "
+            "TorchLens cannot validate. Call trace on the "
+            "underlying unwrapped nn.Module."
+        )
 
     # torch.jit.script / torch.jit.trace -> ScriptModule. Descendants are just
     # as opaque as a scripted root: their forward executes in the TorchScript

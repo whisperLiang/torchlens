@@ -82,6 +82,7 @@ __all__ = [
     "HAS_PARAMETER_AS_SUBCLASS_IN_DISPATCH_MODE",
     "HAS_DYNAMO_OPTIMIZED_MODULE",
     "HAS_DYNAMO_ORIG_CALLABLE_MARKER",
+    "HAS_FSDP_WRAPPER",
     "HAS_ROLL_TENSOR_SHIFTS",
     "HAS_SAFE_WEIGHTS_ONLY_LOAD",
     "HAS_SAVED_TENSORS_HOOK_INTROSPECTION",
@@ -106,6 +107,7 @@ __all__ = [
     "get_dynamo_explain",
     "get_functorch_maybe_current_level",
     "get_functorch_wrapped_tensor_checker",
+    "get_fsdp_wrapper_type",
     "get_fx_graph_module_type",
     "get_jit_builtin_table",
     "get_optional_torch_namespace",
@@ -1092,6 +1094,9 @@ HAS_CODE_QUALNAME: bool = _probe_code_qualname()
 _DYNAMO_OPTIMIZED_MODULE_TYPE: type[Any] | None = None
 _DYNAMO_OPTIMIZED_MODULE_PROBED: bool = False
 _DYNAMO_ORIG_CALLABLE_MARKER_PROBED: bool = False
+HAS_FSDP_WRAPPER: bool = False
+_FSDP_WRAPPER_TYPE: type[Any] | None = None
+_FSDP_WRAPPER_PROBED: bool = False
 
 _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_AUTOCAST_DEVICE_TYPE_ARG",
@@ -1111,6 +1116,7 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_DYNAMO_OPTIMIZED_MODULE",
     "HAS_DYNAMO_ORIG_CALLABLE_MARKER",
     "HAS_DYNAMO_EXPLAIN",
+    "HAS_FSDP_WRAPPER",
     "HAS_GENERATOR_CLONE_STATE",
     "HAS_GENERATOR_GRAPHSAFE_GET_STATE",
     "HAS_GENERATOR_GRAPHSAFE_SET_STATE",
@@ -1172,13 +1178,14 @@ def get_torch_capability_snapshot() -> TorchCapabilitySnapshot:
         ``AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED`` alias, to boolean availability.
     """
 
-    # HAS_DYNAMO_OPTIMIZED_MODULE is lazily probed (see
-    # get_dynamo_optimized_module_type) to avoid an unconditional
-    # torch._dynamo import on the capture hot path. Diagnostic snapshot
-    # consumers (tl.compat.report(), tl.utils.doctor()) are not on that hot
-    # path, so force the probe here to report the real capability instead of
-    # the pre-probe placeholder.
-    get_dynamo_optimized_module_type()
+    # HAS_DYNAMO_OPTIMIZED_MODULE and HAS_FSDP_WRAPPER are lazily probed (see
+    # get_dynamo_optimized_module_type / get_fsdp_wrapper_type) to avoid
+    # unconditional torch._dynamo / torch.distributed.fsdp imports on the
+    # capture hot path. Diagnostic snapshot consumers (tl.compat.report(),
+    # tl.utils.doctor()) are not on that hot path, so force the probes here to
+    # report the real capabilities instead of the pre-probe placeholders.
+    get_dynamo_optimized_module_type(force_probe=True)
+    get_fsdp_wrapper_type(force_probe=True)
     _ensure_dynamo_orig_callable_marker_probed()
     get_dynamo_explain()
     snapshot = {name: bool(globals()[name]) for name in _CAPABILITY_ATTRS}
@@ -1452,19 +1459,86 @@ def get_fx_graph_module_type() -> type[Any] | None:
     return graph_module_type
 
 
-def get_dynamo_optimized_module_type() -> type[Any] | None:
-    """Return Dynamo's private ``OptimizedModule`` type when available.
+def get_fsdp_wrapper_type(*, force_probe: bool = False) -> type[Any] | None:
+    """Return torch's ``FullyShardedDataParallel`` type without eager import.
+
+    Parameters
+    ----------
+    force_probe:
+        Import ``torch.distributed.fsdp`` even when it has never been imported
+        in this process. Diagnostic surfaces set this to report the real build
+        capability; capture paths keep the default.
 
     Returns
     -------
     type[Any] | None
-        Dynamo OptimizedModule type, or ``None`` when unavailable.
+        FSDP wrapper type, or ``None`` when unavailable or when the lazy
+        default defers the probe.
+
+    Notes
+    -----
+    A live model can only be a ``FullyShardedDataParallel`` instance if
+    ``torch.distributed.fsdp`` is already in ``sys.modules`` (Python registers
+    a module before any class from it can be instantiated), so when it is
+    absent the default path reports ``None`` without paying the FSDP import
+    (~1.2s and hundreds of modules cold).
+    """
+
+    global HAS_FSDP_WRAPPER, _FSDP_WRAPPER_PROBED, _FSDP_WRAPPER_TYPE
+
+    if not _FSDP_WRAPPER_PROBED:
+        if not force_probe and "torch.distributed.fsdp" not in sys.modules:
+            return None
+        try:
+            fsdp_type = _import_module_attr_or_none(
+                "torch.distributed.fsdp", "FullyShardedDataParallel"
+            )
+        except RuntimeError:
+            fsdp_type = None
+        _FSDP_WRAPPER_TYPE = fsdp_type if isinstance(fsdp_type, type) else None
+        HAS_FSDP_WRAPPER = _FSDP_WRAPPER_TYPE is not None
+        _FSDP_WRAPPER_PROBED = True
+    fsdp_wrapper_type = _FSDP_WRAPPER_TYPE
+    if fsdp_wrapper_type is None:
+        mark_torch_capability_missing(
+            "HAS_FSDP_WRAPPER",
+            "FSDP wrapper detection and rejection are disabled",
+        )
+        return None
+    return fsdp_wrapper_type
+
+
+def get_dynamo_optimized_module_type(*, force_probe: bool = False) -> type[Any] | None:
+    """Return Dynamo's private ``OptimizedModule`` type when available.
+
+    Parameters
+    ----------
+    force_probe:
+        Import ``torch._dynamo.eval_frame`` even when Dynamo has never been
+        imported in this process. Diagnostic surfaces set this to report the
+        real build capability; capture paths keep the default.
+
+    Returns
+    -------
+    type[Any] | None
+        Dynamo OptimizedModule type, or ``None`` when unavailable or when the
+        lazy default defers the probe.
+
+    Notes
+    -----
+    A live object can only be an ``OptimizedModule`` instance if
+    ``torch._dynamo.eval_frame`` is already in ``sys.modules`` (Python
+    registers a module before any class from it can be instantiated), so when
+    it is absent the default path reports ``None`` without paying the
+    ``torch._dynamo`` import (~0.9s and hundreds of modules cold).
     """
 
     global HAS_DYNAMO_OPTIMIZED_MODULE, _DYNAMO_OPTIMIZED_MODULE_PROBED
     global _DYNAMO_OPTIMIZED_MODULE_TYPE
 
     if not _DYNAMO_OPTIMIZED_MODULE_PROBED:
+        if not force_probe and "torch._dynamo.eval_frame" not in sys.modules:
+            return None
         _DYNAMO_OPTIMIZED_MODULE_TYPE = _import_module_attr_or_none(
             "torch._dynamo.eval_frame", "OptimizedModule"
         )

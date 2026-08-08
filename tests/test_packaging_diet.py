@@ -61,6 +61,63 @@ def test_core_import_capture_and_show_without_optional_tabular_or_notebook_use()
     assert log.show(vis_mode="none") is None
 
 
+def test_plain_capture_never_imports_dynamo_or_fsdp() -> None:
+    """A fresh-process plain trace/record must not import torch._dynamo or FSDP.
+
+    W21 cold-start guarantee: the compiled-wrapper and FSDP guards are lazy
+    sys.modules probes, so a plain eager capture never pays those imports
+    (~2s process time, ~874 modules, ~128MB RSS cold). Once FSDP genuinely is
+    imported, the same probe must still detect and reject an FSDP wrapper.
+    """
+
+    script = """
+import sys
+import torch
+from torch import nn
+import torchlens as tl
+
+model = nn.Sequential(nn.Linear(3, 3), nn.ReLU())
+trace = tl.trace(model, torch.randn(2, 3))
+assert len(trace.ops) > 0
+recording = tl.record(model, torch.randn(2, 3), save=tl.func("relu"))
+offenders = [
+    name
+    for name in sys.modules
+    if name == "torch._dynamo"
+    or name.startswith("torch._dynamo.")
+    or name == "torch.distributed.fsdp"
+    or name.startswith("torch.distributed.fsdp.")
+]
+assert not offenders, f"plain capture imported: {offenders}"
+
+try:
+    from torch.distributed.fsdp import FullyShardedDataParallel
+except ImportError:
+    FullyShardedDataParallel = None
+if FullyShardedDataParallel is not None:
+    wrapped = FullyShardedDataParallel.__new__(FullyShardedDataParallel)
+    nn.Module.__init__(wrapped)
+    wrapped.module = nn.Linear(3, 3)
+    try:
+        tl.trace(wrapped, torch.randn(2, 3))
+    except RuntimeError as exc:
+        assert "FullyShardedDataParallel" in str(exc)
+    else:
+        raise AssertionError("FSDP wrapper was not rejected after fsdp import")
+print("COLD_IMPORT_OK")
+"""
+    repo_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        cwd=repo_root,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "COLD_IMPORT_OK" in result.stdout
+
+
 def test_to_pandas_succeeds_when_tabular_extra_is_available() -> None:
     """Trace.to_pandas succeeds when pandas is installed."""
 
