@@ -384,13 +384,20 @@ def test_report_quantized_row_uses_shared_cycle_safe_tensor_walker() -> None:
 
 
 def test_rng_snapshot_uses_all_cuda_devices(monkeypatch: pytest.MonkeyPatch) -> None:
-    """RNG helpers use all-device CUDA state APIs when CUDA is available."""
+    """RNG helpers use all-device CUDA state APIs when CUDA RNG state is live.
+
+    ``is_initialized`` is part of the fiction: the snapshot deliberately skips
+    CUDA entirely until this process has actually initialized it, so that a
+    CPU-only capture never force-initializes a visible device (see
+    ``torchlens/utils/rng.py::_snapshot_cuda_rng_states``).
+    """
 
     calls: list[str] = []
     fake_states = [torch.tensor([1], dtype=torch.uint8), torch.tensor([2], dtype=torch.uint8)]
 
     monkeypatch.setattr("torchlens.utils.tensor_utils._cuda_available", True)
     monkeypatch.setattr("torchlens.utils.rng._is_cuda_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.cuda, "get_rng_state_all", lambda: fake_states)
 
     def fake_set_rng_state_all(states: list[torch.Tensor]) -> None:

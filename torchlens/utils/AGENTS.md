@@ -30,6 +30,11 @@ this package mostly stateless and free of high-level TorchLens business logic.
 - `log_current_rng_states()` and `set_rng_from_saved_states()` support deterministic replay.
 - Autocast state helpers are used by wrapper execution context and validation replay.
 - Capture RNG before entering `active_logging()`.
+- CUDA RNG state is snapshotted ONLY once the process has initialized CUDA
+  (`_snapshot_cuda_rng_states()`): `torch.cuda.get_rng_state_all()` eagerly initializes every
+  visible device, which made a pure-CPU capture abort on a visible-but-unusable CUDA stack. A
+  failing read degrades to a warning and latches off (`_cuda_rng_unusable`) for both snapshot
+  and restore; real CUDA captures are byte-identical because they have initialized CUDA already.
 
 ## Hashing
 - `make_random_barcode()` supports barcode nesting detection.
@@ -39,7 +44,10 @@ this package mostly stateless and free of high-level TorchLens business logic.
 ## Introspection
 - `get_vars_of_type_from_obj()` is a bounded recursive finder for tensors/modules.
 - `_ATTR_SKIP_SET` avoids expensive tensor pseudo-properties.
-- `_is_cuda_available()` caches CUDA availability to avoid repeated driver probes.
+- `_is_cuda_available()` caches CUDA availability to avoid repeated driver probes, and treats a
+  raising probe as "no CUDA" (warned once) so a broken accelerator cannot abort a CPU capture.
+- `_is_cuda_initialized()` is the uncached, probe-free read of torch's own init flag; use it to
+  skip opportunistic CUDA work instead of force-initializing devices.
 
 ## Gotchas
 - Clean torch function imports must happen before decoration or use originals from `_state`.

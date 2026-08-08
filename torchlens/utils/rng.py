@@ -14,7 +14,10 @@ Three independent RNG engines are captured:
   - Python's ``random`` module
   - NumPy's ``np.random``
   - PyTorch's CPU generator (``torch.random``)
-  - PyTorch's CUDA generator (if CUDA is available)
+  - PyTorch's per-device CUDA generators, but ONLY when this process has
+    already initialized CUDA (see :func:`_snapshot_cuda_rng_states`).  A CPU
+    capture never force-initializes a visible device just to read a generator
+    it cannot have consumed.
 
 Autocast state (``torch.amp.autocast``) is captured similarly so that
 mixed-precision ops can be replayed under the same dtype context.
@@ -31,6 +34,7 @@ import random
 import sys as _sys_module
 import threading as _threading_module
 import time as _time_module
+import warnings as _warnings_module
 import weakref as _weakref_module
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
@@ -71,7 +75,7 @@ from ._torch_compat import (
     autocast_is_enabled,
 )
 from .hashing import seed_barcode_rng
-from .tensor_utils import _is_cuda_available
+from .tensor_utils import _is_cuda_available, _is_cuda_initialized
 
 _AUTOCAST_DEVICES = ("cpu", "cuda")
 _T = TypeVar("_T")
@@ -594,6 +598,69 @@ def _numpy_states_equal(a: Any, b: Any) -> bool:
         return a is b
 
 
+_cuda_rng_unusable: bool = False
+"""Sticky: a CUDA RNG snapshot raised once, so stop retrying it this process.
+
+Set only by :func:`_snapshot_cuda_rng_states`.  A CUDA stack that fails a
+host-side generator read is broken for the lifetime of the process; retrying it
+per op would re-pay the failure cost and re-emit the warning on every logged
+operation.
+"""
+
+
+def _snapshot_cuda_rng_states() -> List[Any]:
+    """Return per-device CUDA RNG states, or ``[]`` when no CUDA state is live.
+
+    ``torch.cuda.get_rng_state_all()`` calls ``torch.cuda._lazy_init()`` and
+    reads a generator for EVERY visible device.  Calling it unconditionally
+    (the pre-fix behavior, gated only on ``torch.cuda.is_available()``) meant a
+    pure-CPU capture on a host with visible CUDA devices paid full CUDA
+    initialization -- and, on a host whose CUDA stack is visible but unusable
+    (stale driver, mismatched build, one bad device in a multi-GPU box), the
+    initialization raised and aborted the CPU capture outright.
+
+    Two guards, in order (both short-circuited once ``_cuda_rng_unusable`` latches):
+
+    1. If this process has never initialized CUDA, no CUDA generator can have
+       produced a number that any captured op consumed, so there is no state to
+       snapshot -- and reading one would create the very CUDA context this
+       capture does not need.  Returning ``[]`` here is exactly equivalent for
+       replay purposes and never touches the driver.
+    2. If CUDA *is* initialized, snapshot every device exactly as before (byte
+       identical for real CUDA captures: a capture that touches CUDA has
+       initialized it by definition).  Should that read still fail, degrade to
+       ``[]`` with a warning instead of aborting the capture, and latch the
+       failure so the warning is not repeated per op.
+
+    Returns
+    -------
+    list[Any]
+        Opaque per-device CUDA RNG state objects, in device order; empty when
+        no live CUDA RNG state exists or it could not be read.
+    """
+    global _cuda_rng_unusable
+    if _cuda_rng_unusable:
+        return []
+    if not _is_cuda_initialized():
+        return []
+    # Defense in depth: an initialized CUDA runtime implies availability, unless the
+    # availability probe itself already failed earlier in this process.
+    if not _is_cuda_available():
+        return []
+    try:
+        return torch.cuda.get_rng_state_all()
+    except Exception as exc:  # noqa: BLE001 - any broken-CUDA failure mode
+        _cuda_rng_unusable = True
+        _warnings_module.warn(
+            "Could not read CUDA RNG state "
+            f"({type(exc).__name__}: {exc}); continuing without CUDA RNG "
+            "snapshots. Replay of operations that consume CUDA randomness "
+            "cannot be reproduced exactly for this capture.",
+            stacklevel=3,
+        )
+        return []
+
+
 def log_current_rng_states(torch_only: bool = False) -> Dict[str, Any]:
     """Snapshot the current state of all RNG engines.
 
@@ -614,7 +681,10 @@ def log_current_rng_states(torch_only: bool = False) -> Dict[str, Any]:
         Dict with keys ``"random"``, ``"np"``, ``"torch"``, and optionally
         ``"torch_cuda_all"``, each holding the opaque state object for that
         engine. ``"torch_cuda"`` is also populated for backward compatibility
-        with older single-device snapshots.
+        with older single-device snapshots. The two CUDA keys are present only
+        when this process has live CUDA RNG state that could be read; a CPU-only
+        capture omits them rather than initializing CUDA (see
+        :func:`_snapshot_cuda_rng_states`).
     """
     # r65 CLUSTER Z: per-op state logging runs INSIDE the capture window; a
     # TorchLens-initiated snapshot is never model host nondeterminism (the
@@ -625,11 +695,10 @@ def log_current_rng_states(torch_only: bool = False) -> Dict[str, Any]:
         if not torch_only:
             rng_dict["random"] = random.getstate()
             rng_dict["np"] = np.random.get_state()
-        if _is_cuda_available():
-            cuda_states = torch.cuda.get_rng_state_all()
+        cuda_states = _snapshot_cuda_rng_states()
+        if cuda_states:
             rng_dict["torch_cuda_all"] = cuda_states
-            if cuda_states:
-                rng_dict["torch_cuda"] = cuda_states[0]
+            rng_dict["torch_cuda"] = cuda_states[0]
         return rng_dict
 
 
@@ -655,9 +724,16 @@ def set_rng_from_saved_states(rng_states: Dict[str, Any]) -> None:
         if "np" in rng_states:
             np.random.set_state(rng_states["np"])
         torch.random.set_rng_state(rng_states["torch"])
-        if _is_cuda_available() and "torch_cuda_all" in rng_states:
+        # ``_cuda_rng_unusable`` latches when a CUDA generator read already failed
+        # in this process; re-entering the CUDA RNG API to *write* it would raise
+        # from inside the ``finally`` restore of
+        # ``execute_with_restored_rng_autocast`` and mask the caller's real
+        # exception. The failure was already surfaced (warned) at snapshot time.
+        if _cuda_rng_unusable or not _is_cuda_available():
+            return
+        if "torch_cuda_all" in rng_states:
             torch.cuda.set_rng_state_all(rng_states["torch_cuda_all"])
-        elif _is_cuda_available() and "torch_cuda" in rng_states:
+        elif "torch_cuda" in rng_states:
             torch.cuda.set_rng_state(rng_states["torch_cuda"], "cuda")
 
 
