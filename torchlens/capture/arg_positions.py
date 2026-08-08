@@ -340,6 +340,28 @@ def _apply_schema_tensor_position_corrections() -> None:
     FUNC_ARG_SPECS.update(corrected_specs)
 
 
+_schema_corrections_applied = False
+
+
+def _ensure_schema_tensor_position_corrections() -> None:
+    """Apply the ATen schema correction pass exactly once, on demand.
+
+    The sweep over ``torch.ops.aten`` schemas is torch-capture setup, but this
+    module is imported on every backend's first capture dispatch (via selector
+    helpers and postprocess). Running it eagerly at import time made non-torch
+    first captures pay the full torch schema sweep (~24% of a small Paddle
+    first capture). ``wrap_torch()`` calls this before wrappers can log any
+    op, so every torch capture still reads the fully corrected table; callers
+    that audit ``FUNC_ARG_SPECS`` outside a capture must call it explicitly.
+    """
+
+    global _schema_corrections_applied
+    if _schema_corrections_applied:
+        return
+    _apply_schema_tensor_position_corrections()
+    _schema_corrections_applied = True
+
+
 DYNAMIC_SPEC_UNCACHEABLE = object()
 """Sentinel cached for Tier-2 names whose BFS-found tensors cannot be represented
 by an ``ArgSpec`` (tensors nested deeper than top-level args, shallow sequences,
@@ -2533,7 +2555,11 @@ for _name in [
 ]:
     FUNC_ARG_SPECS[_name] = _P0
 
-_apply_schema_tensor_position_corrections()
+# Schema correction is deliberately NOT applied at import time: this module is
+# imported on every backend's first capture dispatch (selector helpers,
+# postprocess), and the ATen schema sweep is a torch-only cost that dominated
+# non-torch first-capture profiles. ``wrap_torch()`` arms it before any torch
+# op record can be built, so torch capture always reads the corrected table.
 
 # Cleanup loop variable leakage
 del _name, _spec
