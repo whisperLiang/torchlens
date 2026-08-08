@@ -37,7 +37,7 @@ from ._trace_accessors import (
     TraceModuleCallAccessor,
     TraceOpAccessor,
     _TRACE_LAYER_ACCESSOR_CACHE,
-    _TRACE_MODULE_CALL_ACCESSOR_CACHE,
+    _TRACE_MODULE_CALL_ACCESSOR_ATTR,
     _TRACE_OP_ACCESSOR_CACHE,
 )
 from .backward_pass import BackwardPass, BackwardPassAccessor
@@ -790,7 +790,10 @@ class TraceStatsMixin(_TraceMixinBase):
     def module_calls(self: "Trace") -> TraceModuleCallAccessor:
         """Access per-invocation ModuleCall records by call label or index."""
 
-        cached = _TRACE_MODULE_CALL_ACCESSOR_CACHE.get(self)
+        # Memoized on the instance, never in a module global: the accessor
+        # reaches this Trace through ``ModuleCall._source_trace``, so a global
+        # weak-keyed cache would pin every Trace forever.
+        cached = self.__dict__.get(_TRACE_MODULE_CALL_ACCESSOR_ATTR)
         if cached is not None:
             return cached
         calls: OrderedDict[str, Any] = OrderedDict()
@@ -798,7 +801,7 @@ class TraceStatsMixin(_TraceMixinBase):
             for call in module.calls.values():
                 calls[call.call_label] = call
         accessor = TraceModuleCallAccessor(calls)
-        _TRACE_MODULE_CALL_ACCESSOR_CACHE[self] = accessor
+        self.__dict__[_TRACE_MODULE_CALL_ACCESSOR_ATTR] = accessor
         return accessor
 
     @property

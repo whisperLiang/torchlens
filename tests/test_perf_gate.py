@@ -23,7 +23,7 @@ from benchmarks.perf_suite import (
 from torchlens.backends.torch.model_prep import _traverse_model_modules
 from torchlens.data_classes._trace_accessors import (
     TraceModuleCallAccessor,
-    _TRACE_MODULE_CALL_ACCESSOR_CACHE,
+    _invalidate_trace_module_call_accessor_cache,
 )
 from torchlens.data_classes.trace import Trace
 from torchlens.postprocess import ast_branches
@@ -207,7 +207,7 @@ def test_module_calls_accessor_is_cached_with_profiled_rebuild_reduction(
 
     trace = tl.trace(_RepeatedModuleCallModel(repeats=64), torch.ones(1))
     expected = _fresh_module_calls(trace)
-    _TRACE_MODULE_CALL_ACCESSOR_CACHE.pop(trace, None)
+    _invalidate_trace_module_call_accessor_cache(trace)
 
     from torchlens.data_classes import _trace_stats
 

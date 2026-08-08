@@ -2,6 +2,11 @@
 
 Verifies that Trace, Op, Param, and model parameters
 are garbage-collectible after use / cleanup.
+
+These are marked ``smoke``: a lifetime regression is invisible to call-count,
+``tracemalloc``, and wall-clock gates, so this file is the only per-step gate
+that can see one. It is fast (~5 s) and it has caught the same module-global
+cache root twice now.
 """
 
 import gc
@@ -14,6 +19,11 @@ import torchlens as tl
 from torch import nn
 
 from torchlens import trace as trace_fn
+from torchlens._io import FieldPolicy
+from torchlens.data_classes._trace_accessors import _TRACE_MODULE_CALL_ACCESSOR_ATTR
+from torchlens.data_classes.trace import Trace
+
+pytestmark = pytest.mark.smoke
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +205,58 @@ class TestTraceGC:
         assert not hasattr(trace, "_raw_layer_dict")
         trace.cleanup()
         assert not hasattr(trace, "_raw_layer_dict")
+
+    def test_module_calls_accessor_is_cached_on_the_instance(self):
+        """The flattened ModuleCall accessor memo lives on the Trace, not a global.
+
+        A module-global cache keyed by the Trace cannot hold this value: the
+        accessor holds ModuleCalls and ``ModuleCall._source_trace`` keeps a
+        strong reference back to the Trace, so even a ``WeakKeyDictionary``
+        value would reach its own key and pin every Trace forever.
+        """
+
+        model = _TwoLayerNet()
+        trace = tl.trace(model, torch.randn(1, 5))
+        accessor = trace.module_calls
+
+        assert trace.__dict__[_TRACE_MODULE_CALL_ACCESSOR_ATTR] is accessor
+        assert trace.module_calls is accessor
+        assert Trace.PORTABLE_STATE_SPEC[_TRACE_MODULE_CALL_ACCESSOR_ATTR] is FieldPolicy.DROP
+
+    def test_populated_module_call_accessor_does_not_pin_trace(self):
+        """Reading ``module_calls`` must not make the Trace immortal.
+
+        Every capture populates this accessor internally through the
+        saved-summary refresh, so a root here leaks on the default
+        ``tl.trace()`` path with no user API call at all.
+        """
+
+        model = _TwoLayerNet()
+        refs = []
+        for _ in range(3):
+            trace = tl.trace(model, torch.randn(1, 5))
+            assert len(trace.module_calls) > 0
+            refs.append(weakref.ref(trace))
+            del trace
+            gc.collect()
+        assert [ref() for ref in refs] == [None, None, None]
+
+    def test_held_module_call_still_keeps_its_trace_alive(self):
+        """The intentional ModuleCall -> Trace ownership edge survives the fix."""
+
+        model = _TwoLayerNet()
+        trace = tl.trace(model, torch.randn(1, 5))
+        module_call = trace.module_calls[0]
+        ref = weakref.ref(trace)
+
+        del trace
+        gc.collect()
+        assert ref() is not None, "holding a ModuleCall must keep its Trace alive"
+        assert module_call.trace is ref()
+
+        del module_call
+        gc.collect()
+        assert ref() is None
 
     def test_transient_write_after_finish_does_not_recreate_build_state(self) -> None:
         """Finished traces reject writes to transient build-state aliases."""

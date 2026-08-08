@@ -106,8 +106,8 @@ from .op import Op
 from ._state_adapter import state_items, state_restore
 from ._trace_accessors import (
     _TRACE_LAYER_ACCESSOR_CACHE,
-    _TRACE_MODULE_CALL_ACCESSOR_CACHE,
     _TRACE_OP_ACCESSOR_CACHE,
+    _invalidate_trace_module_call_accessor_cache,
 )
 
 if TYPE_CHECKING:
@@ -1088,6 +1088,7 @@ class Trace(
     _containers: dict[int, Any]
     _annotation_blobs: dict[str, Any] | None
     _last_sibling_ordering_decision: Any
+    _module_call_accessor: Any
     _receptive_field_solution: Any
     _rf_source_solutions: Any
     _rf_target_solutions: Any
@@ -1109,6 +1110,7 @@ class Trace(
         "_tf_op_captures": FieldPolicy.DROP,
         "_tf_validation_result": FieldPolicy.DROP,
         "_tl_save_selector_fire_count": FieldPolicy.DROP,
+        "_module_call_accessor": FieldPolicy.DROP,
         "_receptive_field_solution": FieldPolicy.DROP,
         "_rf_source_solutions": FieldPolicy.DROP,
         "_rf_target_solutions": FieldPolicy.DROP,
@@ -2849,7 +2851,7 @@ class Trace(
         self.__dict__.pop("_validation_replay_status", None)
         _TRACE_OP_ACCESSOR_CACHE.pop(self, None)
         _TRACE_LAYER_ACCESSOR_CACHE.pop(self, None)
-        _TRACE_MODULE_CALL_ACCESSOR_CACHE.pop(self, None)
+        _invalidate_trace_module_call_accessor_cache(self)
         self._rebind_fork_owner_refs()
 
     def _refresh_matching_rerun_state_from(self, new_log: "Trace") -> bool:
@@ -2883,7 +2885,7 @@ class Trace(
         self.__dict__.pop("_validation_replay_status", None)
         _TRACE_OP_ACCESSOR_CACHE.pop(self, None)
         _TRACE_LAYER_ACCESSOR_CACHE.pop(self, None)
-        _TRACE_MODULE_CALL_ACCESSOR_CACHE.pop(self, None)
+        _invalidate_trace_module_call_accessor_cache(self)
         self._rebind_fork_owner_refs()
         return True
 

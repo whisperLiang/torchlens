@@ -347,9 +347,15 @@ _TRACE_OP_ACCESSOR_CACHE: weakref.WeakKeyDictionary[Any, tuple[int, TraceOpAcces
 _TRACE_LAYER_ACCESSOR_CACHE: weakref.WeakKeyDictionary[Any, tuple[int, Any]] = (
     weakref.WeakKeyDictionary()
 )
-_TRACE_MODULE_CALL_ACCESSOR_CACHE: weakref.WeakKeyDictionary[Any, TraceModuleCallAccessor] = (
-    weakref.WeakKeyDictionary()
-)
+# The flattened ModuleCall accessor is memoized on the owning Trace instance,
+# NOT in a module-global weak-keyed dict. The accessor holds ModuleCall records
+# and ``ModuleCall._source_trace`` keeps a strong reference to its Trace, so a
+# module-global WeakKeyDictionary value would reach its own weak key and no
+# Trace could ever be collected (the leak fixed here, and re-opened once
+# before). An instance attribute makes that edge an ordinary intra-object cycle
+# that ``gc`` collects normally. It is registered ``FieldPolicy.DROP`` in
+# ``Trace.PORTABLE_STATE_SPEC``, like the other lazy per-instance solutions.
+_TRACE_MODULE_CALL_ACCESSOR_ATTR = "_module_call_accessor"
 
 
 def _invalidate_trace_module_call_accessor_cache(trace: Any) -> None:
@@ -361,4 +367,6 @@ def _invalidate_trace_module_call_accessor_cache(trace: Any) -> None:
         Trace whose module-call hierarchy changed.
     """
 
-    _TRACE_MODULE_CALL_ACCESSOR_CACHE.pop(trace, None)
+    instance_dict = getattr(trace, "__dict__", None)
+    if instance_dict is not None:
+        instance_dict.pop(_TRACE_MODULE_CALL_ACCESSOR_ATTR, None)
