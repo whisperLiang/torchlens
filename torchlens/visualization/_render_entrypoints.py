@@ -236,6 +236,7 @@ if TYPE_CHECKING:
     from ..data_classes.trace import Trace
 
 
+@_with_per_draw_collapse_cache
 def render_combined_graph(
     self: "Trace",
     vis_outpath: str = "combined_modelgraph",

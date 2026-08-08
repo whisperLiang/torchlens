@@ -2,7 +2,9 @@
 
 # ruff: noqa: F403, F405
 
+import functools
 from collections import deque
+from contextvars import ContextVar
 
 from ..utils._multipass_access import get_multipass_attr, is_multipass_layer
 from ._render_common import *
@@ -1298,6 +1300,56 @@ def _same_layer_dependency_components(layer_log: "Layer") -> tuple[tuple[int, ..
     return tuple(sorted(components, key=lambda values: values[0]))
 
 
+@dataclass
+class _PerDrawCollapseCache:
+    """Per-draw memo for the pure per-layer collapse-rolling computations.
+
+    ``_call_groups_for_layer`` and ``_collapsed_module_rolling_suffix`` are pure
+    functions of the captured graph, but the renderer re-enters them once per
+    collapsed-module NODE. Memoizing them for the duration of ONE draw removes
+    that ``nodes x layers x passes`` blowup. The cache is per-draw rather than
+    per-``Trace`` so a graph mutated between draws is never served stale results.
+    """
+
+    #: Memoized ``_call_groups_for_layer`` results. Keyed by ``id`` of the layer
+    #: object, with the layer itself retained in the value so the identity key
+    #: can never be recycled onto a different object mid-draw.
+    call_groups: dict[int, tuple[Any, tuple[tuple[int, ...], ...]]] = field(default_factory=dict)
+    #: Memoized ``address -> face suffix`` map, built lazily in one pass.
+    rolling_suffixes: dict[str, str] | None = None
+
+
+_PER_DRAW_COLLAPSE_CACHE: ContextVar["_PerDrawCollapseCache | None"] = ContextVar(
+    "torchlens_per_draw_collapse_cache", default=None
+)
+
+
+def _with_per_draw_collapse_cache(render_fn: Any) -> Any:
+    """Scope a fresh :class:`_PerDrawCollapseCache` to one render call.
+
+    Parameters
+    ----------
+    render_fn:
+        Render entrypoint to wrap.
+
+    Returns
+    -------
+    Any
+        Wrapper installing (and always tearing down) the per-draw cache, so no
+        layer references outlive the draw and no result crosses draw boundaries.
+    """
+
+    @functools.wraps(render_fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        token = _PER_DRAW_COLLAPSE_CACHE.set(_PerDrawCollapseCache())
+        try:
+            return render_fn(*args, **kwargs)
+        finally:
+            _PER_DRAW_COLLAPSE_CACHE.reset(token)
+
+    return wrapper
+
+
 def _call_groups_for_layer(layer_log: "Layer") -> tuple[tuple[int, ...], ...]:
     """Return grouped module calls for disjoint same-layer regions.
 
@@ -1311,6 +1363,32 @@ def _call_groups_for_layer(layer_log: "Layer") -> tuple[tuple[int, ...], ...]:
     tuple[tuple[int, ...], ...]
         Module call-index groups. Empty when there is only one dependency component or
         no single common module address.
+    """
+
+    cache = _PER_DRAW_COLLAPSE_CACHE.get()
+    if cache is None:
+        return _call_groups_for_layer_uncached(layer_log)
+    memo_key = id(layer_log)
+    memoized = cache.call_groups.get(memo_key)
+    if memoized is not None:
+        return memoized[1]
+    groups = _call_groups_for_layer_uncached(layer_log)
+    cache.call_groups[memo_key] = (layer_log, groups)
+    return groups
+
+
+def _call_groups_for_layer_uncached(layer_log: "Layer") -> tuple[tuple[int, ...], ...]:
+    """Compute :func:`_call_groups_for_layer` without consulting the draw memo.
+
+    Parameters
+    ----------
+    layer_log:
+        Layer to inspect.
+
+    Returns
+    -------
+    tuple[tuple[int, ...], ...]
+        Module call-index groups.
     """
 
     if len(layer_log.ops) <= 1:
@@ -1352,6 +1430,50 @@ def _format_call_groups(call_groups: Sequence[Sequence[int]]) -> str:
     return ",".join(_compact_int_ranges(group) for group in call_groups)
 
 
+def _collapsed_module_rolling_suffix_map(trace: "Trace") -> dict[str, str]:
+    """Build every collapsed module's rolling face suffix in one pass.
+
+    Walks the rolled layers once and keeps, per module address, the first
+    partition with the most groups -- exactly the strictly-greater ``candidate``
+    rule the per-address scan applied while iterating the same layers in the same
+    order. Addresses with no split partition are simply absent, which the caller
+    reads back as the empty suffix.
+
+    Parameters
+    ----------
+    trace:
+        Trace containing the rendered modules.
+
+    Returns
+    -------
+    dict[str, str]
+        Module address to face suffix beginning with ``":"``.
+    """
+
+    best_groups: dict[str, tuple[tuple[int, ...], ...]] = {}
+    for layer_log in trace.layer_logs.values():
+        if not isinstance(layer_log, Layer) or layer_log.num_passes <= 1:
+            continue
+        groups = _call_groups_for_layer(layer_log)
+        if not groups:
+            # A layer with no split partition could never beat an incumbent
+            # (the rule is strictly-greater group count), so skip its addresses.
+            continue
+        layer_addresses = {
+            parsed[0]
+            for op in layer_log.ops.values()
+            for module_call in op.modules
+            if (parsed := _module_address_and_call(module_call)) is not None
+        }
+        for layer_address in layer_addresses:
+            if len(groups) > len(best_groups.get(layer_address, ())):
+                best_groups[layer_address] = groups
+    return {
+        layer_address: f":{_format_call_groups(groups)}"
+        for layer_address, groups in best_groups.items()
+    }
+
+
 def _collapsed_module_rolling_suffix(trace: "Trace", address: str) -> str:
     """Return a face suffix for a collapsed module's hidden call partitions.
 
@@ -1368,24 +1490,12 @@ def _collapsed_module_rolling_suffix(trace: "Trace", address: str) -> str:
         Suffix beginning with ``":"`` or an empty string.
     """
 
-    candidate_groups: tuple[tuple[int, ...], ...] = ()
-    for layer_log in trace.layer_logs.values():
-        if not isinstance(layer_log, Layer) or layer_log.num_passes <= 1:
-            continue
-        layer_addresses = {
-            parsed[0]
-            for op in layer_log.ops.values()
-            for module_call in op.modules
-            if (parsed := _module_address_and_call(module_call)) is not None
-        }
-        if address not in layer_addresses:
-            continue
-        groups = _call_groups_for_layer(layer_log)
-        if len(groups) > len(candidate_groups):
-            candidate_groups = groups
-    if not candidate_groups:
-        return ""
-    return f":{_format_call_groups(candidate_groups)}"
+    cache = _PER_DRAW_COLLAPSE_CACHE.get()
+    if cache is None:
+        return _collapsed_module_rolling_suffix_map(trace).get(address, "")
+    if cache.rolling_suffixes is None:
+        cache.rolling_suffixes = _collapsed_module_rolling_suffix_map(trace)
+    return cache.rolling_suffixes.get(address, "")
 
 
 def _node_spec_to_graphviz_args(spec: NodeSpec) -> dict[str, str]:
@@ -2115,9 +2225,11 @@ __all__ = [
     "_base_node_for_metadata",
     "_branch_kind_sort_key",
     "_call_groups_for_layer",
+    "_call_groups_for_layer_uncached",
     "_collapse_address_for_node",
     "_collapsed_container_node_name",
     "_collapsed_module_rolling_suffix",
+    "_collapsed_module_rolling_suffix_map",
     "_common_module_call_indices",
     "_compact_int_ranges",
     "_compute_arm_entry_edge_label",
@@ -2167,4 +2279,5 @@ __all__ = [
     "_single_op_module_should_keep_op_render",
     "_unique_repeat_folds",
     "_unwrap_focus_node",
+    "_with_per_draw_collapse_cache",
 ]

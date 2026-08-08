@@ -147,6 +147,7 @@ def _raise_graphviz_failure(
     ) from error
 
 
+@_with_per_draw_collapse_cache
 def draw(
     self: "Trace",
     vis_mode: VisModeLiteral = "unrolled",
