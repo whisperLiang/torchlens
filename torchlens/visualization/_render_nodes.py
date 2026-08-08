@@ -500,6 +500,7 @@ def _build_layer_node(
     collapsed_container_nodes: Mapping[str, str] | None = None,
     show_input_transform_summary: bool = False,
     resolved_specs: list[NodeSpec] | None = None,
+    sibling_counts: Mapping[str, int] | None = None,
 ) -> str:
     """Builds and adds a standard (non-collapsed) layer node to the graphviz graph.
 
@@ -536,7 +537,7 @@ def _build_layer_node(
     # Get the address, shape, color, and line style:
 
     node_address, node_shape, node_color = _get_node_address_shape_color(
-        self, node, show_buffer_layers
+        self, node, show_buffer_layers, sibling_counts
     )
     node_bg_color = _get_node_bg_color(self, node)
 
@@ -1393,7 +1394,36 @@ def _build_collapsed_module_node(
     collapsed_modules.add(graph_node_label)
 
 
-def _atomic_module_split_range(trace: "Trace", layer_log: GraphNode, address: str) -> str:
+def _atomic_module_sibling_counts(trace: "Trace") -> dict[str, int]:
+    """Count rolled atomic-module layers per module address in one pass.
+
+    Parameters
+    ----------
+    trace:
+        Owning trace.
+
+    Returns
+    -------
+    dict[str, int]
+        Mapping from module address to the number of atomic-module ``Layer``
+        nodes whose innermost module is that address. Addresses with no such
+        layers are absent.
+    """
+
+    counts: dict[str, int] = {}
+    for other in trace.layer_logs.values():
+        if isinstance(other, Layer) and getattr(other, "is_atomic_module", False) and other.modules:
+            other_address = other.modules[-1].rsplit(":", 1)[0]
+            counts[other_address] = counts.get(other_address, 0) + 1
+    return counts
+
+
+def _atomic_module_split_range(
+    trace: "Trace",
+    layer_log: GraphNode,
+    address: str,
+    sibling_counts: Mapping[str, int] | None = None,
+) -> str:
     """Return the call-range an atomic module rectangle should mark, or ``""``.
 
     An atomic (single-op) module renders as a rectangle per call site. When the
@@ -1411,6 +1441,9 @@ def _atomic_module_split_range(trace: "Trace", layer_log: GraphNode, address: st
         Atomic module layer being rendered.
     address:
         The atomic module's address.
+    sibling_counts:
+        Optional per-draw ``_atomic_module_sibling_counts`` result; recomputed
+        from ``trace`` when absent.
 
     Returns
     -------
@@ -1423,14 +1456,9 @@ def _atomic_module_split_range(trace: "Trace", layer_log: GraphNode, address: st
     groups = _call_groups_for_layer(layer_log)
     if groups:
         return _format_call_groups(groups)
-    sibling_atomic_layers = sum(
-        1
-        for other in trace.layer_logs.values()
-        if isinstance(other, Layer)
-        and getattr(other, "is_atomic_module", False)
-        and other.modules
-        and other.modules[-1].rsplit(":", 1)[0] == address
-    )
+    if sibling_counts is None:
+        sibling_counts = _atomic_module_sibling_counts(trace)
+    sibling_atomic_layers = sibling_counts.get(address, 0)
     if sibling_atomic_layers > 1:
         calls = _common_module_call_indices(layer_log).get(address, [])
         if calls:
@@ -1510,11 +1538,13 @@ def _get_node_address_shape_color(
     self: "Trace",
     node: GraphNode,
     show_buffer_layers: BufferVisibilityLiteral | bool,
+    sibling_counts: Mapping[str, int] | None = None,
 ) -> Tuple[str, str, str]:
     """Gets the node shape, address, and color for the graphviz figure.
 
     Args:
         node: node to add
+        sibling_counts: optional per-draw atomic-module sibling counts
 
     Returns:
         node_address: address of the node
@@ -1541,7 +1571,7 @@ def _get_node_address_shape_color(
         else:
             sample_module_pass = node.modules[-1]
             module = sample_module_pass.split(":")[0]
-            split_range = _atomic_module_split_range(self, source_node, module)
+            split_range = _atomic_module_split_range(self, source_node, module, sibling_counts)
             node_address = f"{module}:{split_range}" if split_range else module
 
         node_address = "<br/>@" + node_address
@@ -1929,6 +1959,7 @@ __all__ = [
     "_annotation_image_path_for_node",
     "_append_container_overlay_edge",
     "_apply_node_spec_fn",
+    "_atomic_module_sibling_counts",
     "_atomic_module_split_range",
     "_batch_render_limit",
     "_buffer_versions_for_layer",
