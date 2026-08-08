@@ -1158,7 +1158,14 @@ def _node_for_label(trace: "Trace", label: str) -> GraphNode | None:
 
 
 def _same_layer_reachability(layer_log: "Layer") -> dict[int, set[int]]:
-    """Compute transitive same-layer reachability among passes.
+    """Compute direct same-layer reachability among passes.
+
+    Each pass's walk stops at the first same-layer op it reaches instead of
+    walking through it. The weak transitive closure of this direct graph equals
+    that of full transitive reachability (a path through an intermediate pass
+    contributes that pass's own outgoing edges), so the dependency components
+    built from it are unchanged while the walk stays near-linear for long
+    recurrent chains.
 
     Parameters
     ----------
@@ -1168,7 +1175,7 @@ def _same_layer_reachability(layer_log: "Layer") -> dict[int, set[int]]:
     Returns
     -------
     dict[int, set[int]]
-        Mapping from pass index to reachable same-layer pass indices.
+        Mapping from pass index to directly reachable same-layer pass indices.
     """
 
     trace = layer_log.source_trace
@@ -1186,6 +1193,7 @@ def _same_layer_reachability(layer_log: "Layer") -> dict[int, set[int]]:
             seen.add(label)
             if label in same_layer_labels:
                 reachability[pass_index].add(label_to_pass[label])
+                continue
             child = _node_for_label(trace, label)
             if child is not None:
                 stack.extend(child.children)
@@ -1305,6 +1313,8 @@ def _call_groups_for_layer(layer_log: "Layer") -> tuple[tuple[int, ...], ...]:
         no single common module address.
     """
 
+    if len(layer_log.ops) <= 1:
+        return ()
     common_calls = _common_module_call_indices(layer_log)
     if len(common_calls) != 1:
         return ()
