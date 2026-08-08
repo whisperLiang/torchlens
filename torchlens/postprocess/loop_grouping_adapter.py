@@ -316,19 +316,38 @@ class _GroupingWorkspace:
         -------
         dict[str, RecurrenceAssignment]
             Assignments keyed by node label.
+
+        Notes
+        -----
+        All members of a finalized group share ONE ``recurrent_labels`` list object
+        (:func:`_rebuild_pass_assignments`), so the tuple and the label-to-index map
+        are memoized per shared list -- one shared tuple per group instead of one
+        private P-tuple per member, and an O(1) index lookup instead of an O(P)
+        self-scan. The memo is keyed by ``id()`` of lists kept alive by
+        ``self.nodes`` for the duration of the call and is local to this call, so
+        no cross-run staleness is possible. ``equivalence_key`` stays
+        member-specific.
         """
-        return {
-            label: RecurrenceAssignment(
+        shared_groups: dict[int, tuple[tuple[str, ...], dict[str, int]]] = {}
+        assignments: dict[str, RecurrenceAssignment] = {}
+        for label, node in self.nodes.items():
+            group = shared_groups.get(id(node.recurrent_labels))
+            if group is None:
+                members = tuple(node.recurrent_labels)
+                group = (members, {member: index for index, member in enumerate(members)})
+                shared_groups[id(node.recurrent_labels)] = group
+            members, index_by_label = group
+            index = index_by_label.get(label)
+            if index is None:
+                continue
+            assignments[label] = RecurrenceAssignment(
                 layer_label=node.layer_label,
-                recurrent_labels=tuple(node.recurrent_labels),
+                recurrent_labels=members,
                 pass_index=index + 1,
-                num_passes=len(node.recurrent_labels),
+                num_passes=len(members),
                 equivalence_key=node.equivalence_key,
             )
-            for label, node in self.nodes.items()
-            for index, recurrent_label in enumerate(node.recurrent_labels)
-            if recurrent_label == label
-        }
+        return assignments
 
 
 def group_recurrent_nodes(graph: RecurrenceGroupingGraph) -> dict[str, RecurrenceAssignment]:
@@ -612,11 +631,18 @@ def _advance_bfs_frontier(
     # each live deque in place visits candidates in exactly the order the
     # first-non-empty-bucket rescan in :func:`_pop_frontier_node` produced,
     # without restarting the bucket-product scan after every pop.
+    key_index = _build_frontier_key_index(workspace, frontier_nodes)
     for candidate_node_neighbor_type in ("children", "parents"):
+        direction_index = key_index[candidate_node_neighbor_type]
         for candidate_node_subgraph in frontier_nodes:
             bucket = frontier_nodes[candidate_node_subgraph][candidate_node_neighbor_type]
             while bucket:
                 candidate_node_label = bucket.popleft()
+                _discard_from_key_index(
+                    direction_index,
+                    workspace.nodes[candidate_node_label].equivalence_key,
+                    candidate_node_subgraph,
+                )
 
                 if candidate_node_label in state.node_to_subgraph:
                     # The candidate was absorbed into another subgraph after this
@@ -638,6 +664,7 @@ def _advance_bfs_frontier(
                     candidate_node_neighbor_type,
                     candidate_node_subgraph,
                     frontier_nodes,
+                    direction_index,
                 )
 
                 _register_isomorphic_group(workspace, new_equivalent_nodes, state)
@@ -850,12 +877,71 @@ def _pop_frontier_node(
     return None, None, None
 
 
+def _build_frontier_key_index(
+    workspace: _GroupingWorkspace,
+    frontier_nodes: FrontierNodes,
+) -> dict[str, dict[str, dict[str, int]]]:
+    """Index one frontier step's labels by direction and equivalence key.
+
+    Parameters
+    ----------
+    workspace:
+        Mutable grouping workspace.
+    frontier_nodes:
+        Candidate frontier nodes by subgraph and neighbor direction.
+
+    Returns
+    -------
+    dict[str, dict[str, dict[str, int]]]
+        ``direction -> equivalence_key -> {subgraph_label: count}``, with subgraph
+        labels in frontier order. Buckets only ever shrink during a frontier step,
+        so the index is maintained by :func:`_discard_from_key_index` at the two
+        removal points (candidate pop, isomorphic-match deletion) and lets
+        :func:`_find_isomorphic_matches` visit only key-bearing subgraphs instead
+        of scanning every subgraph's deque per candidate.
+    """
+    key_index: dict[str, dict[str, dict[str, int]]] = {"children": {}, "parents": {}}
+    for direction, direction_index in key_index.items():
+        for subgraph_label, direction_buckets in frontier_nodes.items():
+            for label in direction_buckets[direction]:
+                subgraph_counts = direction_index.setdefault(
+                    workspace.nodes[label].equivalence_key, {}
+                )
+                subgraph_counts[subgraph_label] = subgraph_counts.get(subgraph_label, 0) + 1
+    return key_index
+
+
+def _discard_from_key_index(
+    direction_index: dict[str, dict[str, int]],
+    equivalence_key: str,
+    subgraph_label: str,
+) -> None:
+    """Record one label's removal from a subgraph's frontier deque.
+
+    Parameters
+    ----------
+    direction_index:
+        One direction's ``equivalence_key -> {subgraph_label: count}`` index.
+    equivalence_key:
+        Equivalence key of the removed label.
+    subgraph_label:
+        Subgraph whose deque the label was removed from.
+    """
+    subgraph_counts = direction_index[equivalence_key]
+    remaining = subgraph_counts[subgraph_label] - 1
+    if remaining:
+        subgraph_counts[subgraph_label] = remaining
+    else:
+        del subgraph_counts[subgraph_label]
+
+
 def _find_isomorphic_matches(
     workspace: _GroupingWorkspace,
     candidate_node_label: str,
     candidate_node_neighbor_type: str,
     candidate_node_subgraph: str,
     frontier_nodes: FrontierNodes,
+    direction_index: dict[str, dict[str, int]],
 ) -> list[tuple[str, str]]:
     """Find candidate-equivalent nodes across other subgraph frontiers.
 
@@ -871,16 +957,29 @@ def _find_isomorphic_matches(
         Starting-node label for the candidate's subgraph.
     frontier_nodes:
         Candidate frontier nodes by subgraph and neighbor direction.
+    direction_index:
+        This direction's ``equivalence_key -> {subgraph_label: count}`` index over
+        ``frontier_nodes`` (:func:`_build_frontier_key_index`).
 
     Returns
     -------
     list[tuple[str, str]]
         Matched ``(node_label, subgraph_label)`` pairs.
+
+    Notes
+    -----
+    Only subgraphs whose frontier still holds the candidate's equivalence key are
+    visited. This is exact: within one call, subgraphs are independent -- each
+    contributes at most its FIRST key-matching node from its own deque, no
+    cross-subgraph state exists, and the result is sorted by node label -- so
+    skipping subgraphs with zero key-bearing nodes (where the scan would find
+    nothing and mutate nothing) returns the identical set with identical frontier
+    mutations.
     """
     candidate_node = workspace.nodes[candidate_node_label]
     candidate_node_equivalence_key = candidate_node.equivalence_key
     new_equivalent_nodes = [(candidate_node_label, candidate_node_subgraph)]
-    for subgraph_label in frontier_nodes:
+    for subgraph_label in list(direction_index.get(candidate_node_equivalence_key, ())):
         if subgraph_label == candidate_node_subgraph:
             continue
         other_subgraph_nodes = frontier_nodes[subgraph_label][candidate_node_neighbor_type]
@@ -888,6 +987,11 @@ def _find_isomorphic_matches(
             comparison_node = workspace.nodes[comparison_node_label]
             if comparison_node.equivalence_key == candidate_node_equivalence_key:
                 del other_subgraph_nodes[comparison_index]
+                _discard_from_key_index(
+                    direction_index,
+                    candidate_node_equivalence_key,
+                    subgraph_label,
+                )
                 new_equivalent_nodes.append((comparison_node_label, subgraph_label))
                 break
     new_equivalent_nodes = sorted(new_equivalent_nodes, key=lambda item: item[0])

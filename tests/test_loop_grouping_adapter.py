@@ -816,3 +816,38 @@ def test_non_monotone_workspace_keeps_bounded_pair_lane() -> None:
     assert cache._order_monotone is False
     assert not cache._descendant_bits
     assert not cache._batch_attempted
+
+
+@pytest.mark.smoke
+def test_assignments_pool_one_recurrent_labels_tuple_per_group() -> None:
+    """Assignments equal the historical per-node scan and pool one tuple per group."""
+    torch.manual_seed(0)
+    traced = trace_fn(_ExplicitCatCellRNN(24), torch.rand(2, 24, 8))
+    graph = _neutral_graph_from_torch_recurrent_fixture(traced)
+    workspace = lga._GroupingWorkspace.from_graph(graph)
+    lga._detect_and_label_workspace_loops(workspace)
+    assignments = workspace.assignments()
+
+    expected = {
+        label: lga.RecurrenceAssignment(
+            layer_label=node.layer_label,
+            recurrent_labels=tuple(node.recurrent_labels),
+            pass_index=index + 1,
+            num_passes=len(node.recurrent_labels),
+            equivalence_key=node.equivalence_key,
+        )
+        for label, node in workspace.nodes.items()
+        for index, recurrent_label in enumerate(node.recurrent_labels)
+        if recurrent_label == label
+    }
+    assert assignments == expected
+    assert list(assignments) == list(expected)
+
+    instances_by_group: dict[tuple[str, ...], list[tuple[str, ...]]] = defaultdict(list)
+    for assignment in assignments.values():
+        if assignment.num_passes > 1:
+            instances_by_group[assignment.recurrent_labels].append(assignment.recurrent_labels)
+    assert instances_by_group
+    for members, instances in instances_by_group.items():
+        assert len(instances) == len(members)
+        assert all(instance is instances[0] for instance in instances)
