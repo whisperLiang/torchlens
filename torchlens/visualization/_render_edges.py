@@ -32,6 +32,46 @@ if TYPE_CHECKING:
     from .auto_collapse import ModuleRepeatFold
 
 
+@dataclass(frozen=True)
+class _SegmentLookup:
+    """Precomputed first-match indexes for render segment membership."""
+
+    qualified_labels: Mapping[str, SegmentDescriptor]
+    base_labels: Mapping[str, SegmentDescriptor]
+    member_addresses: Mapping[str, tuple[int, SegmentDescriptor]]
+
+
+def _build_segment_lookup(
+    segments: Mapping[str, SegmentDescriptor] | None,
+) -> _SegmentLookup:
+    """Build first-match segment indexes in descriptor iteration order.
+
+    Parameters
+    ----------
+    segments:
+        Segment descriptors keyed by node name.
+
+    Returns
+    -------
+    _SegmentLookup
+        Constant-time indexes preserving the renderer's original first-match
+        ordering.
+    """
+
+    qualified_labels: dict[str, SegmentDescriptor] = {}
+    base_labels: dict[str, SegmentDescriptor] = {}
+    member_addresses: dict[str, tuple[int, SegmentDescriptor]] = {}
+    for position, segment in enumerate((segments or {}).values()):
+        for op in segment.ops:
+            qualified_label = str(op)
+            qualified_labels.setdefault(qualified_label, segment)
+            base_labels.setdefault(qualified_label, segment)
+            base_labels.setdefault(qualified_label.rsplit(":", 1)[0], segment)
+        for member in segment.members:
+            member_addresses.setdefault(str(member), (position, segment))
+    return _SegmentLookup(qualified_labels, base_labels, member_addresses)
+
+
 def _is_noise_buffer(node: GraphNode) -> bool:
     """Return whether ``node`` is a hardcoded noisy buffer.
 
@@ -176,7 +216,7 @@ def _get_node_by_label(trace: "Trace", label: str, vis_mode: str) -> GraphNode:
 
 def _segment_for_node(
     node: GraphNode,
-    segments: Mapping[str, SegmentDescriptor] | None,
+    segment_lookup: _SegmentLookup | None,
 ) -> SegmentDescriptor | None:
     """Return the segment descriptor that absorbs ``node`` if any.
 
@@ -184,8 +224,8 @@ def _segment_for_node(
     ----------
     node:
         Render node being emitted.
-    segments:
-        Segment descriptors keyed by node name.
+    segment_lookup:
+        Precomputed segment membership indexes.
 
     Returns
     -------
@@ -193,7 +233,7 @@ def _segment_for_node(
         Matching descriptor, or ``None``.
     """
 
-    if not segments or isinstance(node, BoundaryNode):
+    if segment_lookup is None or isinstance(node, BoundaryNode):
         return None
     label = str(getattr(node, "layer_label", ""))
     if isinstance(node, Op):
@@ -201,26 +241,26 @@ def _segment_for_node(
         # concrete descriptor ops first so per-pass segments of a reused
         # module absorb exactly their own pass.
         qualified = str(node.label)
-        for segment in segments.values():
-            if qualified in segment.ops:
-                return segment
-        for segment in segments.values():
-            if label in segment.ops:
-                return segment
+        segment = segment_lookup.qualified_labels.get(qualified)
+        if segment is not None:
+            return segment
+        segment = segment_lookup.qualified_labels.get(label)
+        if segment is not None:
+            return segment
     else:
         # Rolled aggregates have no pass identity; match the base label
         # against concrete or legacy pass-free descriptor ops.
-        for segment in segments.values():
-            if label in segment.ops or any(
-                str(op).rsplit(":", 1)[0] == label for op in segment.ops
-            ):
-                return segment
-    for segment in segments.values():
-        member_set = set(segment.members)
-        for address_w_pass in getattr(node, "modules", ()) or ():
-            if str(address_w_pass).rsplit(":", 1)[0] in member_set:
-                return segment
-    return None
+        segment = segment_lookup.base_labels.get(label)
+        if segment is not None:
+            return segment
+    first_member_match: tuple[int, SegmentDescriptor] | None = None
+    for address_w_pass in getattr(node, "modules", ()) or ():
+        candidate = segment_lookup.member_addresses.get(str(address_w_pass).rsplit(":", 1)[0])
+        if candidate is not None and (
+            first_member_match is None or candidate[0] < first_member_match[0]
+        ):
+            first_member_match = candidate
+    return None if first_member_match is None else first_member_match[1]
 
 
 def _is_run_fold_representative(
@@ -976,7 +1016,7 @@ def _add_edges_for_node(
     collapsed_container_nodes: Mapping[str, str] | None = None,
     repeat_folds: Mapping[str, "ModuleRepeatFold"] | None = None,
     run_fold_ellipsis_nodes: set[str] | None = None,
-    segments: Mapping[str, SegmentDescriptor] | None = None,
+    segment_lookup: _SegmentLookup | None = None,
     parent_segment: SegmentDescriptor | None = None,
     antiparallel_projected_edges: frozenset[tuple[str, str]] = frozenset(),
 ) -> None:
@@ -1072,7 +1112,7 @@ def _add_edges_for_node(
         child_fold_ancestor = _run_fold_ancestor_for_node(child_node, repeat_folds)
         if child_fold_ancestor is not None:
             child_module_name_w_pass = child_fold_ancestor
-        child_segment = _segment_for_node(child_node, segments)
+        child_segment = _segment_for_node(child_node, segment_lookup)
         child_is_collapsed_module = child_module_name_w_pass is not None
 
         if child_segment is not None:
@@ -2110,10 +2150,12 @@ def _get_lowest_module_for_two_nodes(
 
 
 __all__ = [
+    "_SegmentLookup",
     "_add_edges_for_node",
     "_add_intervention_hook_nodes",
     "_add_legend_to_graphviz",
     "_buffer_name_segment",
+    "_build_segment_lookup",
     "_collapsed_module_owner_key",
     "_collapsed_module_remainder_stats",
     "_collapsed_module_should_show_remainder",
