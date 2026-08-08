@@ -2900,8 +2900,33 @@ def _record_predicate_intervention_spec(
         direction=decision.direction,
     )
     spec = trace._ensure_intervention_spec()
-    if not any(existing.freeze() == target.freeze() for existing in spec.targets):
+    # The target dedup was a freeze-and-compare scan over all of spec.targets
+    # per matched decision -- quadratic in distinct predicate targets. Mirror
+    # the membership in a frozen-key set keyed to (spec identity, target
+    # count) so out-of-band appends or spec swaps rebuild the mirror; a
+    # pre-existing target whose frozen form is unhashable falls back to the
+    # original linear scan.
+    frozen_target = target.freeze()
+    target_keys = trace.__dict__.get("_tl_predicate_intervention_target_keys")
+    if target_keys is None or target_keys[0] is not spec or target_keys[1] != len(spec.targets):
+        try:
+            target_keys = [
+                spec,
+                len(spec.targets),
+                {existing.freeze() for existing in spec.targets},
+            ]
+        except TypeError:
+            target_keys = None
+        trace.__dict__["_tl_predicate_intervention_target_keys"] = target_keys
+    if target_keys is not None:
+        target_is_new = frozen_target not in target_keys[2]
+    else:
+        target_is_new = not any(existing.freeze() == frozen_target for existing in spec.targets)
+    if target_is_new:
         spec.targets.append(target)
+        if target_keys is not None:
+            target_keys[2].add(frozen_target)
+            target_keys[1] = len(spec.targets)
     for entry in entries:
         metadata = {
             **dict(entry.metadata),
