@@ -4445,6 +4445,80 @@ def _sample_state_toctou_at_consumption(state: _WitnessState, consumed_ptrs: set
     return _sample_buffer_toctou_at_consumption(state, tracker, consumed_ptrs)
 
 
+# PERF (w15 F1): exact classes whose ``untyped_storage``/``data_ptr`` provably resolve to the
+# snapshotted true originals (`_ORIG_TENSORBASE_UNTYPED_STORAGE` / `_ORIG_UNTYPED_STORAGE_DATA_PTR`).
+# The per-consumption TOCTOU scans run under ``pause_logging`` on the OWNER thread, where the
+# per-forward escape patches are a pure call-through (the recording branch is gated on
+# ``_state._logging_enabled``), so for these classes the raw-original read is value- AND
+# side-effect-identical to the wrapped spelling. A SUBCLASS may override either accessor at the
+# Python level, so anything else keeps the verbatim wrapped per-item path.
+_PLAIN_TENSOR_CLS = torch.Tensor
+_PLAIN_PARAM_CLS = torch.nn.Parameter
+
+
+def _split_consumed_state_items(
+    items: tuple[tuple[str, Any], ...], consumed_ptrs: set[int]
+) -> tuple[list[tuple[str, Any]], list[tuple[str, Any]]]:
+    """Split registered state items into consumed-storage HITS and verbatim-path leftovers.
+
+    PERF (w15 F1): the per-consumption TOCTOU scans read every registered param/buffer's
+    CURRENT storage pointer on EVERY dispatched op -- O(ops x params), and each per-item
+    wrapped ``untyped_storage().data_ptr()`` call additionally pays the armed numpy-RNG
+    setprofile classifier's per-event toll, the multiplicative structure behind the
+    quadratic runnable-producer capture. This helper keeps the FULL per-op scan (the scan
+    itself is the r16-H1/r18 coverage: a registration-time ptr->address index goes STALE
+    under a mid-forward ``p.data = other`` rebind and would falsely VERIFY a restored
+    transient write) but batches the pointer reads through ``map`` over the true-original
+    C accessors: C-to-C calls never enter the interpreter loop, so no profile event fires
+    per item and no wrapper frame is paid. ``sys.setprofile`` hooks by contract only see
+    interpreter-level calls, so nothing the RNG monitor could ever have classified is
+    hidden -- user draw-sites always run through the interpreter and remain fully visible.
+
+    Coverage is byte-identical to the verbatim loop: the raw read is only used for exact
+    ``torch.Tensor`` / ``nn.Parameter`` instances (where the wrapped, paused spelling is a
+    pure call-through to the same originals -- raw ``0`` pointers included), any exotic
+    class falls to the leftover list for the verbatim wrapped per-item path, and ANY
+    batch-read exception routes EVERY item to that verbatim path (which reproduces the
+    original per-item skip semantics exactly).
+
+    Returns
+    -------
+    tuple[list, list]
+        ``(hits, leftovers)``: items whose current storage pointer is in
+        ``consumed_ptrs`` (dict order), and items that must take the verbatim per-item
+        path (exotic classes, or all items on a batch-read failure).
+    """
+
+    fast = [
+        pair
+        for pair in items
+        if pair[1].__class__ is _PLAIN_TENSOR_CLS or pair[1].__class__ is _PLAIN_PARAM_CLS
+    ]
+    if len(fast) != len(items):
+        leftovers = [
+            pair
+            for pair in items
+            if not (pair[1].__class__ is _PLAIN_TENSOR_CLS or pair[1].__class__ is _PLAIN_PARAM_CLS)
+        ]
+    else:
+        leftovers = []
+    if not fast:
+        return [], leftovers
+    try:
+        ptrs = list(
+            map(
+                _ORIG_UNTYPED_STORAGE_DATA_PTR,
+                map(_ORIG_TENSORBASE_UNTYPED_STORAGE, [pair[1] for pair in fast]),
+            )
+        )
+    except (RuntimeError, TypeError, NotImplementedError, AttributeError):
+        # Fail SAFE, never fast: any batch failure sends every item through the verbatim
+        # wrapped per-item path, which reproduces the original skip semantics per tensor.
+        return [], list(items)
+    hits = [pair for pair, ptr in zip(fast, ptrs) if ptr in consumed_ptrs]
+    return hits, leftovers
+
+
 def _sample_param_toctou_at_consumption(
     state: _WitnessState, tracker: Any, consumed_ptrs: set[int]
 ) -> bool:
@@ -4469,7 +4543,11 @@ def _sample_param_toctou_at_consumption(
     snapshots = getattr(tracker, "address_to_param_snapshot", None)
     if not isinstance(tensors, dict) or not isinstance(snapshots, dict):
         return False
-    for address, source in tuple(tensors.items()):
+    hits, leftovers = _split_consumed_state_items(tuple(tensors.items()), consumed_ptrs)
+    for address, source in hits:
+        if _param_baseline_differs(state, snapshots, address, source):
+            return True
+    for address, source in leftovers:
         if not isinstance(source, torch.Tensor):
             continue
         try:
@@ -4477,19 +4555,29 @@ def _sample_param_toctou_at_consumption(
                 continue
         except (RuntimeError, TypeError, NotImplementedError):
             continue
-        baseline = snapshots.get(address)
-        if not isinstance(baseline, tuple) or not baseline:
-            continue
-        before = baseline[0]
-        if not isinstance(before, torch.Tensor):
-            continue
-        try:
-            if not torch.equal(_whole_storage_uint8(source), before):  # byte-exact uint8 view
-                _HOST_ESCAPE_MUTABLE_WRITEBACK.add(state.trace)
-                return True
-        except (RuntimeError, TypeError, NotImplementedError):
+        if _param_baseline_differs(state, snapshots, address, source):
+            return True
+    return False
+
+
+def _param_baseline_differs(
+    state: _WitnessState, snapshots: dict[str, Any], address: str, source: torch.Tensor
+) -> bool:
+    """Compare one consumed param's whole-storage bytes against its pre-forward baseline."""
+
+    baseline = snapshots.get(address)
+    if not isinstance(baseline, tuple) or not baseline:
+        return False
+    before = baseline[0]
+    if not isinstance(before, torch.Tensor):
+        return False
+    try:
+        if not torch.equal(_whole_storage_uint8(source), before):  # byte-exact uint8 view
             _HOST_ESCAPE_MUTABLE_WRITEBACK.add(state.trace)
             return True
+    except (RuntimeError, TypeError, NotImplementedError):
+        _HOST_ESCAPE_MUTABLE_WRITEBACK.add(state.trace)
+        return True
     return False
 
 
@@ -4517,7 +4605,11 @@ def _sample_buffer_toctou_at_consumption(
     snapshots = getattr(tracker, "address_to_expected_storage_snapshot", None)
     if not isinstance(tensors, dict) or not isinstance(snapshots, dict):
         return False
-    for address, source in tuple(tensors.items()):
+    hits, leftovers = _split_consumed_state_items(tuple(tensors.items()), consumed_ptrs)
+    for address, source in hits:
+        if _buffer_expected_differs(state, snapshots, address, source):
+            return True
+    for address, source in leftovers:
         if not isinstance(source, torch.Tensor):
             continue
         try:
@@ -4525,16 +4617,26 @@ def _sample_buffer_toctou_at_consumption(
                 continue
         except (RuntimeError, TypeError, NotImplementedError):
             continue
-        expected = snapshots.get(address)
-        if not isinstance(expected, torch.Tensor):
-            continue
-        try:
-            if not torch.equal(_whole_storage_uint8(source), expected):  # byte-exact uint8 view
-                _HOST_ESCAPE_MUTABLE_WRITEBACK.add(state.trace)
-                return True
-        except (RuntimeError, TypeError, NotImplementedError):
+        if _buffer_expected_differs(state, snapshots, address, source):
+            return True
+    return False
+
+
+def _buffer_expected_differs(
+    state: _WitnessState, snapshots: dict[str, Any], address: str, source: torch.Tensor
+) -> bool:
+    """Compare one consumed buffer's whole-storage bytes against its journal-advanced bytes."""
+
+    expected = snapshots.get(address)
+    if not isinstance(expected, torch.Tensor):
+        return False
+    try:
+        if not torch.equal(_whole_storage_uint8(source), expected):  # byte-exact uint8 view
             _HOST_ESCAPE_MUTABLE_WRITEBACK.add(state.trace)
             return True
+    except (RuntimeError, TypeError, NotImplementedError):
+        _HOST_ESCAPE_MUTABLE_WRITEBACK.add(state.trace)
+        return True
     return False
 
 
