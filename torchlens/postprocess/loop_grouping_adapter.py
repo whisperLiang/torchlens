@@ -1541,6 +1541,12 @@ def _pf_entry_union_allowed(
       a parameterized site realized at least twice. A bare two-op chain
       (``tanh(tanh(x))``) has neither and stays split.
 
+    The entry-sweep prefilter in :func:`_pf_partition_class` mirrors the three
+    terminal recurrence-evidence arms above with per-target necessary
+    conditions; changing any arm here requires updating that prefilter (and
+    the oracle battery in ``tests/test_loop_grouping_adapter.py``) in
+    lockstep, or admissible pairs may be silently skipped.
+
     Parameters
     ----------
     workspace:
