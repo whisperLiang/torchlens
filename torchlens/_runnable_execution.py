@@ -393,6 +393,15 @@ def _execute_loaded_sparse_transaction(
     # r55 C3: registry lookup for the per-call allocation preflight (namespace /
     # qualname drive the size-driving classification).
     registry_by_id = {entry.registry_id: entry for entry in descriptor.callable_registry}
+    # Run-invariant ``descriptor.tensor_slots`` indexes for the per-call output bind.
+    # The descriptor is frozen for the whole replay, so these are built ONCE here
+    # instead of once per call (they were O(calls x slots) rebuilds).
+    slots_by_id = {slot.slot_id: slot for slot in descriptor.tensor_slots}
+    state_slot_ids = frozenset(
+        slot.slot_id
+        for slot in descriptor.tensor_slots
+        if slot.role in {TensorSlotRole.PARAMETER, TensorSlotRole.BUFFER}
+    )
 
     # r35 corr2_4: the fork/restore set follows the SEEDING PRIMITIVE, never the
     # bound-input overlay -- every visible CUDA device is forked when CUDA is
@@ -471,6 +480,8 @@ def _execute_loaded_sparse_transaction(
                         before_versions=before_versions,
                         attestation_slot_ids=attestation_slot_ids,
                         attestation_slot_values=attestation_slot_values,
+                        slots=slots_by_id,
+                        state_slot_ids=state_slot_ids,
                         witness_slot_ids=escape_witness_slot_ids,
                         witness_source_snapshots=witness_source_snapshots,
                     )
@@ -3396,12 +3407,19 @@ def _bind_call_outputs(
     before_versions: Mapping[str, int],
     attestation_slot_ids: frozenset[str],
     attestation_slot_values: dict[str, torch.Tensor],
+    slots: Mapping[str, TensorSlotDescriptor],
+    state_slot_ids: frozenset[str],
     witness_slot_ids: frozenset[str] = frozenset(),
     witness_source_snapshots: dict[str, torch.Tensor] | None = None,
 ) -> tuple[ContractCheck, ...]:
-    """Slice, validate, and stage one grouped call's tensor outputs."""
+    """Slice, validate, and stage one grouped call's tensor outputs.
 
-    slots = {slot.slot_id: slot for slot in descriptor.tensor_slots}
+    ``slots`` and ``state_slot_ids`` are the run-invariant ``descriptor.tensor_slots``
+    indexes, built ONCE per run by the transaction and threaded in: the descriptor is a
+    frozen dataclass whose ``tensor_slots`` tuple and per-slot ``role`` cannot change
+    mid-replay, so rebuilding them per call was pure O(calls x slots) waste.
+    """
+
     checks: list[ContractCheck] = []
     output = _resolve_setter_output(call, output, slot_values)
     expected_paths = tuple(slots[slot_id].output_path or () for slot_id in call.output_slot_ids)
@@ -3542,11 +3560,6 @@ def _bind_call_outputs(
                 ),
             )
         )
-    state_slot_ids = frozenset(
-        slot.slot_id
-        for slot in descriptor.tensor_slots
-        if slot.role in {TensorSlotRole.PARAMETER, TensorSlotRole.BUFFER}
-    )
     checks.extend(
         _mutation_contract_checks(call, output, slot_values, before_versions, state_slot_ids)
     )
