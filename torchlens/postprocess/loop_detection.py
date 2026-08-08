@@ -269,9 +269,31 @@ def _build_recurrence_grouping_graph(self: "Trace") -> RecurrenceGroupingGraph:
     raw_labels = tuple(self._raw_layer_labels_list)
     raw_label_set = set(raw_labels)
     effective_equivalence = _differentiated_param_equivalence_classes(self)
+    equivalent_labels_memo: dict[int, tuple[Any, tuple[str, ...]]] = {}
+    recurrent_labels_memo: dict[int, tuple[Any, tuple[str, ...]]] = {}
 
     for label in raw_labels:
         node = self[label]
+        raw_equivalent_labels = node._slot("equivalent_ops")
+        equivalent_labels_cached = equivalent_labels_memo.get(id(raw_equivalent_labels))
+        if equivalent_labels_cached is None:
+            equivalent_labels = tuple(raw_equivalent_labels)
+            equivalent_labels_memo[id(raw_equivalent_labels)] = (
+                raw_equivalent_labels,
+                equivalent_labels,
+            )
+        else:
+            equivalent_labels = equivalent_labels_cached[1]
+        raw_recurrent_labels = node._slot("recurrent_ops")
+        recurrent_labels_cached = recurrent_labels_memo.get(id(raw_recurrent_labels))
+        if recurrent_labels_cached is None:
+            recurrent_labels = tuple(raw_recurrent_labels)
+            recurrent_labels_memo[id(raw_recurrent_labels)] = (
+                raw_recurrent_labels,
+                recurrent_labels,
+            )
+        else:
+            recurrent_labels = recurrent_labels_cached[1]
         is_pruned = bool(getattr(node, "is_orphan", False))
         retain = not is_pruned
         if retain:
@@ -280,11 +302,11 @@ def _build_recurrence_grouping_graph(self: "Trace") -> RecurrenceGroupingGraph:
             label=label,
             raw_order=node.raw_index,
             equivalence_key=effective_equivalence.get(label, node.equivalence_class),
-            equivalent_labels=tuple(node.equivalent_ops),
+            equivalent_labels=equivalent_labels,
             data_parents=tuple(parent for parent in node.parents if parent in raw_label_set),
             data_children=tuple(child for child in node.children if child in raw_label_set),
             layer_label=node._layer_label_raw,
-            recurrent_labels=tuple(node.recurrent_ops),
+            recurrent_labels=recurrent_labels,
             uses_params=bool(node.uses_params),
             func_name=node.func_name,
             param_barcodes=tuple(node._param_barcodes),
@@ -320,10 +342,20 @@ def _apply_recurrence_assignments(
         Neutral assignments returned by ``group_recurrent_nodes``.
     """
 
+    recurrent_labels_memo: dict[int, tuple[tuple[str, ...], list[str]]] = {}
     for label, assignment in assignments.items():
         node = self[label]
+        recurrent_labels_cached = recurrent_labels_memo.get(id(assignment.recurrent_labels))
+        if recurrent_labels_cached is None:
+            recurrent_labels = list(assignment.recurrent_labels)
+            recurrent_labels_memo[id(assignment.recurrent_labels)] = (
+                assignment.recurrent_labels,
+                recurrent_labels,
+            )
+        else:
+            recurrent_labels = recurrent_labels_cached[1]
         node._layer_label_raw = assignment.layer_label
-        node.recurrent_ops = list(assignment.recurrent_labels)
+        node.recurrent_ops = recurrent_labels
         node.pass_index = assignment.pass_index
         node.num_passes = assignment.num_passes
         node.equivalence_class = assignment.equivalence_key

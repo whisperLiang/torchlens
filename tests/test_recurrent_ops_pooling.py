@@ -16,6 +16,8 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
+from torchlens.postprocess.loop_detection import _apply_recurrence_assignments
+from torchlens.postprocess.loop_grouping_adapter import RecurrenceAssignment
 
 STEPS = 6
 DIM = 8
@@ -101,6 +103,35 @@ def test_recurrent_ops_reads_are_alias_safe(loop_trace) -> None:
     stolen.append("corrupted")
     assert first.recurrent_ops == expected
     assert second.recurrent_ops == expected
+
+
+@pytest.mark.smoke
+def test_assignment_apply_pools_lists_without_pooling_member_keys() -> None:
+    """Shared assignment tuples yield one list while keys remain member-specific."""
+
+    class _Node:
+        """Minimal mutable assignment target."""
+
+        pass
+
+    members = ("first", "second")
+    nodes = {label: _Node() for label in members}
+    assignments = {
+        label: RecurrenceAssignment(
+            layer_label="shared_layer",
+            recurrent_labels=members,
+            pass_index=index,
+            num_passes=2,
+            equivalence_key=f"member_key_{index}",
+        )
+        for index, label in enumerate(members, start=1)
+    }
+
+    _apply_recurrence_assignments(nodes, assignments)  # type: ignore[arg-type]
+
+    assert nodes["first"].recurrent_ops is nodes["second"].recurrent_ops
+    assert nodes["first"].equivalence_class == "member_key_1"
+    assert nodes["second"].equivalence_class == "member_key_2"
 
 
 @pytest.mark.smoke
