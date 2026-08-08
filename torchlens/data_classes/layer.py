@@ -438,7 +438,13 @@ class Layer:
 
         # Equivalence
         self.equivalence_class = first_pass.equivalence_class
-        self.equivalent_ops = first_pass.equivalent_ops
+        # Read the RAW slot: the public Op read is copy-on-read, and retaining
+        # one private copy per Layer re-created the O(N^2) duplication the
+        # canonical sharing exists to prevent (a 512-member equivalence class
+        # retained 17 MB across its 512 Layers). The Layer-side
+        # ``equivalent_ops`` property hands out a private copy on read, so the
+        # shared canonical set stays alias-safe.
+        self.equivalent_ops = first_pass._slot("equivalent_ops", set())
 
         # Special flags
         self.is_input = first_pass.is_input
@@ -711,6 +717,30 @@ class Layer:
         """Alias for the owning Trace back-reference."""
 
         return self.source_trace
+
+    @property
+    def equivalent_ops(self) -> Any:
+        """Labels of ops equivalent to this layer, as a private copy per read.
+
+        One canonical set object backs every Op AND Layer of an equivalence
+        class (see ``_COPY_ON_READ_SET_FIELDS`` in ``op.py``); handing out a
+        fresh copy means no holder can alias-corrupt the group. Storage stays
+        in ``__dict__`` under the public field name, so pickle state,
+        ``state_items``, and legacy ``__setstate__`` loads are unchanged.
+        Non-set legacy/loaded values (e.g. a list) pass through untouched.
+        """
+
+        try:
+            value = self.__dict__["equivalent_ops"]
+        except KeyError:
+            # Fall back to ``__getattr__`` delegation, matching a plain
+            # missing attribute.
+            raise AttributeError("equivalent_ops") from None
+        return set(value) if value.__class__ is set else value
+
+    @equivalent_ops.setter
+    def equivalent_ops(self, value: Any) -> None:
+        self.__dict__["equivalent_ops"] = value
 
     def __getstate__(self) -> Dict[str, Any]:
         """Return pickle state with weakrefs and raw autograd handles stripped."""

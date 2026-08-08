@@ -674,7 +674,13 @@ def _scrub_op_label_collections(op: "Op", labels_to_remove: Set[str]) -> None:
         if not value:
             continue
         if isinstance(value, list):
-            setattr(op, field_name, [label for label in value if label not in labels_to_remove])
+            # Only rebind when a dead label is actually present, for the same
+            # reason as the set branch below: ``recurrent_ops`` shares ONE
+            # canonical list across every Op of a recurrence group, and an
+            # unconditional rebind would hand every Op its own equal-but-
+            # distinct copy for nothing.
+            if not labels_to_remove.isdisjoint(value):
+                setattr(op, field_name, [label for label in value if label not in labels_to_remove])
         elif isinstance(value, set):
             # Only rebind when a dead label is actually present. ``equivalent_ops``
             # shares ONE set object across every Op of an equivalence class, and
