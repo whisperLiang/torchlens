@@ -4778,7 +4778,7 @@ def _check_buffer_static_versions(ml: "Trace", buf: object, name: str) -> None:
                 f"Buffer '{address}' version '{label}' has address "
                 f"{getattr(version, 'address', None)!r}",
             )
-        if label not in set(getattr(ml, "layer_dict_all_keys", {})):
+        if label not in getattr(ml, "layer_dict_all_keys", {}):
             raise MetadataInvariantError(
                 name,
                 f"Buffer '{address}' version '{label}' does not resolve in trace",
@@ -5008,7 +5008,13 @@ def _resolve_trace_label(ml: "Trace", label: str) -> str | None:
         Resolved label when present in the trace, otherwise ``None``.
     """
 
-    all_keys = set(getattr(ml, "layer_dict_all_keys", {}))
+    # Membership is tested against the lookup mapping directly rather than a
+    # `set(...)` copy: `x in mapping` is an O(1) key probe with exactly the
+    # hash/`__eq__` semantics a set copy of those same keys would have, whereas
+    # rebuilding the set made every resolution O(n_labels). This helper is
+    # called once per edge-use record and per module boundary, so the copy made
+    # `check_metadata_invariants` quadratic in trace size.
+    all_keys = getattr(ml, "layer_dict_all_keys", {})
     final_label = getattr(ml, "_raw_to_final_layer_labels", {}).get(label)
     # `.get(label)` returns None both when `label` genuinely has no raw-label
     # mapping (the common case for an already-final label) and, in principle,
