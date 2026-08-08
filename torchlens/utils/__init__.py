@@ -11,75 +11,82 @@ from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal, cast, get_args, get_origin, get_type_hints
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Literal,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 import torch
 from packaging.requirements import Requirement
 from torch import nn
 
 from .. import _state
-from ._torch_compat import get_torch_capability_snapshot
-from .rng import (
-    set_random_seed,
-    log_current_rng_states,
-    set_rng_from_saved_states,
-    log_current_autocast_state,
-    AutocastRestore,
-    _AUTOCAST_DEVICES,
-)
-from .tensor_utils import (
-    MAX_FLOATING_POINT_TOLERANCE,
-    _cuda_available,
-    _is_cuda_available,
-    tensor_all_nan,
-    tensor_nanequal,
-    safe_to,
-    get_memory_amount,
-    copy_tensor_payload,
-    safe_copy,
-    print_override,
-)
-from .arg_handling import (
-    _safe_copy_arg,
-    copy_arg_tree,
-    safe_copy_args,
-    safe_copy_kwargs,
-    _model_expects_single_arg,
-    normalize_input_args,
-)
-from .introspection import (
-    _ATTR_SKIP_SET,
-    get_vars_of_type_from_obj,
-    get_attr_values_from_tensor_list,
-    nested_getattr,
-    nested_assign,
-    iter_accessible_attributes,
-    remove_attributes_with_prefix,
-    _get_code_context,
-)
-from .collections import (
-    is_iterable,
-    ensure_iterable,
-    index_nested,
-    remove_entry_from_list,
-    assign_to_sequence_or_dict,
-)
-from .hashing import (
-    make_random_barcode,
-    make_short_barcode_from_input,
-)
-from .display import (
-    format_flops,
-    format_size,
-    identity,
-    int_list_to_compact_str,
-    human_readable_size,
-    in_notebook,
-    progress_bar,
-    tensor_stats_summary,
-    warn_parallel,
-)
-from ..capture.flops import register_op_rule
+
+if TYPE_CHECKING:
+    from ..capture.flops import register_op_rule
+    from .arg_handling import (
+        _model_expects_single_arg,
+        _safe_copy_arg,
+        copy_arg_tree,
+        normalize_input_args,
+        safe_copy_args,
+        safe_copy_kwargs,
+    )
+    from .collections import (
+        assign_to_sequence_or_dict,
+        ensure_iterable,
+        index_nested,
+        is_iterable,
+        remove_entry_from_list,
+    )
+    from .display import (
+        format_flops,
+        format_size,
+        human_readable_size,
+        identity,
+        in_notebook,
+        int_list_to_compact_str,
+        progress_bar,
+        tensor_stats_summary,
+        warn_parallel,
+    )
+    from .hashing import make_random_barcode, make_short_barcode_from_input
+    from .introspection import (
+        _ATTR_SKIP_SET,
+        _get_code_context,
+        get_attr_values_from_tensor_list,
+        get_vars_of_type_from_obj,
+        iter_accessible_attributes,
+        nested_assign,
+        nested_getattr,
+        remove_attributes_with_prefix,
+    )
+    from .rng import (
+        _AUTOCAST_DEVICES,
+        AutocastRestore,
+        log_current_autocast_state,
+        log_current_rng_states,
+        set_random_seed,
+        set_rng_from_saved_states,
+    )
+    from .tensor_utils import (
+        MAX_FLOATING_POINT_TOLERANCE,
+        _cuda_available,
+        _is_cuda_available,
+        copy_tensor_payload,
+        get_memory_amount,
+        print_override,
+        safe_copy,
+        safe_to,
+        tensor_all_nan,
+        tensor_nanequal,
+    )
 
 
 @dataclass(frozen=True)
@@ -373,6 +380,8 @@ def _probe_torch_wrapper_bindings() -> DoctorCheck:
         where torch itself is no longer pointing at registered wrappers.
     """
 
+    from .introspection import nested_getattr
+
     if not _state._orig_to_decorated:
         return DoctorCheck("torch wrapper bindings", "SKIP", "wrappers not installed yet")
     if not _state._is_decorated:
@@ -420,6 +429,8 @@ def _runtime_capability_snapshot() -> dict[str, bool]:
     dict[str, bool]
         Mapping from capability flag names to availability.
     """
+
+    from ._torch_compat import get_torch_capability_snapshot
 
     snapshot = get_torch_capability_snapshot()
     try:
@@ -883,6 +894,128 @@ def trace_streaming(model: nn.Module, inputs_iter: Iterable[Any], **kwargs: Any)
     if not logs:
         raise ValueError("inputs_iter must yield at least one input.")
     return tuple(logs)
+
+
+_LAZY_EXPORTS: dict[str, tuple[str, str]] = {
+    "AutocastRestore": ("torchlens.utils.rng", "AutocastRestore"),
+    "MAX_FLOATING_POINT_TOLERANCE": (
+        "torchlens.utils.tensor_utils",
+        "MAX_FLOATING_POINT_TOLERANCE",
+    ),
+    "_ATTR_SKIP_SET": ("torchlens.utils.introspection", "_ATTR_SKIP_SET"),
+    "_AUTOCAST_DEVICES": ("torchlens.utils.rng", "_AUTOCAST_DEVICES"),
+    "_cuda_available": ("torchlens.utils.tensor_utils", "_cuda_available"),
+    "_get_code_context": ("torchlens.utils.introspection", "_get_code_context"),
+    "_is_cuda_available": ("torchlens.utils.tensor_utils", "_is_cuda_available"),
+    "_model_expects_single_arg": (
+        "torchlens.utils.arg_handling",
+        "_model_expects_single_arg",
+    ),
+    "_safe_copy_arg": ("torchlens.utils.arg_handling", "_safe_copy_arg"),
+    "assign_to_sequence_or_dict": (
+        "torchlens.utils.collections",
+        "assign_to_sequence_or_dict",
+    ),
+    "copy_arg_tree": ("torchlens.utils.arg_handling", "copy_arg_tree"),
+    "copy_tensor_payload": ("torchlens.utils.tensor_utils", "copy_tensor_payload"),
+    "ensure_iterable": ("torchlens.utils.collections", "ensure_iterable"),
+    "format_flops": ("torchlens.utils.display", "format_flops"),
+    "format_size": ("torchlens.utils.display", "format_size"),
+    "get_attr_values_from_tensor_list": (
+        "torchlens.utils.introspection",
+        "get_attr_values_from_tensor_list",
+    ),
+    "get_memory_amount": ("torchlens.utils.tensor_utils", "get_memory_amount"),
+    "get_torch_capability_snapshot": (
+        "torchlens.utils._torch_compat",
+        "get_torch_capability_snapshot",
+    ),
+    "get_vars_of_type_from_obj": (
+        "torchlens.utils.introspection",
+        "get_vars_of_type_from_obj",
+    ),
+    "human_readable_size": ("torchlens.utils.display", "human_readable_size"),
+    "identity": ("torchlens.utils.display", "identity"),
+    "in_notebook": ("torchlens.utils.display", "in_notebook"),
+    "index_nested": ("torchlens.utils.collections", "index_nested"),
+    "int_list_to_compact_str": ("torchlens.utils.display", "int_list_to_compact_str"),
+    "is_iterable": ("torchlens.utils.collections", "is_iterable"),
+    "iter_accessible_attributes": (
+        "torchlens.utils.introspection",
+        "iter_accessible_attributes",
+    ),
+    "log_current_autocast_state": ("torchlens.utils.rng", "log_current_autocast_state"),
+    "log_current_rng_states": ("torchlens.utils.rng", "log_current_rng_states"),
+    "make_random_barcode": ("torchlens.utils.hashing", "make_random_barcode"),
+    "make_short_barcode_from_input": (
+        "torchlens.utils.hashing",
+        "make_short_barcode_from_input",
+    ),
+    "nested_assign": ("torchlens.utils.introspection", "nested_assign"),
+    "nested_getattr": ("torchlens.utils.introspection", "nested_getattr"),
+    "normalize_input_args": ("torchlens.utils.arg_handling", "normalize_input_args"),
+    "print_override": ("torchlens.utils.tensor_utils", "print_override"),
+    "progress_bar": ("torchlens.utils.display", "progress_bar"),
+    "register_op_rule": ("torchlens.capture.flops", "register_op_rule"),
+    "remove_attributes_with_prefix": (
+        "torchlens.utils.introspection",
+        "remove_attributes_with_prefix",
+    ),
+    "remove_entry_from_list": (
+        "torchlens.utils.collections",
+        "remove_entry_from_list",
+    ),
+    "safe_copy": ("torchlens.utils.tensor_utils", "safe_copy"),
+    "safe_copy_args": ("torchlens.utils.arg_handling", "safe_copy_args"),
+    "safe_copy_kwargs": ("torchlens.utils.arg_handling", "safe_copy_kwargs"),
+    "safe_to": ("torchlens.utils.tensor_utils", "safe_to"),
+    "set_random_seed": ("torchlens.utils.rng", "set_random_seed"),
+    "set_rng_from_saved_states": ("torchlens.utils.rng", "set_rng_from_saved_states"),
+    "tensor_all_nan": ("torchlens.utils.tensor_utils", "tensor_all_nan"),
+    "tensor_nanequal": ("torchlens.utils.tensor_utils", "tensor_nanequal"),
+    "tensor_stats_summary": ("torchlens.utils.display", "tensor_stats_summary"),
+    "warn_parallel": ("torchlens.utils.display", "warn_parallel"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve one legacy utility facade export on first access.
+
+    Parameters
+    ----------
+    name:
+        Module attribute requested by Python's PEP 562 lookup.
+
+    Returns
+    -------
+    Any
+        The original object from its defining module.
+
+    Raises
+    ------
+    AttributeError
+        If ``name`` is not a utility facade export.
+    """
+
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attribute_name = target
+    value = getattr(importlib.import_module(module_name), attribute_name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    """Return eager and lazy utility facade attributes.
+
+    Returns
+    -------
+    list[str]
+        Sorted module attribute names, including unresolved lazy exports.
+    """
+
+    return sorted(set(globals()) | set(_LAZY_EXPORTS))
 
 
 __all__ = [
