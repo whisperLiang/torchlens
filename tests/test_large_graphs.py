@@ -463,14 +463,17 @@ class TestRankEngineRendering:
         monkeypatch.setattr(rank_layout, "RANK_LAYOUT_COST_THRESHOLD", 0)
         monkeypatch.setattr(rank_layout, "render_rank_layout", fail_render_rank_layout)
         model = RandomGraphModel(target_nodes=60, seed=42)
-        source = _draw_model(
-            model,
-            torch.randn(2, 64),
-            vis_node_placement="dot",
-            vis_save_only=True,
-            vis_fileformat="svg",
-            vis_outpath=str(tmp_path / "manual_dot"),
-        )
+        # A zero threshold also prices sibling-order verification out of budget,
+        # so explicit dot skips that post-pass with its documented notice.
+        with pytest.warns(UserWarning, match="skipped sibling-order verification"):
+            source = _draw_model(
+                model,
+                torch.randn(2, 64),
+                vis_node_placement="dot",
+                vis_save_only=True,
+                vis_fileformat="svg",
+                vis_outpath=str(tmp_path / "manual_dot"),
+            )
         assert "digraph" in source
 
     def test_manual_rank_forces_rank(

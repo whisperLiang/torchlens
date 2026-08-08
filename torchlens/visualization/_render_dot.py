@@ -685,6 +685,22 @@ def draw(
         vis_call_depth=vis_call_depth,
     ):
         sibling_order_chains = _build_sibling_order_chains(captured_forward_edges)
+        if sibling_order_chains and (
+            layout_cost * SIBLING_ORDER_VERIFY_LAYOUT_BUDGET > RANK_LAYOUT_COST_THRESHOLD
+        ):
+            # Verification pays up to SIBLING_ORDER_VERIFY_LAYOUT_BUDGET full dot
+            # layouts on top of the final render, so its workload is priced
+            # against the same threshold that already degrades over-budget
+            # graphs to rank layout. Siblings stay unordered (never
+            # unverified-ordered) on such graphs.
+            warnings.warn(
+                SIBLING_ORDER_COST_NOTICE.format(
+                    cost=layout_cost,
+                    budget=SIBLING_ORDER_VERIFY_LAYOUT_BUDGET,
+                    threshold=RANK_LAYOUT_COST_THRESHOLD,
+                )
+            )
+            sibling_order_chains = ()
         if sibling_order_chains:
             for chain in sibling_order_chains:
                 _queue_sibling_rank_group(

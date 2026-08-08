@@ -346,3 +346,75 @@ def test_real_model_calibration_ratios_stay_below_cap(tmp_path: Path) -> None:
                 log.cleanup()
         survivor_ratios = [decision.ratios[key] for key in decision.surviving_keys]
         assert max(survivor_ratios, default=0.0) <= 4.5
+
+
+def test_over_budget_graph_skips_verification_with_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graphs whose verification layouts exceed the layout budget skip the pass."""
+
+    from torchlens.visualization._rank_layout_internal import layout as rank_layout
+
+    with torch.no_grad():
+        log = tl.trace(CodexDistorter(depth=5).eval(), torch.randn(1, 3))
+        try:
+            ordered_source = _draw_source(log, tmp_path, "budget_control")
+            control_decision = log._last_sibling_ordering_decision
+
+            # Pin dot so the raw-threshold rank bail cannot preempt the
+            # verification-budget gate under the lowered threshold.
+            monkeypatch.setattr(rank_layout, "RANK_LAYOUT_COST_THRESHOLD", 10)
+            with pytest.warns(UserWarning, match="skipped sibling-order verification"):
+                skipped_source = _draw_source(
+                    log, tmp_path, "budget_skipped", vis_node_placement="dot"
+                )
+            skipped_decision = log._last_sibling_ordering_decision
+            baseline_source = _draw_source(
+                log,
+                tmp_path,
+                "budget_baseline",
+                order_siblings=False,
+                vis_node_placement="dot",
+            )
+        finally:
+            log.cleanup()
+
+    # Control: below the budget the pass runs and emits verified chains.
+    assert control_decision.candidate_count == 2
+    assert "tl:sibling-order:start" in ordered_source
+    # Over budget: no chains are injected, the decision stays trivial, and the
+    # emitted DOT matches the order_siblings=False baseline byte for byte.
+    assert skipped_decision.candidate_count == 0
+    assert skipped_decision.survivor_count == 0
+    assert "tl:sibling-order" not in skipped_source
+    assert skipped_source == baseline_source
+
+
+def test_chainless_over_budget_graph_stays_silent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graphs with no orderable fanouts never emit the budget notice."""
+
+    import warnings as warnings_module
+
+    from torchlens.visualization._rank_layout_internal import layout as rank_layout
+
+    monkeypatch.setattr(rank_layout, "RANK_LAYOUT_COST_THRESHOLD", 10)
+    with torch.no_grad():
+        log = tl.trace(ResidualToy().eval(), torch.randn(1, 3))
+        try:
+            with warnings_module.catch_warnings(record=True) as caught:
+                warnings_module.simplefilter("always")
+                _draw_source(log, tmp_path, "chainless", vis_node_placement="dot")
+            decision = log._last_sibling_ordering_decision
+        finally:
+            log.cleanup()
+
+    assert decision.candidate_count == 0
+    assert not [
+        warning
+        for warning in caught
+        if "skipped sibling-order verification" in str(warning.message)
+    ]

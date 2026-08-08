@@ -280,6 +280,18 @@ COMMUTE_FUNCS = ["add", "mul", "cat", "eq", "ne"]
 SIBLING_ORDER_NODE_CAP = 2000
 SIBLING_ORDER_STRETCH_CAP = 4.5
 SIBLING_ORDER_EPSILON = 1e-9
+# Worst-case number of full ``dot -Tplain`` layouts the sibling-ordering
+# verifier can run on top of the final render: baseline, injected, the
+# post-filter re-layout, and up to two rejection retries.
+SIBLING_ORDER_VERIFY_LAYOUT_BUDGET = 5
+SIBLING_ORDER_COST_NOTICE = (
+    "TorchLens skipped sibling-order verification: its up-to-{budget} extra "
+    "layout passes would exceed the layout budget (estimated layout "
+    "cost={cost} x {budget} > threshold={threshold}). Siblings render in "
+    "Graphviz's default order. Reduce graph complexity with vis_call_depth, "
+    "rolled mode, or module= focus, or disable this pass explicitly with "
+    "order_siblings=False."
+)
 _SIBLING_ORDER_WARNING_EMITTED = False
 
 
@@ -699,9 +711,11 @@ __all__ = [
     "RenderIROrderingConstraint",
     "Role",
     "RollingAnnotation",
+    "SIBLING_ORDER_COST_NOTICE",
     "SIBLING_ORDER_EPSILON",
     "SIBLING_ORDER_NODE_CAP",
     "SIBLING_ORDER_STRETCH_CAP",
+    "SIBLING_ORDER_VERIFY_LAYOUT_BUDGET",
     "SegmentDescriptor",
     "Sequence",
     "Set",
