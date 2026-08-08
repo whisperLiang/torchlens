@@ -28,6 +28,7 @@ from torchlens.capture.arg_positions import (
     DYNAMIC_SPEC_UNCACHEABLE,
     FUNC_ARG_SPECS,
     ArgSpec,
+    _ensure_schema_tensor_position_corrections,
     _iter_aten_packet_names,
     _normalize_func_name,
     _schema_arg_is_parent_candidate,
@@ -113,12 +114,15 @@ def test_static_specs_cover_all_aten_schema_tensor_slots() -> None:
     This is the systemic tripwire behind round-22 F1/F2/F4/F5: each of those
     bugs was a hand-grouped spec silently missing a schema-typed tensor operand
     (``lu_solve`` pos 2, ``cosine_similarity`` x1/x2 kwargs, ``ctc_loss``
-    lengths, ``searchsorted`` sorter). The import-time schema-correction pass now
-    widens EVERY spec from schema, so this sweep must be clean; a new violation
-    means a spec was narrowed or a correction regressed -- fix the spec, never
-    ledger the violation away.
+    lengths, ``searchsorted`` sorter). The schema-correction pass (armed lazily
+    by ``wrap_torch()`` before any torch op record can be built) widens EVERY
+    spec from schema, so this sweep must be clean; a new violation means a spec
+    was narrowed or a correction regressed -- fix the spec, never ledger the
+    violation away.
     """
 
+    # Audit the table exactly as torch capture reads it: corrections armed.
+    _ensure_schema_tensor_position_corrections()
     violations = _spec_schema_tensor_slot_violations(FUNC_ARG_SPECS)
 
     assert violations == [], "\n".join(violations)

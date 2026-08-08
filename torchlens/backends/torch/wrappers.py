@@ -62,6 +62,7 @@ from ...utils.display import identity
 from ...utils.rng import log_current_autocast_state, log_current_rng_states
 from ...utils.hashing import make_random_barcode
 from ...utils.arg_handling import copy_arg_tree
+from ...capture.arg_positions import _ensure_schema_tensor_position_corrections
 from ...utils.tensor_utils import (
     _DEFER_ENABLED as _COW_ENABLED,
     _DEFER_PENDING as _COW_PENDING,
@@ -2832,6 +2833,10 @@ def wrap_torch(
         unaccounted dispatches and marks traces unverified; default is off.
     """
     from .backward import install_autograd_wrappers
+
+    # Torch-only setup deferred out of arg_positions import time: the corrected
+    # spec table must exist before any wrapper can build an op record.
+    _ensure_schema_tensor_position_corrections()
 
     effective_policy = _configure_patch_policy(patch_policy, patch_modules)
     _configure_escape_detector(escape_detector)
