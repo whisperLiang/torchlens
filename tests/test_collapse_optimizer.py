@@ -1201,6 +1201,18 @@ def test_bert_and_distilbert_small_config_auto_cuts_stay_pinned() -> None:
     """BERT-family small-config cuts do not move while freeing GPT-2 blocks."""
 
     transformers = _require_transformers()
+    # The pinned visible counts (BERT 23, DistilBERT 18) are calibrated for the DECLARED
+    # supported Transformers range (transformers~=4.45, i.e. >=4.45,<5.0). Transformers v5's
+    # "Bert-based Models Attention Refactor" (HF commit 155f7e2e / #38301, 2025-09-19) changed
+    # the BERT/DistilBERT program graph, legitimately shifting the honest collapse cut (BERT ->
+    # 21). That is an upstream model-graph change, NOT a TorchLens collapse regression (renders
+    # verified honest at both counts), so this version-sensitive golden is scoped to the
+    # supported range rather than rebaselined.
+    if int(transformers.__version__.split(".")[0]) >= 5:
+        pytest.skip(
+            f"BERT/DistilBERT collapse pins are calibrated for transformers<5.0; installed "
+            f"{transformers.__version__} changes the upstream model graph (HF #38301)."
+        )
     bert_config = transformers.BertConfig(
         num_hidden_layers=2,
         hidden_size=16,
