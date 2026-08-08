@@ -39,6 +39,7 @@ from .auto_collapse import (
     _is_trunk_collapse,
     _make_run_fold,
     _module_output_shape_tuple,
+    _paired_external_connector,
     _readable_band_high,
     _rendered_module_hidden_counts,
     _run_fold_hidden_members_uniform,
@@ -1620,7 +1621,10 @@ def _longest_legal_segment_prefix(
       settles the dominance gate for every prefix length at once;
     * only the longest passing prefix is ever returned, so the chain-interval
       probe walks down from the longest surviving candidate and stops at the
-      first pass rather than testing every prefix.
+      first pass rather than testing every prefix;
+    * ends whose probe provably fails from prefix-independent graph facts
+      (``_segment_prefix_candidate_ends``) are pruned before probing, so an
+      all-illegal component costs one linear pass instead of one probe per end.
 
     Parameters
     ----------
@@ -1647,6 +1651,12 @@ def _longest_legal_segment_prefix(
 
     if len(members) < 2:
         return None
+    if graph is None or not graph.edges:
+        # Chain-interval legality demands exactly one external entry edge, so
+        # an absent or edge-less parent graph fails every candidate prefix.
+        # Returning early keeps the walk-down from probing each end of a long
+        # component against a graph that can never pass.
+        return None
     signals = analysis.signals
     # Landmark ceiling: ``any(...)`` over a prefix short-circuits at the first
     # landmark member, and every longer prefix still contains it, so the first
@@ -1658,6 +1668,10 @@ def _longest_legal_segment_prefix(
             break
     if limit < 2:
         return None
+    candidate_ends = _segment_prefix_candidate_ends(members, graph, limit)
+    if not candidate_ends:
+        return None
+    limit = candidate_ends[0]
 
     # Dominance gate, resolved for every prefix length in one pass. Hidden
     # units are counted in the active render currency -- concrete
@@ -1690,13 +1704,113 @@ def _longest_legal_segment_prefix(
             if hidden / total_ops > dominance_limit:
                 dominant.add(end)
 
-    for end in range(limit, 1, -1):
+    for end in candidate_ends:
         if end in dominant:
             continue
         candidate = tuple(members[:end])
         if _segment_is_legal(candidate, graph):
             return candidate
     return None
+
+
+def _segment_prefix_candidate_ends(
+    members: Sequence[str],
+    graph: "ChildCondensedFlowGraph",
+    limit: int,
+) -> list[int]:
+    """Return candidate prefix lengths not excluded by prefix-independent facts.
+
+    Each rule prunes only candidate ends whose from-scratch chain-interval
+    probe provably returns False, so the walk-down still reaches the exact
+    prefix the naive forward scan would keep. The connector-facing rules lean
+    on one containment fact: for every prefix, ``_chain_connector_nodes`` only
+    ever admits out-neighbors of members and their external source/sink
+    counterparts, so a node outside that superset can never be hidden as a
+    connector.
+
+    * A member-to-member edge that is not one forward step is an internal edge
+      no expected set contains, poisoning every prefix that includes both
+      endpoints.
+    * An entry edge into an interior member from a never-connector external
+      source makes the single-entry check fail for every prefix that includes
+      the target; two such edges into the first member fail every prefix.
+    * An exit edge to a never-connector external node is legal only while its
+      source member is the prefix's last member.
+    * A prefix with no potential entry edge at all (or none from later members)
+      fails the exactly-one-entry check; likewise for exits. Potential coverage
+      deliberately overcounts -- connector concealment is ignored -- so only
+      provably empty ends are pruned.
+
+    Parameters
+    ----------
+    members:
+        Candidate member addresses in flow order.
+    graph:
+        Child-condensed flow graph for the parent.
+    limit:
+        Exclusive bound on candidate prefix lengths from the landmark scan.
+
+    Returns
+    -------
+    list[int]
+        Surviving candidate ends in descending order.
+    """
+
+    positions = {address: index for index, address in enumerate(members[:limit])}
+    edges = set(graph.edges)
+    possible_connectors: set[str] = set()
+    for source, target in edges:
+        if source in positions and target not in positions:
+            possible_connectors.add(target)
+            paired = _paired_external_connector(target)
+            if paired is not None:
+                possible_connectors.add(paired)
+    first = members[0]
+    first_entry_edges = 0
+    entry_cover = [0] * (limit + 2)
+    exit_cover = [0] * (limit + 2)
+
+    def cover(diff: list[int], low: int, high: int) -> None:
+        low = max(low, 2)
+        high = min(high, limit)
+        if low <= high:
+            diff[low] += 1
+            diff[high + 1] -= 1
+
+    for source, target in edges:
+        source_pos = positions.get(source)
+        target_pos = positions.get(target)
+        if source_pos is not None and target_pos is not None:
+            if source != target and target_pos != source_pos + 1:
+                limit = min(limit, max(source_pos, target_pos))
+            if source_pos > target_pos:
+                cover(entry_cover, target_pos + 1, source_pos)
+            elif target_pos > source_pos:
+                cover(exit_cover, source_pos + 1, target_pos)
+            continue
+        if target_pos is not None:
+            cover(entry_cover, target_pos + 1, limit)
+            if source not in possible_connectors:
+                if target == first:
+                    first_entry_edges += 1
+                    if first_entry_edges >= 2:
+                        return []
+                else:
+                    limit = min(limit, target_pos)
+        elif source_pos is not None:
+            cover(exit_cover, source_pos + 1, limit)
+            if target not in possible_connectors:
+                limit = min(limit, source_pos + 1)
+    candidates: list[int] = []
+    entries_available = 0
+    exits_available = 0
+    for end in range(2, limit + 1):
+        entries_available += entry_cover[end]
+        exits_available += exit_cover[end]
+        if entries_available > 0 and exits_available > 0:
+            candidates.append(end)
+    candidates.reverse()
+    return candidates
 
 
 def _encode_segment_address(address: str) -> str:
@@ -3827,14 +3941,13 @@ def _parallel_flow_width(graph: ChildCondensedFlowGraph) -> int:
     """
 
     child_set = set(graph.flow_children)
-    child_edges = {
-        (source, target)
-        for source, target in graph.edges
-        if source in child_set and target in child_set
-    }
+    neighbors: dict[str, set[str]] = {child: set() for child in graph.flow_children}
     upstreams: dict[str, set[str]] = {child: set() for child in graph.flow_children}
     downstreams: dict[str, set[str]] = {child: set() for child in graph.flow_children}
     for source, target in graph.edges:
+        if source in child_set and target in child_set:
+            neighbors[source].add(target)
+            neighbors[target].add(source)
         if target in child_set and source not in child_set:
             upstreams[target].add(source)
         if source in child_set and target not in child_set:
@@ -3845,13 +3958,14 @@ def _parallel_flow_width(graph: ChildCondensedFlowGraph) -> int:
         groups.setdefault(signature, []).append(child)
     max_width = 1 if graph.flow_children else 0
     for members in groups.values():
-        independent: list[str] = []
+        # Greedy scan in member order; a candidate joins when no already-kept
+        # member is a flow neighbor. Checking the candidate's neighbor set
+        # against the kept set reproduces the pairwise edge test exactly while
+        # costing degree instead of kept-set size per candidate.
+        independent: set[str] = set()
         for child in members:
-            if all(
-                (child, other) not in child_edges and (other, child) not in child_edges
-                for other in independent
-            ):
-                independent.append(child)
+            if not (neighbors[child] & independent):
+                independent.add(child)
         max_width = max(max_width, len(independent))
     return max(max_width, _parent_owned_merge_width(graph))
 
