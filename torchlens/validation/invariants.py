@@ -4402,6 +4402,11 @@ def _check_param_xrefs(ml: "Trace") -> None:
     label_set = set(ml.layer_labels)
     op_label_set = set(ml.op_labels)
 
+    # Built on first co-parent link, not up front: most traces declare no
+    # co-parents at all (weight tying and weight/bias siblings are the sources),
+    # and those pay nothing.
+    param_address_index: dict[object, object] | None = None
+
     for param in ml.param_logs:
         for lbl in param.used_by_ops:
             if lbl not in op_label_set:
@@ -4441,7 +4446,12 @@ def _check_param_xrefs(ml: "Trace") -> None:
         if param.num_uses_by_ops == 0 and not param.used_by_layers:
             continue
         _check_param_usage_reciprocal_links(ml, param, name)
-        _check_param_co_parent_links(ml, param, name)
+        # Guarding on a non-empty co-parent list is behavior-neutral: with no
+        # co-parents the callee's only loop body never runs.
+        if getattr(param, "co_parent_params", None):
+            if param_address_index is None:
+                param_address_index = _param_address_index(ml)
+            _check_param_co_parent_links(param_address_index, param, name)
 
     # uses_params forward check
     for lpl in ml.layer_list:
@@ -4502,13 +4512,15 @@ def _check_param_usage_reciprocal_links(ml: "Trace", param: object, name: str) -
             )
 
 
-def _check_param_co_parent_links(ml: "Trace", param: object, name: str) -> None:
+def _check_param_co_parent_links(
+    param_address_index: dict[object, object], param: object, name: str
+) -> None:
     """Check co-parent parameter links resolve and are symmetric.
 
     Parameters
     ----------
-    ml:
-        Trace containing parameter metadata.
+    param_address_index:
+        Primary/alias address -> Param index from ``_param_address_index``.
     param:
         Param record whose co-parent links should be checked.
     name:
@@ -4522,7 +4534,7 @@ def _check_param_co_parent_links(ml: "Trace", param: object, name: str) -> None:
 
     address = getattr(param, "address", "<unknown>")
     for co_parent_address in getattr(param, "co_parent_params", ()) or ():
-        co_parent = _param_by_address(ml, co_parent_address)
+        co_parent = param_address_index.get(co_parent_address)
         if co_parent is None:
             raise MetadataInvariantError(
                 name,
@@ -4664,28 +4676,55 @@ def _param_log_list_contains_param(param_logs: object, param: object) -> bool:
     )
 
 
-def _param_by_address(ml: "Trace", address: str) -> object | None:
-    """Return a Param by primary or alias address.
+def _param_address_index(ml: "Trace") -> dict[object, object]:
+    """Build a one-pass primary/alias address -> Param index.
+
+    Replaces a per-lookup linear scan over ``ml.param_logs``. Co-parent
+    resolution runs once per param, so the scan made ``param_xrefs`` quadratic in
+    the parameter count: every weight-tied or bias/weight sibling link re-walked
+    the whole parameter list (800 lookups x 800 params on an 800-layer chain).
+
+    First writer wins, which reproduces the scan's short-circuit order exactly:
+    the scan returned the FIRST param matching on either its primary address or
+    one of its aliases, and within one param it tested the primary before the
+    aliases. Iterating params in the same order and refusing to overwrite an
+    existing key therefore resolves every address to the same Param the scan
+    picked.
+
+    The ``address`` key is inserted even when it is ``None`` (missing or unset
+    attribute). The scan compared with ``getattr(param, "address", None) ==
+    address``, so a ``None`` query legitimately matched an addressless param;
+    dropping such keys would silently turn that into an unresolved-co-parent
+    failure. Indexing requires hashable keys where the scan only needed ``==``.
+    That is satisfied: primary addresses already key ``ParamAccessor._dict``, and
+    ``all_addresses`` is seeded with the primary address and only ever grows by
+    appending module-path alias strings (weight tying), so every key is a ``str``.
 
     Parameters
     ----------
     ml:
         Trace containing parameter metadata.
-    address:
-        Primary or alias parameter address.
 
     Returns
     -------
-    object | None
-        Matching Param record when present.
+    dict[object, object]
+        Mapping from every primary and alias address to its owning Param.
     """
 
+    # Iterate the accessor rather than its backing list: `ParamAccessor.__iter__`
+    # may re-resolve released live-param references, and the scan this replaces
+    # went through the same path. `_check_param_xrefs` has already iterated every
+    # param before any co-parent lookup happens, so this pass adds no resolution
+    # the check did not already perform.
+    index: dict[object, object] = {}
     for param in ml.param_logs:
-        if getattr(param, "address", None) == address:
-            return param
-        if address in (getattr(param, "all_addresses", None) or ()):
-            return param
-    return None
+        address = getattr(param, "address", None)
+        if address not in index:
+            index[address] = param
+        for alias in getattr(param, "all_addresses", None) or ():
+            if alias not in index:
+                index[alias] = param
+    return index
 
 
 # ---------------------------------------------------------------------------
@@ -5111,6 +5150,54 @@ def _check_buffer_replay_validated_versions(ml: "Trace", buf: object, name: str)
 # ---------------------------------------------------------------------------
 
 
+# Sentinel for "no canonical `equivalent_ops` object could be read". Distinct from
+# `None`, which is a legitimate stored value that the checks below must still reject.
+_EQUIVALENT_OPS_UNAVAILABLE = object()
+
+
+def _canonical_equivalent_ops(owner: "object") -> object:
+    """Return the shared ``equivalent_ops`` object, skipping the copy-on-read copy.
+
+    ``Op.equivalent_ops`` (through ``Op.__getattribute__``) and
+    ``Layer.equivalent_ops`` (through its property) both hand back a fresh
+    ``set(...)`` copy on every read, because ONE canonical set object backs every
+    Op *and* Layer of an equivalence class and a shared mutable set must never be
+    alias-corruptible by a single holder. That barrier is correct, but it makes
+    each read O(group size).
+
+    The object returned here is used ONLY as an identity token for the
+    verified-key memos in ``_check_equivalence_symmetry``: it is never iterated,
+    never mutated, and never handed to a caller, so the copy-on-read guarantee is
+    untouched.
+
+    Fails CLOSED. ``Op`` is ``__slots__``-based and exposes its raw slot through
+    ``_slot``; ``Layer`` stores the field in its instance ``__dict__`` (as its
+    property documents). An owner matching neither shape yields
+    ``_EQUIVALENT_OPS_UNAVAILABLE``, which disables memoization for that owner
+    instead of collapsing distinct groups onto one shared token -- a shared token
+    would let a corrupted group inherit a clean group's verdict and silently
+    disarm this check.
+
+    Parameters
+    ----------
+    owner:
+        ``Op`` or ``Layer`` record holding an ``equivalent_ops`` group.
+
+    Returns
+    -------
+    object
+        The canonical stored object, or ``_EQUIVALENT_OPS_UNAVAILABLE``.
+    """
+
+    slot_reader = getattr(owner, "_slot", None)
+    if callable(slot_reader):
+        return slot_reader("equivalent_ops", _EQUIVALENT_OPS_UNAVAILABLE)
+    instance_dict = getattr(owner, "__dict__", None)
+    if isinstance(instance_dict, dict):
+        return instance_dict.get("equivalent_ops", _EQUIVALENT_OPS_UNAVAILABLE)
+    return _EQUIVALENT_OPS_UNAVAILABLE
+
+
 def _check_equivalence_symmetry(ml: "Trace") -> None:
     """Check L: op_equivalence_classes groups reference valid Op labels.
 
@@ -5149,7 +5236,33 @@ def _check_equivalence_symmetry(ml: "Trace") -> None:
             f"op_equivalence_classes contains labels not in op_labels: {extra}",
         )
 
+    # Per-Op verdict is a pure function of the (canonical `equivalent_ops` object,
+    # expected-group object) PAIR plus the loop-invariant `label_set`. Ops of one
+    # equivalence class all share a single canonical object, so re-running the body
+    # for each of them re-paid an O(group size) copy-on-read, an O(group size)
+    # label scan, and an O(group size) set comparison -- quadratic on any trace with
+    # one large class (an N-step chain, a many-layer transformer).
+    #
+    # Memoizing the pair is verdict-identical: iteration order is unchanged, so a
+    # failing pair still raises at the FIRST Op carrying it, and skipping later Ops
+    # with a pair already proven clean cannot surface an error the full body would
+    # have raised. Both objects are retained in the keepalive list so no `id()` can
+    # be recycled onto a different object mid-check.
+    verified_op_pairs: set[tuple[int, int]] = set()
+    verified_keepalive: list[object] = []
     for op in ml.layer_list:
+        equivalence_class = getattr(op, "equivalence_class", None)
+        expected_group = (
+            ml.op_equivalence_classes.get(equivalence_class)
+            if isinstance(equivalence_class, str)
+            else None
+        )
+        canonical = _canonical_equivalent_ops(op)
+        op_pair_key: tuple[int, int] | None = None
+        if canonical is not _EQUIVALENT_OPS_UNAVAILABLE:
+            op_pair_key = (id(canonical), id(expected_group))
+            if op_pair_key in verified_op_pairs:
+                continue
         equivalent_ops = getattr(op, "equivalent_ops", None)
         if not isinstance(equivalent_ops, set):
             raise MetadataInvariantError(
@@ -5162,20 +5275,32 @@ def _check_equivalence_symmetry(ml: "Trace") -> None:
                     name,
                     f"{op.label}.equivalent_ops contains '{label}' not in op_labels",
                 )
-        equivalence_class = getattr(op, "equivalence_class", None)
-        expected_group = (
-            ml.op_equivalence_classes.get(equivalence_class)
-            if isinstance(equivalence_class, str)
-            else None
-        )
         if expected_group is not None and equivalent_ops != expected_group:
             raise MetadataInvariantError(
                 name,
                 f"{op.label}.equivalent_ops={sorted(equivalent_ops)} != expected "
                 f"{sorted(expected_group)}",
             )
+        if op_pair_key is not None:
+            verified_op_pairs.add(op_pair_key)
+            verified_keepalive.append((canonical, expected_group))
 
+    # Same argument for the per-Layer body, whose verdict is a pure function of the
+    # layer's canonical object and the ordered canonical objects of its passes.
+    verified_layer_keys: set[tuple[int, tuple[int, ...]]] = set()
     for layer in ml.layer_logs.values():
+        layer_canonical = _canonical_equivalent_ops(layer)
+        pass_canonicals = [_canonical_equivalent_ops(op) for op in layer.ops.values()]
+        layer_key: tuple[int, tuple[int, ...]] | None = None
+        if layer_canonical is not _EQUIVALENT_OPS_UNAVAILABLE and all(
+            item is not _EQUIVALENT_OPS_UNAVAILABLE for item in pass_canonicals
+        ):
+            layer_key = (
+                id(layer_canonical),
+                tuple(id(item) for item in pass_canonicals),
+            )
+            if layer_key in verified_layer_keys:
+                continue
         equivalent_ops = getattr(layer, "equivalent_ops", None)
         if not isinstance(equivalent_ops, set):
             raise MetadataInvariantError(
@@ -5203,6 +5328,9 @@ def _check_equivalence_symmetry(ml: "Trace") -> None:
                 f"Layer {layer.layer_label}.equivalent_ops={sorted(equivalent_ops)} != "
                 f"pass equivalent_ops={sorted(next(iter(pass_equivalent_ops)))}",
             )
+        if layer_key is not None:
+            verified_layer_keys.add(layer_key)
+            verified_keepalive.append((layer_canonical, pass_canonicals))
 
 
 # ---------------------------------------------------------------------------
