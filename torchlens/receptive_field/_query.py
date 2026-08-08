@@ -199,14 +199,18 @@ def box_for_unit(
         for reference in (item.label, item.layer_label, item._layer_label_raw)
     }
     ancestry = _ancestor_labels(descriptor.input_op_label, operations, by_reference)
-    terminals = _walk_to_input(
-        op,
-        initial,
-        descriptor.input_op_label,
-        ancestry,
-        by_reference,
-        True,
-    )
+    # The walk enumerates paths, so it revisits each operation once per path
+    # through it, re-deriving per-operation facts that are linear in that
+    # operation's parents. Memoize them for this one query.
+    with _engine._geometry_memo():
+        terminals = _walk_to_input(
+            op,
+            initial,
+            descriptor.input_op_label,
+            ancestry,
+            by_reference,
+            True,
+        )
     if not terminals:
         raise ReceptiveFieldError(
             f"The target {op.label} has no live path to {descriptor.input_op_label}."
