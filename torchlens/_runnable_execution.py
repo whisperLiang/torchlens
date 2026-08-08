@@ -370,7 +370,31 @@ def _execute_loaded_sparse_transaction(
         *input_checks,
         *_state_contract_checks(descriptor, slot_values),
     ]
-    _raise_first_divergence(contract_checks, divergence_policy, fork=fork)
+
+    # ``contract_checks`` only ever grows by appends and ``ContractCheck`` is frozen,
+    # so the earliest failed check is found by visiting each check exactly once across
+    # the whole transaction instead of rescanning the cumulative list at every call
+    # boundary (O(calls^2) ``passed`` reads on long replays). Same earliest check,
+    # same raise, same policy handling as scanning the full list front-to-back.
+    scan_cursor = 0
+    first_failed_check: ContractCheck | None = None
+
+    def first_failed_contract_so_far() -> ContractCheck | None:
+        nonlocal scan_cursor, first_failed_check
+        while first_failed_check is None and scan_cursor < len(contract_checks):
+            check = contract_checks[scan_cursor]
+            scan_cursor += 1
+            if not check.passed:
+                first_failed_check = check
+        return first_failed_check
+
+    def raise_first_divergence_incremental() -> None:
+        failed = first_failed_contract_so_far()
+        if failed is None or divergence_policy is DivergencePolicy.RETURN_DIVERGED:
+            return
+        _raise_failed_contract_as_divergence(failed, fork=fork)
+
+    raise_first_divergence_incremental()
     # r35 corr2_5: PRE-EXECUTION state digests -- eligibility compares each
     # state slot's capture-start bytes, not whatever a mutating call left
     # behind. Computed only when an activation archive exists to attest.
@@ -402,6 +426,17 @@ def _execute_loaded_sparse_transaction(
         for slot in descriptor.tensor_slots
         if slot.role in {TensorSlotRole.PARAMETER, TensorSlotRole.BUFFER}
     )
+    # Producer slot id -> its version-alias slot ids (``version_of`` AND
+    # ``producer_slot_id`` both naming the producer), in ``tensor_slots`` order, so
+    # the per-output bind stages aliases by O(1) lookup instead of scanning every
+    # slot for every produced output (O(outputs x slots)).
+    version_alias_ids: dict[str, tuple[str, ...]] = {}
+    for slot in descriptor.tensor_slots:
+        if slot.version_of is not None and slot.version_of == slot.producer_slot_id:
+            version_alias_ids[slot.version_of] = (
+                *version_alias_ids.get(slot.version_of, ()),
+                slot.slot_id,
+            )
 
     # r35 corr2_4: the fork/restore set follows the SEEDING PRIMITIVE, never the
     # bound-input overlay -- every visible CUDA device is forked when CUDA is
@@ -447,7 +482,7 @@ def _execute_loaded_sparse_transaction(
                     slot_values,
                 )
                 contract_checks.extend(call_checks)
-                _raise_first_divergence(contract_checks, divergence_policy, fork=fork)
+                raise_first_divergence_incremental()
                 try:
                     with _call_execution_context_entered(call.execution_context):
                         output = _execute_sparse_call(
@@ -464,14 +499,13 @@ def _execute_loaded_sparse_transaction(
                     # input DIVERGENCE, not resolved-callable signature drift -- roll back and
                     # raise the typed ``PathDivergenceError`` carrying the first failed check.
                     # Genuine drift (no prior failed check) keeps ``RuntimeSignatureDriftError``.
-                    failed = _first_failed_contract(contract_checks)
+                    failed = first_failed_contract_so_far()
                     if failed is not None:
                         _raise_failed_contract_as_divergence(failed, fork=fork)
                     raise
                 call_outputs[call.call_id] = output
                 contract_checks.extend(
                     _bind_call_outputs(
-                        descriptor,
                         call,
                         output,
                         slot_values,
@@ -482,12 +516,13 @@ def _execute_loaded_sparse_transaction(
                         attestation_slot_values=attestation_slot_values,
                         slots=slots_by_id,
                         state_slot_ids=state_slot_ids,
+                        version_alias_ids=version_alias_ids,
                         witness_slot_ids=escape_witness_slot_ids,
                         witness_source_snapshots=witness_source_snapshots,
                     )
                 )
                 contract_checks.extend(_call_witness_checks(descriptor, call, slot_values))
-                _raise_first_divergence(contract_checks, divergence_policy, fork=fork)
+                raise_first_divergence_incremental()
 
             _walk_call_cone(descriptor.calls, execute_call)
     finally:
@@ -523,7 +558,7 @@ def _execute_loaded_sparse_transaction(
             fork=fork,
         )
     )
-    _raise_first_divergence(contract_checks, divergence_policy, fork=fork)
+    raise_first_divergence_incremental()
     mode_sensitive_op_unwitnessed = _mode_sensitive_op_unwitnessed(descriptor)
     tensor_derived_scalar_stale = _tensor_derived_scalar_stale(
         descriptor, slot_values, witness_source_snapshots
@@ -3397,7 +3432,6 @@ def _resolve_setter_output(
 
 
 def _bind_call_outputs(
-    descriptor: SparseRunDescriptor,
     call: RunnableCallDescriptor,
     output: Any,
     slot_values: dict[str, torch.Tensor],
@@ -3409,15 +3443,17 @@ def _bind_call_outputs(
     attestation_slot_values: dict[str, torch.Tensor],
     slots: Mapping[str, TensorSlotDescriptor],
     state_slot_ids: frozenset[str],
+    version_alias_ids: Mapping[str, tuple[str, ...]],
     witness_slot_ids: frozenset[str] = frozenset(),
     witness_source_snapshots: dict[str, torch.Tensor] | None = None,
 ) -> tuple[ContractCheck, ...]:
     """Slice, validate, and stage one grouped call's tensor outputs.
 
-    ``slots`` and ``state_slot_ids`` are the run-invariant ``descriptor.tensor_slots``
-    indexes, built ONCE per run by the transaction and threaded in: the descriptor is a
-    frozen dataclass whose ``tensor_slots`` tuple and per-slot ``role`` cannot change
-    mid-replay, so rebuilding them per call was pure O(calls x slots) waste.
+    ``slots``, ``state_slot_ids``, and ``version_alias_ids`` are the run-invariant
+    ``descriptor.tensor_slots`` indexes, built ONCE per run by the transaction and
+    threaded in: the descriptor is a frozen dataclass whose ``tensor_slots`` tuple and
+    per-slot ``role``/version topology cannot change mid-replay, so rebuilding or
+    rescanning them per call was pure O(calls x slots) waste.
     """
 
     checks: list[ContractCheck] = []
@@ -3485,10 +3521,9 @@ def _bind_call_outputs(
             # for downstream reads and activation attestation.
             slot_values[out_argument_slot_id] = value
             produced_slot_ids.add(out_argument_slot_id)
-        for version in descriptor.tensor_slots:
-            if version.version_of == slot_id and version.producer_slot_id == slot_id:
-                slot_values[version.slot_id] = value
-                produced_slot_ids.add(version.slot_id)
+        for version_slot_id in version_alias_ids.get(slot_id, ()):
+            slot_values[version_slot_id] = value
+            produced_slot_ids.add(version_slot_id)
         for produced_slot_id in produced_slot_ids & attestation_slot_ids:
             # r59 gate 3: byte-guard every op-output snapshot before it allocates.
             attestation_slot_values[produced_slot_id] = ceiling.guarded_clone(
