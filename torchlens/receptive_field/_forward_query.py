@@ -86,7 +86,11 @@ def box_for_source_unit(
     }
     target_label = descriptor.input_op_label
     active = _labels_to_target(op.label, target_label, operations, by_reference)
-    terminals = _walk_to_target(op, initial, target_label, active, by_reference, True)
+    # The walk enumerates paths, so it revisits each operation once per path
+    # through it, re-deriving per-operation facts that are linear in that
+    # operation's parents. Memoize them for this one query.
+    with _engine._geometry_memo():
+        terminals = _walk_to_target(op, initial, target_label, active, by_reference, True)
     if not terminals:
         raise ReceptiveFieldError(
             f"Source {op.label!r} has no live path to target {target_label!r}."

@@ -7,6 +7,7 @@ over the captured DAG using exact rational arithmetic.
 
 from __future__ import annotations
 
+import threading
 from collections import OrderedDict, defaultdict, deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -140,7 +141,8 @@ def solve(trace: Trace) -> _ReceptiveFieldSolution:
     ):
         return cached
 
-    solution = _solve_uncached(trace, epoch, graph_revision, _is_input_seed)
+    with _geometry_memo():
+        solution = _solve_uncached(trace, epoch, graph_revision, _is_input_seed)
     trace.__dict__["_receptive_field_solution"] = solution
     return solution
 
@@ -183,7 +185,10 @@ def solve_from(trace: Trace, source: Op) -> _ReceptiveFieldSolution:
             cache.move_to_end(source.label)
             return cached_solution
 
-    solution = _solve_uncached(trace, epoch, graph_revision, lambda op: op.label == source.label)
+    with _geometry_memo():
+        solution = _solve_uncached(
+            trace, epoch, graph_revision, lambda op: op.label == source.label
+        )
     cache[source.label] = (epoch, graph_revision, solution)
     cache.move_to_end(source.label)
     while len(cache) > _SOURCE_SOLUTION_CACHE_SIZE:
@@ -256,15 +261,21 @@ def _solve_uncached(
         parents = tuple(by_reference[label] for label in op.parents if label in by_reference)
         parent_states = tuple(states_by_op.get(parent.label, {}) for parent in parents)
         result, rule_name = _rule_result(op)
+        # Group edge-use records once per operation, and classify each parent edge
+        # once rather than once per (parent, io_role): both are functions of the
+        # (op, parent) pair alone, so a wide fan-in operation paid O(parents x
+        # records x roles) for an answer that does not vary with the role.
+        records_by_parent_label = _edge_records_by_parent_label(op) if parents else {}
         branches: dict[str, list[_BranchState]] = defaultdict(list)
         for parent, states in zip(parents, parent_states):
+            if not states:
+                continue
+            edge_neutral = _edge_is_geometry_neutral(op, parent, records_by_parent_label)
             for role, branch in states.items():
                 branches[role].append(
                     _BranchState(
                         state=_apply_rule(op, parent, branch.state, result, rule_name),
-                        geometry_neutral=(
-                            branch.geometry_neutral or _edge_is_geometry_neutral(op, parent)
-                        ),
+                        geometry_neutral=(branch.geometry_neutral or edge_neutral),
                     )
                 )
 
@@ -328,8 +339,122 @@ def _seed_input(op: Op) -> _InputState:
     )
 
 
+class _GeometryMemo:
+    """Per-traversal memo for the per-operation facts a walk re-derives.
+
+    A per-unit walk enumerates paths, so it revisits one operation once per path
+    through it, and each visit re-derives facts that depend on the operation
+    alone. Two of them are linear in the operation's parent count, which makes a
+    wide fan-in concatenation (DenseNet, dense multi-branch blocks) quadratic per
+    visit:
+
+    ``rule_results``
+        ``_rule_result``. Both solvers already reuse one result object across
+        every branch of one operation, so reusing it across repeated visits is
+        the same sharing, not new sharing: ``_RuleResult`` is frozen, its
+        ``values`` mapping is immutable, and its optional callbacks are pure
+        functions over immutable captured configuration. A miss re-derives
+        ``in_shapes`` through ``Op.input_activations``, which resolves every
+        parent through the trace accessor.
+    ``concatenation_starts``
+        The per-position concatenation slice starts, which
+        ``_concatenation_offsets`` otherwise rebuilds from ``op.input_shapes``
+        once per *parent* of every visited concatenation.
+
+    Both are keyed by ``id(op)`` and validated against the retained operation
+    object, so a recycled id can never alias. ``rule_results`` additionally
+    validates ``_rf_rules_epoch()``, so a rule registered mid-traversal is never
+    served a stale result.
+    """
+
+    __slots__ = ("concatenation_starts", "rule_results")
+
+    def __init__(self) -> None:
+        """Create empty memo tables."""
+
+        self.rule_results: dict[int, tuple[Op, int, tuple[_RuleResult, str]]] = {}
+        self.concatenation_starts: dict[tuple[int, int], tuple[Op, tuple[int, ...]]] = {}
+
+
+class _GeometryMemoState(threading.local):
+    """Per-thread stack of active geometry memo scopes, innermost last.
+
+    Thread-local rather than a module global: receptive-field queries read an
+    already-captured trace, so unlike capture they are plausibly issued from more
+    than one thread, and a shared stack's push/pop could interleave into an
+    unbalanced state.
+    """
+
+    def __init__(self) -> None:
+        """Start this thread with no active scope."""
+
+        self.stack: list[_GeometryMemo] = []
+
+
+_GEOMETRY_MEMO_STATE = _GeometryMemoState()
+
+
+def _active_geometry_memo() -> _GeometryMemo | None:
+    """Return this thread's innermost active memo scope, or ``None``.
+
+    Returns
+    -------
+    _GeometryMemo | None
+        Innermost scope, or ``None`` when no traversal scope is open -- in which
+        case every memoized helper falls back to deriving its value.
+    """
+
+    stack = _GEOMETRY_MEMO_STATE.stack
+    return stack[-1] if stack else None
+
+
+class _geometry_memo:
+    """Scope per-operation geometry memoization to one solve or per-unit walk.
+
+    Reentrant: nested scopes push their own tables, so an inner walk never
+    outlives its own memo or reads an outer one.
+    """
+
+    def __enter__(self) -> None:
+        """Push a fresh memo scope."""
+
+        _GEOMETRY_MEMO_STATE.stack.append(_GeometryMemo())
+
+    def __exit__(self, *exc_info: object) -> None:
+        """Pop this memo scope, including on the exception path."""
+
+        _GEOMETRY_MEMO_STATE.stack.pop()
+
+
 def _rule_result(op: Op) -> tuple[_RuleResult, str]:
     """Evaluate the registered local rule for one operation.
+
+    Parameters
+    ----------
+    op:
+        Captured operation.
+
+    Returns
+    -------
+    tuple[_RuleResult, str]
+        Opaque local result and normalized rule name.
+    """
+
+    scope = _active_geometry_memo()
+    memo = None if scope is None else scope.rule_results
+    if memo is not None:
+        epoch = _rf_rules_epoch()
+        cached = memo.get(id(op))
+        if cached is not None and cached[0] is op and cached[1] == epoch:
+            return cached[2]
+    computed = _rule_result_uncached(op)
+    if memo is not None:
+        memo[id(op)] = (op, epoch, computed)
+    return computed
+
+
+def _rule_result_uncached(op: Op) -> tuple[_RuleResult, str]:
+    """Evaluate one operation's registered local rule, bypassing the memo.
 
     Parameters
     ----------
@@ -596,18 +721,54 @@ def _concatenation_offsets(op: Op, parent: Op, result: _RuleResult) -> tuple[int
     parent_references = {parent.label, parent.layer_label, parent._layer_label_raw}
     if bool(result.values.get("stack", False)):
         return tuple(index for index, label in enumerate(op.parents) if label in parent_references)
-    starts: list[int] = []
+    starts = _concatenation_starts_by_position(op, raw_axis)
+    return tuple(start for start, label in zip(starts, op.parents) if label in parent_references)
+
+
+def _concatenation_starts_by_position(op: Op, raw_axis: int) -> tuple[int, ...]:
+    """Return one concatenation's child-axis slice start for every parent position.
+
+    The running offset depends on the operation and axis alone, never on which
+    parent is being composed, but ``_concatenation_offsets`` is called once per
+    parent -- so recomputing it there made a wide fan-in concatenation resolve
+    every parent's activation through the trace accessor once per parent. Under a
+    :class:`_geometry_memo` scope this is derived once per operation instead.
+
+    Parameters
+    ----------
+    op:
+        Concatenation operation.
+    raw_axis:
+        Concatenation axis, already normalized against the output rank.
+
+    Returns
+    -------
+    tuple[int, ...]
+        Slice start at each ``op.parents`` position, truncated to the shorter of
+        ``op.parents`` and ``op.input_shapes`` exactly as the per-parent scan was.
+    """
+
+    scope = _active_geometry_memo()
+    memo = None if scope is None else scope.concatenation_starts
+    key = (id(op), raw_axis)
+    if memo is not None:
+        cached = memo.get(key)
+        if cached is not None and cached[0] is op:
+            return cached[1]
+    positions: list[int] = []
     offset = 0
-    for label, shape in zip(op.parents, op.input_shapes, strict=False):
-        if label in parent_references:
-            starts.append(offset)
+    for _label, shape in zip(op.parents, op.input_shapes, strict=False):
+        positions.append(offset)
         if shape is None:
             continue
         # torch.cat accepts a one-dimensional empty tensor at any concat axis.
         if tuple(shape) == (0,):
             continue
         offset += int(shape[raw_axis])
-    return tuple(starts)
+    starts = tuple(positions)
+    if memo is not None:
+        memo[key] = (op, starts)
+    return starts
 
 
 def _apply_window(
@@ -1029,15 +1190,69 @@ def _edge_record_parent_label(record: object) -> str | None:
     return None
 
 
-def _edge_is_geometry_neutral(op: Op, parent: Op) -> bool:
-    """Return whether one parent reaches ``op`` only through scalar control metadata."""
+def _edge_records_by_parent_label(op: Op) -> dict[str | None, tuple[object, ...]]:
+    """Group one operation's edge-use records by their recorded parent label.
 
-    parent_references = {parent.label, parent.layer_label, parent._layer_label_raw}
-    records = tuple(
-        record
-        for record in getattr(op, "edge_uses", ())
-        if _edge_record_parent_label(record) in parent_references
-    )
+    ``_edge_is_geometry_neutral`` otherwise rescans every ``edge_uses`` record
+    for every parent, which is quadratic on a wide fan-in operation. Grouping
+    once per operation makes each parent's lookup a dict hit. Records with no
+    recoverable parent label are grouped under ``None``, exactly reproducing the
+    scan's ``None in parent_references`` match for an operation whose parent has
+    an unset raw layer label.
+
+    Parameters
+    ----------
+    op:
+        Captured operation whose edge-use records are grouped.
+
+    Returns
+    -------
+    dict[str | None, tuple[object, ...]]
+        Mapping from recorded parent label to that label's records, in
+        ``edge_uses`` order.
+    """
+
+    grouped: dict[str | None, list[object]] = {}
+    for record in getattr(op, "edge_uses", ()):
+        grouped.setdefault(_edge_record_parent_label(record), []).append(record)
+    return {label: tuple(records) for label, records in grouped.items()}
+
+
+def _edge_is_geometry_neutral(
+    op: Op,
+    parent: Op,
+    records_by_parent_label: Mapping[str | None, tuple[object, ...]] | None = None,
+) -> bool:
+    """Return whether one parent reaches ``op`` only through scalar control metadata.
+
+    Parameters
+    ----------
+    op:
+        Captured consuming operation.
+    parent:
+        Captured parent operation whose edge into ``op`` is classified.
+    records_by_parent_label:
+        Optional prebuilt grouping from :func:`_edge_records_by_parent_label` for
+        ``op``. Supplying it avoids rescanning ``op.edge_uses`` per parent; the
+        classification is unchanged because it depends only on the *set* of
+        matching records, never on their relative order.
+
+    Returns
+    -------
+    bool
+        Whether the edge carries only scalar shape/control metadata.
+    """
+
+    if records_by_parent_label is None:
+        records_by_parent_label = _edge_records_by_parent_label(op)
+    matched: list[object] = []
+    seen_references: set[str | None] = set()
+    for reference in (parent.label, parent.layer_label, parent._layer_label_raw):
+        if reference in seen_references:
+            continue
+        seen_references.add(reference)
+        matched.extend(records_by_parent_label.get(reference, ()))
+    records = tuple(matched)
     if not records:
         return False
     edge_kinds = tuple(getattr(record, "edge_use", None) for record in records)

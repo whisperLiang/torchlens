@@ -2648,10 +2648,14 @@ class Op:
             self._label_raw,
             self._layer_label_raw,
         )
+        # ``Trace.ops`` is a cache-checking property, so resolving it per parent
+        # made a wide fan-in operation (concatenation) pay that check once per
+        # parent; the accessor cannot change while this loop runs.
+        ops = trace.ops
         for parent_label in self.parents:
             parent: Op | None
             try:
-                parent = trace.ops[parent_label]
+                parent = ops[parent_label]
             except KeyError:
                 parent = cast("Op | None", trace.layer_dict_all_keys.get(parent_label))
             if parent is None:

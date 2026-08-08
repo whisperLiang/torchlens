@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from ._engine import (
     _concatenation_offsets,
+    _geometry_memo,
     _graph_revision,
     _merge_states,
     _operation_is_live,
@@ -96,7 +97,8 @@ def solve_projective(trace: Trace, target_ops: Iterable[Op | str]) -> _Projectiv
             cache.move_to_end(target_labels)
             return cached_solution
 
-    solution = _solve_projective_uncached(trace, targets, epoch, revision)
+    with _geometry_memo():
+        solution = _solve_projective_uncached(trace, targets, epoch, revision)
     cache[target_labels] = (epoch, revision, solution)
     cache.move_to_end(target_labels)
     while len(cache) > _TARGET_SOLUTION_CACHE_SIZE:
@@ -177,6 +179,11 @@ def _solve_projective_uncached(
             for reference in op.children
             if reference in by_reference and by_reference[reference].label in active_labels
         )
+        # This reverse program visits each edge from the PARENT side, so one
+        # child's local rule and concatenation layout are re-requested once per
+        # parent -- quadratic on a wide fan-in concatenation, since each miss is
+        # itself linear in the child's parents. The enclosing ``_geometry_memo``
+        # scope opened by ``solve_projective`` collapses both to once per child.
         for child in children:
             result, rule_name = _rule_result(child)
             for role, child_state in states_by_op.get(child.label, {}).items():
