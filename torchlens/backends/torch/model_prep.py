@@ -10,6 +10,7 @@ import itertools
 import math
 import sys
 import time
+import weakref
 from collections.abc import Callable, Iterable
 from collections import defaultdict, deque
 from dataclasses import replace
@@ -76,6 +77,34 @@ from .escape_detection import (
 # shared across instances of the same class type. Cleared at the start of each
 # session in _prepare_model_session to avoid stale data from reloaded modules.
 _module_class_metadata_cache: dict[type, dict[str, Any]] = {}
+
+# Process-stable memo for source start lines. ``inspect.findsource`` re-tokenizes
+# (functions) or fully AST-parses (classes, CPython < 3.13) the defining file on
+# every call, a fixed multi-ms tax repaid each capture because the per-session
+# cache above is cleared. The start line is a fact of the definition site, so it
+# is keyed on the class object itself or on a function's code object: a
+# reloaded/redefined class or a monkey-patched method is a *new* object and can
+# never be served a stale entry. Weak keys keep dynamically created classes and
+# code collectable; failures are never cached, so exception behavior is unchanged.
+_source_line_cache: "weakref.WeakKeyDictionary[Any, int]" = weakref.WeakKeyDictionary()
+
+
+def _source_start_line(obj: Any) -> int:
+    """Memoized ``inspect.getsourcelines(obj)[1]`` for classes and functions."""
+    key = obj if isinstance(obj, type) else getattr(obj, "__code__", None)
+    if key is not None:
+        try:
+            line = _source_line_cache.get(key)
+        except TypeError:
+            key = None
+        else:
+            if line is not None:
+                return line
+    line = inspect.getsourcelines(obj)[1]
+    if key is not None:
+        _source_line_cache[key] = line
+    return line
+
 
 # Pre-computed set of nn.Module attribute names (from MRO). Used to filter out
 # inherited custom_methods/attrs when scanning for user-defined extras. Computed once
@@ -507,9 +536,9 @@ def _prepare_model_session(
     trace.forward_docstring = getattr(forward_method, "__doc__", None)
     try:
         trace.class_source_file = inspect.getfile(type(model))
-        trace.class_source_line = inspect.getsourcelines(type(model))[1]
+        trace.class_source_line = _source_start_line(type(model))
         trace.init_source_file = inspect.getfile(type(model).__init__)
-        trace.init_source_line = inspect.getsourcelines(type(model).__init__)[1]
+        trace.init_source_line = _source_start_line(type(model).__init__)
     except (OSError, TypeError):
         trace.class_source_file = None
         trace.class_source_line = None
@@ -520,7 +549,7 @@ def _prepare_model_session(
         trace.forward_source_file = inspect.getsourcefile(forward_func) or inspect.getfile(
             forward_func
         )
-        trace.forward_source_line = inspect.getsourcelines(forward_func)[1]
+        trace.forward_source_line = _source_start_line(forward_func)
     except (OSError, TypeError):
         trace.forward_source_file = None
         trace.forward_source_line = None
@@ -735,8 +764,7 @@ def _get_class_metadata(module_class: type, save_code_context: bool = False) -> 
         except (TypeError, OSError):
             meta["class_source_file"] = None
         try:
-            _, line = inspect.getsourcelines(module_class)
-            meta["class_source_line"] = line
+            meta["class_source_line"] = _source_start_line(module_class)
         except (TypeError, OSError):
             meta["class_source_line"] = None
 
@@ -746,7 +774,7 @@ def _get_class_metadata(module_class: type, save_code_context: bool = False) -> 
                 meta["init_source_file"] = inspect.getsourcefile(init_method) or inspect.getfile(
                     init_method
                 )
-                meta["init_source_line"] = inspect.getsourcelines(init_method)[1]
+                meta["init_source_line"] = _source_start_line(init_method)
             else:
                 meta["init_source_file"] = None
                 meta["init_source_line"] = None
@@ -767,7 +795,7 @@ def _get_class_metadata(module_class: type, save_code_context: bool = False) -> 
                 meta["forward_source_file"] = inspect.getsourcefile(
                     forward_method
                 ) or inspect.getfile(forward_method)
-                meta["forward_source_line"] = inspect.getsourcelines(forward_method)[1]
+                meta["forward_source_line"] = _source_start_line(forward_method)
             else:
                 meta["forward_source_file"] = None
                 meta["forward_source_line"] = None
@@ -821,7 +849,7 @@ def _hook_info_from_registry(registry: Any) -> list[HookInfo]:
         source_location = None
         try:
             source_file = inspect.getsourcefile(hook) or inspect.getfile(hook)
-            source_line = inspect.getsourcelines(hook)[1]
+            source_line = _source_start_line(hook)
         except (OSError, TypeError):
             pass
         else:
