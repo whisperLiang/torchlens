@@ -5438,12 +5438,69 @@ def _check_loop_detection_invariants(ml: "Trace") -> None:
     name = "loop_detection"
     label_set = set(ml.op_labels)
 
+    # O(1) member-label resolution: inline the first steps of the
+    # ``Trace.__getitem__`` string cascade (layer_logs -> ambiguous ->
+    # layer_dict_all_keys) and delegate anything else to the full lookup, so
+    # every resolution (including ambiguous-key errors) matches ``ml[label]``.
+    _MISS = object()
+    layer_logs = ml.layer_logs
+    all_keys = ml.layer_dict_all_keys
+    ambiguous_keys = getattr(ml, "_ambiguous_lookup_keys", {})
+
+    def _resolve(member_label: str) -> "Op":
+        hit = layer_logs.get(member_label, _MISS)
+        if hit is not _MISS:
+            return cast("Op", hit)
+        if member_label not in ambiguous_keys:
+            hit = all_keys.get(member_label, _MISS)
+            if hit is not _MISS:
+                return cast("Op", hit)
+        return ml[member_label]
+
     # Build same-layer groups from the authoritative recurrent_ops lists
     # Key: frozenset of labels, Value: list of OpLogs in the group
     groups_seen: dict[frozenset[str], list[str]] = {}
+    # Group-level checks run once per recurrence group, at its first
+    # layer_list encounter.  The symmetry check there proves every member
+    # resolves to the same label set, so a later member whose object IS the
+    # resolved op (identity-guarded below) would pass the identical checks;
+    # re-running them per member is what made this check quadratic.
+    member_group: dict[str, frozenset[str]] = {}
+    # The shared-func_name check only runs at computational anchors, so a
+    # group first encountered via an input/buffer/output member still owes it
+    # at its first computational member (matching the original scan order).
+    group_func_checked: dict[frozenset[str], bool] = {}
 
     for lpl in ml.layer_list:
         slo = lpl.recurrent_ops
+
+        group_key = member_group.get(lpl.label)
+        if group_key is not None and _resolve(lpl.label) is lpl:
+            # This op was already validated as a member of its group; only
+            # the genuinely per-layer checks remain.
+            if not group_func_checked[group_key] and not (
+                lpl.is_input or lpl.is_buffer or lpl.is_output
+            ):
+                for member_label in slo:
+                    member = _resolve(member_label)
+                    if member.func_name != lpl.func_name:
+                        raise MetadataInvariantError(
+                            name,
+                            f"recurrent_ops func mismatch: '{lpl.layer_label}' "
+                            f"func='{lpl.func_name}' vs '{member_label}' "
+                            f"func='{member.func_name}'",
+                        )
+                group_func_checked[group_key] = True
+
+            # num_passes == len(recurrent_ops)
+            if lpl.num_passes != len(slo):
+                raise MetadataInvariantError(
+                    name,
+                    f"Layer '{lpl.layer_label}': num_passes={lpl.num_passes} "
+                    f"!= len(recurrent_ops)={len(slo)}",
+                )
+            continue
+
         if not slo:
             raise MetadataInvariantError(
                 name,
@@ -5466,9 +5523,12 @@ def _check_loop_detection_invariants(ml: "Trace") -> None:
             )
 
         # Symmetry: all members agree on the group
+        slo_set = set(slo)
+        members: list[tuple[str, "Op"]] = []
         for member_label in slo:
-            member = ml[member_label]
-            if set(member.recurrent_ops) != set(slo):
+            member = _resolve(member_label)
+            members.append((member_label, member))
+            if set(member.recurrent_ops) != slo_set:
                 raise MetadataInvariantError(
                     name,
                     f"Asymmetric recurrent_ops: '{lpl.layer_label}' has "
@@ -5477,8 +5537,7 @@ def _check_loop_detection_invariants(ml: "Trace") -> None:
                 )
 
         # All members share layer_label
-        for member_label in slo:
-            member = ml[member_label]
+        for member_label, member in members:
             if member.layer_label != lpl.layer_label:
                 raise MetadataInvariantError(
                     name,
@@ -5488,8 +5547,7 @@ def _check_loop_detection_invariants(ml: "Trace") -> None:
                 )
 
         # All members share equivalence_class
-        for member_label in slo:
-            member = ml[member_label]
+        for member_label, member in members:
             if member.equivalence_class != lpl.equivalence_class:
                 raise MetadataInvariantError(
                     name,
@@ -5499,9 +5557,9 @@ def _check_loop_detection_invariants(ml: "Trace") -> None:
                 )
 
         # All members share func_name (for computational layers)
-        if not (lpl.is_input or lpl.is_buffer or lpl.is_output):
-            for member_label in slo:
-                member = ml[member_label]
+        anchor_computational = not (lpl.is_input or lpl.is_buffer or lpl.is_output)
+        if anchor_computational:
+            for member_label, member in members:
                 if member.func_name != lpl.func_name:
                     raise MetadataInvariantError(
                         name,
@@ -5522,8 +5580,7 @@ def _check_loop_detection_invariants(ml: "Trace") -> None:
         group_key = frozenset(slo)
         if group_key not in groups_seen:
             pass_indices = []
-            for member_label in slo:
-                member = ml[member_label]
+            for member_label, member in members:
                 pass_indices.append(member.pass_index)
             expected = set(range(1, len(slo) + 1))
             actual = set(pass_indices)
@@ -5533,6 +5590,11 @@ def _check_loop_detection_invariants(ml: "Trace") -> None:
                     f"Pass numbering for group {sorted(slo)}: expected {expected}, got {actual}",
                 )
             groups_seen[group_key] = slo
+
+        for member_label in slo_set:
+            member_group[member_label] = group_key
+        if group_key not in group_func_checked or anchor_computational:
+            group_func_checked[group_key] = anchor_computational
 
     # Rule 1: Parameter sharing invariant.
     # Layers with the same func_name, identical sorted(_param_barcodes), and the
@@ -5573,7 +5635,7 @@ def _check_loop_detection_invariants(ml: "Trace") -> None:
         # All members of a same-layer group should be in the same equivalence set
         equiv_keys = set()
         for member_label in slo:
-            member = ml[member_label]
+            member = _resolve(member_label)
             if member.label in op_label_to_equiv_key:
                 equiv_keys.add(op_label_to_equiv_key[member.label])
         equiv_stems = {re.sub(r"_outindex\d+$", "", equiv_key) for equiv_key in equiv_keys}
