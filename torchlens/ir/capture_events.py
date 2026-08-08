@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, Iterable, NoReturn
 import weakref
 
 from .events import (
@@ -186,7 +186,11 @@ class CaptureEvents:
             None,
         )
 
-    def copy_for_replay(self) -> "CaptureEvents":
+    def copy_for_replay(
+        self,
+        *,
+        projected_op_events: Iterable[OpEvent] | None = None,
+    ) -> "CaptureEvents":
         """Return a structural working projection for postprocess mutation.
 
         Later postprocess steps replace entries in ``op_events`` and
@@ -207,22 +211,43 @@ class CaptureEvents:
         reference, so the copy is cheap and does not clone activations. Scalars
         and the opaque ``backend_session`` are copied by value / reference.
 
+        A caller that already projected independent ``OpEvent`` objects may
+        provide them through ``projected_op_events``. Those events are installed
+        directly while every mutable container and live-index lane is still
+        copied. The caller must own independent ``transform_config`` and
+        ``parent_arg_positions`` dictionaries on each supplied event.
+
+        Parameters
+        ----------
+        projected_op_events
+            Already-projected operation events whose mutable dictionaries are
+            independent from this source stream. ``None`` clones this source's
+            operation events as usual.
+
         Returns
         -------
         CaptureEvents
             Independent event buffer over the same underlying events.
         """
 
-        cloned_op_events = [_clone_op_event_for_replay(event) for event in self.op_events]
-        cloned_by_label = {event.label_raw: event for event in cloned_op_events}
+        if projected_op_events is None:
+            replay_op_events = [_clone_op_event_for_replay(event) for event in self.op_events]
+        else:
+            replay_op_events = list(projected_op_events)
+        replay_by_label = {event.label_raw: event for event in replay_op_events}
         projected_index = self.live_index.copy()
-        projected_index.by_raw_label = {
-            label: cloned_by_label.get(label, event)
-            for label, event in projected_index.by_raw_label.items()
-        }
+        if projected_op_events is None:
+            projected_index.by_raw_label = {
+                label: replay_by_label.get(label, event)
+                for label, event in projected_index.by_raw_label.items()
+            }
+        else:
+            projected_index.by_raw_label = dict(replay_by_label)
+            projected_index.labels = list(replay_by_label)
+            projected_index.rebuild_edges()
 
         return CaptureEvents(
-            op_events=cloned_op_events,
+            op_events=replay_op_events,
             module_events=list(self.module_events),
             module_prep_events=list(self.module_prep_events),
             module_enter_events=list(self.module_enter_events),
