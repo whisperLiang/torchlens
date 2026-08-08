@@ -420,6 +420,7 @@ def draw(
     segments: dict[str, SegmentDescriptor] = {}
     if collapse_fn is not None:
         segments = dict(getattr(collapse_fn, "_torchlens_v2_segments", {}) or {})
+    segment_lookup = _build_segment_lookup(segments)
     # THE _layers_logged guard: protects all downstream rendering code from missing-layer lookups.
     if not self._layers_logged:
         raise ValueError(
@@ -589,6 +590,7 @@ def draw(
         context=request,
         universe=node_universe,
         segments=segments,
+        segment_lookup=segment_lookup,
     )
     antiparallel_projected_edges = projected_antiparallel_endpoint_pairs(forward_render_ir)
 
@@ -624,7 +626,7 @@ def draw(
                 show_input_transform_summary,
                 repeat_folds,
                 run_fold_ellipsis_nodes,
-                segments,
+                segment_lookup,
                 emitted_segment_nodes,
                 antiparallel_projected_edges,
                 node_record

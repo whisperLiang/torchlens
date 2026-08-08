@@ -366,7 +366,7 @@ def _add_node_to_graphviz(
     show_input_transform_summary: bool = False,
     repeat_folds: Mapping[str, "ModuleRepeatFold"] | None = None,
     run_fold_ellipsis_nodes: set[str] | None = None,
-    segments: Mapping[str, SegmentDescriptor] | None = None,
+    segment_lookup: _SegmentLookup | None = None,
     emitted_segment_nodes: set[str] | None = None,
     antiparallel_projected_edges: frozenset[tuple[str, str]] = frozenset(),
     node_decision: Any | None = None,
@@ -393,7 +393,7 @@ def _add_node_to_graphviz(
     fold_ancestor_address = _run_fold_ancestor_for_node(node, repeat_folds)
     if fold_ancestor_address is not None:
         collapse_address = fold_ancestor_address
-    segment = _segment_for_node(node, segments)
+    segment = _segment_for_node(node, segment_lookup)
     if segment is not None:
         _queue_segment_node(
             graphviz_graph,
@@ -478,7 +478,7 @@ def _add_node_to_graphviz(
         collapsed_container_nodes,
         repeat_folds,
         run_fold_ellipsis_nodes,
-        segments,
+        segment_lookup,
         segment,
         antiparallel_projected_edges,
     )

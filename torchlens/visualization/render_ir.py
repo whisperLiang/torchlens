@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..data_classes.module import Module
     from ..data_classes.trace import Trace
     from .auto_collapse import ModuleRepeatFold
+    from ._render_edges import _SegmentLookup
     from .node_universe import NodeUnit
     from .rendering import RenderedNodeEmission
     from .renderers.base import RendererCapabilities
@@ -263,6 +264,7 @@ def build_render_ir(
     context: RenderContext | None = None,
     universe: Any | None = None,
     segments: "Mapping[str, Any] | None" = None,
+    segment_lookup: "_SegmentLookup | None" = None,
 ) -> RenderIR:
     """Build the first render-IR slice from current renderer-faithful emissions.
 
@@ -284,6 +286,10 @@ def build_render_ir(
     """
 
     resolved_context = RenderContext() if context is None else context
+    if segment_lookup is None:
+        from ._render_edges import _build_segment_lookup
+
+        segment_lookup = _build_segment_lookup(segments)
     if universe is None:
         from .node_universe import build_node_universe
         from .source_graph import build_source_graph
@@ -296,7 +302,13 @@ def build_render_ir(
     sibling_counts = _atomic_module_sibling_counts(trace)
     nodes = tuple(
         _node_from_unit(
-            trace, unit, resolved_context, universe, repeat_folds, segments, sibling_counts
+            trace,
+            unit,
+            resolved_context,
+            universe,
+            repeat_folds,
+            segment_lookup,
+            sibling_counts,
         )
         for unit in universe.units
     )
@@ -635,7 +647,7 @@ def _node_from_unit(
     context: RenderContext,
     universe: Any,
     repeat_folds: "Mapping[str, ModuleRepeatFold] | None",
-    segments: "Mapping[str, Any] | None",
+    segment_lookup: "_SegmentLookup",
     sibling_counts: "Mapping[str, int] | None" = None,
 ) -> RenderIRNode:
     """Decorate one structural node-universe unit as a render-IR node."""
@@ -669,7 +681,7 @@ def _node_from_unit(
     region_path: tuple[str, ...] = ()
     if emission.node is not None:
         node_calls, owned_node_args, node_color, node_spec, label_spans = _resolve_node_decision(
-            trace, emission, context, universe, repeat_folds, segments, sibling_counts
+            trace, emission, context, universe, repeat_folds, segment_lookup, sibling_counts
         )
         modules = list(emission.node.modules)
         if emission.kind == "module_box":
@@ -700,7 +712,7 @@ def _resolve_node_decision(
     context: RenderContext,
     universe: Any,
     repeat_folds: "Mapping[str, ModuleRepeatFold] | None",
-    segments: "Mapping[str, Any] | None",
+    segment_lookup: "_SegmentLookup",
     sibling_counts: "Mapping[str, int] | None" = None,
 ) -> tuple[
     tuple[Any, ...], tuple[tuple[str, dict[str, Any]], ...], str, Any | None, tuple[str, ...]
@@ -740,7 +752,7 @@ def _resolve_node_decision(
     node = emission.node
     if node is None:
         return (), (), "black", None, ()
-    if _segment_for_node(node, segments) is not None:
+    if _segment_for_node(node, segment_lookup) is not None:
         return (), (), "black", None, ()
     recorder = _RenderIRDecisionBuilder()
     module_nodes: dict[str, Any] = defaultdict(dict)
