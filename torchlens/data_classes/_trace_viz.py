@@ -4,8 +4,6 @@ from collections.abc import Iterable, Mapping
 from html import escape
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, cast
 
-import torch
-
 if TYPE_CHECKING:
     from ..experimental.dagua._bridge import TorchLensRenderAudit
     from ..intervention.types import FireRecord
@@ -29,6 +27,7 @@ from .._literals import (
 )
 from .._source_links import file_line_text, terminal_file_line_link, vscode_file_line_link
 from ..intervention.types import FireRecord
+from ._nonfinite import first_nonfinite_layer
 from .module import Module
 
 
@@ -345,16 +344,8 @@ class TraceVisualizationMixin(_TraceMixinBase):
             module, shape, dtype, parents, and source location.
         """
 
-        for layer in getattr(self, "layer_list", []) or []:
-            out = getattr(layer, "out", None)
-            if not isinstance(out, torch.Tensor) or out.numel() == 0:
-                continue
-            try:
-                has_nonfinite = bool((~torch.isfinite(out.detach())).any().item())
-            except (RuntimeError, TypeError):
-                continue
-            if not has_nonfinite:
-                continue
+        layer = first_nonfinite_layer(self, kind="trace")
+        if layer is not None:
             stack = getattr(layer, "code_context", None) or []
             location = "source unavailable"
             if stack:

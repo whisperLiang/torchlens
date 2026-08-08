@@ -186,3 +186,54 @@ def test_find_nan_accepts_explicit_capture_options() -> None:
 
     assert result.found is True
     assert result.scope == "first non-finite tensor"
+
+
+def test_first_nonfinite_scan_is_memoized_per_trace() -> None:
+    """A repeated non-finite question must not re-read every saved activation.
+
+    ``print(trace)``, ``_repr_html_``, and ``report.explain`` each ask this
+    question, so a scan per call meant re-running ``torch.isfinite`` over the
+    whole forward's payload on every repr. Lock the memo in: the second answer
+    costs zero element reads.
+    """
+
+    trace = tl.trace(nn.Sequential(nn.Linear(2, 2)), _input_tensor())
+    real_isfinite = torch.isfinite
+    calls = 0
+
+    def counting_isfinite(tensor: torch.Tensor) -> torch.Tensor:
+        """Count element-scanning checks issued by the non-finite scan."""
+
+        nonlocal calls
+        calls += 1
+        return real_isfinite(tensor)
+
+    torch.isfinite = counting_isfinite  # type: ignore[assignment]
+    try:
+        first = trace.first_nonfinite()
+        cold_calls = calls
+        calls = 0
+        assert trace.first_nonfinite() == first
+        assert calls == 0
+    finally:
+        torch.isfinite = real_isfinite  # type: ignore[assignment]
+    assert cold_calls > 0
+
+
+def test_first_nonfinite_rescans_after_saved_activation_changes() -> None:
+    """The memoized scan must never serve a stale clean verdict."""
+
+    trace = tl.trace(nn.Sequential(nn.Linear(2, 2)), _input_tensor())
+    assert trace.first_nonfinite().startswith("No non-finite")
+
+    with torch.no_grad():
+        trace.layer_list[-1].out.mul_(float("nan"))
+    in_place_answer = trace.first_nonfinite()
+    assert "First non-finite" in in_place_answer
+    assert "No NaN or Inf" not in tl.report.explain(trace)
+
+    replaced = trace.layer_list[0]
+    replaced.out = torch.full_like(replaced.out, float("inf"))
+    replaced_answer = trace.first_nonfinite()
+    assert "First non-finite" in replaced_answer
+    assert str(replaced.layer_label) in replaced_answer

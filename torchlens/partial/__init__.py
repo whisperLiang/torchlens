@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from html import escape
 from typing import TYPE_CHECKING, Any, Literal
 
-import torch
+from ..data_classes._nonfinite import first_nonfinite_layer
 
 if TYPE_CHECKING:
     from torchlens.debug._audit import TraceAudit
@@ -76,24 +76,16 @@ class PartialTrace:
             Human-readable summary with layer, operation, shape, dtype, and parents.
         """
 
-        for layer in self.raw_layers:
-            out = getattr(layer, "out", None)
-            candidate = out if isinstance(out, torch.Tensor) else None
-            if candidate is None or candidate.numel() == 0:
-                continue
-            try:
-                has_nonfinite = bool((~torch.isfinite(candidate.detach())).any().item())
-            except (RuntimeError, TypeError):
-                continue
-            if has_nonfinite:
-                parents = ", ".join(getattr(layer, "parents", None) or []) or "none"
-                return (
-                    "First non-finite captured tensor is in "
-                    f"layer {getattr(layer, '_label_raw', 'unknown')} "
-                    f"(op {getattr(layer, 'func_name', 'unknown')}), "
-                    f"shape={getattr(layer, 'shape', None)}, "
-                    f"dtype={getattr(layer, 'dtype', None)}, parents={parents}."
-                )
+        layer = first_nonfinite_layer(self, kind="raw")
+        if layer is not None:
+            parents = ", ".join(getattr(layer, "parents", None) or []) or "none"
+            return (
+                "First non-finite captured tensor is in "
+                f"layer {getattr(layer, '_label_raw', 'unknown')} "
+                f"(op {getattr(layer, 'func_name', 'unknown')}), "
+                f"shape={getattr(layer, 'shape', None)}, "
+                f"dtype={getattr(layer, 'dtype', None)}, parents={parents}."
+            )
         fields = getattr(self.original_exception, "fields", {})
         if "layer" in fields:
             return (

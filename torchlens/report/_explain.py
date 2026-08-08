@@ -8,6 +8,8 @@ import traceback
 
 import torch
 
+from ..data_classes._nonfinite import first_nonfinite_layer, nonfinite_layers
+
 Audience = Literal["researcher", "practitioner", "auto"]
 ExplainFormat = Literal["text", "json"]
 
@@ -333,38 +335,6 @@ def _partial_json(
     return result
 
 
-def _saved_out(layer: Any) -> Any:
-    """Return a layer's saved output payload, or ``None`` when unavailable.
-
-    The anomaly scans below only reason about *saved* activation payloads. On a
-    selective-save trace most layers retain no payload, and reading ``.out`` on
-    such an op raises ``ValueError`` (``"... was not saved; no saved payload is
-    available"``) -- a per-pass ``ValueError`` that a plain ``getattr(layer,
-    "out", None)`` cannot swallow, so both the JSON and prose reports previously
-    crashed on the ordinary predicate-save trace shape instead of honoring their
-    documented ``unknown``/scoped-clean contract. Gate on the saved-payload flag
-    first, then read the property inside the known-unavailable boundary so an
-    unsaved op is honestly skipped rather than aborting the whole report.
-
-    Parameters
-    ----------
-    layer:
-        A per-pass operation/layer entry from ``log.layer_list``.
-
-    Returns
-    -------
-    Any
-        The saved output tensor when a payload was retained, else ``None``.
-    """
-
-    if not bool(getattr(layer, "has_saved_activation", False)):
-        return None
-    try:
-        return getattr(layer, "out", None)
-    except ValueError:
-        return None
-
-
 def _first_nonfinite_summary(log: Any) -> str:
     """Return a saved-output non-finite summary without speculation.
 
@@ -379,24 +349,18 @@ def _first_nonfinite_summary(log: Any) -> str:
         First recorded non-finite detail, or a scoped clean statement.
     """
 
-    for layer in getattr(log, "layer_list", []) or []:
-        out = _saved_out(layer)
-        if not isinstance(out, torch.Tensor) or out.numel() == 0:
-            continue
-        try:
-            if bool((~torch.isfinite(out.detach())).any().item()):
-                label = str(getattr(layer, "layer_label", "unknown"))
-                return _first_nonfinite_detail(log, label)
-        except (RuntimeError, TypeError):
-            continue
-    return "No non-finite values found in saved outputs."
+    layer = first_nonfinite_layer(log, kind="saved")
+    if layer is None:
+        return "No non-finite values found in saved outputs."
+    return _first_nonfinite_detail(log, str(getattr(layer, "layer_label", "unknown")))
 
 
 def _first_nonfinite_detail(log: Any, saved_label: str) -> str:
     """Return the log's own non-finite detail, or a scoped fallback.
 
-    ``log.first_nonfinite()`` rescans the trace and can itself raise ``ValueError``
-    on a selective-save trace (it reads unsaved ``.out`` payloads). explain() must
+    ``log.first_nonfinite()`` re-asks the trace under its own scan contract and can
+    itself raise ``ValueError`` on a selective-save trace (it reads unsaved ``.out``
+    payloads, saved or not, and revalidating a memo reads them too). explain() must
     not propagate that: fall back to the scoped saved-output statement so the
     report always honors its ``unknown``/clean contract.
 
@@ -536,18 +500,10 @@ def _anomaly_lines(log: Any) -> list[str]:
         Bullet lines describing non-finite outs.
     """
 
-    nonfinite_labels: list[str] = []
-    for layer in getattr(log, "layer_list", []) or []:
-        out = _saved_out(layer)
-        if not isinstance(out, torch.Tensor) or out.numel() == 0:
-            continue
-        try:
-            has_nonfinite = bool((~torch.isfinite(out.detach())).any().item())
-        except (RuntimeError, TypeError):
-            continue
-        if has_nonfinite:
-            nonfinite_labels.append(str(getattr(layer, "layer_label", "unknown")))
-
+    nonfinite_labels = [
+        str(getattr(layer, "layer_label", "unknown"))
+        for layer in nonfinite_layers(log, kind="saved")
+    ]
     if not nonfinite_labels:
         return ["- No NaN or Inf values were found in saved outs."]
     first = nonfinite_labels[0]
