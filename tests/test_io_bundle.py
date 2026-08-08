@@ -16,6 +16,7 @@ from torch import nn
 pytest.importorskip("safetensors")
 
 from torchlens import Trace, load, trace as trace_fn, save
+from torchlens._io import bundle as bundle_io
 from torchlens.io import cleanup_tmp, detect_tlspec_format
 from torchlens._io import TLSPEC_VERSION, TorchLensIOError
 from torchlens._io.paths import resolve_bundle_blob_path
@@ -1263,6 +1264,30 @@ def test_resolve_bundle_blob_path_accepts_regular_blobs_dir(tmp_path: Path) -> N
     resolved = resolve_bundle_blob_path(bundle_root, "blobs/0000000001.safetensors")
 
     assert resolved == blob_file.resolve()
+
+
+def test_eager_load_resolves_blob_containment_root_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An eager load should canonicalize its shared blob root only once."""
+
+    bundle_path, _ = _save_bundle(tmp_path)
+    original_resolver = bundle_io.resolve_bundle_blobs_dir
+    call_count = 0
+
+    def counting_resolver(bundle_root: Path) -> Path:
+        """Count canonical blob-root resolutions while preserving behavior."""
+
+        nonlocal call_count
+        call_count += 1
+        return original_resolver(bundle_root)
+
+    monkeypatch.setattr(bundle_io, "resolve_bundle_blobs_dir", counting_resolver)
+
+    load(bundle_path, lazy=False)
+
+    assert call_count == 1
 
 
 def test_bundle_loaded_log_validation_guard_raises(tmp_path: Path) -> None:

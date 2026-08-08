@@ -37,7 +37,11 @@ from .payload_codec import (
     get_payload_codec,
     numpy_to_transport_tensor,
 )
-from .paths import reject_symlink_path as _reject_symlink_path, resolve_bundle_blob_path
+from .paths import (
+    reject_symlink_path as _reject_symlink_path,
+    resolve_bundle_blob_path,
+    resolve_bundle_blobs_dir,
+)
 from .rehydrate import rehydrate_trace
 from .scrub import BlobSpec, scrub_for_save
 from .state_keys import invalidate_static_class_attr_cache
@@ -1092,10 +1096,16 @@ def _load_trace_payload(
     python_major_mismatch = False
     try:
         enforce_version_policy(manifest)
-        _validate_manifest_blob_paths(manifest, bundle_path)
+        resolved_blobs_dir = resolve_bundle_blobs_dir(bundle_path)
+        _validate_manifest_blob_paths(manifest, bundle_path, resolved_blobs_dir)
         _check_unknown_blob_entries(manifest, blobs_path)
         if not lazy:
-            _eager_verify_blob_payloads(manifest, bundle_path, map_location)
+            _eager_verify_blob_payloads(
+                manifest,
+                bundle_path,
+                map_location,
+                resolved_blobs_dir,
+            )
 
         python_major_mismatch = _python_major_mismatch(manifest)
         with metadata_path.open("rb") as handle:
@@ -1127,6 +1137,7 @@ def _load_trace_payload(
         map_location=map_location,
         materialize_nested=materialize_nested,
         payload_hints=payload_hints,
+        resolved_blobs_dir=resolved_blobs_dir,
     )
     setattr(trace, "_loaded_from_bundle", True)
     setattr(trace, "_source_bundle_manifest_sha256", sha256_of_file(manifest_path))
@@ -1140,18 +1151,21 @@ def _load_trace_payload(
         manifest=manifest,
         bundle_path=bundle_path,
         map_location=map_location,
+        resolved_blobs_dir=resolved_blobs_dir,
     )
     _bind_embedded_weight_payload(
         trace,
         manifest=manifest,
         bundle_path=bundle_path,
         map_location=map_location,
+        resolved_blobs_dir=resolved_blobs_dir,
     )
     _bind_archived_activation_payload(
         trace,
         manifest=manifest,
         bundle_path=bundle_path,
         map_location=map_location,
+        resolved_blobs_dir=resolved_blobs_dir,
     )
     return trace
 
@@ -1257,6 +1271,7 @@ def _bind_embedded_nonpersistent_buffer_payload(
     manifest: Manifest,
     bundle_path: Path,
     map_location: str | torch.device,
+    resolved_blobs_dir: Path | None = None,
 ) -> None:
     """Decode and bind mandatory captured non-persistent buffer values.
 
@@ -1270,6 +1285,8 @@ def _bind_embedded_nonpersistent_buffer_payload(
         Artifact root used to resolve blob paths safely.
     map_location:
         Device selected for loaded buffer tensors.
+    resolved_blobs_dir:
+        Canonical blob containment root for this load operation.
 
     Raises
     ------
@@ -1279,6 +1296,8 @@ def _bind_embedded_nonpersistent_buffer_payload(
         If decoded values violate the non-persistent buffer slot contract.
     """
 
+    if resolved_blobs_dir is None:
+        resolved_blobs_dir = resolve_bundle_blobs_dir(bundle_path)
     descriptor = trace.runnable_descriptor
     entries = tuple(
         entry for entry in manifest.tensors if entry.kind == _RUNNABLE_NONPERSISTENT_BUFFER_KIND
@@ -1311,7 +1330,11 @@ def _bind_embedded_nonpersistent_buffer_payload(
             raise TorchLensIOError(
                 f"Runnable non-persistent buffer payload repeats canonical name {entry.label!r}."
             )
-        blob_path = resolve_bundle_blob_path(bundle_path, entry.relative_path)
+        blob_path = resolve_bundle_blob_path(
+            bundle_path,
+            entry.relative_path,
+            resolved_blobs_dir=resolved_blobs_dir,
+        )
         observed_sha256 = sha256_of_file(blob_path)
         if observed_sha256 != entry.sha256:
             raise TorchLensIOError(
@@ -1337,6 +1360,7 @@ def _bind_embedded_weight_payload(
     manifest: Manifest,
     bundle_path: Path,
     map_location: str | torch.device,
+    resolved_blobs_dir: Path | None = None,
 ) -> None:
     """Decode and strictly bind the optional runnable state-dict blob family.
 
@@ -1350,6 +1374,8 @@ def _bind_embedded_weight_payload(
         Artifact root used to resolve blob paths safely.
     map_location:
         Device selected for loaded state tensors.
+    resolved_blobs_dir:
+        Canonical blob containment root for this load operation.
 
     Raises
     ------
@@ -1360,6 +1386,8 @@ def _bind_embedded_weight_payload(
         If the decoded state violates the shared strict binding contract.
     """
 
+    if resolved_blobs_dir is None:
+        resolved_blobs_dir = resolve_bundle_blobs_dir(bundle_path)
     descriptor = trace.runnable_descriptor
     weight_entries = tuple(
         entry for entry in manifest.tensors if entry.kind == _RUNNABLE_WEIGHT_KIND
@@ -1388,7 +1416,11 @@ def _bind_embedded_weight_payload(
             raise TorchLensIOError(
                 f"Runnable weight payload repeats canonical state name {entry.label!r}."
             )
-        blob_path = resolve_bundle_blob_path(bundle_path, entry.relative_path)
+        blob_path = resolve_bundle_blob_path(
+            bundle_path,
+            entry.relative_path,
+            resolved_blobs_dir=resolved_blobs_dir,
+        )
         observed_sha256 = sha256_of_file(blob_path)
         if observed_sha256 != entry.sha256:
             raise TorchLensIOError(
@@ -1411,6 +1443,7 @@ def _bind_archived_activation_payload(
     manifest: Manifest,
     bundle_path: Path,
     map_location: str | torch.device,
+    resolved_blobs_dir: Path | None = None,
 ) -> None:
     """Load the inspection-only selected-activation family without seeding execution.
 
@@ -1424,6 +1457,8 @@ def _bind_archived_activation_payload(
         Artifact root used to resolve blob paths safely.
     map_location:
         Device selected for loaded activation tensors.
+    resolved_blobs_dir:
+        Canonical blob containment root for this load operation.
 
     Raises
     ------
@@ -1434,6 +1469,8 @@ def _bind_archived_activation_payload(
     from .._runnable_state import runnable_tensor_byte_digest
     from ..runnable import ActivationPayloadLayerDescriptor, ArchivedActivation
 
+    if resolved_blobs_dir is None:
+        resolved_blobs_dir = resolve_bundle_blobs_dir(bundle_path)
     descriptor = trace.runnable_descriptor
     activation_entries = {
         entry.blob_id: entry
@@ -1473,7 +1510,11 @@ def _bind_archived_activation_payload(
             raise TorchLensIOError(
                 f"Runnable activation member {member.blob_id!r} has no tensor entry."
             )
-        blob_path = resolve_bundle_blob_path(bundle_path, entry.relative_path)
+        blob_path = resolve_bundle_blob_path(
+            bundle_path,
+            entry.relative_path,
+            resolved_blobs_dir=resolved_blobs_dir,
+        )
         observed_sha256 = sha256_of_file(blob_path)
         if observed_sha256 != entry.sha256:
             raise TorchLensIOError(
@@ -3331,7 +3372,11 @@ def _check_unknown_blob_entries(manifest: Manifest, blobs_path: Path) -> None:
         )
 
 
-def _validate_manifest_blob_paths(manifest: Manifest, bundle_path: Path) -> None:
+def _validate_manifest_blob_paths(
+    manifest: Manifest,
+    bundle_path: Path,
+    resolved_blobs_dir: Path | None = None,
+) -> None:
     """Ensure every manifest tensor entry points at a real non-symlink blob file.
 
     Parameters
@@ -3340,6 +3385,8 @@ def _validate_manifest_blob_paths(manifest: Manifest, bundle_path: Path) -> None
         Parsed bundle manifest.
     bundle_path:
         Bundle directory root.
+    resolved_blobs_dir:
+        Canonical blob containment root for this load operation.
 
     Raises
     ------
@@ -3347,9 +3394,15 @@ def _validate_manifest_blob_paths(manifest: Manifest, bundle_path: Path) -> None
         If any referenced blob is missing or symlinked.
     """
 
+    if resolved_blobs_dir is None:
+        resolved_blobs_dir = resolve_bundle_blobs_dir(bundle_path)
     missing_blob_ids: list[str] = []
     for entry in manifest.tensors:
-        blob_path = resolve_bundle_blob_path(bundle_path, entry.relative_path)
+        blob_path = resolve_bundle_blob_path(
+            bundle_path,
+            entry.relative_path,
+            resolved_blobs_dir=resolved_blobs_dir,
+        )
         if blob_path.is_symlink():
             raise TorchLensIOError(f"Refusing to load symlinked blob path {blob_path}.")
         if not blob_path.exists():
@@ -3365,6 +3418,7 @@ def _eager_verify_blob_payloads(
     manifest: Manifest,
     bundle_path: Path,
     map_location: str | torch.device,
+    resolved_blobs_dir: Path | None = None,
 ) -> None:
     """Eagerly checksum and decode every blob for ``lazy=False`` loads.
 
@@ -3376,10 +3430,18 @@ def _eager_verify_blob_payloads(
         Bundle directory root.
     map_location:
         Device passed through to ``safetensors`` decoding.
+    resolved_blobs_dir:
+        Canonical blob containment root for this load operation.
     """
 
+    if resolved_blobs_dir is None:
+        resolved_blobs_dir = resolve_bundle_blobs_dir(bundle_path)
     for entry in manifest.tensors:
-        blob_path = resolve_bundle_blob_path(bundle_path, entry.relative_path)
+        blob_path = resolve_bundle_blob_path(
+            bundle_path,
+            entry.relative_path,
+            resolved_blobs_dir=resolved_blobs_dir,
+        )
         observed_sha256 = sha256_of_file(blob_path)
         if observed_sha256 != entry.sha256:
             raise TorchLensIOError(f"Checksum mismatch for blob_id={entry.blob_id} at {blob_path}.")

@@ -108,8 +108,14 @@ class LazyActivationRef:
     codec_metadata: dict[str, Any] | None = None
     payload_hints: PayloadLoadHints | Mapping[str, Any] | None = None
 
-    def blob_path(self) -> Path:
+    def blob_path(self, *, resolved_blobs_dir: Path | None = None) -> Path:
         """Return the absolute path to the referenced blob file.
+
+        Parameters
+        ----------
+        resolved_blobs_dir:
+            Canonical blob containment root already resolved for the current
+            bundle operation.
 
         Returns
         -------
@@ -117,13 +123,18 @@ class LazyActivationRef:
             Absolute safetensors blob path.
         """
 
-        return resolve_bundle_blob_path(self.source_bundle_path, self.relative_path)
+        return resolve_bundle_blob_path(
+            self.source_bundle_path,
+            self.relative_path,
+            resolved_blobs_dir=resolved_blobs_dir,
+        )
 
     def materialize(
         self,
         *,
         map_location: Any = "cpu",
         payload_hints: PayloadLoadHints | Mapping[str, Any] | None = None,
+        resolved_blobs_dir: Path | None = None,
     ) -> Any:
         """Materialize the referenced payload from disk.
 
@@ -134,6 +145,9 @@ class LazyActivationRef:
         payload_hints:
             Optional backend payload hints. When omitted, hints captured during
             ``torchlens.load(..., lazy=True)`` are used.
+        resolved_blobs_dir:
+            Canonical blob containment root already resolved for the current
+            bundle operation.
 
         Returns
         -------
@@ -146,7 +160,7 @@ class LazyActivationRef:
             If the referenced blob is missing, corrupt, or checksum-drifted.
         """
 
-        blob_path = self.blob_path()
+        blob_path = self.blob_path(resolved_blobs_dir=resolved_blobs_dir)
 
         try:
             blob_size = blob_path.stat().st_size
