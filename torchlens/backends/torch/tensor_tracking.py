@@ -529,55 +529,40 @@ def _locate_parent_tensors_in_args(
         ``{"args": {pos: label, ...}, "kwargs": {key: label, ...}}``
     """
     tensor_all_arg_positions: dict[str, dict[Any, str]] = {"args": {}, "kwargs": {}}
-    arg_struct_dict = {"args": args, "kwargs": kwargs}
+    if not parent_log_entries:
+        return tensor_all_arg_positions
 
-    for parent_entry in parent_log_entries:
-        for arg_type in ["args", "kwargs"]:
-            arg_struct = arg_struct_dict[arg_type]
-            _find_arg_positions_for_single_parent(
-                parent_entry,
-                arg_type,
-                arg_struct,  # type: ignore[arg-type]
-                tensor_all_arg_positions,
-            )
+    positions_by_label: dict[str, dict[str, list[Any]]] = {
+        parent_entry._label_raw: {"args": [], "kwargs": []} for parent_entry in parent_log_entries
+    }
 
-    return tensor_all_arg_positions
+    for arg_type, arg_struct in (("args", args), ("kwargs", kwargs)):
+        for arg_key, arg in _iter_arg_container_items(arg_type, arg_struct):
+            arg_label = None if isinstance(arg, torch.nn.Parameter) else get_tensor_label(arg)
+            if arg_label in positions_by_label:
+                positions_by_label[arg_label][arg_type].append(arg_key)
 
-
-def _find_arg_positions_for_single_parent(
-    parent_entry: Op,
-    arg_type: str,
-    arg_struct: list[Any] | tuple[Any, ...] | dict[Any, Any],
-    tensor_all_arg_positions: dict[str, dict[Any, str]],
-) -> None:
-    """Locate a single parent tensor within args or kwargs (up to 2 nesting levels).
-
-    Scans the top-level args/kwargs and one level of sub-containers (lists,
-    tuples, dicts).  For top-level matches, the key is a scalar (int index or
-    kwarg name).  For nested matches, the key is a tuple ``(outer_key, inner_key)``.
-
-    Args:
-        parent_entry: The parent tensor's log entry.
-        arg_type: ``"args"`` or ``"kwargs"``.
-        arg_struct: The actual args tuple or kwargs dict.
-        tensor_all_arg_positions: Accumulator dict; mutated in place.
-    """
-    for arg_key, arg in _iter_arg_container_items(arg_type, arg_struct):
-        if (
-            not isinstance(arg, torch.nn.Parameter)
-            and get_tensor_label(arg) == parent_entry._label_raw
-        ):
-            tensor_all_arg_positions[arg_type][arg_key] = parent_entry._label_raw
-        elif _is_supported_parent_arg_container(arg):
+            if not _is_supported_parent_arg_container(arg):
+                continue
             # Second level of nesting (e.g., torch.cat([tensor_a, tensor_b])).
             for sub_arg_key, sub_arg in _iter_arg_container_items(arg, arg):
-                if (
-                    not isinstance(sub_arg, torch.nn.Parameter)
-                    and get_tensor_label(sub_arg) == parent_entry._label_raw
-                ):
-                    tensor_all_arg_positions[arg_type][(arg_key, sub_arg_key)] = (
-                        parent_entry._label_raw
-                    )
+                sub_arg_label = (
+                    None if isinstance(sub_arg, torch.nn.Parameter) else get_tensor_label(sub_arg)
+                )
+                # The former parent-first scan stopped at a top-level match for that
+                # parent, while still inspecting the container for every other parent.
+                if sub_arg_label in positions_by_label and sub_arg_label != arg_label:
+                    positions_by_label[sub_arg_label][arg_type].append((arg_key, sub_arg_key))
+
+    # Preserve the historical insertion order: positions were emitted parent by
+    # parent, even though finding them required rescanning every argument each time.
+    for parent_entry in parent_log_entries:
+        parent_label = parent_entry._label_raw
+        for arg_type in ("args", "kwargs"):
+            for position in positions_by_label[parent_label][arg_type]:
+                tensor_all_arg_positions[arg_type][position] = parent_label
+
+    return tensor_all_arg_positions
 
 
 def _is_supported_parent_arg_container(value: object) -> bool:
