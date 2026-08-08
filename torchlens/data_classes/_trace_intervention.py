@@ -1,6 +1,7 @@
 """Trace intervention mixin."""
 
 import copy
+import copyreg
 from collections import OrderedDict
 from functools import cached_property
 from pathlib import Path
@@ -139,6 +140,335 @@ def _deep_copy_fork_container(value: Any, memo: dict[Any, Any] | None = None) ->
 _PROPAGATE = object()
 
 
+def _derive_deepcopy_atomic_types() -> frozenset:
+    """Return the exact set of types ``copy.deepcopy`` treats as atomic.
+
+    Derived from the running interpreter's own dispatch table, so the typed
+    fast path below can never disagree with generic deepcopy about which types
+    are returned uncopied. If the private table is unavailable, the fallback
+    names only types that are atomic in every CPython release; a smaller set
+    only shrinks the fast path, never changes copy semantics.
+    """
+
+    try:
+        dispatch = copy._deepcopy_dispatch  # type: ignore[attr-defined]
+        atomic_copier = copy._deepcopy_atomic  # type: ignore[attr-defined]
+        derived = frozenset(cls for cls, fn in dispatch.items() if fn is atomic_copier)
+        if str not in derived:
+            derived = frozenset({type(None), int, float, bool, complex, bytes, str})
+    except Exception:
+        derived = frozenset({type(None), int, float, bool, complex, bytes, str})
+    try:
+        # ``torch.dtype`` instances are process-wide singletons that generic
+        # deepcopy reduces back to themselves without memoizing, i.e. they
+        # behave exactly like atomics. Verify that exhaustively against the
+        # RUNNING torch before granting the fast path, so a future torch that
+        # changes dtype pickling automatically loses it.
+        dtypes = [d for d in vars(torch).values() if isinstance(d, torch.dtype)]
+        if dtypes and all(copy.deepcopy(d) is d for d in dtypes):
+            derived |= {torch.dtype}
+    except Exception:
+        pass
+    return derived
+
+
+_DEEPCOPY_ATOMIC_TYPES = _derive_deepcopy_atomic_types()
+_NIL: Any = []
+_OBJECT_REDUCE_EX = object.__reduce_ex__
+_OBJECT_REDUCE = object.__reduce__
+_OBJECT_GETSTATE = getattr(object, "__getstate__", None)
+_PLAIN_COPY_CLASS_SAFE: dict[type, bool] = {}
+
+
+def _probe_plain_object_protocol() -> bool:
+    """Verify the interpreter's plain-object deepcopy contract once at import.
+
+    The plain-object fast path in ``_typed_deep_copy`` replicates what generic
+    deepcopy does for a hook-free instance: ``__reduce_ex__(4)`` returning
+    ``(copyreg.__newobj__, (cls,), instance __dict__ or None, None, None)``,
+    reconstructed as ``cls.__new__(cls)`` + memoize + deep-copied state dict.
+    If a future interpreter changes any of that, this probe fails and the fast
+    path disables itself rather than diverging.
+    """
+
+    class _Probe:
+        pass
+
+    try:
+        inst = _Probe()
+        inst.attr = [1]  # type: ignore[attr-defined]
+        rv = inst.__reduce_ex__(4)
+        if not (
+            isinstance(rv, tuple)
+            and len(rv) == 5
+            and rv[0] is copyreg.__newobj__  # type: ignore[attr-defined]
+            and rv[1] == (_Probe,)
+            and rv[2] is inst.__dict__
+            and rv[3] is None
+            and rv[4] is None
+        ):
+            return False
+        if _Probe().__reduce_ex__(4)[2] is not None:
+            return False
+        # Generic deepcopy must memoize the source instance AND its state dict
+        # (the aliasing surface the fast path must reproduce).
+        probe_memo: dict[Any, Any] = {}
+        copy.deepcopy(inst, probe_memo)
+        if id(inst) not in probe_memo or id(inst.__dict__) not in probe_memo:
+            return False
+    except Exception:
+        return False
+    return True
+
+
+_PLAIN_COPY_ENABLED = _probe_plain_object_protocol()
+
+
+def _plain_object_class_safe(cls: type) -> bool:
+    """Structural scan gating the plain-object fast path for ``cls``.
+
+    Anything that changes the shape of the default reduce protocol -- slots
+    anywhere in the MRO, ``__getnewargs__``/``__getnewargs_ex__``, a custom
+    ``__getstate__``/``__setstate__`` -- routes to generic deepcopy. The cheap
+    per-call hooks (``__deepcopy__``, ``__reduce_ex__``, ``__reduce__``,
+    ``copyreg.dispatch_table``) are re-checked on every copy, mirroring the
+    lookups generic deepcopy itself performs.
+    """
+
+    try:
+        if issubclass(
+            cls,
+            (list, tuple, dict, set, frozenset, str, bytes, bytearray, int, float, complex),
+        ):
+            # Builtin-base subclasses keep instance state outside __dict__
+            # (list/dict subclasses additionally reduce with a list/dict
+            # iterator); all of them stay on the generic path.
+            return False
+        if copyreg._slotnames(cls):  # type: ignore[attr-defined]
+            return False
+        for attr in ("__getnewargs_ex__", "__getnewargs__", "__setstate__"):
+            if getattr(cls, attr, None) is not None:
+                return False
+        getstate = getattr(cls, "__getstate__", None)
+        if getstate is not None and getstate is not _OBJECT_GETSTATE:
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def _memo_keep_alive(value: Any, memo: dict[Any, Any]) -> None:
+    """Mirror ``copy._keep_alive``: pin ``value`` for the memo's lifetime.
+
+    Without the pin, a memoized source object could be garbage collected while
+    the memo is still in use and a new object recycling its ``id`` would
+    wrongly hit its entry. The keep-alive list occupies a normal insertion
+    position, so ``_ForkMemo.rollback`` handles it like any other key.
+    """
+
+    try:
+        memo[id(memo)].append(value)
+    except KeyError:
+        memo[id(memo)] = [value]
+
+
+def _typed_deep_copy(value: Any, memo: dict[Any, Any]) -> Any:
+    """Deep-copy ``value`` with direct handling of the fork's common types.
+
+    Most values the fork copies are atomics (or containers of atomics), and
+    generic ``copy.deepcopy`` charges each one its full dispatch -- ``id()``,
+    memo probe, type lookup -- just to return it unchanged. This copier answers
+    atomics with one frozenset membership test and recurses through exact
+    ``list``/``tuple``/``dict``/``set`` instances itself, replicating the memo
+    and keep-alive protocol of CPython's ``_deepcopy_list``/``_deepcopy_tuple``
+    /``_deepcopy_dict`` and the set reduce path byte-for-byte (including
+    returning an all-atomic tuple by identity, exactly as ``_deepcopy_tuple``
+    does). Instances of verified hook-free classes take the probed
+    plain-object path below. Everything else -- container subclasses, objects
+    with ``__deepcopy__``/``__reduce__``/state hooks/slots, tensors -- falls
+    back to ``copy.deepcopy`` with the same shared memo, so aliasing across
+    the typed/generic boundary is preserved.
+    """
+
+    cls = type(value)
+    if cls in _DEEPCOPY_ATOMIC_TYPES:
+        # deepcopy never memoizes atomics, so skipping its memo probe is safe.
+        return value
+    if cls is list:
+        y = memo.get(id(value), _NIL)
+        if y is not _NIL:
+            return y
+        copied_list: list[Any] = []
+        memo[id(value)] = copied_list
+        append = copied_list.append
+        for item in value:
+            append(_typed_deep_copy(item, memo))
+        _memo_keep_alive(value, memo)
+        return copied_list
+    if cls is dict:
+        y = memo.get(id(value), _NIL)
+        if y is not _NIL:
+            return y
+        copied_dict: dict[Any, Any] = {}
+        memo[id(value)] = copied_dict
+        for key, item in value.items():
+            copied_dict[_typed_deep_copy(key, memo)] = _typed_deep_copy(item, memo)
+        _memo_keep_alive(value, memo)
+        return copied_dict
+    if cls is tuple:
+        y = memo.get(id(value), _NIL)
+        if y is not _NIL:
+            return y
+        copied_items = [_typed_deep_copy(item, memo) for item in value]
+        # Copying the items may have reached this tuple again through a cycle.
+        try:
+            return memo[id(value)]
+        except KeyError:
+            pass
+        for item, item_copy in zip(value, copied_items):
+            if item is not item_copy:
+                copied_tuple = tuple(copied_items)
+                memo[id(value)] = copied_tuple
+                _memo_keep_alive(value, memo)
+                return copied_tuple
+        # All items copied by identity: deepcopy returns the tuple itself,
+        # unmemoized.
+        return value
+    if cls is set:
+        y = memo.get(id(value), _NIL)
+        if y is not _NIL:
+            return y
+        # Mirror the reduce path deepcopy takes for exact ``set``: elements are
+        # copied BEFORE the new set exists or is memoized (a set cannot contain
+        # itself, so pre-memoization is unreachable there), then the copy is
+        # memoized and the source pinned. Only the reduce machinery's private
+        # temp-list memo entry is skipped; nothing else can reference it.
+        copied_set = {_typed_deep_copy(item, memo) for item in value}
+        memo[id(value)] = copied_set
+        _memo_keep_alive(value, memo)
+        return copied_set
+    y = memo.get(id(value), _NIL)
+    if y is not _NIL:
+        # Every non-atomic copy is memoized, so pre-seeded fork shells and
+        # already-copied shared objects resolve here without paying a
+        # ``copy.deepcopy`` frame.
+        return y
+    plain_dict: Any = _NIL
+    if _PLAIN_COPY_ENABLED and not isinstance(value, type):
+        try:
+            instance_dict = value.__dict__
+            if (
+                type(instance_dict) is dict
+                and "__deepcopy__" not in instance_dict
+                and "__reduce_ex__" not in instance_dict
+                and "__reduce__" not in instance_dict
+                and getattr(cls, "__deepcopy__", None) is None
+                and cls.__reduce_ex__ is _OBJECT_REDUCE_EX
+                and cls.__reduce__ is _OBJECT_REDUCE
+                and copyreg.dispatch_table.get(cls) is None
+                and copy._deepcopy_dispatch.get(cls) is None  # type: ignore[attr-defined]
+            ):
+                safe = _PLAIN_COPY_CLASS_SAFE.get(cls)
+                if safe is None:
+                    safe = _plain_object_class_safe(cls)
+                    _PLAIN_COPY_CLASS_SAFE[cls] = safe
+                if safe:
+                    plain_dict = instance_dict
+        except Exception:
+            plain_dict = _NIL
+    if plain_dict is not _NIL:
+        # Verified hook-free instance: replicate _reconstruct for the default
+        # reduce -- construct, memoize, deep-copy the state dict, pin the
+        # source. Exceptions from __new__ or the state copy propagate exactly
+        # as they would from generic deepcopy.
+        copied_obj = cls.__new__(cls)  # type: ignore[call-overload]
+        memo[id(value)] = copied_obj
+        if plain_dict:
+            copied_obj.__dict__.update(_typed_deep_copy(plain_dict, memo))
+        _memo_keep_alive(value, memo)
+        return copied_obj
+    # Verbatim port of ``copy.deepcopy``'s protocol branch (same lookups, same
+    # order, same errors), except recursion routes back through this copier so
+    # children of hooked/slotted objects keep the typed fast paths. A custom
+    # ``__deepcopy__`` (e.g. torch.Tensor's) receives the same shared memo.
+    copier = copy._deepcopy_dispatch.get(cls)  # type: ignore[attr-defined]
+    if copier is not None:
+        y = copier(value, memo)
+    elif issubclass(cls, type):
+        y = value
+    else:
+        deepcopy_hook = getattr(value, "__deepcopy__", None)
+        if deepcopy_hook is not None:
+            y = deepcopy_hook(memo)
+        else:
+            reductor = copyreg.dispatch_table.get(cls)
+            if reductor:
+                rv = reductor(value)
+            else:
+                reductor = getattr(value, "__reduce_ex__", None)
+                if reductor is not None:
+                    rv = reductor(4)
+                else:
+                    reductor = getattr(value, "__reduce__", None)
+                    if reductor:
+                        rv = reductor()
+                    else:
+                        raise copy.Error("un(deep)copyable object of type %s" % cls)
+            if isinstance(rv, str):
+                y = value
+            else:
+                y = _typed_reconstruct(value, memo, *rv)
+    if y is not value:
+        memo[id(value)] = y
+        _memo_keep_alive(value, memo)
+    return y
+
+
+def _typed_reconstruct(
+    x: Any,
+    memo: dict[Any, Any],
+    func: Any,
+    args: Any,
+    state: Any = None,
+    listiter: Any = None,
+    dictiter: Any = None,
+) -> Any:
+    """``copy._reconstruct`` specialized to deep copies through the typed copier.
+
+    Line-for-line port of the stdlib reconstructor with ``deep = True`` (the
+    fork memo always exists) and every recursive ``deepcopy`` call replaced by
+    ``_typed_deep_copy``, which is equivalence-proven against it.
+    """
+
+    if args:
+        args = (_typed_deep_copy(arg, memo) for arg in args)
+    y = func(*args)
+    memo[id(x)] = y
+
+    if state is not None:
+        state = _typed_deep_copy(state, memo)
+        if hasattr(y, "__setstate__"):
+            y.__setstate__(state)
+        else:
+            if isinstance(state, tuple) and len(state) == 2:
+                state, slotstate = state
+            else:
+                slotstate = None
+            if state is not None:
+                y.__dict__.update(state)
+            if slotstate is not None:
+                for key, item in slotstate.items():
+                    setattr(y, key, item)
+
+    if listiter is not None:
+        for item in listiter:
+            y.append(_typed_deep_copy(item, memo))
+    if dictiter is not None:
+        for key, item in dictiter:
+            y[_typed_deep_copy(key, memo)] = _typed_deep_copy(item, memo)
+    return y
+
+
 def _memoized_deep_copy(
     value: Any,
     memo: dict[Any, Any] | None,
@@ -171,7 +501,7 @@ def _memoized_deep_copy(
         memo = _ForkMemo()
     mark = memo.mark() if isinstance(memo, _ForkMemo) else None
     try:
-        return copy.deepcopy(value, memo)
+        return _typed_deep_copy(value, memo)
     except Exception:
         # A raised deepcopy can leave half-populated objects behind in the memo
         # (``copy._reconstruct`` memoizes before it restores state), so those
