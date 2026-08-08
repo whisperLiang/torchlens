@@ -506,10 +506,55 @@ def _safe_get_memory_format(t: torch.Tensor) -> torch.memory_format:
 # Eager cloning was immune to that case; deferral is therefore gated to plain
 # captures where none of the honesty machinery (runnable witnesses, backward
 # capture, transforms) is armed.
+#
+# GRAPH-CONNECTED PAYLOADS (the default ``tl.trace(model, x)`` regime)
+# --------------------------------------------------------------------
+# ``detach_saved_activations`` defaults to False, so in a plain grad-enabled
+# capture the eager clone is ``x.clone()``: graph-connected, ``requires_grad``
+# True, ``grad_fn`` ``CloneBackward0``. A ``detach()``-flavored alias cannot
+# stand in for that, which is why deferral was originally gated to the
+# detached/no-grad cases. Standing an ALIAS in for such a clone needs three
+# things to hold, each of which is a measured hazard rather than a worry:
+#
+#   H1 The alias must not be an autograd VIEW of the source. ``aten.alias``
+#      keeps ``requires_grad`` but registers a differentiable view, so a later
+#      in-place write to the SOURCE rebases the payload's ``grad_fn``
+#      (``AliasBackward0`` -> ``AsStridedBackward0``) and silently re-routes
+#      the gradient through ops that ran AFTER the capture point. In-place
+#      ``ReLU`` makes that the common path, not an exotic one. The mint here
+#      therefore grafts the graph edge onto a plain ``detach()`` alias through
+#      :class:`_DeferredPayloadCloneFn` (identity backward), whose output is
+#      NOT a view; the alias is passed in a holder so autograd cannot see it
+#      as an input and wrap it into one.
+#   H2 Materialization must not go through ``Tensor.set_``. ``set_`` has no
+#      derivative, so rebinding a graph-connected alias poisons the graph:
+#      backward then dies with "derivative for set_ is not implemented".
+#      :func:`_rebind_alias_to_fresh_clone` uses ``.data =`` for
+#      graph-connected aliases, which swaps storage without touching autograd
+#      metadata (``grad_fn`` and the version counter both survive).
+#   H3 RESIDUAL, and the reason grad-connected deferral stays opt-in:
+#      autograd's saved-tensor machinery is a SECOND holder of the alias that
+#      interception cannot reach. If the user builds a differentiable graph on
+#      a saved payload while it is still pending, the ``SavedVariable`` inside
+#      that graph aliases the source storage; a later intercepted in-place
+#      write rebinds the payload's Python object but NOT the saved copy, and
+#      backward then fails on autograd's version guard where an eager clone
+#      would have succeeded. It fails LOUD (never a silent wrong gradient,
+#      because the alias deliberately keeps sharing the source's version
+#      counter) and the documented way to build losses from saved outs,
+#      ``backward_ready=True``, already keeps eager clones. Closing it needs a
+#      read barrier on the wrapper's pre-call path (materialize a pending
+#      graph-connected alias when it appears as an argument to ANY wrapped
+#      call, not only a mutating one), which is out of this module's scope.
 
 # Kill switch: TORCHLENS_EAGER_PAYLOAD_CLONE=1 restores unconditional eager
 # clones (also used by the perf harness for A/B runs).
 _DEFER_ENABLED: bool = os.environ.get("TORCHLENS_EAGER_PAYLOAD_CLONE", "0") != "1"
+
+# Opt-in: TORCHLENS_DEFER_GRAD_PAYLOADS=1 extends deferral to graph-connected
+# payloads (the default grad-enabled capture regime). OFF by default because of
+# residual H3 above; H1/H2 are closed unconditionally by the mint and rebind.
+_DEFER_GRAD_ENABLED: bool = os.environ.get("TORCHLENS_DEFER_GRAD_PAYLOADS", "0") == "1"
 
 # storage key -> list of pending aliases. NEVER rebound (only mutated), so the
 # wrapper can bind the dict object once and use plain truthiness on its hot
@@ -570,13 +615,61 @@ def _deferred_storage_key(x: torch.Tensor) -> Optional[tuple[int, int, str]]:
     return (ptr, nbytes, str(x.device))
 
 
-def _try_defer_payload_alias(x: torch.Tensor) -> Optional[torch.Tensor]:
+class _DeferredPayloadCloneFn(torch.autograd.Function):
+    """Identity autograd node standing in for ``CloneBackward0`` on an alias.
+
+    ``clone`` and ``alias`` both have identity gradients, so grafting this node
+    onto a ``detach()`` alias reproduces the eager clone's gradient exactly.
+    The alias arrives inside ``holder`` rather than as a tensor argument on
+    purpose: autograd wraps any output that IS one of its inputs into a
+    differentiable view (``var.view_as(var)``), which is precisely the view
+    relationship hazard H1 above. Passing it in a list keeps the output a
+    plain non-view tensor whose ``grad_fn`` is this node.
+    """
+
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx: Any, source: torch.Tensor, holder: list[torch.Tensor]
+    ) -> torch.Tensor:
+        return holder[0]
+
+    @staticmethod
+    def backward(  # type: ignore[override]
+        ctx: Any, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor, None]:
+        return grad_output, None
+
+
+def _mint_graph_connected_alias(x: torch.Tensor) -> torch.Tensor:
+    """Return a non-view alias of ``x`` carrying an identity gradient edge.
+
+    The result matches what ``x.clone()`` would have produced on every field
+    the capture records — dtype, shape, strides, ``requires_grad`` — plus a
+    live gradient path back to ``x``. It deliberately keeps sharing ``x``'s
+    autograd version counter so the belt (and autograd's own guard) still see
+    unintercepted writes; see H1-H3 in the module notes above.
+    """
+    return cast(torch.Tensor, _DeferredPayloadCloneFn.apply(x, [x.detach()]))
+
+
+def _try_defer_payload_alias(
+    x: torch.Tensor, *, graph_connected: bool = False
+) -> Optional[torch.Tensor]:
     """Return a registered clone-on-write alias for ``x``, or ``None``.
 
     Only called from ``_clone_tensor_payload`` (already under
-    ``pause_logging``) for the plain ``save_mode="copy"`` + ``detach_tensor``
-    path while the wrapper's payload window is armed. Ineligible tensors fall
-    back to the historical eager clone.
+    ``pause_logging``) for the plain ``save_mode="copy"`` path while the
+    wrapper's payload window is armed. Ineligible tensors fall back to the
+    historical eager clone.
+
+    Parameters
+    ----------
+    x
+        Source payload tensor.
+    graph_connected
+        Whether the eager clone this alias replaces would have stayed attached
+        to the autograd graph. ``False`` mints the historical ``detach()``
+        alias; ``True`` mints the identity-grafted alias described above.
     """
     if isinstance(x, torch.nn.Parameter):
         return None
@@ -606,7 +699,7 @@ def _try_defer_payload_alias(x: torch.Tensor) -> Optional[torch.Tensor]:
         # pin the WHOLE backing storage, where the eager clone compacts.
         return None
     try:
-        alias = x.detach()
+        alias = _mint_graph_connected_alias(x) if graph_connected else x.detach()
         version = int(alias._version)
     except Exception:
         return None
@@ -640,8 +733,26 @@ def _rebind_alias_to_fresh_clone(alias: torch.Tensor) -> None:
     which detached aliases of one source SHARE — so within a pending group
     every :func:`_belt_check_pending_alias` must run BEFORE the first rebind,
     or a sibling's legitimate materialization reads as a belt violation.
+
+    Graph-connected aliases (hazard H2 in the module notes) cannot use ``set_``
+    at all: it has no derivative, so rebinding through it replaces the
+    payload's ``grad_fn`` with a node that raises "derivative for set_ is not
+    implemented" the moment anyone backwards through the saved activation.
+    Those rebind through ``.data =``, which swaps storage without entering
+    autograd — ``grad_fn``, ``requires_grad`` and the version counter all
+    survive untouched, so the payload keeps the eager clone's gradient path.
     """
     fmt = _safe_get_memory_format(alias)
+    if alias.requires_grad or alias.grad_fn is not None:
+        with torch.no_grad():
+            # The throwaway clone contributes nothing but storage; taking it
+            # under no_grad keeps a dead CloneBackward node out of the graph.
+            try:
+                fresh = alias.clone(memory_format=fmt)
+            except (TypeError, RuntimeError):
+                fresh = alias.clone()
+        alias.data = fresh
+        return
     try:
         fresh = alias.clone(memory_format=fmt)
     except (TypeError, RuntimeError):
@@ -864,18 +975,19 @@ def _clone_tensor_payload(
         if save_mode not in {"copy", "reference", "view", "cpu_async"}:
             raise ValueError("save_mode must be one of 'copy', 'reference', 'view', or 'cpu_async'")
         vals_tensor = None
-        # Deferral is legal only when the eager clone would carry NO autograd
-        # state either — an alias is ``detach()``-flavored (requires_grad
-        # False, no grad_fn), so it may only stand in for a clone taken with
-        # ``detach_tensor=True``, from a ``requires_grad=False`` source, or
-        # under disabled grad mode (where ``clone`` outputs are detached too,
-        # e.g. the common ``torch.no_grad()`` activation-extraction pattern).
-        if (
-            _DEFER_WINDOW_DEPTH
-            and save_mode == "copy"
-            and (detach_tensor or not x.requires_grad or not torch.is_grad_enabled())
-        ):
-            vals_tensor = _try_defer_payload_alias(x)
+        if _DEFER_WINDOW_DEPTH and save_mode == "copy":
+            # A plain ``detach()`` alias carries NO autograd state, so it may
+            # only stand in for a clone taken with ``detach_tensor=True``, from
+            # a ``requires_grad=False`` source, or under disabled grad mode
+            # (where ``clone`` outputs are detached too, e.g. the common
+            # ``torch.no_grad()`` activation-extraction pattern).
+            if detach_tensor or not x.requires_grad or not torch.is_grad_enabled():
+                vals_tensor = _try_defer_payload_alias(x)
+            elif _DEFER_GRAD_ENABLED:
+                # Default grad-enabled regime: the eager clone stays attached,
+                # so the alias needs a grafted identity gradient edge. Opt-in
+                # while residual H3 is open; see the module notes.
+                vals_tensor = _try_defer_payload_alias(x, graph_connected=True)
         if vals_tensor is None:
             vals_tensor = _copy_tensor_payload(
                 x,

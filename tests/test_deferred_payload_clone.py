@@ -28,16 +28,23 @@ from torchlens.utils import tensor_utils as _tu
 
 
 @contextlib.contextmanager
-def _payload_clone_mode(defer: bool):
-    """Force deferred or eager payload clones for the duration of the block."""
+def _payload_clone_mode(defer: bool, grad_defer: bool = False):
+    """Force deferred or eager payload clones for the duration of the block.
+
+    ``grad_defer`` additionally opts into deferral of GRAPH-CONNECTED payloads
+    (the default grad-enabled capture regime), which ships off by default.
+    """
     prev_tu, prev_w = _tu._DEFER_ENABLED, _wrappers._COW_ENABLED
+    prev_grad = _tu._DEFER_GRAD_ENABLED
     _tu._DEFER_ENABLED = defer
     _wrappers._COW_ENABLED = defer
+    _tu._DEFER_GRAD_ENABLED = defer and grad_defer
     try:
         yield
     finally:
         _tu._DEFER_ENABLED = prev_tu
         _wrappers._COW_ENABLED = prev_w
+        _tu._DEFER_GRAD_ENABLED = prev_grad
 
 
 class _InplaceZoo(nn.Module):
@@ -68,8 +75,8 @@ class _InplaceZoo(nn.Module):
         return q2.contiguous().sum(dim=-1)
 
 
-def _zoo_trace(defer: bool, seed: int = 7, grad: bool = False):
-    with _payload_clone_mode(defer):
+def _zoo_trace(defer: bool, seed: int = 7, grad: bool = False, grad_defer: bool = False):
+    with _payload_clone_mode(defer, grad_defer=grad_defer):
         torch.manual_seed(seed)
         model = _InplaceZoo().train()
         torch.manual_seed(seed)
@@ -180,6 +187,159 @@ def test_version_belt_refuses_unintercepted_mutation():
     with pytest.raises(RuntimeError, match="deferred-clone tripwire"):
         _tu._belt_check_pending_alias(entry, alias)
     _tu._DEFER_PENDING.pop(key, None)
+
+
+# ---------------------------------------------------------------------------
+# Graph-connected payload deferral (the default grad-enabled capture regime).
+#
+# A plain ``detach()`` alias cannot stand in for ``x.clone()`` when the clone
+# stays attached to the graph, so these payloads mint an identity-grafted
+# alias instead. The tests below pin the two hazards that mint closes, the
+# byte/gradient equivalence it must preserve, and the residual that keeps it
+# opt-in.
+# ---------------------------------------------------------------------------
+
+
+def _grad_zoo_payloads(defer: bool, grad_defer: bool):
+    """Trace the zoo grad-enabled and return (log, saved tensor payloads)."""
+    _, log = _zoo_trace(defer=defer, grad=True, grad_defer=grad_defer)
+    return log, _tensor_payload_labels(log)
+
+
+@pytest.mark.smoke
+def test_grad_connected_deferral_is_off_by_default():
+    # Residual H3 (autograd's saved-tensor machinery is a second holder that
+    # interception cannot rebind) keeps this opt-in; pin the shipped default so
+    # it cannot be flipped on by accident.
+    assert _tu._DEFER_GRAD_ENABLED is False
+
+
+@pytest.mark.smoke
+def test_grad_connected_deferral_actually_defers():
+    # Guard against the whole feature silently degrading to eager clones: at
+    # least one graph-connected payload must genuinely share its source
+    # storage, and it must look exactly like a clone otherwise.
+    log, labels = _grad_zoo_payloads(defer=True, grad_defer=True)
+    grafted = [
+        k
+        for k in labels
+        if log[k].out.grad_fn is not None
+        and type(log[k].out.grad_fn).__name__.startswith("_DeferredPayloadCloneFn")
+    ]
+    assert grafted, "no graph-connected payload was deferred"
+    for k in grafted:
+        out = log[k].out
+        assert out.requires_grad is True, k
+        # H1: an autograd VIEW would let a later in-place write to the source
+        # rebase this grad_fn and re-route the gradient past the capture point.
+        assert out._is_view() is False, k
+
+
+@pytest.mark.smoke
+def test_grad_connected_payloads_byte_identical_to_eager_clones():
+    _, log_eager = _zoo_trace(defer=False, grad=True)
+    _, log_defer = _zoo_trace(defer=True, grad=True, grad_defer=True)
+    _assert_payloads_identical(log_eager, log_defer)
+
+
+@pytest.mark.smoke
+def test_grad_connected_payload_gradients_match_eager_clones():
+    """Backward through every saved payload must match the eager clone exactly.
+
+    This is the real fidelity bar for graph-connected deferral: the grafted
+    identity node has to reproduce ``CloneBackward0``'s gradient, and
+    materialization (the zoo mutates several payload storages in place) must
+    not poison the graph on the way.
+    """
+
+    def grads(defer: bool, grad_defer: bool):
+        model, log = _zoo_trace(defer=defer, grad=True, grad_defer=grad_defer)
+        out = {}
+        for k in _tensor_payload_labels(log):
+            payload = log[k].out
+            if not (payload.requires_grad and payload.is_floating_point()):
+                continue
+            got = torch.autograd.grad(
+                payload.sum(),
+                [p for p in model.parameters() if p.requires_grad],
+                retain_graph=True,
+                allow_unused=True,
+            )
+            out[k] = [None if g is None else g.clone() for g in got]
+        return out
+
+    eager = grads(defer=False, grad_defer=False)
+    deferred = grads(defer=True, grad_defer=True)
+    assert set(eager) == set(deferred)
+    assert eager, "no graph-connected payload was reachable by backward"
+    for k in eager:
+        for ge, gd in zip(eager[k], deferred[k]):
+            assert (ge is None) == (gd is None), k
+            if ge is not None:
+                assert torch.equal(ge, gd), k
+
+
+@pytest.mark.smoke
+def test_grad_connected_alias_materialization_preserves_backward():
+    """H2 regression: ``set_`` has no derivative and would poison the graph.
+
+    Rebinding a graph-connected alias with ``Tensor.set_`` leaves a payload
+    whose backward dies with "derivative for set_ is not implemented" — a
+    corrupted saved activation that only shows up when someone differentiates.
+    """
+    x = torch.randn(4, 4, requires_grad=True)
+    src = x * 2
+    alias = _tu._mint_graph_connected_alias(src)
+    before = alias.detach().clone()
+    _tu._rebind_alias_to_fresh_clone(alias)
+    assert alias.data_ptr() != src.data_ptr()  # exclusive storage now
+    assert torch.equal(alias.detach(), before)  # capture-time bytes preserved
+    assert alias.requires_grad is True
+    # The gradient path survived the rebind and still matches a plain clone.
+    (grad,) = torch.autograd.grad(alias.sum(), [x])
+    (expected,) = torch.autograd.grad((x * 2).clone().sum(), [x])
+    assert torch.equal(grad, expected)
+
+
+@pytest.mark.smoke
+def test_grad_connected_alias_survives_source_mutation_without_rebasing():
+    """H1 regression: an autograd view would re-route the gradient.
+
+    ``aten.alias`` preserves ``requires_grad`` but registers a differentiable
+    view, so an in-place write to the SOURCE rebases the payload's ``grad_fn``
+    and the gradient starts flowing through ops that ran after the capture
+    point (in-place ``ReLU`` makes this the common path). The grafted mint is
+    not a view, so it stays pinned to the capture point.
+    """
+    x = torch.randn(4, 4, requires_grad=True)
+    src = x * 2
+    alias = _tu._mint_graph_connected_alias(src)
+    _tu._rebind_alias_to_fresh_clone(alias)  # interception, before the write
+    snapshot = alias.detach().clone()
+    torch.ops.aten.relu_(src)  # source mutated in place afterwards
+    assert torch.equal(alias.detach(), snapshot)
+    assert type(alias.grad_fn).__name__.startswith("_DeferredPayloadCloneFn")
+    (grad,) = torch.autograd.grad(alias.sum(), [x])
+    assert torch.equal(grad, torch.full_like(x, 2.0))  # identity through mul, not relu
+
+
+@pytest.mark.smoke
+def test_grad_connected_alias_keeps_sharing_the_source_version_counter():
+    """Residual H3 stays LOUD rather than silently wrong.
+
+    The grafted alias deliberately keeps sharing the source's autograd version
+    counter. An unintercepted write therefore still trips the belt, and an
+    autograd graph built on a still-pending payload fails on autograd's own
+    version guard instead of quietly differentiating stale bytes. Giving the
+    alias a private counter would turn that loud failure into a silent wrong
+    gradient, so this sharing is load-bearing, not an oversight.
+    """
+    x = torch.randn(4, 4, requires_grad=True)
+    src = x * 2
+    alias = _tu._mint_graph_connected_alias(src)
+    version = int(alias._version)
+    torch.ops.aten.relu_(src)
+    assert int(alias._version) != version
 
 
 @pytest.mark.smoke
