@@ -596,6 +596,9 @@ def draw(
     antiparallel_projected_edges = projected_antiparallel_endpoint_pairs(forward_render_ir)
 
     decisions_by_name = {node.name: node for node in forward_render_ir.nodes}
+    # One rolled draw reads the Layer rolled-edge map properties O(edges)
+    # times; share one per-draw memo so each layer computes them once.
+    rolled_maps = _RolledEdgeMaps() if vis_mode == "rolled" else None
     for unit in node_universe.units:
         node_record = decisions_by_name[unit.unit_id]
         for source_index, node in enumerate(unit.source_nodes):
@@ -633,6 +636,7 @@ def draw(
                 node_record
                 if source_index == 0
                 else replace(node_record, node_calls=(), owned_node_args=()),
+                rolled_maps,
             )
 
     for node_args in pending_container_collapse_nodes:
