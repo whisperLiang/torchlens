@@ -291,8 +291,13 @@ def build_render_ir(
         universe = build_node_universe(
             build_source_graph(trace, resolved_context), collapse_fn, repeat_folds
         )
+    from .rendering import _atomic_module_sibling_counts
+
+    sibling_counts = _atomic_module_sibling_counts(trace)
     nodes = tuple(
-        _node_from_unit(trace, unit, resolved_context, universe, repeat_folds, segments)
+        _node_from_unit(
+            trace, unit, resolved_context, universe, repeat_folds, segments, sibling_counts
+        )
         for unit in universe.units
     )
     edges = _build_forward_edges_from_universe(universe)
@@ -631,6 +636,7 @@ def _node_from_unit(
     universe: Any,
     repeat_folds: "Mapping[str, ModuleRepeatFold] | None",
     segments: "Mapping[str, Any] | None",
+    sibling_counts: "Mapping[str, int] | None" = None,
 ) -> RenderIRNode:
     """Decorate one structural node-universe unit as a render-IR node."""
 
@@ -663,7 +669,7 @@ def _node_from_unit(
     region_path: tuple[str, ...] = ()
     if emission.node is not None:
         node_calls, owned_node_args, node_color, node_spec, label_spans = _resolve_node_decision(
-            trace, emission, context, universe, repeat_folds, segments
+            trace, emission, context, universe, repeat_folds, segments, sibling_counts
         )
         modules = list(emission.node.modules)
         if emission.kind == "module_box":
@@ -695,6 +701,7 @@ def _resolve_node_decision(
     universe: Any,
     repeat_folds: "Mapping[str, ModuleRepeatFold] | None",
     segments: "Mapping[str, Any] | None",
+    sibling_counts: "Mapping[str, int] | None" = None,
 ) -> tuple[
     tuple[Any, ...], tuple[tuple[str, dict[str, Any]], ...], str, Any | None, tuple[str, ...]
 ]:
@@ -710,6 +717,8 @@ def _resolve_node_decision(
         Fully resolved render request.
     universe:
         Presentation-free universe that selected the node.
+    sibling_counts:
+        Optional per-draw atomic-module sibling counts shared across nodes.
 
     Returns
     -------
@@ -782,6 +791,7 @@ def _resolve_node_decision(
             collapsed_containers,
             context.show_input_transform_summary,
             resolved_specs,
+            sibling_counts,
         )
     owned = tuple(
         (owner, dict(args))
