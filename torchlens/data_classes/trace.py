@@ -215,6 +215,7 @@ _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "graph_shape_hash": None,
     "module_filter": None,
     "emit_nvtx": False,
+    "measure_python_peak_memory": False,
     "raise_on_nan": False,
     "keep_orphans": False,
     "annotations": {},
@@ -1203,6 +1204,12 @@ class Trace(
         "chunked_forward": FieldPolicy.KEEP,
         "module_filter": FieldPolicy.DROP,
         "emit_nvtx": FieldPolicy.KEEP,
+        # Session-time measurement knob (like ``backward_ready``): it selects how
+        # ``forward_peak_memory`` was measured during this capture and has no
+        # meaning for a loaded artifact, which never re-measures. Portable load
+        # restores the default ``False``, so it stays out of
+        # ``MODEL_LOG_FIELD_ORDER`` and out of the portable schema.
+        "measure_python_peak_memory": FieldPolicy.DROP,
         "raise_on_nan": FieldPolicy.KEEP,
         "annotations": FieldPolicy.KEEP,
         "observer_spans": FieldPolicy.KEEP,
@@ -1461,6 +1468,7 @@ class Trace(
         chunked_forward: bool = False,
         module_filter: Callable[[Any], bool] | None = None,
         emit_nvtx: bool = False,
+        measure_python_peak_memory: bool = False,
         facet_registry_snapshot: Any | None = None,
         transform: Callable[[Any], Any] | None = None,
         raw_input: Any | None = None,
@@ -1506,6 +1514,11 @@ class Trace(
             emit_nvtx: Whether decorated torch operations should emit NVTX ranges
                 around captured torch calls. This is a profiling aid for CUDA/Nsight
                 workflows and does not change graph construction or saved payloads.
+            measure_python_peak_memory: Session-time flag selecting whether the
+                CPU/MPS ``forward_peak_memory`` measurement also runs a
+                ``tracemalloc`` Python-allocation probe. Off by default because the
+                allocator hook taxes every traced operation. Portable bundle load
+                restores the default ``False`` value.
             facet_registry_snapshot: Immutable facet recipe snapshot captured for
                 this trace.
             transform: Optional callable used to convert raw user input into
@@ -1604,6 +1617,7 @@ class Trace(
         self.chunked_forward = chunked_forward
         self.module_filter = module_filter
         self.emit_nvtx = emit_nvtx
+        self.measure_python_peak_memory = measure_python_peak_memory
         self.facet_registry_snapshot = facet_registry_snapshot
         self.raise_on_nan: bool = False
         self.annotations: Dict[str, Any] = {}
@@ -2707,6 +2721,8 @@ class Trace(
             }
         if state["backward_ready"] is None:
             state["backward_ready"] = False
+        if state.get("measure_python_peak_memory") is None:
+            state["measure_python_peak_memory"] = False
         if state["inference_only"] is None:
             state["inference_only"] = False
         if state["chunked_forward"] is None:

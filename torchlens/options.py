@@ -74,6 +74,7 @@ _CAPTURE_FIELDS: Final[tuple[str, ...]] = (
     "payload_policy",
     "save_preview",
     "emit_nvtx",
+    "measure_python_peak_memory",
     "raise_on_nan",
     "_module_containment_engine",
 )
@@ -778,6 +779,17 @@ class CaptureOptions:
         ``tl.trace`` capture and is preserved through ``tl.record``-style
         options, although sparse recording may only expose ranges for operations
         it actually logs.
+    measure_python_peak_memory:
+        Whether the host-side forward-pass peak recorded in
+        ``Trace.forward_peak_memory`` additionally includes a ``tracemalloc``
+        Python-allocation peak. The default is ``False``: the CPU/MPS
+        measurement is then the cheap host resident-set-size (or MPS allocator)
+        delta alone, which reads ``0`` for models too small to move that
+        coarse-grained counter. Enabling it installs CPython's allocator hook
+        for the duration of the forward pass, which is precise for small models
+        but taxes every traced operation (measured at 1.7x-2.5x total capture
+        time on torchvision CNNs and ViTs), so it is opt-in. CUDA captures
+        report the true device peak and ignore this option.
     raise_on_nan:
         Whether capture should stop at the first NaN or Inf tensor.
 
@@ -829,6 +841,7 @@ class CaptureOptions:
     payload_policy: str | None = None
     save_preview: bool = False
     emit_nvtx: bool = False
+    measure_python_peak_memory: bool = False
     raise_on_nan: bool = False
     _module_containment_engine: Literal["thread_replay", "hook_stack", "both"] = "hook_stack"
     _specified_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
@@ -876,6 +889,7 @@ class CaptureOptions:
         payload_policy: str | None | MissingType = MISSING,
         save_preview: bool | MissingType = MISSING,
         emit_nvtx: bool | MissingType = MISSING,
+        measure_python_peak_memory: bool | MissingType = MISSING,
         raise_on_nan: bool | MissingType = MISSING,
         _module_containment_engine: (
             Literal["thread_replay", "hook_stack", "both"] | MissingType
@@ -1030,6 +1044,12 @@ class CaptureOptions:
                 "save_preview", save_preview, False, specified_fields
             ),
             "emit_nvtx": _resolve_option_value("emit_nvtx", emit_nvtx, False, specified_fields),
+            "measure_python_peak_memory": _resolve_option_value(
+                "measure_python_peak_memory",
+                measure_python_peak_memory,
+                False,
+                specified_fields,
+            ),
             "raise_on_nan": _resolve_option_value(
                 "raise_on_nan", raise_on_nan, False, specified_fields
             ),

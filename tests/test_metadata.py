@@ -146,20 +146,51 @@ def test_tensor_info_fields(small_input):
 
 
 def test_forward_peak_memory_is_populated(small_input):
-    """forward_peak_memory reflects a real forward-pass peak, not a hard zero.
+    """forward_peak_memory is measured and labeled on the default capture path.
 
     Regression: forward_peak_memory was declared and serialized but never written,
     so it was always 0 while backward_peak_memory was measured. The forward pass
-    is now bracketed by a CPU/CUDA peak-memory probe (CUDA device peak; CPU host
-    RSS delta combined with the tracemalloc Python-allocation peak so even small
-    models read positive).
+    is now bracketed by a peak-memory probe (CUDA device peak; CPU/MPS host
+    resident-set-size or MPS allocator delta).
+
+    The default path deliberately does NOT run a tracemalloc probe -- that
+    allocator hook costs 1.7x-2.5x total capture time -- so the coarse host delta
+    may legitimately round to 0 for a model this small. The measurement is
+    present and labeled; positive Python-allocation peaks for small models are
+    the opt-in behavior asserted by
+    ``test_measure_python_peak_memory_opt_in_reports_positive_peak``.
     """
 
     model = example_models.SimpleFF()
     mh = trace_fn(model, small_input)
     assert isinstance(mh.forward_peak_memory, torchlens.Bytes)
-    assert int(mh.forward_peak_memory) > 0
+    assert int(mh.forward_peak_memory) >= 0
     assert mh.forward_memory_backend in {"cpu", "cuda", "mps"}
+    assert mh.measure_python_peak_memory is False
+
+
+def test_measure_python_peak_memory_opt_in_reports_positive_peak(small_input):
+    """The opt-in tracemalloc probe reads positive even for a tiny model.
+
+    ``CaptureOptions(measure_python_peak_memory=True)`` folds the stdlib
+    tracemalloc Python-allocation peak into ``forward_peak_memory`` via ``max()``,
+    which stays reliably positive where the host RSS delta rounds to zero. Only
+    the measurement changes: the captured graph must be identical to the default
+    path.
+    """
+
+    model = example_models.SimpleFF()
+    baseline = trace_fn(model, small_input)
+    measured = trace_fn(
+        model,
+        small_input,
+        capture=torchlens.options.CaptureOptions(measure_python_peak_memory=True),
+    )
+    assert measured.measure_python_peak_memory is True
+    assert isinstance(measured.forward_peak_memory, torchlens.Bytes)
+    assert int(measured.forward_peak_memory) > 0
+    assert measured.forward_memory_backend in {"cpu", "cuda", "mps"}
+    assert [op.layer_label for op in measured.ops] == [op.layer_label for op in baseline.ops]
 
 
 def test_param_info_fields(small_input):

@@ -254,6 +254,10 @@ pytest tests/ -m "not slow" -x --tb=short
   `allowed_custom_callable_modules={"my_trusted_module"}` is narrower and remains restrictive even if
   the boolean is also true. TorchLens-owned `torchlens.*` custom callables and the fixed trusted
   namespaces resolve without an opt-in.
+- `Trace.forward_peak_memory` on CPU/MPS is only the cheap host RSS (or MPS allocator) delta and
+  legitimately reads `0` for small models. The `tracemalloc` Python-allocation peak is opt-in via
+  `CaptureOptions(measure_python_peak_memory=True)` because the allocator hook costs 1.7x-2.5x
+  total capture time. Never assert `forward_peak_memory > 0` on the default path.
 - `__wrapped__` is removed from built-in function wrappers to avoid `inspect.unwrap`
   failures.
 - Fast-path module decoration skips `_handle_module_entry`; alignment state must be

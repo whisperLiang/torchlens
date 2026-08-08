@@ -798,6 +798,7 @@ def _run_model_and_save_specified_outs(
     name: str | None = None,
     module_filter: Callable[[Any], bool] | None = None,
     emit_nvtx: bool = False,
+    measure_python_peak_memory: bool = False,
     raise_on_nan: bool = False,
     module_containment_engine: str = "hook_stack",
     transform: Callable[[Any], Any] | None = None,
@@ -900,6 +901,10 @@ def _run_model_and_save_specified_outs(
         emit_nvtx: If True, emit NVTX ranges around decorated torch operations.
             This is a profiling aid for CUDA/Nsight workflows and does not
             change graph construction or saved payloads.
+        measure_python_peak_memory: If True, fold a ``tracemalloc``
+            Python-allocation peak into the CPU/MPS ``forward_peak_memory``
+            measurement. Off by default because the allocator hook taxes every
+            traced operation.
         raise_on_nan: If True, stop capture at the first NaN or Inf tensor and raise
             ``CaptureError`` with the offending operation metadata.
         module_containment_engine: Internal module-containment diagnostic engine selector.
@@ -1056,6 +1061,7 @@ def _run_model_and_save_specified_outs(
             inference_only=inference_only,
             module_filter=module_filter,
             emit_nvtx=emit_nvtx,
+            measure_python_peak_memory=measure_python_peak_memory,
             transform=transform,
             raw_input=raw_input,
             save_raw_input=save_raw_input,
@@ -2639,6 +2645,7 @@ def _trace_torch_model(
         name=log_name,
         module_filter=module_filter_value,
         emit_nvtx=capture_options.emit_nvtx,
+        measure_python_peak_memory=capture_options.measure_python_peak_memory,
         raise_on_nan=raise_on_nan_value,
         module_containment_engine=module_containment_engine,
         transform=input_transform,

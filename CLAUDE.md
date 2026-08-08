@@ -180,6 +180,14 @@ print(tl.compat.report(model, x).to_markdown())
 - Smart-collapse metadata is computed at access time: `Module.collapse_score`,
   `Trace.module_collapse_order`, and `Trace.collapse_order(weights=..., mode=...)`. These are
   not portable fields and must not be added to `*_FIELD_ORDER` without an explicit schema change.
+- `Trace.forward_peak_memory` is a real runtime measurement, never a portable fact. CUDA
+  reports the device peak; CPU/MPS report only the cheap host RSS (or MPS allocator) delta,
+  which legitimately reads `0` when a forward fits in already-resident heap headroom.
+  `CaptureOptions(measure_python_peak_memory=True)` additionally folds in a `tracemalloc`
+  Python-allocation peak, which stays positive for tiny models. It is OFF by default because
+  the allocator hook costs 1.7x-2.5x total capture time on real CNNs/ViTs. The flag is a
+  session-time knob (`FieldPolicy.DROP`, not in `MODEL_LOG_FIELD_ORDER`) and does not survive
+  save/load. Never assert `forward_peak_memory > 0` on the default path.
 - `torchlens._io` and `torchlens.io` own portable `.tlspec` save/load helpers. Manifest
   schema v2 is backend-aware; non-torch preview bundles may be audit-only or metadata-only.
 - `torchlens.debug` owns power-user diagnostics such as `bisect_nan` and `hot_path`;
