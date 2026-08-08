@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -13,9 +14,11 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.capture.kernel import OpObservation
+from torchlens.capture.ledgers import EventId, EventJournal
 from torchlens.capture.plan import CapturePlan, EnrichmentLevel
 from torchlens.capture.session import CaptureSession
 from torchlens.fastlog import RecordContext
+from torchlens.ir.events import OpEvent
 
 
 class PredicateToy(nn.Module):
@@ -87,6 +90,41 @@ class IntegerSelectorToy(nn.Module):
         x = torch.relu(self.fc1(x))
         x = torch.relu(self.fc2(x))
         return self.fc3(x)
+
+
+def _ledger_event(raw_index: int, label_raw: str) -> OpEvent:
+    """Return the minimal event shape needed by ledger identity tests."""
+
+    return cast(OpEvent, SimpleNamespace(raw_index=raw_index, label_raw=label_raw))
+
+
+def test_event_journal_index_tracks_misses_replacements_and_rebinding() -> None:
+    """Stable-id lookup stays exact as the producer spine is reused and mutated."""
+
+    first = _ledger_event(3, "relu_1_3_raw")
+    second = _ledger_event(11, "add_1_11_raw")
+    spine = [first, second]
+    journal = EventJournal()
+    journal.bind(spine)
+
+    assert journal.by_id[EventId.from_event(first)].event is first
+    assert journal.by_id[EventId.from_event(second)].event is second
+    with pytest.raises(KeyError):
+        journal.by_id[EventId(7, "missing_1_7_raw")]
+
+    appended = _ledger_event(20, "mul_1_20_raw")
+    spine.append(appended)
+    assert journal.by_id[EventId.from_event(appended)].event is appended
+
+    replacement = _ledger_event(11, "add_1_11_raw")
+    spine[1] = replacement
+    assert journal.by_id[EventId.from_event(replacement)].event is replacement
+
+    rebound = _ledger_event(101, "sigmoid_1_101_raw")
+    journal.bind([rebound])
+    assert journal.by_id[EventId.from_event(rebound)].event is rebound
+    with pytest.raises(KeyError):
+        journal.by_id[EventId.from_event(first)]
 
 
 def test_capture_kernel_process_gates_disabled_enrichment_targets() -> None:

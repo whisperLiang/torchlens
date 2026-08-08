@@ -58,13 +58,94 @@ class EventFact:
     event: OpEvent
 
 
-def _event_for_id(events: Sequence[OpEvent], event_id: EventId) -> OpEvent:
-    """Resolve an event from a dense producer-ordered spine.
+class _EventIndex:
+    """Session-local stable-id index over a producer-ordered event spine."""
+
+    def __init__(self, events: Sequence[OpEvent]) -> None:
+        """Index the current contents of an event spine.
+
+        Parameters
+        ----------
+        events
+            Canonical producer-ordered event spine, which may grow in place.
+        """
+
+        self.events = events
+        self._by_id: dict[EventId, tuple[int, OpEvent]] = {}
+        self._indexed_length = 0
+        self._sync()
+
+    def _rebuild(self) -> None:
+        """Rebuild the index after a non-append mutation of the event spine."""
+
+        self._by_id.clear()
+        for position, event in enumerate(self.events):
+            self._by_id.setdefault(EventId.from_event(event), (position, event))
+        self._indexed_length = len(self.events)
+
+    def _sync(self) -> None:
+        """Index producer appends without rescanning already registered events."""
+
+        event_count = len(self.events)
+        if event_count < self._indexed_length:
+            self._rebuild()
+            return
+        for position in range(self._indexed_length, event_count):
+            event = self.events[position]
+            self._by_id.setdefault(EventId.from_event(event), (position, event))
+        self._indexed_length = event_count
+
+    def note_append(self) -> None:
+        """Register newly appended producer events with the stable-id index."""
+
+        self._sync()
+
+    def resolve(self, event_id: EventId) -> OpEvent:
+        """Resolve one stable event identity in amortized constant time.
+
+        Parameters
+        ----------
+        event_id
+            Stable event identity to resolve.
+
+        Returns
+        -------
+        OpEvent
+            Event matching ``event_id``.
+
+        Raises
+        ------
+        KeyError
+            If the canonical spine does not contain ``event_id``.
+        """
+
+        self._sync()
+        indexed = self._by_id.get(event_id)
+        if indexed is None:
+            raise KeyError(event_id)
+        position, event = indexed
+        if position < len(self.events) and self.events[position] is event:
+            return event
+
+        current = self.events[position] if position < len(self.events) else None
+        if current is not None and EventId.from_event(current) == event_id:
+            self._by_id[event_id] = (position, current)
+            return current
+
+        self._rebuild()
+        indexed = self._by_id.get(event_id)
+        if indexed is None:
+            raise KeyError(event_id)
+        return indexed[1]
+
+
+def _event_for_id(event_index: _EventIndex, event_id: EventId) -> OpEvent:
+    """Resolve an event through its session-local stable-id index.
 
     Parameters
     ----------
-    events
-        Canonical producer-ordered event spine.
+    event_index
+        Index bound to the canonical producer-ordered event spine.
     event_id
         Stable event identity to resolve.
 
@@ -79,19 +160,7 @@ def _event_for_id(events: Sequence[OpEvent], event_id: EventId) -> OpEvent:
         If the canonical spine does not contain ``event_id``.
     """
 
-    if events:
-        index = event_id.raw_index - events[0].raw_index
-        if 0 <= index < len(events):
-            candidate = events[index]
-            if (
-                candidate.raw_index == event_id.raw_index
-                and candidate.label_raw == event_id.label_raw
-            ):
-                return candidate
-    for event in events:
-        if event.raw_index == event_id.raw_index and event.label_raw == event_id.label_raw:
-            return event
-    raise KeyError(event_id)
+    return event_index.resolve(event_id)
 
 
 class EventFactSequence(Sequence[EventFact]):
@@ -145,16 +214,19 @@ class EventFactSequence(Sequence[EventFact]):
 class _DerivedEventMapping(Mapping[EventId, Any]):
     """Base mapping that derives sidecar values from canonical events."""
 
-    def __init__(self, events: Sequence[OpEvent]) -> None:
+    def __init__(self, event_index: _EventIndex | Sequence[OpEvent]) -> None:
         """Bind a canonical event sequence.
 
         Parameters
         ----------
-        events
-            Producer-ordered operation events.
+        event_index
+            Stable-id index or sealed producer-ordered operation events.
         """
 
-        self._events = events
+        self._event_index = (
+            event_index if isinstance(event_index, _EventIndex) else _EventIndex(event_index)
+        )
+        self._events = self._event_index.events
 
     def __iter__(self) -> Iterator[EventId]:
         """Yield stable event identities in producer order."""
@@ -179,6 +251,7 @@ class EventJournal:
         """Initialize an empty journal."""
 
         self._events: list[OpEvent] = []
+        self._event_index = _EventIndex(self._events)
         self._owns_events = True
 
     def bind(self, events: list[OpEvent]) -> None:
@@ -191,6 +264,7 @@ class EventJournal:
         """
 
         self._events = events
+        self._event_index = _EventIndex(events)
         self._owns_events = False
 
     def append(self, event: OpEvent) -> EventId:
@@ -213,12 +287,14 @@ class EventJournal:
         """
 
         event_id = EventId.from_event(event)
-        if any(
-            existing.raw_index == event.raw_index and existing.label_raw == event.label_raw
-            for existing in self._events
-        ):
+        try:
+            self._event_index.resolve(event_id)
+        except KeyError:
+            pass
+        else:
             raise ValueError(f"Duplicate stable capture event id: {event_id!r}")
         self._events.append(event)
+        self._event_index.note_append()
         return event_id
 
     def replace(self, event: OpEvent) -> EventId:
@@ -262,6 +338,7 @@ class EventJournal:
         else:
             self._events = []
             self._owns_events = True
+        self._event_index = _EventIndex(self._events)
 
     @property
     def facts(self) -> tuple[EventFact, ...]:
@@ -275,7 +352,7 @@ class EventJournal:
     def by_id(self) -> Mapping[EventId, EventFact]:
         """Return a read-only stable-id lookup of journaled facts."""
 
-        return _EventFactMapping(self._events)
+        return _EventFactMapping(self._event_index)
 
     @property
     def events(self) -> Sequence[OpEvent]:
@@ -301,7 +378,7 @@ class _EventFactMapping(_DerivedEventMapping):
             Derived event fact.
         """
 
-        event = _event_for_id(self._events, event_id)
+        event = _event_for_id(self._event_index, event_id)
         return EventFact(event_id=event_id, event=event)
 
 
@@ -359,7 +436,7 @@ class DecisionLedger:
 
         if self._journal is None:
             raise RuntimeError("DecisionLedger must be bound before recording decisions.")
-        _event_for_id(self._journal.events, event_id)
+        _event_for_id(self._journal._event_index, event_id)
 
     def clear(self) -> None:
         """Release all decision sidecars.
@@ -376,8 +453,8 @@ class DecisionLedger:
     def records(self) -> Mapping[EventId, DecisionRecord]:
         """Return a read-only stable-id lookup of decisions."""
 
-        events: Sequence[OpEvent] = () if self._journal is None else self._journal.events
-        return DecisionMapping(events)
+        event_index = _EventIndex(()) if self._journal is None else self._journal._event_index
+        return DecisionMapping(event_index)
 
 
 class DecisionMapping(_DerivedEventMapping):
@@ -397,7 +474,7 @@ class DecisionMapping(_DerivedEventMapping):
             Immutable decision projection.
         """
 
-        event = _event_for_id(self._events, event_id)
+        event = _event_for_id(self._event_index, event_id)
         return DecisionRecord(
             predicate_matched=event.predicate_matched,
             intervention_fired=event.intervention_fired,
@@ -452,7 +529,7 @@ class PayloadLedger:
 
         if self._journal is None:
             raise RuntimeError("PayloadLedger must be bound before recording payloads.")
-        _event_for_id(self._journal.events, event_id)
+        _event_for_id(self._journal._event_index, event_id)
 
     def clear(self) -> None:
         """Release all payload leases.
@@ -470,8 +547,8 @@ class PayloadLedger:
     def records(self) -> Mapping[EventId, PayloadRecord]:
         """Return a read-only stable-id lookup of payload sidecars."""
 
-        events: Sequence[OpEvent] = () if self._journal is None else self._journal.events
-        return PayloadMapping(events)
+        event_index = _EventIndex(()) if self._journal is None else self._journal._event_index
+        return PayloadMapping(event_index)
 
 
 class PayloadMapping(_DerivedEventMapping):
@@ -491,4 +568,4 @@ class PayloadMapping(_DerivedEventMapping):
             Immutable payload projection.
         """
 
-        return PayloadRecord(output=_event_for_id(self._events, event_id).output)
+        return PayloadRecord(output=_event_for_id(self._event_index, event_id).output)
