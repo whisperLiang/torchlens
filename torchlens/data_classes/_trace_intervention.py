@@ -53,49 +53,47 @@ class _ForkMemo(dict):
     can never introduce parent aliasing: every seeded mapping points at a
     fork-owned object, never at a parent-owned one.
 
-    ``journal`` records insertion order so a field copy that raises partway
-    through can roll its partially built entries back out. A half-constructed
-    object must never survive in the memo to be reused by a later field.
+    Rollback rides the dict's own insertion order: nothing ever deletes memo
+    entries except ``rollback`` itself (which only pops the tail), so the keys
+    inserted since a ``mark`` are exactly the keys past the marked length. That
+    keeps the hot path -- one ``memo[id] = obj`` per object ``copy.deepcopy``
+    visits -- a plain C-level ``dict.__setitem__`` with no Python-frame
+    journaling hook, and a field copy that raises partway through can still
+    roll its partially built entries back out. A half-constructed object must
+    never survive in the memo to be reused by a later field.
     """
 
-    __slots__ = ("journal",)
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Initialize the memo and its empty rollback journal."""
-
-        super().__init__(*args, **kwargs)
-        self.journal: list[Any] = []
-
-    def __setitem__(self, key: Any, value: Any) -> None:
-        """Record first-time insertions so they can be rolled back."""
-
-        if key not in self:
-            self.journal.append(key)
-        super().__setitem__(key, value)
+    __slots__ = ()
 
     def mark(self) -> int:
         """Return a rollback token for the current memo contents."""
 
-        return len(self.journal)
+        return len(self)
 
     def rollback(self, mark: int) -> None:
         """Drop every entry inserted since ``mark``.
 
-        Entries seeded through ``dict.update`` bypass the journal on purpose:
-        the parent-to-fork identity seeds are permanent and must survive any
-        per-field rollback. ``copy``'s keep-alive list entry is journaled like
-        any other key, so rolling back never leaves a copied object whose
-        source has been freed (and whose ``id`` could be recycled).
+        The parent-to-fork identity seeds are permanent: they are installed
+        before the first field copy takes a mark, so their positions always
+        precede every rollback token and no rollback can remove them.
+        ``copy``'s keep-alive list entry is positioned like any other key, so
+        rolling back never leaves a copied object whose source has been freed
+        (and whose ``id`` could be recycled). Exception-only path (a deepcopy
+        that raised), so the linear key scan is off the hot loop.
         """
 
-        journal = self.journal
-        for key in journal[mark:]:
-            self.pop(key, None)
-        del journal[mark:]
+        from itertools import islice
+
+        for key in list(islice(self.keys(), mark, None)):
+            del self[key]
 
 
 def _seed_fork_memo(memo: _ForkMemo, mapping: dict[Any, Any]) -> None:
-    """Install permanent (non-rollbackable) identity seeds into ``memo``."""
+    """Install permanent identity seeds into ``memo``.
+
+    Seeds are permanent because every seeding call precedes the first
+    ``mark()`` a field copy takes, so no ``rollback`` position can reach them.
+    """
 
     dict.update(memo, mapping)
 
@@ -1020,7 +1018,9 @@ class TraceInterventionMixin(_TraceMixinBase):
             # reads them, and mappingproxy does not implement the pickle hooks
             # used by copy/deepcopy.
             return value
-        policy = MODEL_LOG_FIELD_FORK_POLICY.get(field_name, self._default_fork_policy(value))
+        policy = MODEL_LOG_FIELD_FORK_POLICY.get(field_name)
+        if policy is None:
+            policy = self._default_fork_policy(value)
         if policy is ForkFieldPolicy.FORK_SHARE:
             return value
         if policy is ForkFieldPolicy.FORK_RECONSTRUCT:
@@ -1121,7 +1121,9 @@ class TraceInterventionMixin(_TraceMixinBase):
             return None
         if not deep_copy:
             return self._copy_shallow_fork_value(value, memo)
-        policy = Op.FIELD_FORK_POLICY.get(field_name, self._default_fork_policy(value))
+        policy = Op.FIELD_FORK_POLICY.get(field_name)
+        if policy is None:
+            policy = self._default_fork_policy(value)
         if policy is ForkFieldPolicy.FORK_SHARE:
             return value
         if policy is ForkFieldPolicy.FORK_RECONSTRUCT:
@@ -1240,6 +1242,10 @@ class TraceInterventionMixin(_TraceMixinBase):
         """
 
         if isinstance(value, torch.Tensor) or callable(value):
+            return value
+        if isinstance(value, (str, bytes, int, float, bool, type(None))):
+            # ``copy.deepcopy`` returns atomic immutables identically and never
+            # memoizes them; skip its per-value dispatch on the fork hot path.
             return value
         return _memoized_deep_copy(value, memo, on_failure=copy.copy)
 

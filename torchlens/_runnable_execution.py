@@ -2002,28 +2002,31 @@ def _input_alias_topology_checks(
     def _ordered_pair(left: str, right: str) -> tuple[str, str]:
         return (left, right) if left <= right else (right, left)
 
-    # Identity aliasing: two input sites bound to the SAME tensor object (``a is b``).
-    for i in range(len(resolved)):
-        for j in range(i + 1, len(resolved)):
-            if resolved[i][1] is resolved[j][1]:
-                aliased_pairs.add(_ordered_pair(resolved[i][0], resolved[j][0]))
-    # Storage aliasing (r35 decision D): the three-valued touched-byte engine.
-    # PROVED overlap is an observed contradiction (failed check -> DIVERGED);
-    # PROVED disjointness passes; ``unknown`` is the
-    # ``input_alias_topology_unresolved`` unverifiability ceiling -- never
-    # ``overlap`` by assumption and never VERIFIED.
+    # One pass over the unordered input pairs, under ONE logging pause (the
+    # nestable toggle was previously re-entered per pair via the
+    # ``_touched_bytes_relation`` adapter -- pure per-pair overhead at high arity):
+    # * Identity aliasing: two input sites bound to the SAME tensor object
+    #   (``a is b``) -- recorded directly, the byte engine is not consulted.
+    # * Storage aliasing (r35 decision D): the three-valued touched-byte engine.
+    #   PROVED overlap is an observed contradiction (failed check -> DIVERGED);
+    #   PROVED disjointness passes; ``unknown`` is the
+    #   ``input_alias_topology_unresolved`` unverifiability ceiling -- never
+    #   ``overlap`` by assumption and never VERIFIED.
     unresolved = False
-    for i in range(len(resolved)):
-        for j in range(i + 1, len(resolved)):
-            left_id, left = resolved[i]
-            right_id, right = resolved[j]
-            if left is right:
-                continue  # identity already recorded above
-            relation = _touched_bytes_relation(left, right)
-            if relation == "overlap":
-                aliased_pairs.add(_ordered_pair(left_id, right_id))
-            elif relation == "unknown":
-                unresolved = True
+    if len(resolved) > 1:
+        with _state.pause_logging():
+            for i in range(len(resolved)):
+                left_id, left = resolved[i]
+                for j in range(i + 1, len(resolved)):
+                    right_id, right = resolved[j]
+                    if left is right:
+                        aliased_pairs.add(_ordered_pair(left_id, right_id))
+                        continue
+                    relation = touched_bytes_relation(left, right)
+                    if relation == "overlap":
+                        aliased_pairs.add(_ordered_pair(left_id, right_id))
+                    elif relation == "unknown":
+                        unresolved = True
     if not aliased_pairs:
         return (), unresolved
     return (
@@ -4130,6 +4133,11 @@ def _post_execution_contract_checks(
     """Validate final slot production, arm identity, and structure witnesses."""
 
     checks: list[ContractCheck] = []
+    # The frozen input-site inventory is a pure function of the descriptor; resolve
+    # it at most once per transaction (at the FIRST input-structure witness, so the
+    # inventory belt still raises at exactly the point the per-witness computation
+    # did) instead of rescanning and re-decoding every witness per witness.
+    input_structure_positions: "set[Any] | None" = None
     for call in descriptor.calls:
         missing = tuple(slot_id for slot_id in call.output_slot_ids if slot_id not in slot_values)
         checks.append(
@@ -4173,11 +4181,13 @@ def _post_execution_contract_checks(
             # r67 C2: per-site input-boundary structure facts compare against a runtime
             # snapshot built by the SAME spine function -- kind, exact class, child
             # schema, ordered codec keys, arity, and the symmetric instance-state proof.
+            if input_structure_positions is None:
+                input_structure_positions = _input_structure_positions(descriptor)
             checks.append(
                 _input_structure_witness_check(
                     witness,
                     inputs=inputs,
-                    all_positions=_input_structure_positions(descriptor),
+                    all_positions=input_structure_positions,
                 )
             )
         elif witness.kind is ControlWitnessKind.SHAPE_STRUCTURE_FACT:
