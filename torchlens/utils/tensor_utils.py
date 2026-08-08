@@ -245,6 +245,14 @@ def tensor_nanequal(
         if tensor_a.is_quantized or tensor_b.is_quantized:
             return _quantized_tensor_equal(tensor_a, tensor_b)
 
+        # Validation overwhelmingly compares identical ordinary floating-point
+        # payloads. Avoid constructing the Inf/NaN masks and substituted tensors
+        # in that common case; non-exact comparisons and non-floating dtypes
+        # retain the full comparison below.
+        if tensor_a.layout == torch.strided and tensor_a.dtype.is_floating_point:
+            if torch.equal(tensor_a, tensor_b):
+                return True
+
         # Inf positions must match exactly (inf != -inf).
         if not torch.equal(tensor_a.isinf(), tensor_b.isinf()):
             return False
@@ -1316,7 +1324,7 @@ def touched_bytes_relation(left: torch.Tensor, right: torch.Tensor) -> AliasRela
     """
 
     left_footprint = tensor_byte_footprint(left)
-    right_footprint = tensor_byte_footprint(right)
+    right_footprint = left_footprint if left is right else tensor_byte_footprint(right)
     if left_footprint is None or right_footprint is None:
         return "unknown"
     if left_footprint.numel == 0 or right_footprint.numel == 0:
