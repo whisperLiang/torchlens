@@ -825,8 +825,11 @@ def _unwrap_capture_wrapper(func: Callable[..., Any]) -> Callable[..., Any]:
         from .. import _state
     except Exception:  # pragma: no cover - defensive; _state always imports here.
         return func
-    current = func
-    seen: set[int] = set()
+    original = _state._decorated_to_orig.get(id(func))
+    if original is None:
+        return func
+    current = original
+    seen: set[int] = {id(func)}
     while id(current) not in seen:
         seen.add(id(current))
         original = _state._decorated_to_orig.get(id(current))
