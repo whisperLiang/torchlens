@@ -370,6 +370,7 @@ def _add_node_to_graphviz(
     emitted_segment_nodes: set[str] | None = None,
     antiparallel_projected_edges: frozenset[tuple[str, str]] = frozenset(),
     node_decision: Any | None = None,
+    rolled_maps: "_RolledEdgeMaps | None" = None,
 ) -> None:
     """Adds a node and its relevant edges to the graphviz figure.
 
@@ -481,6 +482,7 @@ def _add_node_to_graphviz(
         segment_lookup,
         segment,
         antiparallel_projected_edges,
+        rolled_maps,
     )
 
 
