@@ -109,17 +109,16 @@ STRUCTURAL_ARG_POSITIONS: Dict[str, Set[int]] = {
     "fill_": {0},  # destination values are overwritten; the fill VALUE (arg 1) stays tested
     "expand_as": {1},  # shape template only; arg 0 values flow into the output
     "expandas": {1},  # canonicalized spelling
-    "cross_entropy": {1},  # target labels (LongTensor)
-    "embedding": {1},  # index tensor — random indices cause CUDA OOB
-    "gather": {2},  # index tensor
-    "index_select": {2},  # index tensor
-    "scatter_": {2},  # index tensor
-    "scatter_add_": {2},  # index tensor -- same OOB class as scatter_; dest/src stay strict
-    "scatter_add": {2},  # out-of-place spelling
-    "scatteradd": {2},  # canonicalized spelling
-    "maskedfill": {1},  # mask tensor; TorchLens canonical name for Tensor.masked_fill
-    "masked_fill": {1},  # mask tensor
-    "masked_fill_": {1},  # mask tensor
+    # F2 tightening: the legacy OOB-justified index/target/mask blankets
+    # (``cross_entropy`` target, ``embedding`` indices, ``gather``/
+    # ``index_select``/``scatter*`` index tensors, ``masked_fill`` masks) were
+    # REMOVED from this registry. Those args are genuine VALUE dependencies --
+    # the index/mask values select which data flows to the output -- so a
+    # blanket skip could excuse a genuinely-missed dependency. They are now
+    # perturbed IN-DOMAIN (``index_domain_rotation_values`` rotates valid
+    # indices; boolean masks flip), with narrow exemptions only for provably
+    # degenerate domains (``_check_index_domain_degenerate``) and provable
+    # value-irrelevance (``_index_domain_value_irrelevance_decision``).
     "_pack_padded_sequence": {1},  # lengths tensor
     "_pad_packed_sequence": {1},  # lengths tensor
     "type_as": {1},  # type template tensor (value irrelevant)
@@ -139,14 +138,6 @@ STRUCTURAL_ARG_POSITIONS: Dict[str, Set[int]] = {
 
 
 STRUCTURAL_ARG_KWARG_ALIASES: Dict[str, Dict[int, Set[str]]] = {
-    "cross_entropy": {1: {"target"}},
-    "embedding": {1: {"indices", "input"}},
-    "gather": {2: {"index"}},
-    "index_select": {2: {"index"}},
-    "scatter_": {2: {"index"}},
-    "maskedfill": {1: {"mask"}},
-    "masked_fill": {1: {"mask"}},
-    "masked_fill_": {1: {"mask"}},
     "_pack_padded_sequence": {1: {"lengths"}},
     "_pad_packed_sequence": {1: {"lengths"}},
     "type_as": {1: {"tensor", "other"}},
@@ -170,6 +161,234 @@ class PosthocPerturbDecision:
     exempt: bool
     reason: str
     justification: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Index-domain perturbation standard (F2 tightening).
+#
+# The ops below consume an integer index/target arg whose VALUES genuinely
+# determine the output, but whose valid domain is bounded by a sibling arg's
+# shape (random draws can go out of bounds and crash the kernel). The legacy
+# treatment blanket-skipped perturbing those args, which could excuse a
+# genuinely-missed dependency. The tightened standard perturbs them IN-DOMAIN:
+# every in-range entry is rotated by one position (``(v + 1) % n``, a bijection
+# on ``[0, n)``), out-of-range sentinels (e.g. ``cross_entropy`` ignore_index)
+# are preserved, and only the provably degenerate domain (``n <= 1`` or no
+# in-range entries) is exempted pre-execution.
+# ---------------------------------------------------------------------------
+
+_INDEX_DOMAIN_INT_DTYPES = frozenset(
+    {
+        torch.uint8,
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+    }
+)
+
+# func_name -> (positional index-arg slot, kwarg spellings of the index arg).
+_INDEX_DOMAIN_ARG_SPECS: Dict[str, tuple[int, frozenset[str]]] = {
+    # aten spelling: embedding(weight, indices, ...) -- domain = weight rows.
+    "embedding": (1, frozenset({"indices", "input"})),
+    # gather/index_select/scatter*(input, dim, index, ...) -- domain =
+    # input.shape[dim].
+    "gather": (2, frozenset({"index"})),
+    "index_select": (2, frozenset({"index"})),
+    "scatter": (2, frozenset({"index"})),
+    "scatter_": (2, frozenset({"index"})),
+    "scatter_add": (2, frozenset({"index"})),
+    "scatter_add_": (2, frozenset({"index"})),
+    "scatteradd": (2, frozenset({"index"})),
+    # cross_entropy(input, target, ...) -- domain = the class dimension.
+    "cross_entropy": (1, frozenset({"target"})),
+}
+
+
+def _parent_is_index_domain_arg(layer: Op, parent_label: str) -> bool:
+    """Return whether ``parent_label`` occupies the op's index/target arg slot.
+
+    Parameters
+    ----------
+    layer:
+        Captured op whose parent-argument map is inspected.
+    parent_label:
+        Perturbed parent label.
+
+    Returns
+    -------
+    bool
+        True when the parent is registered at the index-arg position or one of
+        its kwarg spellings. Position identity only -- never tensor equality.
+    """
+
+    spec = _INDEX_DOMAIN_ARG_SPECS.get(getattr(layer, "func_name", None) or "")
+    if spec is None:
+        return False
+    index_pos, index_kwargs = spec
+    parent_arg_positions = getattr(layer, "parent_arg_positions", {}) or {}
+    if (parent_arg_positions.get("args", {}) or {}).get(index_pos) == parent_label:
+        return True
+    kwarg_map = parent_arg_positions.get("kwargs", {}) or {}
+    return any(kwarg_map.get(name) == parent_label for name in index_kwargs)
+
+
+def _index_domain_size(layer: Op) -> int | None:
+    """Return the exclusive upper bound of the op's valid index domain.
+
+    Parameters
+    ----------
+    layer:
+        Captured index-consuming op.
+
+    Returns
+    -------
+    int or None
+        Number of valid index values (``weight`` rows for ``embedding``,
+        ``input.shape[dim]`` for the gather/scatter family, the class-dim size
+        for ``cross_entropy``), or ``None`` when the saved call shape cannot
+        prove a bound (callers then stay strict).
+    """
+
+    func_name = getattr(layer, "func_name", None)
+    args: tuple[Any, ...] = getattr(layer, "saved_args", None) or ()
+    kwargs = getattr(layer, "saved_kwargs", None) or {}
+    if func_name == "embedding":
+        weight = kwargs.get("weight", args[0] if args else None)
+        if isinstance(weight, torch.Tensor) and weight.ndim >= 1:
+            return int(weight.shape[0])
+        return None
+    if func_name == "cross_entropy":
+        logits = kwargs.get("input", args[0] if args else None)
+        if not isinstance(logits, torch.Tensor) or logits.ndim < 1:
+            return None
+        return int(logits.shape[1]) if logits.ndim >= 2 else int(logits.shape[0])
+    source = kwargs.get("input", args[0] if args else None)
+    dim = kwargs.get("dim", args[1] if len(args) > 1 else None)
+    if not isinstance(source, torch.Tensor) or not isinstance(dim, int):
+        return None
+    if dim < 0:
+        dim = source.ndim + dim
+    if dim < 0 or dim >= source.ndim:
+        return None
+    return int(source.shape[dim])
+
+
+def _saved_index_domain_arg_value(layer: Op) -> Any:
+    """Return the saved index/target argument value for an index-domain op.
+
+    Parameters
+    ----------
+    layer:
+        Captured index-consuming op.
+
+    Returns
+    -------
+    Any
+        The saved argument at the index slot (positional or kwarg spelling),
+        or ``None`` when it cannot be located.
+    """
+
+    spec = _INDEX_DOMAIN_ARG_SPECS.get(getattr(layer, "func_name", None) or "")
+    if spec is None:
+        return None
+    index_pos, index_kwargs = spec
+    kwargs = getattr(layer, "saved_kwargs", None) or {}
+    for name in index_kwargs:
+        if name in kwargs:
+            return kwargs[name]
+    args: tuple[Any, ...] = getattr(layer, "saved_args", None) or ()
+    if len(args) > index_pos:
+        return args[index_pos]
+    return None
+
+
+def index_domain_rotation_values(
+    layer: Op,
+    parent_label: str,
+    parent_values: torch.Tensor,
+) -> torch.Tensor | None:
+    """Return a domain-safe rotated index perturbation for ``parent_values``.
+
+    Every in-domain entry is rotated by one valid position
+    (``(v + 1) % n``, guaranteed distinct from ``v`` when ``n >= 2``);
+    out-of-domain entries (e.g. ``ignore_index`` sentinels) are preserved so
+    the perturbed call stays executable. Mirrors the ``one_hot`` precedent.
+
+    Parameters
+    ----------
+    layer:
+        Child op being replayed.
+    parent_label:
+        Parent label selected for perturbation.
+    parent_values:
+        Saved parent tensor values.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Rotated in-domain indices, or ``None`` when this parent is not an
+        integer index arg of an index-domain op or no in-domain rotation
+        exists (callers fall through to the generic strategies).
+    """
+
+    if not _parent_is_index_domain_arg(layer, parent_label):
+        return None
+    if not isinstance(parent_values, torch.Tensor):
+        return None
+    if parent_values.dtype not in _INDEX_DOMAIN_INT_DTYPES:
+        return None
+    domain_size = _index_domain_size(layer)
+    if domain_size is None or domain_size < 2:
+        return None
+    in_domain = (parent_values >= 0) & (parent_values < domain_size)
+    if not bool(in_domain.any()):
+        return None
+    rotated = (parent_values + 1).remainder(domain_size)
+    return torch.where(in_domain, rotated, parent_values)
+
+
+def _check_index_domain_degenerate(self: "Trace", layer: Op, layers_to_perturb: List[str]) -> bool:
+    """Exempt an index parent ONLY when no in-domain perturbation exists.
+
+    A domain of ``n <= 1`` valid values, or a saved index tensor with zero
+    in-domain entries (e.g. an all-``ignore_index`` target), admits no valid
+    alternate index at all -- value-irrelevance is forced by the domain
+    constraint, not assumed. Any perturbable domain returns False so the
+    strict in-domain rotation check runs.
+
+    Parameters
+    ----------
+    self:
+        Trace being validated (unused; signature parity with the registry).
+    layer:
+        Captured index-consuming op.
+    layers_to_perturb:
+        Parent labels currently being perturbed.
+
+    Returns
+    -------
+    bool
+        Whether the perturbed parent is a provably unperturbable index arg.
+    """
+
+    del self
+    if len(layers_to_perturb) != 1:
+        return False
+    if not _parent_is_index_domain_arg(layer, layers_to_perturb[0]):
+        return False
+    saved_index = _saved_index_domain_arg_value(layer)
+    if not isinstance(saved_index, torch.Tensor):
+        return False
+    if saved_index.dtype not in _INDEX_DOMAIN_INT_DTYPES:
+        return False
+    domain_size = _index_domain_size(layer)
+    if domain_size is None:
+        return False
+    if domain_size < 2:
+        return True
+    in_domain = (saved_index >= 0) & (saved_index < domain_size)
+    return not bool(in_domain.any())
 
 
 # ---------------------------------------------------------------------------
@@ -990,14 +1209,63 @@ def _masked_fill_saved_mask_selectedness(
     return fill_selected, total_elements
 
 
+def _masked_fill_input_equals_value_everywhere(
+    input_tensor: torch.Tensor,
+    mask: torch.Tensor,
+    value: torch.Tensor | Number,
+) -> bool:
+    """Return whether ``input == value`` at every broadcast output position.
+
+    When the saved input already equals the fill value everywhere, ANY mask
+    (including every possible perturbation) produces the identical output, so
+    the mask's value-irrelevance is proved, not assumed.
+
+    Parameters
+    ----------
+    input_tensor:
+        Saved input/destination tensor.
+    mask:
+        Saved boolean mask argument (bounds the broadcast output shape).
+    value:
+        Saved scalar tensor or Python scalar fill value.
+
+    Returns
+    -------
+    bool
+        True only when the equality is provable over the full output shape.
+    """
+
+    try:
+        if isinstance(value, torch.Tensor):
+            value_tensor = value
+        else:
+            value_tensor = torch.as_tensor(
+                value, dtype=input_tensor.dtype, device=input_tensor.device
+            )
+        equal = torch.eq(input_tensor, value_tensor)
+        output_shape = torch.broadcast_shapes(
+            tuple(equal.shape),
+            tuple(mask.shape),
+        )
+        broadcast_equal = torch.broadcast_to(equal, output_shape)
+        if broadcast_equal.numel() == 0:
+            return False
+        return bool(broadcast_equal.all().item())
+    except (TypeError, ValueError, RuntimeError):
+        return False
+
+
 def _check_masked_fill_exempt(self: "Trace", layer: Op, layers_to_perturb: List[str]) -> bool:
-    """Exempt ``masked_fill`` value parents only when entirely unselected.
+    """Exempt ``masked_fill`` parents only when saved values prove irrelevance.
 
     ``masked_fill(input, mask, value)`` is equivalent to
     ``where(mask, value, input)``. The input parent is irrelevant only when the
     saved mask is true at every output element; a tensor fill-value parent is
     irrelevant only when the saved mask is false at every output element. The
-    mask itself remains handled by the structural-position registry.
+    mask parent (F2 tightening: no longer a structural-position blanket) is
+    irrelevant only when the saved input already equals the fill value at
+    every broadcast position -- then every possible mask yields the same
+    output. Any other mask perturbation must run and register sensitivity.
     """
 
     perturbed_positions = _perturbed_parent_arg_positions(layer, layers_to_perturb)
@@ -1013,6 +1281,8 @@ def _check_masked_fill_exempt(self: "Trace", layer: Op, layers_to_perturb: List[
         and isinstance(value, (torch.Tensor, Number))
     ):
         return False
+    if perturbed_positions == {1}:
+        return _masked_fill_input_equals_value_everywhere(input_tensor, mask, value)
     if not perturbed_positions.issubset({0, 2}):
         return False
     if len(perturbed_positions) != 1:
@@ -1057,6 +1327,18 @@ def _check_norm_running_stat_exempt(self: "Trace", layer: Op, layers_to_perturb:
     return bool(perturbed_positions) and perturbed_positions.issubset({3, 4})
 
 
+def _check_scatter_or_index_domain_exempt(
+    self: "Trace",
+    layer: Op,
+    layers_to_perturb: List[str],
+) -> bool:
+    """Exempt scatter for a fully-overwritten destination or a degenerate index domain."""
+
+    return _check_scatter_exempt(self, layer, layers_to_perturb) or (
+        _check_index_domain_degenerate(self, layer, layers_to_perturb)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Registry 4: Custom exemption checks keyed by func name.
 # ---------------------------------------------------------------------------
@@ -1067,8 +1349,15 @@ CUSTOM_EXEMPTION_CHECKS: Dict[str, Callable[["Trace", Op, List[str]], bool]] = {
     "index_put_": _check_index_put_exempt,
     "lstm": _check_lstm_exempt,
     "interpolate": _check_interpolate_exempt,
-    "scatter": _check_scatter_exempt,
-    "scatter_": _check_scatter_exempt,
+    "scatter": _check_scatter_or_index_domain_exempt,
+    "scatter_": _check_scatter_or_index_domain_exempt,
+    "scatter_add": _check_index_domain_degenerate,
+    "scatter_add_": _check_index_domain_degenerate,
+    "scatteradd": _check_index_domain_degenerate,
+    "embedding": _check_index_domain_degenerate,
+    "gather": _check_index_domain_degenerate,
+    "index_select": _check_index_domain_degenerate,
+    "cross_entropy": _check_index_domain_degenerate,
     "where": _check_where_exempt,
     "maskedfill": _check_masked_fill_exempt,
     "masked_fill": _check_masked_fill_exempt,
@@ -1205,7 +1494,9 @@ def posthoc_perturb_check(
     decision = _posthoc_discrete_output_decision(layer_to_validate_parents_for)
     if decision.exempt:
         return decision
-    decision = _posthoc_structural_output_decision(layer_to_validate_parents_for, args)
+    decision = _posthoc_structural_output_decision(
+        layer_to_validate_parents_for, args, layers_to_perturb
+    )
     if decision.exempt:
         return decision
     decision = _posthoc_overwrite_decision(layer_to_validate_parents_for, layers_to_perturb, args)
@@ -1247,9 +1538,57 @@ def _posthoc_discrete_output_decision(layer: Op) -> PosthocPerturbDecision:
     return PosthocPerturbDecision(False, "not_discrete_output")
 
 
+def _perturbed_parents_only_occupy_template_slot(
+    layer: Op,
+    layers_to_perturb: List[str],
+) -> bool:
+    """Return whether EVERY perturbed parent occupies only the template slot.
+
+    The ``*_like`` structural-template exemption is only sound for the
+    TEMPLATE argument (``args[0]`` / ``input=``): its values never flow into
+    the output, only its shape/dtype/device do. Any other parent slot -- in
+    particular a runtime ``full_like`` fill_value tensor -- is a genuine value
+    dependency, and an unchanged output there must NOT be excused as
+    structural (F2 tightening). Missing position metadata fails closed.
+
+    Parameters
+    ----------
+    layer:
+        Captured ``*_like``-family op.
+    layers_to_perturb:
+        Parent labels currently being perturbed.
+
+    Returns
+    -------
+    bool
+        True only when every perturbed parent's every registered position is
+        the template slot.
+    """
+
+    if not layers_to_perturb:
+        return False
+    parent_arg_positions = getattr(layer, "parent_arg_positions", {}) or {}
+    args_map = parent_arg_positions.get("args", {}) or {}
+    kwargs_map = parent_arg_positions.get("kwargs", {}) or {}
+    for perturbed_label in layers_to_perturb:
+        arg_keys = [key for key, label in args_map.items() if label == perturbed_label]
+        kwarg_names = [name for name, label in kwargs_map.items() if label == perturbed_label]
+        if not arg_keys and not kwarg_names:
+            return False
+        for key in arg_keys:
+            root = key[0] if isinstance(key, tuple) and key else key
+            if root != 0:
+                return False
+        for name in kwarg_names:
+            if name != "input":
+                return False
+    return True
+
+
 def _posthoc_structural_output_decision(
     layer: Op,
     args: tuple[Any, ...],
+    layers_to_perturb: List[str],
 ) -> PosthocPerturbDecision:
     """Return posthoc decisions for structural output-template operations.
 
@@ -1259,6 +1598,8 @@ def _posthoc_structural_output_decision(
         Operation whose unchanged perturbation output is being classified.
     args:
         Saved positional arguments for ``layer``.
+    layers_to_perturb:
+        Parent labels selected for perturbation.
 
     Returns
     -------
@@ -1285,7 +1626,11 @@ def _posthoc_structural_output_decision(
         "empty_like",
         "rand_like",
         "randn_like",
-    ]:
+    ] and _perturbed_parents_only_occupy_template_slot(layer, layers_to_perturb):
+        # F2 tightening: only the TEMPLATE parent (args[0] / input=) is
+        # structural. A perturbed runtime value parent -- e.g. a ``full_like``
+        # fill_value tensor -- whose replay output stays unchanged is a missed
+        # or broken dependency and must fall through to the failure path.
         return PosthocPerturbDecision(True, "structural_output_template")
     if layer.func_name == "bernoulli" and "p" in layer.saved_kwargs:
         return PosthocPerturbDecision(True, "rng_probability_template")
@@ -1515,6 +1860,10 @@ def _posthoc_value_proof_decision(
         Exempt decision for narrow proved cases, otherwise non-exempt.
     """
 
+    if layer.func_name in _INDEX_DOMAIN_ARG_SPECS:
+        decision = _index_domain_value_irrelevance_decision(layer, layers_to_perturb, args)
+        if decision.exempt:
+            return decision
     if layer.func_name in _MULTIPLICATIVE_ANNIHILATOR_FUNC_NAMES and len(args) > 1:
         decision = _multiplicative_zero_annihilator_decision(layer, layers_to_perturb, args)
         if decision.exempt:
@@ -1565,6 +1914,161 @@ def _posthoc_value_proof_decision(
             "non-floating max output is a discrete value result",
         )
     return PosthocPerturbDecision(False, "not_value_proved")
+
+
+def _tensor_or_number_is_constant(value: Any) -> bool:
+    """Return whether ``value`` is a scalar or a tensor with one constant value.
+
+    Parameters
+    ----------
+    value:
+        Saved scatter source argument (tensor or Python scalar).
+
+    Returns
+    -------
+    bool
+        True when every element provably equals one constant.
+    """
+
+    if isinstance(value, Number):
+        return True
+    if not isinstance(value, torch.Tensor) or value.numel() == 0:
+        return False
+    first = value.reshape(-1)[0]
+    return bool(torch.eq(value, first).all().item())
+
+
+def _tensor_constant_along_dim(tensor: torch.Tensor, dim: int) -> bool:
+    """Return whether ``tensor`` holds identical values at every index of ``dim``.
+
+    Parameters
+    ----------
+    tensor:
+        Source tensor being indexed.
+    dim:
+        Normalized dimension the index selects along.
+
+    Returns
+    -------
+    bool
+        True when swapping any two positions along ``dim`` provably leaves the
+        tensor unchanged.
+    """
+
+    if tensor.numel() == 0 or tensor.shape[dim] == 0:
+        return False
+    reference = tensor.select(dim, 0).unsqueeze(dim)
+    return bool(torch.eq(tensor, reference).all().item())
+
+
+def _index_domain_value_irrelevance_decision(
+    layer: Op,
+    layers_to_perturb: List[str],
+    args: tuple[Any, ...],
+) -> PosthocPerturbDecision:
+    """Return a proof decision for an index parent that provably cannot matter.
+
+    These are the ONLY excuses for an in-domain index rotation leaving the
+    output unchanged (F2 tightening); each is a mathematical irrelevance proof
+    read from the saved co-arguments, so a genuinely missed/broken index
+    dependency (where the co-arguments DO vary) still falls through to
+    ``perturbation_insensitive``:
+
+    - ``embedding``: every weight row is identical, so any index selects the
+      same values.
+    - ``gather``/``index_select``: the source is constant along the indexed
+      dim, so any in-range index reads the same values.
+    - ``cross_entropy``: the logits are constant along the class dim and no
+      per-class ``weight`` reweights the reduction, so every target picks an
+      equal-probability class.
+    - ``scatter``/``scatter_``: the source value is one constant and the saved
+      index fully covers the destination dim, so every slot ends at that
+      constant under any valid index permutation.
+    - ``scatter_add`` family: additionally requires exactly-once coverage
+      (``index.shape[dim] == dest.shape[dim]``), because duplicate writes make
+      per-slot sums depend on index multiplicities.
+
+    Parameters
+    ----------
+    layer:
+        Index-consuming op whose unchanged perturbed replay is being
+        classified.
+    layers_to_perturb:
+        Parent labels selected for perturbation.
+    args:
+        Saved positional arguments for ``layer``.
+
+    Returns
+    -------
+    PosthocPerturbDecision
+        Exempt decision when irrelevance is proved, otherwise non-exempt.
+    """
+
+    not_proved = PosthocPerturbDecision(False, "not_index_domain_value_irrelevant")
+    if len(layers_to_perturb) != 1:
+        return not_proved
+    if not _parent_is_index_domain_arg(layer, layers_to_perturb[0]):
+        return not_proved
+    func_name = layer.func_name
+    kwargs = getattr(layer, "saved_kwargs", None) or {}
+    if func_name == "embedding":
+        weight = kwargs.get("weight", args[0] if args else None)
+        if isinstance(weight, torch.Tensor) and weight.ndim >= 2 and weight.shape[0] > 0:
+            if bool(torch.eq(weight, weight[0:1]).all().item()):
+                return PosthocPerturbDecision(
+                    True,
+                    "index_domain_value_irrelevant",
+                    "every embedding weight row is identical, so any valid index "
+                    "selects the same values",
+                )
+        return not_proved
+    if func_name == "cross_entropy":
+        logits = kwargs.get("input", args[0] if args else None)
+        if kwargs.get("weight") is not None or (len(args) > 2 and args[2] is not None):
+            return not_proved
+        if isinstance(logits, torch.Tensor) and logits.ndim >= 1:
+            class_dim = 1 if logits.ndim >= 2 else 0
+            if _tensor_constant_along_dim(logits, class_dim):
+                return PosthocPerturbDecision(
+                    True,
+                    "index_domain_value_irrelevant",
+                    "logits are constant along the class dim with no per-class "
+                    "weight, so every target class yields the same loss",
+                )
+        return not_proved
+    if func_name in ("gather", "index_select"):
+        source = kwargs.get("input", args[0] if args else None)
+        dim = kwargs.get("dim", args[1] if len(args) > 1 else None)
+        if isinstance(source, torch.Tensor) and isinstance(dim, int):
+            if dim < 0:
+                dim = source.ndim + dim
+            if 0 <= dim < source.ndim and _tensor_constant_along_dim(source, dim):
+                return PosthocPerturbDecision(
+                    True,
+                    "index_domain_value_irrelevant",
+                    "the indexed source is constant along the gather dim, so any "
+                    "in-range index reads the same values",
+                )
+        return not_proved
+    scatter_components = _get_scatter_destination_dim_index(layer)
+    if scatter_components is None:
+        return not_proved
+    dest, dim, index = scatter_components
+    source = kwargs.get("src", kwargs.get("value", args[3] if len(args) > 3 else None))
+    if source is None or not _tensor_or_number_is_constant(source):
+        return not_proved
+    if not _scatter_index_fully_overwrites_dim(dest, dim, index):
+        return not_proved
+    if func_name in ("scatter_add", "scatter_add_", "scatteradd") and (
+        index.shape[dim] != dest.shape[dim]
+    ):
+        return not_proved
+    return PosthocPerturbDecision(
+        True,
+        "index_domain_value_irrelevant",
+        "a constant scatter source with full destination-dim coverage writes "
+        "the same value to every slot under any valid index",
+    )
 
 
 # Every elementwise-multiplication spelling whose output is provably zero when

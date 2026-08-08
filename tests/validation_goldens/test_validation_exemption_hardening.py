@@ -1184,7 +1184,14 @@ def test_output_bookkeeping_projection_is_structural() -> None:
 
 
 def test_structural_arg_exemption_covers_keyword_parent_positions() -> None:
-    """Structural arg exemptions should use kwarg parent-position metadata."""
+    """Keyword-spelled index-class parents are sensitivity-VERIFIED, not exempted.
+
+    F2 tightening: the ``cross_entropy`` target blanket was removed from the
+    structural registries, so a keyword-spelled target edge must now be
+    exercised by the in-domain rotation (which reads kwarg parent-position
+    metadata) and register genuine sensitivity instead of a blanket
+    ``pre_perturbation_exemption``.
+    """
 
     logits = torch.tensor([[2.0, -1.0, 0.5], [0.1, 0.4, 0.7]], dtype=torch.float32)
     target = torch.tensor([0, 2], dtype=torch.long)
@@ -1199,7 +1206,21 @@ def test_structural_arg_exemption_covers_keyword_parent_positions() -> None:
     result = trace.validate_forward_pass([_first_output(trace)], validate_metadata=False)
 
     assert result is True
-    assert trace.validation_replay_status.exempted_reason_counts["pre_perturbation_exemption"] >= 1
+    cross_entropy_op = next(op for op in trace.layer_list if op.func_name == "cross_entropy")
+    assert cross_entropy_op.parent_arg_positions["kwargs"]["target"]
+    perturbation_decisions = [
+        decision
+        for decision in trace.validation_replay_status.decisions
+        if decision.get("op_label") == cross_entropy_op.label
+        and decision.get("phase") == "perturbation"
+    ]
+    # Both keyword-spelled parent edges (input= logits and target= labels) are
+    # perturbed and register real sensitivity -- no blanket exemption remains.
+    assert len(perturbation_decisions) >= 2, trace.validation_replay_status.decisions
+    assert all(
+        decision["decision"] == "validated" and decision["reason"] == "perturbation_changed"
+        for decision in perturbation_decisions
+    ), perturbation_decisions
 
 
 def test_skip_validation_registry_entries_have_justifications() -> None:

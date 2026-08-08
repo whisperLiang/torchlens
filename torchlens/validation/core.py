@@ -52,6 +52,7 @@ from .exemptions import (
     SKIP_PERTURBATION_ENTIRELY,
     STRUCTURAL_ARG_POSITIONS,
     CUSTOM_EXEMPTION_CHECKS,
+    index_domain_rotation_values,
     perturbed_layer_at_structural_position,
     posthoc_perturb_check,
 )
@@ -3599,6 +3600,9 @@ def _perturb_parent_values_for_layer(
     domain_values = _perturb_domain_sensitive_parent_values(layer, parent_label, parent_values)
     if domain_values is not None:
         return domain_values
+    index_values = index_domain_rotation_values(layer, parent_label, parent_values)
+    if index_values is not None:
+        return index_values
     selection_values = _perturb_selection_parent_values(layer, parent_label, parent_values)
     if selection_values is not None:
         return selection_values
