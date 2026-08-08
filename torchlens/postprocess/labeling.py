@@ -76,7 +76,9 @@ def _map_raw_labels_to_final_labels(self: "Trace") -> None:
         else:
             # Pass > 1: INHERIT layer_type and numbers from the first pass.
             # This ensures all ops of the same layer share layer_label.
-            first_pass_tensor = self[tensor_log_entry.recurrent_ops[0]]
+            # Raw slot read: the public read is copy-on-read, and copying a
+            # 512-element group list just to index its head is pure waste.
+            first_pass_tensor = self[tensor_log_entry._slot("recurrent_ops")[0]]
             layer_type = first_pass_tensor.layer_type
             type_index = first_pass_tensor.type_index
             if layer_type in ["input", "buffer"]:
@@ -144,9 +146,11 @@ def _log_final_info_for_layers(self: "Trace") -> None:
         "module_ops": set(),
     }
 
-    # One rename per equivalence class instead of one per pass; see
-    # ``_replace_layer_names_for_layer_entry`` for why the shared result is safe.
+    # One rename per equivalence class / recurrence group instead of one per
+    # pass; see ``_replace_layer_names_for_layer_entry`` for why the shared
+    # results are safe.
     equivalent_ops_memo: Dict[int, Tuple[Any, Any]] = {}
+    recurrent_ops_memo: Dict[Tuple[str, ...], List[str]] = {}
 
     for t, layer_entry in enumerate(self):
         _normalize_io_role_flags(layer_entry)
@@ -160,7 +164,9 @@ def _log_final_info_for_layers(self: "Trace") -> None:
             step_index += 1
 
         # Replace any layer names with their final names:
-        _replace_layer_names_for_layer_entry(self, layer_entry, equivalent_ops_memo)
+        _replace_layer_names_for_layer_entry(
+            self, layer_entry, equivalent_ops_memo, recurrent_ops_memo
+        )
 
         # Log the module hierarchy information:
         _log_module_hierarchy_info_for_layer(self, layer_entry, _shadow_sets)
@@ -347,6 +353,7 @@ def _replace_layer_names_for_layer_entry(
     self: "Trace",
     layer_entry: Op,
     equivalent_ops_memo: Dict[int, Tuple[Any, Any]] | None = None,
+    recurrent_ops_memo: Dict[Tuple[str, ...], List[str]] | None = None,
 ) -> None:
     """Replace all raw labels in a Op's fields with final labels.
 
@@ -367,6 +374,16 @@ def _replace_layer_names_for_layer_entry(
     (``_COPY_ON_READ_SET_FIELDS`` in ``data_classes/op.py``), so no holder of the
     shared group can alias-corrupt a sibling Op.
 
+    ``recurrent_ops`` gets the same canonical-container treatment, but keyed on
+    VALUE rather than identity: loop detection hands every member of a
+    recurrence group its own pre-rename list (equal contents, distinct
+    objects), so an identity memo would never hit. Renaming is a pure function
+    of the contents, and group symmetry guarantees every member carries the
+    same ordered labels, so equal inputs share one canonical renamed list. On a
+    512-step loop the per-op lists were 4.41 MB of spines for THREE distinct
+    group contents. Safe for the same reason as above: ``Op.recurrent_ops``
+    reads hand back a private copy (``_COPY_ON_READ_LIST_FIELDS``).
+
     Args:
         layer_entry: Op to rename labels for.
         equivalent_ops_memo: Cross-Op ``id(raw group) -> (raw group, renamed
@@ -374,12 +391,17 @@ def _replace_layer_names_for_layer_entry(
             alive in the value is what makes keying on ``id`` sound: the key
             object cannot be freed, so its address cannot be reused. ``None``
             builds a throwaway table (single-Op callers, test doubles).
+        recurrent_ops_memo: Cross-Op ``tuple(raw labels) -> renamed list``
+            table for the current rename sweep. ``None`` builds a throwaway
+            table (single-Op callers, test doubles).
     """
     mapping = self._raw_to_final_layer_labels
     layer_mapping = self._raw_to_final_parent_layer_labels
     op_mapping = self._raw_to_final_op_labels
     if equivalent_ops_memo is None:
         equivalent_ops_memo = {}
+    if recurrent_ops_memo is None:
+        recurrent_ops_memo = {}
 
     def set_entry_field(field_name: str, value: Any) -> None:
         """Set a renamed entry field on real Ops or lightweight test doubles."""
@@ -406,13 +428,28 @@ def _replace_layer_names_for_layer_entry(
                 renamed = cached[1]
             set_entry_field(field, renamed)
             continue
+        if field == "recurrent_ops":
+            # Read the RAW slot: the public read is copy-on-read, and a copy
+            # would defeat both sharing and the memo hit-rate.
+            slot_read = getattr(layer_entry, "_slot", None)
+            orig = slot_read(field) if slot_read is not None else getattr(layer_entry, field, None)
+            if not orig:
+                continue
+            if isinstance(orig, list):
+                key = tuple(orig)
+                renamed_list = recurrent_ops_memo.get(key)
+                if renamed_list is None:
+                    renamed_list = [op_mapping[raw] for raw in orig]
+                    recurrent_ops_memo[key] = renamed_list
+                set_entry_field(field, renamed_list)
+            else:  # legacy non-list value: preserve type, no sharing
+                set_entry_field(field, type(orig)(op_mapping[raw] for raw in orig))
+            continue
         orig = getattr(layer_entry, field, None)
         if not orig:
             continue
         if field.startswith("conditional_"):
             field_mapping = layer_mapping
-        elif field == "recurrent_ops":
-            field_mapping = op_mapping
         else:
             field_mapping = mapping
         if isinstance(orig, list):

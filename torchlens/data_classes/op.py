@@ -138,7 +138,13 @@ _LAZY_READ_FIELDS = frozenset({"grad", "out"})
 # private to that read and mutating it can never reach a sibling Op.  Writes are
 # unaffected: assigning rebinds the slot exactly as before.
 _COPY_ON_READ_SET_FIELDS = frozenset({"equivalent_ops"})
-_INTERCEPTED_READ_FIELDS = _LAZY_READ_FIELDS | _COPY_ON_READ_SET_FIELDS
+# List-valued analogue of the set barrier above: ``recurrent_ops`` shares ONE
+# canonical list per recurrence group (order-bearing, so a list, not a set --
+# see the memoized rename in ``postprocess/labeling.py``).  Reads hand back a
+# fresh copy for exactly the same reason: a shared MUTABLE container must never
+# be alias-corruptible through any single holder.
+_COPY_ON_READ_LIST_FIELDS = frozenset({"recurrent_ops"})
+_INTERCEPTED_READ_FIELDS = _LAZY_READ_FIELDS | _COPY_ON_READ_SET_FIELDS | _COPY_ON_READ_LIST_FIELDS
 _WARNED_REFERENCE_SAVE_MODE = False
 _LAYER_PASS_LOG_DEFAULT_FILL: dict[str, Any] = {
     "_source_trace_ref": None,
@@ -357,6 +363,9 @@ _UNPOOLED_SLOTS = frozenset(
         # duplicate of a label survives this skip.  Pooling is a cost choice, not
         # a correctness one (see the pooling block above).
         "equivalent_ops",
+        # Same sharing argument: one canonical list per recurrence group, whose
+        # members are final op labels already pooled through their own slots.
+        "recurrent_ops",
     }
 )
 _POOLED_SLOTS = tuple(name for name in _OP_SLOT_NAMES if name not in _UNPOOLED_SLOTS)
@@ -1416,7 +1425,7 @@ class Op:
         _getattribute: Callable[[Any, str], Any] = _object_getattribute,
         _lazy_fields: frozenset = _INTERCEPTED_READ_FIELDS,
     ) -> Any:
-        """Materialize lazy grads, copy shared sets, reject unsaved predicate outs."""
+        """Materialize lazy grads, copy shared groups, reject unsaved predicate outs."""
 
         if name not in _lazy_fields:
             return _getattribute(self, name)
@@ -1426,6 +1435,12 @@ class Op:
             # Non-set legacy/loaded values (e.g. a list) pass through untouched.
             value = _getattribute(self, name)
             return set(value) if value.__class__ is set else value
+        if name == "recurrent_ops":
+            # Same barrier for the recurrence group: one canonical list per
+            # group, private copy per read.  Non-list legacy values pass
+            # through untouched.
+            value = _getattribute(self, name)
+            return list(value) if value.__class__ is list else value
         if name == "grad":
             slot = _object_getattribute(self, "_slot")
             records = slot("_grad_records")
