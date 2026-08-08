@@ -78,6 +78,10 @@ CompletenessWitnessMode = Literal["off", "shadow"]
 MAX_AUDITED_COMPLETENESS_BOUNDARIES = 9
 """Hard budget preventing expected-opaque wrapper scopes from growing unchecked."""
 
+_TORCH_ROOT = Path(torch.__file__).resolve().parent
+_TORCHLENS_ROOT = Path(__file__).resolve().parents[2]
+_FRAMEWORK_FILENAME_VERDICTS: dict[str, bool] = {}
+
 
 @dataclass(frozen=True)
 class AuditedCompletenessBoundary:
@@ -3856,18 +3860,19 @@ def _dispatch_callsite() -> _DispatchCallsite:
     """
 
     frame: Any = sys._getframe(2)
-    torch_root = Path(torch.__file__).resolve().parent
-    torchlens_root = Path(__file__).resolve().parents[2]
     fallback = frame
     while frame is not None:
         filename = frame.f_code.co_filename
-        try:
-            resolved = Path(filename).resolve()
-            framework_frame = resolved.is_relative_to(torch_root) or resolved.is_relative_to(
-                torchlens_root
-            )
-        except (OSError, RuntimeError, ValueError):
-            framework_frame = False
+        framework_frame = _FRAMEWORK_FILENAME_VERDICTS.get(filename)
+        if framework_frame is None:
+            try:
+                resolved = Path(filename).resolve()
+                framework_frame = resolved.is_relative_to(_TORCH_ROOT) or resolved.is_relative_to(
+                    _TORCHLENS_ROOT
+                )
+            except (OSError, RuntimeError, ValueError):
+                framework_frame = False
+            _FRAMEWORK_FILENAME_VERDICTS[filename] = framework_frame
         if not framework_frame:
             return _DispatchCallsite(filename, frame.f_lineno, frame.f_code.co_name)
         fallback = frame
