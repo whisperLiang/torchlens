@@ -61,6 +61,7 @@ from .collapse_plan import (
     RepeatFold,
     SegmentDescriptor,
     count,
+    collapse_plan_for_source_graph,
     collapse_plan_for_trace,
 )
 from .collapse_plan import EllipsisNode
@@ -70,6 +71,7 @@ if TYPE_CHECKING:
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
     from .auto_collapse import ChildCondensedFlowGraph
+    from .source_graph import SourceGraph
 
 
 K_CAP = 64
@@ -294,6 +296,7 @@ def select_collapse_plan(
     context: RenderContext,
     weights: OptimizerWeights | None = None,
     mode: Literal["auto", "max"] = "auto",
+    source_graph: "SourceGraph | None" = None,
 ) -> OptimizerResult:
     """Return the v2 auto-collapse plan for ``trace``.
 
@@ -307,6 +310,8 @@ def select_collapse_plan(
         Optional optimizer weights.
     mode:
         Collapse policy to select.
+    source_graph:
+        Optional schedule-local normalized source graph.
 
     Returns
     -------
@@ -323,7 +328,7 @@ def select_collapse_plan(
     if cached is not None:
         return cached
     if mode == "max":
-        result = _select_max_plan(trace, context, weights)
+        result = _select_max_plan(trace, context, weights, source_graph)
         cached_by_context[cache_key] = result
         return result
     analysis = analyze_collapse(trace)
@@ -361,6 +366,7 @@ def select_collapse_plan(
             expanded_cache=expanded_cache,
             output_shape_cache=output_shape_cache,
             best=best,
+            source_graph=source_graph,
         )
     if first_pass_plan is None or count(first_pass_plan) > _readable_band_high(trace):
         best = _select_best_decision(
@@ -378,7 +384,7 @@ def select_collapse_plan(
         first_pass_point = None
         first_pass_plan = None
     if best is None:
-        selected, plan = _floor_fallback_selection(trace, context)
+        selected, plan = _floor_fallback_selection(trace, context, source_graph)
         result = OptimizerResult(
             selected=selected,
             repeat_folds={},
@@ -402,6 +408,7 @@ def select_collapse_plan(
             expanded_cache=expanded_cache,
             output_shape_cache=output_shape_cache,
             best=best,
+            source_graph=source_graph,
         )
     else:
         instantiated_point = first_pass_point
@@ -424,6 +431,7 @@ def select_collapse_plan(
             output_shape_cache=output_shape_cache,
             weights=replace(resolved_weights, fold_intrinsic=0.05),
             band_high=band_high,
+            source_graph=source_graph,
         )
     ):
         segmented_plan, segments = _condense_plan_with_child_segments(
@@ -548,9 +556,22 @@ def collapse_schedule(
     cached = cached_by_context.get(context)
     if cached is not None:
         return cached
-    full_plan = collapse_plan_for_trace(trace, None, None, context)
+    from .source_graph import build_source_graph
+
+    source_graph = build_source_graph(trace, context)
+    node_pool: dict[PlanNode, PlanNode] = {}
+    full_plan = collapse_plan_for_source_graph(
+        source_graph,
+        None,
+        None,
+        node_pool=node_pool,
+    )
     full_count = count(full_plan)
-    max_result = select_collapse_plan(trace, context, mode="max")
+    max_result = select_collapse_plan(trace, context, mode="max", source_graph=source_graph)
+    max_plan = CollapsePlan(
+        nodes=tuple(node_pool.setdefault(node, node) for node in max_result.plan.nodes),
+        context=max_result.plan.context,
+    )
     if max_result.declined:
         step = CollapseScheduleStep(
             t=0.0,
@@ -572,7 +593,7 @@ def collapse_schedule(
                     max_count,
                     max_count,
                     _reported_collapsed_addresses(max_result),
-                    max_result.plan,
+                    max_plan,
                 ),
             )
         )
@@ -587,7 +608,12 @@ def collapse_schedule(
     for address in ordered_addresses:
         selected.add(address)
         collapse_fn = _collapse_fn_from_selected(frozenset(selected))
-        plan = collapse_plan_for_trace(trace, collapse_fn, {}, context)
+        plan = collapse_plan_for_source_graph(
+            source_graph,
+            collapse_fn,
+            {},
+            node_pool=node_pool,
+        )
         visible_count = count(plan)
         if visible_count <= previous_count:
             raw_steps.append((frozenset(selected), plan, visible_count))
@@ -597,7 +623,7 @@ def collapse_schedule(
         # The append decision keys on the narrow module-address set (frozen
         # schedule behavior); the appended max step reports the honest wider
         # set including op-segment-hidden op labels.
-        raw_steps.append((_reported_collapsed_addresses(max_result), max_result.plan, max_count))
+        raw_steps.append((_reported_collapsed_addresses(max_result), max_plan, max_count))
     denominator = max(full_count - max_count, 1)
     steps = tuple(
         CollapseScheduleStep(
@@ -759,6 +785,7 @@ def _select_max_plan(
     trace: "Trace",
     context: RenderContext,
     weights: OptimizerWeights | None,
+    source_graph: "SourceGraph | None" = None,
 ) -> OptimizerResult:
     """Return the max-mode v2 plan by condensing legal auto-plan intervals.
 
@@ -770,6 +797,8 @@ def _select_max_plan(
         Rendering context.
     weights:
         Optional optimizer weights forwarded to the auto selector.
+    source_graph:
+        Optional schedule-local normalized source graph.
 
     Returns
     -------
@@ -777,7 +806,13 @@ def _select_max_plan(
         Max-mode result with segment descriptors, or an L3 auto fallback.
     """
 
-    auto = select_collapse_plan(trace, context, weights, mode="auto")
+    auto = select_collapse_plan(
+        trace,
+        context,
+        weights,
+        mode="auto",
+        source_graph=source_graph,
+    )
     if auto.declined:
         return auto
     analysis = analyze_collapse(trace)
@@ -831,6 +866,7 @@ def _select_max_plan(
                 output_shape_cache=output_shape_cache,
                 best=best,
                 prefer_instantiated_nodes=True,
+                source_graph=source_graph,
             )
             point, plan = _repair_max_salience_floor(
                 trace=trace,
@@ -843,6 +879,7 @@ def _select_max_plan(
                 weights=replace(resolved_weights, fold_intrinsic=0.05),
                 g_star=best[1],
                 point=point,
+                source_graph=source_graph,
             )
             segments = _segments_from_plan_nodes(trace, context, analysis, plan)
             plan_count = count(plan)
@@ -934,6 +971,7 @@ def _repair_max_salience_floor(
     weights: OptimizerWeights,
     g_star: float,
     point: _FrontierPoint,
+    source_graph: "SourceGraph | None" = None,
 ) -> tuple[_FrontierPoint, CollapsePlan]:
     """Expand selected max boxes that hide unique wide parallel fans.
 
@@ -959,6 +997,8 @@ def _repair_max_salience_floor(
         Winning target hidden-mass grain.
     point:
         Instantiated max-plan frontier point.
+    source_graph:
+        Optional schedule-local normalized source graph.
 
     Returns
     -------
@@ -1015,11 +1055,12 @@ def _repair_max_salience_floor(
         box_costs.extend(replacement.box_costs)
     if not changed:
         return point, CollapsePlan(nodes=point.nodes, context=context)
-    rendered_plan = collapse_plan_for_trace(
+    rendered_plan = _collapse_plan_for_source_or_trace(
         trace,
         _collapse_fn_from_selected(frozenset(selected)),
         _fold_mapping(folds),
         context,
+        source_graph,
     )
     rendered_plan, _ = _condense_plan_with_child_segments(
         trace,
@@ -1950,6 +1991,7 @@ def _instantiate_best_point(
         bool,
     ],
     prefer_instantiated_nodes: bool = False,
+    source_graph: "SourceGraph | None" = None,
 ) -> tuple[_FrontierPoint, CollapsePlan]:
     """Instantiate a winning DP point and its renderer-faithful plan.
 
@@ -1973,6 +2015,10 @@ def _instantiate_best_point(
         Plan-local cache shared by optimizer states.
     best:
         Winner tuple from :func:`_select_best_decision`.
+    prefer_instantiated_nodes:
+        Whether to use decision nodes directly instead of renderer planning.
+    source_graph:
+        Optional schedule-local normalized source graph.
 
     Returns
     -------
@@ -2010,8 +2056,47 @@ def _instantiate_best_point(
     if prefer_instantiated_nodes:
         plan = CollapsePlan(nodes=instantiated_point.nodes, context=context)
     else:
-        plan = collapse_plan_for_trace(trace, collapse_fn, repeat_folds, context)
+        plan = _collapse_plan_for_source_or_trace(
+            trace,
+            collapse_fn,
+            repeat_folds,
+            context,
+            source_graph,
+        )
     return instantiated_point, plan
+
+
+def _collapse_plan_for_source_or_trace(
+    trace: "Trace",
+    collapse_fn: Callable[["Module"], bool] | None,
+    repeat_folds: Mapping[str, ModuleRepeatFold] | None,
+    context: RenderContext,
+    source_graph: "SourceGraph | None",
+) -> CollapsePlan:
+    """Build a plan from a shared source graph when one is available.
+
+    Parameters
+    ----------
+    trace:
+        Trace being projected.
+    collapse_fn:
+        Active collapse predicate.
+    repeat_folds:
+        Active repeat-fold mapping.
+    context:
+        Resolved rendering context.
+    source_graph:
+        Optional schedule-local normalized source graph.
+
+    Returns
+    -------
+    CollapsePlan
+        Renderer-faithful structural plan.
+    """
+
+    if source_graph is None:
+        return collapse_plan_for_trace(trace, collapse_fn, repeat_folds, context)
+    return collapse_plan_for_source_graph(source_graph, collapse_fn, repeat_folds)
 
 
 def _collapse_fn_from_selected(selected: frozenset[str]) -> Callable[["Module"], bool]:
@@ -2163,6 +2248,7 @@ def _frontier_can_reach_band(
     output_shape_cache: dict[tuple[str, str], tuple[int, ...] | None],
     weights: OptimizerWeights,
     band_high: int,
+    source_graph: "SourceGraph | None" = None,
 ) -> bool:
     """Return whether module boxes or run folds can reach the readable band.
 
@@ -2188,6 +2274,8 @@ def _frontier_can_reach_band(
         Optimizer weights for the fold-enabled pass.
     band_high:
         Maximum readable auto node count.
+    source_graph:
+        Optional schedule-local normalized source graph.
 
     Returns
     -------
@@ -2226,11 +2314,12 @@ def _frontier_can_reach_band(
             if point.k < 1 or point.k > band_high:
                 continue
             instantiated = _instantiate_module("self", point.k, state, memo)
-            plan = collapse_plan_for_trace(
+            plan = _collapse_plan_for_source_or_trace(
                 trace,
                 _collapse_fn_from_selected(instantiated.selected),
                 _fold_mapping(instantiated.folds),
                 context,
+                source_graph,
             )
             if 1 <= count(plan) <= band_high:
                 return True
@@ -2342,6 +2431,7 @@ def _declined_result(context: RenderContext, reason: str) -> OptimizerResult:
 def _floor_fallback_selection(
     trace: "Trace",
     context: RenderContext,
+    source_graph: "SourceGraph | None" = None,
 ) -> tuple[frozenset[str], CollapsePlan]:
     """Return the conservative visible plan used when the DP frontier is empty.
 
@@ -2351,6 +2441,8 @@ def _floor_fallback_selection(
         Trace being optimized.
     context:
         Rendering context.
+    source_graph:
+        Optional schedule-local normalized source graph.
 
     Returns
     -------
@@ -2360,12 +2452,16 @@ def _floor_fallback_selection(
         is the full-op renderer plan.
     """
 
-    full_plan = collapse_plan_for_trace(trace, None, None, context)
+    full_plan = _collapse_plan_for_source_or_trace(trace, None, None, context, source_graph)
     full_count = count(full_plan)
     selected = frozenset(_top_level_fallback_addresses(trace))
     if selected:
-        candidate_plan = collapse_plan_for_trace(
-            trace, _collapse_fn_from_selected(selected), None, context
+        candidate_plan = _collapse_plan_for_source_or_trace(
+            trace,
+            _collapse_fn_from_selected(selected),
+            None,
+            context,
+            source_graph,
         )
         if 0 < count(candidate_plan) < full_count:
             return selected, candidate_plan

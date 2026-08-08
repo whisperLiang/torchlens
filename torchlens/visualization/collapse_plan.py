@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..data_classes.op import Op
     from ..data_classes.trace import Trace
     from .auto_collapse import ModuleRepeatFold
+    from .source_graph import SourceGraph
 
 
 @dataclass(frozen=True)
@@ -348,23 +349,57 @@ def collapse_plan_for_trace(
         Renderer-faithful structural plan.
     """
 
-    from .node_universe import build_node_universe
     from .source_graph import build_source_graph
 
     resolved_context = RenderContext() if context is None else context
-    universe = build_node_universe(
+    return collapse_plan_for_source_graph(
         build_source_graph(trace, resolved_context), collapse_fn, repeat_folds
     )
-    return collapse_plan_from_universe(universe)
 
 
-def collapse_plan_from_universe(universe: Any) -> CollapsePlan:
+def collapse_plan_for_source_graph(
+    source_graph: "SourceGraph",
+    collapse_fn: Callable[["Module"], bool] | None,
+    repeat_folds: Mapping[str, "ModuleRepeatFold"] | None,
+    node_pool: dict[PlanNode, PlanNode] | None = None,
+) -> CollapsePlan:
+    """Build a collapse plan from one normalized source graph.
+
+    Parameters
+    ----------
+    source_graph:
+        Normalized source graph shared by one or more plan projections.
+    collapse_fn:
+        Active collapse predicate.
+    repeat_folds:
+        Active repeat-fold mapping.
+    node_pool:
+        Optional schedule-local value interner for immutable plan nodes.
+
+    Returns
+    -------
+    CollapsePlan
+        Renderer-faithful structural plan.
+    """
+
+    from .node_universe import build_node_universe
+
+    universe = build_node_universe(source_graph, collapse_fn, repeat_folds)
+    return collapse_plan_from_universe(universe, node_pool=node_pool)
+
+
+def collapse_plan_from_universe(
+    universe: Any,
+    node_pool: dict[PlanNode, PlanNode] | None = None,
+) -> CollapsePlan:
     """Convert visible structural units into the stable collapse-plan AST.
 
     Parameters
     ----------
     universe:
         Presentation-free node universe.
+    node_pool:
+        Optional schedule-local value interner for immutable plan nodes.
 
     Returns
     -------
@@ -404,4 +439,6 @@ def collapse_plan_from_universe(universe: Any) -> CollapsePlan:
     for emission in emissions:
         if emission.kind == "run_fold_ellipsis" and emission.name not in consumed_ellipsis:
             nodes.append(Boundary("run_fold_ellipsis"))
+    if node_pool is not None:
+        nodes = [node_pool.setdefault(node, node) for node in nodes]
     return CollapsePlan(nodes=tuple(nodes), context=universe.source_graph.request)
