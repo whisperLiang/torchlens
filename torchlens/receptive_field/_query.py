@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
+from itertools import islice
 from math import ceil, floor, gcd, ulp
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
@@ -52,7 +53,18 @@ class _Progression:
 
 @dataclass(frozen=True)
 class _IndexSet:
-    """Bounded union of arithmetic progressions with honest collapse metadata."""
+    """Bounded union of arithmetic progressions with honest collapse metadata.
+
+    CANONICAL FORM INVARIANT. Every instance is produced either by
+    :meth:`empty`, :meth:`singleton`, :meth:`interval`, :meth:`from_values`, or
+    by re-wrapping another instance's ``progressions`` with a weaker ``exact``
+    flag. All of those yield exactly the greedy run decomposition that
+    :meth:`from_values` derives from the sorted, de-duplicated value list, so
+    ``progressions`` is always ascending, disjoint, maximal, and no longer than
+    ``_PROGRESSION_BUDGET``. The fast paths below rely on that invariant: they
+    are shortcuts for results the general algorithm would reproduce, never a
+    different answer.
+    """
 
     progressions: tuple[_Progression, ...]
     exact: bool = True
@@ -77,15 +89,25 @@ class _IndexSet:
     @classmethod
     def from_values(cls, values: Iterable[int], *, exact: bool = True) -> _IndexSet:
         """Compress values into at most sixteen runs, else an inexact dense hull."""
-        ordered = sorted(set(values))
+        return cls._from_sorted_unique(sorted(set(values)), exact=exact)
+
+    @classmethod
+    def _from_sorted_unique(cls, ordered: Sequence[int], *, exact: bool = True) -> _IndexSet:
+        """Compress an already sorted, de-duplicated value list into runs.
+
+        This is the body of :meth:`from_values`; callers that already hold
+        ascending distinct values skip the redundant ``sorted(set(...))``.
+        """
         if not ordered:
             return cls.empty(exact=exact)
         runs: list[_Progression] = []
         run_start = ordered[0]
         run_step = 1
         run_count = 1
-        for index, value in enumerate(ordered[1:], start=1):
-            difference = value - ordered[index - 1]
+        previous = run_start
+        for value in islice(ordered, 1, None):
+            difference = value - previous
+            previous = value
             if run_count == 1:
                 run_step = difference
                 run_count = 2
@@ -118,18 +140,37 @@ class _IndexSet:
 
     def values(self) -> tuple[int, ...]:
         """Materialize represented indices in sorted order."""
-        return tuple(sorted({value for item in self.progressions for value in item.values()}))
+        progressions = self.progressions
+        if len(progressions) == 1:
+            item = progressions[0]
+            return tuple(range(item.start, item.stop + 1, item.step))
+        # Canonical progressions are ascending and disjoint, so chaining them
+        # already yields the sorted distinct order the contract promises.
+        return tuple(value for item in progressions for value in item.values())
 
     def clipped(self, extent: int) -> _IndexSet:
         """Intersect this set with ``[0, extent)`` without changing exactness."""
-        return _IndexSet.from_values(
-            (value for value in self.values() if 0 <= value < extent), exact=self.exact
+        progressions = self.progressions
+        if not progressions:
+            return self
+        if progressions[0].start >= 0 and progressions[-1].stop < extent:
+            # Nothing is dropped, so recompressing would rebuild this exact
+            # canonical decomposition with this exact ``exact`` flag.
+            return self
+        return _IndexSet._from_sorted_unique(
+            [value for value in self.values() if 0 <= value < extent], exact=self.exact
         )
 
     @classmethod
     def union(cls, sets: Iterable[_IndexSet]) -> _IndexSet:
         """Union progression sets and enforce the global progression budget."""
-        materialized = tuple(sets)
+        # Path enumeration hands the same set in many times. Union is idempotent
+        # and ``all(...)`` over exactness ignores repeats, so collapsing equal
+        # operands leaves both the value set and the exactness flag unchanged.
+        materialized = tuple(dict.fromkeys(sets))
+        if len(materialized) == 1:
+            # Recompressing one canonical set with its own exactness is identity.
+            return materialized[0]
         return cls.from_values(
             (value for index_set in materialized for value in index_set.values()),
             exact=all(index_set.exact for index_set in materialized),
@@ -210,6 +251,7 @@ def box_for_unit(
             ancestry,
             by_reference,
             True,
+            {},
         )
     if not terminals:
         raise ReceptiveFieldError(
@@ -321,6 +363,19 @@ def _ancestor_labels(
     return frozenset(reachable)
 
 
+def _distinct_terminals(terminals: Iterable[_TerminalState]) -> tuple[_TerminalState, ...]:
+    """Collapse repeated terminal states produced by distinct paths.
+
+    Path enumeration reaches the same terminal state once per path, so a
+    merge-heavy graph grows the terminal tuple exponentially while adding no
+    information. Every consumer -- the emptiness test in the two query entry
+    points and all four aggregations in :func:`_build_box` (two unions, one
+    ``any``, one ``all``) -- is insensitive to both multiplicity and order, and
+    first-occurrence order is preserved here, so the resolved box is unchanged.
+    """
+    return tuple(dict.fromkeys(terminals))
+
+
 def _walk_to_input(
     op: Op,
     output_sets: _AxisSets,
@@ -328,8 +383,38 @@ def _walk_to_input(
     ancestry: frozenset[str],
     by_reference: Mapping[str, Op],
     exact: bool,
+    memo: dict[tuple[str, _AxisSets, bool], tuple[_TerminalState, ...]],
 ) -> tuple[_TerminalState, ...]:
-    """Recursively map a joint axis-set state to one requested model input."""
+    """Recursively map a joint axis-set state to one requested model input.
+
+    The walk enumerates paths, so a merge-heavy graph re-derives the same
+    ``(operation, axis-set state)`` subwalk once per path that reaches it --
+    exponential in the number of merges. ``memo`` caches that pure subresult
+    for the duration of one query. It is plain memoization of a pure function:
+    the cached tuple is exactly what the recursion would rebuild. Terminal
+    de-duplication is a separate step; see :func:`_distinct_terminals`.
+    """
+    key = (op.label, output_sets, exact)
+    cached = memo.get(key)
+    if cached is not None:
+        return cached
+    terminals_for_key = _walk_body(
+        op, output_sets, input_label, ancestry, by_reference, exact, memo
+    )
+    memo[key] = terminals_for_key
+    return terminals_for_key
+
+
+def _walk_body(
+    op: Op,
+    output_sets: _AxisSets,
+    input_label: str,
+    ancestry: frozenset[str],
+    by_reference: Mapping[str, Op],
+    exact: bool,
+    memo: dict[tuple[str, _AxisSets, bool], tuple[_TerminalState, ...]],
+) -> tuple[_TerminalState, ...]:
+    """Map one joint axis-set state across a single reverse hop."""
     if op.label == input_label:
         clipped = tuple(
             None if item is None else item.clipped(int(op.shape[axis]))
@@ -366,9 +451,10 @@ def _walk_to_input(
                 ancestry,
                 by_reference,
                 exact and hop_exact and all(item is None or item.exact for item in parent_sets),
+                memo,
             )
         )
-    return tuple(terminals)
+    return _distinct_terminals(terminals)
 
 
 def _map_to_parent(

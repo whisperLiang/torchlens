@@ -18,6 +18,7 @@ from ._query import (
     _IndexSet,
     _TerminalState,
     _build_box,
+    _distinct_terminals,
     _call_index_callback,
     _call_interval_callback,
     _initial_axis_sets,
@@ -90,7 +91,7 @@ def box_for_source_unit(
     # through it, re-deriving per-operation facts that are linear in that
     # operation's parents. Memoize them for this one query.
     with _engine._geometry_memo():
-        terminals = _walk_to_target(op, initial, target_label, active, by_reference, True)
+        terminals = _walk_to_target(op, initial, target_label, active, by_reference, True, {})
     if not terminals:
         raise ReceptiveFieldError(
             f"Source {op.label!r} has no live path to target {target_label!r}."
@@ -152,8 +153,37 @@ def _walk_to_target(
     active: frozenset[str],
     by_reference: Mapping[str, Op],
     exact: bool,
+    memo: dict[tuple[str, _AxisSets, bool], tuple[_TerminalState, ...]],
 ) -> tuple[_TerminalState, ...]:
-    """Recursively transpose a joint axis-set state toward one target."""
+    """Recursively transpose a joint axis-set state toward one target.
+
+    ``memo`` collapses the path enumeration to distinct
+    ``(operation, axis-set state)`` states for the duration of one query. It is
+    plain memoization of a pure function, so the cached tuple is exactly what
+    the recursion would rebuild; see ``_query._walk_to_input``.
+    """
+
+    key = (op.label, input_sets, exact)
+    cached = memo.get(key)
+    if cached is not None:
+        return cached
+    terminals_for_key = _walk_target_body(
+        op, input_sets, target_label, active, by_reference, exact, memo
+    )
+    memo[key] = terminals_for_key
+    return terminals_for_key
+
+
+def _walk_target_body(
+    op: Op,
+    input_sets: _AxisSets,
+    target_label: str,
+    active: frozenset[str],
+    by_reference: Mapping[str, Op],
+    exact: bool,
+    memo: dict[tuple[str, _AxisSets, bool], tuple[_TerminalState, ...]],
+) -> tuple[_TerminalState, ...]:
+    """Transpose one joint axis-set state across a single forward hop."""
 
     if op.label == target_label:
         clipped = tuple(
@@ -191,9 +221,10 @@ def _walk_to_target(
                 active,
                 by_reference,
                 exact and hop_exact and all(item is None or item.exact for item in child_sets),
+                memo,
             )
         )
-    return tuple(terminals)
+    return _distinct_terminals(terminals)
 
 
 def _map_to_child(
