@@ -218,6 +218,7 @@ def _build_root_module_log(
         _source_trace=self,
     )
 
+    root_pre_hook_provenance = _pre_hook_provenance_for_call(self, "self:1")
     root_pass = ModuleCall(
         address="self",
         call_index=1,
@@ -227,9 +228,9 @@ def _build_root_module_log(
         output_layers=list(self.output_layers),
         output_ops=list(self.output_layers),
         output_structure=_first_output_structure(self, list(self.output_layers)),
-        inputs_before_pre_hooks=_pre_hook_provenance_for_call(self, "self:1")[0],
-        inputs_after_pre_hooks=_pre_hook_provenance_for_call(self, "self:1")[1],
-        forward_pre_hook_effects=_pre_hook_provenance_for_call(self, "self:1")[2],
+        inputs_before_pre_hooks=root_pre_hook_provenance[0],
+        inputs_after_pre_hooks=root_pre_hook_provenance[1],
+        forward_pre_hook_effects=root_pre_hook_provenance[2],
         call_parent=None,
         call_children=_root_call_children(mbd),
         all_addresses=root_meta.get("all_addresses", ["self"]),
@@ -648,6 +649,7 @@ def _build_submodule_call_logs(
         if call_parent_pass is None and call_label in mbd["top_level_module_ops"]:
             call_parent_pass = "self:1"
 
+        pre_hook_provenance = _pre_hook_provenance_for_call(self, call_label)
         module_call_log = ModuleCall(
             address=address,
             call_index=call_index,
@@ -662,9 +664,9 @@ def _build_submodule_call_logs(
             output_paths=mbd.get("module_output_paths", {}).get(call_label, ()),
             forward_args=fwd_positional,
             forward_kwargs=fwd_kwargs,
-            inputs_before_pre_hooks=_pre_hook_provenance_for_call(self, call_label)[0],
-            inputs_after_pre_hooks=_pre_hook_provenance_for_call(self, call_label)[1],
-            forward_pre_hook_effects=_pre_hook_provenance_for_call(self, call_label)[2],
+            inputs_before_pre_hooks=pre_hook_provenance[0],
+            inputs_after_pre_hooks=pre_hook_provenance[1],
+            forward_pre_hook_effects=pre_hook_provenance[2],
             forward_args_template=fwd_args_template,
             forward_kwargs_template=fwd_kwargs_template,
             forward_arg_names=[
