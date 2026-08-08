@@ -1885,14 +1885,21 @@ def _compute_child_condensed_flow_graphs(
                 ),
             )
         )
+        owner_by_op = _condensed_owner_map(flow_children, child_sets)
         parent_ops = tuple(
             label
             for label in signals.get(parent, _empty_signal(parent)).subtree_ops
-            if _condensed_owner_for_op(label, parent, flow_children, child_sets) == label
+            if _condensed_owner_for_op(label, owner_by_op) == label
             and not _is_buffer_op_label(trace, label)
         )
         nodes = (*flow_children, *parent_ops)
-        edges = _condensed_edges(trace, parent, flow_children, child_sets, set(parent_ops))
+        edges = _condensed_edges(
+            trace,
+            flow_children,
+            child_sets,
+            set(parent_ops),
+            owner_by_op,
+        )
         endpoint_counts = _child_external_endpoint_counts(edges, flow_children)
         interval_flags = _flow_interval_flags(trace, flow_children, child_sets, edges)
         graphs[parent] = ChildCondensedFlowGraph(
@@ -2019,20 +2026,14 @@ def _is_forward_dataflow_edge(trace: "Trace", source_label: str, target_label: s
     )
 
 
-def _condensed_owner_for_op(
-    op_label: str,
-    parent: str,
+def _condensed_owner_map(
     flow_children: Sequence[str],
     child_sets: Mapping[str, set[str]],
-) -> str:
-    """Return the condensed node that owns an op within ``parent``.
+) -> dict[str, str]:
+    """Invert child subtree membership into a first-wins op owner map.
 
     Parameters
     ----------
-    op_label:
-        Operation label.
-    parent:
-        Parent module address.
     flow_children:
         Direct children in flow order.
     child_sets:
@@ -2040,23 +2041,42 @@ def _condensed_owner_for_op(
 
     Returns
     -------
+    dict[str, str]
+        Child address keyed by every operation in a direct child subtree.
+    """
+
+    owner_by_op: dict[str, str] = {}
+    for child in flow_children:
+        for op_label in child_sets[child]:
+            owner_by_op.setdefault(op_label, child)
+    return owner_by_op
+
+
+def _condensed_owner_for_op(op_label: str, owner_by_op: Mapping[str, str]) -> str:
+    """Return the condensed node that owns an operation.
+
+    Parameters
+    ----------
+    op_label:
+        Operation label.
+    owner_by_op:
+        First-wins direct-child owner index.
+
+    Returns
+    -------
     str
         Child address when the op belongs to a child subtree; otherwise the op label.
     """
 
-    _ = parent
-    for child in flow_children:
-        if op_label in child_sets.get(child, set()):
-            return child
-    return op_label
+    return owner_by_op.get(op_label, op_label)
 
 
 def _condensed_edges(
     trace: "Trace",
-    parent: str,
     flow_children: Sequence[str],
     child_sets: Mapping[str, set[str]],
     parent_ops: set[str],
+    owner_by_op: Mapping[str, str],
 ) -> tuple[tuple[str, str], ...]:
     """Return condensed edges within one parent module subtree.
 
@@ -2064,14 +2084,14 @@ def _condensed_edges(
     ----------
     trace:
         Trace owning the operation graph.
-    parent:
-        Parent module address.
     flow_children:
         Direct children in flow order.
     child_sets:
         Child subtree operation labels.
     parent_ops:
         Parent-owned operation labels.
+    owner_by_op:
+        First-wins direct-child owner index.
 
     Returns
     -------
@@ -2087,7 +2107,7 @@ def _condensed_edges(
         parent_subtree, key=lambda item: int(getattr(trace.ops[item], "step_index", 0))
     ):
         op = cast("Op", trace.ops[label])
-        source = _condensed_owner_for_op(label, parent, flow_children, child_sets)
+        source = _condensed_owner_for_op(label, owner_by_op)
         for parent_label in getattr(op, "parents", ()) or ():
             parent_op = _resolve_relationship_op(trace, parent_label)
             normalized_parent_label = parent_op.label
@@ -2106,9 +2126,7 @@ def _condensed_edges(
                 continue
             target = _condensed_owner_for_op(
                 normalized_child_label,
-                parent,
-                flow_children,
-                child_sets,
+                owner_by_op,
             )
             if source != target:
                 edges.add((source, target))

@@ -17,8 +17,11 @@ import torch
 
 import torchlens as tl
 import torchlens.visualization.auto_collapse as auto_collapse
+import torchlens.visualization.source_graph as source_graph_module
 from torchlens.data_classes._trace_accessors import TraceOpAccessor
 from torchlens.visualization.auto_collapse import (
+    _condensed_owner_for_op,
+    _condensed_owner_map,
     _resolve_relationship_op,
     analyze_collapse,
     resolve_collapse_fn,
@@ -967,6 +970,102 @@ def test_float_collapse_level_is_deterministic() -> None:
         )
     finally:
         trace.cleanup()
+
+
+def test_float_collapse_schedule_reuses_source_graph_and_plan_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold float schedule shares one source graph and equal immutable plan nodes."""
+
+    trace = _trace(UniformStack(depth=8), torch.randn(2, 8))
+    context = RenderContext()
+    original_build_source_graph = source_graph_module.build_source_graph
+    source_graph_calls = 0
+
+    def counted_build_source_graph(
+        candidate_trace: tl.Trace,
+        request: Any,
+    ) -> Any:
+        """Count normalized source-graph builds while preserving their result.
+
+        Parameters
+        ----------
+        candidate_trace:
+            Trace being normalized.
+        request:
+            Resolved rendering request.
+
+        Returns
+        -------
+        Any
+            Normalized source graph returned by the production builder.
+        """
+
+        nonlocal source_graph_calls
+        source_graph_calls += 1
+        return original_build_source_graph(candidate_trace, request)
+
+    monkeypatch.setattr(source_graph_module, "build_source_graph", counted_build_source_graph)
+    try:
+        _clear_collapse_caches(trace)
+        schedule = collapse_schedule(trace, context)
+
+        assert source_graph_calls == 1
+        canonical_nodes: dict[Any, Any] = {}
+        reused_values = 0
+        for step in schedule.steps:
+            for node in step.plan.nodes:
+                if node in canonical_nodes:
+                    reused_values += 1
+                    assert canonical_nodes[node] is node
+                else:
+                    canonical_nodes[node] = node
+        assert reused_values > 0
+    finally:
+        trace.cleanup()
+
+
+def test_condensed_owner_map_is_first_wins_and_built_once() -> None:
+    """The condensed owner inversion reads each child set once and preserves flow priority."""
+
+    class CountingChildSets(dict[str, set[str]]):
+        """Child-set mapping that counts indexed reads."""
+
+        reads = 0
+
+        def __getitem__(self, key: str) -> set[str]:
+            """Return one child set and count the indexed read.
+
+            Parameters
+            ----------
+            key:
+                Child address to read.
+
+            Returns
+            -------
+            set[str]
+                Operation labels in the requested child subtree.
+            """
+
+            type(self).reads += 1
+            return super().__getitem__(key)
+
+    flow_children = ("first", "second", "third")
+    child_sets = CountingChildSets(
+        {
+            "first": {"shared", "first_only"},
+            "second": {"shared", "second_only"},
+            "third": {"third_only"},
+        }
+    )
+    owner_by_op = _condensed_owner_map(flow_children, child_sets)
+
+    assert CountingChildSets.reads == len(flow_children)
+    for _ in range(50):
+        assert _condensed_owner_for_op("shared", owner_by_op) == "first"
+        assert _condensed_owner_for_op("second_only", owner_by_op) == "second"
+        assert _condensed_owner_for_op("parent_owned", owner_by_op) == "parent_owned"
+    assert CountingChildSets.reads == len(flow_children)
 
 
 @pytest.fixture
