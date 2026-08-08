@@ -7,6 +7,7 @@ passing only data-flow edges in ``data_parents`` and ``data_children``.
 
 import heapq
 import itertools as it
+from bisect import bisect_right
 from collections import Counter, OrderedDict, defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Dict, Mapping, Optional, Set, Tuple
@@ -1669,9 +1670,10 @@ def _pf_partition_class(
         if root1 != root2:
             parent_map[root2] = root1
 
+    member_signature_keys = [frozenset(signatures[member].items()) for member in members]
     cohorts: dict[frozenset, list[str]] = defaultdict(list)
-    for member in members:
-        cohorts[frozenset(signatures[member].items())].append(member)
+    for member, signature_key in zip(members, member_signature_keys):
+        cohorts[signature_key].append(member)
     cohort_sizes = {signature: len(cohort) for signature, cohort in cohorts.items()}
 
     for signature, cohort in cohorts.items():
@@ -1717,12 +1719,52 @@ def _pf_partition_class(
     realized_equal_members = {
         member for member in members if equal_component_sizes[find(member)] > 1
     }
+
+    # Entry-admission prefilter. :func:`_pf_entry_union_allowed` returns ``True``
+    # only through one of three terminal recurrence-evidence arms, and each arm
+    # carries a necessary condition on the pair that is checkable from per-member
+    # indexes without touching the pair:
+    #
+    # * a surviving param/anchor flank in the agreeing remainder needs entry and
+    #   target to SHARE a param/anchor color;
+    # * a realized target cohort needs the target's equal-signature cohort to be
+    #   non-singleton;
+    # * a realized target odd parent needs the target to carry a param/anchor
+    #   color with two or more realizations.
+    #
+    # A target failing all three conditions can never be admitted for any entry,
+    # so walking only qualifying targets is admission-identical while emptying
+    # the pair triangle in the degenerate long-loop regime, where every
+    # signature is a distinct singleton cohort of bare colors. Index lists are
+    # ascending by construction, so per-entry suffixes come from one bisect.
+    member_param_anchor_colors = [
+        [color for color in signatures[member] if color[0] in ("param", "anchor")]
+        for member in members
+    ]
+    shared_color_positions: dict[_SlotColor, list[int]] = defaultdict(list)
+    target_side_positions: list[int] = []
+    for position, signature_key in enumerate(member_signature_keys):
+        param_anchor_colors = member_param_anchor_colors[position]
+        for color in param_anchor_colors:
+            shared_color_positions[color].append(position)
+        if cohort_sizes[signature_key] >= 2 or any(
+            realizations.get(color, 0) >= 2 for color in param_anchor_colors
+        ):
+            target_side_positions.append(position)
+
     for index, entry in enumerate(members):
         if entry in realized_equal_members:
             continue
-        entry_signature = frozenset(signatures[entry].items())
-        for target in members[index + 1 :]:
-            if frozenset(signatures[target].items()) == entry_signature:
+        entry_signature = member_signature_keys[index]
+        candidate_positions = set(
+            target_side_positions[bisect_right(target_side_positions, index) :]
+        )
+        for color in member_param_anchor_colors[index]:
+            positions = shared_color_positions[color]
+            candidate_positions.update(positions[bisect_right(positions, index) :])
+        for position in sorted(candidate_positions):
+            target = members[position]
+            if member_signature_keys[position] == entry_signature:
                 continue
             if find(entry) == find(target):
                 break
@@ -1738,7 +1780,20 @@ def _pf_partition_class(
                 realizations,
                 reach_memo,
             ):
-                union(entry, target)
+                # The unfiltered sweep breaks at the FIRST later
+                # differing-signature member whose root already equals the
+                # entry's -- even a non-candidate -- abandoning any later
+                # admissible target. (Same-signature members are skipped
+                # without a root check, so they never block.) Scan the skipped
+                # gap once before admitting; this runs only on admissions, so
+                # the degenerate regime never pays it.
+                gap_blocked = any(
+                    member_signature_keys[skipped] != entry_signature
+                    and find(members[skipped]) == find(entry)
+                    for skipped in range(index + 1, position)
+                )
+                if not gap_blocked:
+                    union(entry, target)
                 break
 
     groups: dict[str, list[str]] = defaultdict(list)
