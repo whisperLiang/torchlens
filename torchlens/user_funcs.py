@@ -534,6 +534,7 @@ def _intervention_spec_from_hook_plan(hook_plan: Any) -> InterventionSpec | None
     if not hook_plan:
         return None
     spec = InterventionSpec()
+    target_keys: set[Any] | None = set()
     for entry in hook_plan:
         site_target = entry.site_target
         if isinstance(site_target, TargetSpec):
@@ -542,8 +543,21 @@ def _intervention_spec_from_hook_plan(hook_plan: Any) -> InterventionSpec | None
             target = site_target.to_target_spec()
         else:
             target = TargetSpec("label", site_target)
-        if not any(existing.freeze() == target.freeze() for existing in spec.targets):
+        frozen_target = target.freeze()
+        if target_keys is not None:
+            try:
+                target_is_new = frozen_target not in target_keys
+            except TypeError:
+                target_keys = None
+                target_is_new = not any(
+                    existing.freeze() == frozen_target for existing in spec.targets
+                )
+        else:
+            target_is_new = not any(existing.freeze() == frozen_target for existing in spec.targets)
+        if target_is_new:
             spec.targets.append(target)
+            if target_keys is not None:
+                target_keys.add(frozen_target)
         spec.add_hook(
             target,
             entry.helper_spec if entry.helper_spec is not None else entry.normalized_callable,
@@ -627,9 +641,28 @@ def _merge_intervention_spec_hooks(
 
     if source is None:
         return destination
+    try:
+        target_keys: set[Any] | None = {existing.freeze() for existing in destination.targets}
+    except TypeError:
+        target_keys = None
     for target in source.targets:
-        if not any(existing.freeze() == target.freeze() for existing in destination.targets):
+        frozen_target = target.freeze()
+        if target_keys is not None:
+            try:
+                target_is_new = frozen_target not in target_keys
+            except TypeError:
+                target_keys = None
+                target_is_new = not any(
+                    existing.freeze() == frozen_target for existing in destination.targets
+                )
+        else:
+            target_is_new = not any(
+                existing.freeze() == frozen_target for existing in destination.targets
+            )
+        if target_is_new:
             destination.targets.append(target)
+            if target_keys is not None:
+                target_keys.add(frozen_target)
     destination.hook_specs.extend(source.hook_specs)
     return destination
 
