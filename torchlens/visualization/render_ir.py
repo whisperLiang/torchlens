@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, Mapping
 
@@ -972,11 +972,23 @@ def finalize_forward_regions(
         )
         for edge in render_ir.edges
     )
+    # Bucket every per-region lookup ONCE, the way ``_build_regions`` already does,
+    # so the region loop below stays linear. Re-scanning ``render_ir.nodes`` /
+    # ``edges`` / the module tree inside the loop is a linear number of full
+    # collection scans, i.e. quadratic time on module-rich models.
     region_keys = set(module_payloads)
+    region_nodes: defaultdict[str, list[str]] = defaultdict(list)
     for node in render_ir.nodes:
         region_keys.update(node.region_path)
+        if node.region_path:
+            region_nodes[node.region_path[-1]].append(node.name)
+    region_edge_indexes: defaultdict[str, list[int]] = defaultdict(list)
+    for index, edge in enumerate(edges):
+        if edge.owner_cluster is not None:
+            region_edge_indexes[edge.owner_cluster].append(index)
     module_children, top_modules = _region_module_hierarchy(trace, vis_mode)
     max_depth = _get_max_call_depth(top_modules, module_payloads, module_children)
+    call_depths = _region_call_depths(top_modules, module_children)
     regions: list[RenderIRRegion] = []
     for key in sorted(region_keys):
         address = key.split(":", 1)[0]
@@ -995,17 +1007,18 @@ def finalize_forward_regions(
             module_type=module.class_name,
             line_style="solid" if payload.get("has_input_ancestor") else "dashed",
             penwidth=compute_module_penwidth(
-                _region_call_depth(key, top_modules, module_children), max_depth
+                call_depths.get(key, _module_depth(key) - 1), max_depth
             ),
         )
         for attr_name, attr_value in overrides.module.items():
             attrs[attr_name] = str(attr_value(trace, key) if callable(attr_value) else attr_value)
         node_names = tuple(str(args.get("name", "")) for args in payload.get("nodes", ()))
-        node_names += tuple(
-            node.name
-            for node in render_ir.nodes
-            if node.region_path and node.region_path[-1] == key and node.name not in node_names
-        )
+        # ``node_names`` on the right-hand side of the historical ``+=`` was the
+        # payload-derived prefix only (the tuple is fully built before rebinding),
+        # so IR nodes are deduplicated against the prefix and NOT against each
+        # other. ``payload_names`` reproduces exactly that scope.
+        payload_names = set(node_names)
+        node_names += tuple(name for name in region_nodes.get(key, ()) if name not in payload_names)
         regions.append(
             RenderIRRegion(
                 key=key,
@@ -1014,9 +1027,7 @@ def finalize_forward_regions(
                 label=label,
                 style=tuple(attrs.items()),
                 node_names=node_names,
-                edge_indexes=tuple(
-                    index for index, edge in enumerate(edges) if edge.owner_cluster == key
-                ),
+                edge_indexes=tuple(region_edge_indexes.get(key, ())),
             )
         )
     for container in container_regions:
@@ -1088,17 +1099,21 @@ def _region_module_hierarchy(
     return children, list(trace.modules["self"].call_children)
 
 
-def _region_call_depth(
-    key: str,
+def _region_call_depths(
     top_modules: list[str],
     children: Mapping[str, list[str]],
-) -> int:
-    """Return the legacy BFS subgraph depth for a module region.
+) -> dict[str, int]:
+    """Return legacy BFS subgraph depths for every reachable module key.
+
+    One breadth-first sweep replaces the historical per-key sweep. Both report
+    the depth at which breadth-first traversal from ``top_modules``, in the same
+    child order, first reaches a key -- the shortest root distance -- so every
+    recorded depth matches the per-key search exactly. Keys the sweep never
+    reaches are simply absent; callers keep the historical
+    ``_module_depth(key) - 1`` fallback for those.
 
     Parameters
     ----------
-    key:
-        Region key to locate.
     top_modules:
         Top-level emitted module keys.
     children:
@@ -1106,14 +1121,16 @@ def _region_call_depth(
 
     Returns
     -------
-    int
-        Zero-based nesting depth used for module border widths.
+    dict[str, int]
+        Zero-based nesting depth per reachable key, used for module border widths.
     """
 
-    pending = [(candidate, 0) for candidate in top_modules]
+    depths: dict[str, int] = {}
+    pending: deque[tuple[str, int]] = deque((candidate, 0) for candidate in top_modules)
     while pending:
-        candidate, depth = pending.pop(0)
-        if candidate == key:
-            return depth
-        pending.extend((child, depth + 1) for child in children[candidate])
-    return _module_depth(key) - 1
+        candidate, depth = pending.popleft()
+        if candidate in depths:
+            continue
+        depths[candidate] = depth
+        pending.extend((child, depth + 1) for child in children.get(candidate, ()))
+    return depths
