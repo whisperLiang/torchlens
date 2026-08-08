@@ -1565,40 +1565,14 @@ def _legal_plan_child_segment_run(
     if len(addresses) < 2 or parent is None:
         return None
     graph = analysis.child_flow_graphs.get(parent)
-    best: tuple[str, ...] | None = None
-    for end in range(2, len(addresses) + 1):
-        candidate = tuple(addresses[:end])
-        if any(analysis.signals[address].landmark_edges >= 2 for address in candidate):
-            continue
-        if not _segment_is_legal(candidate, graph):
-            continue
-        hidden = _child_segment_hidden_units(analysis, candidate, hidden_counts, context.vis_mode)
-        if total_ops > 0 and hidden / total_ops > dominance_limit:
-            continue
-        best = candidate
-    return best
-
-
-def _child_segment_hidden_units(
-    analysis: CollapseAnalysis,
-    addresses: tuple[str, ...],
-    hidden_counts: Mapping[str, int],
-    vis_mode: str = "unrolled",
-) -> int:
-    """Return rendered hidden-unit count for a candidate child segment.
-
-    The count is expressed in the active render currency: concrete
-    pass-qualified ops for unrolled graphs and deduplicated layer labels for
-    rolled graphs, matching the optimizer's total-unit normalization.
-    """
-
-    covered_ops = _child_segment_covered_ops(analysis, addresses)
-    if covered_ops:
-        if vis_mode == "rolled":
-            return len({str(label).rsplit(":", 1)[0] for label in covered_ops})
-        return len(covered_ops)
-    return sum(
-        hidden_counts.get(address, analysis.signals[address].hidden_ops) for address in addresses
+    return _longest_legal_segment_prefix(
+        addresses,
+        graph,
+        analysis,
+        hidden_counts,
+        total_ops,
+        dominance_limit=dominance_limit,
+        vis_mode=context.vis_mode,
     )
 
 
@@ -1621,6 +1595,108 @@ def _segment_is_legal(
     if len(addresses) < 2 or graph is None:
         return False
     return _run_fold_is_chain_interval(addresses, graph)
+
+
+def _longest_legal_segment_prefix(
+    members: Sequence[str],
+    graph: "ChildCondensedFlowGraph | None",
+    analysis: CollapseAnalysis,
+    hidden_counts: Mapping[str, int],
+    total_ops: int,
+    *,
+    dominance_limit: float,
+    vis_mode: str = "unrolled",
+) -> tuple[str, ...] | None:
+    """Return the longest prefix of ``members`` that is a legal segment run.
+
+    Selects exactly the prefix a forward ``members[:end]`` scan would keep
+    last, but reduces each gate to its cheapest exact form so the search costs
+    one linear pass plus the chain-interval probes it cannot avoid:
+
+    * a member with two or more landmark edges poisons every prefix that
+      reaches it, so one forward scan yields a hard prefix ceiling instead of
+      a rescan of the whole prefix per candidate;
+    * hidden-unit currency accumulates over prefixes, so one incremental pass
+      settles the dominance gate for every prefix length at once;
+    * only the longest passing prefix is ever returned, so the chain-interval
+      probe walks down from the longest surviving candidate and stops at the
+      first pass rather than testing every prefix.
+
+    Parameters
+    ----------
+    members:
+        Candidate member addresses in flow order.
+    graph:
+        Child-condensed flow graph for the parent.
+    analysis:
+        Shared collapse analysis.
+    hidden_counts:
+        Renderer-faithful hidden counts.
+    total_ops:
+        Total rendered operation units.
+    dominance_limit:
+        Maximum segment dominance.
+    vis_mode:
+        Render currency for hidden-unit counting.
+
+    Returns
+    -------
+    tuple[str, ...] | None
+        Longest legal run, or ``None``.
+    """
+
+    if len(members) < 2:
+        return None
+    signals = analysis.signals
+    # Landmark ceiling: ``any(...)`` over a prefix short-circuits at the first
+    # landmark member, and every longer prefix still contains it, so the first
+    # landmark index is the exclusive bound on candidate lengths.
+    limit = len(members)
+    for index, address in enumerate(members):
+        if signals[address].landmark_edges >= 2:
+            limit = index
+            break
+    if limit < 2:
+        return None
+
+    # Dominance gate, resolved for every prefix length in one pass. Hidden
+    # units are counted in the active render currency -- concrete
+    # pass-qualified ops for unrolled graphs, deduplicated layer labels for
+    # rolled graphs -- matching the optimizer's total-unit normalization. Both
+    # that covered-op currency and the no-coverage fallback accumulate member
+    # by member, so recounting a whole prefix per candidate is redundant work
+    # over already-seen members.
+    dominant: set[int] = set()
+    if total_ops > 0:
+        rolled = vis_mode == "rolled"
+        covered: dict[str, None] = {}
+        rolled_bases: dict[str, None] = {}
+        fallback = 0
+        for end in range(1, limit + 1):
+            address = members[end - 1]
+            signal = signals[address]
+            for label in signal.subtree_ops:
+                text = str(label)
+                covered[text] = None
+                if rolled:
+                    rolled_bases[text.rsplit(":", 1)[0]] = None
+            fallback += hidden_counts.get(address, signal.hidden_ops)
+            if end < 2:
+                continue
+            if covered:
+                hidden = len(rolled_bases) if rolled else len(covered)
+            else:
+                hidden = fallback
+            if hidden / total_ops > dominance_limit:
+                dominant.add(end)
+
+    for end in range(limit, 1, -1):
+        if end in dominant:
+            continue
+        candidate = tuple(members[:end])
+        if _segment_is_legal(candidate, graph):
+            return candidate
+    return None
 
 
 def _encode_segment_address(address: str) -> str:
@@ -2833,18 +2909,14 @@ def _legal_component_segment_run(
 
     if len(members) < 2 or graph is None:
         return None
-    best: tuple[str, ...] | None = None
-    for end in range(2, len(members) + 1):
-        candidate = tuple(members[:end])
-        if any(state.analysis.signals[address].landmark_edges >= 2 for address in candidate):
-            continue
-        if not _segment_is_legal(candidate, graph):
-            continue
-        hidden = _child_segment_hidden_units(state.analysis, candidate, state.hidden_counts)
-        if state.total_ops > 0 and hidden / state.total_ops > 0.75:
-            continue
-        best = candidate
-    return best
+    return _longest_legal_segment_prefix(
+        members,
+        graph,
+        state.analysis,
+        state.hidden_counts,
+        state.total_ops,
+        dominance_limit=0.75,
+    )
 
 
 def _component_boxes(component: RoleComponent, state: _OptimizerState) -> _DecisionPoint | None:
