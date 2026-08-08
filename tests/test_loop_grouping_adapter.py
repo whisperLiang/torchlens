@@ -3,6 +3,7 @@
 import cProfile
 import itertools as it
 import pstats
+import random
 from collections import Counter, defaultdict
 from typing import Any
 
@@ -466,3 +467,352 @@ def test_entry_sweep_prefilter_empties_degenerate_pair_triangle(monkeypatch: Any
     outcomes.clear()
     trace_fn(_HandLSTM(24), torch.rand(2, 24, 8))
     assert any(outcomes)
+
+
+class _TwinCatCellRNN(torch.nn.Module):
+    """Two independent cat-cell loops: a mixed-ancestry multi-root bare group.
+
+    Each stream's FIRST ``cat`` consumes only the raw input and a fresh zeros
+    tensor (no anchored ancestry) while every later ``cat`` consumes the
+    previous ``tanh(linear(...))`` (anchored ancestry), so the ``cat``
+    candidate group mixes ancestry-free and ancestry-carrying members with
+    MULTIPLE surviving roots and nonconsecutive eligible pairs -- adversarial
+    for any pair-space restriction in the iso-group merge sweep.
+    """
+
+    def __init__(self, num_steps: int, dim: int = 8) -> None:
+        super().__init__()
+        self.num_steps = num_steps
+        self.cell_a = torch.nn.Linear(2 * dim, dim)
+        self.cell_b = torch.nn.Linear(2 * dim, dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        hidden_a = torch.zeros(x.shape[0], x.shape[2])
+        hidden_b = torch.zeros(x.shape[0], x.shape[2])
+        for step in range(self.num_steps):
+            hidden_a = torch.tanh(self.cell_a(torch.cat([x[:, step], hidden_a], dim=1)))
+        for step in range(self.num_steps):
+            hidden_b = torch.tanh(self.cell_b(torch.cat([x[:, step], hidden_b], dim=1)))
+        return hidden_a + hidden_b
+
+
+def _unrestricted_merge_iso_groups_oracle(
+    workspace: Any,
+    iso_node_groups: dict,
+    node_to_subgraph: dict,
+    adjacent_subgraphs: dict,
+) -> dict:
+    """Verbatim pre-restriction ``_merge_iso_groups_to_layers``: the identity oracle.
+
+    This is the full-triangle sweep exactly as shipped before the bare-group
+    combinations restriction (every pair of an all-bare group enumerated, with
+    the historical all-anchored group skip), kept as a reference so the
+    restricted production sweep can be asserted merge-identical on every real
+    call issued while tracing adversarial recurrent fixtures.
+    """
+    uf_parent: dict = {}
+
+    def find(x: str) -> str:
+        if x not in uf_parent:
+            uf_parent[x] = x
+        while uf_parent[x] != x:
+            uf_parent[x] = uf_parent[uf_parent[x]]
+            x = uf_parent[x]
+        return x
+
+    def union(x: str, y: str) -> None:
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            if rx > ry:
+                rx, ry = ry, rx
+            uf_parent[ry] = rx
+
+    all_iso_nodes: set = set()
+    for iso_nodes_orig in iso_node_groups.values():
+        all_iso_nodes.update(iso_nodes_orig)
+
+    sg_param_types: dict = {}
+    for iso_nodes_orig in iso_node_groups.values():
+        for node_label in iso_nodes_orig:
+            sg = node_to_subgraph[node_label]
+            sg_label = sg.starting_node
+            if sg_label not in sg_param_types:
+                sg_param_types[sg_label] = frozenset(
+                    workspace.nodes[pnode].equivalence_key for pnode in sg.param_nodes
+                )
+
+    reach_memo = lga._ReachabilityCache(workspace)
+    anchor_ancestry = lga._topology_anchor_ancestry(workspace)
+
+    for iso_group_label, iso_nodes_orig in iso_node_groups.items():
+        iso_nodes = sorted(
+            iso_nodes_orig, key=lambda node_label: workspace.nodes[node_label].raw_order
+        )
+        distinct_roots = len({find(node_label) for node_label in iso_nodes})
+        if distinct_roots == 1:
+            continue
+        if all(
+            not workspace.nodes[node_label].uses_params
+            and not workspace.nodes[node_label].recurrence_anchored
+            and anchor_ancestry[node_label]
+            for node_label in iso_nodes
+        ):
+            continue
+        pair_iter = it.chain(zip(iso_nodes, iso_nodes[1:]), it.combinations(iso_nodes, 2))
+        for node1_label, node2_label in pair_iter:
+            if find(node1_label) == find(node2_label):
+                continue
+            node1_subgraph_label = node_to_subgraph[node1_label].starting_node
+            node2_subgraph_label = node_to_subgraph[node2_label].starting_node
+            subgraphs_are_adjacent = (
+                node1_subgraph_label in adjacent_subgraphs
+                and node2_subgraph_label in adjacent_subgraphs[node1_subgraph_label]
+            )
+            node1 = workspace.nodes[node1_label]
+            node2 = workspace.nodes[node2_label]
+            if (
+                node1.uses_params
+                and node2.uses_params
+                and lga._param_call_identity(node1) != lga._param_call_identity(node2)
+            ):
+                continue
+            pair_anchored = node1.recurrence_anchored or node2.recurrence_anchored
+            if not (node1.uses_params or node2.uses_params or pair_anchored):
+                if (
+                    not anchor_ancestry[node1_label]
+                    and not anchor_ancestry[node2_label]
+                    and subgraphs_are_adjacent
+                    and lga._param_free_adjacency_merge_allowed(
+                        workspace,
+                        node1_label,
+                        node2_label,
+                        node_to_subgraph[node1_label],
+                        node_to_subgraph[node2_label],
+                    )
+                ):
+                    union(node1_label, node2_label)
+                    distinct_roots -= 1
+                    if distinct_roots == 1:
+                        break
+                continue
+            overlapping_param_types = (
+                sg_param_types[node1_subgraph_label] & sg_param_types[node2_subgraph_label]
+            )
+            if overlapping_param_types:
+                if subgraphs_are_adjacent or lga._seed_reaches(
+                    workspace, node1_label, node2_label, reach_memo
+                ):
+                    union(node1_label, node2_label)
+                    distinct_roots -= 1
+                    if distinct_roots == 1:
+                        break
+            elif subgraphs_are_adjacent and pair_anchored:
+                union(node1_label, node2_label)
+                distinct_roots -= 1
+                if distinct_roots == 1:
+                    break
+
+    param_barcode_groups: dict = defaultdict(list)
+    for node_label in all_iso_nodes:
+        node = workspace.nodes[node_label]
+        if node.uses_params and node.param_barcodes:
+            param_barcode_groups[lga._param_call_identity(node)].append(node_label)
+
+    for _identity_key, nodes_with_same_params in param_barcode_groups.items():
+        if len(nodes_with_same_params) > 1:
+            first = nodes_with_same_params[0]
+            for other in nodes_with_same_params[1:]:
+                union(first, other)
+
+    merged_layer_groups: dict = defaultdict(set)
+    for node_label in all_iso_nodes:
+        root = find(node_label)
+        merged_layer_groups[root].add(node_label)
+
+    return {leader: nodes for leader, nodes in merged_layer_groups.items() if len(nodes) > 1}
+
+
+@pytest.mark.smoke
+def test_bare_group_restriction_matches_unrestricted_merge_oracle(monkeypatch: Any) -> None:
+    """Restricted iso-group merge is merge-identical to the full-triangle oracle.
+
+    Every real ``_merge_iso_groups_to_layers`` call issued while tracing the
+    adversarial battery (mixed-ancestry cat-cell, twin multi-root cat-cell
+    streams, admissions-firing hand LSTM, and the pure param-free
+    parallel-streams net whose bare groups have NO anchored ancestry and must
+    keep their full triangle) must return exactly the merged groups -- same
+    min-label roots, same member sets -- the unrestricted sweep returns.
+    """
+    production = lga._merge_iso_groups_to_layers
+    compared_calls = {"count": 0}
+
+    def comparing_merge(*args: Any, **kwargs: Any) -> dict:
+        produced = production(*args, **kwargs)
+        oracle = _unrestricted_merge_iso_groups_oracle(*args, **kwargs)
+        assert produced == oracle
+        compared_calls["count"] += 1
+        return produced
+
+    monkeypatch.setattr(lga, "_merge_iso_groups_to_layers", comparing_merge)
+    torch.manual_seed(0)
+    trace_fn(_ExplicitCatCellRNN(32), torch.rand(2, 32, 8))
+    trace_fn(_TwinCatCellRNN(16), torch.rand(2, 16, 8))
+    trace_fn(_HandLSTM(24), torch.rand(2, 24, 8))
+    trace_fn(_ParallelStreamsNet(), torch.rand(2, 3, 8))
+    assert compared_calls["count"] > 0
+
+
+def _reachability_workspace(
+    labels: list[str],
+    raw_orders: dict[str, int],
+    children: dict[str, tuple[str, ...]],
+) -> Any:
+    """Build a minimal grouping workspace exposing only reachability topology."""
+    nodes = {
+        label: lga._MutableRecurrenceNode(
+            label=label,
+            raw_order=raw_orders[label],
+            equivalence_key="key",
+            equivalent_labels=(),
+            data_parents=(),
+            data_children=children.get(label, ()),
+            layer_label=label,
+            recurrent_labels=[],
+            uses_params=False,
+            func_name="func",
+            param_barcodes=(),
+        )
+        for label in labels
+    }
+    return lga._GroupingWorkspace(
+        nodes=nodes,
+        raw_labels=tuple(sorted(labels, key=lambda label: raw_orders[label])),
+        source_labels=(labels[0],),
+        eligible_labels=set(labels),
+    )
+
+
+def _random_monotone_workspace(seed: int, num_nodes: int, edge_probability: float) -> Any:
+    """Build a random forward-edge DAG workspace in topological insertion order."""
+    rng = random.Random(seed)
+    labels = [f"n{index:03d}" for index in range(num_nodes)]
+    children = {
+        labels[i]: tuple(
+            labels[j] for j in range(i + 1, num_nodes) if rng.random() < edge_probability
+        )
+        for i in range(num_nodes)
+    }
+    raw_orders = {label: index for index, label in enumerate(labels)}
+    return _reachability_workspace(labels, raw_orders, children)
+
+
+def _reference_reaches(workspace: Any, src_label: str, dst_label: str) -> bool:
+    """Plain unbounded DFS reachability: the reachability ground truth."""
+    if src_label == dst_label:
+        return True
+    stack = [src_label]
+    seen = {src_label}
+    while stack:
+        for child in workspace.nodes[stack.pop()].data_children:
+            if child == dst_label:
+                return True
+            if child not in seen and child in workspace.nodes:
+                seen.add(child)
+                stack.append(child)
+    return False
+
+
+@pytest.mark.smoke
+def test_adaptive_reachability_matches_reference_on_random_dags() -> None:
+    """Sparse, dense, and repeated queries all match ground-truth reachability.
+
+    The query mix drives every adaptive lane: one distinct target per source
+    (the post-prefilter sparse shape, answered by the bounded pair query),
+    repeated identical pairs (the pair memo), and dense sources with many
+    distinct targets (mask materialization through the batch DP). Dense
+    demand must actually materialize masks -- the adaptive policy defers the
+    full-mask regime, never disables it.
+    """
+    for seed in range(12):
+        workspace = _random_monotone_workspace(seed, num_nodes=40, edge_probability=0.08)
+        labels = list(workspace.nodes)
+        cache = lga._ReachabilityCache(workspace)
+        rng = random.Random(1000 + seed)
+        queries: list[tuple[str, str]] = []
+        for index in range(len(labels) - 1):
+            queries.append((labels[index], labels[index + 1]))
+        for src_label in rng.sample(labels[: len(labels) // 2], 3):
+            src_order = workspace.nodes[src_label].raw_order
+            later = [label for label in labels if workspace.nodes[label].raw_order >= src_order]
+            for dst_label in rng.sample(later, min(8, len(later))):
+                queries.append((src_label, dst_label))
+        queries.extend(queries[:10])
+        for src_label, dst_label in queries:
+            assert cache.reaches_from_earlier(src_label, dst_label) == _reference_reaches(
+                workspace, src_label, dst_label
+            ), (seed, src_label, dst_label)
+        assert cache._batch_attempted
+        assert len(cache._descendant_bits) == len(labels)
+
+
+@pytest.mark.smoke
+def test_batch_dp_masks_equal_per_source_bfs_masks() -> None:
+    """The reverse-topological batch DP builds bit-identical descendant masks."""
+    for seed in (0, 1, 2):
+        workspace = _random_monotone_workspace(seed, num_nodes=60, edge_probability=0.06)
+        batch_cache = lga._ReachabilityCache(workspace)
+        batch_cache._prepare()
+        batch_cache._batch_build_descendant_masks()
+        bfs_cache = lga._ReachabilityCache(workspace)
+        bfs_cache._prepare()
+        assert batch_cache._descendant_bits, "batch DP unexpectedly abandoned"
+        for label in workspace.nodes:
+            assert batch_cache._descendant_bits[label] == bfs_cache._build_descendant_mask(label), (
+                seed,
+                label,
+            )
+
+
+@pytest.mark.smoke
+def test_tied_insertion_order_falls_back_to_per_source_bfs() -> None:
+    """A raw-order tie inserted child-first abandons the batch DP, not correctness.
+
+    ``_order_monotone`` accepts ``raw_order`` ties, but the batch DP requires
+    strict insertion-order topology: with the tied child inserted BEFORE its
+    parent, a naive DP would drop the child's own descendants from the
+    parent's mask. The guard must abandon the batch and serve the dense
+    source through the exact per-source BFS, including the grand-descendant
+    reached through the tied edge.
+    """
+    labels = ["tied_child", "tied_parent", "grandchild", "detached"]
+    raw_orders = {"tied_parent": 0, "tied_child": 0, "grandchild": 1, "detached": 2}
+    children = {
+        "tied_parent": ("tied_child",),
+        "tied_child": ("grandchild",),
+    }
+    workspace = _reachability_workspace(labels, raw_orders, children)
+    cache = lga._ReachabilityCache(workspace)
+
+    assert cache.reaches_from_earlier("tied_parent", "tied_child")
+    assert cache.reaches_from_earlier("tied_parent", "grandchild")
+    assert not cache.reaches_from_earlier("tied_parent", "detached")
+    assert cache._batch_attempted
+    assert set(cache._descendant_bits) == {"tied_parent"}
+    assert cache.reaches_from_earlier("tied_parent", "grandchild")
+
+
+@pytest.mark.smoke
+def test_non_monotone_workspace_keeps_bounded_pair_lane() -> None:
+    """A raw-order-violating edge disables masks entirely, answers stay exact."""
+    labels = ["late_parent", "early_child", "tail"]
+    raw_orders = {"late_parent": 5, "early_child": 1, "tail": 6}
+    children = {"late_parent": ("early_child",), "early_child": ("tail",)}
+    workspace = _reachability_workspace(labels, raw_orders, children)
+    cache = lga._ReachabilityCache(workspace)
+
+    for _ in range(4):
+        assert cache.reaches_from_earlier("early_child", "tail")
+        assert not cache.reaches_from_earlier("early_child", "late_parent")
+    assert cache._order_monotone is False
+    assert not cache._descendant_bits
+    assert not cache._batch_attempted

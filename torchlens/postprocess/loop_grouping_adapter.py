@@ -21,6 +21,14 @@ FrontierNodes = OrderedDict[str, dict[str, deque[str]]]
 _PSEUDO_FUNC_NAME = "none"
 _MIN_PARAM_FREE_LOOP_BODY_OPS = 2
 
+# Distinct-target reachability queries a monotone-lane source may answer through
+# the exact bounded per-pair BFS before it is treated as dense and its full
+# descendant mask is materialized (see :class:`_ReachabilityCache`). The
+# post-prefilter cohort sweeps demand about one distinct target per source, so
+# sparse sources never pay a graph-wide traversal, while genuinely dense demand
+# reaches the O(1) mask lane after two bounded probes.
+_DENSE_SOURCE_DISTINCT_QUERIES = 2
+
 # A slot color is the site identity a parent contributes to a param-free op's
 # signature: ``("param", call_identity)`` for parameterized calls, ``("anchor",
 # (equivalence_key, output_slot))`` for anchored (module-bound or buffer) ops,
@@ -595,37 +603,44 @@ def _advance_bfs_frontier(
         is_first_node,
     )
 
-    while True:
-        (
-            candidate_node_label,
-            candidate_node_neighbor_type,
-            candidate_node_subgraph,
-        ) = _pop_frontier_node(frontier_nodes)
-        if candidate_node_label is None:
-            break
+    # Direction-major drain: every subgraph's children before any parents, so a
+    # loop-carried value shared between a child frontier and a parent frontier
+    # is deterministically absorbed through its child position first and its
+    # parent-side appearance records iteration adjacency at pop time. Callees
+    # only ever REMOVE frontier entries (isomorphic matches delete from OTHER
+    # subgraphs' same-direction deques; nothing refills a bucket), so draining
+    # each live deque in place visits candidates in exactly the order the
+    # first-non-empty-bucket rescan in :func:`_pop_frontier_node` produced,
+    # without restarting the bucket-product scan after every pop.
+    for candidate_node_neighbor_type in ("children", "parents"):
+        for candidate_node_subgraph in frontier_nodes:
+            bucket = frontier_nodes[candidate_node_subgraph][candidate_node_neighbor_type]
+            while bucket:
+                candidate_node_label = bucket.popleft()
 
-        if candidate_node_label in state.node_to_subgraph:
-            # The candidate was absorbed into another subgraph after this frontier
-            # was collected (a loop-carried value: child of body ``i``, parent of
-            # body ``i + 1``). It cannot be matched again, but its presence on this
-            # subgraph's frontier is exactly the evidence that consecutive
-            # iterations are directly adjacent -- record that instead.
-            _record_frontier_adjacency(
-                candidate_node_subgraph,  # type: ignore[arg-type]
-                candidate_node_label,
-                state,
-            )
-            continue
+                if candidate_node_label in state.node_to_subgraph:
+                    # The candidate was absorbed into another subgraph after this
+                    # frontier was collected (a loop-carried value: child of body
+                    # ``i``, parent of body ``i + 1``). It cannot be matched again,
+                    # but its presence on this subgraph's frontier is exactly the
+                    # evidence that consecutive iterations are directly adjacent --
+                    # record that instead.
+                    _record_frontier_adjacency(
+                        candidate_node_subgraph,
+                        candidate_node_label,
+                        state,
+                    )
+                    continue
 
-        new_equivalent_nodes = _find_isomorphic_matches(
-            workspace,
-            candidate_node_label,
-            candidate_node_neighbor_type,  # type: ignore[arg-type]
-            candidate_node_subgraph,  # type: ignore[arg-type]
-            frontier_nodes,
-        )
+                new_equivalent_nodes = _find_isomorphic_matches(
+                    workspace,
+                    candidate_node_label,
+                    candidate_node_neighbor_type,
+                    candidate_node_subgraph,
+                    frontier_nodes,
+                )
 
-        _register_isomorphic_group(workspace, new_equivalent_nodes, state)
+                _register_isomorphic_group(workspace, new_equivalent_nodes, state)
 
 
 def _collect_frontier_and_detect_adjacency(
@@ -820,6 +835,12 @@ def _pop_frontier_node(
     that a loop-carried value shared between a child frontier and a parent frontier
     is deterministically absorbed through its child position first; its parent-side
     appearance then records iteration adjacency at pop time.
+
+    This helper is the reference specification of the frontier pop order. The
+    production loop in :func:`_advance_bfs_frontier` drains the live deques
+    directly in the identical order (buckets only ever shrink during a frontier
+    step, so a single direction-major pass is pop-for-pop equivalent) instead of
+    restarting this scan from the first bucket after every pop.
     """
     for neighbor_type, subgraph_label in it.product(["children", "parents"], frontier_nodes):
         subgraph_neighbors = frontier_nodes[subgraph_label][neighbor_type]
@@ -960,15 +981,28 @@ def _finalize_layer_assignments(
 class _ReachabilityCache:
     """Per-grouping-run reachability cache backing :func:`_seed_reaches`.
 
-    The bare-op fixpoint's entry-admission and cohort sweeps issue O(N^2)
-    reachability queries drawn from only O(N) distinct sources, so a per-pair
-    memo still runs one bounded BFS per query and the sweep degenerates to
-    O(N^3) interpreter work on explicit recurrence chains. This cache instead
-    materializes the FULL descendant set once per distinct source (lazily, on
-    first query) and answers every later query for that source with an O(1)
-    membership test. Descendant sets are stored as per-node-index bitmask ints,
-    not label sets, keeping the whole cache in the hundreds-of-kilobytes range
-    at 512-step traces.
+    The bare-op fixpoint's entry-admission and cohort sweeps issue reachability
+    queries whose demand SHAPE varies by regime. Before the entry-admission
+    prefilter emptied the degenerate pair triangle, O(N) distinct sources each
+    answered O(N) queries, so materializing the full descendant set per source
+    was the right trade. After it, the surviving phase-1 sweeps issue roughly
+    ONE distinct query per source, and an unconditional full-graph BFS per
+    source is itself the quadratic term. The cache therefore adapts per source:
+
+    * The first :data:`_DENSE_SOURCE_DISTINCT_QUERIES` distinct targets of a
+      source are answered with the exact historical raw-order-bounded per-pair
+      BFS (identical pairs hit the pair memo first). Sparse sources never pay
+      a graph-wide traversal.
+    * A source demanding more distinct targets is dense: its FULL descendant
+      set is materialized and every later query for it is an O(1) membership
+      test. The first dense source triggers ONE batch DP pass that builds ALL
+      masks from child masks in reverse topological order -- one int-OR per
+      edge instead of one full BFS per dense source -- guarded by a strict
+      insertion-order topology check with the historical per-source BFS as the
+      fallback (:meth:`_batch_build_descendant_masks`).
+
+    Descendant sets are stored as per-node-index bitmask ints, not label sets,
+    keeping the whole cache in the low-megabytes range at 1,024-step traces.
 
     The historical query bounds its search window by the destination's
     ``raw_order``; the unbounded per-source set gives the identical answer only
@@ -976,7 +1010,7 @@ class _ReachabilityCache:
     (every node on a directed path to the destination finishes at or below the
     destination's ``raw_order``). That premise is verified once per run with a
     single O(E) edge scan; a workspace carrying any raw-order-violating edge
-    falls back to the exact historical bounded per-pair BFS.
+    falls back to the exact historical bounded per-pair BFS for every query.
 
     Workspace topology (the node set, ``data_children`` tuples, and
     ``raw_order``) is frozen once :meth:`_GroupingWorkspace.from_graph` builds
@@ -984,7 +1018,15 @@ class _ReachabilityCache:
     descendant sets can never go stale within the run that owns the cache.
     """
 
-    __slots__ = ("_workspace", "_order_monotone", "_bit_index", "_descendant_bits", "_pair_memo")
+    __slots__ = (
+        "_workspace",
+        "_order_monotone",
+        "_bit_index",
+        "_descendant_bits",
+        "_pair_memo",
+        "_sparse_query_counts",
+        "_batch_attempted",
+    )
 
     def __init__(self, workspace: _GroupingWorkspace) -> None:
         self._workspace = workspace
@@ -992,6 +1034,8 @@ class _ReachabilityCache:
         self._bit_index: dict[str, int] = {}
         self._descendant_bits: dict[str, int] = {}
         self._pair_memo: dict[tuple[str, str], bool] = {}
+        self._sparse_query_counts: dict[str, int] = {}
+        self._batch_attempted = False
 
     def reaches_from_earlier(self, src_label: str, dst_label: str) -> bool:
         """Return whether ``src_label`` reaches ``dst_label`` along data edges.
@@ -1018,7 +1062,14 @@ class _ReachabilityCache:
             return self._bounded_pair_query(src_label, dst_label)
         mask = self._descendant_bits.get(src_label)
         if mask is None:
-            mask = self._build_descendant_mask(src_label)
+            queries_seen = self._sparse_query_counts.get(src_label, 0)
+            if queries_seen < _DENSE_SOURCE_DISTINCT_QUERIES:
+                cached = self._pair_memo.get((src_label, dst_label))
+                if cached is not None:
+                    return cached
+                self._sparse_query_counts[src_label] = queries_seen + 1
+                return self._bounded_pair_query(src_label, dst_label)
+            mask = self._acquire_descendant_mask(src_label)
         return (mask >> self._bit_index[dst_label]) & 1 == 1
 
     def _prepare(self) -> None:
@@ -1030,6 +1081,53 @@ class _ReachabilityCache:
             for node in nodes.values()
             for child in node.data_children
         )
+
+    def _acquire_descendant_mask(self, src_label: str) -> int:
+        """Return the mask for a dense source, batch-building all masks once.
+
+        The first dense source attempts the whole-graph batch DP; when the
+        strict insertion-order topology premise fails, that source and every
+        later dense source keep the exact historical per-source BFS.
+        """
+        if not self._batch_attempted:
+            self._batch_attempted = True
+            self._batch_build_descendant_masks()
+        mask = self._descendant_bits.get(src_label)
+        if mask is None:
+            mask = self._build_descendant_mask(src_label)
+        return mask
+
+    def _batch_build_descendant_masks(self) -> None:
+        """Build every descendant mask in one reverse-insertion-order DP pass.
+
+        ``mask[node] = OR over eligible children c of (bit(c) | mask[c])``
+        computes all masks with one int-OR per edge, replacing one full BFS per
+        dense source. The DP consumes children's masks while walking the node
+        mapping in reverse, so it requires every eligible data child to appear
+        STRICTLY AFTER its parent in the mapping. ``_order_monotone`` is not
+        sufficient evidence for that -- it accepts ``raw_order`` ties, and a
+        tied edge inserted child-first would silently drop the child's own
+        descendants from the parent's mask. On any violating edge the batch is
+        abandoned (no partial state) and dense sources fall back to the exact
+        per-source BFS.
+        """
+        nodes = self._workspace.nodes
+        bit_index = self._bit_index
+        for label, node in nodes.items():
+            position = bit_index[label]
+            for child in node.data_children:
+                child_position = bit_index.get(child)
+                if child_position is not None and child_position <= position:
+                    return
+        masks: dict[str, int] = {}
+        for label in reversed(nodes):
+            mask = 0
+            for child in nodes[label].data_children:
+                child_position = bit_index.get(child)
+                if child_position is not None:
+                    mask |= (1 << child_position) | masks[child]
+            masks[label] = mask
+        self._descendant_bits = masks
 
     def _build_descendant_mask(self, src_label: str) -> int:
         """Run one full BFS from ``src_label`` and cache its descendant bitmask."""
@@ -2049,19 +2147,32 @@ def _merge_iso_groups_to_layers(
         distinct_roots = len({find(node_label) for node_label in iso_nodes})
         if distinct_roots == 1:
             continue
+        combination_nodes = iso_nodes
         if all(
             not workspace.nodes[node_label].uses_params
             and not workspace.nodes[node_label].recurrence_anchored
-            and anchor_ancestry[node_label]
             for node_label in iso_nodes
         ):
-            # Every member is a bare param-free op with an anchored ancestor, so
-            # every pair deterministically falls into the bare branch below and
-            # `continue`s without a union (`not anchor_ancestry[...]` fails).
-            # These nodes belong to the two-sided param-free fixpoint; skipping
-            # their O(len(iso_nodes)^2) no-op sweep is output-identical.
-            continue
-        pair_iter = it.chain(zip(iso_nodes, iso_nodes[1:]), it.combinations(iso_nodes, 2))
+            # Every pair in an all-bare group deterministically falls into the
+            # bare branch below, whose ONLY union arm additionally requires BOTH
+            # endpoints to be free of anchored ancestry. A pair with an
+            # ancestry-carrying endpoint is therefore a guaranteed no-op
+            # ``continue``, so restricting the combinations triangle to the
+            # ancestry-free members removes only provably inert pairs: the union
+            # sequence -- and with it the final partition and its min-label
+            # roots -- is identical, while a mixed-ancestry group's O(N^2) tail
+            # collapses to its handful of eligible members. With fewer than two
+            # ancestry-free members no pair anywhere in the group (consecutive
+            # or combination) can union, so the whole sweep is skipped; those
+            # anchored-descendant bare ops belong to the two-sided param-free
+            # fixpoint, which assigns them after all parameterized/anchored
+            # groups are final.
+            combination_nodes = [
+                node_label for node_label in iso_nodes if not anchor_ancestry[node_label]
+            ]
+            if len(combination_nodes) < 2:
+                continue
+        pair_iter = it.chain(zip(iso_nodes, iso_nodes[1:]), it.combinations(combination_nodes, 2))
         for node1_label, node2_label in pair_iter:
             if find(node1_label) == find(node2_label):
                 continue
