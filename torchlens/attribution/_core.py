@@ -348,10 +348,9 @@ def _interned_path_leaves(
 
     return _interned_by_identity(
         inputs.attributed_leaves,
-        lambda slot: (baseline_tensors[slot] + alpha * deltas[slot])
-        .detach()
-        .clone()
-        .requires_grad_(True),
+        lambda slot: (
+            (baseline_tensors[slot] + alpha * deltas[slot]).detach().clone().requires_grad_(True)
+        ),
     )
 
 
