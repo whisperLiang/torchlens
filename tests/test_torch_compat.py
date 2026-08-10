@@ -258,6 +258,14 @@ def test_imported_private_helper_absence_marks_capability(
     """Import-based private torch helpers degrade to their documented fallbacks."""
 
     _reset_capability(monkeypatch, flag_name)
+    if helper_name == "get_dynamo_optimized_module_type":
+        # This helper DEFERS (returns None without degrading, by design) when
+        # ``torch._dynamo.eval_frame`` is not yet imported -- so the degrade path
+        # under test (module present, ``OptimizedModule`` attr absent, monkeypatched
+        # below) is only reached once the module is in ``sys.modules``. Some torch
+        # builds do not auto-import it, so place a stub to make the degrade contract
+        # deterministic across the supported range.
+        monkeypatch.setitem(tc.sys.modules, "torch._dynamo.eval_frame", SimpleNamespace())
     monkeypatch.setattr(tc, "_import_module_attr_or_none", lambda _module, _attr: None)
     with pytest.warns(UserWarning, match=flag_name):
         assert getattr(tc, helper_name)() is expected

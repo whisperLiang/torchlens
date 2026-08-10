@@ -82,6 +82,22 @@ from torchlens._io._safe_unpickle import (
 )
 from torchlens._io.bundle import _RenameAwareUnpickler
 from torchlens.options import CaptureOptions
+from torchlens.utils._torch_compat import HAS_SAFE_WEIGHTS_ONLY_LOAD
+
+# torch renamed ``torch._C._TensorBase`` -> ``torch._C.TensorBase`` (the new name on
+# torch>=2.4; the old spelling remains on the 2.1 floor). Feature-detect so the tensor-base
+# descriptor probe below works across the whole supported range without parsing versions.
+_TENSOR_BASE = getattr(torch._C, "TensorBase", None) or torch._C._TensorBase
+
+# Embedded-tensor bundles are only loadable on torch>=2.6 (CVE-2025-32434: torch.load
+# weights_only RCE, fixed in 2.6). On older torch the load path CORRECTLY refuses, so the
+# embedded-blob round-trip tests below exercise a torch>=2.6 feature and are gated on the
+# same feature flag the production loader uses.
+_requires_safe_weights_only_load = pytest.mark.skipif(
+    not HAS_SAFE_WEIGHTS_ONLY_LOAD,
+    reason="embedded-tensor bundles are refused on torch<2.6 (CVE-2025-32434); "
+    "the round-trip is a torch>=2.6 feature",
+)
 
 _CAP = CaptureOptions(
     intervention_ready=True,
@@ -355,7 +371,7 @@ def test_tensor_constructor_methods_are_all_refused(method: str) -> None:
 
     from torchlens._io._safe_unpickle import _safe_getattr
 
-    descriptor = _safe_getattr(torch._C.TensorBase, method)
+    descriptor = _safe_getattr(_TENSOR_BASE, method)
     assert getattr(descriptor, "__module__", None) is None, "the __module__-blind case"
     assert _alloc_refusal_reason(descriptor, (torch.zeros(1), (_N,))) is not None
 
@@ -450,6 +466,7 @@ def _rebuild_amplification_pickle(blob: bytes, count: int) -> bytes:
     )
 
 
+@_requires_safe_weights_only_load
 @pytest.mark.smoke
 @pytest.mark.parametrize("legacy", [False, True])
 def test_embedded_storage_is_never_resizable(legacy: bool) -> None:
@@ -473,6 +490,7 @@ def test_embedded_storage_is_never_resizable(legacy: bool) -> None:
         assert not storage.resizable(), f"{type(loaded).__name__} stayed growable"
 
 
+@_requires_safe_weights_only_load
 @pytest.mark.smoke
 @pytest.mark.parametrize("legacy", [False, True])
 def test_rebuild_tensor_v2_cannot_amplify_an_embedded_storage(legacy: bool) -> None:
@@ -504,6 +522,7 @@ def test_rebuild_amplification_refused_end_to_end_through_tl_load(tmp_path: Path
     assert "resiz" in (str(caught.value) + str(caught.value.__cause__)).lower()
 
 
+@_requires_safe_weights_only_load
 @pytest.mark.smoke
 @pytest.mark.parametrize("legacy", [False, True])
 def test_embedded_blob_round_trips_exactly_after_freezing(legacy: bool) -> None:
