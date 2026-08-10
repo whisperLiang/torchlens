@@ -360,7 +360,13 @@ def test_tensor_constructor_method_descriptor_reduce_refused() -> None:
         + pickle.STOP
     )
 
-    with pytest.raises(pickle.UnpicklingError, match="mediated allocation"):
+    # The malicious pickle embeds a tensor storage, so on torch < 2.6 the
+    # CVE-2025-32434 embedded-tensor refusal fires FIRST -- before the
+    # mediated-allocation guard this test targets is reached. Both are correct
+    # refusals of the hostile construction; assert the reason reachable on the
+    # running torch.
+    expected_refusal = "mediated allocation" if HAS_SAFE_WEIGHTS_ONLY_LOAD else "CVE-2025-32434"
+    with pytest.raises(pickle.UnpicklingError, match=expected_refusal):
         _RenameAwareUnpickler(io.BytesIO(payload)).load()
 
 
