@@ -1,0 +1,37 @@
+{#-
+  Custom GitHub-release-notes template.
+
+  Overrides ONLY the release-notes body (the file GitHub receives for a release).
+  It is the sole file under ``templates/``, so python-semantic-release keeps
+  using its bundled default for the full ``CHANGELOG.md`` (which has no size
+  limit) -- only this GitHub-release body is capped.
+
+  WHY: the default release-notes template inlines every commit's full multi-line
+  body (``commit.descriptions[1:]``). Across a large release that easily exceeds
+  GitHub's 125,000-character release-body limit and the create-release API then
+  fails with ``422 Unprocessable Entity`` (a 549-commit release produced ~294KB
+  and blocked the 2.34.0 publish). This template emits one line per commit --
+  scope + subject + short hash -- which stays well under the limit (subjects-only
+  for the same 549 commits is ~45KB) while the annotated CHANGELOG.md keeps the
+  full detail.
+-#}
+{% set license_name = license_name | default("", true) -%}
+## {{ release.version.as_semver_tag() }} ({{ release.tagged_date.strftime("%Y-%m-%d") }})
+{% if license_name %}
+_This release is published under the {{ license_name }} License._
+{% endif -%}
+{% set commit_objects = release["elements"] | dictsort -%}
+{% for type_, commits in commit_objects if type_ != "unknown" %}
+### {{ type_ | title }}
+{% for commit in commits -%}
+{% if commit.error is undefined -%}
+{% set summary = commit.descriptions[0] -%}
+{% if commit.scope %}{% set summary = "**" ~ commit.scope ~ "**: " ~ summary %}{% endif -%}
+- {{ summary }} (`{{ commit.short_hash }}`)
+{% else -%}
+- {{ (commit.commit.message | string).split("\n")[0] }}
+{% endif -%}
+{% endfor %}
+{%- endfor %}
+
+_The full annotated changelog for this release is in [CHANGELOG.md](https://github.com/{{ repo_owner }}/{{ repo_name }}/blob/{{ release.version.as_tag() }}/CHANGELOG.md)._
