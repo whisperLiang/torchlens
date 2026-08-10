@@ -1,6 +1,20 @@
 # CHANGELOG
 
 
+## v2.34.1 (2026-08-10)
+
+### Bug Fixes
+
+- **release**: Cap GitHub release notes to one line per commit
+  ([`4ac2725`](https://github.com/johnmarktaylor91/torchlens/commit/4ac27257482a8c97eb24c736979fc16aaeacbba8))
+
+The default release-notes template inlines every commit's full multi-line body, so a large release
+  (549 commits -> ~294KB) exceeds GitHub's 125,000-char release-body limit and the create-release
+  API fails with 422 (this blocked the 2.34.0 publish). Override only the GitHub-release body with a
+  one-line-per-commit summary (subjects-only ~45KB for the same set); the annotated CHANGELOG.md
+  keeps full detail via the bundled default template.
+
+
 ## v2.34.0 (2026-08-10)
 
 ### Bug Fixes
