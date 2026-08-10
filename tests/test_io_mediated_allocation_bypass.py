@@ -331,7 +331,7 @@ def test_tensor_constructor_method_descriptor_reduce_refused() -> None:
     embedded = blob.getvalue()
     descriptor = (
         _glob("builtins", "getattr")
-        + _glob("torch._C", "TensorBase")
+        + _glob("torch._C", _TENSOR_BASE.__name__)
         + pickle.SHORT_BINUNICODE
         + bytes([9])
         + b"new_empty"

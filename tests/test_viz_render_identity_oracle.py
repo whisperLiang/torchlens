@@ -737,6 +737,34 @@ def _stable_repr(value: Any) -> str:
     return re.sub(r"frozenset\(\{([^{}]*)\}\)", sort_members, repr(value))
 
 
+def _normalize_version_dependent_fn(dot: str) -> str:
+    """Canonicalize the Python-version-dependent ``fn=`` node label token.
+
+    The profiling node mode renders ``fn=<call-site function name>``.  On
+    CPython 3.11+ that name is the fully qualified ``co_qualname`` (e.g.
+    ``OracleCNN.forward``); on 3.10 and earlier ``co_qualname`` does not exist,
+    so the renderer falls back to the bare ``co_name`` (``forward``).  That
+    difference is an environmental property of the running interpreter, not a
+    TorchLens rendering decision -- so, exactly like the ``func_duration = 0.0``
+    timing normalization applied before capture, it is canonicalized to the
+    version-independent trailing component before the byte-identity comparison.
+    Values without a qualifier (``fn=none``) are left unchanged.
+
+    Parameters
+    ----------
+    dot:
+        DOT source returned by the draw invocation under test.
+
+    Returns
+    -------
+    str
+        DOT source with every ``fn=`` token reduced to its final dotted
+        component.
+    """
+
+    return re.sub(r"fn=([^<\s]+)", lambda m: f"fn={m.group(1).rsplit('.', 1)[-1]}", dot)
+
+
 def _capture_case(case: OracleCase, tmp_path: Path) -> dict[str, Any]:
     """Capture all oracle layers for one deterministic matrix case.
 
@@ -792,6 +820,7 @@ def _capture_case(case: OracleCase, tmp_path: Path) -> dict[str, Any]:
             assert case.name == "none_short_circuit"
             return {"tags": list(case.tags), "dot": None, "structural": None, "callbacks": {}}
         assert isinstance(source, str)
+        source = _normalize_version_dependent_fn(source)
         if node_calls is not None:
             _assert_exactly_once(node_calls, "node_spec_fn")
         if collapsed_calls is not None:
@@ -843,7 +872,10 @@ def _capture_backward_combined(tmp_path: Path) -> dict[str, Any]:
         )
         return {
             name: {"dot": dot, "structural": _structural_digest(dot)}
-            for name, dot in {"backward": backward, "combined": combined}.items()
+            for name, dot in {
+                "backward": _normalize_version_dependent_fn(backward),
+                "combined": _normalize_version_dependent_fn(combined),
+            }.items()
         }
     finally:
         trace.cleanup()
