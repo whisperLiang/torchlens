@@ -50,9 +50,9 @@ def test_plain_trace_does_not_arm_monitor_and_stamps_fail_closed():
     # The fail-closed stamp: channel coverage is UNKNOWABLE, never "no consumption".
     assert trace._runnable.rng_monitor_uncertain is True
     assert trace._runnable.rng_monitor_uncertain_detail == ("monitor_not_armed",)
-    # The channel verdict fields were never observed and must not exist.
-    assert not trace._runnable.host_rng_channels
-    assert not trace._runnable.host_rng_unreplayable
+    # The channel verdict fields were never observed and must remain tri-state.
+    assert trace._runnable.host_rng_channels is None
+    assert trace._runnable.host_rng_unreplayable is None
 
 
 @pytest.mark.smoke

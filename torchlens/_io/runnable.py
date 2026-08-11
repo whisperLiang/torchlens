@@ -843,7 +843,7 @@ def _build_rng_profile(trace: Any) -> RunnableRngProfile:
     ``random_seed`` is the concrete effective seed every capture is seeded with.
     """
 
-    consumed = trace._runnable.host_rng_consumed
+    consumed = bool(trace._runnable.host_rng_consumed)
     seed = getattr(trace, "random_seed", None)
     capture_seed = int(seed) if isinstance(seed, int) and not isinstance(seed, bool) else None
     # r37 hon1_2: a touch on any NON-global monitored channel (RNG instances,

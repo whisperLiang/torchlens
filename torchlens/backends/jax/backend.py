@@ -2114,6 +2114,7 @@ class JAXBackend:
             trace.module_identity_mode = "pytree_module"
             self._attach_pytree_module_logs(trace, module_tree)
         trace._tracing_finished = True
+        trace._compact_op_metadata()
         # The depth flood deliberately resolves ops through its own explicit
         # label index, NOT Trace.__getitem__ (finished-mode lookup returns
         # Layer objects, not the ops the flood must mutate); running it after

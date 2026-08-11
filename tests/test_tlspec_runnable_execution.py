@@ -13,6 +13,7 @@ from torch import nn
 import torchlens as tl
 from torchlens import _state
 from torchlens._errors import TorchLensCaptureGapWarning
+from torchlens._runnable_execution import _fresh_bare_tensor_root
 from torchlens._runnable_state import prepare_runnable_state
 from torchlens.errors import (
     PathDivergenceError,
@@ -30,6 +31,15 @@ from torchlens.runnable import (
     StateSource,
     WitnessCompleteness,
 )
+
+
+def test_fresh_bare_tensor_root_fails_closed_for_duck_trace() -> None:
+    """A duck trace without runnable state must fail closed instead of raising."""
+
+    class _DuckTrace:
+        """Minimal dict-backed trace stand-in without runnable state."""
+
+    assert _fresh_bare_tensor_root(_DuckTrace()) is False
 
 
 class RunnableExecutionModel(nn.Module):

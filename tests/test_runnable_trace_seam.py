@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 from dataclasses import fields
 from pathlib import Path
+import pickle
+from types import MappingProxyType
 
 from torchlens._runnable_seam import (
     LEGACY_RUNNABLE_TRACE_FIELD_MAP,
@@ -175,6 +177,47 @@ def test_legacy_plain_pickle_fields_normalize_into_collapsed_state() -> None:
     assert runnable_state.descriptor == "descriptor"
     assert runnable_state.poisoned is True
     assert state == {"_runnable": runnable_state}
+
+
+def test_trace_pickled_at_pre_seam_commit_loads_with_collapsed_state() -> None:
+    """Load a real Trace pickled at ``85c8c60f`` through the current state seam."""
+
+    fixture = Path(__file__).parent / "fixtures" / "legacy_trace_85c8c60f.pkl"
+    trace = pickle.loads(fixture.read_bytes())  # noqa: S301 - trusted checked-in fixture
+
+    assert isinstance(trace, Trace)
+    assert len(trace) == 2
+    assert isinstance(trace.__dict__.get("_runnable"), RunnableTraceState)
+    assert not any(
+        legacy_name in trace.__dict__ for legacy_name in LEGACY_RUNNABLE_TRACE_FIELD_MAP
+    )
+    assert "_build_state" not in trace.__dict__
+
+
+def test_runnable_fork_keeps_mutable_witness_ledgers_independent() -> None:
+    """Fork mutable witness state while retaining immutable state bindings by identity."""
+
+    parent = Trace.__new__(Trace)
+    immutable_state = MappingProxyType({})
+    parent_state = RunnableTraceState(
+        staged_user_state=immutable_state,
+        embedded_state=immutable_state,
+        capture_state=immutable_state,
+        input_metadata_reads={("args", 0): {"shape": (2, 3)}},
+    )
+
+    forked_state = parent._fork_model_field("_runnable", parent_state, {})
+
+    assert forked_state is not parent_state
+    assert forked_state.staged_user_state is immutable_state
+    assert forked_state.embedded_state is immutable_state
+    assert forked_state.capture_state is immutable_state
+    assert forked_state.input_metadata_reads == parent_state.input_metadata_reads
+    assert forked_state.input_metadata_reads is not parent_state.input_metadata_reads
+    assert (
+        forked_state.input_metadata_reads[("args", 0)]
+        is not parent_state.input_metadata_reads[("args", 0)]
+    )
 
 
 def test_public_runnable_schema_has_no_runtime_imports() -> None:

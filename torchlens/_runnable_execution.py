@@ -3936,7 +3936,8 @@ def _fresh_bare_tensor_root(trace: Any) -> bool:
     could be wrongly blessed. A missing or malformed proof fails closed (returns ``False``).
     """
 
-    proof = trace._runnable.output_losslessness
+    runnable_state = getattr(trace, "__dict__", {}).get("_runnable")
+    proof = getattr(runnable_state, "output_losslessness", None)
     if not isinstance(proof, Mapping):
         return False
     return (
