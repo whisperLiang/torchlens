@@ -1389,6 +1389,7 @@ def _check_journal_seq_invariants(trace: "Trace", name: str) -> None:
         "pre_hook_events",
         "output_version_events",
         "buffer_write_events",
+        "intervention_events",
         "backward_events",
     )
     seen_lane_by_seq: dict[int, str] = {}
@@ -1735,13 +1736,13 @@ def op_has_genuine_replacement_evidence(layer: "Op", trace: "Trace | None" = Non
     forged during PLAIN capture passed validation -- defeating the 2026-06-02
     lesson that a placeholder op appearing during plain capture must STILL
     fail. This helper is the cross-check: the op must appear in the
-    trace-level replacement-event ledger populated ONLY at the capture sites
-    that directly observed the replacement (``wrapped_hook`` seeing a raw
-    forward hook return a new object; a live-fire hook reporting
-    ``replaced=True`` while intervention machinery is armed; an explicit
-    ``push()`` intervention), or the trace must carry no ledger authority at
-    all (loaded bundles, backend-neutral traces) in which case the legacy
-    per-op behavior is preserved.
+    journal's intervention-edit records (``InterventionAppliedEvent``),
+    appended ONLY by the capture sites that directly observed the replacement
+    (``wrapped_hook`` seeing a raw forward hook return a new object; a
+    live-fire hook reporting ``replaced=True`` while intervention machinery
+    is armed), or the trace must carry no journal authority at all (loaded
+    bundles, backend-neutral traces) in which case the legacy per-op behavior
+    is preserved.
 
     Parameters
     ----------
@@ -1764,25 +1765,34 @@ def op_has_genuine_replacement_evidence(layer: "Op", trace: "Trace | None" = Non
         # cross-check.
         return True
     if bool(getattr(trace, "_loaded_from_bundle", False)):
-        # The ledger is a live-capture runtime attribute (never serialized);
-        # loaded artifacts keep the legacy per-op behavior. Functionless
-        # replacement ops in bundles are independently refused by
-        # ``_raise_if_portable_bundle_log`` on the replay path.
+        # Journal edit records are live-capture runtime facts (never
+        # serialized); loaded artifacts keep the legacy per-op behavior.
+        # Functionless replacement ops in bundles are independently refused
+        # by ``_raise_if_portable_bundle_log`` on the replay path.
         return True
-    ledger = getattr(trace, "_replacement_event_labels", None)
-    if ledger:
+    from ..ir.events import InterventionAppliedEvent
+
+    edited_labels = {
+        event.label_raw
+        for event in getattr(
+            getattr(trace, "_capture_events", None), "intervention_events", ()
+        )
+        or ()
+        if isinstance(event, InterventionAppliedEvent) and event.kind == "replaced"
+    }
+    if edited_labels:
         candidate_labels = {
             getattr(layer, "_label_raw", None),
             getattr(layer, "label", None),
             getattr(layer, "layer_label", None),
         }
         candidate_labels.discard(None)
-        if candidate_labels & set(ledger):
+        if candidate_labels & edited_labels:
             return True
-    # Push/rerun fallback: the ledger is a plain runtime attribute on the
+    # Push/rerun fallback: the journal is a run-scoped stream on the
     # capture-time trace object, and the intervention rerun engine rebuilds a
     # fresh trace off to the side then swaps its FIELD-ORDER state into the
-    # original object -- the ledger does not survive the swap, and push()
+    # original object -- the stream does not survive the swap, and push()
     # stamps sites without a capture at all. Both are explicit user
     # interventions, so accept the conjunction of two signals a plain-capture
     # placeholder can never carry together: (1) this op holds a hook-minted

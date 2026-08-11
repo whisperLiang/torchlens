@@ -14,7 +14,11 @@ if TYPE_CHECKING:
     from .refs import ParamRef, TensorRef
     from .semantics import BackendSemantics, CapturePolicy
 
-OpEventKind = Literal["op", "source", "synthetic_output", "intervention_replacement"]
+# "intervention_replacement" is deliberately NOT an operation kind: an
+# intervention is an EDIT (an InterventionAppliedEvent referencing its target),
+# never a synthetic operation, so a functionless op can no longer be expressed
+# as a legal kind. (No producer ever constructed the retired literal.)
+OpEventKind = Literal["op", "source", "synthetic_output"]
 EdgeUseKind = Literal["arg", "kwarg", "container", "module", "buffer", "output", "control"]
 JaxEquationKind = Literal[
     "primitive",
@@ -321,6 +325,31 @@ class ModuleFrame:
     call_index: int
     fx_qualpath: str | None
     entry_argnames: tuple[str, ...]
+
+
+InterventionEditKind = Literal["replaced", "fired"]
+InterventionEditOrigin = Literal["raw_forward_hook", "live_fire", "push"]
+
+
+@dataclass(frozen=True, slots=True)
+class InterventionAppliedEvent:
+    """Journal edit record for one observed intervention on a captured value.
+
+    Interventions are EDITS referencing an existing identity, never op kinds:
+    the record is appended only by the capture sites that directly observed
+    the edit (a raw ``register_forward_hook`` returning a new object, or a
+    live-fire hook reporting ``replaced=True`` while intervention machinery
+    is armed for this capture), so it is the trace-level ground truth the
+    functionless-op validation carve-out requires. A placeholder minted
+    during PLAIN capture can never mint one of these and must still fail
+    validation (2026-06-02 lesson).
+    """
+
+    label_raw: str
+    kind: InterventionEditKind
+    origin: InterventionEditOrigin
+    timestamp: float
+    seq: int = 0
 
 
 BufferWriteKind = Literal["reassign", "inplace", "fused", "data_reassign"]

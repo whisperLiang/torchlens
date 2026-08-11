@@ -1364,21 +1364,25 @@ def _copy_field_value_for_replacement(value: Any) -> Any:
     return value
 
 
-def _note_replacement_event(trace: "Trace", raw_label: str | None) -> None:
-    """Record positive trace-level evidence of a genuine replacement event.
+def _note_replacement_event(
+    trace: "Trace",
+    raw_label: str | None,
+    *,
+    origin: str = "raw_forward_hook",
+) -> None:
+    """Append the journal edit record for one genuinely observed replacement.
 
-    The validation exemptions for ``intervention_replacement`` ops used to key
-    ENTIRELY on per-op attributes (``func_name``/``intervention_replaced``/
-    ``is_internal_source``) that the placeholder synthesizer itself writes --
-    so a placeholder minted during PLAIN capture (a capture gap, or forged
-    attributes) was indistinguishable from a genuine user intervention and
-    passed validation, defeating the 2026-06-02 lesson ("a placeholder op
-    appearing during PLAIN capture must STILL fail"). This ledger is the
-    trace-level ground truth those exemptions now require: an entry is added
-    ONLY at the sites that directly observe the replacement event itself (a
-    raw ``register_forward_hook`` returning a new object, or a live-fire
+    Interventions are EDITS in the capture journal
+    (``InterventionAppliedEvent`` referencing the edited label), never op
+    kinds and never a side ledger. The record is appended ONLY at the sites
+    that directly observe the replacement event itself (a raw
+    ``register_forward_hook`` returning a new object, or a live-fire
     intervention hook reporting ``replaced=True`` while an intervention spec
-    or hook plan is actually armed for this capture).
+    or hook plan is actually armed for this capture), so it is the
+    trace-level ground truth the functionless-op validation carve-out
+    requires: a placeholder minted during PLAIN capture (a capture gap, or
+    forged per-op attributes) can never mint one and must STILL fail
+    validation (2026-06-02 lesson).
 
     Parameters
     ----------
@@ -1386,11 +1390,25 @@ def _note_replacement_event(trace: "Trace", raw_label: str | None) -> None:
         Active model log.
     raw_label:
         Raw label of the op whose value was genuinely replaced.
+    origin:
+        Which observation site directly witnessed the edit.
     """
 
     if trace is None or not isinstance(raw_label, str):
         return
-    trace.__dict__.setdefault("_replacement_event_labels", set()).add(raw_label)
+    events = getattr(trace, "capture_events", None)
+    if events is None:
+        return
+    from ...ir.events import InterventionAppliedEvent
+
+    events.append_intervention(
+        InterventionAppliedEvent(
+            label_raw=raw_label,
+            kind="replaced",
+            origin=origin,  # type: ignore[arg-type]
+            timestamp=time.time(),
+        )
+    )
 
 
 def _live_intervention_machinery_armed() -> bool:
@@ -1733,7 +1751,7 @@ def _ensure_module_output_tensor_logged(
         # trace stays unledgered, so validation refuses the placeholder it
         # would otherwise launder into a plain capture.
         if fields_dict["intervention_replaced"] and _live_intervention_machinery_armed():
-            _note_replacement_event(trace, raw_label)
+            _note_replacement_event(trace, raw_label, origin="live_fire")
     trace.op_equivalence_classes[raw_label].add(raw_label)
     new_entry = _make_layer_log_entry(
         trace, tensor, fields_dict, (), {}, trace.activation_transform
@@ -1942,7 +1960,7 @@ def _record_module_exit_metadata(
                     fire_results=remaining_fire_results,
                 )
                 if any_replaced and _live_intervention_machinery_armed():
-                    _note_replacement_event(trace, tensor_label)
+                    _note_replacement_event(trace, tensor_label, origin="live_fire")
         is_atomic_module = _is_bottom_level_submodule_exit(trace, t, module)
         atomic_module_call = (address, module_call_index) if is_atomic_module else None
         output_tensor_labels_raw.append(tensor_label)

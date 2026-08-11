@@ -15,6 +15,7 @@ from .events import (
     BufferWriteEvent,
     GradFnDiscovered,
     GradFnFired,
+    InterventionAppliedEvent,
     ModuleEnterEvent,
     ModuleExitEvent,
     ModulePrepEvent,
@@ -54,6 +55,7 @@ LANE_MERGE_POLICIES: dict[str, str] = {
     "module_exit_events": "first_run_only",
     "pre_hook_events": "append_restamp",
     "op_events": "append_restamp",
+    "intervention_events": "append_restamp",
     "output_version_events": "run_local",
     "buffer_write_events": "run_local",
     "backward_events": "run_local",
@@ -110,6 +112,7 @@ class CaptureEvents:
     pre_hook_events: list[PreHookProvenanceEvent] = field(default_factory=list)
     output_version_events: list[OutputVersionEvent] = field(default_factory=list)
     buffer_write_events: list[BufferWriteEvent] = field(default_factory=list)
+    intervention_events: list[InterventionAppliedEvent] = field(default_factory=list)
     backward_events: list[
         BackwardPassStart
         | OpGradObserved
@@ -310,6 +313,7 @@ class CaptureEvents:
             pre_hook_events=list(self.pre_hook_events),
             output_version_events=list(self.output_version_events),
             buffer_write_events=list(self.buffer_write_events),
+            intervention_events=list(self.intervention_events),
             backward_events=list(self.backward_events),
             param_refs=dict(self.param_refs),
             raw_layer_counter=self.raw_layer_counter,
@@ -344,6 +348,7 @@ class CaptureEvents:
         self.pre_hook_events.clear()
         self.output_version_events.clear()
         self.buffer_write_events.clear()
+        self.intervention_events.clear()
         self.live_index.clear()
         self.grad_fn_handles_by_label_raw.clear()
 
@@ -477,6 +482,11 @@ class CaptureEvents:
         """Append a registered-buffer write event, stamping the global seq."""
         object.__setattr__(event, "seq", self.next_seq())
         self.buffer_write_events.append(event)
+
+    def append_intervention(self, event: InterventionAppliedEvent) -> None:
+        """Append an intervention edit record, stamping the global seq."""
+        object.__setattr__(event, "seq", self.next_seq())
+        self.intervention_events.append(event)
 
     def concat(self, other: "CaptureEvents", *, lanes: Iterable[str] | None = None) -> None:
         """Merge another stream's lanes into this journal under the merge law.

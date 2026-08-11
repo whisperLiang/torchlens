@@ -169,7 +169,9 @@ def test_w32_forged_placeholder_in_plain_capture_fails() -> None:
     object.__setattr__(relu_op, "func", None)
     object.__setattr__(relu_op, "func_name", "intervention_replacement")
     object.__setattr__(relu_op, "intervention_replaced", True)
-    assert getattr(trace, "_replacement_event_labels", None) in (None, set())
+    # No journal edit record exists for a plain capture: the forged per-op
+    # stamps below have no corroborating InterventionAppliedEvent.
+    assert not getattr(getattr(trace, "_capture_events", None), "intervention_events", ())
 
     status = validate_saved_outs(trace, [ground_truth], validate_metadata=False)
     assert status.state == "failed"
@@ -731,3 +733,54 @@ def test_geometric_ladder_scoped_to_value_discretizing_children() -> None:
         "unit_step_up",
         "unit_step_down",
     ]
+
+
+def test_genuine_raw_hook_replacement_mints_journal_edit_and_validates() -> None:
+    """A genuine untraceable replacement is a journal EDIT and validates.
+
+    The user's raw ``register_forward_hook`` returns a tensor TorchLens never
+    traced (built outside the forward), so capture synthesizes a functionless
+    boundary op. The observing site appends an ``InterventionAppliedEvent``
+    to the journal — the ONLY authority the functionless-op carve-out
+    accepts — so metadata invariants pass for the genuine case while the
+    forged plain-capture case (previous test) still fails.
+    """
+
+    from torchlens.ir.events import InterventionAppliedEvent
+    from torchlens.validation.invariants import check_metadata_invariants
+
+    model = _Tiny()
+    injected = torch.ones(3, 4) * 7.0
+
+    def raw_hook(
+        module: torch.nn.Module,
+        args: tuple[torch.Tensor, ...],
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        del module, args, output
+        return injected
+
+    handle = model.lin.register_forward_hook(raw_hook)
+    try:
+        trace, _ = _capture(model, torch.randn(3, 4))
+    finally:
+        handle.remove()
+
+    boundary_layers = [
+        layer for layer in trace.layer_list if layer.func_name == "intervention_replacement"
+    ]
+    assert boundary_layers, "the untraceable replacement must synthesize a boundary op"
+    edits = [
+        event
+        for event in getattr(trace._capture_events, "intervention_events", ())
+        if isinstance(event, InterventionAppliedEvent)
+    ]
+    assert edits, "the observing site must append a journal edit record"
+    assert {event.kind for event in edits} == {"replaced"}
+    assert all(event.seq >= 1 for event in edits)
+    edited_labels = {event.label_raw for event in edits}
+    assert {layer._label_raw for layer in boundary_layers} & edited_labels
+    # The journal edit is the corroboration the carve-out requires: the
+    # genuine case validates; no side ledger exists anymore.
+    assert not hasattr(type(trace), "_replacement_event_labels")
+    check_metadata_invariants(trace)
