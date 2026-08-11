@@ -85,6 +85,33 @@ def _rolled_layer_count(trace: tl.Trace) -> int:
     )
 
 
+def _historical_dependency_components(layer_log: Layer) -> tuple[tuple[int, ...], ...]:
+    """Compute pass components through the historical per-pass reachability walk."""
+
+    reachability = _render_leaf._same_layer_reachability(layer_log)
+    adjacency = {pass_index: set() for pass_index in layer_log.ops}
+    for source, targets in reachability.items():
+        for target in targets:
+            adjacency[source].add(target)
+            adjacency[target].add(source)
+    components: list[tuple[int, ...]] = []
+    seen: set[int] = set()
+    for pass_index in sorted(layer_log.ops):
+        if pass_index in seen:
+            continue
+        stack = [pass_index]
+        component: set[int] = set()
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            component.add(current)
+            stack.extend(adjacency[current] - seen)
+        components.append(tuple(sorted(component)))
+    return tuple(sorted(components, key=lambda values: values[0]))
+
+
 def _historical_rolling_suffix(trace: tl.Trace, address: str) -> str:
     """The pre-wave-19 per-address scan, verbatim, as the oracle."""
 
@@ -245,3 +272,43 @@ def test_memo_does_not_outlive_one_draw() -> None:
     assert entry_states == [True, True], "each draw must start from an empty cache"
     # Outside every scope the ContextVar is clean, so no layer refs leak past a draw.
     assert _render_leaf._PER_DRAW_COLLAPSE_CACHE.get() is None
+
+
+@pytest.mark.parametrize("steps", [5, 20, 80])
+def test_union_find_components_match_historical_reachability(steps: int) -> None:
+    """The linear interior union-find preserves the historical pass partition."""
+
+    trace = tl.trace(CellLoop(steps=steps), torch.rand(2, 8))
+    rolled_layers = [
+        layer
+        for layer in trace.layer_logs.values()
+        if isinstance(layer, Layer) and layer.num_passes > 1
+    ]
+    assert rolled_layers
+    for layer in rolled_layers:
+        assert _render_leaf._same_layer_dependency_components(
+            layer
+        ) == _historical_dependency_components(layer)
+
+
+def test_union_find_partition_is_children_order_invariant() -> None:
+    """Permuting child tuples cannot change user-visible rolled pass groups."""
+
+    trace = tl.trace(CellLoop(steps=20), torch.rand(2, 8))
+    layer = max(
+        (
+            candidate
+            for candidate in trace.layer_logs.values()
+            if isinstance(candidate, Layer) and candidate.num_passes > 1
+        ),
+        key=lambda candidate: candidate.num_passes,
+    )
+    expected = _render_leaf._same_layer_dependency_components(layer)
+    original_children = [(op, op.children) for op in trace.ops]
+    try:
+        for op, children in original_children:
+            op.children = list(reversed(children))
+        assert _render_leaf._same_layer_dependency_components(layer) == expected
+    finally:
+        for op, children in original_children:
+            op.children = children

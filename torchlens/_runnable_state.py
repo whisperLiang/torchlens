@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from hashlib import sha256
 import math
@@ -1058,6 +1059,26 @@ def prepare_runnable_state(trace: Any, seed: int | None = None) -> PreparedRunna
         If the descriptor or selected state source violates a slot contract.
     """
 
+    with _host_memory_budget_scope():
+        return _prepare_runnable_state(trace, seed)
+
+
+def _prepare_runnable_state(trace: Any, seed: int | None = None) -> PreparedRunnableState:
+    """Implement one runnable-state preparation inside its host-budget scope.
+
+    Parameters
+    ----------
+    trace:
+        Loaded sparse Trace whose descriptor supplies state-slot contracts.
+    seed:
+        Optional isolated initializer seed. ``None`` uses normal runtime RNG.
+
+    Returns
+    -------
+    PreparedRunnableState
+        Run-local slot values and honest source/initializer reporting.
+    """
+
     descriptor = _require_descriptor(trace)
     # r55 free_1: bound every recorded op-output allocation BEFORE the DAG runs, on
     # every state source (staged/embedded/random-init), so a tampered self-consistent
@@ -1572,9 +1593,37 @@ largest legitimate single random-init state slot on record (a 70B-class
 embedding) is three orders of magnitude below it.
 """
 
+_HOST_MEMORY_BUDGET_CACHE: ContextVar[dict[str, int | None] | None] = ContextVar(
+    "torchlens_host_memory_budget_cache",
+    default=None,
+)
+
+
+@contextmanager
+def _host_memory_budget_scope() -> Iterator[None]:
+    """Cache the dynamic host-memory probe for one atomic state preparation."""
+
+    token = _HOST_MEMORY_BUDGET_CACHE.set({})
+    try:
+        yield
+    finally:
+        _HOST_MEMORY_BUDGET_CACHE.reset(token)
+
 
 def _host_memory_budget_bytes() -> int | None:
     """Return available host memory plus free swap, or ``None`` when unprobeable."""
+
+    cache = _HOST_MEMORY_BUDGET_CACHE.get()
+    if cache is not None and "host" in cache:
+        return cache["host"]
+    budget = _probe_host_memory_budget_bytes()
+    if cache is not None:
+        cache["host"] = budget
+    return budget
+
+
+def _probe_host_memory_budget_bytes() -> int | None:
+    """Probe available host memory plus free swap without memoization."""
 
     if sys.platform.startswith("linux"):
         try:

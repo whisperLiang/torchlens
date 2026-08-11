@@ -31,6 +31,7 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
+from torchlens import _runnable_state as runnable_state
 from torchlens._runnable_state import _preflight_random_init_allocation
 from torchlens.errors import RunCapabilityUnavailableError
 from torchlens.runnable import (
@@ -367,3 +368,26 @@ def test_preflight_refuses_only_truly_infeasible_totals() -> None:
         _preflight_random_init_allocation([infeasible])
     assert caught.value.fields.get("detection_stage") == "state_allocation_preflight"
     assert int(caught.value.fields["required_bytes"]) > int(caught.value.fields["available_bytes"])
+
+
+def test_host_memory_budget_is_probed_once_per_preparation_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One atomic run preparation reuses one dynamic host-memory observation."""
+
+    calls = 0
+
+    def probe() -> int:
+        """Return a changing budget so stale cross-run reuse is observable."""
+
+        nonlocal calls
+        calls += 1
+        return calls * 1024
+
+    monkeypatch.setattr(runnable_state, "_probe_host_memory_budget_bytes", probe)
+    with runnable_state._host_memory_budget_scope():
+        assert runnable_state._host_memory_budget_bytes() == 1024
+        assert runnable_state._host_memory_budget_bytes() == 1024
+    with runnable_state._host_memory_budget_scope():
+        assert runnable_state._host_memory_budget_bytes() == 2048
+    assert calls == 2
