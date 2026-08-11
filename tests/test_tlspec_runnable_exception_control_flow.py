@@ -47,10 +47,23 @@ def _pd_input() -> torch.Tensor:
 
 
 def _non_pd_input() -> torch.Tensor:
-    """Non-positive-definite, SINGULAR 2x2 matrix (raising branch for both
-    the Cholesky and the inversion fallback models)."""
+    """Negative-definite-leading AND SINGULAR 2x2 matrix (raising branch for
+    both the Cholesky and the inversion fallback models).
 
-    return torch.tensor([[1.0, 1.0], [1.0, 1.0]])
+    The leading entry is exactly ``-1.0``, so ``cholesky`` fails on its FIRST
+    pivot (``sqrt(-1)``) and ``det`` is exactly ``0``, so ``inv`` fails as
+    singular. Both hold on every BLAS/LAPACK kernel with no rounding involved.
+
+    Deliberately not ``[[1, 1], [1, 1]]``: that is singular, but whether
+    ``cholesky`` raises on it is a float32 knife edge. The second pivot is
+    ``1 - (A21/L11)**2``, and CPUs whose LAPACK kernel computes ``A21/L11`` as
+    ``0.99999994`` instead of exactly ``1.0`` get a tiny POSITIVE pivot and
+    SUCCEED, silently taking the non-raising branch and disarming this
+    tripwire. Observed doing exactly that on a 4-core cluster box at the same
+    torch build that raises on a 20-core workstation.
+    """
+
+    return torch.tensor([[-1.0, 0.0], [0.0, 0.0]])
 
 
 class _CholeskyFallbackModel(nn.Module):
