@@ -461,8 +461,7 @@ class Recorder:
             captured_run_core = trace.__dict__.pop("_fastlog_captured_run_core", None)
             if captured_run_core is not None:
                 self._captured_run_cores.append(captured_run_core)
-            self._carry_module_structure_events(trace)
-            self._capture_events.extend(trace.capture_events.op_events)
+            self._absorb_pass_events(trace)
             object.__setattr__(
                 self._state.recording,
                 "n_ops",
@@ -509,8 +508,7 @@ class Recorder:
             # populates these on a normal return.
             output_tensors, output_tensor_addresses = _extract_and_mark_outputs(trace, output)
         trace.__dict__.pop("_output_attribution_input_tensors", None)
-        self._carry_module_structure_events(trace)
-        self._capture_events.extend(trace.capture_events.op_events)
+        self._absorb_pass_events(trace)
         trace.capture_events = self._capture_events
         trace._capture_events = self._capture_events
         self._state.runtime_trace = trace
@@ -526,31 +524,24 @@ class Recorder:
         )
         return output
 
-    def _carry_module_structure_events(self, trace: Trace) -> None:
-        """Retain the pass's module prep/enter/exit events for ``to_trace()``.
+    def _absorb_pass_events(self, trace: Trace) -> None:
+        """Fold one pass's capture stream into the recorder's journal.
 
-        The predicate-capture per-pass ``trace`` created in
-        :meth:`_run_unified_capture` owns its own ``CaptureEvents`` while the
-        forward runs: model preparation emits one ``ModulePrepEvent`` per module
-        (``backends/torch/model_prep.py``) onto it, carrying each module's real
-        ``address_children`` / source metadata. The recorder then extends only
-        ``op_events`` into its own longer-lived ``self._capture_events`` and
-        reassigns ``trace.capture_events`` away, orphaning those prep events.
+        The per-pass ``trace`` created in :meth:`_run_unified_capture` owns its
+        own ``CaptureEvents`` while the forward runs: model preparation emits
+        one ``ModulePrepEvent`` per module onto it (with each module's real
+        ``address_children`` / source metadata), the wrapper hot path emits the
+        op events, and user pre-hook provenance lands in its own lane.
+        ``Recording.to_trace()`` rebuilds a fresh ``Trace`` from exactly the
+        recorder's accumulated journal, so those structure facts must fold
+        across or ``_build_root_module_log`` degrades to an address-children
+        fallback that breaks the module-hierarchy invariant.
 
-        ``Recording.to_trace()`` rebuilds a fresh ``Trace`` from exactly
-        ``self._capture_events`` and runs the same postprocess pipeline as a live
-        capture. Without the module prep events, ``_module_metadata`` stays empty
-        and ``_build_root_module_log`` (postprocess finalization) falls back to
-        deriving the root's ``address_children`` from ``top_level_modules`` --
-        which is empty whenever every op's module stack starts at ``self`` --
-        yielding a root ``Module`` with no ``address_children`` and a
-        ``module_hierarchy`` invariant failure for any model with a submodule.
-
-        Carry the real prep (and, for symmetry, any enter/exit) events across so
-        ``to_trace()``'s materialize step applies them exactly as an exhaustive
-        capture would. Guarded on emptiness so multi-pass recordings -- which
-        re-prepare the model and re-emit identical prep events every pass -- keep
-        a single, non-duplicated set.
+        The fold is one :meth:`CaptureEvents.concat` call under the declared
+        merge law: module structure lanes are first-run-only (multi-pass
+        recordings re-emit identical prep events every pass), op and pre-hook
+        lanes append with re-stamped seq, and run-local lanes (output
+        versions, buffer writes, backward) never merge.
         """
 
         if self._capture_events is None:
@@ -558,13 +549,7 @@ class Recorder:
         source = getattr(trace, "capture_events", None)
         if source is None or source is self._capture_events:
             return
-        if not self._capture_events.module_prep_events:
-            self._capture_events.module_prep_events.extend(source.module_prep_events)
-        if not self._capture_events.module_enter_events:
-            self._capture_events.module_enter_events.extend(source.module_enter_events)
-        if not self._capture_events.module_exit_events:
-            self._capture_events.module_exit_events.extend(source.module_exit_events)
-        self._capture_events.pre_hook_events.extend(source.pre_hook_events)
+        self._capture_events.concat(source)
 
     def _mark_halted_pass(self, pass_index: int, halt_exc: HaltSignal) -> None:
         """Persist halt state for the given pass."""
@@ -601,14 +586,12 @@ class Recorder:
                 "failed-capture event snapshot missing; cannot build a faithful partial"
             )
         combined_events = CaptureEvents()
-        combined_events.extend(self._capture_events.op_events)
-        combined_events.module_prep_events.extend(self._capture_events.module_prep_events)
-        combined_events.module_enter_events.extend(self._capture_events.module_enter_events)
-        combined_events.module_exit_events.extend(self._capture_events.module_exit_events)
-        combined_events.pre_hook_events.extend(self._capture_events.pre_hook_events)
+        combined_events.concat(self._capture_events)
         if failed_events is not self._capture_events:
-            combined_events.extend(failed_events.op_events)
-            combined_events.pre_hook_events.extend(failed_events.pre_hook_events)
+            # The failing pass contributes only its op and pre-hook facts;
+            # module structure from a partially-executed forward is not
+            # trusted (matching the historical recovery behavior).
+            combined_events.concat(failed_events, lanes=("op_events", "pre_hook_events"))
         self._capture_events = combined_events
         trace.capture_events = combined_events
         trace._capture_events = combined_events

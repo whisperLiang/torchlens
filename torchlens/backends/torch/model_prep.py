@@ -578,7 +578,7 @@ def _prepare_model_session(
             if capture_events is None:
                 capture_events = CaptureEvents()
                 trace.capture_events = capture_events
-            capture_events.module_prep_events.append(
+            capture_events.append_module_prep(
                 ModulePrepEvent(
                     address=meta_address,
                     all_addresses=tuple(meta["all_addresses"]),
@@ -1199,7 +1199,7 @@ def _record_module_entry_metadata(
 
     # Catch buffers created dynamically (e.g. in forward()) after initial scan.
     _tag_untagged_buffers(trace, module)
-    trace.capture_events.module_enter_events.append(
+    trace.capture_events.append_module_enter(
         ModuleEnterEvent(
             address=module_address,
             call_index=module_call_index,
@@ -1364,21 +1364,25 @@ def _copy_field_value_for_replacement(value: Any) -> Any:
     return value
 
 
-def _note_replacement_event(trace: "Trace", raw_label: str | None) -> None:
-    """Record positive trace-level evidence of a genuine replacement event.
+def _note_replacement_event(
+    trace: "Trace",
+    raw_label: str | None,
+    *,
+    origin: str = "raw_forward_hook",
+) -> None:
+    """Append the journal edit record for one genuinely observed replacement.
 
-    The validation exemptions for ``intervention_replacement`` ops used to key
-    ENTIRELY on per-op attributes (``func_name``/``intervention_replaced``/
-    ``is_internal_source``) that the placeholder synthesizer itself writes --
-    so a placeholder minted during PLAIN capture (a capture gap, or forged
-    attributes) was indistinguishable from a genuine user intervention and
-    passed validation, defeating the 2026-06-02 lesson ("a placeholder op
-    appearing during PLAIN capture must STILL fail"). This ledger is the
-    trace-level ground truth those exemptions now require: an entry is added
-    ONLY at the sites that directly observe the replacement event itself (a
-    raw ``register_forward_hook`` returning a new object, or a live-fire
+    Interventions are EDITS in the capture journal
+    (``InterventionAppliedEvent`` referencing the edited label), never op
+    kinds and never a side ledger. The record is appended ONLY at the sites
+    that directly observe the replacement event itself (a raw
+    ``register_forward_hook`` returning a new object, or a live-fire
     intervention hook reporting ``replaced=True`` while an intervention spec
-    or hook plan is actually armed for this capture).
+    or hook plan is actually armed for this capture), so it is the
+    trace-level ground truth the functionless-op validation carve-out
+    requires: a placeholder minted during PLAIN capture (a capture gap, or
+    forged per-op attributes) can never mint one and must STILL fail
+    validation (2026-06-02 lesson).
 
     Parameters
     ----------
@@ -1386,11 +1390,34 @@ def _note_replacement_event(trace: "Trace", raw_label: str | None) -> None:
         Active model log.
     raw_label:
         Raw label of the op whose value was genuinely replaced.
+    origin:
+        Which observation site directly witnessed the edit.
     """
 
     if trace is None or not isinstance(raw_label, str):
         return
-    trace.__dict__.setdefault("_replacement_event_labels", set()).add(raw_label)
+    events = getattr(trace, "capture_events", None)
+    if events is None:
+        return
+    from ...ir.events import InterventionAppliedEvent
+
+    # Causal binding stamped at the observation site: the edited op's event
+    # already exists in this journal (the boundary/replacement op was logged
+    # before the edit is noted), so the edit records the run nonce and the
+    # exact target event instance. Validation refuses an edit without a live
+    # binding, so a record appended anywhere else stays inert.
+    target_event = events.op_event_by_label_raw.get(raw_label)
+    events.append_intervention(
+        InterventionAppliedEvent(
+            label_raw=raw_label,
+            kind="replaced",
+            origin=origin,  # type: ignore[arg-type]
+            timestamp=time.time(),
+            run_token=events.run_nonce,
+            target_seq=int(getattr(target_event, "seq", 0) or 0),
+            target_func_call_id=getattr(target_event, "func_call_id", None),
+        )
+    )
 
 
 def _live_intervention_machinery_armed() -> bool:
@@ -1733,7 +1760,7 @@ def _ensure_module_output_tensor_logged(
         # trace stays unledgered, so validation refuses the placeholder it
         # would otherwise launder into a plain capture.
         if fields_dict["intervention_replaced"] and _live_intervention_machinery_armed():
-            _note_replacement_event(trace, raw_label)
+            _note_replacement_event(trace, raw_label, origin="live_fire")
     trace.op_equivalence_classes[raw_label].add(raw_label)
     new_entry = _make_layer_log_entry(
         trace, tensor, fields_dict, (), {}, trace.activation_transform
@@ -1942,7 +1969,7 @@ def _record_module_exit_metadata(
                     fire_results=remaining_fire_results,
                 )
                 if any_replaced and _live_intervention_machinery_armed():
-                    _note_replacement_event(trace, tensor_label)
+                    _note_replacement_event(trace, tensor_label, origin="live_fire")
         is_atomic_module = _is_bottom_level_submodule_exit(trace, t, module)
         atomic_module_call = (address, module_call_index) if is_atomic_module else None
         output_tensor_labels_raw.append(tensor_label)
@@ -1965,7 +1992,7 @@ def _record_module_exit_metadata(
             )
         output_names.append(output_name)
         trace._mod_exited[mod_id].append(tensor_label)
-    trace.capture_events.module_exit_events.append(
+    trace.capture_events.append_module_exit(
         ModuleExitEvent(
             address=address,
             call_index=module_call_index,
@@ -1976,6 +2003,7 @@ def _record_module_exit_metadata(
             output_paths=tuple(output_paths),
             per_output_atomic=tuple(per_output_atomic),
             output_names=tuple(output_names),
+            output_tensor_leaf_count=len(output_entries),
         )
     )
     return tuple(untraceable_output_boundaries)
@@ -2032,7 +2060,9 @@ def _record_predicate_module_boundary_outputs(
     }
     module_call_label = f"{module_address}:{module_call_index}"
     labeled_outputs: list[tuple[torch.Tensor, tuple[Any, ...], str]] = []
+    walked_leaf_count = 0
     for tensor, container_path, _container_spec in _walk_output_tensors_with_paths(out):
+        walked_leaf_count += 1
         raw_label = get_tensor_label(tensor)
         if raw_label is None:
             parent_labels = tuple(
@@ -2041,7 +2071,7 @@ def _record_predicate_module_boundary_outputs(
             raw_label = parent_labels[0] if parent_labels else None
         if raw_label is not None:
             labeled_outputs.append((tensor, tuple(container_path), raw_label))
-    trace.capture_events.module_exit_events.append(
+    trace.capture_events.append_module_exit(
         ModuleExitEvent(
             address=module_address,
             call_index=module_call_index,
@@ -2052,6 +2082,7 @@ def _record_predicate_module_boundary_outputs(
             output_paths=tuple(path for _tensor, path, _label in labeled_outputs),
             per_output_atomic=(),
             output_names=tuple(None for _tensor, _path, _label in labeled_outputs),
+            output_tensor_leaf_count=walked_leaf_count,
         )
     )
     for tensor, container_path, raw_label in labeled_outputs:

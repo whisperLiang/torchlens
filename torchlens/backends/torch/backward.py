@@ -40,6 +40,7 @@ from ...data_classes.backward_pass import BackwardPass
 from ...errors import ConfigurationError
 from ...utils.introspection import _get_code_qualname, _get_col_offset
 from ...ir.events import (
+    BackwardCoverageGap,
     BackwardPassEnd,
     BackwardPassStart,
     GradFnDiscovered,
@@ -1315,7 +1316,9 @@ def _materialize_backward_projections_impl(
             base_ordinals = [
                 call_ordinal
                 for call_ordinal, prior_call in prior_calls.items()
-                if prior_call.backward_pass_index <= pass_index_base
+                # A call with no recorded pass index counts as pre-base so its
+                # ordinal is reserved (never reused), the conservative reading.
+                if (prior_call.backward_pass_index or 0) <= pass_index_base
             ]
             if base_ordinals:
                 state.per_object_ordinals[object_id] = max(
@@ -2384,7 +2387,20 @@ def _walk_and_hook_backward_graph(trace: Any, loss: torch.Tensor) -> list[Any]:
                 handles.append(
                     grad_fn_handle.register_prehook(_make_grad_fn_prehook(trace, grad_fn_object_id))
                 )
-        except RuntimeError:
+        except RuntimeError as exc:
+            # A node the walk discovered but could not observe is a typed
+            # journal fact, never a silent skip: validation fails closed on
+            # every reason that is not a proven framework-contract exclusion.
+            _ensure_backward_event_stream(trace).append_backward(
+                BackwardCoverageGap(
+                    pass_index=int(getattr(trace, "_active_backward_pass_index", 0) or 0),
+                    object_id=grad_fn_object_id,
+                    class_qualname=grad_fn_record.class_qualname,
+                    reason="registration_error",
+                    detail=str(exc)[:200],
+                    timestamp=time.time(),
+                )
+            )
             continue
     _sync_grad_fn_graph_relations(trace)
     return handles
@@ -2780,11 +2796,22 @@ def _run_backward_with_capture(
     try:
         handles = _walk_and_hook_backward_graph(trace, loss)
     except BaseException:
-        # The graph walk can fail after the start event and global capture state have
-        # been installed. Restore both so a failed backward cannot poison later traces.
-        if events.backward_events and events.backward_events[-1] is start_event:
-            events.backward_events.pop()
-            events.note_backward_event_removal()
+        # The graph walk can fail after the start event and global capture
+        # state have been installed. Restore the global state so a failed
+        # backward cannot poison later traces — but NEVER delete the start
+        # record: a failed attempted pass is evidence, and it closes with a
+        # terminal failed End so the bracket invariant holds exactly (the
+        # same convention the engine-failure path below already follows).
+        events.append_backward(
+            BackwardPassEnd(
+                pass_index=pass_index,
+                duration=None,
+                peak_memory=None,
+                status="error",
+                order_attribution_coverage=None,
+            )
+        )
+        trace.num_backward_passes = max(int(getattr(trace, "num_backward_passes", 0)), pass_index)
         _state._active_trace = previous_trace
         _state._active_hook_plan = previous_plan
         _state._active_intervention_spec = previous_spec
@@ -2793,6 +2820,7 @@ def _run_backward_with_capture(
             trace._active_save_grads_policy = previous_save_grads_policy
         else:
             trace.__dict__.pop("_active_save_grads_policy", None)
+        _materialize_backward_projections(trace)
         raise
     backend, before = _reset_peak_memory(loss.device)
     backward_start_time = time.time()
@@ -2801,7 +2829,11 @@ def _run_backward_with_capture(
     trace._tl_active_backward_bracket = True
     try:
         result = backward_callable()
-    except Exception:
+    except BaseException:
+        # BaseException (including KeyboardInterrupt/SystemExit) is stamped
+        # as a failed attempt without being swallowed or translated: the
+        # terminal End record in ``finally`` must never report "ok" for a
+        # pass the engine did not complete.
         status = "error"
         raise
     finally:

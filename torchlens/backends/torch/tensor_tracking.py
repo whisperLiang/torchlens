@@ -62,7 +62,9 @@ def _is_fork_relative(trace: "Trace", other: "Trace") -> bool:
     return False
 
 
-def _add_tensor_backward_hook(trace: "Trace", t: torch.Tensor, tensor_label: str) -> None:
+def _add_tensor_backward_hook(
+    trace: "Trace", t: torch.Tensor, tensor_label: str, *, take_ownership: bool = False
+) -> None:
     """Register a backward hook on ``t`` that captures its grad into Trace.
 
     The hook closure captures a ``weakref`` to Trace (not a strong reference)
@@ -73,10 +75,23 @@ def _add_tensor_backward_hook(trace: "Trace", t: torch.Tensor, tensor_label: str
     Only tensors that participate in autograd (have grad_fn_handle or require_grad)
     get hooks — others would never receive grads.
 
+    One label, one gradient OWNER: a raw label names exactly one logical op
+    output, so exactly one hooked tensor may emit ``OpGradObserved`` for it —
+    otherwise aliased registrations (an identity module's relabeled live
+    tensor, an in-place op's live result) double-emit the same logical fact
+    and trip the events<->projection multiplicity reconciliation. The first
+    registration owns the label; a later registration with
+    ``take_ownership=True`` (the live-tensor path, whose premise is that the
+    logged object is a graph dead end) transfers ownership. Non-owner hooks
+    stay registered but drop their fire.
+
     Args:
         t: The tensor to hook.
         tensor_label: Raw tensor label (e.g. ``"conv2d_3_47_raw"``) used to
             look up the corresponding log entry when the grad arrives.
+        take_ownership: Transfer gradient-emission ownership of
+            ``tensor_label`` to this tensor even if another tensor already
+            holds it.
     """
     # r65: TorchLens's OWN hook-bookkeeping ``grad_fn``/``requires_grad`` reads, hoisted
     # under the explicit internal-read marker so the r65 state-metadata property observer
@@ -107,16 +122,29 @@ def _add_tensor_backward_hook(trace: "Trace", t: torch.Tensor, tensor_label: str
 
     hooked_tensors = trace.__dict__.setdefault("_tl_backward_hooked_tensor_keys", set())
     hook_key = (tensor_label, id(t))
+    grad_hook_owners = trace.__dict__.setdefault("_tl_grad_hook_owner_by_label", {})
+    if take_ownership or tensor_label not in grad_hook_owners:
+        grad_hook_owners[tensor_label] = id(t)
     if hook_key in hooked_tensors:
         return
     hooked_tensors.add(hook_key)
 
     # Weak reference prevents Trace -> tensor -> hook -> Trace ref cycle.
     trace_ref = weakref.ref(trace)
+    hooked_tensor_id = id(t)
 
     def log_grad_to_model_history(grad: torch.Tensor) -> None:
         """Emit and optionally retain one gradient observed by a tensor hook."""
         active_trace = trace_ref()
+        # One-owner-per-label: a non-owner alias registration drops its fire
+        # so one logical op output emits exactly one OpGradObserved per pass.
+        if active_trace is not None:
+            owner_map = active_trace.__dict__.get("_tl_grad_hook_owner_by_label")
+            if (
+                owner_map is not None
+                and owner_map.get(tensor_label, hooked_tensor_id) != hooked_tensor_id
+            ):
+                return
         refresh_target_ref = getattr(active_trace, "_refresh_projection_target_ref", None)
         if refresh_target_ref is not None:
             active_trace = refresh_target_ref()
@@ -139,6 +167,21 @@ def _add_tensor_backward_hook(trace: "Trace", t: torch.Tensor, tensor_label: str
         ):
             active_trace = managed_trace
         if active_trace is not None:
+            # One-owner-per-label must hold on the FINAL emission target, not
+            # just the hook's own trace: after a refresh-projection or fork
+            # redirect, a stale source-trace hook (e.g. on an in-place live
+            # tensor) can own the label in the SOURCE map while the target's
+            # rebound map names a different tensor -- both passing their own
+            # map would emit duplicate observations for one label. A target
+            # map with no entry for the label stays permissive so redirected
+            # gradients are not silently dropped.
+            if active_trace is not trace_ref():
+                target_owner_map = active_trace.__dict__.get("_tl_grad_hook_owner_by_label")
+                if (
+                    target_owner_map is not None
+                    and target_owner_map.get(tensor_label, hooked_tensor_id) != hooked_tensor_id
+                ):
+                    return
             _emit_tensor_grad_event(active_trace, grad, tensor_label)
             if getattr(active_trace, "save_grads", None) not in (None, False):
                 _log_tensor_grad(active_trace, grad, tensor_label)

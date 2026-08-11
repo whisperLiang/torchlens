@@ -785,7 +785,10 @@ class BufferWriteTracker:
             buffer_version=_tensor_version(value),
             source_func_name=source_func_name,
         )
-        self.trace._buffer_write_events.append(event)
+        # Buffer writes are journal facts: the single writer stamps the one
+        # run-monotonic seq, ordering each write exactly against the ops and
+        # module events around it.
+        self.trace.capture_events.append_buffer_write(event)
         self._register_address(address, value, copied_value)
         # r81 (r80 F1 root A): the written/reassigned value's stamp MUST be
         # inventoried + identity-registered, not bare-stamped -- a reassigned

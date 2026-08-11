@@ -665,7 +665,7 @@ def test_reassignment_double_count_is_exact() -> None:
     """Assert N top-level reassignments produce exactly N write events."""
 
     trace = tl.trace(RecurrentReassign(steps=5), torch.ones(2), save_arg_values=True)
-    events = [event for event in trace._buffer_write_events if event.address == "h"]
+    events = [event for event in trace.event_stream.buffer_write_events if event.address == "h"]
     assert len(events) == 5
     assert trace.buffers["h"].num_overwrites == 5
 

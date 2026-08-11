@@ -392,6 +392,31 @@ def validate_backward_pass(
         trace.log_backward(logged_loss)
         if validate_metadata:
             check_metadata_invariants(trace)
+        # Fail closed on coverage gaps: a node the walk could not observe is a
+        # typed journal fact, and only a PROVEN framework-contract exclusion
+        # may preserve a complete-coverage claim. No reason class has been
+        # proven yet, so every recorded gap sinks the verdict rather than
+        # hiding inside a tolerance.
+        from ..ir.events import BackwardCoverageGap
+
+        proven_framework_exclusions: frozenset[str] = frozenset()
+        unexplained_gaps = [
+            event
+            for event in getattr(trace, "backward_events", ())
+            if isinstance(event, BackwardCoverageGap)
+            and event.reason not in proven_framework_exclusions
+        ]
+        if unexplained_gaps:
+            warnings.warn(
+                "validate_backward_pass observed "
+                f"{len(unexplained_gaps)} backward coverage gap(s) "
+                f"(first: {unexplained_gaps[0].reason} on "
+                f"{unexplained_gaps[0].class_qualname}); coverage cannot be "
+                "verified, failing closed.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return False
         observed_param_grads = _param_grads(model)
 
         if validate_layer_grads:

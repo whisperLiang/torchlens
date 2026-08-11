@@ -188,3 +188,9 @@ menagerie/data/verification.db*
 
 # Menagerie crawler disposable runtime state. Canonical records and manifests stay tracked.
 /.crawl-local/
+
+# Repo-root sprint ledgers and agent result files are internal working state
+# (the no-internal-notes pre-commit hook hard-fails them as well).
+/FORKS.md
+/PROGRESS.md
+/*_RESULTS.md

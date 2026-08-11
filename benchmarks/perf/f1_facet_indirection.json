@@ -1,0 +1,13 @@
+{
+  "absent_facet_check_us": 0.19167513097636402,
+  "budget_us_1pct": 112.02285085979383,
+  "construct_core_facets_us": 8.463364200433716,
+  "construct_flat_us": 12.86228494020179,
+  "per_op_capture_us_baseline": 11202.285085979383,
+  "per_op_delta_us": -9.765389448730275,
+  "read_facet_hop_us": 0.11037201795261353,
+  "read_flat_us": 0.16403670504223555,
+  "reads_per_op_charged": 100,
+  "schema": "torchlens.f1_facet_indirection.v1",
+  "verdict": "DECOMPOSE"
+}

@@ -5,28 +5,27 @@ from __future__ import annotations
 from collections.abc import Iterable
 import gc
 from typing import Any, Protocol, TypeVar, runtime_checkable
-from weakref import WeakKeyDictionary
 
 from .ir import CaptureEvents
 
 ActivationT = TypeVar("ActivationT")
-_EVENT_STREAMS: WeakKeyDictionary[object, CaptureEvents] = WeakKeyDictionary()
-
-
-def remember_event_stream(run: object, events: CaptureEvents) -> None:
-    """Retain a raw event stream without adding public instance fields."""
-
-    _EVENT_STREAMS[run] = events
 
 
 def forget_event_stream(run: object) -> None:
-    """Release the retained raw event stream for an explicitly cleaned run."""
+    """Release the run-owned raw event stream for an explicitly cleaned run.
 
-    try:
-        events = _EVENT_STREAMS.pop(run, None)
-    except TypeError:
-        return
-    if events is not None:
+    The run (Trace/Recording) strongly owns its event stream through instance
+    attributes -- ``_capture_events``, and on capture-time traces also the
+    ``capture_events`` attribute holding the same stream; the former
+    module-level ``_EVENT_STREAMS`` weak side registry is gone. Releasing pops
+    the ``_capture_events`` instance attribute and clears the stream's working
+    lanes, so a ``capture_events`` alias (or any outside holder) is left with
+    an empty buffer rather than a live projection.
+    """
+
+    run_dict = getattr(run, "__dict__", None)
+    events = run_dict.pop("_capture_events", None) if isinstance(run_dict, dict) else None
+    if isinstance(events, CaptureEvents):
         events.release_working_projection()
         gc.collect(0)
 
@@ -67,12 +66,7 @@ class CapturedRun:
             events = object.__getattribute__(self, "_capture_events")
         except AttributeError:
             events = None
-        if events is not None:
-            return events
-        try:
-            return _EVENT_STREAMS.get(self)
-        except TypeError:
-            return None
+        return events
 
     @property
     def op_events(self) -> tuple[Any, ...]:

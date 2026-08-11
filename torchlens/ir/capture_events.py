@@ -4,15 +4,19 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field, replace
+import itertools
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Iterable, NoReturn
 import weakref
 
 from .events import (
+    BackwardCoverageGap,
     BackwardPassEnd,
     BackwardPassStart,
+    BufferWriteEvent,
     GradFnDiscovered,
     GradFnFired,
+    InterventionAppliedEvent,
     ModuleEnterEvent,
     ModuleExitEvent,
     ModulePrepEvent,
@@ -30,6 +34,72 @@ if TYPE_CHECKING:
     import torch
 
     from .intervention import FireResult
+
+
+# Declared merge law: how each journal lane combines when one run's stream is
+# folded into an accumulating journal (multi-pass recording, failed-partial
+# recovery). ``CaptureEvents.concat`` is the ONLY sanctioned way to combine two
+# streams; ad-hoc lane splicing is forbidden.
+#
+# - ``append_restamp``: events join the target journal and are re-stamped into
+#   its sequence domain by the single writer.
+# - ``first_run_only``: merged only while the target lane is empty (module
+#   structure repeats identically per pass; one non-duplicated set is kept).
+# - ``run_local``: never merged — the lane's facts are scoped to their own run
+#   (per-pass replay snapshots, buffer writes predicate capture does not track,
+#   and backward events, which append to the ACCUMULATING stream directly).
+#
+# Dict order is the stamping order for one concat call.
+LANE_MERGE_POLICIES: dict[str, str] = {
+    "module_prep_events": "first_run_only",
+    "module_enter_events": "first_run_only",
+    "module_exit_events": "first_run_only",
+    "pre_hook_events": "append_restamp",
+    "op_events": "append_restamp",
+    "intervention_events": "append_restamp",
+    "output_version_events": "run_local",
+    "buffer_write_events": "run_local",
+    "backward_events": "run_local",
+}
+
+_LANE_APPENDERS: dict[str, str] = {
+    "op_events": "append",
+    "module_prep_events": "append_module_prep",
+    "module_enter_events": "append_module_enter",
+    "module_exit_events": "append_module_exit",
+    "pre_hook_events": "append_pre_hook",
+    "intervention_events": "append_intervention",
+}
+
+
+class LaneMergePolicyError(RuntimeError):
+    """A lane declares a merging policy but has no registered appender.
+
+    Raised by :meth:`CaptureEvents.concat` BEFORE any event moves, so a
+    declared-but-unwired lane fails closed instead of silently skipping (or
+    crashing halfway through a merge and corrupting the target journal).
+    """
+
+
+class SourceSequencingError(RuntimeError):
+    """A concat source's global seq domain is invalid.
+
+    Raised by :meth:`CaptureEvents.concat` BEFORE any event moves when the
+    source stream holds an unstamped event, a duplicate cross-lane seq, a
+    non-monotone lane, or a stamp beyond the source's writer counter. Sorting
+    such a stream on its seq domain would substitute dict-lane-order
+    tie-breaking for real chronology, laundering a producer defect (an
+    unstamped, duplicate, reordered, or counter-bypassing writer) into a
+    merged journal that then passes the seq invariants the source itself
+    would have failed.
+    """
+
+
+# Process-monotonic run-nonce source: every CaptureEvents stream is one
+# capture run's journal, and intervention-edit records are causally bound to
+# their run through this token (streams never serialize, so an in-process
+# counter is collision-free for the token's whole lifetime).
+_RUN_NONCE_COUNTER = itertools.count(1)
 
 
 def _clone_op_event_for_replay(event: OpEvent) -> OpEvent:
@@ -73,6 +143,8 @@ class CaptureEvents:
     module_exit_events: list[ModuleExitEvent] = field(default_factory=list)
     pre_hook_events: list[PreHookProvenanceEvent] = field(default_factory=list)
     output_version_events: list[OutputVersionEvent] = field(default_factory=list)
+    buffer_write_events: list[BufferWriteEvent] = field(default_factory=list)
+    intervention_events: list[InterventionAppliedEvent] = field(default_factory=list)
     backward_events: list[
         BackwardPassStart
         | OpGradObserved
@@ -80,6 +152,7 @@ class CaptureEvents:
         | BackwardPassEnd
         | GradFnDiscovered
         | GradFnFired
+        | BackwardCoverageGap
     ] = field(default_factory=list)
     param_refs: dict[str, ParamRef] = field(default_factory=dict)
     raw_layer_counter: int = 0
@@ -89,8 +162,19 @@ class CaptureEvents:
     backend_session: object | None = None
     live_index: LiveIndex = field(default_factory=LiveIndex)
     grad_fn_handles_by_label_raw: dict[str, Any] = field(default_factory=dict)
-    backward_event_seq: int = 0
+    # ONE run-monotonic sequence counter spanning every event kind and phase
+    # (forward ops, module/prehook/output-version siblings, buffer writes, and
+    # the whole backward family). The append methods below are the single
+    # sequencing authority: every event receives ``seq`` at append time, so
+    # cross-kind and forward/backward ordering is an exact recorded fact.
+    event_seq: int = 0
     backward_revision: int = 0
+    # Run identity token for causal binding of intervention-edit records: the
+    # observing site stamps it onto each edit, and validation accepts an edit
+    # only when its token matches the validated stream's nonce. Working
+    # projections of the SAME run (``copy_for_replay``) preserve the nonce;
+    # detached streams and fresh captures get their own.
+    run_nonce: int = field(default_factory=lambda: next(_RUN_NONCE_COUNTER))
     # Detached-stream baseline: event streams never serialize and forks never
     # share a stream, so a stream installed on a trace that ALREADY carries a
     # materialized backward projection records the projection it extends.
@@ -266,6 +350,8 @@ class CaptureEvents:
             module_exit_events=list(self.module_exit_events),
             pre_hook_events=list(self.pre_hook_events),
             output_version_events=list(self.output_version_events),
+            buffer_write_events=list(self.buffer_write_events),
+            intervention_events=list(self.intervention_events),
             backward_events=list(self.backward_events),
             param_refs=dict(self.param_refs),
             raw_layer_counter=self.raw_layer_counter,
@@ -275,8 +361,9 @@ class CaptureEvents:
             backend_session=self.backend_session,
             live_index=projected_index,
             grad_fn_handles_by_label_raw=dict(self.grad_fn_handles_by_label_raw),
-            backward_event_seq=self.backward_event_seq,
+            event_seq=self.event_seq,
             backward_revision=self.backward_revision,
+            run_nonce=self.run_nonce,
             pass_index_base=self.pass_index_base,
             base_total_gradient_memory=self.base_total_gradient_memory,
             base_total_backward_memory=self.base_total_backward_memory,
@@ -299,6 +386,8 @@ class CaptureEvents:
         self.module_exit_events.clear()
         self.pre_hook_events.clear()
         self.output_version_events.clear()
+        self.buffer_write_events.clear()
+        self.intervention_events.clear()
         self.live_index.clear()
         self.grad_fn_handles_by_label_raw.clear()
 
@@ -396,16 +485,172 @@ class CaptureEvents:
         self.grad_fn_handles_by_label_raw.clear()
         self.recent_events.clear()
 
-    def next_backward_seq(self) -> int:
-        """Return the next monotonic backward event sequence number."""
+    def next_seq(self) -> int:
+        """Return the next value of the one run-monotonic event sequence."""
 
-        self.backward_event_seq += 1
-        return self.backward_event_seq
+        self.event_seq += 1
+        return self.event_seq
 
     def append(self, event: OpEvent) -> None:
-        """Append a single operation event."""
+        """Append a single operation event, stamping the global seq."""
+        object.__setattr__(event, "seq", self.next_seq())
         self.op_events.append(event)
         self.live_index.append(event)
+
+    def append_module_prep(self, event: ModulePrepEvent) -> None:
+        """Append a module-prep sibling event, stamping the global seq."""
+        object.__setattr__(event, "seq", self.next_seq())
+        self.module_prep_events.append(event)
+
+    def append_module_enter(self, event: ModuleEnterEvent) -> None:
+        """Append a module-entry sibling event, stamping the global seq."""
+        object.__setattr__(event, "seq", self.next_seq())
+        self.module_enter_events.append(event)
+
+    def append_module_exit(self, event: ModuleExitEvent) -> None:
+        """Append a module-exit sibling event, stamping the global seq."""
+        object.__setattr__(event, "seq", self.next_seq())
+        self.module_exit_events.append(event)
+
+    def append_pre_hook(self, event: PreHookProvenanceEvent) -> None:
+        """Append a pre-hook provenance sibling event, stamping the global seq."""
+        object.__setattr__(event, "seq", self.next_seq())
+        self.pre_hook_events.append(event)
+
+    def append_buffer_write(self, event: BufferWriteEvent) -> None:
+        """Append a registered-buffer write event, stamping the global seq."""
+        object.__setattr__(event, "seq", self.next_seq())
+        self.buffer_write_events.append(event)
+
+    def append_intervention(self, event: InterventionAppliedEvent) -> None:
+        """Append an intervention edit record, stamping the global seq."""
+        object.__setattr__(event, "seq", self.next_seq())
+        self.intervention_events.append(event)
+
+    def concat(self, other: "CaptureEvents", *, lanes: Iterable[str] | None = None) -> None:
+        """Merge another stream's lanes into this journal under the merge law.
+
+        This is the ONLY sanctioned way to combine two capture streams. Each
+        lane follows its declared :data:`LANE_MERGE_POLICIES` entry. Merging
+        events keep the SOURCE stream's cross-lane chronological order (its
+        ``seq`` domain is the sort key) and are re-stamped into THIS journal's
+        sequence domain by the single-writer append methods, so the combined
+        journal keeps unique seq values that preserve the source's recorded
+        chronology. Every merged event is a CLONE: re-stamping never mutates
+        the sealed source stream. Counters, param refs, and runtime sidecars
+        stay the target's own (they are run state, not journal facts).
+
+        Raises
+        ------
+        LaneMergePolicyError
+            When a requested lane declares a merging (non-``run_local``)
+            policy but has no registered single-writer appender. The check
+            runs before any event moves, so a declared-but-unwired lane fails
+            closed even while empty.
+        SourceSequencingError
+            When the source's global seq domain is invalid: an unstamped
+            event, a duplicate cross-lane seq, a non-monotone lane, or a
+            stamp beyond the source's writer counter. The check runs before
+            any event moves, so an invalid source never partially merges.
+
+        Parameters
+        ----------
+        other
+            Source stream whose lanes should fold into this journal.
+        lanes
+            Optional restriction to a subset of lane names. ``None`` merges
+            every declared lane under its policy. A caller may restrict lanes
+            (failed-partial recovery keeps only op and pre-hook facts from the
+            failing pass) but never override a lane's declared policy.
+        """
+
+        if other is self:
+            return
+        lane_names = tuple(lanes) if lanes is not None else tuple(LANE_MERGE_POLICIES)
+        for lane_name in lane_names:
+            if LANE_MERGE_POLICIES[lane_name] != "run_local" and lane_name not in _LANE_APPENDERS:
+                raise LaneMergePolicyError(
+                    f"lane {lane_name!r} declares merge policy "
+                    f"{LANE_MERGE_POLICIES[lane_name]!r} but has no registered appender; "
+                    "wire it into _LANE_APPENDERS before it can merge"
+                )
+        # Source seq-domain gate: sorting an invalid domain would replace real
+        # chronology with dict-lane-order tie-breaking, so the source must
+        # PROVE its stamps are unique, per-lane monotone, and counter-covered
+        # before anything moves. This mirrors the journal seq invariants a
+        # standalone stream is held to; concat must not launder a stream that
+        # validation would reject. Skipped (``first_run_only``-satisfied)
+        # lanes still validate: a corrupt lane in the source is a producer
+        # defect regardless of whether its events merge this round.
+        seen_lane_by_seq: dict[int, str] = {}
+        for lane_name in lane_names:
+            if LANE_MERGE_POLICIES[lane_name] == "run_local":
+                continue
+            previous_seq = 0
+            for event in getattr(other, lane_name):
+                seq = int(getattr(event, "seq", 0) or 0)
+                if seq < 1:
+                    raise SourceSequencingError(
+                        f"concat source lane {lane_name!r} holds an unstamped event "
+                        f"(seq {seq}): only single-writer-stamped streams may merge"
+                    )
+                if seq <= previous_seq:
+                    raise SourceSequencingError(
+                        f"concat source lane {lane_name!r} seq {seq} does not "
+                        f"increase past {previous_seq}"
+                    )
+                previous_seq = seq
+                duplicate_lane = seen_lane_by_seq.get(seq)
+                if duplicate_lane is not None:
+                    raise SourceSequencingError(
+                        f"concat source seq {seq} appears in both "
+                        f"{duplicate_lane!r} and {lane_name!r}"
+                    )
+                seen_lane_by_seq[seq] = lane_name
+        if seen_lane_by_seq and max(seen_lane_by_seq) > int(other.event_seq or 0):
+            raise SourceSequencingError(
+                f"concat source seq {max(seen_lane_by_seq)} exceeds the source "
+                f"writer counter {other.event_seq}: an event bypassed the "
+                "single-writer append path"
+            )
+        merge_rows: list[tuple[int, str, Any]] = []
+        for lane_name in lane_names:
+            policy = LANE_MERGE_POLICIES[lane_name]
+            if policy == "run_local":
+                continue
+            source_events = list(getattr(other, lane_name))
+            if not source_events:
+                continue
+            if policy == "first_run_only" and getattr(self, lane_name):
+                continue
+            merge_rows.extend((event.seq, lane_name, event) for event in source_events)
+        # Sort on the source seq domain: cross-lane chronology is preserved
+        # exactly (the gate above proved every stamp unique and monotone, so
+        # the sort never has to tie-break).
+        merge_rows.sort(key=lambda row: row[0])
+        seq_map: dict[int, int] = {}
+        for source_seq, lane_name, event in merge_rows:
+            if lane_name == "op_events":
+                clone = _clone_op_event_for_replay(event)
+            else:
+                clone = replace(event)
+            # Sanctioned chain of custody: an edit genuinely bound to the
+            # SOURCE run re-binds to this journal (its run token and the
+            # re-stamped seq of its already-merged target op, which sorts
+            # earlier by chronology). A forged/unbound edit or one bound to
+            # a foreign run keeps its stale binding and stays refused by
+            # validation.
+            if (
+                lane_name == "intervention_events"
+                and getattr(event, "run_token", None) == other.run_nonce
+            ):
+                object.__setattr__(clone, "run_token", self.run_nonce)
+                object.__setattr__(
+                    clone, "target_seq", seq_map.get(getattr(event, "target_seq", 0), 0)
+                )
+            getattr(self, _LANE_APPENDERS[lane_name])(clone)
+            if source_seq:
+                seq_map[source_seq] = clone.seq
 
     def append_backward(
         self,
@@ -414,7 +659,8 @@ class CaptureEvents:
         | ParamGradObserved
         | BackwardPassEnd
         | GradFnDiscovered
-        | GradFnFired,
+        | GradFnFired
+        | BackwardCoverageGap,
     ) -> None:
         """Append a backward sidecar event, stamping the global backward seq.
 
@@ -441,7 +687,7 @@ class CaptureEvents:
 
         if isinstance(event, GradFnDiscovered):
             object.__setattr__(event, "source", MappingProxyType(dict(event.source)))
-        object.__setattr__(event, "seq", self.next_backward_seq())
+        object.__setattr__(event, "seq", self.next_seq())
         self.backward_events.append(event)
         self.backward_revision += 1
 
@@ -456,12 +702,18 @@ class CaptureEvents:
         self.backward_revision += 1
 
     def extend(self, events: tuple[OpEvent, ...] | list[OpEvent]) -> None:
-        """Append multiple operation events in order."""
+        """Append multiple operation events in order, re-stamping seq.
+
+        Extending moves events into THIS buffer's sequence domain (the
+        recorder's multi-pass accumulation), so each event receives a fresh
+        ``seq`` from this buffer's counter.
+        """
         for event in events:
             self.append(event)
 
     def append_output_version(self, event: OutputVersionEvent) -> None:
-        """Append a parent output-version sibling event."""
+        """Append a parent output-version sibling event, stamping the global seq."""
+        object.__setattr__(event, "seq", self.next_seq())
         self.output_version_events.append(event)
 
     def reserve_label(self, layer_type: str) -> ReservedLabel:

@@ -287,3 +287,23 @@ class TestTraceGC:
             trace._mod_call_index = {"x": 1}
 
         assert "_build_state" not in trace.__dict__
+
+
+def test_delattr_capture_events_releases_the_working_projection():
+    """``del trace._capture_events`` clears a held stream's working lanes.
+
+    Regression: ``Trace.__delattr__`` popped the attribute FIRST and then
+    called ``forget_event_stream``, which looks up the attribute it just
+    removed -- so ``release_working_projection()`` never ran and an outside
+    holder kept every op event alive.
+    """
+
+    trace = tl.trace(_TwoLayerNet(), torch.randn(2, 5))
+    stream = trace._capture_events
+    assert stream.op_events
+
+    del trace._capture_events
+
+    assert trace.__dict__.get("_capture_events") is None
+    assert not stream.op_events
+    assert not stream.module_prep_events

@@ -22,7 +22,15 @@ partial diagnostics, and fastlog's lightweight `RecordContext` construction.
 ## How It Connects
 
 Decorated wrappers in `backends/torch/wrappers.py` and `backends/torch/ops.py` emit
-backend events for every logged operation. `trace.py` owns the forward session;
+backend events for every logged operation. `CaptureEvents` (torchlens/ir) is the ONE
+logical journal for a run: its append methods are the single writer and stamp every
+event of every kind (op, module prep/enter/exit, pre-hook, output-version, buffer-write,
+and the whole backward family) with one run-monotonic `seq`, so cross-kind and
+forward/backward ordering is an exact recorded fact. Never append to a lane list
+directly. Torch op events are trace-backref-free from birth (`source_trace=None`); the
+trace owns its stream through instance attributes -- `_capture_events`, plus the
+`capture_events` alias during capture until postprocess drops it (the old
+`_EVENT_STREAMS` weak side registry is gone). `trace.py` owns the forward session;
 backend producers create raw op/input/buffer records consumed by `postprocess/`.
 Backward capture is routed through validation/backward and trace methods rather
 than a capture-local `backward.py` module.

@@ -109,6 +109,21 @@ def _annotations_from_event(event: OpEvent) -> dict[str, object]:
     return dict(raw_annotations) if isinstance(raw_annotations, Mapping) else {}
 
 
+def _journal_buffer_write_events(trace: "Trace") -> tuple[Any, ...]:
+    """Return the journal's buffer-write lane for one trace.
+
+    Buffer writes live in the capture journal (``CaptureEvents.buffer_write_events``),
+    not in a Trace-side list. During Step 0 the live stream is still attached as
+    ``trace.capture_events``; afterwards the trace owns the released stream via
+    ``_capture_events``.
+    """
+
+    stream = getattr(trace, "capture_events", None)
+    if stream is None:
+        stream = getattr(trace, "_capture_events", None)
+    return tuple(getattr(stream, "buffer_write_events", ()) or ())
+
+
 def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
     """Materialize capture events into raw build-state logs.
 
@@ -643,7 +658,7 @@ def _children_by_parent(
         for edge in event.parents:
             if event.label_raw not in children[edge.parent_label_raw]:
                 children[edge.parent_label_raw].append(event.label_raw)
-    for event in getattr(trace, "_buffer_write_events", []):
+    for event in _journal_buffer_write_events(trace):
         producer_label_raw = getattr(event, "producer_label_raw", None)
         version_label_raw = getattr(event, "version_label_raw", None)
         if producer_label_raw not in op_event_labels or version_label_raw not in op_event_labels:
@@ -771,7 +786,7 @@ def _equivalent_ops_by_label(
 
     groups: dict[str, set[str]] = defaultdict(set)
     buffer_address_by_label = dict(buffer_addresses_by_label)
-    for event in getattr(trace, "_buffer_write_events", []):
+    for event in _journal_buffer_write_events(trace):
         label_raw = getattr(event, "version_label_raw", None)
         address = getattr(event, "address", None)
         if isinstance(label_raw, str) and isinstance(address, str):
@@ -851,7 +866,7 @@ def _buffer_addresses_by_label(trace: "Trace", op_events: list[OpEvent]) -> dict
             if isinstance(label_raw, str) and label_raw in source_buffer_labels:
                 by_label[label_raw] = f"{module_address}.{buffer_name}"
 
-    for write_event in getattr(trace, "_buffer_write_events", []):
+    for write_event in _journal_buffer_write_events(trace):
         producer_label_raw = getattr(write_event, "producer_label_raw", None)
         if not isinstance(producer_label_raw, str):
             continue
@@ -1007,7 +1022,7 @@ def _buffer_alias_snapshots_by_address(trace: "Trace") -> dict[str, torch.Tensor
     """
 
     directly_written = {
-        getattr(event, "address", None) for event in getattr(trace, "_buffer_write_events", [])
+        getattr(event, "address", None) for event in _journal_buffer_write_events(trace)
     }
     model_ref = getattr(trace, "_source_model_ref", None)
     model = None if model_ref is None else model_ref()
@@ -1602,7 +1617,7 @@ def _buffer_write_fields(
     """
 
     by_label: dict[str, dict[str, object]] = {}
-    for event in getattr(trace, "_buffer_write_events", []):
+    for event in _journal_buffer_write_events(trace):
         label_raw = getattr(event, "version_label_raw", None)
         if label_raw is None:
             continue

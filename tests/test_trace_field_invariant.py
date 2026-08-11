@@ -24,7 +24,6 @@ def test_trace_field_set_subset_of_user_facing() -> None:
     allowed_runtime_useful = {
         "_buffer_accessor",
         "_buffer_initial_values",
-        "_buffer_write_events",
         "_buffer_write_tracker",
         "_intervention_spec",
         "_layer_nums_to_save",
@@ -53,6 +52,10 @@ def test_trace_field_set_subset_of_user_facing() -> None:
         "_param_log_by_pid",
         "_capture_events",
         "_tl_backward_hooked_tensor_keys",
+        # One-gradient-owner-per-label bookkeeping (FieldPolicy.DROP,
+        # trace.py PORTABLE_STATE_SPEC): session-only, stripped from pickle
+        # state, reset by refresh rebind and replay resets.
+        "_tl_grad_hook_owner_by_label",
         "_backward_gradfn_refs",
         # Backward projection guard trio: session-only fold watermark, all
         # declared FieldPolicy.DROP in Trace.PORTABLE_STATE_SPEC and stripped

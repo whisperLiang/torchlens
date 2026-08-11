@@ -983,6 +983,11 @@ class Trace(
             events = self.event_stream
             if events is not None:
                 return events
+        if name == "_buffer_write_events":
+            # Buffer writes live in the capture journal now; this read-through
+            # keeps capture-time internals and diagnostics working unchanged.
+            stream = self.__dict__.get("capture_events") or self.__dict__.get("_capture_events")
+            return list(getattr(stream, "buffer_write_events", ()) or ())
         state_field = _BUILD_STATE_ATTR_MAP_GET(name)
         if state_field is None:
             # A trace CAN self-report its footprint, but not under the singular name
@@ -1069,7 +1074,9 @@ class Trace(
         if name == "_capture_events":
             from ..captured_run import forget_event_stream
 
-            self.__dict__.pop(name, None)
+            # forget_event_stream pops the attribute itself and releases the
+            # stream's working lanes; popping here first would hand it nothing
+            # to release (the pre-migration weak registry used to find it).
             forget_event_stream(self)
             return
         state_field = _BUILD_STATE_ATTR_MAP_GET(name)
@@ -1147,6 +1154,12 @@ class Trace(
         "backend_runtime_config": FieldPolicy.KEEP,
         "backend_runtime_device_summary": FieldPolicy.KEEP,
         "backend_runtime_version": FieldPolicy.KEEP,
+        # Provenance marker for traces cooked from a Recording: postprocess
+        # runs exhaustive-style (capture_mode stays "exhaustive" for behavior
+        # compatibility), but the marker records the true origin so gates and
+        # diagnostics never mistake a cooked projection for a live exhaustive
+        # capture. Session-only; not a portable fact.
+        "_cooked_from": FieldPolicy.DROP,
         "_paddle_capture_depth": FieldPolicy.DROP,
         "_paddle_op_captures": FieldPolicy.DROP,
         "_paddle_alias_annotations": FieldPolicy.DROP,
@@ -1361,7 +1374,6 @@ class Trace(
         "buffer_layers": FieldPolicy.KEEP,
         "buffer_num_calls": FieldPolicy.KEEP,
         "_buffer_accessor": FieldPolicy.DROP,
-        "_buffer_write_events": FieldPolicy.DROP,
         "_buffer_write_tracker": FieldPolicy.DROP,
         "_param_storage_addresses": FieldPolicy.DROP,
         "_buffer_initial_values": FieldPolicy.BLOB_RECURSIVE,
@@ -1469,6 +1481,11 @@ class Trace(
         "_capture_events": FieldPolicy.DROP,
         "_capture_session": FieldPolicy.DROP,
         "_tl_backward_hooked_tensor_keys": FieldPolicy.DROP,
+        "_tl_grad_hook_owner_by_label": FieldPolicy.DROP,
+        # RF probe suppression flag: declared statically so a Trace serialized
+        # BEFORE any receptive-field probe has the same class spec as one
+        # serialized after (the probe used to setdefault this at call time).
+        "_tl_rf_probe_active": FieldPolicy.DROP,
         "_active_backward_pass_index": FieldPolicy.DROP,
         "_backward_roots_by_pass": FieldPolicy.DROP,
         "_backward_projection_event_count": FieldPolicy.DROP,
@@ -1796,7 +1813,6 @@ class Trace(
         self.buffer_layers: List[str] = []
         self.buffer_num_calls: Dict[str, int] = {}
         self._buffer_accessor = None
-        self._buffer_write_events: list[Any] = []
         self._buffer_write_tracker: Any | None = None
         self._buffer_initial_values: Dict[str, Any] = {}
         self.internal_source_ops: List[str] = []
@@ -2651,6 +2667,7 @@ class Trace(
         state.pop("_build_state", None)
         state["_backward_gradfn_refs"] = []
         state["_tl_backward_hooked_tensor_keys"] = set()
+        state.pop("_tl_grad_hook_owner_by_label", None)
         state["_pending_live_fire_records"] = []
         state["_last_hook_handle_ids"] = ()
         state["_activation_transform_repr"] = (

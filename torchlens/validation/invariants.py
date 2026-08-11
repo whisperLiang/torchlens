@@ -660,6 +660,7 @@ def _check_backward_graph_invariants(trace: "Trace") -> None:
     sync_projection = getattr(trace, "_sync_backward_projection_if_needed", None)
     if callable(sync_projection):
         sync_projection()
+    _check_journal_seq_invariants(trace, name)
     _check_backward_event_flow_invariants(trace, name)
     if not trace.grad_fn_logs:
         return
@@ -1352,6 +1353,79 @@ def _resolve_op_grad_event_label(trace: "Trace", op_label: str) -> str:
     return _impl(trace, op_label)
 
 
+def _check_journal_seq_invariants(trace: "Trace", name: str) -> None:
+    """Check one-journal sequencing across every retained event lane.
+
+    The event writer stamps ONE run-monotonic ``seq`` on every event of every
+    kind (forward ops, module prep/enter/exit, pre-hook provenance, output
+    versions, buffer writes, and the whole backward family), so a torch live
+    stream must show writer-stamped (>= 1), lane-monotonic, journal-unique seq
+    values. Preview backends do not yet route every lane through the writer;
+    they join this check in the ports phase.
+
+    Parameters
+    ----------
+    trace:
+        Postprocessed model log to validate.
+    name:
+        Invariant check name to use in raised errors.
+
+    Raises
+    ------
+    MetadataInvariantError
+        If any lane holds an unstamped, reordered, or duplicated seq value.
+    """
+
+    if getattr(trace, "backend", "torch") != "torch":
+        return
+    capture_events = getattr(trace, "_capture_events", None)
+    if capture_events is None:
+        return
+    lane_names = (
+        "op_events",
+        "module_prep_events",
+        "module_enter_events",
+        "module_exit_events",
+        "pre_hook_events",
+        "output_version_events",
+        "buffer_write_events",
+        "intervention_events",
+        "backward_events",
+    )
+    seen_lane_by_seq: dict[int, str] = {}
+    for lane_name in lane_names:
+        previous_seq = 0
+        for event in getattr(capture_events, lane_name, ()) or ():
+            seq = getattr(event, "seq", None)
+            if not isinstance(seq, int) or seq < 1:
+                raise MetadataInvariantError(
+                    name,
+                    f"{lane_name} event {event!r:.120} is missing a writer-stamped seq",
+                )
+            if seq <= previous_seq:
+                raise MetadataInvariantError(
+                    name,
+                    f"{lane_name} seq {seq} does not increase past {previous_seq}",
+                )
+            previous_seq = seq
+            duplicate_lane = seen_lane_by_seq.get(seq)
+            if duplicate_lane is not None:
+                raise MetadataInvariantError(
+                    name,
+                    f"journal seq {seq} appears in both {duplicate_lane} and {lane_name}",
+                )
+            seen_lane_by_seq[seq] = lane_name
+    if seen_lane_by_seq:
+        counter = int(getattr(capture_events, "event_seq", 0) or 0)
+        max_seen = max(seen_lane_by_seq)
+        if max_seen > counter:
+            raise MetadataInvariantError(
+                name,
+                f"journal seq {max_seen} exceeds the writer counter {counter}: "
+                "an event bypassed the single-writer append path",
+            )
+
+
 def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
     """Check runtime backward event stream consistency against projections.
 
@@ -1370,6 +1444,7 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
     """
 
     from ..ir.events import (
+        BackwardCoverageGap,
         BackwardPassEnd,
         BackwardPassStart,
         GradFnDiscovered,
@@ -1452,10 +1527,20 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
     # inference from timestamps or list positions.
     start_seq_by_pass = {event.pass_index: event.seq for event in starts}
     end_seq_by_pass = {event.pass_index: event.seq for event in ends}
-    pass_scoped_events: list[OpGradObserved | GradFnFired | ParamGradObserved] = [
+    coverage_gap_events = [event for event in events if isinstance(event, BackwardCoverageGap)]
+    for gap_event in coverage_gap_events:
+        if gap_event.pass_index not in valid_pass_indices:
+            raise MetadataInvariantError(
+                name,
+                f"coverage gap references missing pass {gap_event.pass_index!r}",
+            )
+    pass_scoped_events: list[
+        OpGradObserved | GradFnFired | ParamGradObserved | BackwardCoverageGap
+    ] = [
         *op_grad_events,
         *fired_events,
         *param_grad_events,
+        *coverage_gap_events,
     ]
     for event in pass_scoped_events:
         start_seq = start_seq_by_pass.get(event.pass_index)
@@ -1651,13 +1736,15 @@ def op_has_genuine_replacement_evidence(layer: "Op", trace: "Trace | None" = Non
     forged during PLAIN capture passed validation -- defeating the 2026-06-02
     lesson that a placeholder op appearing during plain capture must STILL
     fail. This helper is the cross-check: the op must appear in the
-    trace-level replacement-event ledger populated ONLY at the capture sites
-    that directly observed the replacement (``wrapped_hook`` seeing a raw
-    forward hook return a new object; a live-fire hook reporting
-    ``replaced=True`` while intervention machinery is armed; an explicit
-    ``push()`` intervention), or the trace must carry no ledger authority at
-    all (loaded bundles, backend-neutral traces) in which case the legacy
-    per-op behavior is preserved.
+    journal's intervention-edit records (``InterventionAppliedEvent``) with a
+    live causal binding (run token matching the stream nonce plus the exact
+    target op-event instance), appended ONLY by the capture sites that
+    directly observed the replacement
+    (``wrapped_hook`` seeing a raw forward hook return a new object; a
+    live-fire hook reporting ``replaced=True`` while intervention machinery
+    is armed), or the trace must carry no journal authority at all (loaded
+    bundles, backend-neutral traces) in which case the legacy per-op behavior
+    is preserved.
 
     Parameters
     ----------
@@ -1680,25 +1767,62 @@ def op_has_genuine_replacement_evidence(layer: "Op", trace: "Trace | None" = Non
         # cross-check.
         return True
     if bool(getattr(trace, "_loaded_from_bundle", False)):
-        # The ledger is a live-capture runtime attribute (never serialized);
-        # loaded artifacts keep the legacy per-op behavior. Functionless
-        # replacement ops in bundles are independently refused by
-        # ``_raise_if_portable_bundle_log`` on the replay path.
+        # Journal edit records are live-capture runtime facts (never
+        # serialized); loaded artifacts keep the legacy per-op behavior.
+        # Functionless replacement ops in bundles are independently refused
+        # by ``_raise_if_portable_bundle_log`` on the replay path.
         return True
-    ledger = getattr(trace, "_replacement_event_labels", None)
-    if ledger:
+    from ..ir.events import InterventionAppliedEvent
+
+    stream = getattr(trace, "_capture_events", None)
+    # Causal binding: an edit counts only when it is bound to THIS stream's
+    # run (its run_token matches the stream nonce) AND the journal really
+    # contains the exact target op event it was stamped against at the
+    # observation site -- (label_raw, seq) identifies one event instance, so
+    # a bare record appended through the ordinary writer (forged) and a
+    # genuine record replayed from a DIFFERENT run's journal both stay
+    # refused, and a pass-1 edit can no longer bless a same-labelled pass-2
+    # op after a multi-pass merge (concat re-binds sanctioned merges).
+    run_nonce = getattr(stream, "run_nonce", None)
+    target_event_ids = {
+        (event.label_raw, event.seq)
+        for event in getattr(stream, "op_events", ()) or ()
+    }
+    bound_edits = [
+        event
+        for event in getattr(stream, "intervention_events", ()) or ()
+        if isinstance(event, InterventionAppliedEvent)
+        and event.kind == "replaced"
+        and event.run_token is not None
+        and event.run_token == run_nonce
+        and event.target_seq
+        and (event.label_raw, event.target_seq) in target_event_ids
+    ]
+    if bound_edits:
         candidate_labels = {
             getattr(layer, "_label_raw", None),
             getattr(layer, "label", None),
             getattr(layer, "layer_label", None),
         }
         candidate_labels.discard(None)
-        if candidate_labels & set(ledger):
+        layer_func_call_id = getattr(layer, "func_call_id", None)
+        for event in bound_edits:
+            if event.label_raw not in candidate_labels:
+                continue
+            # Pin the op instance when both sides carry a func_call_id;
+            # synthesized boundary ops may legitimately carry None on the
+            # layer, which keeps the label+target binding as the authority.
+            if (
+                layer_func_call_id is not None
+                and event.target_func_call_id is not None
+                and event.target_func_call_id != layer_func_call_id
+            ):
+                continue
             return True
-    # Push/rerun fallback: the ledger is a plain runtime attribute on the
+    # Push/rerun fallback: the journal is a run-scoped stream on the
     # capture-time trace object, and the intervention rerun engine rebuilds a
     # fresh trace off to the side then swaps its FIELD-ORDER state into the
-    # original object -- the ledger does not survive the swap, and push()
+    # original object -- the stream does not survive the swap, and push()
     # stamps sites without a capture at all. Both are explicit user
     # interventions, so accept the conjunction of two signals a plain-capture
     # placeholder can never carry together: (1) this op holds a hook-minted
