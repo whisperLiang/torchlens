@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from .capture_events import (
     CaptureEvents,
-    LiveOpRecord,
-    live_record_for_label,
     register_live_event,
     replace_op_event,
 )
@@ -98,7 +96,6 @@ __all__ = [
     "is_value_edge_use",
     "GradFnDiscovered",
     "GradFnFired",
-    "LiveOpRecord",
     "LiveIndex",
     "LiveIndexWindowError",
     "MLXValueUnavailableError",
@@ -130,7 +127,6 @@ __all__ = [
     "_DEFERRED_VALUE",
     "coerce_deferred_value",
     "is_deferred_value",
-    "live_record_for_label",
     "register_live_event",
     "replace_op_event",
     # Deprecated inert shims (warn on access; see __getattr__ below).

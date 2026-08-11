@@ -44,7 +44,6 @@ from ..utils.tensor_utils import get_memory_amount_from_metadata
 if TYPE_CHECKING:
     from ..fastlog.options import RecordingOptions
     from ..data_classes.trace import Trace
-    from ..ir import LiveOpRecord
 
 _active_recording_state: "RecordingState | None" = None
 
@@ -1084,7 +1083,7 @@ class LiveOpView:
 
     __slots__ = ("_trace_ref", "_record")
 
-    def __init__(self, trace: "Trace", record: "LiveOpRecord | OpEvent") -> None:
+    def __init__(self, trace: "Trace", record: OpEvent) -> None:
         """Initialize the live view.
 
         Parameters
@@ -1092,7 +1091,7 @@ class LiveOpView:
         trace
             Active trace that owns the live record.
         record
-            Operation event, or a legacy live operation record.
+            Operation event backing this view.
         """
 
         object.__setattr__(self, "_trace_ref", weakref.ref(trace))
@@ -1130,18 +1129,7 @@ class LiveOpView:
         """
 
         record = object.__getattribute__(self, "_record")
-        if isinstance(record, OpEvent):
-            return _event_live_field(self._trace, record, name)
-        if name in record.fields:
-            return record.fields[name]
-        if hasattr(record, name):
-            return getattr(record, name)
-        if name in _OPLOG_FIELDS_KNOWN_LATE:
-            raise LiveOpViewFieldNotYetWritten(
-                f"LiveOpView.{name!r} is populated by postprocess Step 0; "
-                "it is not available inside a forward-time callback."
-            )
-        raise AttributeError(f"LiveOpView has no attribute {name!r}.")
+        return _event_live_field(self._trace, record, name)
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Reject direct mutation of live views.

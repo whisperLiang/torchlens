@@ -10,7 +10,7 @@ prepares the model and calls `wrap_torch()` from `backends/torch/`.
 
 ```
 import torchlens
-  |- exposes 90 top-level public names in __all__
+  |- exposes 93 top-level public names in __all__
   |- eagerly imports the core capture/intervention surface, fastlog/options, and
   |  the HuggingFace autoroute bridge; compat, export, report, stats,
   |  validation, and viz stay lazy
@@ -113,7 +113,7 @@ exclusive with backward-related capture because it discards the autograd graph.
 
 | Path | Purpose |
 |------|---------|
-| `__init__.py` | Top-level API, 90-name `__all__`, deprecation shims, `peek`/`extract` helpers |
+| `__init__.py` | Top-level API, 93-name `__all__`, deprecation shims, `peek`/`extract` helpers |
 | `_state.py` | Global logging toggle, active log, decoration maps, prepared-model registry; no torchlens imports |
 | `_trace_state.py` | Small runtime state enum exposed through `torchlens.io` |
 | `_errors.py`, `errors/` | Public and legacy exception classes |

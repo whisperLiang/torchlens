@@ -8,7 +8,10 @@ version = "2.34.1"
 description = "A package for extracting activations from PyTorch models and saving portable bundles"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.9"
+# 3.10 is the real floor: the package uses @dataclass(slots=True) in 143 places
+# across 31 modules, and `slots=True` is Python 3.10+, so `import torchlens`
+# cannot succeed on 3.9. CI tests 3.10 and 3.11.
+requires-python = ">=3.10"
 authors = [
     {name = "JohnMark Taylor", email = "johnmarkedwardtaylor@gmail.com"},
 ]
@@ -17,7 +20,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Natural Language :: English",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -37,7 +39,7 @@ dependencies = [
     "safetensors>=0.4",
     "tqdm",
     "graphviz",
-    # typing_extensions.Self is used for Python 3.9/3.10 (typing.Self is 3.11+).
+    # typing_extensions.Self is used for Python 3.10 (typing.Self is 3.11+).
     "typing_extensions>=4.0",
     # Pillow is imported at module load by the viz / repgeom image-rendering
     # surfaces (node images, input montages, MDS/feature-map thumbnails), which

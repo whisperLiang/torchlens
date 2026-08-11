@@ -24,7 +24,7 @@
 - `_raw_` prefix for pre-postprocessing state; `_final_` for post-processed state.
 
 ## Public Surface
-`torchlens.__all__` is intentionally small and currently has 90 names. New user-facing
+`torchlens.__all__` is intentionally small and currently has 93 names. New user-facing
 objects should usually live under submodules (`torchlens.io`, `torchlens.options`,
 `torchlens.bridge`, `torchlens.errors`, etc.) with moved-name shims only when compatibility
 requires them.
@@ -157,7 +157,8 @@ update the class definition, the appropriate FIELD_ORDER constant, metadata test
 3. RNG state capture/restore must happen before `active_logging()`.
 4. Internal torch ops during capture must be wrapped in `pause_logging()`.
 5. Module suffixes are appended to `equivalence_class` at op creation before loop detection.
-6. `postprocess_fast()` must not call `_build_module_logs()`.
+6. There is no `postprocess_fast()` orchestrator; refresh captures run the full `postprocess()`
+   entry point (see `postprocess/CLAUDE.md`, "Refresh Projection").
 7. `backward_ready=True` must preserve user `requires_grad` and reject detach/disk conflicts.
 8. Portable I/O must reject unsafe paths/symlinks and unsupported tensor variants.
 

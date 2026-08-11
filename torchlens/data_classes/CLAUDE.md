@@ -98,13 +98,17 @@ Transform boundary ops carry `is_transform`, `transform_kind`, `transform_chain`
 `unattributed_tensor_args`. Synthetic output ops should clear transform/provenance
 role fields so `Trace.transforms` only reports real transform boundary nodes.
 
-## Circular References
+## Back-References
 
 ```
-Trace -> Op -> source_trace -> Trace
-Trace -> Module -> _source_trace -> Trace
+Trace -> Op -> source_trace -> Trace          (weakref: Op._source_trace_ref)
+Trace -> Module -> _source_trace -> Trace     (weakref: Module._source_trace_ref)
 Param -> _param_ref -> nn.Parameter
 ```
 
-These rely on cyclic GC. Use `Trace.cleanup()` when retaining many logs or after
+The two Trace back-references are stored as `weakref.ref` in `_source_trace_ref` slots
+(`FieldPolicy.WEAKREF_STRIP`), so they do NOT form strong cycles and a dropped Trace is
+reclaimed without waiting for the cyclic collector; reading the back-reference after the
+Trace dies yields `None` (and consumers that need it, such as `ModuleCall.module`, raise).
+Still call `Trace.cleanup()` when retaining many logs or after
 visualization-only workflows.
