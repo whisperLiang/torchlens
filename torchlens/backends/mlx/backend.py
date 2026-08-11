@@ -14,7 +14,7 @@ from typing import Any, Callable, cast
 import numpy as np
 
 from ... import _state
-from ...backends import BackendName, BackendUnsupportedError
+from ...backends import BackendName, BackendUnsupportedError, get_backend_spec
 from ...data_classes.derived_grad import (
     DerivedGradAccessor,
     DerivedGradRecord,
@@ -883,6 +883,7 @@ class MLXBackend:
         save_code_context: bool = False,
         save_rng_states: bool = False,
         recurrence_detection: bool = True,
+        compute_input_output_distances: bool = False,
         verbose: bool = False,
         backward_ready: bool = False,
         name: str | None = None,
@@ -917,6 +918,7 @@ class MLXBackend:
                 "save_visualizations": save_visualizations,
             },
             MLX_PREVIEW_TRACE_OPTION_POLICY,
+            capabilities=get_backend_spec("mlx").capabilities,
         )
         if random_seed is not None:
             raise BackendUnsupportedError(
@@ -936,7 +938,7 @@ class MLXBackend:
             save_arg_values=save_arg_values,
             save_grads=None,
             detach_saved_activations=detach_saved_activations,
-            mark_layer_depths=False,
+            mark_layer_depths=compute_input_output_distances,
             num_context_lines=num_context_lines,
             optimizer=None,
             save_code_context=save_code_context,

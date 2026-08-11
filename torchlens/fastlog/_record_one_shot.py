@@ -11,7 +11,7 @@ from .._deprecations import MISSING, MissingType
 from .._input_coerce import _coerce_input_args
 from .._capture_state_helpers import unwrap_compiled_model
 from .._robustness import check_model_and_input_variants
-from ..backends import BackendName, BackendUnsupportedError
+from ..backends import BackendName, BackendUnsupportedError, get_backend_spec
 from ..intervention.predicates import InterventionPredicate
 from ..options import StreamingOptions
 from ..types import ActivationPostfunc, GradientPostfunc
@@ -138,7 +138,7 @@ def record(
         Fastlog recording, optionally with the model output.
     """
 
-    if backend not in (None, "torch"):
+    if backend is not None and not get_backend_spec(str(backend)).capabilities.fastlog:
         raise BackendUnsupportedError(
             "tl.record() is torch-only in backend v1. Use tl.trace(..., backend='jax') "
             "for the JAX full-save preview."

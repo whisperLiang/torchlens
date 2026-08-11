@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any, cast
 
 from ..._deprecations import MISSING, MissingType
-from ...backends import BackendName, BackendUnsupportedError
+from ...backends import BackendName, BackendUnsupportedError, get_backend_spec
 from ...data_classes.derived_grad import (
     DerivedGradAccessor,
     DerivedGradRecord,
@@ -228,6 +228,7 @@ class TinygradBackend:
         save_code_context: bool | MissingType = MISSING,
         save_rng_states: bool | MissingType = MISSING,
         recurrence_detection: bool | MissingType = MISSING,
+        compute_input_output_distances: bool | MissingType = MISSING,
         verbose: bool | MissingType = MISSING,
         backward_ready: bool | MissingType = MISSING,
         name: str | None | MissingType = MISSING,
@@ -337,6 +338,9 @@ class TinygradBackend:
         save_rng_states = _default_if_missing(save_rng_states, False)
         random_seed = _default_if_missing(random_seed, None)
         recurrence_detection = _default_if_missing(recurrence_detection, True)
+        compute_input_output_distances = _default_if_missing(
+            compute_input_output_distances, False
+        )
         verbose = _default_if_missing(verbose, False)
         backward_ready = _default_if_missing(backward_ready, False)
         name = _default_if_missing(name, None)
@@ -389,6 +393,7 @@ class TinygradBackend:
             keep_orphans=cast(bool, keep_orphans),
             num_context_lines=cast(int, num_context_lines),
             recurrence_detection=cast(bool, recurrence_detection),
+            compute_input_output_distances=cast(bool, compute_input_output_distances),
             verbose=cast(bool, verbose),
             name=cast(str | None, name),
             raw_input=raw_input,
@@ -620,6 +625,7 @@ class TinygradBackend:
         batch_render: str,
         output_transform: object | None,
         save_raw_output: str | bool,
+        compute_input_output_distances: bool = False,
     ) -> Trace:
         """Construct an empty tinygrad trace.
 
@@ -665,7 +671,7 @@ class TinygradBackend:
             save_arg_values=False,
             save_grads=None,
             detach_saved_activations=False,
-            mark_layer_depths=False,
+            mark_layer_depths=compute_input_output_distances,
             num_context_lines=num_context_lines,
             optimizer=None,
             save_code_context=False,
@@ -1638,7 +1644,11 @@ class TinygradBackend:
             Returns when all options are supported.
         """
 
-        reject_unsupported_trace_options(options, TINYGRAD_PREVIEW_TRACE_OPTION_POLICY)
+        reject_unsupported_trace_options(
+            options,
+            TINYGRAD_PREVIEW_TRACE_OPTION_POLICY,
+            capabilities=get_backend_spec("tinygrad").capabilities,
+        )
 
     def _reject_extra_kwargs(self, kwargs: Mapping[str, Any]) -> None:
         """Reject unrecognized kwargs reaching the backend.
@@ -1654,7 +1664,11 @@ class TinygradBackend:
             Returns when no extras are present.
         """
 
-        reject_extra_trace_kwargs(dict(kwargs), TINYGRAD_EXTRA_KWARG_POLICY)
+        reject_extra_trace_kwargs(
+            dict(kwargs),
+            TINYGRAD_EXTRA_KWARG_POLICY,
+            capabilities=get_backend_spec("tinygrad").capabilities,
+        )
 
 
 def discover_tinygrad_module_tree(model: Any) -> TinygradModuleTree | None:

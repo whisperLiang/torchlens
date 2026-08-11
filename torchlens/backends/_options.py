@@ -7,7 +7,25 @@ from dataclasses import dataclass
 from typing import Any
 
 from .._deprecations import MISSING
-from .registry import BackendUnsupportedError
+from .registry import BackendCapabilities, BackendUnsupportedError
+
+TRACE_OPTION_CAPABILITY_GATES: dict[str, str] = {
+    "intervene": "interventions",
+    "halt": "interventions",
+    "recipes": "interventions",
+    "storage": "streaming",
+    "streaming": "streaming",
+    "save_grads": "backward_capture",
+    "backward_ready": "backward_capture",
+    "save_rng_states": "rng_replay",
+    "random_seed": "rng_replay",
+}
+"""Public trace options whose support is owned by a ``BackendCapabilities`` flag.
+
+The rejection helpers below consult this map so the registered capability table
+is the load-bearing authority: an option listed here is rejected for a backend
+exactly when the named capability flag is ``False``. Flipping the flag to
+``True`` opens the gate without editing any per-backend message policy."""
 
 
 @dataclass(frozen=True)
@@ -436,7 +454,12 @@ def default_if_missing(value: Any, default: Any) -> Any:
     return default if is_missing(value) else value
 
 
-def reject_extra_trace_kwargs(kwargs: dict[str, Any], policy: ExtraKwargPolicy) -> None:
+def reject_extra_trace_kwargs(
+    kwargs: dict[str, Any],
+    policy: ExtraKwargPolicy,
+    *,
+    capabilities: BackendCapabilities | None = None,
+) -> None:
     """Reject non-default extra public trace kwargs for a backend.
 
     Parameters
@@ -445,6 +468,11 @@ def reject_extra_trace_kwargs(kwargs: dict[str, Any], policy: ExtraKwargPolicy) 
         Extra keyword arguments that reached the backend object entry.
     policy:
         Declarative backend rejection policy.
+    capabilities:
+        Registered capability table for the backend. When provided, options in
+        ``TRACE_OPTION_CAPABILITY_GATES`` whose owning flag is ``True`` are
+        accepted instead of rejected; the table, not the message policy, is the
+        support authority for those options.
 
     Returns
     -------
@@ -459,6 +487,10 @@ def reject_extra_trace_kwargs(kwargs: dict[str, Any], policy: ExtraKwargPolicy) 
             continue
         if key in inert_values and inert_values[key] == value:
             continue
+        if capabilities is not None:
+            gate = TRACE_OPTION_CAPABILITY_GATES.get(key)
+            if gate is not None and getattr(capabilities, gate):
+                continue
         rejected[key] = value
     if not rejected:
         return
@@ -471,6 +503,8 @@ def reject_extra_trace_kwargs(kwargs: dict[str, Any], policy: ExtraKwargPolicy) 
 def reject_unsupported_trace_options(
     options: dict[str, Any],
     policy: PreviewTraceOptionPolicy,
+    *,
+    capabilities: BackendCapabilities | None = None,
 ) -> None:
     """Reject unsupported normalized public trace options.
 
@@ -480,6 +514,11 @@ def reject_unsupported_trace_options(
         Normalized public trace options keyed by option name.
     policy:
         Declarative backend rejection policy.
+    capabilities:
+        Registered capability table for the backend. When provided, options in
+        ``TRACE_OPTION_CAPABILITY_GATES`` whose owning flag is ``True`` are
+        accepted instead of rejected; the table, not the message policy, is the
+        support authority for those options.
 
     Returns
     -------
@@ -493,6 +532,10 @@ def reject_unsupported_trace_options(
         raise BackendUnsupportedError(policy.full_save_message)
     for option_name, message in (policy.rejected_truthy_messages or {}).items():
         if options.get(option_name):
+            if capabilities is not None:
+                gate = TRACE_OPTION_CAPABILITY_GATES.get(option_name)
+                if gate is not None and getattr(capabilities, gate):
+                    continue
             raise BackendUnsupportedError(message)
     if policy.output_device_message is not None and options.get("output_device") != "same":
         raise policy.output_device_error(policy.output_device_message)

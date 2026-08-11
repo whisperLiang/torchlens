@@ -25,6 +25,7 @@ else:
 from .._deprecations import warn_deprecated_alias
 from ..quantities import Duration, Flops, Macs, as_duration
 from ._accessor_base import Accessor
+from ._backend_capability_guards import raise_if_no_backward_capture
 from ._trace_profile import (
     ModelProfile,
     _infer_input_modality,
@@ -1110,12 +1111,7 @@ class TraceStatsMixin(_TraceMixinBase):
     def backward_passes(self: "Trace") -> BackwardPassAccessor:
         """Access backward pass records by 0-based position or named pass number."""
 
-        if getattr(self, "backend", "torch") in {"jax", "mlx", "tinygrad"}:
-            raise ValueError(
-                f"{getattr(self, 'backend', 'backend')} traces do not support true backward "
-                "capture. Use trace.derived_grads for leaf-level derived gradients computed "
-                "by the backend preview."
-            )
+        raise_if_no_backward_capture(self, plural_subject="backward_passes")
         self._sync_backward_projection_if_needed()
         return BackwardPassAccessor(self.backward_pass_logs)
 
@@ -1162,12 +1158,7 @@ class TraceStatsMixin(_TraceMixinBase):
     def saved_grad_ops(self: "Trace") -> Accessor[Op]:
         """Access Ops with saved gradients."""
 
-        if getattr(self, "backend", "torch") in {"jax", "mlx", "tinygrad"}:
-            raise ValueError(
-                f"{getattr(self, 'backend', 'backend')} traces do not expose op-level saved "
-                "gradients. Use trace.derived_grads for leaf-level derived gradients computed "
-                "by the backend preview."
-            )
+        raise_if_no_backward_capture(self, plural_subject="op-level saved gradients")
         return TraceOpAccessor(
             [op for op in self.layer_list if op.has_grad],
             self.layer_num_calls,

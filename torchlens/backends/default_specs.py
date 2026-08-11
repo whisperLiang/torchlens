@@ -918,6 +918,7 @@ def register_default_backend_specs() -> None:
                 input_container_structure="full_spec",
                 output_container_structure="full_spec",
                 module_identity_modes=("torch_module",),
+                save_levels=("audit", "executable_with_callables", "portable", "runnable"),
                 trace_options=TORCH_TRACE_OPTIONS,
             ),
             capture_backend=_torch_capture_backend,

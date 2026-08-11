@@ -39,6 +39,7 @@ def finalize_single_pass_trace(
     update_param_totals_from_layers: bool = False,
     count_layers_with_attached_params: bool = False,
     finish_before_module_logs: bool = True,
+    compute_input_output_distances: bool | None = None,
 ) -> None:
     """Finalize raw single-pass op logs into public trace accessors.
 
@@ -68,6 +69,11 @@ def finalize_single_pass_trace(
         Whether to compute ``trace.num_layers_with_params`` from attached params.
     finish_before_module_logs:
         Whether to set ``_tracing_finished`` before module logs are attached.
+    compute_input_output_distances:
+        Whether to run the neutral input/output distance flood (torch Step 4)
+        over the finalized single-pass graph. ``None`` reads the request the
+        backend stored on ``trace.mark_layer_depths``; the effective value is
+        written back to ``trace.mark_layer_depths`` either way.
 
     Returns
     -------
@@ -101,6 +107,15 @@ def finalize_single_pass_trace(
         for op_log in trace.layer_list
         if not (op_log.is_input or op_log.is_output or op_log.is_buffer)
     )
+    if compute_input_output_distances is None:
+        compute_input_output_distances = bool(getattr(trace, "mark_layer_depths", False))
+    trace.mark_layer_depths = bool(compute_input_output_distances)
+    if compute_input_output_distances:
+        compute_preview_input_output_distances(trace)
+    # Single-pass finalization never groups recurrent calls; the stored flag is
+    # the EFFECTIVE value, so it must not claim grouping that never ran. (JAX
+    # finalizes through its own recurrence-grouping path and keeps the request.)
+    trace.recurrence_detection = False
     if update_param_totals_from_layers:
         _update_param_totals_from_layers(trace)
     if count_layers_with_attached_params:
@@ -320,6 +335,37 @@ def populate_object_module_build_data(
                 seen_pass_children[parent_call_label].add(call_label)
                 mbd["module_pass_children"][parent_call_label].append(call_label)
             parent_call_label = call_label
+
+
+def compute_preview_input_output_distances(trace: Trace) -> None:
+    """Run torch's Step-4 depth flood over a finalized preview graph.
+
+    Parameters
+    ----------
+    trace:
+        Finalized preview trace whose ops carry raw-label ``parents``/
+        ``children`` edges and populated ``input_layers``/``output_layers``.
+
+    Returns
+    -------
+    None
+        ``min/max_distance_from_input``, ``min/max_distance_to_output``,
+        ``input_ancestors``, and ``output_descendants`` are populated in place.
+
+    Notes
+    -----
+    The flood mutates lineage sets, so backend-emitted immutable placeholders
+    (e.g. TF's ``input_ancestors=()``) are normalized to mutable sets first.
+    """
+
+    from ..postprocess.graph_traversal import _mark_layer_depths
+
+    for op_log in trace.layer_list:
+        for field_name in ("input_ancestors", "output_descendants"):
+            value = getattr(op_log, field_name, None)
+            if not isinstance(value, set):
+                setattr(op_log, field_name, set(value or ()))
+    _mark_layer_depths(trace)
 
 
 def _finalize_single_op(trace: Trace, op_log: Any, label: str, raw_index: int) -> None:

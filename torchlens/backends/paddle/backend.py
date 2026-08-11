@@ -10,8 +10,8 @@ from dataclasses import dataclass, replace
 from typing import Any, cast
 
 from ... import _state
-from ..._deprecations import MISSING
-from ...backends import BackendName, BackendUnsupportedError
+from ..._deprecations import MISSING, MissingType
+from ...backends import BackendName, BackendUnsupportedError, get_backend_spec
 from ...data_classes.derived_grad import (
     DerivedGradAccessor,
     DerivedGradRecord,
@@ -283,6 +283,7 @@ class PaddleBackend:
         save_visualizations: bool = False,
         module_identity_mode: str | None = None,
         grad_options: GradOptions | None = None,
+        compute_input_output_distances: bool | MissingType = MISSING,
         **extra_kwargs: Any,
     ) -> Trace:
         """Capture a Paddle forward pass into a structural Trace."""
@@ -315,6 +316,9 @@ class PaddleBackend:
         save_visualizations = _default_if_missing(save_visualizations, False)
         module_identity_mode = _default_if_missing(module_identity_mode, None)
         grad_options = _default_if_missing(grad_options, None)
+        compute_input_output_distances = _default_if_missing(
+            compute_input_output_distances, False
+        )
         save_predicate = pop_static_label_save_predicate(extra_kwargs, backend_name="paddle")
         _reject_extra_kwargs(extra_kwargs)
         if random_seed is not None:
@@ -342,6 +346,7 @@ class PaddleBackend:
                 "lookback_payload_policy": "metadata_only",
             },
             PADDLE_PREVIEW_TRACE_OPTION_POLICY,
+            capabilities=get_backend_spec("paddle").capabilities,
         )
         module_tree = discover_paddle_module_tree(model)
         use_object_module = _resolve_paddle_module_identity_mode(module_identity_mode, module_tree)
@@ -356,7 +361,7 @@ class PaddleBackend:
             save_arg_values=save_arg_values,
             save_grads=None,
             detach_saved_activations=detach_saved_activations,
-            mark_layer_depths=False,
+            mark_layer_depths=cast(bool, compute_input_output_distances),
             num_context_lines=num_context_lines,
             optimizer=None,
             save_code_context=save_code_context,
@@ -1895,7 +1900,11 @@ def _default_if_missing(value: Any, default: Any) -> Any:
 def _reject_extra_kwargs(extra_kwargs: dict[str, Any]) -> None:
     """Reject explicit unsupported public kwargs that reach Paddle capture."""
 
-    reject_extra_trace_kwargs(extra_kwargs, PADDLE_EXTRA_KWARG_POLICY)
+    reject_extra_trace_kwargs(
+        extra_kwargs,
+        PADDLE_EXTRA_KWARG_POLICY,
+        capabilities=get_backend_spec("paddle").capabilities,
+    )
 
 
 class _PaddleIntermediateTapObserver:

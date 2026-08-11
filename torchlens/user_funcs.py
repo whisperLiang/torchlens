@@ -317,6 +317,7 @@ def _trace_mlx_model(
         save_code_context=capture_options.save_code_context,
         save_rng_states=capture_options.save_rng_states,
         recurrence_detection=capture_options.recurrence_detection,
+        compute_input_output_distances=capture_options.compute_input_output_distances,
         verbose=capture_options.verbose,
         backward_ready=capture_options.backward_ready,
         name=capture_options.name,
@@ -380,14 +381,11 @@ def _trace_mlx_model_from_public_kwargs(**kwargs: Any) -> Trace:
             "save_raw_gradients": kwargs.get("save_raw_gradients", MISSING),
             "mark_layer_depths": kwargs.get("mark_layer_depths", MISSING),
             "source_context_lines": kwargs.get("source_context_lines", MISSING),
-            "compute_input_output_distances": kwargs.get(
-                "compute_input_output_distances",
-                MISSING,
-            ),
             "unwrap_when_done": kwargs.get("unwrap_when_done", MISSING),
             "reconstruction_ready": kwargs.get("reconstruction_ready", MISSING),
         },
         MLX_EXTRA_KWARG_POLICY,
+        capabilities=get_backend_spec("mlx").capabilities,
     )
     save_options, save_predicate = _split_save_options_and_predicate(kwargs["save"])
     if save_predicate is not None:
