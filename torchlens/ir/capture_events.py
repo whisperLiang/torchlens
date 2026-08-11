@@ -94,6 +94,7 @@ class CaptureEvents:
     module_stack_by_label_raw: dict[str, tuple[str, ...]] = field(default_factory=dict)
     grad_fn_handles_by_label_raw: dict[str, Any] = field(default_factory=dict)
     backward_event_seq: int = 0
+    backward_revision: int = 0
 
     @property
     def op_event_by_label_raw(self) -> dict[str, OpEvent]:
@@ -280,6 +281,7 @@ class CaptureEvents:
             module_stack_by_label_raw=dict(self.module_stack_by_label_raw),
             grad_fn_handles_by_label_raw=dict(self.grad_fn_handles_by_label_raw),
             backward_event_seq=self.backward_event_seq,
+            backward_revision=self.backward_revision,
         )
 
     def release_working_projection(self) -> None:
@@ -423,6 +425,17 @@ class CaptureEvents:
         """Append a backward sidecar event."""
 
         self.backward_events.append(event)
+        self.backward_revision += 1
+
+    def note_backward_event_removal(self) -> None:
+        """Advance the backward revision after a sanctioned event removal.
+
+        Event count alone cannot distinguish an add-then-remove from an
+        unchanged stream, so every mutation of ``backward_events`` must move
+        the revision forward for the projection guard to stay sound.
+        """
+
+        self.backward_revision += 1
 
     def extend(self, events: tuple[OpEvent, ...] | list[OpEvent]) -> None:
         """Append multiple operation events in order."""

@@ -1407,6 +1407,8 @@ class Trace(
         "_active_backward_pass_index": FieldPolicy.DROP,
         "_backward_roots_by_pass": FieldPolicy.DROP,
         "_backward_projection_event_count": FieldPolicy.DROP,
+        "_backward_projection_revision": FieldPolicy.DROP,
+        "_backward_projection_fold_state": FieldPolicy.DROP,
         "_implicit_backward_pass_open": FieldPolicy.DROP,
         "_warned_implicit_backward_pass": FieldPolicy.DROP,
         "_tl_backward_triggers_disarmed": FieldPolicy.DROP,

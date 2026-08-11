@@ -17,7 +17,7 @@ import warnings
 import weakref
 from collections import OrderedDict, deque
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterator, Literal, cast
 
 import torch
@@ -1143,6 +1143,69 @@ def _grad_fn_type_from_class_name(class_name: str) -> str:
     return re.sub(r"Backward\d*$", "", class_name).lower()
 
 
+@dataclass
+class _BackwardFoldState:
+    """Cross-fold accumulators for incremental backward projection.
+
+    Session-only state (never portable): holds exactly what the full rebuild
+    computes along the way so that a clean appended event tail can be folded
+    in O(tail) instead of re-reading every backward event ever emitted.
+    """
+
+    discovered: "OrderedDict[int, GradFnDiscovered]" = field(default_factory=OrderedDict)
+    latest_topology: dict[int, tuple[int, ...]] = field(default_factory=dict)
+    starts: dict[int, BackwardPassStart] = field(default_factory=dict)
+    ends: dict[int, BackwardPassEnd] = field(default_factory=dict)
+    per_object_ordinals: dict[int, int] = field(default_factory=dict)
+    unique_payload_ids: set[int] = field(default_factory=set)
+    total_gradient_memory: int = 0
+    total_backward_memory: int = 0
+    saved_grad_labels: set[str] = field(default_factory=set)
+    resolved_pass_orders: dict[int, int] = field(default_factory=dict)
+    built_pass_indices: set[int] = field(default_factory=set)
+    op_grad_passes: set[int] = field(default_factory=set)
+
+
+def _backward_tail_is_foldable(state: _BackwardFoldState, tail: list[Any]) -> bool:
+    """Return whether an appended event tail can fold without a full rebuild.
+
+    Foldable means the tail introduces no new grad-fn node, no merge that
+    would retroactively change an already-assigned label or field, no
+    topology change (which would require re-running the global order and
+    module-inference passes), and no event for an already-built pass. Any
+    other tail falls back to the byte-identical full rebuild.
+    """
+
+    max_built = max(state.built_pass_indices, default=0)
+    for event in tail:
+        if isinstance(event, BackwardPassStart):
+            if event.pass_index <= max_built or event.pass_index in state.starts:
+                return False
+        elif isinstance(event, BackwardPassEnd):
+            if event.pass_index <= max_built or event.pass_index in state.ends:
+                return False
+        elif isinstance(event, GradFnDiscovered):
+            existing = state.discovered.get(event.object_id)
+            if existing is None:
+                return False
+            if existing.op_label is None and event.op_label is not None:
+                return False
+            if existing.param_ref is None and event.param_ref is not None:
+                return False
+            if existing.created_in_pass is None and event.created_in_pass is not None:
+                return False
+            if existing.creator_object_id is None and event.creator_object_id is not None:
+                return False
+            if tuple(event.topology) != tuple(state.latest_topology.get(event.object_id, ())):
+                return False
+        elif isinstance(event, (GradFnFired, OpGradObserved)):
+            if event.pass_index <= max_built:
+                return False
+        else:
+            return False
+    return True
+
+
 def _materialize_backward_projections(trace: Any) -> None:
     """Rebuild backward-facing Trace records from sidecar events.
 
@@ -1162,14 +1225,32 @@ def _materialize_backward_projections(trace: Any) -> None:
         return
     if getattr(trace, "_tl_materializing_backward_projection", False):
         return
-    events = list(getattr(_ensure_backward_event_stream(trace), "backward_events", ()))
+    stream = _ensure_backward_event_stream(trace)
+    events = list(getattr(stream, "backward_events", ()))
     if not events:
         return
-    if getattr(trace, "_backward_projection_event_count", None) == len(events):
+    revision = getattr(stream, "backward_revision", None)
+    if revision is None:
+        # Legacy stream (e.g. unpickled from an older version) without a
+        # revision counter: fall back to the event count as a change signal.
+        revision = len(events)
+    if getattr(trace, "_backward_projection_revision", None) == revision:
         return
     trace._tl_materializing_backward_projection = True
     try:
-        _materialize_backward_projections_impl(trace, events)
+        state = getattr(trace, "_backward_projection_fold_state", None)
+        watermark = getattr(trace, "_backward_projection_event_count", None)
+        if (
+            isinstance(state, _BackwardFoldState)
+            and isinstance(watermark, int)
+            and 0 < watermark < len(events)
+            and _backward_tail_is_foldable(state, events[watermark:])
+        ):
+            _fold_backward_projection_tail(trace, state, events[watermark:])
+        else:
+            _materialize_backward_projections_impl(trace, events)
+        trace._backward_projection_event_count = len(events)
+        trace._backward_projection_revision = revision
     finally:
         trace.__dict__.pop("_tl_materializing_backward_projection", None)
 
@@ -1177,12 +1258,13 @@ def _materialize_backward_projections(trace: Any) -> None:
 def _materialize_backward_projections_impl(trace: Any, events: list[Any]) -> None:
     """Rebuild backward projections from an already-snapshotted event list."""
 
-    starts: dict[int, BackwardPassStart] = {}
-    ends: dict[int, BackwardPassEnd] = {}
-    discovered: OrderedDict[int, GradFnDiscovered] = OrderedDict()
-    latest_topology: dict[int, tuple[int, ...]] = {}
+    state = _BackwardFoldState()
+    starts = state.starts
+    ends = state.ends
+    discovered = state.discovered
+    latest_topology = state.latest_topology
     fired_events: list[GradFnFired] = []
-    op_grad_passes: set[int] = set()
+    op_grad_passes = state.op_grad_passes
     op_grad_events: list[OpGradObserved] = []
     for event in events:
         if isinstance(event, BackwardPassStart):
@@ -1272,13 +1354,95 @@ def _materialize_backward_projections_impl(trace: Any, events: list[Any]) -> Non
     trace.grad_fn_order = list(grad_fn_logs)
 
     pass_to_calls: dict[int, list[GradFnCall]] = {}
-    per_object_ordinals: dict[int, int] = {}
+    _fold_fired_events(trace, state, fired_events, pass_to_calls)
+
+    _sync_grad_fn_graph_relations(trace)
+    _infer_grad_fn_module_membership(trace)
+    _prefer_direct_pairing_source_for_paired_ops(trace)
+
+    for op in getattr(trace, "layer_list", []):
+        op._clear_gradient_records()
+    _fold_op_grad_events(trace, state, op_grad_events)
+
+    backward_pass_logs: OrderedDict[int, BackwardPass] = OrderedDict()
+    pass_indices = sorted(set(starts) | set(ends) | set(pass_to_calls) | op_grad_passes)
+    _build_backward_pass_records(trace, state, pass_indices, pass_to_calls, backward_pass_logs)
+    trace.backward_pass_logs = backward_pass_logs
+    _refresh_backward_pass_counters(trace, state)
+
+    for grad_fn_record in trace.grad_fn_logs.values():
+        if grad_fn_record.op is not None:
+            grad_fn_record.op.grad_fn = grad_fn_record
+            parent_layer = trace.layer_logs.get(grad_fn_record.op.layer_label)
+            if parent_layer is not None:
+                parent_layer.grad_fn = grad_fn_record
+    for layer in getattr(trace, "layer_list", ()):
+        grad_fn_object_id = getattr(layer, "grad_fn_object_id", None)
+        if grad_fn_object_id in trace.grad_fn_logs:
+            layer.grad_fn = trace.grad_fn_logs[grad_fn_object_id]
+    for layer in getattr(trace, "layer_logs", {}).values():
+        grad_fn_object_id = getattr(layer, "grad_fn_object_id", None)
+        if grad_fn_object_id in trace.grad_fn_logs:
+            layer.grad_fn = trace.grad_fn_logs[grad_fn_object_id]
+
+    trace._backward_projection_fold_state = state
+
+
+def _fold_backward_projection_tail(
+    trace: Any, state: _BackwardFoldState, tail: list[Any]
+) -> None:
+    """Fold a clean appended event tail into the existing projections.
+
+    Only called after ``_backward_tail_is_foldable`` proved the tail contains
+    no new grad-fn nodes, no retroactive merges, no topology changes, and no
+    events for already-built passes, so the global order / graph-relation /
+    module-inference passes provably do not need to re-run.
+    """
+
+    fired_events: list[GradFnFired] = []
+    op_grad_events: list[OpGradObserved] = []
+    new_pass_candidates: set[int] = set()
+    for event in tail:
+        if isinstance(event, BackwardPassStart):
+            state.starts[event.pass_index] = event
+            new_pass_candidates.add(event.pass_index)
+        elif isinstance(event, BackwardPassEnd):
+            state.ends[event.pass_index] = event
+            new_pass_candidates.add(event.pass_index)
+        elif isinstance(event, GradFnDiscovered):
+            state.latest_topology[event.object_id] = event.topology
+        elif isinstance(event, GradFnFired):
+            fired_events.append(event)
+        elif isinstance(event, OpGradObserved):
+            state.op_grad_passes.add(event.pass_index)
+            new_pass_candidates.add(event.pass_index)
+            op_grad_events.append(event)
+
+    pass_to_calls: dict[int, list[GradFnCall]] = {}
+    _fold_fired_events(trace, state, fired_events, pass_to_calls)
+    new_pass_candidates.update(pass_to_calls)
+    _fold_op_grad_events(trace, state, op_grad_events)
+    new_pass_indices = sorted(new_pass_candidates - state.built_pass_indices)
+    _build_backward_pass_records(
+        trace, state, new_pass_indices, pass_to_calls, trace.backward_pass_logs
+    )
+    _refresh_backward_pass_counters(trace, state)
+
+
+def _fold_fired_events(
+    trace: Any,
+    state: _BackwardFoldState,
+    fired_events: list["GradFnFired"],
+    pass_to_calls: dict[int, list[GradFnCall]],
+) -> None:
+    """Fold grad-fn fire events into ``GradFn.calls`` and per-pass call lists."""
+
     for event in sorted(fired_events, key=lambda item: (item.pass_index, item.timestamp, item.seq)):
         grad_fn_record = trace.grad_fn_logs.get(event.object_id)
         if grad_fn_record is None:
             continue
-        ordinal = per_object_ordinals.get(event.object_id, 0) + 1
-        per_object_ordinals[event.object_id] = ordinal
+        ordinal = state.per_object_ordinals.get(event.object_id, 0) + 1
+        state.per_object_ordinals[event.object_id] = ordinal
         call = GradFnCall(
             call_index=ordinal,
             ordinal=ordinal,
@@ -1295,16 +1459,14 @@ def _materialize_backward_projections_impl(trace: Any, events: list[Any]) -> Non
         grad_fn_record.calls[ordinal] = call
         pass_to_calls.setdefault(event.pass_index, []).append(call)
 
-    _sync_grad_fn_graph_relations(trace)
-    _infer_grad_fn_module_membership(trace)
-    _prefer_direct_pairing_source_for_paired_ops(trace)
 
-    unique_payload_ids: set[int] = set()
-    total_gradient_memory = 0
-    total_backward_memory = 0
-    saved_grad_labels: set[str] = set()
-    for op in getattr(trace, "layer_list", []):
-        op._clear_gradient_records()
+def _fold_op_grad_events(
+    trace: Any,
+    state: _BackwardFoldState,
+    op_grad_events: list["OpGradObserved"],
+) -> None:
+    """Fold op-gradient events into Op records and cumulative totals."""
+
     for event in sorted(
         op_grad_events, key=lambda item: (item.pass_index, item.timestamp, item.seq)
     ):
@@ -1336,27 +1498,39 @@ def _materialize_backward_projections_impl(trace: Any, events: list[Any]) -> Non
         op.transformed_grad_shape = _shape_or_none(transformed_payload)
         op.transformed_grad_dtype = _dtype_or_none(transformed_payload)
         op.transformed_gradient_memory = _memory_or_none(transformed_payload)
-        saved_grad_labels.add(op.layer_label)
+        state.saved_grad_labels.add(op.layer_label)
         for payload_ref, payload_memory in _retained_grad_payload_refs(
             payload, transformed_payload, raw_memory=event.memory
         ):
             payload_id = id(payload_ref)
-            if payload_id not in unique_payload_ids:
-                unique_payload_ids.add(payload_id)
-                total_backward_memory += payload_memory
-        total_gradient_memory += int(event.memory or 0)
-    trace._saved_grad_labels = saved_grad_labels
-    trace.saved_gradient_memory = Bytes(total_gradient_memory)
-    trace.total_gradient_memory = Bytes(total_gradient_memory)
-    trace.total_backward_memory = Bytes(total_backward_memory)
+            if payload_id not in state.unique_payload_ids:
+                state.unique_payload_ids.add(payload_id)
+                state.total_backward_memory += payload_memory
+        state.total_gradient_memory += int(event.memory or 0)
+    # Assign a copy: the live hook path also mutates trace._saved_grad_labels
+    # mid-pass, and every fold must overwrite those live writes with the
+    # events-derived set exactly like the historical full rebuild did.
+    trace._saved_grad_labels = set(state.saved_grad_labels)
+    trace.saved_gradient_memory = Bytes(state.total_gradient_memory)
+    trace.total_gradient_memory = Bytes(state.total_gradient_memory)
+    trace.total_backward_memory = Bytes(state.total_backward_memory)
 
+
+def _build_backward_pass_records(
+    trace: Any,
+    state: _BackwardFoldState,
+    pass_indices: list[int],
+    pass_to_calls: dict[int, list[GradFnCall]],
+    backward_pass_logs: "OrderedDict[int, BackwardPass]",
+) -> None:
+    """Build BackwardPass records for ``pass_indices`` into ``backward_pass_logs``."""
+
+    grad_fn_logs = trace.grad_fn_logs
     roots_by_pass = getattr(trace, "_backward_roots_by_pass", {})
-    backward_pass_logs: OrderedDict[int, BackwardPass] = OrderedDict()
-    pass_indices = sorted(set(starts) | set(ends) | set(pass_to_calls) | op_grad_passes)
-    resolved_pass_orders: dict[int, int] = {}
+    resolved_pass_orders = state.resolved_pass_orders
     for pass_index in pass_indices:
-        start = starts.get(pass_index)
-        end = ends.get(pass_index)
+        start = state.starts.get(pass_index)
+        end = state.ends.get(pass_index)
         root_grad_fn_ids = list(roots_by_pass.get(pass_index, ()))
         pass_order = (
             _pass_order_from_roots(root_grad_fn_ids, grad_fn_logs, resolved_pass_orders)
@@ -1398,33 +1572,22 @@ def _materialize_backward_projections_impl(trace: Any, events: list[Any]) -> Non
         )
         pass_record.source_trace = trace
         backward_pass_logs[pass_index] = pass_record
+        state.built_pass_indices.add(pass_index)
         if pass_order is not None:
             resolved_pass_orders[pass_index] = pass_order
 
-    trace.backward_pass_logs = backward_pass_logs
+
+def _refresh_backward_pass_counters(trace: Any, state: _BackwardFoldState) -> None:
+    """Refresh pass-derived Trace counters after a full or incremental fold."""
+
+    roots_by_pass = getattr(trace, "_backward_roots_by_pass", {})
     trace.backward_root_grad_fn_object_ids = [
         root_id for roots in roots_by_pass.values() for root_id in roots
     ]
-    trace.num_backward_passes = max(pass_indices) if pass_indices else 0
-    trace.has_backward_pass = bool(pass_indices)
+    trace.num_backward_passes = max(state.built_pass_indices, default=0)
+    trace.has_backward_pass = bool(state.built_pass_indices)
     trace.num_saved_grad_fn_calls = len(trace.saved_grad_fn_calls)
     trace.num_saved_grad_fns = len(trace.saved_grad_fns)
-    trace._backward_projection_event_count = len(events)
-
-    for grad_fn_record in trace.grad_fn_logs.values():
-        if grad_fn_record.op is not None:
-            grad_fn_record.op.grad_fn = grad_fn_record
-            parent_layer = trace.layer_logs.get(grad_fn_record.op.layer_label)
-            if parent_layer is not None:
-                parent_layer.grad_fn = grad_fn_record
-    for layer in getattr(trace, "layer_list", ()):
-        grad_fn_object_id = getattr(layer, "grad_fn_object_id", None)
-        if grad_fn_object_id in trace.grad_fn_logs:
-            layer.grad_fn = trace.grad_fn_logs[grad_fn_object_id]
-    for layer in getattr(trace, "layer_logs", {}).values():
-        grad_fn_object_id = getattr(layer, "grad_fn_object_id", None)
-        if grad_fn_object_id in trace.grad_fn_logs:
-            layer.grad_fn = trace.grad_fn_logs[grad_fn_object_id]
 
 
 def _torch_dtype_from_string(dtype_name: str) -> torch.dtype | str:
@@ -2476,6 +2639,7 @@ def _run_backward_with_capture(
         # been installed. Restore both so a failed backward cannot poison later traces.
         if events.backward_events and events.backward_events[-1] is start_event:
             events.backward_events.pop()
+            events.note_backward_event_removal()
         _state._active_trace = previous_trace
         _state._active_hook_plan = previous_plan
         _state._active_intervention_spec = previous_spec

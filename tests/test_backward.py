@@ -278,6 +278,127 @@ def test_recording_backward_context_manager() -> None:
     assert trace.num_backward_passes == 2
 
 
+def _backward_projection_snapshot(trace: tl.Trace) -> dict:
+    """Return a value-level snapshot of every backward projection surface."""
+
+    grad_fns = {
+        object_id: (
+            grad_fn.label,
+            grad_fn.type,
+            grad_fn.type_index,
+            grad_fn.ordinal_index,
+            grad_fn.step_index,
+            grad_fn.order,
+            grad_fn.has_op,
+            grad_fn.op_label,
+            list(grad_fn.children),
+            list(grad_fn.parents),
+            grad_fn.module_address,
+            grad_fn.module_membership_source,
+            list(grad_fn.next_grad_fn_ids),
+            sorted(grad_fn.calls),
+        )
+        for object_id, grad_fn in trace.grad_fn_logs.items()
+    }
+    calls = {
+        (object_id, ordinal): (call.label, call.backward_pass_index)
+        for object_id, grad_fn in trace.grad_fn_logs.items()
+        for ordinal, call in grad_fn.calls.items()
+    }
+    passes = {
+        pass_index: (
+            record.trigger,
+            record.status,
+            record.order,
+            len(record.grad_fn_calls),
+            record.order_attribution_coverage,
+        )
+        for pass_index, record in trace.backward_pass_logs.items()
+    }
+    op_grads = {
+        op.layer_label: (
+            [
+                (record.backward_pass_index, record.grad is not None, record.shape)
+                for record in op._slot("_grad_records")
+            ],
+            int(op.gradient_memory),
+        )
+        for op in trace.layer_list
+        if getattr(op, "has_grad", False)
+    }
+    return {
+        "grad_fns": grad_fns,
+        "calls": calls,
+        "passes": passes,
+        "op_grads": op_grads,
+        "order": list(trace.grad_fn_order),
+        "num_passes": trace.num_backward_passes,
+        "num_calls": trace.num_saved_grad_fn_calls,
+        "num_fns": trace.num_saved_grad_fns,
+        "saved_labels": set(trace._saved_grad_labels),
+        "total_grad_mem": int(trace.total_gradient_memory),
+        "total_bwd_mem": int(trace.total_backward_memory),
+    }
+
+
+@pytest.mark.smoke
+def test_backward_reprojection_folds_incrementally() -> None:
+    """Repeated passes over an unchanged graph fold O(tail), not full rebuilds."""
+    from torchlens.backends.torch import backward as backward_mod
+
+    _model, _x, trace = _logged_model()
+    loss = _output_loss(trace)
+    full_rebuild_sizes: list[int] = []
+    real_impl = backward_mod._materialize_backward_projections_impl
+
+    def counting_impl(trace_arg: tl.Trace, events: list) -> None:
+        full_rebuild_sizes.append(len(events))
+        real_impl(trace_arg, events)
+
+    with mock.patch.object(
+        backward_mod, "_materialize_backward_projections_impl", counting_impl
+    ):
+        with trace.recording_backward():
+            loss.backward(retain_graph=True)
+            loss.backward(retain_graph=True)
+            loss.backward()
+    assert trace.num_backward_passes == 3
+    assert len(full_rebuild_sizes) == 1, (
+        "later same-graph passes must fold incrementally, not rebuild: "
+        f"{full_rebuild_sizes}"
+    )
+
+    incremental_snapshot = _backward_projection_snapshot(trace)
+    trace.__dict__.pop("_backward_projection_fold_state", None)
+    trace.__dict__.pop("_backward_projection_revision", None)
+    trace.__dict__.pop("_backward_projection_event_count", None)
+    backward_mod._materialize_backward_projections(trace)
+    assert _backward_projection_snapshot(trace) == incremental_snapshot
+
+
+@pytest.mark.smoke
+def test_backward_reprojection_guard_survives_count_preserving_mutation() -> None:
+    """A count-preserving event mutation still triggers reprojection."""
+    from dataclasses import replace as dataclass_replace
+
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+    from torchlens.ir.events import BackwardPassEnd
+
+    _model, _x, trace = _logged_model()
+    trace.log_backward(_output_loss(trace))
+    assert trace.backward_pass_logs[1].status == "ok"
+
+    stream = _ensure_backward_event_stream(trace)
+    old_end = stream.backward_events[-1]
+    assert isinstance(old_end, BackwardPassEnd)
+    stream.backward_events.pop()
+    stream.note_backward_event_removal()
+    stream.append_backward(dataclass_replace(old_end, status="error"))
+
+    trace._sync_backward_projection_if_needed()
+    assert trace.backward_pass_logs[1].status == "error"
+
+
 @pytest.mark.smoke
 def test_recording_backward_delegates_foreign_graphs() -> None:
     """A backward on an unrelated graph inside the context never enters the trace."""

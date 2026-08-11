@@ -362,6 +362,9 @@ def _reset_backward_projection(log: "Trace") -> None:
     log.__dict__.pop("_warned_implicit_backward_pass", None)
     log.__dict__.pop("_tl_backward_triggers_disarmed", None)
     log.__dict__.pop("_backward_gradfn_refs", None)
+    log.__dict__.pop("_backward_projection_event_count", None)
+    log.__dict__.pop("_backward_projection_revision", None)
+    log.__dict__.pop("_backward_projection_fold_state", None)
     log.has_backward_pass = False
     log.grad_fn_logs = OrderedDict()
     log.grad_fn_order = []
