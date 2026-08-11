@@ -166,6 +166,7 @@ markers = [
     "optional: marks tests that require optional dependencies",
     "backend_parity: marks active backend substrate parity gates",
     "backend_jax: marks tests that require the optional JAX backend runtime",
+    "backend_mlx: marks tests that require the optional MLX backend runtime",
     "backend_tinygrad: marks tests that require the optional tinygrad backend runtime",
     "backend_paddle: marks tests that require the optional paddle backend runtime",
     "tf_backend: marks tests that require the optional TensorFlow backend runtime",
