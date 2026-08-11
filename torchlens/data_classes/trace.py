@@ -2552,6 +2552,16 @@ class Trace(
     def __getstate__(self) -> Dict[str, Any]:
         """Return pickle state with non-picklable weakref-backed accessors stripped."""
         state = self.__dict__.copy()
+        # Event streams never serialize (FieldPolicy.DROP): strip the stream
+        # AND the projection guard derived from it, or a restored trace would
+        # claim a source-process revision/fold-state over a fresh empty stream
+        # (silently dropped passes / stale-id partial folds on the advertised
+        # restored-trace backward-capture path).
+        state.pop("_capture_events", None)
+        state.pop("_backward_projection_event_count", None)
+        state.pop("_backward_projection_revision", None)
+        state.pop("_backward_projection_fold_state", None)
+        state.pop("_tl_materializing_backward_projection", None)
         state["_module_logs"] = None
         state["_buffer_accessor"] = None
         state["_source_model_ref"] = None
@@ -2779,15 +2789,26 @@ class Trace(
         from .._io.state_keys import refuse_callable_shadowing_state_keys
 
         refuse_callable_shadowing_state_keys(type(self), state)
+        # Restore is keyed off the INCOMING state, never the reused object's
+        # dict: a legacy artifact that baked in a stream is discarded, and a
+        # reused object's prior stream must not survive a re-restore (it would
+        # retain the previous trace's events and re-serialize them later).
+        state.pop("_capture_events", None)
         self.__dict__.update(state)
         # Event streams never serialize (FieldPolicy.DROP), but a restored
         # trace remains a supported backward-capture target within the live
         # process, so restore installs a fresh stream EXPLICITLY here rather
         # than letting backward capture fabricate one silently on demand.
-        if "_capture_events" not in self.__dict__:
-            from ..ir import CaptureEvents
+        from ..ir import CaptureEvents
 
-            self.__dict__["_capture_events"] = CaptureEvents()
+        self.__dict__["_capture_events"] = CaptureEvents()
+        # The projection guard is derived from the stream that just got
+        # replaced; stale values from the source process (or a reused object)
+        # would silently drop new passes or fold onto dead-process fold state.
+        self.__dict__.pop("_backward_projection_event_count", None)
+        self.__dict__.pop("_backward_projection_revision", None)
+        self.__dict__.pop("_backward_projection_fold_state", None)
+        self.__dict__.pop("_tl_materializing_backward_projection", None)
         if not containers_were_serialized:
             self.__dict__.pop("_containers", None)
         if self.__dict__.get("_module_logs") is None:
