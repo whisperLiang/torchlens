@@ -273,9 +273,16 @@ def test_dark_theme_themes_caption_and_parameter_nodes(tmp_path: Path) -> None:
 
 
 def test_rank_layout_embeds_code_panel(tmp_path: Path) -> None:
-    """Rank layout should keep code panel content instead of dropping it."""
+    """Rank layout should keep code panel content instead of dropping it.
 
-    trace = tl.trace(nn.Sequential(nn.Linear(4, 4), nn.ReLU()), torch.randn(1, 4))
+    The model stays bound to a local: a callable ``code_panel`` documents that
+    the ORIGINAL model must still be alive at draw time (the Trace holds only
+    a weakref), so an anonymous inline model only ever rendered by
+    cycle-collection timing luck.
+    """
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
+    trace = tl.trace(model, torch.randn(1, 4))
 
     dot = trace.draw(
         vis_node_placement="rank",
