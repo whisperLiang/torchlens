@@ -2112,12 +2112,15 @@ class JAXBackend:
         else:
             trace.module_identity_mode = "pytree_module"
             self._attach_pytree_module_logs(trace, module_tree)
+        trace._tracing_finished = True
+        # The depth flood resolves ops through Trace.__getitem__, whose
+        # finished-mode lookup accepts both raw and final labels; run it after
+        # the finished flag flips so relabeled child edges resolve.
         trace.mark_layer_depths = bool(getattr(trace, "mark_layer_depths", False))
         if trace.mark_layer_depths:
             from .._finalize import compute_preview_input_output_distances
 
             compute_preview_input_output_distances(trace)
-        trace._tracing_finished = True
 
     def _attach_pytree_op_params(
         self,

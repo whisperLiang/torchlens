@@ -115,8 +115,38 @@ jobs:
           pytest tests/ -m "not slow and not rare" --tb=short
 
   preview-backends:
-    name: Preview backend tests
+    name: Preview backend tests (${{ matrix.backend }})
     runs-on: ubuntu-latest
+    # One framework per job: the frameworks carry conflicting pins and native
+    # runtimes that segfault when co-imported in one process (test collection
+    # imports every framework-marked module), so a combined env cannot be
+    # gated. With a single framework installed, the other suites' module-level
+    # importorskip guards skip cleanly during collection.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: tf
+            install: tensorflow-cpu
+            marker: tf_backend
+          - backend: jax
+            install: '"jax[cpu]" equinox flax'
+            marker: backend_jax
+          - backend: tinygrad
+            # Pinned to the exact version the backend runtime asserts. The
+            # replay/derived-grad oracles require the PYTHON device.
+            install: '"tinygrad==0.13.0"'
+            marker: backend_tinygrad
+            dev: PYTHON
+          - backend: paddle
+            install: '"paddlepaddle>=3.3,<3.4"'
+            marker: backend_paddle
+          - backend: mlx
+            # MLX ships manylinux CPU wheels, so its suite runs on Linux CI;
+            # pinned to 0.26.3 because the 0.26.5 manylinux wheel is missing
+            # libmlx.so. Metal-path coverage still needs Apple silicon.
+            install: '"mlx==0.26.3"'
+            marker: backend_mlx
     steps:
       - uses: actions/checkout@v4
 
@@ -126,17 +156,21 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
 
-      - name: Install TorchLens and preview backends
+      - name: Install TorchLens and the ${{ matrix.backend }} preview backend
         run: |
           uv pip install --system -e ".[dev,test,tabular]"
-          uv pip install --system tensorflow-cpu "jax[cpu]" equinox flax "tinygrad==0.13.0" paddlepaddle "mlx>=0.26,<0.27"
-          # MLX ships manylinux CPU wheels (>=0.26), so its suite runs on Linux CI;
-          # Metal-path coverage still needs an Apple-silicon runner.
-          # tinygrad is pinned to the exact version the backend runtime asserts.
+          uv pip install --system ${{ matrix.install }}
 
-      - name: Run preview backend tests
+      - name: Run ${{ matrix.backend }} preview backend tests
+        env:
+          # MLX's CPU JIT emits _FloatNN typedefs newer g++ rejects; the
+          # uncompiled path is equivalent for capture. No-op for other legs.
+          MLX_DISABLE_COMPILE: "1"
+          TORCHLENS_RUN_UNSTABLE_MLX_TESTS: "1"
+          # tinygrad leg only; empty (unread) elsewhere.
+          DEV: ${{ matrix.dev || '' }}
         run: |
-          pytest tests/ -m "(tf_backend or backend_jax or backend_tinygrad or backend_paddle or backend_mlx) and not slow" --tb=short
+          pytest tests/ -m "${{ matrix.marker }} and not slow" --tb=short
 
   wheel:
     name: Wheel package smoke

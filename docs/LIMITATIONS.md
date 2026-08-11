@@ -19,8 +19,10 @@ the recommended workaround. See the [robustness sprint
 catalog](https://github.com/johnmarktaylor91/torchlens/pull/143) for the
 original analysis.
 
-Backend note: `backend=None` preserves current PyTorch eager capture and MLX
-module auto-routing. Explicit `backend="torch"`, `backend="jax"`,
+Backend note: `backend=None` preserves current PyTorch eager capture, and every
+registered preview backend (MLX, JAX, tinygrad, Paddle, TensorFlow) auto-routes
+genuine framework models through its `can_handle` detector when the framework is
+installed and no foreign tensors are present. Explicit `backend="torch"`, `backend="jax"`,
 `backend="tinygrad"`, `backend="paddle"`, and `backend="tf"` / `backend="tensorflow"` are supported; unknown,
 ambiguous, or mismatched backend selections fail before capture with typed
 backend registry errors. MLX remains a

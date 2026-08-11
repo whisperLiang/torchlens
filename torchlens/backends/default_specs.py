@@ -852,6 +852,44 @@ def _tinygrad_validate_trace(*args: Any, **kwargs: Any) -> Any:
     return TinygradBackend().validate_trace(*args, **kwargs)
 
 
+def _mlx_validate_entry(*args: Any, **kwargs: Any) -> bool:
+    """Dispatch to MLX capture-then-validate.
+
+    Parameters
+    ----------
+    *args, **kwargs:
+        Public validation arguments.
+
+    Returns
+    -------
+    bool
+        Validation result.
+    """
+
+    from .mlx import MLXBackend
+
+    return MLXBackend().validate_entry(*args, **kwargs)
+
+
+def _mlx_validate_trace(*args: Any, **kwargs: Any) -> Any:
+    """Dispatch to MLX trace replay validation.
+
+    Parameters
+    ----------
+    *args, **kwargs:
+        Trace validation arguments.
+
+    Returns
+    -------
+    Any
+        Validation result.
+    """
+
+    from .mlx import MLXBackend
+
+    return MLXBackend().validate_trace(*args, **kwargs)
+
+
 def _paddle_validate_trace(*args: Any, **kwargs: Any) -> Any:
     """Dispatch to Paddle trace replay validation.
 
@@ -937,11 +975,11 @@ def register_default_backend_specs() -> None:
             name="mlx",
             can_handle=_mlx_can_handle,
             capture_trace=_mlx_capture_trace,
-            validate_entry=_unsupported_validate_entry,
-            validate_trace=_unsupported_validate_trace,
+            validate_entry=_mlx_validate_entry,
+            validate_trace=_mlx_validate_trace,
             capabilities=BackendCapabilities(
                 backward_capture=False,
-                validation_replay=False,
+                validation_replay=True,
                 fastlog=False,
                 interventions=False,
                 rng_replay=False,

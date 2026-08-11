@@ -11,11 +11,29 @@ preview, explicit `backend="tinygrad"` enables the tinygrad preview, and explici
 | Backend | Capture | Validation | Payloads | Modules | Gradients |
 |---|---|---|---|---|---|
 | `torch` | Stable eager wrapper capture | Replay validation | Materialized `.tlspec` payloads | `torch_module` | True backward capture |
-| `mlx` | Technical preview | Unsupported | Materialized forward/derived array `.tlspec` payloads | `function_root`, object `object_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
+| `mlx` | Technical preview | Live per-op replay and parent perturbation over the captured (whitelisted) op set | Materialized forward/derived array `.tlspec` payloads | `function_root`, object `object_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
 | `jax` | Preview jaxpr-first functional capture | Live per-equation replay and parent perturbation | Materialized forward/derived array `.tlspec` payloads | `function_root`, Equinox/NNX `pytree_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
 | `tinygrad` | Preview UOp-snapshot functional capture | Live UOp replay and parent perturbation on `DEV=PYTHON` payloads | Materialized forward/derived array `.tlspec` payloads | `function_root`, object `object_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
 | `paddle` | Preview dygraph/eager capture | Live replay/perturbation plus static inventory guard | Materialized forward/derived array `.tlspec` payloads | `function_root`, object `object_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
-| `tf` | Preview eager op-callback capture; graph-only FuncGraph fallback planned | Callback self-consistency plus per-op replay/perturbation accounting | Materialized forward array `.tlspec` payloads | `function_root`, Keras/`tf.Module` object `object_module` | Deferred |
+| `tf` | Preview eager op-callback capture; implemented graph-only FuncGraph static path for compiled/SavedModel entries | Callback self-consistency plus per-op replay/perturbation accounting | Materialized forward array `.tlspec` payloads | `function_root`, Keras/`tf.Module` object `object_module` | Deferred |
+
+Two cross-backend honesty notes apply to every preview row above:
+
+- **`save=` on previews is a presentation filter, not a memory saver.** Preview backends capture
+  the full forward first; static-label selectors then null the public payloads of unselected ops
+  (retaining hidden copies for live replay validation). Unlike torch's single-pass selective
+  capture, peak memory is unchanged. Value-dependent predicates, `followed_by`/`preceded_by`,
+  lookback windows, and save shaping reject typed.
+- **Preview `tl.validate(...)` may return a status object, not a plain bool.** Partial-coverage
+  results return a `ValidationReplayStatus` whose `bool()` raises `TypeError` for non-final
+  (`unverified`/`unavailable`) states instead of guessing; branch on `.state`/`.passed`.
+- **Auto-routing applies to every preview, not just MLX.** Each registered preview declares a
+  `can_handle` detector, so `backend=None` routes a genuine framework model (framework installed,
+  no foreign tensors) to its preview automatically. Pass an explicit `backend=` to pin capture.
+- **Recurrence and depth.** JAX groups recurrent calls into multi-pass layers through the neutral
+  grouper; the four single-pass previews (tf/mlx/tinygrad/paddle) do not group, and their traces
+  now store `recurrence_detection=False` to say so. All previews honor
+  `compute_input_output_distances=True` (input/output hop distances plus ancestor/descendant sets).
 
 ## Public Option Spine
 
@@ -90,9 +108,10 @@ capture: TorchLens runs the real `model(*args, **kwargs)` forward under
 taken-branch control flow, and snapshots Keras/`tf.Module` call-stack frames for
 `module_identity_mode="object_module"` when discovery succeeds. Raw callables can use the root-only
 `function_root` mode. Graph-only entries such as compiled `Model.call`, `tf.function` roots,
-SavedModel-style signatures, and `.predict()` are detected separately; the FuncGraph walk/prune
-fallback is the planned static-mode path, and current P6 builds fail closed rather than producing a
-partial graph-only trace.
+SavedModel-style signatures, and `.predict()` are detected separately and route to the implemented
+FuncGraph static importer (`torchlens/backends/tf/funcgraph.py`): a walk/prune pass with a tiered
+concrete-value ladder, opaque regions recorded honestly as unverified rather than fabricated, and
+zero module attribution in graph-only mode.
 
 Static-label `save=` selectors are applied after full graph finalization, with unsaved ops retaining
 metadata and dropping public payloads. TensorFlow validation is non-vacuous but scoped to the

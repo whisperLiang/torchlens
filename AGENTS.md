@@ -165,8 +165,9 @@ pytest tests/ -m "not slow" -x --tb=short
     glossary, FIELD_ORDER, and serialization compatibility gates together.
 15. TensorFlow `backend="tf"` / `backend="tensorflow"` targets Keras 3 on TF>=2.16 with
     `keras.backend.backend() == "tensorflow"`. Eager `op_callbacks` capture is the shipped primary
-    path; graph-only FuncGraph fallback is the static-mode design; interventions, true backward
-    capture, and T1 derived gradients are deferred.
+    path; the graph-only FuncGraph static importer is implemented for compiled/SavedModel entries
+    (opaque regions stay unverified); interventions, true backward capture, and T1 derived
+    gradients are deferred.
 16. Smart-collapse metadata is computed, not serialized: `Module.collapse_score`,
     `Trace.module_collapse_order`, and `Trace.collapse_order(weights=..., mode=...)` must stay
     out of `*_FIELD_ORDER` schemas until the policy is intentionally stabilized.

@@ -343,7 +343,7 @@ def compute_preview_input_output_distances(trace: Trace) -> None:
     Parameters
     ----------
     trace:
-        Finalized preview trace whose ops carry raw-label ``parents``/
+        Finalized preview trace whose ops carry label-based ``parents``/
         ``children`` edges and populated ``input_layers``/``output_layers``.
 
     Returns
@@ -354,18 +354,97 @@ def compute_preview_input_output_distances(trace: Trace) -> None:
 
     Notes
     -----
-    The flood mutates lineage sets, so backend-emitted immutable placeholders
-    (e.g. TF's ``input_ancestors=()``) are normalized to mutable sets first.
+    This mirrors ``postprocess.graph_traversal._mark_layer_depths`` but
+    resolves labels through an explicit op index instead of
+    ``Trace.__getitem__`` (whose finished-mode lookup returns ``Layer``
+    objects, not the ops the flood must mutate). Lineage sets are normalized
+    first because backends may emit immutable placeholders (e.g. TF's
+    ``input_ancestors=()``).
     """
 
-    from ..postprocess.graph_traversal import _mark_layer_depths
-
+    ops_by_label: dict[str, Any] = {}
     for op_log in trace.layer_list:
         for field_name in ("input_ancestors", "output_descendants"):
             value = getattr(op_log, field_name, None)
             if not isinstance(value, set):
                 setattr(op_log, field_name, set(value or ()))
-    _mark_layer_depths(trace)
+        for key in (
+            getattr(op_log, "_label_raw", None),
+            getattr(op_log, "label", None),
+            getattr(op_log, "layer_label", None),
+        ):
+            if key is not None:
+                ops_by_label.setdefault(key, op_log)
+
+    ordered_ops = [
+        ops_by_label[label] for label in trace._raw_layer_labels_list if label in ops_by_label
+    ]
+    for mode, starting_labels, min_field, max_field, marker_field, lineage_field, edge_field in (
+        (
+            "input",
+            trace.input_layers,
+            "min_distance_from_input",
+            "max_distance_from_input",
+            "has_input_ancestor",
+            "input_ancestors",
+            "children",
+        ),
+        (
+            "output",
+            trace.output_layers,
+            "min_distance_to_output",
+            "max_distance_to_output",
+            "has_output_descendant",
+            "output_descendants",
+            "parents",
+        ),
+    ):
+        traversal = ordered_ops if mode == "input" else list(reversed(ordered_ops))
+        for starting_label in starting_labels:
+            starting_op = ops_by_label.get(starting_label)
+            if starting_op is None:
+                continue
+            _update_distance(starting_op, min_field, max_field, 0)
+            setattr(starting_op, marker_field, True)
+            getattr(starting_op, lineage_field).add(starting_label)
+        for op_log in traversal:
+            current_min = getattr(op_log, min_field, None)
+            current_max = getattr(op_log, max_field, None)
+            if current_min is None or current_max is None:
+                continue
+            lineage = getattr(op_log, lineage_field)
+            for next_label in getattr(op_log, edge_field, ()) or ():
+                next_op = ops_by_label.get(next_label)
+                if next_op is None:
+                    continue
+                _update_distance(next_op, min_field, max_field, current_min + 1)
+                _update_distance(next_op, min_field, max_field, current_max + 1)
+                setattr(next_op, marker_field, True)
+                getattr(next_op, lineage_field).update(lineage)
+
+
+def _update_distance(op_log: Any, min_field: str, max_field: str, hops: int) -> None:
+    """Fold one candidate hop count into an op's min/max distance fields.
+
+    Parameters
+    ----------
+    op_log:
+        Op receiving the update.
+    min_field, max_field:
+        Distance attribute names for the active flood direction.
+    hops:
+        Candidate hop count from the flood frontier.
+
+    Returns
+    -------
+    None
+        The op's distance fields are widened in place.
+    """
+
+    current_min = getattr(op_log, min_field, None)
+    current_max = getattr(op_log, max_field, None)
+    setattr(op_log, min_field, hops if current_min is None else min(current_min, hops))
+    setattr(op_log, max_field, hops if current_max is None else max(current_max, hops))
 
 
 def _finalize_single_op(trace: Trace, op_log: Any, label: str, raw_index: int) -> None:
