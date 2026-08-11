@@ -23,9 +23,9 @@ from torchlens.intervention.errors import (
     UntrustedCallableError,
 )
 from torchlens.intervention.resolver import (
-    _selector_from_spec,
     function_registry_key_from_callable,
 )
+from torchlens.ir.selector_eval import selector_from_spec
 from torchlens.intervention.save import _write_tlspec_tensor_blob
 from torchlens.intervention.save import _sync_spec_records_from_log
 from torchlens.intervention.save import resolve_function_registry_key, save_intervention
@@ -281,7 +281,7 @@ def test_target_spec_selector_rehydration_covers_path_and_pattern_selectors() ->
     with pytest.warns(MultiMatchWarning):
         regex_labels = log.resolve_sites(tl.regex("chunk_[12]").to_target_spec()).labels()
     assert regex_labels == ("chunk_1_2", "chunk_2_3")
-    assert repr(_selector_from_spec("input_at", (0,), {})) == "tl.input_at((0,))"
+    assert repr(selector_from_spec("input_at", (0,), {})) == "tl.input_at((0,))"
 
 
 def test_loaded_forward_hook_spec_executes_on_fresh_trace(tmp_path: Path) -> None:

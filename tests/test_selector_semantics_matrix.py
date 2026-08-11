@@ -175,9 +175,8 @@ def _probe_live(model_key: str, make_selector: Callable[[], Any]) -> Any:
 def _probe_spec(make_selector: Callable[[], Any]) -> Any:
     """Round-trip a selector through both spec deserializers."""
 
-    from torchlens.intervention.hooks import _selector_from_target_spec
-    from torchlens.intervention.resolver import _selector_from_spec
     from torchlens.intervention.selectors import _classify_selector_direction
+    from torchlens.ir.selector_eval import selector_from_spec
 
     try:
         selector = make_selector()
@@ -197,13 +196,17 @@ def _probe_spec(make_selector: Callable[[], Any]) -> Any:
         return cell
     cell["spec_kind"] = str(spec.selector_kind)
     try:
-        rebuilt = _selector_from_spec(spec.selector_kind, spec.selector_value, spec.metadata)
+        rebuilt = selector_from_spec(
+            spec.selector_kind, spec.selector_value, spec.metadata, lifecycle="site"
+        )
         cell["resolver_repr"] = repr(rebuilt)
         cell["resolver_direction"] = _classify_selector_direction(rebuilt)
     except Exception as exc:  # noqa: BLE001
         cell["resolver_repr"] = _error_cell(exc)
     try:
-        rebuilt_live = _selector_from_target_spec(spec)
+        rebuilt_live = selector_from_spec(
+            spec.selector_kind, spec.selector_value, spec.metadata, lifecycle="live"
+        )
         cell["hooks_repr"] = repr(rebuilt_live)
         cell["hooks_direction"] = _classify_selector_direction(rebuilt_live)
     except Exception as exc:  # noqa: BLE001

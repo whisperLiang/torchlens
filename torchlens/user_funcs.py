@@ -84,7 +84,8 @@ from .intervention.errors import ChunkedForwardConfigError
 from .intervention.predicates import InterventionPredicate
 from .intervention.types import InterventionDecision, InterventionSpec, TargetSpec
 from .intervention.hooks import normalize_hook_plan
-from .intervention.selectors import BaseSelector, _selector_contains_kind
+from .intervention.selectors import BaseSelector
+from .ir.selector_eval import selector_contains_kind
 from .intervention.resolver import _selector_resolution_direction
 from .intervention.resolver import resolve_sites
 from ._chunking import iter_chunked_inputs, normalize_chunk_paths, normalize_chunk_size, plan_chunks
@@ -971,7 +972,7 @@ def _run_model_and_save_specified_outs(
     module_save_selector = (
         save_predicate
         if isinstance(save_predicate, BaseSelector)
-        and _selector_contains_kind(save_predicate, "module")
+        and selector_contains_kind(save_predicate, "module")
         else None
     )
     if module_save_selector is not None:
@@ -998,7 +999,7 @@ def _run_model_and_save_specified_outs(
     candidate_intervene_decision = getattr(intervene_predicate, "decision", None)
     if (
         isinstance(candidate_intervene_selector, BaseSelector)
-        and _selector_contains_kind(candidate_intervene_selector, "module")
+        and selector_contains_kind(candidate_intervene_selector, "module")
         and isinstance(candidate_intervene_decision, InterventionDecision)
         and candidate_intervene_decision.hook is not None
         and candidate_intervene_decision.direction in {"forward", "both"}

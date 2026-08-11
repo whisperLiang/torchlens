@@ -2041,12 +2041,13 @@ def _record_predicate_module_boundary_outputs(
     from ...capture.predicates import _evaluate_keep_op
     from ...capture.projections import _event_from_record
     from ...fastlog.types import ActivationRecord
-    from ...intervention.selectors import BaseSelector, _selector_contains_kind
+    from ...intervention.selectors import BaseSelector
+    from ...ir.selector_eval import selector_contains_kind
     from ...ir.predicate import RetroactiveCaptureDecision
     from .ops import _walk_output_tensors_with_paths
 
     predicate = state.options.keep_op
-    if not isinstance(predicate, BaseSelector) or not _selector_contains_kind(predicate, "module"):
+    if not isinstance(predicate, BaseSelector) or not selector_contains_kind(predicate, "module"):
         return
     contexts_by_label = {
         ctx.raw_label: ctx

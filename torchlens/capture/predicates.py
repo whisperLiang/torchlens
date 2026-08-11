@@ -17,10 +17,10 @@ from ..intervention.selectors import (
     BaseSelector,
     CompositeSelector,
     FollowedBySelector,
-    _selector_contains_kind,
 )
 from ..intervention.types import InterventionDecision
 from ..ir.predicate import RetroactiveCaptureDecision
+from ..ir.selector_eval import contains_followed_by, selector_contains_kind
 
 if TYPE_CHECKING:
     from ..fastlog.options import RecordingOptions
@@ -157,7 +157,7 @@ def _keep_op_needs_alias_retry(predicate: object | None) -> bool:
 
     if not isinstance(predicate, BaseSelector):
         return True
-    return any(_selector_contains_kind(predicate, kind) for kind in _ALIAS_RETRY_SELECTOR_KINDS)
+    return any(selector_contains_kind(predicate, kind) for kind in _ALIAS_RETRY_SELECTOR_KINDS)
 
 
 def _evaluate_intervene_op(
@@ -326,7 +326,7 @@ def validate_followed_by_capability(
         Raises only for unsupported ``followed_by`` usage.
     """
 
-    if not _predicate_contains_followed_by(predicate):
+    if not contains_followed_by(predicate, unwrap=True):
         return
     if not _is_supported_followed_by_predicate(predicate):
         raise PredicateError(
@@ -338,20 +338,6 @@ def validate_followed_by_capability(
             f"{api_name} does not support tl.followed_by(...) retroactive capture; "
             "use trace(save=...) with lookback and lookback_payload_policy instead."
         )
-
-
-def _predicate_contains_followed_by(predicate: Any) -> bool:
-    """Return whether a predicate tree contains ``FollowedBySelector``."""
-
-    if isinstance(predicate, FollowedBySelector):
-        return True
-    if isinstance(predicate, CompositeSelector):
-        left, right = predicate.selectors
-        return _predicate_contains_followed_by(left) or _predicate_contains_followed_by(right)
-    selector = getattr(predicate, "selector", None)
-    if selector is not None:
-        return _predicate_contains_followed_by(selector)
-    return False
 
 
 def _matching_recent_parent_labels(

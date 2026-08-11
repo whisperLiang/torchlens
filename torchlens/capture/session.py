@@ -324,7 +324,8 @@ class CaptureSession:
                 for parent_label in output_op.parents:
                     parent = trace.layer_dict_all_keys[parent_label]
                     live_output_by_raw_index[parent.raw_index] = output_tensor
-            from ..intervention.selectors import BaseSelector, _selector_contains_kind
+            from ..intervention.selectors import BaseSelector
+            from ..ir.selector_eval import selector_contains_kind
 
             selected: list[int] | str
             if isinstance(activation_selector, BaseSelector):
@@ -347,7 +348,7 @@ class CaptureSession:
             requested_nums = set() if selected == "all" else set(selected)
             selected_nums = set(requested_nums)
             exact_selector = isinstance(activation_selector, BaseSelector) and (
-                _selector_contains_kind(activation_selector, "module")
+                selector_contains_kind(activation_selector, "module")
             )
             if not exact_selector:
                 selected_nums.update(

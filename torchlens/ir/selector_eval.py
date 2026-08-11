@@ -882,6 +882,8 @@ def _evaluate_subject(selector: BaseSelector, subject: Any, lifecycle: str) -> b
             raise _capability_error(kind, lifecycle)
         return _preceded_by_matches(selector, subject)
     if kind == "followed_by":
+        if lifecycle != "capture":
+            raise _capability_error(kind, lifecycle)
         raise SelectorCompositionError(
             "tl.followed_by(...) only supports candidate & tl.followed_by(successor); "
             "standalone, negated, or OR-composed followed_by selectors are unsupported."

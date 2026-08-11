@@ -8,7 +8,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias, overload
 
-from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
 from .types import TargetSpec
 
 SelectorKind: TypeAlias = Literal[
@@ -27,12 +26,14 @@ SelectorKind: TypeAlias = Literal[
     "or",
     "not",
     "grad_fn",
+    "grad_fn_label",
+    "grad_kind",
+    "backward_pass",
     "intervening",
     "without_op",
     "regex",
     "followed_by",
     "preceded_by",
-    "label",
 ]
 
 
@@ -74,7 +75,9 @@ class BaseSelector:
             Union selector.
         """
 
-        if _selector_contains_followed_by(self) or _selector_contains_followed_by(other):
+        from ..ir.selector_eval import contains_followed_by
+
+        if contains_followed_by(self) or contains_followed_by(other):
             from .errors import SelectorCompositionError
 
             raise SelectorCompositionError(
@@ -93,7 +96,9 @@ class BaseSelector:
             Negated selector.
         """
 
-        if _selector_contains_followed_by(self):
+        from ..ir.selector_eval import contains_followed_by
+
+        if contains_followed_by(self):
             from .errors import SelectorCompositionError
 
             raise SelectorCompositionError(
@@ -164,7 +169,9 @@ class BaseSelector:
             Whether ``ctx`` matches this selector.
         """
 
-        return _selector_matches_record_context(self, ctx)
+        from ..ir.selector_eval import evaluate
+
+        return evaluate(self, ctx, lifecycle="capture")
 
 
 @dataclass(frozen=True, repr=False)
@@ -705,7 +712,13 @@ class FacetSelector(BaseSelector):
 
 @dataclass(frozen=True, repr=False)
 class GradFnLabelSelector(BaseSelector):
-    """Backward-only selector matching a grad_fn label exactly."""
+    """Backward-only selector matching a grad_fn label exactly.
+
+    Carries its own ``"grad_fn_label"`` selector kind: the earlier ``"label"``
+    kind collided with :class:`LabelSelector`, so saving and reloading a spec
+    silently converted the selector to a forward label match and post-hoc
+    resolution never reached the backward exact-label branch.
+    """
 
     label: str
     direction: Literal["backward"] = "backward"
@@ -719,7 +732,7 @@ class GradFnLabelSelector(BaseSelector):
             GradFn label to match.
         """
 
-        object.__setattr__(self, "selector_kind", "label")
+        object.__setattr__(self, "selector_kind", "grad_fn_label")
         object.__setattr__(self, "selector_value", name)
         object.__setattr__(self, "label", name)
         object.__setattr__(self, "direction", "backward")
@@ -1311,351 +1324,12 @@ def in_module(address_or_layer: Any, address: str | None = None) -> InModuleSele
     if address is None:
         return InModuleSelector(str(address_or_layer))
 
+    from ..ir.selector_eval import module_address_matches
+
     modules = getattr(address_or_layer, "modules", ())
     module_ops = getattr(address_or_layer, "output_of_module_calls", ())
     candidates = tuple(modules) + tuple(module_ops)
-    return any(_module_address_matches(candidate, address) for candidate in candidates)
-
-
-def _context_labels(ctx: Any) -> set[str]:
-    """Return all label-like strings visible on a predicate context.
-
-    Parameters
-    ----------
-    ctx:
-        Capture-time context or layer-like object.
-
-    Returns
-    -------
-    set[str]
-        Non-empty label strings available for selector matching.
-    """
-
-    labels: set[str] = set()
-    for attr in ("label", "raw_label", "label_raw", "layer_label", "layer_label_short"):
-        value = getattr(ctx, attr, None)
-        if value is not None:
-            labels.add(str(value))
-    return labels
-
-
-def _context_module_candidates(ctx: Any) -> tuple[str, ...]:
-    """Return module-address candidates from a context.
-
-    Parameters
-    ----------
-    ctx:
-        Capture-time context or layer-like object.
-
-    Returns
-    -------
-    tuple[str, ...]
-        Module addresses and pass-qualified module labels.
-    """
-
-    candidates: list[str] = []
-    address = getattr(ctx, "address", None)
-    if address is not None:
-        candidates.append(str(address))
-    source_trace = getattr(ctx, "source_trace", None)
-    if getattr(source_trace, "module_identity_mode", None) == "function_root":
-        candidates.append("self")
-        candidates.append("self:1")
-    for frame in getattr(ctx, "module_stack", ()):
-        frame_address = getattr(frame, "address", None)
-        if frame_address is None and isinstance(frame, dict):
-            frame_address = frame.get("address")
-        if frame_address is None:
-            continue
-        frame_pass = getattr(frame, "pass_index", None)
-        if frame_pass is None and isinstance(frame, dict):
-            frame_pass = frame.get("pass_index")
-        candidates.append(str(frame_address))
-        if frame_pass is not None:
-            candidates.append(f"{frame_address}:{frame_pass}")
-    modules = getattr(ctx, "modules", ())
-    module_ops = getattr(ctx, "output_of_module_calls", ())
-    candidates.extend(
-        _module_candidate_strings(candidate) for candidate in tuple(modules) + tuple(module_ops)
-    )
-    return tuple(candidates)
-
-
-def _module_candidate_strings(candidate: Any) -> str:
-    """Return a selector-compatible module candidate string.
-
-    Parameters
-    ----------
-    candidate
-        Module candidate from an op, module call, or capture context.
-
-    Returns
-    -------
-    str
-        Address or pass-qualified address suitable for ``_module_address_matches``.
-    """
-
-    if isinstance(candidate, tuple) and candidate and isinstance(candidate[0], str):
-        if len(candidate) > 1:
-            return f"{candidate[0]}:{candidate[1]}"
-        return candidate[0]
-    return str(candidate)
-
-
-def _sanitize_transform_kind(kind: object) -> str:
-    """Return the transform-kind spelling used for labels.
-
-    Parameters
-    ----------
-    kind:
-        Transform kind or selector value.
-
-    Returns
-    -------
-    str
-        Lowercase spelling with underscores and dots removed.
-    """
-
-    return str(kind).lower().replace("_", "").replace(".", "")
-
-
-def _selector_matches_record_context(selector: BaseSelector, ctx: Any) -> bool:
-    """Evaluate a selector as a capture-time predicate.
-
-    Parameters
-    ----------
-    selector:
-        Selector to evaluate.
-    ctx:
-        Capture-time ``RecordContext`` or layer-like object.
-
-    Returns
-    -------
-    bool
-        Whether the selector matches ``ctx``.
-    """
-
-    kind = selector.selector_kind
-    if kind == "label":
-        _guard_capture_time_finalized_label(ctx, kind, str(selector.selector_value))
-        return str(selector.selector_value) in _context_labels(ctx)
-    if kind == "contains":
-        _guard_capture_time_finalized_label(ctx, kind, str(selector.selector_value))
-        needle = str(selector.selector_value)
-        return any(needle in label for label in _context_labels(ctx))
-    if kind == "regex":
-        _guard_capture_time_finalized_label(ctx, kind, str(selector.selector_value))
-        pattern = str(selector.selector_value)
-        return any(_re.search(pattern, label) is not None for label in _context_labels(ctx))
-    if kind == "func":
-        value = selector.selector_value
-        if isinstance(value, dict):
-            name = value.get("name")
-            output_target = value.get("output")
-            if output_target is not None and getattr(ctx, "output_index", None) != output_target:
-                return False
-        else:
-            name = value
-        func_name = getattr(ctx, "func_name", None)
-        layer_type = getattr(ctx, "layer_type", None)
-        return str(name) in {str(func_name), str(layer_type)}
-    if kind == "func_transform":
-        if not bool(getattr(ctx, "is_transform", False)):
-            return False
-        value = selector.selector_value
-        if value is None:
-            return True
-        transform_kind = getattr(ctx, "transform_kind", None)
-        if transform_kind is None:
-            return False
-        return _sanitize_transform_kind(transform_kind) == _sanitize_transform_kind(value)
-    if kind == "module":
-        target = str(selector.selector_value)
-        module_outputs = tuple(getattr(ctx, "output_of_module_calls", ()) or ())
-        source_trace = getattr(ctx, "source_trace", None)
-        if not module_outputs and getattr(source_trace, "backend", "torch") != "torch":
-            module_candidate = getattr(ctx, "module", None)
-            module_outputs = () if module_candidate is None else (module_candidate,)
-        return any(_module_address_matches(candidate, target) for candidate in module_outputs)
-    if kind == "in_module":
-        target = str(selector.selector_value)
-        return any(
-            _module_address_matches(candidate, target)
-            for candidate in _context_module_candidates(ctx)
-        )
-    if kind == "output":
-        return getattr(ctx, "output_index", None) == selector.selector_value
-    if kind == "output_at":
-        return _output_path_matches(
-            tuple(getattr(ctx, "container_path", ()) or ()),
-            tuple(selector.selector_value),
-        )
-    if kind == "input_at":
-        return _input_path_matches(ctx, tuple(selector.selector_value))
-    if kind == "predicate":
-        predicate = getattr(selector, "predicate")
-        return bool(predicate(ctx))
-    if kind == "grad_kind":
-        return getattr(ctx, "grad_kind", None) == selector.selector_value
-    if kind == "backward_pass":
-        ctx_pass = getattr(ctx, "backward_pass_index", None)
-        if ctx_pass is None:
-            ctx_pass = getattr(ctx, "pass_index", None)
-        return ctx_pass == selector.selector_value
-    if kind == "preceded_by" and isinstance(selector, PrecededBySelector):
-        parent_labels = set(
-            getattr(ctx, "parent_labels_raw", ()) or getattr(ctx, "parent_labels", ())
-        )
-        recent_ops = tuple(getattr(ctx, "recent_ops", ()))
-        if parent_labels:
-            return any(
-                (recent.raw_label or recent.label) in parent_labels and bool(selector.inner(recent))  # type: ignore[operator]
-                for recent in recent_ops
-            )
-        return any(bool(selector.inner(recent)) for recent in recent_ops)  # type: ignore[operator]
-    if kind == "followed_by":
-        from .errors import SelectorCompositionError
-
-        raise SelectorCompositionError(
-            "tl.followed_by(...) only supports candidate & tl.followed_by(successor); "
-            "standalone, negated, or OR-composed followed_by selectors are unsupported."
-        )
-    if kind == "and" and isinstance(selector, CompositeSelector):
-        left, right = selector.selectors
-        return bool(left(ctx)) and bool(right(ctx))  # type: ignore[operator]
-    if kind == "or" and isinstance(selector, CompositeSelector):
-        left, right = selector.selectors
-        return bool(left(ctx)) or bool(right(ctx))  # type: ignore[operator]
-    if kind == "not" and isinstance(selector, NotSelector):
-        return not bool(selector.selector(ctx))  # type: ignore[operator]
-    if kind in {"grad_fn", "grad_fn_handle", "grad_kind", "backward_pass", "intervening"}:
-        return False
-    from .errors import SiteResolutionError
-
-    raise SiteResolutionError(f"Unsupported capture-time selector kind {kind!r}.")
-
-
-def _guard_capture_time_finalized_label(ctx: Any, kind: str, value: str) -> None:
-    """Apply finalized-label diagnostics only to live predicate contexts.
-
-    Parameters
-    ----------
-    ctx:
-        Candidate selector context.
-    kind:
-        Label-oriented selector kind.
-    value:
-        Selector literal or pattern.
-
-    Returns
-    -------
-    None
-        Finalized layer objects remain valid post-capture selector inputs.
-    """
-
-    from ..ir.predicate import RecordContext
-
-    if isinstance(ctx, RecordContext):
-        from .hooks import _raise_for_finalized_live_label_selector
-
-        _raise_for_finalized_live_label_selector(kind, value)
-
-
-def _module_address_matches(module_pass: Any, address: str) -> bool:
-    """Return whether a module candidate belongs to an address.
-
-    Parameters
-    ----------
-    module_pass:
-        Pass-qualified label, ``(address, call_index)`` tuple, or tuple repr.
-    address:
-        Module address without pass qualification.
-
-    Returns
-    -------
-    bool
-        Whether the module candidate belongs to the requested address.
-    """
-
-    if isinstance(module_pass, tuple) and module_pass and isinstance(module_pass[0], str):
-        return module_pass[0] == address
-    module_label = str(module_pass)
-    if module_label.startswith("("):
-        return f"'{address}'" in module_label or f'"{address}"' in module_label
-    module_address = module_label.rsplit(":", 1)[0]
-    return module_label == address or module_address == address
-
-
-def _output_path_matches(saved_path: tuple[Any, ...], requested_path: tuple[Any, ...]) -> bool:
-    """Return whether a captured typed path matches a user path.
-
-    Parameters
-    ----------
-    saved_path:
-        Captured output path.
-    requested_path:
-        User path.
-
-    Returns
-    -------
-    bool
-        Whether both paths address the same output.
-    """
-
-    if len(saved_path) != len(requested_path):
-        return False
-    return all(
-        _output_path_component_matches(saved_component, requested_component)
-        for saved_component, requested_component in zip(saved_path, requested_path)
-    )
-
-
-def _output_path_component_matches(saved_component: Any, requested_component: Any) -> bool:
-    """Return whether one captured path component matches a user component.
-
-    Parameters
-    ----------
-    saved_component:
-        Captured typed path component.
-    requested_component:
-        User path component.
-
-    Returns
-    -------
-    bool
-        Whether both components address the same child.
-    """
-
-    if isinstance(saved_component, TupleIndex):
-        return saved_component.index == requested_component
-    if isinstance(saved_component, (DictKey, HFKey)):
-        return saved_component.key == requested_component
-    if isinstance(saved_component, (NamedField, DataclassField)):
-        return saved_component.name == requested_component
-    return saved_component == requested_component
-
-
-def _input_path_matches(ctx: Any, requested_path: tuple[Any, ...]) -> bool:
-    """Return whether hook context belongs to an input container path.
-
-    Parameters
-    ----------
-    ctx:
-        Hook context.
-    requested_path:
-        User-facing path.
-
-    Returns
-    -------
-    bool
-        Whether the context path matches.
-    """
-
-    for container in getattr(ctx, "input_containers", ()) or ():
-        for occurrence in getattr(container, "leaf_occurrences", ()) or ():
-            if _output_path_matches(tuple(occurrence.path), requested_path):
-                return True
-    return False
+    return any(module_address_matches(candidate, address) for candidate in candidates)
 
 
 def _classify_selector_direction(
@@ -1678,7 +1352,7 @@ def _classify_selector_direction(
 
     if isinstance(sel, TargetSpec):
         kind = sel.selector_kind
-        if kind in {"grad_fn", "intervening", "without_op"}:
+        if kind in {"grad_fn", "grad_fn_label", "grad_kind", "backward_pass", "intervening", "without_op"}:
             return "backward"
         if kind in {"func", "func_transform"}:
             return "forward"
@@ -1736,57 +1410,6 @@ def _classify_selector_direction(
     )
 
 
-def _selector_contains_followed_by(selector: SelectorLike) -> bool:
-    """Return whether ``selector`` contains a ``followed_by`` selector.
-
-    Parameters
-    ----------
-    selector:
-        Selector to inspect.
-
-    Returns
-    -------
-    bool
-        Whether the selector tree contains ``FollowedBySelector``.
-    """
-
-    if isinstance(selector, FollowedBySelector):
-        return True
-    if isinstance(selector, CompositeSelector):
-        left, right = selector.selectors
-        return _selector_contains_followed_by(left) or _selector_contains_followed_by(right)
-    if isinstance(selector, NotSelector):
-        return _selector_contains_followed_by(selector.selector)
-    return False
-
-
-def _selector_contains_kind(selector: SelectorLike, kind: str) -> bool:
-    """Return whether a selector tree contains one selector kind.
-
-    Parameters
-    ----------
-    selector:
-        Selector tree to inspect.
-    kind:
-        Selector-kind name to find.
-
-    Returns
-    -------
-    bool
-        Whether the selector or any child has the requested kind.
-    """
-
-    if not isinstance(selector, BaseSelector):
-        return False
-    if selector.selector_kind == kind:
-        return True
-    if isinstance(selector, CompositeSelector):
-        return any(_selector_contains_kind(child, kind) for child in selector.selectors)
-    if isinstance(selector, NotSelector):
-        return _selector_contains_kind(selector.selector, kind)
-    return False
-
-
 def _check_composition(a: SelectorLike, b: SelectorLike) -> None:
     """Validate that two selectors can be composed.
 
@@ -1803,6 +1426,7 @@ def _check_composition(a: SelectorLike, b: SelectorLike) -> None:
         Raises when composition is invalid.
     """
 
+    from ..ir.selector_eval import contains_followed_by
     from .errors import SelectorCompositionError
 
     a_dir = _classify_selector_direction(a)
@@ -1812,12 +1436,12 @@ def _check_composition(a: SelectorLike, b: SelectorLike) -> None:
             "Cross-graph composition not supported: a forward selector and a backward "
             "selector cannot be combined. Use separate forward and backward hook sites."
         )
-    if _selector_contains_followed_by(a) or _selector_contains_followed_by(b):
+    if contains_followed_by(a) or contains_followed_by(b):
         if not (
             isinstance(a, FollowedBySelector)
-            and not _selector_contains_followed_by(b)
+            and not contains_followed_by(b)
             or isinstance(b, FollowedBySelector)
-            and not _selector_contains_followed_by(a)
+            and not contains_followed_by(a)
         ):
             raise SelectorCompositionError(
                 "tl.followed_by(...) only supports candidate & tl.followed_by(successor); "
@@ -1861,8 +1485,8 @@ __all__ = [
     "label",
     "in_module",
     "in_backward_pass",
+    "grad_fn_label",
     "head",
-    "label",
     "module",
     "output",
     "output_at",

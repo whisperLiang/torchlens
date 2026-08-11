@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -28,16 +27,20 @@ from .selectors import (
     GradKindSelector,
     NotSelector,
     _classify_selector_direction,
-    _module_address_matches,
 )
 from .types import HelperSpec, HookSpec, InterventionSpec, TargetSpec, TargetValueSpec
+from ..ir.selector_eval import (
+    evaluate,
+    live_label_error_message,
+    looks_like_finalized_label,
+    normalize_selector_like,
+)
 
 HookTiming: TypeAlias = Literal["pre", "post"]
 HookDirection: TypeAlias = Literal["forward", "backward"]
 HookDirectionRequest: TypeAlias = Literal["forward", "backward", "both"]
 HookCallable: TypeAlias = Callable[..., Any]
 HookInput: TypeAlias = Callable[..., Any] | HelperSpec
-_FINAL_LABEL_PATTERN = re.compile(r"(?:_\d+_\d+(?::\d+)?$|:\d+$)")
 _DEFAULT_HEAD_FACET_NAMES = ("q", "k", "v")
 
 _LAYER_LOG_CONTEXT_FIELDS = (
@@ -787,11 +790,11 @@ def live_selector_matches_site(selector_like: Any, site: Any) -> bool:
     """
 
     selector = _normalize_live_selector(selector_like)
-    matched = _live_selector_matches_unchecked(selector, site)
+    matched = evaluate(selector, site, lifecycle="live")
     if not matched and selector.selector_kind == "label":
         label_value = str(selector.selector_value)
-        if _looks_like_finalized_label(label_value):
-            raise LiveModeLabelError(_live_label_error_message(label_value))
+        if looks_like_finalized_label(label_value):
+            raise LiveModeLabelError(live_label_error_message(label_value))
     return matched
 
 
@@ -809,117 +812,7 @@ def _normalize_live_selector(selector_like: Any) -> BaseSelector:
         Normalized selector.
     """
 
-    if isinstance(selector_like, BaseSelector):
-        return selector_like
-    if isinstance(selector_like, TargetSpec):
-        return _selector_from_target_spec(selector_like)
-    if isinstance(selector_like, str):
-        from .selectors import label
-
-        return label(selector_like)
-    if hasattr(selector_like, "layer_label"):
-        from .selectors import label
-
-        return label(str(selector_like.layer_label))
-    raise SiteResolutionError(f"Unsupported live hook selector {selector_like!r}.")
-
-
-def _selector_from_target_spec(target: TargetSpec) -> BaseSelector:
-    """Build a selector from a live target spec.
-
-    Parameters
-    ----------
-    target:
-        Target spec to convert.
-
-    Returns
-    -------
-    BaseSelector
-        Selector equivalent to the target spec.
-    """
-
-    from .selectors import (
-        contains,
-        func,
-        func_transform,
-        grad_fn,
-        grad_input,
-        grad_output,
-        in_backward_pass,
-        label,
-        module,
-        output_at,
-        regex,
-        where,
-        without_op,
-    )
-
-    if target.selector_kind == "label":
-        return label(str(target.selector_value))
-    if target.selector_kind == "func":
-        if isinstance(target.selector_value, dict):
-            return func(
-                str(target.selector_value.get("name")),
-                output=target.selector_value.get("output"),
-            )
-        return func(str(target.selector_value))
-    if target.selector_kind == "module":
-        return module(str(target.selector_value))
-    if target.selector_kind == "output":
-        from .selectors import output
-
-        return output(cast("int | str", target.selector_value))
-    if target.selector_kind == "output_at":
-        return output_at(target.selector_value)
-    if target.selector_kind == "input_at":
-        raise SiteResolutionError(
-            "tl.input_at(...) resolves saved input placeholders, but model inputs are not live "
-            "hook application sites. Use trace(..., intervene=...) on downstream ops or mutate "
-            "the model input before capture."
-        )
-    if target.selector_kind == "contains":
-        return contains(str(target.selector_value))
-    if target.selector_kind == "regex":
-        return regex(str(target.selector_value))
-    if target.selector_kind == "func_transform":
-        return func_transform(None if target.selector_value is None else str(target.selector_value))
-    if target.selector_kind == "in_module":
-        from .selectors import in_module as make_in_module
-
-        selector = make_in_module(str(target.selector_value))
-        if isinstance(selector, BaseSelector):
-            return selector
-    if target.selector_kind == "predicate" and callable(target.selector_value):
-        return where(target.selector_value, name_hint=target.metadata.get("name_hint"))
-    if target.selector_kind == "grad_fn":
-        payload = dict(target.selector_value or {})
-        return grad_fn(
-            payload.get("type"),
-            label=payload.get("grad_fn_label_pattern"),
-            is_custom=payload.get("is_custom"),
-        )
-    if target.selector_kind == "grad_kind":
-        return grad_input() if target.selector_value == "grad_input" else grad_output()
-    if target.selector_kind == "backward_pass":
-        pass_index = target.selector_value
-        if not isinstance(pass_index, int):
-            raise SiteResolutionError("backward_pass target specs require an integer pass index.")
-        return in_backward_pass(pass_index)
-    if target.selector_kind in {"intervening", "without_op"}:
-        return without_op()
-    if target.selector_kind == "not":
-        return ~_normalize_live_selector(target.selector_value)
-    if target.selector_kind in {"and", "or"}:
-        if not isinstance(target.selector_value, Sequence) or len(target.selector_value) != 2:
-            raise SiteResolutionError(
-                f"{target.selector_kind!r} target specs require two nested selectors."
-            )
-        left, right = target.selector_value
-        return CompositeSelector(
-            cast("Literal['and', 'or']", target.selector_kind),
-            (_normalize_live_selector(left), _normalize_live_selector(right)),
-        )
-    raise SiteResolutionError(f"Unsupported live hook selector kind {target.selector_kind!r}.")
+    return normalize_selector_like(selector_like, lifecycle="live")
 
 
 def live_backward_selector_matches(
@@ -1404,240 +1297,6 @@ def _selector_direction_recursive(selector: BaseSelector) -> HookDirection | Non
     if isinstance(selector, NotSelector):
         return _selector_direction_recursive(_normalize_live_selector(selector.selector))
     return _classify_selector_direction(selector)
-
-
-def _live_selector_matches_unchecked(selector: BaseSelector, site: Any) -> bool:
-    """Match one normalized selector against one live site.
-
-    Parameters
-    ----------
-    selector:
-        Normalized selector.
-    site:
-        Capture-time site proxy.
-
-    Returns
-    -------
-    bool
-        Whether the selector matches.
-    """
-
-    kind = selector.selector_kind
-    value = selector.selector_value
-    if kind == "and" and isinstance(selector, CompositeSelector):
-        return all(
-            _live_selector_matches_unchecked(_normalize_live_selector(child), site)
-            for child in selector.selectors
-        )
-    if kind == "or" and isinstance(selector, CompositeSelector):
-        return any(
-            _live_selector_matches_unchecked(_normalize_live_selector(child), site)
-            for child in selector.selectors
-        )
-    if kind == "not" and isinstance(selector, NotSelector):
-        return not _live_selector_matches_unchecked(
-            _normalize_live_selector(selector.selector), site
-        )
-    if kind == "label":
-        _raise_for_finalized_live_label_selector(kind, str(value))
-        return _live_label_matches(site, str(value))
-    if kind == "func":
-        if isinstance(value, dict):
-            return bool(getattr(site, "func_name", None) == value.get("name")) and (
-                _live_output_matches(site, value.get("output"))
-            )
-        return bool(getattr(site, "func_name", None) == value)
-    if kind == "module":
-        return _live_module_output_matches(site, str(value))
-    if kind == "output":
-        return _live_output_matches(site, value)
-    if kind == "output_at":
-        from .resolver import _output_path_matches
-
-        return _output_path_matches(
-            tuple(getattr(site, "container_path", ()) or ()),
-            tuple(value),
-        )
-    if kind == "input_at":
-        from .selectors import _input_path_matches
-
-        return _input_path_matches(site, tuple(value))
-    if kind == "contains":
-        _raise_for_finalized_live_label_selector(kind, str(value))
-        if bool(getattr(site, "_tl_module_boundary", False)):
-            return False
-        return str(value).lower() in str(getattr(site, "_layer_label_raw", "")).lower()
-    if kind == "regex":
-        _raise_for_finalized_live_label_selector(kind, str(value))
-        return re.search(str(value), str(getattr(site, "_layer_label_raw", ""))) is not None
-    if kind == "func_transform":
-        from .selectors import _sanitize_transform_kind
-
-        if value is None:
-            return bool(getattr(site, "is_transform", False))
-        return bool(getattr(site, "is_transform", False)) and _sanitize_transform_kind(
-            getattr(site, "transform_kind", "")
-        ) == _sanitize_transform_kind(value)
-    if kind == "in_module":
-        return _live_module_contains(site, str(value))
-    if kind == "predicate":
-        predicate = value[0] if isinstance(value, tuple) and callable(value[0]) else value
-        if not callable(predicate):
-            raise SiteResolutionError("tl.where(...) requires a callable predicate.")
-        try:
-            return bool(predicate(site))
-        except Exception as exc:
-            raise SiteResolutionError(
-                f"live predicate selector failed at {getattr(site, '_layer_label_raw', '<unknown>')}"
-            ) from exc
-    raise SiteResolutionError(f"Unsupported live hook selector kind {kind!r}.")
-
-
-def _live_label_matches(site: Any, label_value: str) -> bool:
-    """Return whether a label selector matches capture-time labels.
-
-    Parameters
-    ----------
-    site:
-        Capture-time site proxy.
-    label_value:
-        Requested label literal.
-
-    Returns
-    -------
-    bool
-        Whether the literal matches a raw label available during capture.
-    """
-
-    candidates = (
-        getattr(site, "_layer_label_raw", None),
-        getattr(site, "_label_raw", None),
-        getattr(site, "layer_label", None),
-    )
-    return label_value in candidates
-
-
-def _live_module_output_matches(site: Any, address: str) -> bool:
-    """Return whether a live site is a module-output boundary.
-
-    Parameters
-    ----------
-    site:
-        Capture-time site proxy.
-    address:
-        Module address or pass label.
-
-    Returns
-    -------
-    bool
-        Whether the site exits the requested module.
-    """
-
-    candidates = tuple(getattr(site, "output_of_module_calls", ()) or ())
-    return any(_module_address_matches(candidate, address) for candidate in candidates)
-
-
-def _live_module_contains(site: Any, address: str) -> bool:
-    """Return whether a live site is contained in a module.
-
-    Parameters
-    ----------
-    site:
-        Capture-time site proxy.
-    address:
-        Module address or pass label.
-
-    Returns
-    -------
-    bool
-        Whether the site is inside or exits the requested module.
-    """
-
-    candidates = tuple(getattr(site, "output_of_module_calls", ()) or ()) + tuple(
-        getattr(site, "modules", ()) or ()
-    )
-    return any(_module_address_matches(candidate, address) for candidate in candidates)
-
-
-def _live_output_matches(site: Any, value: Any) -> bool:
-    """Return whether a live site matches an output index or role.
-
-    Parameters
-    ----------
-    site:
-        Capture-time site proxy.
-    value:
-        Output index or semantic role.
-
-    Returns
-    -------
-    bool
-        Whether the site matches the requested output.
-    """
-
-    if isinstance(value, int):
-        return getattr(site, "multi_output_index", None) == value
-    return getattr(site, "multi_output_name", None) == str(value)
-
-
-def _looks_like_finalized_label(label_value: str) -> bool:
-    """Return whether a label literal looks postprocessed.
-
-    Parameters
-    ----------
-    label_value:
-        Label literal from ``tl.label``.
-
-    Returns
-    -------
-    bool
-        True for pass suffixes like ``:2`` or ``relu_4_27``-style names.
-    """
-
-    return bool(_FINAL_LABEL_PATTERN.search(label_value)) and not label_value.endswith("_raw")
-
-
-def _raise_for_finalized_live_label_selector(selector_kind: str, label_value: str) -> None:
-    """Reject finalized-looking label selectors during live capture.
-
-    Parameters
-    ----------
-    selector_kind:
-        Label-oriented selector kind.
-    label_value:
-        Selector literal or pattern.
-
-    Raises
-    ------
-    LiveModeLabelError
-        If the value names a label that exists only after postprocessing.
-    """
-
-    if _looks_like_finalized_label(label_value):
-        raise LiveModeLabelError(_live_label_error_message(label_value, selector_kind))
-
-
-def _live_label_error_message(label_value: str, selector_kind: str = "label") -> str:
-    """Build a copy-pasteable finalized-label diagnostic.
-
-    Parameters
-    ----------
-    label_value:
-        Finalized-looking label.
-
-    Returns
-    -------
-    str
-        User-facing error message.
-    """
-
-    return (
-        f"tl.{selector_kind}({label_value!r}) looks like a finalized postprocess label, but "
-        "live selectors run during capture before those labels exist. For post-capture "
-        "selection use "
-        f'tl.where(lambda p: p.layer_label == "{label_value}"). For live hooks, prefer '
-        'a capture-time selector such as tl.func("relu") or tl.module("encoder.layer.4").'
-    )
 
 
 def make_live_site_proxy(

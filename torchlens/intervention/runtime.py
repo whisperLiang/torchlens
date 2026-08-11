@@ -493,9 +493,10 @@ def _apply_module_boundary_live_hooks(
     predicate_intervene = getattr(predicate_options, "intervene", None)
     predicate_selector = getattr(predicate_intervene, "selector", None)
     if predicate_selector is not None:
-        from .selectors import BaseSelector, _selector_contains_kind
+        from .selectors import BaseSelector
+        from ..ir.selector_eval import selector_contains_kind
 
-        if not isinstance(predicate_selector, BaseSelector) or not _selector_contains_kind(
+        if not isinstance(predicate_selector, BaseSelector) or not selector_contains_kind(
             predicate_selector, "module"
         ):
             predicate_intervene = None
