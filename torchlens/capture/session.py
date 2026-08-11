@@ -13,18 +13,6 @@ from weakref import ReferenceType, WeakKeyDictionary, ref
 from .. import _state
 from ..ir.events import OpEvent
 from ..utils.tensor_utils import safe_copy
-from .kernel import CaptureKernel
-from .ledgers import (
-    DecisionMapping,
-    DecisionLedger,
-    DecisionRecord,
-    EventFactSequence,
-    EventId,
-    EventJournal,
-    PayloadMapping,
-    PayloadLedger,
-    PayloadRecord,
-)
 from .plan import CapturePlan, EnrichmentLevel, RetentionKind, RetentionProfile
 
 TerminalState = Literal["complete", "halted", "failed"]
@@ -63,26 +51,12 @@ class CapturedRunCore:
     ----------
     events
         Canonical immutable operation event spine in producer order.
-    event_facts
-        Derived immutable operation-fact sequence.
-    decisions
-        Derived selection and intervention view keyed by stable event identity.
-    payloads
-        Derived payload view keyed by stable event identity.
+    projection_facts
+        Snapshot of legacy run facts needed by Recording projections.
     """
 
     events: tuple[OpEvent, ...]
     projection_facts: Mapping[str, Any]
-    event_facts: EventFactSequence = field(init=False)
-    decisions: Mapping[EventId, DecisionRecord] = field(init=False)
-    payloads: Mapping[EventId, PayloadRecord] = field(init=False)
-
-    def __post_init__(self) -> None:
-        """Bind all compatibility views to the single sealed event tuple."""
-
-        object.__setattr__(self, "event_facts", EventFactSequence(self.events))
-        object.__setattr__(self, "decisions", DecisionMapping(self.events))
-        object.__setattr__(self, "payloads", PayloadMapping(self.events))
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,9 +125,6 @@ class CaptureSession:
 
     plan: CapturePlan
     backend_token: object | None = None
-    event_journal: EventJournal = field(default_factory=EventJournal)
-    decision_ledger: DecisionLedger = field(default_factory=DecisionLedger)
-    payload_ledger: PayloadLedger = field(default_factory=PayloadLedger)
     output_bindings: dict[str, object] = field(default_factory=dict)
     counters: dict[str, int] = field(default_factory=dict)
     module_state: dict[str, object] = field(default_factory=dict)
@@ -161,7 +132,7 @@ class CaptureSession:
     builders: dict[str, object] = field(default_factory=dict)
     cleanup_stack: list[_CleanupEntry] = field(default_factory=list)
     outcome: RunOutcome | None = None
-    kernel: CaptureKernel = field(init=False)
+    _event_spine: list[OpEvent] | None = field(default=None, init=False, repr=False)
     _sealed_core: CapturedRunCore | None = field(default=None, init=False, repr=False)
     projection_facts: dict[str, Any] = field(default_factory=dict)
     activation_escrow: dict[int, ActivationEscrowPayload] = field(default_factory=dict)
@@ -178,15 +149,8 @@ class CaptureSession:
     )
     _gradient_warning_emitted: bool = field(default=False, init=False, repr=False)
 
-    def __post_init__(self) -> None:
-        """Compile the session's fixed-order capture kernel."""
-
-        self.decision_ledger.bind(self.event_journal)
-        self.payload_ledger.bind(self.event_journal)
-        self.kernel = CaptureKernel(self)
-
     def bind_event_spine(self, events: list[OpEvent]) -> None:
-        """Bind session views to the active ``CaptureEvents`` operation list.
+        """Bind the session to the active ``CaptureEvents`` operation list.
 
         Parameters
         ----------
@@ -196,9 +160,7 @@ class CaptureSession:
 
         if self._sealed_core is not None:
             raise RuntimeError("Cannot bind a capture spine after the run core is sealed.")
-        self.event_journal.bind(events)
-        self.decision_ledger.bind(self.event_journal)
-        self.payload_ledger.bind(self.event_journal)
+        self._event_spine = events
 
     def release(self) -> None:
         """Release all run-local compatibility sidecars.
@@ -214,9 +176,7 @@ class CaptureSession:
             This operation is idempotent.
         """
 
-        self.event_journal.clear()
-        self.decision_ledger.clear()
-        self.payload_ledger.clear()
+        self._event_spine = None
         self.output_bindings.clear()
         self.counters.clear()
         self.module_state.clear()
@@ -475,54 +435,6 @@ class CaptureSession:
         trace.__dict__.pop("_deferred_retention_selector", None)
         trace.__dict__.pop("_deferred_gradient_selector", None)
 
-    def observe_event(self, event: OpEvent) -> None:
-        """Validate a compatibility observation against the canonical spine.
-
-        Parameters
-        ----------
-        event
-            Frozen event already appended to the legacy ``CaptureEvents``
-            buffer.  No event fields, payloads, selectors, or interventions are
-            recomputed here.
-        """
-
-        if self._sealed_core is not None:
-            raise RuntimeError("Cannot append capture facts after the run core is sealed.")
-        event_id = EventId.from_event(event)
-        if self.event_journal.events and self.event_journal.events[-1] is event:
-            return
-        existing = self.event_journal.by_id.get(event_id)
-        if existing is None or existing.event is not event:
-            raise ValueError(f"Observed event is absent from the canonical spine: {event_id!r}")
-
-    def note_legacy_emission(self) -> None:
-        """Record entry through the Stage-1 producer compatibility seam.
-
-        Returns
-        -------
-        None
-            Updates only session-local instrumentation; the legacy producer
-            remains solely responsible for capture behavior.
-        """
-
-        return
-
-    def replace_event(self, event: OpEvent) -> None:
-        """Mirror an existing immutable producer-event replacement.
-
-        Parameters
-        ----------
-        event
-            Replacement event produced by a legacy compatibility helper.
-        """
-
-        if self._sealed_core is not None:
-            raise RuntimeError("Cannot replace capture facts after the run core is sealed.")
-        event_id = EventId.from_event(event)
-        existing = self.event_journal.by_id.get(event_id)
-        if existing is None or existing.event is not event:
-            raise ValueError(f"Replacement is absent from the canonical spine: {event_id!r}")
-
     def seal(self) -> CapturedRunCore:
         """Seal and return the repeatedly readable projection source.
 
@@ -534,9 +446,7 @@ class CaptureSession:
         """
 
         if self._sealed_core is None:
-            events = tuple(self.event_journal.events)
-            self.counters["events"] = len(events)
-            self.counters["producer_emissions"] = len(events)
+            events = tuple(self._event_spine or ())
             self._sealed_core = CapturedRunCore(
                 events=events,
                 projection_facts=MappingProxyType(dict(self.projection_facts)),
