@@ -270,6 +270,18 @@ pytest tests/ -m "not slow" -x --tb=short
   torch activation-save paths (`_save_activation_fields` and `_save_predicate_activation_fields`),
   and only for RAM-retained payloads -- charging disk-streamed payloads would refuse captures that
   were never going to OOM. Any new activation-save path must charge it too.
+- A Dynamo-traced region reached during capture is bypassed in the wrapper (see
+  `_is_inside_dynamo_compilation`), warning once per forward and setting
+  `trace._raw_transform_escape_detected` (which licenses the unattributable-output tolerance,
+  exactly like the functorch guard beside it) plus `trace._raw_dynamo_region_detected`, which is
+  the top-precedence `capture_verification_reason` -- `"dynamo_region_not_logged"` -- at BOTH
+  verdict sites (`completeness_witness._finalize_census` and the `escape_detection` capture-scope
+  `finally`, the last writer). Without the dedicated flag the Trace blamed
+  `owner_thread_tripwire_changed`, since compiling spawns threads. Compiled child
+  `nn.Module`s are still unwrapped to eager BEFORE capture, so their interiors stay logged -- there
+  is a test asserting the bypass did not regress that into a silent gap. Fake/functional tensors on
+  inputs or params refuse at capture entry in `_robustness.py`; never let one reach the metadata
+  path, where `data_ptr()` on a FakeTensor is a torch-flagged bug.
 - `__wrapped__` is removed from built-in function wrappers to avoid `inspect.unwrap`
   failures.
 - Fast-path module decoration skips `_handle_module_entry`; alignment state must be

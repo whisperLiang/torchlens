@@ -208,6 +208,14 @@ print(tl.compat.report(model, x).to_markdown())
   an explicitly-labelled LOWER BOUND (the forward was still running), never an extrapolated total.
   Like `measure_python_peak_memory` it is a session-time knob (`FieldPolicy.DROP`, not in
   `MODEL_LOG_FIELD_ORDER`) and load restores the default.
+- `torch.compile` regions and tracing tensors are a graceful boundary, not a crash. A Dynamo-traced
+  region reached mid-capture is bypassed with a one-per-forward warning and the returned `Trace`
+  honestly contains only what ran outside it, marked `capture_verified=False` /
+  `capture_verification_reason="dynamo_region_not_logged"` (top precedence, since Dynamo's compile
+  threads and unaccounted aten dispatches are symptoms of that same region); compiled child
+  `nn.Module`s are still unwrapped to their eager source, so their interiors ARE logged. `FakeTensor` / `FunctionalTensor` on inputs or
+  parameters refuse at capture entry with `UnsupportedTensorVariantError`, alongside meta and sparse.
+  Gated by `HAS_DYNAMO_IS_COMPILING` / `HAS_TRACING_TENSOR_TYPES`.
 - `torchlens._io` and `torchlens.io` own portable `.tlspec` save/load helpers. Manifest
   schema v2 is backend-aware; non-torch preview bundles may be audit-only or metadata-only.
 - `torchlens.debug` owns power-user diagnostics such as `bisect_nan` and `hot_path`;

@@ -6433,7 +6433,13 @@ def _finalize_census(state: _WitnessState) -> None:
                 stacklevel=3,
             )
         return
-    if getattr(trace, "escape_detector_verified", None) is False:
+    if getattr(trace, "_raw_dynamo_region_detected", False):
+        # More specific than either reason below: the transform-escape flag is shared with
+        # the functorch boundary, and a shadow-mode escape report is a downstream symptom
+        # of the same bypassed compiled region.
+        trace.capture_verified = False
+        trace.capture_verification_reason = "dynamo_region_not_logged"
+    elif getattr(trace, "escape_detector_verified", None) is False:
         trace.capture_verified = False
         trace.capture_verification_reason = "callable_escape_shadow_report"
     elif getattr(trace, "_raw_transform_escape_detected", False):

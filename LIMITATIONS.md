@@ -16,6 +16,30 @@ Eager dynamic control flow is a feature, not a limitation. TorchLens records the
 module behavior that occurred for the concrete input you supplied. It does not claim to enumerate
 branches that did not execute.
 
+## torch.compile Regions and Tracing Tensors
+
+Tensors inside a `torch.compile` (Dynamo) region are data-free `FakeTensor`s. Every TorchLens step
+that reads a value -- `safe_copy`, `torch.equal`, `.item()`, `data_ptr()`, memory accounting -- is
+meaningless or fatal on them, so TorchLens cannot record real activations there.
+
+Compiled child `nn.Module`s are handled automatically: they are swapped for their eager source
+module for the duration of capture (with a one-time note), so their interiors *are* logged. A
+compiled **callable** held as a plain attribute or called as a free function cannot be swapped out.
+Reaching one during capture used to die with a raw
+`torch._dynamo.exc.InternalTorchDynamoError: AttributeError: 'FakeTensor' object has no attribute
+'fake_mode'`. It now degrades gracefully: operations inside the compiled region are not logged,
+a one-per-forward `UserWarning` names the gap and the remedy, and the returned `Trace` contains
+only what ran outside the region, marked `capture_verified=False` with
+`capture_verification_reason="dynamo_region_not_logged"`. Call the eager function during capture
+if you need its interior.
+
+Passing a `FakeTensor` or `FunctionalTensor` as a model input, or tracing a model whose parameters
+were built under a fake mode, is refused at capture entry with `UnsupportedTensorVariantError`
+alongside the other data-free variants. Previously this crashed mid-forward with a bare
+`AssertionError: Please convert all Tensors to FakeTensors first` from torch's own fake machinery,
+after TorchLens had already tripped torch's "almost definitely a bug in your code" warning by
+reading a FakeTensor's `data_ptr()`.
+
 ## Retained Activation Footprint
 
 `tl.trace(model, x)` retains every operation's output by default. That is the right default for

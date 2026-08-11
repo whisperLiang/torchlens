@@ -366,6 +366,12 @@ def test_torch_capability_snapshot_contract() -> None:
         "HAS_DTENSOR": tc.HAS_DTENSOR,
         "HAS_DEVICE_MESH": tc.HAS_DEVICE_MESH,
         "HAS_PIPELINING": tc.HAS_PIPELINING,
+        # Dynamo/fake-mode boundary probes. Without them a compiled region reached
+        # during capture dies inside the wrappers with a raw
+        # InternalTorchDynamoError, and fake/functional tensors fall back to
+        # structural name matching. Build-dependent, so mirror the live values.
+        "HAS_DYNAMO_IS_COMPILING": tc.HAS_DYNAMO_IS_COMPILING,
+        "HAS_TRACING_TENSOR_TYPES": tc.HAS_TRACING_TENSOR_TYPES,
         "HAS_GENERATOR_CLONE_STATE": hasattr(torch.Generator, "clone_state"),
         "HAS_GENERATOR_GRAPHSAFE_GET_STATE": hasattr(torch.Generator, "graphsafe_get_state"),
         "HAS_GENERATOR_GRAPHSAFE_SET_STATE": hasattr(torch.Generator, "graphsafe_set_state"),

@@ -852,4 +852,14 @@ def capture_escape_guard(trace: Any) -> Iterator[None]:
                 TorchLensCaptureGapWarning,
                 stacklevel=2,
             )
+        if getattr(trace, "_raw_dynamo_region_detected", False):
+            # A bypassed torch.compile region is the ROOT cause of the incompleteness and
+            # outranks the incidental symptoms it produces (Dynamo spawns compile threads,
+            # tripping the owner-thread tripwire above, and its interior aten dispatches
+            # are unaccounted). Reporting a thread-count change for what is really an
+            # unlogged compiled region is honest-but-misleading, so name the real cause.
+            # This is the last verdict site in the capture scope, hence the unconditional
+            # override; it only ever ceilings the verdict, never lifts one.
+            trace.capture_verified = False
+            trace.capture_verification_reason = "dynamo_region_not_logged"
         _copy_recording_diagnostics(trace)

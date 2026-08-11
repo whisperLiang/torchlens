@@ -52,6 +52,7 @@ from ...utils._torch_compat import (
     get_device_constructors,
     get_device_context_type,
     fix_tensor_sequence_slot,
+    dynamo_is_compiling,
     get_functorch_maybe_current_level,
     get_jit_builtin_table,
     get_optional_torch_namespace,
@@ -257,6 +258,44 @@ def _is_inside_functorch_transform() -> bool:
     if maybe_current_level is None:
         return False
     return maybe_current_level() is not None
+
+
+def _is_inside_dynamo_compilation() -> bool:
+    """Return True while Dynamo is tracing the current frame.
+
+    Returns
+    -------
+    bool
+        Whether a ``torch.compile`` region is being traced right now. False when
+        the capability probe is unavailable, so an absent probe degrades to
+        "not compiling" and leaves capture behavior exactly as it was.
+    """
+
+    return dynamo_is_compiling()
+
+
+def _warn_dynamo_region_not_logged() -> None:
+    """Warn once that a compiled region's interior was not logged.
+
+    Returns
+    -------
+    None
+        Emits a ``UserWarning`` describing the honest gap in the Trace.
+    """
+
+    import warnings
+
+    warnings.warn(
+        "TorchLens detected a torch.compile (Dynamo) region during this forward pass. "
+        "Operations that run inside the compiled region are not logged: the tensors "
+        "there are data-free FakeTensors, so TorchLens cannot record real activations. "
+        "The returned Trace contains only operations that ran OUTSIDE the compiled "
+        "region. Compiled child nn.Modules are unwrapped to their eager source "
+        "automatically; a compiled plain-attribute callable or free function cannot be, "
+        "so call the eager function during capture if you need its interior logged.",
+        UserWarning,
+        stacklevel=2,
+    )
 
 
 def _warn_transform_boundary_collapse(transform_kind: str) -> None:
@@ -1630,6 +1669,36 @@ def torch_func_decorator(
                     with expected_original_call(func, f"torch_func:{func_name}:functorch"):
                         return func(*args, **kwargs)
                 return func(*args, **kwargs)
+
+        # Skip logging inside a Dynamo-traced region, for the same reason as the
+        # functorch guard above: TorchLens' internal operations (safe_copy,
+        # torch.equal, .item(), memory accounting) read tensor VALUES, and the
+        # tensors flowing through a compiled region are data-free FakeTensors.
+        # Tracing through the wrapper used to die with a raw, unexplained
+        # ``InternalTorchDynamoError: 'FakeTensor' object has no attribute
+        # 'fake_mode'``. TorchLens already unwraps compiled *submodules* before
+        # capture (see _capture_state_helpers.unwrap_compiled_submodules), but a
+        # compiled *callable* held as a plain attribute or called as a free
+        # function cannot be swapped out, so this is the boundary for those.
+        # Degrading to a pass-through matches the documented contract: log the
+        # eager source module; torch.compile internals are not traced.
+        if _is_inside_dynamo_compilation():
+            # ``_raw_dynamo_region_detected`` is the specific cause and outranks every
+            # other verification reason: a compiled region also spawns compile threads
+            # and leaves unaccounted aten dispatches, so without it the Trace reports a
+            # true-but-misleading reason such as ``owner_thread_tripwire_changed``.
+            # ``_raw_transform_escape_detected`` additionally licenses the
+            # unattributable-model-output tolerance the functorch boundary uses, which is
+            # what lets the forward finish at all when the output leaves the region.
+            trace._raw_dynamo_region_detected = True
+            trace._raw_transform_escape_detected = True
+            if not _state._dynamo_warning_emitted:
+                _state._dynamo_warning_emitted = True
+                _warn_dynamo_region_not_logged()
+            if _state._completeness_witness_mode == "shadow":
+                with _state.pause_logging():
+                    return func(*args, **kwargs)
+            return func(*args, **kwargs)
 
         # Usage stats: count every decorated function call during logging.
         if _state._collect_usage_stats:

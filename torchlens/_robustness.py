@@ -15,6 +15,11 @@ Sparse tensor     ``safe_copy``/print-override paths assume dense    raise Runti
 Symbolic shape   Dimensions that are ``torch.SymInt`` /              raise RuntimeError
                   ``torch.SymFloat`` break shape-dependent metadata
                   (flops, tensor memory, counter alignment).
+Tracing tensor    ``FakeTensor`` / ``FunctionalTensor`` carry no      raise RuntimeError
+                  data, so every value-reading step (``safe_copy``,
+                  ``torch.equal``, ``.item()``, ``data_ptr()``) is
+                  meaningless; torch's own fake machinery aborts
+                  mid-forward with a bare ``AssertionError``.
 Quantized model   Partial support: logging works but FLOPs are        warn (keep going)
                   computed as zero/wrong for quantized ops.
 ================  =================================================  =================
@@ -36,6 +41,7 @@ from torch import nn
 
 from ._distributed import check_distributed_capture
 from .errors._base import CompatibilityError
+from .utils._torch_compat import get_tracing_tensor_types
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +65,35 @@ def _is_sparse_tensor(t: torch.Tensor) -> bool:
     except Exception:
         return False
     return layout is not torch.strided
+
+
+def _tracing_tensor_kind(t: torch.Tensor) -> str | None:
+    """Return the data-free tracing-subclass name for ``t``, if it is one.
+
+    ``FakeTensor`` and ``FunctionalTensor`` are tensor subclasses used by Dynamo,
+    AOTAutograd, ``torch.export``, and functionalization. They carry shape and
+    dtype but no storage, so every TorchLens step that reads a value is either
+    meaningless or fatal: ``data_ptr()`` on a FakeTensor is a torch-flagged bug,
+    and torch's own fake machinery aborts the forward with a bare
+    ``AssertionError`` ("Please convert all Tensors to FakeTensors first") the
+    moment a real parameter meets a fake activation.
+
+    Args:
+        t: Tensor to classify.
+
+    Returns:
+        Class name of the tracing subclass, or ``None`` for an ordinary tensor.
+    """
+    if type(t) is torch.Tensor:
+        return None
+    tracing_types = get_tracing_tensor_types()
+    if tracing_types and isinstance(t, tracing_types):
+        return type(t).__name__
+    # Structural fallback for builds where the exact classes could not be probed.
+    type_name = type(t).__name__
+    if type_name in {"FakeTensor", "FunctionalTensor"}:
+        return type_name
+    return None
 
 
 def _has_symbolic_shape(t: torch.Tensor) -> bool:
@@ -228,6 +263,17 @@ def check_model_and_input_variants(
                     "counter alignment.",
                 )
             )
+        tracing_kind = _tracing_tensor_kind(t)
+        if tracing_kind is not None:
+            offenses.append(
+                (
+                    f"{tracing_kind} in input",
+                    "Tracing tensors carry shape and dtype but no data, so saved "
+                    "activations would be empty and torch's own fake-tensor machinery "
+                    "aborts the forward as soon as a real parameter meets a fake "
+                    "activation. Capture the eager forward on real tensors instead.",
+                )
+            )
     for t in _iter_tensors(dict(input_kwargs)):
         if _is_meta_tensor(t):
             offenses.append(("meta tensor in keyword input", ""))
@@ -235,6 +281,9 @@ def check_model_and_input_variants(
             offenses.append((f"sparse tensor ({t.layout}) in keyword input", ""))
         if _has_symbolic_shape(t):
             offenses.append(("symbolic tensor shape in keyword input", ""))
+        tracing_kind = _tracing_tensor_kind(t)
+        if tracing_kind is not None:
+            offenses.append((f"{tracing_kind} in keyword input", ""))
 
     # Model params + buffers (dedupe across both generators).
     seen_ids: set[int] = set()
@@ -251,6 +300,16 @@ def check_model_and_input_variants(
                 )
             )
             break  # one message is enough — don't list every param.
+        tracing_kind = _tracing_tensor_kind(t)
+        if tracing_kind is not None:
+            offenses.append(
+                (
+                    f"{tracing_kind} among model parameters/buffers",
+                    "The model was constructed under a fake/functional tracing mode and "
+                    "holds no real weights. Build it on a real device before logging.",
+                )
+            )
+            break
 
     if offenses:
         # Dedupe while preserving order of first appearance.

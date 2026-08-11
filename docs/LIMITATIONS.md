@@ -84,6 +84,8 @@ earlier saved activation. Use `"copy"` unless that aliasing tradeoff is explicit
 |---|---|---|
 | **Nested `trace`** (hook/postfunc calls log again) | `RuntimeError` at inner entry | Use `pause_logging()` before the inner call, or run the inner log afterwards on the outer's sub-model |
 | **`torch.compile(model)`** | Unwraps to the eager source module and emits one note per process | Use a profiler/compiler tool to inspect fused compiled execution |
+| **Compiled callable reached mid-capture** (plain attribute or free function) | Bypassed with one `UserWarning` per forward; the Trace holds only what ran outside the region and reports `capture_verification_reason="dynamo_region_not_logged"` | Call the eager function during capture, or compile an `nn.Module` child so it can be unwrapped |
+| **`FakeTensor` / `FunctionalTensor` input or parameter** | `UnsupportedTensorVariantError` at entry | Build the model and inputs outside any fake/functional tracing mode |
 | **`torch.jit.script` / `torch.jit.trace`** | `RuntimeError` at entry | Log the un-scripted / un-traced Python module |
 | **`torch.export.ExportedProgram`** | `RuntimeError` at entry | Log the source `nn.Module` before exporting |
 | **`FullyShardedDataParallel` (FSDP)** | `RuntimeError` at entry | Log a rank-local unsharded copy of the inner module |
@@ -163,6 +165,26 @@ This eager-source behavior applies to ``trace``, metadata and summary helpers,
 graph display, forward/backward validation, and ``Trace.run``. ``record`` keeps
 an intentional hard rejection for compiled models because it is the torch-only
 fast capture lane.
+
+A compiled **callable** -- held as a plain attribute or called as a free function --
+cannot be swapped for an eager source module, so unwrapping cannot reach it. Reaching
+one during capture used to die with a raw
+``torch._dynamo.exc.InternalTorchDynamoError: AttributeError: 'FakeTensor' object has
+no attribute 'fake_mode'``, because the tensors inside a Dynamo-traced region are
+data-free ``FakeTensor``s and every TorchLens step that reads a value (``safe_copy``,
+``torch.equal``, ``.item()``, ``data_ptr()``, memory accounting) is meaningless or fatal
+on them. It is now a graceful boundary: operations inside the region are not logged, a
+one-per-forward ``UserWarning`` names the gap and the remedy, and the Trace reports
+``capture_verified=False`` with
+``capture_verification_reason="dynamo_region_not_logged"``. Call the eager function
+during capture if you need its interior logged.
+
+Passing a ``FakeTensor`` or ``FunctionalTensor`` as a model input, or tracing a model
+whose parameters were built under a fake mode, is refused at capture entry with
+``UnsupportedTensorVariantError`` alongside the other data-free tensor variants.
+Detection routes through the ``HAS_DYNAMO_IS_COMPILING`` and
+``HAS_TRACING_TENSOR_TYPES`` capability flags, so both degradations are visible in
+``tl.doctor()`` / ``tl.compat.report()``.
 
 ### `torch.jit.script` / `torch.jit.trace` — not supported (raises)
 
@@ -315,6 +337,12 @@ if your log looks wrong in one of these scenarios, suspect the caveat:
   census. A pre-wrap torch.func/functorch callable can have no boundary op; when its transform
   escape signal fires, TorchLens preserves the clean witness-only result but sets
   `capture_verified=False` with `capture_verification_reason="transform_call_route_unverified"`.
+  A bypassed `torch.compile` region reports the more specific
+  `capture_verification_reason="dynamo_region_not_logged"`, which outranks every other reason
+  because Dynamo also spawns compile threads (tripping the owner-thread tripwire) and leaves
+  unaccounted aten dispatches -- symptoms of the same unlogged region. That verdict does not
+  depend on compilation happening during this capture, so a warm compile cache still reads
+  `capture_verified=False`.
 - **bfloat16 / fp16 + non-deterministic GPU reductions**: validation
   replay compares activations to within ``3e-6`` absolute tolerance; on
   bf16/fp16 GPU atomics, small reordering differences can cross that

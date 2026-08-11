@@ -155,7 +155,9 @@ the census result `True` while setting `capture_verified=False` with
 `capture_verification_reason="transform_call_route_unverified"`. `escape_detector_verified=True` makes
 the separate claim that the callable detector saw no observable raw-call escape. `capture_verified=True`
 is the combined result only when the enabled census/detector checks pass, no raw-transform escape was
-detected, and the owner-thread qualification remains valid.
+detected, and the owner-thread qualification remains valid. A bypassed `torch.compile` region reports
+the more specific `capture_verification_reason="dynamo_region_not_logged"` in preference to any of the
+above, since Dynamo's compile threads and unaccounted aten dispatches are symptoms of that one region.
 
 The honest rollout comparison is **legacy with no guard** versus **scoped with the requested
 guard**, not crawl time in isolation. On Python 3.9–3.11, shadow mode uses `sys.setprofile` and can
