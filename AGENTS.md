@@ -158,7 +158,10 @@ pytest tests/ -m "not slow" -x --tb=short
     keeps sibling ordering enabled when endpoints survive as rendered nodes.
 12. Predicate `save=` is the ONLY selective-capture spelling; the old
     `record(keep_op=...)` / `record(keep_module=...)` alias kwargs are removed and raise
-    TypeError. Module-boundary event recording is gated by `default_module=`.
+    TypeError (`dry_run` likewise takes `save=` only). Module-boundary event recording is
+    gated by `default_module=`, which records ALL module enter/exit events uniformly —
+    predicate-gated module-event selection has no public spelling
+    (`docs/reference/deprecations.md` has the honest capability statement).
 13. `torch.func` / functorch transforms are captured as boundary ops; do not expect their
     per-element internal eager operations to appear unless a future expand-inside mode exists.
 14. Public backend-neutral state (`Trace.backend`, `module_identity_mode`, `param_source`,

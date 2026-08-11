@@ -37,7 +37,8 @@ labels save all passes; pass-qualified labels such as `"attn:2"` save one 1-base
 Prefer `save=tl.func(...)`, `save=tl.in_module(...)`, and composed predicates for new
 single-pass selective capture. The old `keep_op=`/`keep_module=` `record()` alias
 kwargs are removed; `save=` is the only predicate spelling and `default_module=`
-gates module-boundary event recording.
+gates module-boundary event recording (uniformly — ALL module enter/exit events;
+predicate-gated module-event selection has no public spelling).
 
 Common unified capture examples:
 

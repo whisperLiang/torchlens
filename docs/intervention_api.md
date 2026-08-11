@@ -20,10 +20,20 @@ Selectors resolve against completed `Trace.layers` records.
 
 One interpreter evaluates every selector in every lifecycle (capture-time
 `save=`, post-hoc `find_sites`, live hooks); `contains` is case-insensitive and
-`regex` case-sensitive everywhere. Capture-only selectors (`tl.followed_by`,
+`regex` case-sensitive everywhere. Post-hoc `contains`/`regex` search the
+final `layer_label` only; exact `tl.label` additionally matches raw, short,
+and pass-qualified spellings. Capture-only selectors (`tl.followed_by`,
 `tl.preceded_by`) and mutator-only selectors (`tl.facet`, `tl.head`) refuse
 unsupported lifecycles with the typed `SelectorCapabilityError` (a
-`SiteResolutionError` subclass) instead of a generic message.
+`SiteResolutionError` subclass) instead of a generic message — upfront, before
+any per-site evaluation, for post-hoc resolution and live hook attachment
+alike.
+
+Composites (`&`, `|`, `~`) SHORT-CIRCUIT per site in every lifecycle: a
+`tl.where` predicate is only invoked for sites its siblings have not already
+decided, so predicates must not rely on side effects from seeing every site.
+`&`/`|` build nested binary composites, and deserialized target specs may
+carry flat n-ary child tuples; both shapes evaluate identically.
 
 Selectors compose with `&` and `|` for in-memory discovery:
 
@@ -141,7 +151,10 @@ streamed = tl.trace(model, x, save=tl.in_module("encoder"), storage=tl.to_disk("
 
 `record(save=...)` is the only predicate spelling; the old `keep_op=` /
 `keep_module=` alias kwargs are removed and raise `TypeError`. Module-boundary
-event recording is gated by `default_module=`.
+event recording is gated by `default_module=`, which records ALL module
+enter/exit events uniformly — predicate-gated module-event selection has no
+public spelling (see `docs/reference/deprecations.md` for the honest
+capability statement).
 
 Forward exceptions keep the historical behavior unless you opt in. With
 `on_forward_error="attach_partial"`, TorchLens attaches `exc.partial_recording` and re-raises
