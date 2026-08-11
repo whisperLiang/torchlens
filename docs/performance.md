@@ -268,6 +268,11 @@ assert trace.find_sites(tl.func("conv2d")).first().out.shape == (1, 2, 3, 3)
 ```
 
 Use disk-backed storage for selected payloads that are too large or numerous to keep in memory.
+Trace repr, notebook HTML, and JSON explanation do not materialize lazy disk payloads for their
+NaN/Inf summary; those refs are reported as unexamined until you call ``op.materialize_out()``.
+This exemption applies to predicate-selected disk-only payloads. Exhaustive ``save="all"`` keeps
+RAM copies until postprocess, so combine a narrower ``save=`` with disk streaming to reduce peak
+retained memory.
 Portable `.tlspec/` bundles store manifest data plus tensor sidecars when the backend supports
 materialized payloads; executable Python callables are not portable. Backend-aware manifest schema
 v2 adds `backend`, `backend_runtime`, nullable torch-specific fields, and `payload_policy`.

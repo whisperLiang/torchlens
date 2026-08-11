@@ -735,17 +735,26 @@ def _fsdp_row(model: nn.Module) -> CompatRow:
 # matches a DistributedFinding.kind so the report and the capture-entry refusal
 # can never drift apart.
 _DISTRIBUTED_ROW_SPECS: tuple[tuple[str, str, str], ...] = (
-    ("dtensor", "DTensor / sharded tensors", "No DTensor or sharded tensor state detected."),
+    (
+        "dtensor",
+        "DTensor / sharded tensors",
+        "No DTensor or sharded tensor state detected by the bounded entry scan. "
+        "It covers registered state, builtin/instance-__dict__ input containers, and plain "
+        "module attributes; descriptor-only or slots-only containers and tensors created "
+        "inside forward remain outside entry-time detection.",
+    ),
     ("device_mesh", "Device mesh", "No device mesh detected."),
     (
         "tensor_parallel",
         "Tensor parallel (TP)",
-        "No tensor-parallel sharding detected.",
+        "No tensor-parallel state or direct TP-namespace forward hook detected by the bounded "
+        "entry scan; user-wrapped or opaque hook callables remain outside structural detection.",
     ),
     (
         "pipeline_parallel",
         "Pipeline parallel (PP)",
-        "No pipeline-parallel stage or schedule detected.",
+        "No pipeline-parallel stage or schedule detected by the bounded instance-state scan; "
+        "descriptor-only or slots-only holders remain opaque.",
     ),
 )
 
@@ -871,15 +880,32 @@ def _torch_compile_row(model: nn.Module) -> CompatRow:
         Report row.
     """
 
+    from .._capture_state_helpers import compiled_plain_callable_sites
+
     optimized_module_type = get_dynamo_optimized_module_type()
-    detected = optimized_module_type is not None and isinstance(model, optimized_module_type)
-    status: Status = "scope" if detected else "pass"
-    details = (
-        "torch.compile OptimizedModule detected; compiled graph capture is outside TorchLens' "
-        "primary scope."
-        if detected
-        else "torch.compile wrapper not detected."
+    optimized_detected = optimized_module_type is not None and isinstance(
+        model, optimized_module_type
     )
+    plain_callable_sites = compiled_plain_callable_sites(model)
+    detected = optimized_detected or bool(plain_callable_sites)
+    status: Status = "scope" if detected else "pass"
+    if optimized_detected:
+        details = (
+            "torch.compile OptimizedModule detected; compiled graph capture is outside "
+            "TorchLens' primary scope."
+        )
+    elif plain_callable_sites:
+        details = (
+            "torch.compile callable detected on a plain module attribute at "
+            f"{', '.join(plain_callable_sites)}. Capture marks its compiled interior incomplete, "
+            "including on warm-cache execution."
+        )
+    else:
+        details = (
+            "No OptimizedModule or direct plain-attribute compiled callable detected. Compiled "
+            "callables reached only through globals/free-function references remain outside "
+            "this structural preflight."
+        )
     return CompatRow(
         "torch_compile",
         "torch.compile",
@@ -987,7 +1013,11 @@ def _functorch_row(model: nn.Module) -> CompatRow:
         "forward source references vmap/functorch; TorchLens skips logging inside active "
         "functorch transforms and will produce an incomplete log."
         if detected
-        else "No static vmap/functorch marker detected in forward source."
+        else (
+            "No static vmap/functorch marker detected in forward source. Functional tensors "
+            "already present in inspectable input/state containers are refused at entry; private "
+            "functional tensors created inside forward remain outside that preflight."
+        )
     )
     return CompatRow(
         "vmap_functorch",

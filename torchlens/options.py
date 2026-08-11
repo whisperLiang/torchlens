@@ -794,16 +794,20 @@ class CaptureOptions:
         report the true device peak and ignore this option.
     save_budget:
         Ceiling on the bytes of activation payload a single capture may retain,
-        enforced per device as payloads are committed. ``"auto"`` (the default)
+        enforced per device. ``"auto"`` (the default)
         allows half of each device's *available* memory measured at that device's
         first save; a float in ``(0, 1]`` sets a different fraction; an int sets
         an absolute per-device byte cap; ``None`` disables budgeting. Crossing the
         budget stops capture with
-        :class:`torchlens.errors.SaveBudgetExceededError`, naming the committed
-        footprint, the tripping operation, and the remedies, instead of letting
-        the default ``save="all"`` OOM-kill the process at frontier shapes.
+        :class:`torchlens.errors.SaveBudgetExceededError`. The primary retained copy
+        is admitted before allocation from source-tensor bytes and retained storage
+        is alias-aware. This is not a general OOM guarantee: the model forward,
+        transform-only deltas, and cross-device temporaries can allocate before they
+        are knowable. Predicate-selected disk-only saves are exempt, while exhaustive
+        ``save="all"`` plus disk streaming remains budgeted until postprocess eviction.
         Devices whose headroom cannot be measured are left unbudgeted and
-        reported as such rather than silently assumed infinite.
+        emit a ``UserWarning`` on their first non-empty charge; use an absolute byte
+        cap to enforce those devices.
     raise_on_nan:
         Whether capture should stop at the first NaN or Inf tensor.
 

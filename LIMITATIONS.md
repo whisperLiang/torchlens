@@ -24,8 +24,8 @@ meaningless or fatal on them, so TorchLens cannot record real activations there.
 
 Compiled child `nn.Module`s are handled automatically: they are swapped for their eager source
 module for the duration of capture (with a one-time note), so their interiors *are* logged. A
-compiled **callable** held as a plain attribute or called as a free function cannot be swapped out.
-Reaching one during capture used to die with a raw
+compiled **callable** cannot be unwrapped to eager in the same way. Reaching one during capture used
+to die with a raw
 `torch._dynamo.exc.InternalTorchDynamoError: AttributeError: 'FakeTensor' object has no attribute
 'fake_mode'`. It now degrades gracefully: operations inside the compiled region are not logged,
 a one-per-forward `UserWarning` names the gap and the remedy, and the returned `Trace` contains
@@ -33,12 +33,27 @@ only what ran outside the region, marked `capture_verified=False` with
 `capture_verification_reason="dynamo_region_not_logged"`. Call the eager function during capture
 if you need its interior.
 
+For plain module attributes, TorchLens inventories Dynamo's original-callable marker before the
+forward and temporarily invokes the callable with TorchLens logging paused. This prevents both cold
+FakeTensor internals and warm-cache execution from entering capture wrappers, independently of
+`torch.compiler.is_compiling()` timing. The inventory is conservative: merely holding such a
+callable marks the capture incomplete even if a particular branch does not call it. A compiled
+callable reached only through a module global/free-function reference still relies on the in-wrapper
+boundary when Python is entered; opaque hot-cache execution there is a disclosed residual. Use an
+eager callable for a complete claim.
+
 Passing a `FakeTensor` or `FunctionalTensor` as a model input, or tracing a model whose parameters
 were built under a fake mode, is refused at capture entry with `UnsupportedTensorVariantError`
 alongside the other data-free variants. Previously this crashed mid-forward with a bare
 `AssertionError: Please convert all Tensors to FakeTensors first` from torch's own fake machinery,
 after TorchLens had already tripped torch's "almost definitely a bug in your code" warning by
 reading a FakeTensor's `data_ptr()`.
+
+Input preflight follows builtin containers and inspectable instance `__dict__` state to a bounded
+12-level/4096-object limit, including exact-type tensors produced by
+`torch._to_functional_tensor`. Descriptor-only or slots-only custom containers, and functional
+tensors created inside `forward`, remain outside entry-time detection; the `vmap_functorch`
+compatibility row discloses that residual.
 
 ## Retained Activation Footprint
 
@@ -48,17 +63,28 @@ kill (or an allocator error from deep inside torch) rather than an explanation.
 
 Capture therefore enforces a per-device ceiling on retained payload bytes, `save_budget`, which
 defaults to half of each device's *available* memory measured at that device's first save. Crossing
-it stops capture with `torchlens.errors.SaveBudgetExceededError`, naming the bytes committed so far,
+it stops capture with `torchlens.errors.SaveBudgetExceededError`, naming the bytes accounted so far,
 the budget and where it came from, the operation that tripped it, and the remedies.
 
-The reported footprint is an explicitly-labelled **lower bound**: the forward pass was still running
-when the budget tripped, so a completed default capture would have retained more. TorchLens says
-that rather than extrapolating a total it cannot know.
+The primary retained-copy path is admitted **before** `safe_copy`, using the source tensor's byte
+size on the projected retention device. Physical retained storage is reconciled afterwards, so
+aliased raw/transformed fields are charged once. The reported footprint is an explicitly-labelled
+**lower bound** because the forward pass is incomplete.
 
-Only payloads actually held in RAM are charged, so `storage=tl.to_disk(...)` and
-`layers_to_save="none"` are never budgeted -- those captures were never going to exhaust memory.
-Devices whose headroom cannot be measured are left unbudgeted and reported as such rather than
-silently assumed infinite.
+This is not a general OOM-prevention guarantee. The model's own forward allocations happen before
+TorchLens sees an output. A user activation transform's output size and alias behavior are unknowable
+until that callable runs, and a cross-device move can require a temporary source copy; additional
+transform storage is charged after it exists. The guard prevents the ordinary over-budget retained
+copy that it can project, while these allocations remain disclosed residuals.
+
+Only payloads retained in RAM are charged. Predicate-selected disk-only saves such as
+`save=tl.func("relu"), storage=tl.to_disk(...)` are exempt. Default exhaustive `save="all"` plus
+`to_disk(...)` is **not** exempt: it keeps RAM copies until postprocess attaches disk refs and evicts
+them, so a tiny budget refuses. `layers_to_save="none"` remains uncharged.
+
+When an automatic fraction cannot measure device headroom (including MPS and unknown device types),
+that device is left unbudgeted and a `UserWarning` fires on its first non-empty charge. Use an
+absolute integer budget to enforce a ceiling there.
 
 Tune it with `capture=tl.options.CaptureOptions(save_budget=...)`: a float in `(0, 1]` for another
 fraction of available memory, an int for an absolute per-device byte cap, or `None` to disable the
@@ -85,11 +111,11 @@ Because all-pass-then-silently-wrong is worse than a clear failure, both surface
   input sites that carry the sharded state. The structured findings are on
   `exc.fields["findings"]`, so code branches on `finding.kind` rather than message text.
 
-Refusal is deliberately narrower than reporting. Only the conditions that provably corrupt a
-capture refuse: sharded tensor state (`dtensor`) and pipeline stages (`pipeline_parallel`). A bare
-`DeviceMesh` attached to a model whose parameters are ordinary dense tensors, or a tensor-parallel
-style wrapper that left dense parameters behind, is reported as a warning row and captured
-normally, because that capture is correct.
+Refusal is deliberately narrower than reporting, but active tensor-parallel styles are refusing:
+even with dense parameters, `PrepareModuleInput`/output hooks can run rank redistribution and
+collectives below TorchLens' wrapped layer. Sharded tensor state (`dtensor`), active TP hooks/styles
+(`tensor_parallel`), and pipeline stages (`pipeline_parallel`) refuse. Only a bare inert
+`DeviceMesh` with ordinary dense state remains informational.
 
 **What to do instead:** trace the undistributed module. Build and trace the model before wrapping
 it with `parallelize_module` / `fully_shard` / pipeline stages, or materialize the logical tensors
@@ -100,6 +126,20 @@ Detection is capability-probed, never version-parsed, and every degradation poin
 named flag in `torchlens.utils.doctor()` / `tl.compat.report()`: `HAS_DTENSOR`, `HAS_DEVICE_MESH`,
 and `HAS_PIPELINING`. When one is absent, detection falls back from an exact `isinstance` check to
 structural namespace matching, and the affected report row says so.
+
+The entry scan covers registered parameters/buffers, builtin and inspectable user input containers,
+plain module tensor attributes, direct TP-namespace forward-hook registries, and nested module
+attributes up to 12 levels / 4096 objects. It never executes descriptors. Descriptor-only or
+slots-only holders, user-wrapped/opaque TP hooks that hide their defining namespace, state beyond
+the bound, and distributed tensors constructed inside `forward` remain residual classes; the clear
+compatibility rows state this rather than issuing an unqualified clean bill of health.
+
+## Disk-backed reporting
+
+`repr`, `str`, notebook HTML, and `report.explain(..., format="json")` never materialize a saved
+activation solely to answer the NaN/Inf summary. An unmaterialized disk ref is counted as
+"disk-backed and not examined by reporting" in clean HTML/JSON answers. Call `op.materialize_out()`
+explicitly before asking for a value-based answer when the I/O cost is intended.
 
 ## Bundle Diff Rendering
 
@@ -125,7 +165,7 @@ separate unsupported contexts from new TorchLens bugs.
 | `fsdp` | `scope` when detected | FSDP sharded materialization is not launch-scope support. |
 | `dtensor` | `scope` when detected | DTensor/ShardedTensor state; capture refuses with `DistributedCaptureUnsupportedError`. |
 | `device_mesh` | `scope` when detected | Informational: identifies the distributed topology. Does not refuse capture on its own. |
-| `tensor_parallel` | `scope` when detected | Rank-local shapes and parameter counts are fractions of the logical model; collectives are invisible. |
+| `tensor_parallel` | `scope` when detected | Active TP state/hooks refuse; dense parameters do not make hidden redistribution/collectives capturable. |
 | `pipeline_parallel` | `scope` when detected | A stage is a fragment driven by an external schedule; capture refuses. |
 | `deepspeed` | `scope` when detected | DeepSpeed/ZeRO/offload execution is not launch-scope support. |
 | `torch_compile` | `scope` when detected | Log the eager model; use `torchlens.bridge.depyf` for compiled-code context. |

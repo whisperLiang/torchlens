@@ -260,16 +260,20 @@ pytest tests/ -m "not slow" -x --tb=short
   total capture time. Never assert `forward_peak_memory > 0` on the default path.
 - Distributed/sharded state is detected in `torchlens/_distributed.py` and refused at capture entry
   with `DistributedCaptureUnsupportedError`; the same detection feeds the `dtensor` / `device_mesh` /
-  `tensor_parallel` / `pipeline_parallel` rows of `tl.compat.report`, so the two cannot drift. Only
-  `dtensor` and `pipeline_parallel` refuse. Detection is capability-probed (`HAS_DTENSOR`,
-  `HAS_DEVICE_MESH`, `HAS_PIPELINING`), never version-parsed, and the module-attribute scan skips
-  torch's own `nn.Module` bookkeeping attributes (probed from a live bare module) because it runs on
-  every capture -- an unhoisted MRO walk there cost 44 ms on resnet50.
-- `CaptureOptions(save_budget=...)` is a per-device running ceiling on retained activation bytes,
-  default `"auto"` = half of available memory. It is charged in `_charge_save_budget` from BOTH
-  torch activation-save paths (`_save_activation_fields` and `_save_predicate_activation_fields`),
-  and only for RAM-retained payloads -- charging disk-streamed payloads would refuse captures that
-  were never going to OOM. Any new activation-save path must charge it too.
+  `tensor_parallel` / `pipeline_parallel` rows of `tl.compat.report`, so the two cannot drift.
+  `dtensor`, active TP hooks/styles, and `pipeline_parallel` refuse; dense parameters do not make a
+  `PrepareModuleInput` redistribution safe. Only a bare inert mesh is informational. Detection is
+  capability-probed (`HAS_DTENSOR`, `HAS_DEVICE_MESH`, `HAS_PIPELINING`), never version-parsed, and
+  bounded to inspectable instance state (12 levels / 4096 objects). Slots/descriptor-only holders,
+  opaque user-wrapped TP hooks, over-bound state, and tensors created inside `forward` remain
+  disclosed residuals.
+- `CaptureOptions(save_budget=...)` is a per-device ceiling on retained activation bytes, default
+  `"auto"` = half of measurable available memory. Exhaustive, predicate, and deferred
+  `Op.save_activation()` paths pre-admit the primary source-sized RAM copy before allocation, then
+  reconcile alias-aware physical storage. Transform
+  deltas and cross-device temporaries cannot always be known pre-allocation, so this is not a general
+  OOM guarantee. Predicate disk-only saves are exempt; exhaustive `save="all"` plus `to_disk(...)`
+  stays budgeted until postprocess eviction. Unmeasurable auto devices warn on first charge.
 - A Dynamo-traced region reached during capture is bypassed in the wrapper (see
   `_is_inside_dynamo_compilation`), warning once per forward and setting
   `trace._raw_transform_escape_detected` (which licenses the unattributable-output tolerance,
@@ -277,8 +281,11 @@ pytest tests/ -m "not slow" -x --tb=short
   the top-precedence `capture_verification_reason` -- `"dynamo_region_not_logged"` -- at BOTH
   verdict sites (`completeness_witness._finalize_census` and the `escape_detection` capture-scope
   `finally`, the last writer). Without the dedicated flag the Trace blamed
-  `owner_thread_tripwire_changed`, since compiling spawns threads. Compiled child
-  `nn.Module`s are still unwrapped to eager BEFORE capture, so their interiors stay logged -- there
+  `owner_thread_tripwire_changed`, since compiling spawns threads. Plain compiled-callable
+  attributes are also inventoried before forward and invoked with logging paused, conservatively
+  arming the same flags on cold/warm runs where `is_compiling()` may never fire; global/free hot
+  callables remain disclosed. Compiled child `nn.Module`s are still unwrapped to eager BEFORE
+  capture, so their interiors stay logged -- there
   is a test asserting the bypass did not regress that into a silent gap. Fake/functional tensors on
   inputs or params refuse at capture entry in `_robustness.py`; never let one reach the metadata
   path, where `data_ptr()` on a FakeTensor is a torch-flagged bug.

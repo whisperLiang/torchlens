@@ -21,7 +21,11 @@ from torch import nn
 
 from . import _state
 from .data_classes.trace import Trace
-from .utils._torch_compat import get_dynamo_optimized_module_type, get_fsdp_wrapper_type
+from .utils._torch_compat import (
+    get_dynamo_optimized_module_type,
+    get_fsdp_wrapper_type,
+    is_dynamo_compiled_callable,
+)
 
 
 def _clone_state_dict_with_metadata(model: nn.Module) -> OrderedDict[str, torch.Tensor]:
@@ -138,6 +142,28 @@ class _CompiledSubmoduleSwap:
     compiled_module: nn.Module
 
 
+@dataclasses.dataclass(frozen=True)
+class _CompiledCallableSwap:
+    """Snapshot of one temporarily bypassed compiled callable attribute.
+
+    Parameters
+    ----------
+    module:
+        Module that owns the plain attribute.
+    name:
+        Attribute name in the module instance dictionary.
+    compiled_callable:
+        Original Dynamo-compiled callable restored after capture.
+    bypass_callable:
+        Temporary wrapper that invokes it with TorchLens logging paused.
+    """
+
+    module: nn.Module
+    name: str
+    compiled_callable: Callable[..., Any]
+    bypass_callable: Callable[..., Any]
+
+
 def reset_compiled_model_unwrap_warning_state() -> None:
     """Reset the process-local compiled-model unwrap warning flag.
 
@@ -218,6 +244,158 @@ def unwrap_compiled_model(model: nn.Module) -> nn.Module:
         return model
     _warn_compiled_model_unwrapped_once()
     return orig_mod
+
+
+def compiled_plain_callable_sites(model: nn.Module) -> tuple[str, ...]:
+    """Return plain module attributes carrying Dynamo-compiled callables.
+
+    Parameters
+    ----------
+    model:
+        Model whose module instance dictionaries are inspected.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Stable module-attribute paths for compiled non-module callables.
+
+    Notes
+    -----
+    The direct ``vars`` walk never executes descriptors. This inventory is what
+    makes cache-hit handling independent of the transient ``is_compiling()`` flag:
+    a hot compiled callable can bypass Python torch wrappers entirely.
+    """
+
+    sites: list[str] = []
+    try:
+        modules = tuple(model.named_modules())
+    except Exception:
+        modules = (("", model),)
+    for module_name, module in modules:
+        try:
+            attributes = vars(module)
+        except (TypeError, AttributeError):
+            continue
+        for attr_name, value in attributes.items():
+            if attr_name in _PLAIN_ATTR_IGNORED_NAMES or isinstance(value, nn.Module):
+                continue
+            if is_dynamo_compiled_callable(value):
+                prefix = module_name or "<root>"
+                sites.append(f"{prefix}.{attr_name}")
+    return tuple(dict.fromkeys(sites))
+
+
+def _make_compiled_callable_bypass(
+    compiled_callable: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Return a wrapper that executes one compiled callable outside logging.
+
+    Parameters
+    ----------
+    compiled_callable:
+        Dynamo-compiled callable to invoke.
+
+    Returns
+    -------
+    Callable[..., Any]
+        Plain wrapper preserving compiled execution while pausing TorchLens logging.
+    """
+
+    def bypass(*args: Any, **kwargs: Any) -> Any:
+        """Invoke the compiled boundary without exposing FakeTensor internals.
+
+        Parameters
+        ----------
+        *args:
+            Positional callable arguments.
+        **kwargs:
+            Keyword callable arguments.
+
+        Returns
+        -------
+        Any
+            Compiled callable result.
+        """
+
+        with _state.pause_logging():
+            return compiled_callable(*args, **kwargs)
+
+    return bypass
+
+
+@contextmanager
+def bypass_compiled_plain_callables(model: nn.Module) -> Iterator[None]:
+    """Temporarily route direct compiled attributes through a logging pause.
+
+    Parameters
+    ----------
+    model:
+        Root model whose direct instance attributes are inspected.
+
+    Yields
+    ------
+    None
+        Control while compiled callable attributes have safe boundary wrappers.
+    """
+
+    swaps: list[_CompiledCallableSwap] = []
+    try:
+        modules = tuple(model.named_modules())
+    except Exception:
+        modules = (("", model),)
+    try:
+        for _module_name, module in modules:
+            try:
+                attributes = tuple(vars(module).items())
+            except (TypeError, AttributeError):
+                continue
+            for attr_name, value in attributes:
+                if attr_name in _PLAIN_ATTR_IGNORED_NAMES or isinstance(value, nn.Module):
+                    continue
+                if not callable(value) or not is_dynamo_compiled_callable(value):
+                    continue
+                bypass = _make_compiled_callable_bypass(value)
+                setattr(module, attr_name, bypass)
+                swaps.append(
+                    _CompiledCallableSwap(
+                        module=module,
+                        name=attr_name,
+                        compiled_callable=value,
+                        bypass_callable=bypass,
+                    )
+                )
+    except BaseException:
+        for swap in reversed(swaps):
+            setattr(swap.module, swap.name, swap.compiled_callable)
+        raise
+
+    try:
+        yield
+    finally:
+        for swap in reversed(swaps):
+            if vars(swap.module).get(swap.name) is swap.bypass_callable:
+                setattr(swap.module, swap.name, swap.compiled_callable)
+
+
+@contextmanager
+def prepare_compiled_capture(model: nn.Module) -> Iterator[tuple[str, ...]]:
+    """Prepare compiled submodules and plain callables for honest eager capture.
+
+    Parameters
+    ----------
+    model:
+        Root model to prepare temporarily.
+
+    Yields
+    ------
+    tuple[str, ...]
+        Direct compiled-callable sites whose interiors remain unlogged.
+    """
+
+    with unwrap_compiled_submodules(model):
+        sites = compiled_plain_callable_sites(model)
+        with bypass_compiled_plain_callables(model):
+            yield sites
 
 
 @contextmanager

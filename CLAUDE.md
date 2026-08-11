@@ -193,19 +193,24 @@ print(tl.compat.report(model, x).to_markdown())
   raises `tl.errors.DistributedCaptureUnsupportedError` (structured findings on
   `exc.fields["findings"]`; branch on `finding.kind`, never message text). DTensor/ShardedTensor
   work below the `__torch_function__` layer, so an unguarded capture reported 0 modules and 0
-  params. Refusal is narrower than reporting on purpose: only `dtensor` and `pipeline_parallel`
-  refuse, since a bare `DeviceMesh` or a dense-parameter TP wrapper leaves capture correct.
+  params. `dtensor`, active `tensor_parallel` hooks/styles, and `pipeline_parallel` refuse;
+  `PrepareModuleInput` can omit redistribution/collectives even with dense parameters. Only a bare
+  inert `DeviceMesh` remains informational. The bounded scan covers inspectable inputs/plain attrs
+  and direct TP-namespace hook registries; slots/descriptor-only holders, opaque user-wrapped hooks,
+  over-bound state, and tensors created inside `forward` remain disclosed residuals.
   Detection lives in `torchlens/_distributed.py` and is shared verbatim by both surfaces; the
   `HAS_DTENSOR` / `HAS_DEVICE_MESH` / `HAS_PIPELINING` capability flags gate the exact-`isinstance`
   path and fall back to structural namespace matching.
 - `CaptureOptions(save_budget=...)` bounds retained activation bytes per device, defaulting to
   `"auto"` (half of each device's available memory measured at its first save). Crossing it raises
   `tl.errors.SaveBudgetExceededError` naming the committed footprint, the tripping op, and the
-  remedies, instead of letting the default `save="all"` OOM-kill a first-time user at frontier
-  shapes. A float sets another fraction, an int an absolute byte cap, `None` disables it; anything
-  else raises rather than silently unguarding. Only RAM-retained payloads are charged, so
-  `storage=tl.to_disk(...)` and `layers_to_save="none"` are never budgeted. The reported figure is
-  an explicitly-labelled LOWER BOUND (the forward was still running), never an extrapolated total.
+  remedies. The primary retained copy is admitted before allocation and physical storage is
+  alias-aware, but this is not a general OOM guarantee: the forward, transform-only deltas, and
+  cross-device temporaries can allocate first. A float sets another fraction, an int an absolute
+  cap, and `None` disables it. Predicate-selected disk-only saves are exempt; exhaustive
+  `save="all"` plus `to_disk(...)` remains budgeted until postprocess eviction. Unmeasurable auto
+  devices warn on first charge and require an absolute budget for enforcement. The reported figure
+  is an explicitly-labelled lower bound.
   Like `measure_python_peak_memory` it is a session-time knob (`FieldPolicy.DROP`, not in
   `MODEL_LOG_FIELD_ORDER`) and load restores the default.
 - `torch.compile` regions and tracing tensors are a graceful boundary, not a crash. A Dynamo-traced
@@ -213,8 +218,14 @@ print(tl.compat.report(model, x).to_markdown())
   honestly contains only what ran outside it, marked `capture_verified=False` /
   `capture_verification_reason="dynamo_region_not_logged"` (top precedence, since Dynamo's compile
   threads and unaccounted aten dispatches are symptoms of that same region); compiled child
-  `nn.Module`s are still unwrapped to their eager source, so their interiors ARE logged. `FakeTensor` / `FunctionalTensor` on inputs or
-  parameters refuse at capture entry with `UnsupportedTensorVariantError`, alongside meta and sparse.
+  `nn.Module`s are still unwrapped to their eager source, so their interiors ARE logged. Compiled
+  plain attributes are inventoried before forward and invoked with logging paused so cold/warm
+  honesty does not depend on `is_compiling()` timing (conservatively ceilings even an unused
+  attribute; hot global/free callables remain a disclosed residual). `FakeTensor` /
+  `FunctionalTensor` on inspectable inputs or
+  parameters refuse at capture entry with `UnsupportedTensorVariantError`, alongside meta and sparse;
+  exact-type `_to_functional_tensor` values are covered, while slots-only holders and values created
+  inside `forward` remain disclosed by the compat row.
   Gated by `HAS_DYNAMO_IS_COMPILING` / `HAS_TRACING_TENSOR_TYPES`.
 - `torchlens._io` and `torchlens.io` own portable `.tlspec` save/load helpers. Manifest
   schema v2 is backend-aware; non-torch preview bundles may be audit-only or metadata-only.

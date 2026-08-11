@@ -72,7 +72,7 @@ from .options import (
     merge_streaming_options,
 )
 from ._robustness import check_model_and_input_variants
-from ._save_budget import SaveBudgetOption
+from ._save_budget import SaveBudgetExceededError, SaveBudgetOption
 from .utils.display import _vprint, warn_parallel
 from .utils.introspection import _get_code_context
 from .utils.tensor_utils import SaveMode
@@ -911,7 +911,8 @@ def _run_model_and_save_specified_outs(
             (default) allows half of each device's available memory, a float sets
             another fraction, an int an absolute byte cap, and ``None`` disables
             the guard. Crossing it raises ``SaveBudgetExceededError`` naming the
-            committed footprint instead of OOM-killing the process.
+            projected or committed footprint. The primary retained copy is admitted
+            before allocation; this is not a general OOM-prevention guarantee.
         raise_on_nan: If True, stop capture at the first NaN or Inf tensor and raise
             ``CaptureError`` with the offending operation metadata.
         module_containment_engine: Internal module-containment diagnostic engine selector.
@@ -1227,7 +1228,7 @@ def _run_model_and_save_specified_outs(
                 grads_to_save,
                 random_seed,
             )
-    except (PredicateError, TorchLensIOError, TorchLensPostfuncError):
+    except (PredicateError, SaveBudgetExceededError, TorchLensIOError, TorchLensPostfuncError):
         raise
     except Exception as exc:
         if trace._out_writer is not None:

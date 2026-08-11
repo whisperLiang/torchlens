@@ -320,6 +320,7 @@ def tensor_nanequal(
 
     if tensor_a.dtype != tensor_b.dtype:
         return False
+    original_dtype = tensor_a.dtype
 
     # Meta tensors carry no data: with shape and dtype already matched there
     # is nothing left to compare, and any content op (torch.equal, .isinf())
@@ -391,6 +392,11 @@ def tensor_nanequal(
         payload_dtype = tensor_a_nonan.dtype
         if allow_tolerance and (payload_dtype.is_floating_point or payload_dtype.is_complex):
             rtol, atol = _tolerances_for_dtype(payload_dtype)
+            if original_dtype in get_fp8_dtypes():
+                # Widening is exact, but float32's absolute floor (1e-5) is larger
+                # than adjacent subnormal values in e5m2fnuz/e8m0fnu. An absolute
+                # tolerance would therefore bless a genuine one-ULP divergence.
+                atol = 0.0
             if torch.allclose(tensor_a_nonan, tensor_b_nonan, rtol=rtol, atol=atol):
                 return True
 

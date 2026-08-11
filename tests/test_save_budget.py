@@ -35,6 +35,7 @@ from torchlens._save_budget import (
     format_bytes,
     resolve_save_budget,
 )
+from torchlens.fastlog import _storage_resolver
 from torchlens.data_classes.trace import Trace
 from torchlens.options import CaptureOptions
 
@@ -122,13 +123,14 @@ def test_format_bytes_is_readable_at_every_scale() -> None:
 
 
 def test_unmeasurable_device_is_unbudgeted_not_assumed_infinite() -> None:
-    """Meta tensors have no storage, so headroom is reported unmeasurable."""
+    """An unmeasurable device warns when automatic budgeting is disabled."""
 
-    assert available_device_bytes(torch.device("meta")) is None
+    assert available_device_bytes(torch.device("mps")) is None
     budget = SaveBudget.from_option("auto")
     assert budget is not None
-    budget.charge("op", torch.device("meta"), 1)
-    assert budget.unbudgeted_devices() == ("meta",)
+    with pytest.warns(UserWarning, match="cannot measure.*mps"):
+        budget.charge("op", torch.device("mps"), 1)
+    assert budget.unbudgeted_devices() == ("mps",)
     assert budget.tripped is False
 
 
@@ -204,6 +206,18 @@ def test_disk_streamed_payloads_are_not_charged(tmp_path: Path) -> None:
     assert len(trace.layer_labels) > 0
 
 
+def test_exhaustive_disk_capture_is_budgeted_until_postprocess(tmp_path: Path) -> None:
+    """Default ``save='all'`` keeps RAM copies until postprocess even with disk streaming."""
+
+    with pytest.raises(SaveBudgetExceededError):
+        tl.trace(
+            _model(),
+            _input(),
+            storage=tl.to_disk(str(tmp_path / "run.tlspec")),
+            capture=CaptureOptions(save_budget=64),
+        )
+
+
 # ---------------------------------------------------------------------------
 # The refusal itself
 # ---------------------------------------------------------------------------
@@ -217,7 +231,9 @@ def test_absolute_budget_refuses_with_structured_fields() -> None:
 
     fields = excinfo.value.fields
     assert fields["budget_bytes"] == 1024
-    assert fields["committed_bytes"] > 1024
+    assert fields["accounted_bytes"] > 1024
+    assert fields["projected_bytes"] == fields["accounted_bytes"]
+    assert fields["committed_bytes"] is None
     assert fields["device"] == "cpu"
     assert fields["num_saved"] >= 1
     assert isinstance(fields["label"], str) and fields["label"]
@@ -231,7 +247,8 @@ def test_refusal_message_names_footprint_site_and_remedies() -> None:
     message = str(excinfo.value)
 
     assert "save budget" in message
-    assert "committed so far" in message
+    assert "projected retained footprint" in message
+    assert excinfo.value.fields["accounting_phase"] == "pre_allocation_admission"
     assert "1.00 KB" in message, "the configured budget must be quoted"
     assert "tripped while saving" in message
     # Honesty: the figure is a lower bound and the message says so, rather than
@@ -261,6 +278,65 @@ def test_predicate_save_path_is_also_budgeted() -> None:
             capture=CaptureOptions(save_budget=64),
         )
     assert "relu" in excinfo.value.fields["label"]
+
+
+def test_budget_refuses_before_the_crossing_copy_is_attempted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Admission must run before ``safe_copy`` can allocate the over-budget payload."""
+
+    allocation_attempted = False
+
+    def fail_if_copy_runs(*args: object, **kwargs: object) -> object:
+        """Record an attempted allocation and fail immediately.
+
+        Parameters
+        ----------
+        *args:
+            Positional arguments supplied to ``safe_copy``.
+        **kwargs:
+            Keyword arguments supplied to ``safe_copy``.
+
+        Returns
+        -------
+        object
+            Never returned.
+
+        Raises
+        ------
+        AssertionError
+            Always, because a successful admission guard must run first.
+        """
+
+        del args, kwargs
+        nonlocal allocation_attempted
+        allocation_attempted = True
+        raise AssertionError("over-budget activation copy was attempted")
+
+    monkeypatch.setattr(_storage_resolver, "safe_copy", fail_if_copy_runs)
+    with pytest.raises(SaveBudgetExceededError):
+        tl.trace(
+            nn.ReLU(),
+            torch.randn(8),
+            save=tl.func("relu"),
+            capture=CaptureOptions(save_budget=1),
+        )
+    assert allocation_attempted is False
+
+
+def test_aliasing_raw_and_transformed_payloads_are_charged_once() -> None:
+    """An identity transform retains one storage allocation, not two logical fields."""
+
+    trace = tl.trace(
+        nn.ReLU(),
+        torch.randn(8),
+        save=tl.func("relu"),
+        activation_transform=lambda tensor: tensor,
+        capture=CaptureOptions(save_budget=40),
+    )
+    relu = next(op for op in trace.layer_list if getattr(op, "func_name", None) == "relu")
+    assert relu.out is relu.transformed_out
+    assert int(trace._save_budget_accountant.ledgers["cpu"].committed_bytes) == 32
 
 
 def test_budget_refusal_leaves_the_model_reusable() -> None:
@@ -304,6 +380,7 @@ def test_accountant_charges_cumulatively_and_trips_once_over() -> None:
     with pytest.raises(SaveBudgetExceededError) as excinfo:
         budget.charge("c", cpu, 40)
     assert excinfo.value.fields["committed_bytes"] == 120
+    assert excinfo.value.fields["projected_bytes"] is None
     assert excinfo.value.fields["num_saved"] == 3
     assert excinfo.value.fields["label"] == "c"
 

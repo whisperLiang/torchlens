@@ -195,6 +195,27 @@ def test_tensor_nanequal_rejects_a_single_ulp_fp8_difference_even_with_tolerance
     assert tensor_nanequal(base, neighbour, allow_tolerance=True) is False
 
 
+@pytest.mark.parametrize("dtype_name", ["float8_e5m2fnuz", "float8_e8m0fnu"])
+def test_tensor_nanequal_rejects_adjacent_tiny_fp8_values_with_tolerance(
+    dtype_name: str,
+) -> None:
+    """Absolute float32 tolerance must not absorb tiny adjacent fp8 values.
+
+    Parameters
+    ----------
+    dtype_name:
+        Narrow fp8 variant whose first two encodings differ by less than ``1e-5``.
+    """
+
+    dtype = getattr(torch, dtype_name, None)
+    if dtype is None:
+        pytest.skip(f"{dtype_name} is unavailable")
+    left = torch.tensor([0], dtype=torch.uint8).view(dtype)
+    right = torch.tensor([1], dtype=torch.uint8).view(dtype)
+    assert not torch.equal(left.float(), right.float())
+    assert tensor_nanequal(left, right, allow_tolerance=True) is False
+
+
 # ---------------------------------------------------------------------------
 # Capture + validation on a model that really produces fp8 activations
 # ---------------------------------------------------------------------------

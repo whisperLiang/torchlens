@@ -65,6 +65,7 @@ from .._io import (
     read_tlspec_version,
 )
 from .._errors import MutatedReferenceError, TorchLensPostfuncError
+from .._save_budget import SaveBudgetExceededError
 from .._trace_state import TraceState
 from .._training_validation import _NON_GRAD_DTYPES, TrainingModeConfigError
 from ..constants import ARG_EXPRESSIONS_FIELD, LAYER_PASS_LOG_FIELD_ORDER, RAW_LABEL_SUFFIX
@@ -3437,6 +3438,21 @@ class Op:
                 func_name=self.func_name,
                 is_inplace=bool(self.is_inplace),
             )
+            budget = getattr(trace, "_save_budget_accountant", None)
+            target_device = t.device
+            if save_mode == "cpu_async":
+                target_device = torch.device("cpu")
+            elif self.output_device not in ("same", str(t.device)):
+                target_device = torch.device(self.output_device)
+            budget_reservation = (
+                None
+                if budget is None
+                else budget.admit(
+                    self._layer_label_raw,
+                    target_device,
+                    get_memory_amount_from_metadata(t, tuple(t.shape), t.dtype),
+                )
+            )
             # Clone the tensor, optionally detaching from autograd graph.
             raw_out = copy_tensor_payload(
                 t,
@@ -3496,10 +3512,12 @@ class Op:
                 self.transformed_out_shape = _shape_or_none(self.transformed_out)
                 self.transformed_out_dtype = _dtype_or_none(self.transformed_out)
                 self.transformed_activation_memory = _memory_or_none(self.transformed_out)
+            if budget is not None:
+                budget.commit(budget_reservation, (self.out, self.transformed_out))
         except Exception as exc:
             if writer is not None:
                 writer.abort(f"Failed while saving out for {self._streaming_label}: {exc}")
-                if isinstance(exc, TorchLensPostfuncError):
+                if isinstance(exc, (SaveBudgetExceededError, TorchLensPostfuncError)):
                     raise
                 raise TorchLensIOError(
                     f"Streaming out save failed for {self._streaming_label}."

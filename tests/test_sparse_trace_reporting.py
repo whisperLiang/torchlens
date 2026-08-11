@@ -12,6 +12,11 @@ a whole-capture guarantee.
 
 from __future__ import annotations
 
+from pathlib import Path
+import sys
+import types
+from typing import Any, NoReturn
+
 import pytest
 import torch
 from torch import nn
@@ -21,6 +26,7 @@ from torchlens.data_classes._nonfinite import (
     first_nonfinite_layer,
     unexamined_payload_count,
 )
+from torchlens._io.lazy import LazyActivationRef
 from torchlens.options import CaptureOptions
 
 
@@ -90,6 +96,75 @@ def test_explain_works_on_a_predicate_sparse_capture() -> None:
 
     trace = tl.trace(_plain_model(), torch.randn(2, 4), save=tl.func("relu"))
     assert isinstance(tl.report.explain(trace), str)
+
+
+def test_disk_backed_reports_do_not_materialize_payloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text, HTML, and JSON reporting must remain metadata-only for disk payloads."""
+
+    trace = tl.trace(
+        _plain_model(),
+        torch.randn(2, 4),
+        save=tl.func("relu"),
+        storage=tl.to_disk(str(tmp_path / "run.tlspec")),
+    )
+    assert any(getattr(op, "out_ref", None) is not None for op in trace.layer_list)
+
+    def fail_materialization(
+        self: LazyActivationRef,
+        *,
+        map_location: Any = "cpu",
+        payload_hints: Any | None = None,
+        resolved_blobs_dir: Path | None = None,
+    ) -> NoReturn:
+        """Fail if a reporting surface attempts a lazy value read.
+
+        Parameters
+        ----------
+        self:
+            Lazy payload reference.
+        map_location:
+            Requested materialization device.
+        payload_hints:
+            Optional codec hints.
+        resolved_blobs_dir:
+            Optional resolved blob directory.
+
+        Raises
+        ------
+        AssertionError
+            Always; reporting must never reach this method.
+        """
+
+        del self, map_location, payload_hints, resolved_blobs_dir
+        raise AssertionError("reporting materialized a disk-backed activation")
+
+    monkeypatch.setattr(LazyActivationRef, "materialize", fail_materialization)
+    monkeypatch.setitem(sys.modules, "IPython", types.ModuleType("IPython"))
+
+    text = str(trace)
+    html = trace._repr_html_()
+    report = tl.report.explain(trace, format="json")
+    assert isinstance(text, str)
+    assert "disk-backed" in html
+    assert isinstance(report, dict)
+    assert "disk-backed" in report["first_nonfinite"]
+
+
+def test_json_and_html_clean_answers_disclose_sparse_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Machine and notebook reports preserve the same coverage hedge as text."""
+
+    trace = tl.trace(_plain_model(), torch.randn(2, 4), save=tl.func("relu"))
+    monkeypatch.setitem(sys.modules, "IPython", types.ModuleType("IPython"))
+
+    report = tl.report.explain(trace, format="json")
+    assert isinstance(report, dict)
+    assert "could not be examined" in report["first_nonfinite"]
+    assert "could not be examined" in trace._repr_html_()
 
 
 # ---------------------------------------------------------------------------

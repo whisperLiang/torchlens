@@ -2510,9 +2510,7 @@ class Trace(
         if getattr(self, "num_saved_ops", 0) == 0:
             save_level = "metadata only"
         nonfinite = self.first_nonfinite(link_format="html")
-        nonfinite_summary = (
-            "No non-finite saved outs" if nonfinite.startswith("No non-finite") else nonfinite
-        )
+        nonfinite_summary = nonfinite
         title = escape(str(getattr(self, "trace_label", None) or self.model_label))
         state = escape(str(getattr(getattr(self, "state", None), "name", "UNKNOWN")))
         return (

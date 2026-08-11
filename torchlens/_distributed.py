@@ -27,9 +27,8 @@ overwhelmingly common case.
 
 Reporting is deliberately wider than refusal. A bare ``DeviceMesh`` attached to
 a model whose parameters are ordinary dense tensors does not make capture wrong,
-so it is *reported* but not refused; only tensor-level sharded state and
-pipeline-stage fragments -- the conditions that provably corrupt a capture --
-refuse.
+so it is *reported* but not refused. DTensor/ShardedTensor state, active tensor-
+parallel hooks/styles, and pipeline-stage fragments refuse.
 """
 
 from __future__ import annotations
@@ -61,13 +60,14 @@ __all__ = [
 MAX_REPORTED_SITES = 5
 """Number of named sites listed in a finding before eliding the remainder."""
 
-REFUSING_KINDS: frozenset[str] = frozenset({"dtensor", "pipeline_parallel"})
+REFUSING_KINDS: frozenset[str] = frozenset(
+    {"dtensor", "tensor_parallel", "pipeline_parallel"}
+)
 """Finding kinds that make a capture provably wrong and therefore refuse it.
 
-``device_mesh`` and ``tensor_parallel`` are reported but never refuse on their
-own: a mesh object or a tensor-parallel *style* wrapper with ordinary dense
-parameters leaves capture correct. Whenever those modes do corrupt a capture
-they also produce DTensor state, which is caught by the ``dtensor`` kind.
+``device_mesh`` alone is informational. Active tensor-parallel styles refuse even
+when parameters remain dense: ``PrepareModuleInput`` installs hooks whose rank
+redistribution runs below TorchLens' capture layer and would otherwise be omitted.
 """
 
 # Namespaces whose presence in ``sys.modules`` is a precondition for any live
@@ -117,14 +117,13 @@ _NN_MODULE_INTERNAL_ATTRS: frozenset[str] = frozenset(vars(nn.Module()))
 
 # Attribute value types that can never *be* a mesh/pipeline object. Containers
 # are absent on purpose: a user may hold a mesh in a small list or dict, and
-# :func:`_iter_candidate_attribute_values` descends one bounded level into those.
+# :func:`_iter_candidate_attribute_values` performs a bounded recursive walk.
 _SKIP_ATTRIBUTE_TYPES: frozenset[type] = frozenset(
     {bool, int, float, complex, str, bytes, bytearray, type(None), torch.dtype, torch.device}
 )
 
-# Bound on how many elements of a container-valued module attribute are examined,
-# so a module holding a large plain list cannot turn detection into an O(n) walk.
-_MAX_CONTAINER_PROBE = 8
+_MAX_OBJECT_WALK_DEPTH = 12
+_MAX_OBJECT_WALK_NODES = 4096
 
 
 class DistributedCaptureUnsupportedError(CompatibilityError, RuntimeError):
@@ -208,6 +207,7 @@ class _Evidence:
     mesh_exact: bool = True
     mesh_descriptions: list[str] = field(default_factory=list)
     tp_module_sites: list[str] = field(default_factory=list)
+    tp_hook_sites: list[str] = field(default_factory=list)
     tp_module_exact: bool = True
     pp_sites: list[str] = field(default_factory=list)
     pp_exact: bool = True
@@ -447,13 +447,13 @@ def _iter_named_state(model: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
 
 
 def _iter_input_tensors(payload: Any) -> Iterator[tuple[str, torch.Tensor]]:
-    """Yield ``(path, tensor)`` for tensors reachable through builtin containers.
+    """Yield ``(path, tensor)`` through builtin and inspectable user containers.
 
     Parameters
     ----------
     payload:
-        Input tree to walk. Tensors, lists, tuples, sets, and dicts are
-        traversed; ``nn.Module`` instances are not descended into.
+        Input tree to walk. Tensors, builtin containers, and inspectable user
+        containers are traversed; ``nn.Module`` instances are not descended into.
 
     Yields
     ------
@@ -482,23 +482,76 @@ def _walk_inputs(payload: Any, path: str, seen: set[int]) -> Iterator[tuple[str,
         Dotted access path and the tensor found there.
     """
 
-    if id(payload) in seen:
+    yield from _walk_tensors(payload, path, seen, depth=0, nodes=[0])
+
+
+def _walk_tensors(
+    payload: Any,
+    path: str,
+    seen: set[int],
+    *,
+    depth: int,
+    nodes: list[int],
+) -> Iterator[tuple[str, torch.Tensor]]:
+    """Walk tensors through builtin and inspectable user containers.
+
+    Parameters
+    ----------
+    payload:
+        Current object.
+    path:
+        Rendered access path.
+    seen:
+        Object identities already visited.
+    depth:
+        Current recursion depth.
+    nodes:
+        Mutable one-item node counter shared by the traversal.
+
+    Yields
+    ------
+    tuple[str, torch.Tensor]
+        Tensor path and value.
+    """
+
+    if depth > _MAX_OBJECT_WALK_DEPTH or nodes[0] >= _MAX_OBJECT_WALK_NODES:
         return
-    seen.add(id(payload))
+    payload_id = id(payload)
+    if payload_id in seen:
+        return
+    seen.add(payload_id)
+    nodes[0] += 1
     if isinstance(payload, torch.Tensor):
         yield path, payload
         return
+    if isinstance(payload, nn.Module):
+        return
     if isinstance(payload, (list, tuple)):
         for index, item in enumerate(payload):
-            yield from _walk_inputs(item, f"{path}[{index}]", seen)
+            yield from _walk_tensors(
+                item, f"{path}[{index}]", seen, depth=depth + 1, nodes=nodes
+            )
         return
     if isinstance(payload, (set, frozenset)):
         for index, item in enumerate(payload):
-            yield from _walk_inputs(item, f"{path}{{{index}}}", seen)
+            yield from _walk_tensors(
+                item, f"{path}{{{index}}}", seen, depth=depth + 1, nodes=nodes
+            )
         return
     if isinstance(payload, dict):
         for key, item in payload.items():
-            yield from _walk_inputs(item, f"{path}[{key!r}]", seen)
+            yield from _walk_tensors(
+                item, f"{path}[{key!r}]", seen, depth=depth + 1, nodes=nodes
+            )
+        return
+    try:
+        attributes = vars(payload)
+    except (TypeError, AttributeError):
+        return
+    for attr_name, item in attributes.items():
+        yield from _walk_tensors(
+            item, f"{path}.{attr_name}", seen, depth=depth + 1, nodes=nodes
+        )
 
 
 def _collect_module_evidence(model: nn.Module, evidence: _Evidence) -> None:
@@ -530,9 +583,15 @@ def _collect_module_evidence(model: nn.Module, evidence: _Evidence) -> None:
     # supported flow, and a mesh with no sharded tensors is an informational row
     # that never refuses capture, so the refusing path stays fully sound while an
     # ordinary trace pays nothing. See FORKS.md ("device-mesh scan gate").
-    scan_meshes = _sharded_tensor_namespace_imported() or _distributed_initialized()
+    scan_tensors = _sharded_tensor_namespace_imported()
+    scan_meshes = scan_tensors or _distributed_initialized()
     mesh_type = get_device_mesh_type() if scan_meshes else None
-    if not scan_meshes and not pipelining_types and not check_tp_namespace:
+    if (
+        not scan_meshes
+        and not pipelining_types
+        and not check_tp_namespace
+        and not check_pp_namespace
+    ):
         return
 
     try:
@@ -544,14 +603,52 @@ def _collect_module_evidence(model: nn.Module, evidence: _Evidence) -> None:
         label = name or "<root>"
         if check_tp_namespace and _type_in_namespace(module, _TENSOR_PARALLEL_NAMESPACES):
             evidence.tp_module_sites.append(label)
+        if check_tp_namespace:
+            _collect_tp_hook_evidence(module, label, evidence)
         if pipelining_types and isinstance(module, pipelining_types):
             evidence.pp_sites.append(label)
         elif check_pp_namespace and _type_in_namespace(module, _PIPELINE_PARALLEL_NAMESPACES):
             evidence.pp_sites.append(label)
             evidence.pp_exact = False
         _collect_attribute_evidence(
-            module, label, evidence, scan_meshes, mesh_type, pipelining_types, check_pp_namespace
+            module,
+            label,
+            evidence,
+            scan_meshes,
+            mesh_type,
+            pipelining_types,
+            check_pp_namespace,
+            scan_tensors,
         )
+
+
+def _collect_tp_hook_evidence(module: nn.Module, label: str, evidence: _Evidence) -> None:
+    """Record active tensor-parallel forward hooks on one module.
+
+    Parameters
+    ----------
+    module:
+        Module whose hook registries are inspected directly.
+    label:
+        Module path used in findings.
+    evidence:
+        Mutable evidence collector.
+    """
+
+    for registry_name in ("_forward_pre_hooks", "_forward_hooks"):
+        registry = vars(module).get(registry_name)
+        if not isinstance(registry, dict):
+            continue
+        for hook_id, hook in registry.items():
+            module_name = str(getattr(hook, "__module__", "") or "")
+            qualname = str(getattr(hook, "__qualname__", "") or "")
+            if any(
+                module_name == prefix or module_name.startswith(f"{prefix}.")
+                for prefix in _TENSOR_PARALLEL_NAMESPACES
+            ):
+                evidence.tp_hook_sites.append(
+                    f"{label}.{registry_name}[{hook_id!r}] ({qualname or type(hook).__name__})"
+                )
 
 
 def _iter_candidate_attribute_values(module: nn.Module) -> Iterator[tuple[str, Any]]:
@@ -569,41 +666,89 @@ def _iter_candidate_attribute_values(module: nn.Module) -> Iterator[tuple[str, A
 
     Notes
     -----
-    Only the instance ``__dict__`` is read, never ``getattr``, so a property or
-    ``__getattr__`` hook is never executed during a compatibility probe. Torch's
-    own bookkeeping attributes and primitive values are skipped, and plain
-    containers are descended exactly one level with a bounded element budget so
-    ``self.meshes = [mesh]`` is still found without turning detection into an
-    unbounded walk.
+    Only instance ``__dict__`` mappings are read, never descriptors. Builtin and
+    user-defined containers are traversed to a documented global node/depth cap.
     """
 
     try:
-        attributes = list(vars(module).items())
-    except Exception:
+        attributes = vars(module)
+    except (TypeError, AttributeError):
         return
-    for attr_name, value in attributes:
+    seen: set[int] = {id(module)}
+    nodes = [0]
+    for attr_name, value in attributes.items():
         if attr_name in _NN_MODULE_INTERNAL_ATTRS:
             continue
-        value_type = type(value)
-        if value_type in _SKIP_ATTRIBUTE_TYPES:
-            continue
-        if value_type in (list, tuple, set, frozenset):
-            for index, item in enumerate(value):
-                if index >= _MAX_CONTAINER_PROBE:
-                    break
-                if type(item) in _SKIP_ATTRIBUTE_TYPES:
-                    continue
-                yield f"{attr_name}[{index}]", item
-            continue
-        if value_type is dict:
-            for index, (key, item) in enumerate(value.items()):
-                if index >= _MAX_CONTAINER_PROBE:
-                    break
-                if type(item) in _SKIP_ATTRIBUTE_TYPES:
-                    continue
-                yield f"{attr_name}[{key!r}]", item
-            continue
-        yield attr_name, value
+        yield from _walk_attribute_values(value, attr_name, seen, depth=0, nodes=nodes)
+
+
+def _walk_attribute_values(
+    value: Any,
+    path: str,
+    seen: set[int],
+    *,
+    depth: int,
+    nodes: list[int],
+) -> Iterator[tuple[str, Any]]:
+    """Yield inspectable nested module-attribute values within bounded work.
+
+    Parameters
+    ----------
+    value:
+        Current value.
+    path:
+        Rendered module-relative path.
+    seen:
+        Object identities already visited.
+    depth:
+        Current recursion depth.
+    nodes:
+        Shared node counter.
+
+    Yields
+    ------
+    tuple[str, Any]
+        Candidate path and value.
+    """
+
+    if depth > _MAX_OBJECT_WALK_DEPTH or nodes[0] >= _MAX_OBJECT_WALK_NODES:
+        return
+    value_id = id(value)
+    if value_id in seen:
+        return
+    seen.add(value_id)
+    nodes[0] += 1
+    if type(value) in _SKIP_ATTRIBUTE_TYPES:
+        return
+    yield path, value
+    if isinstance(value, (torch.Tensor, nn.Module)):
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            yield from _walk_attribute_values(
+                item, f"{path}[{index}]", seen, depth=depth + 1, nodes=nodes
+            )
+        return
+    if isinstance(value, (set, frozenset)):
+        for index, item in enumerate(value):
+            yield from _walk_attribute_values(
+                item, f"{path}{{{index}}}", seen, depth=depth + 1, nodes=nodes
+            )
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from _walk_attribute_values(
+                item, f"{path}[{key!r}]", seen, depth=depth + 1, nodes=nodes
+            )
+        return
+    try:
+        attributes = vars(value)
+    except (TypeError, AttributeError):
+        return
+    for attr_name, item in attributes.items():
+        yield from _walk_attribute_values(
+            item, f"{path}.{attr_name}", seen, depth=depth + 1, nodes=nodes
+        )
 
 
 def _collect_attribute_evidence(
@@ -614,6 +759,7 @@ def _collect_attribute_evidence(
     mesh_type: type[Any] | None,
     pipelining_types: tuple[type[Any], ...],
     check_pp_namespace: bool,
+    scan_tensors: bool,
 ) -> None:
     """Record device-mesh and pipeline objects held as plain module attributes.
 
@@ -633,10 +779,16 @@ def _collect_attribute_evidence(
         Probed pipeline-parallel stage types, empty when unavailable.
     check_pp_namespace:
         Whether the structural pipeline-namespace fallback is worth running.
+    scan_tensors:
+        Whether distributed tensor subclasses can exist in this process.
     """
 
     for attr_path, value in _iter_candidate_attribute_values(module):
-        if isinstance(value, (torch.Tensor, nn.Module)):
+        if isinstance(value, torch.Tensor):
+            if scan_tensors:
+                _record_tensor(f"{label}.{attr_path}", value, evidence)
+            continue
+        if isinstance(value, nn.Module):
             continue
         if scan_meshes:
             if mesh_type is not None:
@@ -793,9 +945,16 @@ def _build_findings(evidence: _Evidence) -> tuple[DistributedFinding, ...]:
             )
         )
 
-    tp_sites = tuple(dict.fromkeys(evidence.tp_module_sites))
+    tp_sites = tuple(dict.fromkeys(evidence.tp_module_sites + evidence.tp_hook_sites))
     if tp_sites or evidence.dtensor_sharded:
-        if tp_sites:
+        if evidence.tp_hook_sites:
+            detail = (
+                f"Active torch.distributed.tensor.parallel forward hook(s) detected at "
+                f"{len(evidence.tp_hook_sites)} module site(s). Dense parameters do not make "
+                "this safe: input/output redistribution and collectives execute below "
+                "TorchLens' wrapped layer."
+            )
+        elif tp_sites:
             detail = (
                 f"torch.distributed.tensor.parallel style/wrapper classes detected at "
                 f"{len(tp_sites)} module site(s)."

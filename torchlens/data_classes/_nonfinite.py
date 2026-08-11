@@ -87,6 +87,18 @@ def _saved_out(layer: Any) -> Any:
 
     if not bool(getattr(layer, "has_saved_activation", False)):
         return None
+    if getattr(layer, "out_ref", None) is not None:
+        slot = getattr(layer, "_slot", None)
+        if callable(slot):
+            try:
+                resident = slot("out")
+            except (AttributeError, KeyError, TypeError):
+                resident = None
+            if resident is None:
+                # Repr/report surfaces are metadata queries. A disk-backed value
+                # remains explicitly unexamined until the user requests it.
+                return None
+            return resident
     try:
         return getattr(layer, "out", None)
     except ValueError:
@@ -335,6 +347,40 @@ def unexamined_payload_count(log: Any, *, kind: str = "saved") -> int:
     return unexamined
 
 
+def _unmaterialized_disk_payload_count(log: Any, *, kind: str) -> int:
+    """Return disk-backed payloads deliberately not read by reporting.
+
+    Parameters
+    ----------
+    log:
+        Trace-like object to inspect.
+    kind:
+        Scan contract whose sequence is counted.
+
+    Returns
+    -------
+    int
+        Number of saved outs represented only by an unmaterialized disk ref.
+    """
+
+    sequence, _gate = _KINDS[kind]
+    count = 0
+    for layer in sequence(log):
+        if not bool(getattr(layer, "has_saved_activation", False)):
+            continue
+        if getattr(layer, "out_ref", None) is None:
+            continue
+        slot = getattr(layer, "_slot", None)
+        if not callable(slot):
+            continue
+        try:
+            if slot("out") is None:
+                count += 1
+        except (AttributeError, KeyError, TypeError):
+            continue
+    return count
+
+
 def uncheckable_payload_count(log: Any, *, kind: str = "saved") -> int:
     """Return how many examined payloads hold a dtype with no finiteness check.
 
@@ -396,18 +442,26 @@ def coverage_gap_note(log: Any, *, kind: str = "saved") -> str:
     """
 
     unexamined = unexamined_payload_count(log, kind=kind)
+    disk_backed = _unmaterialized_disk_payload_count(log, kind=kind)
+    unsaved = max(0, unexamined - disk_backed)
     uncheckable = uncheckable_payload_count(log, kind=kind)
     if not unexamined and not uncheckable:
         return ""
-    if not uncheckable:
+    if not uncheckable and not disk_backed:
         # Unchanged wording for the save=-scoped case, which is the common one.
         return (
             f" ({unexamined} op(s) retained no payload and could not be examined; "
             "re-run with a wider save= to cover them)"
         )
     gaps = [f"{uncheckable} op(s) hold a dtype with no runnable finiteness check"]
-    if unexamined:
-        gaps.insert(0, f"{unexamined} op(s) retained no payload")
+    if not uncheckable:
+        gaps = []
+    if disk_backed:
+        gaps.append(
+            f"{disk_backed} disk-backed payload(s) were not materialized by reporting"
+        )
+    if unsaved:
+        gaps.insert(0, f"{unsaved} op(s) retained no payload")
     return f" ({'; '.join(gaps)}, so they could not be examined)"
 
 

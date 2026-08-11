@@ -1854,7 +1854,7 @@ def get_fp8_dtypes(*, force_probe: bool = False) -> frozenset[Any]:
     if not _FP8_DTYPES_PROBED:
         found = []
         for name in _NARROW_FLOAT_DTYPE_NAMES:
-            candidate = getattr(torch, name, None)
+            candidate = torch_attr(name)
             if isinstance(candidate, torch.dtype):
                 found.append(candidate)
         _FP8_DTYPES = frozenset(found)

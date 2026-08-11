@@ -84,7 +84,7 @@ earlier saved activation. Use `"copy"` unless that aliasing tradeoff is explicit
 |---|---|---|
 | **Nested `trace`** (hook/postfunc calls log again) | `RuntimeError` at inner entry | Use `pause_logging()` before the inner call, or run the inner log afterwards on the outer's sub-model |
 | **`torch.compile(model)`** | Unwraps to the eager source module and emits one note per process | Use a profiler/compiler tool to inspect fused compiled execution |
-| **Compiled callable reached mid-capture** (plain attribute or free function) | Bypassed with one `UserWarning` per forward; the Trace holds only what ran outside the region and reports `capture_verification_reason="dynamo_region_not_logged"` | Call the eager function during capture, or compile an `nn.Module` child so it can be unwrapped |
+| **Compiled callable reached mid-capture** (plain attribute or free function) | Plain attributes are conservatively inventoried and invoked with logging paused; wrapper entry handles free-function regions when Python is entered. The Trace reports `capture_verification_reason="dynamo_region_not_logged"` | Call the eager function during capture, or compile an `nn.Module` child so it can be unwrapped |
 | **`FakeTensor` / `FunctionalTensor` input or parameter** | `UnsupportedTensorVariantError` at entry | Build the model and inputs outside any fake/functional tracing mode |
 | **`torch.jit.script` / `torch.jit.trace`** | `RuntimeError` at entry | Log the un-scripted / un-traced Python module |
 | **`torch.export.ExportedProgram`** | `RuntimeError` at entry | Log the source `nn.Module` before exporting |
@@ -167,8 +167,8 @@ an intentional hard rejection for compiled models because it is the torch-only
 fast capture lane.
 
 A compiled **callable** -- held as a plain attribute or called as a free function --
-cannot be swapped for an eager source module, so unwrapping cannot reach it. Reaching
-one during capture used to die with a raw
+cannot be unwrapped to an eager source module in the same way. Reaching one during capture used to
+die with a raw
 ``torch._dynamo.exc.InternalTorchDynamoError: AttributeError: 'FakeTensor' object has
 no attribute 'fake_mode'``, because the tensors inside a Dynamo-traced region are
 data-free ``FakeTensor``s and every TorchLens step that reads a value (``safe_copy``,
@@ -179,12 +179,56 @@ one-per-forward ``UserWarning`` names the gap and the remedy, and the Trace repo
 ``capture_verification_reason="dynamo_region_not_logged"``. Call the eager function
 during capture if you need its interior logged.
 
+For plain module attributes, TorchLens inventories Dynamo's original-callable marker before the
+forward and temporarily invokes the callable with logging paused. This covers cold FakeTensor
+internals and hot cache hits where ``is_compiling()`` never becomes true. It is deliberately
+conservative: holding such an attribute marks the capture incomplete even if one concrete branch
+does not call it. A compiled free function that is reachable only through globals still relies on
+wrapper entry; opaque hot-cache execution in that residual class cannot support a complete claim.
+
 Passing a ``FakeTensor`` or ``FunctionalTensor`` as a model input, or tracing a model
 whose parameters were built under a fake mode, is refused at capture entry with
 ``UnsupportedTensorVariantError`` alongside the other data-free tensor variants.
 Detection routes through the ``HAS_DYNAMO_IS_COMPILING`` and
 ``HAS_TRACING_TENSOR_TYPES`` capability flags, so both degradations are visible in
 ``tl.doctor()`` / ``tl.compat.report()``.
+
+The preflight recognizes exact-type values returned by ``torch._to_functional_tensor`` and walks
+builtin plus inspectable instance-``__dict__`` containers to 12 levels / 4096 objects. It does not
+execute descriptors. Slots-only/descriptor-only holders and functional tensors created inside
+``forward`` remain outside entry-time detection; the ``vmap_functorch`` row says so.
+
+### Retained activation budget
+
+``CaptureOptions(save_budget=...)`` is a per-device ceiling, defaulting to half of measurable
+available memory. TorchLens admits the primary retained copy before ``safe_copy`` from the source
+tensor's byte size, then reconciles alias-aware physical storage, so an identity transform is not
+double-charged. This guard is not a general OOM guarantee: the user's forward already ran, transform
+output size is unknowable before user code executes, and cross-device moves may allocate a temporary
+source copy. Additional transform storage is charged after it exists.
+
+Predicate-selected disk-only payloads are not charged. In contrast, exhaustive ``save="all"`` with
+``storage=tl.to_disk(...)`` retains RAM copies until postprocess and remains budgeted. To reduce that
+path, save less **and** stream those selected payloads. If automatic headroom measurement is
+unavailable (including MPS/unknown devices), the first non-empty charge emits ``UserWarning`` and
+that device is unbudgeted; use an absolute integer ceiling to enforce it.
+
+### Distributed entry-detection scope
+
+Capture refuses DTensor/ShardedTensor state, active TP hooks/styles, and pipeline stages. Dense
+parameters do not make an active ``PrepareModuleInput`` style safe because its redistribution and
+collectives execute below TorchLens' wrapped layer. A bare inert ``DeviceMesh`` remains
+informational. The shared compat/capture scan covers registered state, inspectable custom input
+containers, plain module tensor attributes, direct TP-namespace hook registries, and nested module
+attributes to 12 levels / 4096 objects. Descriptor-only or slots-only holders, user-wrapped/opaque
+TP hooks that hide their defining namespace, state beyond that bound, and distributed tensors
+constructed inside ``forward`` are disclosed residuals in the clear compat rows.
+
+### Disk-backed report scans
+
+Text/notebook/JSON reporting does not materialize lazy disk payloads to compute NaN/Inf summaries.
+Clean HTML/JSON answers count them as disk-backed and unexamined. Materialize explicitly with
+``op.materialize_out()`` before requesting a value-based answer when that I/O is intended.
 
 ### `torch.jit.script` / `torch.jit.trace` — not supported (raises)
 

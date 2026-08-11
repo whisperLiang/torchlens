@@ -6,30 +6,31 @@ frontier shapes: a first-time user pointing the default at a large model gets an
 OOM kill (or an allocator ``RuntimeError`` from somewhere deep inside torch)
 rather than an explanation.
 
-This module makes that failure honest. Retained payload bytes are charged to a
-per-device running total as they are committed, and when a device's total crosses
-its budget capture stops with :class:`SaveBudgetExceededError`, naming the bytes
-already committed, the budget and where the budget came from, the operation that
-tripped it, and the remedies.
+This module makes that failure more predictable without claiming a general OOM
+guarantee. The primary retained copy is admitted from source-tensor bytes before
+allocation, then alias-aware physical storage is reconciled after user transforms.
+The model forward, cross-device temporaries, and transform-only deltas can allocate
+before their size is knowable.
 
 The accounting is deliberately a **lower bound, labelled as one**. At the moment
 of the trip the forward is incomplete, so the true footprint of the finished
 capture would have been larger; the error says exactly that instead of
-extrapolating a total it cannot know. What it can state precisely -- committed
-bytes, saved-activation count, mean bytes per saved activation, and the tripping
-site -- it does.
+extrapolating a total it cannot know. Pre-allocation refusals label their figure
+as projected; post-transform refusals label committed storage.
 
 Budgets are per-device because saved payloads follow the tensors they copy
 (``output_device="same"`` by default), so a CUDA capture spends VRAM and a CPU
-capture spends host RAM. Devices whose headroom cannot be measured are reported
-as unbudgeted rather than silently assumed infinite.
+capture spends host RAM. Devices whose headroom cannot be measured warn on their
+first non-empty automatic charge and remain unbudgeted unless the user supplies
+an absolute limit.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 import os
-from typing import Union
+import warnings
+from typing import Any, Union
 
 import torch
 
@@ -63,9 +64,10 @@ _BYTES_UNITS = (("TB", 1024**4), ("GB", 1024**3), ("MB", 1024**2), ("KB", 1024),
 class SaveBudgetExceededError(CaptureError, RuntimeError):
     """Raised when retained activation bytes cross the configured save budget.
 
-    The structured accounting is retained on ``fields`` (``committed_bytes``,
-    ``budget_bytes``, ``device``, ``num_saved``, ``label``) so callers branch on
-    numbers rather than parsing the message.
+    The structured accounting is retained on ``fields`` (``accounted_bytes``,
+    ``committed_bytes`` or ``projected_bytes``, ``budget_bytes``, ``device``,
+    ``num_saved``, ``label``, ``accounting_phase``) so callers branch on numbers
+    rather than parsing the message.
     """
 
 
@@ -249,6 +251,16 @@ class _DeviceLedger:
     limit_bytes: int | None = None
     available_bytes: int | None = None
     measured: bool = False
+    retained_storage_keys: set[tuple[Any, ...]] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class _BudgetReservation:
+    """One pre-allocation admission reserved against a device ledger."""
+
+    label: str
+    device: torch.device
+    num_bytes: int
 
 
 @dataclass
@@ -321,8 +333,97 @@ class SaveBudget:
             if available is not None:
                 fraction = self.spec.fraction or DEFAULT_SAVE_BUDGET_FRACTION
                 ledger.limit_bytes = int(available * fraction)
+            else:
+                warnings.warn(
+                    "TorchLens cannot measure available memory for device "
+                    f"{device}; automatic save budgeting is disabled on that device. "
+                    "Use an absolute save_budget=<bytes> to enforce a ceiling there.",
+                    UserWarning,
+                    stacklevel=4,
+                )
         self.ledgers[key] = ledger
         return ledger
+
+    def admit(
+        self,
+        label: str,
+        device: torch.device,
+        num_bytes: int,
+    ) -> _BudgetReservation | None:
+        """Reserve a projected retained payload before its allocation.
+
+        Parameters
+        ----------
+        label:
+            Operation label used in a refusal.
+        device:
+            Projected retention device.
+        num_bytes:
+            Source-tensor bytes used as the pre-allocation estimate.
+
+        Returns
+        -------
+        _BudgetReservation | None
+            Reservation to reconcile after allocation, or ``None`` for an empty payload.
+
+        Raises
+        ------
+        SaveBudgetExceededError
+            If the projected footprint crosses the configured ceiling.
+        """
+
+        if num_bytes <= 0:
+            return None
+        ledger = self._ledger_for(device)
+        ledger.committed_bytes += int(num_bytes)
+        ledger.num_saved += 1
+        self._raise_if_over_budget(label, device, ledger, phase="pre_allocation_admission")
+        return _BudgetReservation(label=label, device=device, num_bytes=int(num_bytes))
+
+    def commit(
+        self,
+        reservation: _BudgetReservation | None,
+        payloads: tuple[torch.Tensor | None, ...],
+    ) -> None:
+        """Replace one estimate with alias-aware physical retained storage.
+
+        Parameters
+        ----------
+        reservation:
+            Admission returned by :meth:`admit`.
+        payloads:
+            RAM-retained raw and transformed payloads after saving.
+
+        Notes
+        -----
+        A transform can allocate an output whose size or alias behavior is unknowable
+        before user code runs. The source-sized reservation protects the first retained
+        allocation; reconciliation then charges any additional transform storage. That
+        transform-only delta is necessarily post-allocation and is disclosed publicly.
+        """
+
+        if reservation is None:
+            return
+        reserved_ledger = self._ledger_for(reservation.device)
+        reserved_ledger.committed_bytes -= reservation.num_bytes
+        reserved_ledger.num_saved -= 1
+
+        for payload in payloads:
+            if not isinstance(payload, torch.Tensor):
+                continue
+            identity, physical_bytes = _retained_storage_identity(payload)
+            ledger = self._ledger_for(payload.device)
+            if identity in ledger.retained_storage_keys:
+                continue
+            ledger.retained_storage_keys.add(identity)
+            ledger.committed_bytes += physical_bytes
+            ledger.num_saved += 1
+            self._raise_if_over_budget(
+                reservation.label,
+                payload.device,
+                ledger,
+                phase="post_transform_reconciliation",
+            )
 
     def charge(self, label: str, device: torch.device, num_bytes: int) -> None:
         """Charge retained payload bytes and refuse when the budget is crossed.
@@ -348,18 +449,49 @@ class SaveBudget:
         ledger = self._ledger_for(device)
         ledger.committed_bytes += int(num_bytes)
         ledger.num_saved += 1
+        self._raise_if_over_budget(label, device, ledger, phase="running_charge")
+
+    def _raise_if_over_budget(
+        self,
+        label: str,
+        device: torch.device,
+        ledger: _DeviceLedger,
+        *,
+        phase: str,
+    ) -> None:
+        """Raise when one ledger exceeds its resolved limit.
+
+        Parameters
+        ----------
+        label:
+            Operation label used in the refusal.
+        device:
+            Device whose ledger is checked.
+        ledger:
+            Updated per-device ledger.
+        phase:
+            Accounting phase exposed in structured error fields.
+        """
+
         limit = ledger.limit_bytes
         if limit is None or ledger.committed_bytes <= limit:
             return
         self.tripped = True
         raise SaveBudgetExceededError(
-            self._message(label, device, ledger),
-            committed_bytes=ledger.committed_bytes,
+            self._message(label, device, ledger, phase=phase),
+            accounted_bytes=ledger.committed_bytes,
+            committed_bytes=(
+                None if phase == "pre_allocation_admission" else ledger.committed_bytes
+            ),
+            projected_bytes=(
+                ledger.committed_bytes if phase == "pre_allocation_admission" else None
+            ),
             budget_bytes=limit,
             available_bytes=ledger.available_bytes,
             device=str(device),
             num_saved=ledger.num_saved,
             label=label,
+            accounting_phase=phase,
         )
 
     def unbudgeted_devices(self) -> tuple[str, ...]:
@@ -374,7 +506,14 @@ class SaveBudget:
 
         return tuple(key for key, ledger in self.ledgers.items() if not ledger.measured)
 
-    def _message(self, label: str, device: torch.device, ledger: _DeviceLedger) -> str:
+    def _message(
+        self,
+        label: str,
+        device: torch.device,
+        ledger: _DeviceLedger,
+        *,
+        phase: str,
+    ) -> str:
         """Build the refusal message.
 
         Parameters
@@ -385,6 +524,8 @@ class SaveBudget:
             Device whose budget was crossed.
         ledger:
             Ledger at the moment of the trip.
+        phase:
+            Accounting phase that detected the crossing.
 
         Returns
         -------
@@ -399,21 +540,54 @@ class SaveBudget:
             if ledger.available_bytes is not None
             else ""
         )
+        footprint_label = (
+            "projected retained footprint (refused before the crossing allocation)"
+            if phase == "pre_allocation_admission"
+            else "committed so far"
+        )
         return (
             "torchlens stopped capture: retained activations crossed the save budget on "
             f"{device}.\n"
-            f"  committed so far: {format_bytes(ledger.committed_bytes)} across "
+            f"  {footprint_label}: {format_bytes(ledger.committed_bytes)} across "
             f"{ledger.num_saved} saved activation(s), mean {format_bytes(mean_bytes)} each\n"
             f"  budget: {format_bytes(limit)} from {self.spec.source}{headroom}\n"
             f"  tripped while saving: {label}\n"
-            "  This is a LOWER BOUND: the forward pass was still running, so a completed "
-            "default capture of this model would have retained more than the figure above.\n"
+            "  This is a LOWER BOUND on the retained footprint at this point in the "
+            "incomplete forward, not an extrapolated completed-capture total.\n"
             "  Remedies, cheapest first:\n"
             "    - save less: save=tl.func('relu') or save=tl.in_module('encoder') "
             "instead of the default save='all'\n"
-            "    - stream payloads to disk: storage=tl.to_disk('run.tlspec')\n"
+            "    - save less AND stream those selected payloads to disk: "
+            "save=tl.func('relu'), storage=tl.to_disk('run.tlspec')\n"
             "    - keep metadata only: layers_to_save='none' (the graph is still captured)\n"
             "    - raise or lift the budget deliberately: "
             "capture=tl.options.CaptureOptions(save_budget=<bytes|fraction>), or "
             "save_budget=None to disable it"
         )
+
+
+def _retained_storage_identity(tensor: torch.Tensor) -> tuple[tuple[Any, ...], int]:
+    """Return a device-scoped physical storage identity and byte size.
+
+    Parameters
+    ----------
+    tensor:
+        Retained tensor payload.
+
+    Returns
+    -------
+    tuple[tuple[Any, ...], int]
+        Stable identity while the retained storage is live, plus physical bytes.
+    """
+
+    from ._state import pause_logging
+
+    with pause_logging():
+        try:
+            storage = tensor.untyped_storage()
+            num_bytes = int(storage.nbytes())
+            identity = (str(tensor.device), int(storage.data_ptr()), num_bytes)
+            return identity, num_bytes
+        except Exception:
+            num_bytes = int(tensor.numel() * tensor.element_size())
+            return (str(tensor.device), "tensor", id(tensor), num_bytes), num_bytes

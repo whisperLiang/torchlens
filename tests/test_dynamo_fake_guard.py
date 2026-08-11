@@ -29,6 +29,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens._robustness import UnsupportedTensorVariantError, _tracing_tensor_kind
+from torchlens.backends.torch import wrappers as torch_wrappers
 from torchlens.utils._torch_compat import (
     dynamo_is_compiling,
     get_torch_capability_snapshot,
@@ -105,6 +106,23 @@ def test_fake_tensor_is_classified() -> None:
     with fake_mode():
         fake = torch.randn(2, 4)
     assert _tracing_tensor_kind(fake) == "FakeTensor"
+
+
+def test_exact_torch_functional_tensor_is_classified_and_refused() -> None:
+    """PyTorch's ordinary functional wrapper retains exact ``torch.Tensor`` type."""
+
+    to_functional = getattr(torch, "_to_functional_tensor", None)
+    if not callable(to_functional):
+        pytest.skip("torch._to_functional_tensor is unavailable")
+    functional = to_functional(torch.randn(2, 4))
+    assert type(functional) is torch.Tensor
+    assert _tracing_tensor_kind(functional) == "FunctionalTensor"
+
+    with pytest.raises(UnsupportedTensorVariantError, match="FunctionalTensor in input"):
+        tl.trace(nn.Identity(), functional)
+
+    compat_row = tl.compat.report(nn.Identity(), torch.randn(2, 4)).row("vmap_functorch")
+    assert "created inside forward" in compat_row.details
 
 
 @pytest.mark.smoke
@@ -256,6 +274,7 @@ def test_compiled_attribute_callable_degrades_instead_of_crashing() -> None:
 
     torch.compiler.reset()
     model = _CompiledAttributeModel()
+    compiled_callable = model.compiled_activation
     x = torch.randn(2, 4)
 
     with pytest.warns(UserWarning, match="torch.compile"):
@@ -264,6 +283,7 @@ def test_compiled_attribute_callable_degrades_instead_of_crashing() -> None:
     # The eager part is captured; the compiled interior honestly is not.
     assert any("linear" in label for label in trace.layer_labels)
     assert not any("relu" in label for label in trace.layer_labels)
+    assert model.compiled_activation is compiled_callable
 
 
 @pytest.mark.heavy
@@ -340,6 +360,43 @@ def test_compiled_region_verdict_survives_a_warm_compile_cache() -> None:
     assert warm._raw_dynamo_region_detected is True
     assert warm.capture_verified is False
     assert warm.capture_verification_reason == "dynamo_region_not_logged"
+
+
+@pytest.mark.heavy
+def test_compiled_attribute_boundary_does_not_depend_on_is_compiling_timing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plain-attribute inventory arms the gap even when Dynamo's timing probe stays false."""
+
+    torch.compiler.reset()
+    model = _CompiledAttributeModel()
+    x = torch.randn(2, 4)
+    model(x)  # populate the compiled callable's execution cache before capture
+    monkeypatch.setattr(torch_wrappers, "_is_inside_dynamo_compilation", lambda: False)
+
+    with pytest.warns(UserWarning, match="torch.compile"):
+        trace = tl.trace(model, x)
+
+    assert trace._raw_dynamo_region_detected is True
+    assert trace._raw_transform_escape_detected is True
+    assert trace.capture_verified is False
+    assert trace.capture_verification_reason == "dynamo_region_not_logged"
+
+
+@pytest.mark.heavy
+def test_compile_compat_row_reports_direct_attribute_and_free_function_residual() -> None:
+    """Compatibility reporting matches the preflight inventory and its residual."""
+
+    compiled_row = tl.compat.report(_CompiledAttributeModel(), torch.randn(2, 4)).row(
+        "torch_compile"
+    )
+    assert compiled_row.detected is True
+    assert "plain module attribute" in compiled_row.details
+    assert "warm-cache" in compiled_row.details
+
+    clear_row = tl.compat.report(nn.Identity(), torch.randn(2, 4)).row("torch_compile")
+    assert clear_row.detected is False
+    assert "globals/free-function references" in clear_row.details
 
 
 @pytest.mark.heavy

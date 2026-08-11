@@ -78,12 +78,23 @@ def _tracing_tensor_kind(t: torch.Tensor) -> str | None:
     ``AssertionError`` ("Please convert all Tensors to FakeTensors first") the
     moment a real parameter meets a fake activation.
 
-    Args:
-        t: Tensor to classify.
+    Parameters
+    ----------
+    t:
+        Tensor to classify.
 
-    Returns:
-        Class name of the tracing subclass, or ``None`` for an ordinary tensor.
+    Returns
+    -------
+    str | None
+        Class name of the tracing tensor, or ``None`` for an ordinary tensor.
     """
+    functional_predicate = getattr(torch, "_is_functional_tensor", None)
+    if callable(functional_predicate):
+        try:
+            if bool(functional_predicate(t)):
+                return "FunctionalTensor"
+        except (RuntimeError, TypeError):
+            pass
     if type(t) is torch.Tensor:
         return None
     tracing_types = get_tracing_tensor_types()
@@ -154,29 +165,69 @@ def _model_has_quantized_modules(model: nn.Module) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _iter_tensors(obj: Any, _seen: set[int] | None = None) -> Iterator[torch.Tensor]:
-    """Yield every ``torch.Tensor`` reachable through builtin containers.
+def _iter_tensors(
+    obj: Any,
+    _seen: set[int] | None = None,
+    *,
+    _depth: int = 0,
+    _nodes: list[int] | None = None,
+) -> Iterator[torch.Tensor]:
+    """Yield tensors through builtin and inspectable user containers.
 
-    Doesn't descend into ``nn.Module`` instances (those are handled by
-    ``model.parameters()`` / ``model.buffers()``). Dedupe applies to every
-    visited object id, so shared tensors and cyclic containers are visited
-    safely at most once.
+    Parameters
+    ----------
+    obj:
+        Current object to inspect.
+    _seen:
+        Shared object-identity set for cycle prevention.
+    _depth:
+        Internal recursion depth.
+    _nodes:
+        Internal bounded-work counter.
+
+    Yields
+    ------
+    torch.Tensor
+        Reachable tensor values.
+
+    Notes
+    -----
+    ``nn.Module`` instances are not descended into because registered state is
+    handled separately. Instance ``__dict__`` is read directly, so properties and
+    descriptors never execute. Traversal is capped at 12 levels / 4096 objects;
+    opaque slots-only objects and tensors created later inside ``forward`` remain
+    outside entry-time detection and are disclosed in the compatibility report.
     """
     if _seen is None:
         _seen = set()
-    if id(obj) in _seen:
+    if _nodes is None:
+        _nodes = [0]
+    if _depth > 12 or _nodes[0] >= 4096:
         return
-    _seen.add(id(obj))
+    obj_id = id(obj)
+    if obj_id in _seen:
+        return
+    _seen.add(obj_id)
+    _nodes[0] += 1
     if isinstance(obj, torch.Tensor):
         yield obj
         return
+    if isinstance(obj, nn.Module):
+        return
     if isinstance(obj, (list, tuple, set, frozenset)):
         for item in obj:
-            yield from _iter_tensors(item, _seen)
+            yield from _iter_tensors(item, _seen, _depth=_depth + 1, _nodes=_nodes)
         return
     if isinstance(obj, dict):
         for item in obj.values():
-            yield from _iter_tensors(item, _seen)
+            yield from _iter_tensors(item, _seen, _depth=_depth + 1, _nodes=_nodes)
+        return
+    try:
+        attributes = vars(obj)
+    except (TypeError, AttributeError):
+        return
+    for item in attributes.values():
+        yield from _iter_tensors(item, _seen, _depth=_depth + 1, _nodes=_nodes)
 
 
 # ---------------------------------------------------------------------------

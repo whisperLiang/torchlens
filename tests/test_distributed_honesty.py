@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 import os
+import sys
+import types
 
 import pytest
 import torch
@@ -237,6 +239,42 @@ def test_synthesized_dtensor_in_nested_input_container_is_detected() -> None:
     assert finding.sites == ("input[1]['weights']",)
 
 
+def test_synthesized_dtensor_in_custom_input_container_is_detected() -> None:
+    """User-defined input containers cannot hide refusing distributed tensors."""
+
+    class Box:
+        """Simple user container exposing a tensor through instance state."""
+
+        def __init__(self, value: torch.Tensor) -> None:
+            """Store the wrapped tensor.
+
+            Parameters
+            ----------
+            value:
+                Tensor payload.
+            """
+
+            self.value = value
+
+    finding = _find(
+        detect_distributed_state(TinyModel(), Box(_fake_dtensor((2, 4)))),
+        "dtensor",
+    )
+    assert finding.sites == ("input.value",)
+
+
+def test_synthesized_dtensor_plain_module_attribute_is_detected() -> None:
+    """An unregistered tensor attribute must be covered by the typed refusal."""
+
+    model = TinyModel()
+    model.unregistered_shard = _fake_dtensor((2, 4))  # type: ignore[assignment]
+
+    finding = _find(detect_distributed_state(model, torch.randn(2, 4)), "dtensor")
+    assert finding.sites == ("<root>.unregistered_shard",)
+    with pytest.raises(DistributedCaptureUnsupportedError):
+        tl.trace(model, torch.randn(2, 4))
+
+
 def test_synthesized_dtensor_keyword_input_is_detected() -> None:
     """Keyword-argument inputs are walked too."""
 
@@ -258,9 +296,16 @@ def test_synthesized_sharded_tensor_is_detected_as_dtensor_kind() -> None:
     assert finding.refuses_capture is True
 
 
-def test_synthesized_pipeline_stage_attribute_is_detected_and_refuses() -> None:
+def test_synthesized_pipeline_stage_attribute_is_detected_and_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A pipeline-stage object on a module attribute refuses capture."""
 
+    monkeypatch.setitem(
+        sys.modules,
+        "torch.distributed.pipelining",
+        types.ModuleType("torch.distributed.pipelining"),
+    )
     model = TinyModel()
     model.stage = _FakePipelineStage()  # type: ignore[assignment]
 
@@ -275,14 +320,63 @@ def test_synthesized_pipeline_stage_attribute_is_detected_and_refuses() -> None:
     assert "pipeline_parallel" in str(excinfo.value)
 
 
-def test_pipeline_stage_inside_container_attribute_is_detected() -> None:
+def test_pipeline_stage_inside_container_attribute_is_detected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A stage held in a plain list attribute is still found."""
 
+    monkeypatch.setitem(
+        sys.modules,
+        "torch.distributed.pipelining",
+        types.ModuleType("torch.distributed.pipelining"),
+    )
     model = TinyModel()
     model.stages = [_FakePipelineStage()]  # type: ignore[assignment]
 
     finding = _find(detect_distributed_state(model, torch.randn(2, 4)), "pipeline_parallel")
     assert finding.sites == ("<root>.stages[0]",)
+
+
+def test_pipeline_stage_after_the_eighth_container_item_is_detected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Detection cannot silently stop before a later pipeline stage."""
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torch.distributed.pipelining",
+        types.ModuleType("torch.distributed.pipelining"),
+    )
+    model = TinyModel()
+    model.stages = [object() for _ in range(8)] + [_FakePipelineStage()]  # type: ignore[assignment]
+
+    finding = _find(detect_distributed_state(model, torch.randn(2, 4)), "pipeline_parallel")
+    assert finding.sites == ("<root>.stages[8]",)
+
+
+def test_pipeline_stage_in_a_nested_custom_container_is_detected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nested user containers cannot hide pipeline-stage state."""
+
+    class StageBox:
+        """User container holding a nested pipeline stage."""
+
+        def __init__(self) -> None:
+            """Build the nested state."""
+
+            self.payload = {"nested": [_FakePipelineStage()]}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torch.distributed.pipelining",
+        types.ModuleType("torch.distributed.pipelining"),
+    )
+    model = TinyModel()
+    model.stage_box = StageBox()  # type: ignore[assignment]
+
+    finding = _find(detect_distributed_state(model, torch.randn(2, 4)), "pipeline_parallel")
+    assert finding.sites == ("<root>.stage_box.payload['nested'][0]",)
 
 
 def test_module_internal_attributes_are_not_scanned() -> None:
@@ -372,9 +466,9 @@ def test_dense_tensor_subclass_is_not_a_false_positive() -> None:
 
 
 def test_refusing_kinds_is_the_single_source_of_truth() -> None:
-    """Only the two provably-corrupting kinds refuse; mesh/TP alone report."""
+    """Every active distributed execution mode that omits work refuses."""
 
-    assert REFUSING_KINDS == frozenset({"dtensor", "pipeline_parallel"})
+    assert REFUSING_KINDS == frozenset({"dtensor", "tensor_parallel", "pipeline_parallel"})
 
 
 def test_site_list_is_bounded_with_explicit_remainder() -> None:
@@ -412,9 +506,14 @@ def test_report_row_marks_refusal_and_matches_detection() -> None:
     assert row.suggestion
 
 
-def test_non_refusing_row_is_warning_not_error() -> None:
+def test_non_refusing_row_is_warning_not_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """A reported-but-not-refused condition must not claim capture refuses."""
 
+    monkeypatch.setitem(
+        sys.modules,
+        "torch.distributed.pipelining",
+        types.ModuleType("torch.distributed.pipelining"),
+    )
     model = TinyModel()
     model.stages = [_FakePipelineStage()]  # type: ignore[assignment]
     refusing_row = tl.compat.report(model, torch.randn(2, 4)).row("pipeline_parallel")
@@ -423,6 +522,13 @@ def test_non_refusing_row_is_warning_not_error() -> None:
     clean_row = tl.compat.report(TinyModel(), torch.randn(2, 4)).row("device_mesh")
     assert clean_row.severity == "ok"
     assert "DistributedCaptureUnsupportedError" not in clean_row.details
+
+    dtensor_clear = tl.compat.report(TinyModel(), torch.randn(2, 4)).row("dtensor")
+    assert "bounded entry scan" in dtensor_clear.details
+    assert "slots-only" in dtensor_clear.details
+
+    tp_clear = tl.compat.report(TinyModel(), torch.randn(2, 4)).row("tensor_parallel")
+    assert "user-wrapped or opaque hook" in tp_clear.details
 
 
 def test_report_renders_with_distributed_rows() -> None:
@@ -541,8 +647,90 @@ def test_real_tensor_parallel_model_is_detected_exactly(single_rank_cpu_mesh: ob
     assert "DeviceMesh(" in mesh_finding.detail
 
     tp_finding = _find(findings, "tensor_parallel")
-    assert tp_finding.refuses_capture is False
+    assert tp_finding.refuses_capture is True
     assert "non-replicated placement" in tp_finding.detail
+
+
+@pytest.mark.heavy
+def test_real_dtensor_in_custom_input_container_is_detected(
+    single_rank_cpu_mesh: object,
+) -> None:
+    """A real DTensor inside user container state reaches the typed boundary."""
+
+    tensor_api = pytest.importorskip("torch.distributed.tensor")
+
+    class Box:
+        """User input container holding a real DTensor."""
+
+        def __init__(self, value: torch.Tensor) -> None:
+            """Store the wrapped tensor.
+
+            Parameters
+            ----------
+            value:
+                DTensor input payload.
+            """
+
+            self.value = value
+
+    value = tensor_api.distribute_tensor(
+        torch.randn(2, 4),
+        single_rank_cpu_mesh,
+        placements=[tensor_api.Replicate()],
+    )
+    finding = _find(detect_distributed_state(nn.Identity(), Box(value)), "dtensor")
+    assert finding.exact is True
+    assert finding.sites == ("input.value",)
+    with pytest.raises(DistributedCaptureUnsupportedError):
+        tl.trace(nn.Identity(), Box(value))
+
+
+@pytest.mark.heavy
+def test_real_dtensor_in_plain_module_attribute_is_detected(
+    single_rank_cpu_mesh: object,
+) -> None:
+    """A real unregistered DTensor attribute reaches the typed boundary."""
+
+    tensor_api = pytest.importorskip("torch.distributed.tensor")
+    model = TinyModel()
+    model.unregistered_shard = tensor_api.distribute_tensor(  # type: ignore[assignment]
+        torch.randn(2, 4),
+        single_rank_cpu_mesh,
+        placements=[tensor_api.Replicate()],
+    )
+
+    finding = _find(detect_distributed_state(model, torch.randn(2, 4)), "dtensor")
+    assert finding.exact is True
+    assert finding.sites == ("<root>.unregistered_shard",)
+    with pytest.raises(DistributedCaptureUnsupportedError):
+        tl.trace(model, torch.randn(2, 4))
+
+
+@pytest.mark.heavy
+def test_real_dense_tensor_parallel_hook_is_detected_and_refuses(
+    single_rank_cpu_mesh: object,
+) -> None:
+    """``PrepareModuleInput`` TP hooks omit collectives even when parameters stay dense."""
+
+    parallel = pytest.importorskip("torch.distributed.tensor.parallel")
+    tensor_api = pytest.importorskip("torch.distributed.tensor")
+    model = nn.ReLU()
+    parallel.parallelize_module(
+        model,
+        single_rank_cpu_mesh,
+        parallel.PrepareModuleInput(
+            input_layouts=tensor_api.Shard(0),
+            desired_input_layouts=tensor_api.Replicate(),
+            use_local_output=True,
+        ),
+    )
+
+    finding = _find(detect_distributed_state(model, torch.randn(2, 4)), "tensor_parallel")
+    assert finding.refuses_capture is True
+    assert "forward hook" in finding.detail
+    with pytest.raises(DistributedCaptureUnsupportedError) as excinfo:
+        tl.trace(model, torch.randn(2, 4))
+    assert [item.kind for item in excinfo.value.fields["findings"]] == ["tensor_parallel"]
 
 
 @pytest.mark.heavy
@@ -565,7 +753,10 @@ def test_real_tensor_parallel_capture_refuses_instead_of_lying(
     message = str(excinfo.value)
     assert "fc.weight" in message
     assert "LIMITATIONS.md" in message
-    assert [item.kind for item in excinfo.value.fields["findings"]] == ["dtensor"]
+    assert [item.kind for item in excinfo.value.fields["findings"]] == [
+        "dtensor",
+        "tensor_parallel",
+    ]
 
     row = tl.compat.report(model, x).row("dtensor")
     assert row.detected is True

@@ -5488,6 +5488,17 @@ def _save_activation_fields(
             func_name=fields_dict.get("func_name"),
             is_inplace=bool(fields_dict.get("is_inplace", False)),
         )
+        budget_reservation = _admit_save_budget(
+            trace,
+            t,
+            fields_dict,
+            target_device=(
+                torch.device("cpu")
+                if save_mode == "cpu_async"
+                else _retention_device(t, fields_dict.get("output_device"))
+            ),
+            retain_in_ram=True,
+        )
         raw_out = safe_copy(
             t,
             fields_dict["detach_saved_activations"],
@@ -5557,7 +5568,7 @@ def _save_activation_fields(
             fields_dict["transformed_out_dtype"] = _dtype_or_none(transformed_out)
             fields_dict["transformed_activation_memory"] = _memory_or_none(transformed_out)
         fields_dict["has_saved_activation"] = True
-        _charge_save_budget(trace, fields_dict)
+        _commit_save_budget(trace, fields_dict, budget_reservation)
 
         _stream_activation_fields(trace, fields_dict)
 
@@ -5613,44 +5624,101 @@ def _stream_activation_fields(trace: "Trace", fields_dict: dict[str, Any]) -> No
         writer.write_blob(blob_id, tensor, kind=kind, label=label)
 
 
-def _charge_save_budget(trace: "Trace", fields_dict: dict[str, Any]) -> None:
-    """Charge this operation's RAM-retained payload bytes to the save budget.
+def _retention_device(tensor: torch.Tensor, configured: Any) -> torch.device:
+    """Return the projected RAM retention device for one activation.
+
+    Parameters
+    ----------
+    tensor:
+        Live source tensor.
+    configured:
+        User-configured output device or ``"same"``.
+
+    Returns
+    -------
+    torch.device
+        Device used for pre-allocation admission.
+    """
+
+    if configured in (None, "same", str(tensor.device)):
+        return tensor.device
+    return torch.device(configured)
+
+
+def _admit_save_budget(
+    trace: "Trace",
+    tensor: torch.Tensor,
+    fields_dict: dict[str, Any],
+    *,
+    target_device: torch.device,
+    retain_in_ram: bool,
+) -> Any:
+    """Pre-admit a source-sized retained payload before any copy allocation.
+
+    Parameters
+    ----------
+    trace:
+        Active trace carrying the accountant.
+    tensor:
+        Live source tensor whose copy would be retained.
+    fields_dict:
+        Current operation fields used to name the admission site.
+    target_device:
+        Projected device of the retained payload.
+    retain_in_ram:
+        Whether this storage route keeps a RAM payload.
+
+    Returns
+    -------
+    Any
+        Opaque reservation reconciled after allocation, or ``None``.
+    """
+
+    budget = getattr(trace, "_save_budget_accountant", None)
+    if budget is None or not retain_in_ram:
+        return None
+    label = fields_dict.get("_layer_label_raw") or fields_dict.get("_label_raw") or "<unlabeled>"
+    shape = tuple(tensor.shape)
+    num_bytes = get_memory_amount_from_metadata(tensor, shape, tensor.dtype)
+    return budget.admit(str(label), target_device, int(num_bytes))
+
+
+def _commit_save_budget(
+    trace: "Trace",
+    fields_dict: dict[str, Any],
+    reservation: Any,
+) -> None:
+    """Reconcile admission against alias-aware retained physical storage.
 
     Parameters
     ----------
     trace:
         Active trace, carrying the per-capture accountant.
     fields_dict:
-        Operation fields, already populated with the retained payloads and their
-        byte counts.
+        Operation fields populated with retained payloads.
+    reservation:
+        Opaque pre-allocation reservation returned by :func:`_admit_save_budget`.
 
     Returns
     -------
     None
-        Charges the accountant, which raises when a device budget is crossed.
+        Reconciles the accountant, which raises when added transform storage crosses
+        the budget.
 
     Notes
     -----
-    Only payloads actually held in RAM are charged: a payload streamed to disk
-    costs no process memory, so charging it would refuse captures that were never
-    going to OOM. This runs once per saved activation and is a dict lookup, an
-    integer add, and a compare when the budget holds.
+    Storage identity, not logical field identity, is charged. An identity transform
+    therefore counts once. A transform's output size cannot be known before user
+    code runs; any storage beyond the source-sized admission is charged here.
     """
 
     budget = getattr(trace, "_save_budget_accountant", None)
-    if budget is None:
+    if budget is None or reservation is None:
         return
-    label = fields_dict.get("_layer_label_raw") or fields_dict.get("_label_raw") or "<unlabeled>"
-    for payload_key, memory_key in (
-        ("out", "activation_memory"),
-        ("transformed_out", "transformed_activation_memory"),
-    ):
-        payload = fields_dict.get(payload_key)
-        if not isinstance(payload, torch.Tensor):
-            continue
-        num_bytes = fields_dict.get(memory_key) or 0
-        if num_bytes:
-            budget.charge(str(label), payload.device, int(num_bytes))
+    budget.commit(
+        reservation,
+        (fields_dict.get("out"), fields_dict.get("transformed_out")),
+    )
 
 
 def _save_predicate_activation_fields(
@@ -5684,6 +5752,13 @@ def _save_predicate_activation_fields(
     intent = StorageIntent(
         in_ram=streaming is None or streaming.bundle_path is None or streaming.retain_in_memory,
         on_disk=streaming is not None and streaming.bundle_path is not None,
+    )
+    budget_reservation = _admit_save_budget(
+        trace,
+        tensor,
+        fields_dict,
+        target_device=_retention_device(tensor, spec.device),
+        retain_in_ram=intent.in_ram,
     )
     (
         ram_payload,
@@ -5726,7 +5801,7 @@ def _save_predicate_activation_fields(
     fields_dict["transformed_out_dtype"] = _dtype_or_none(transformed_metadata)
     fields_dict["transformed_activation_memory"] = _memory_or_none(transformed_metadata)
     fields_dict["has_saved_activation"] = True
-    _charge_save_budget(trace, fields_dict)
+    _commit_save_budget(trace, fields_dict, budget_reservation)
     _stream_predicate_payloads(
         trace,
         fields_dict,
