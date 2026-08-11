@@ -1,37 +1,44 @@
-"""Fixed-order controller for live operation capture."""
+"""DEPRECATED import-path shim for the removed capture kernel layer.
+
+The fixed-order ``CaptureKernel``/``OpObservation`` pipeline was deleted in
+the backend migration: production capture always ran the straight-line
+per-op commit path in ``torchlens.backends.torch.ops``, and the kernel's
+counters, stage ordering, and ledgers were an inert parallel lane. This
+module keeps ``import torchlens.capture.kernel`` working for external code;
+the classes are inert shells whose behavioral entry points raise.
+"""
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable, NoReturn
 
-from .plan import EnrichmentLevel
-
-if TYPE_CHECKING:
-    from .session import CaptureSession
+warnings.warn(
+    "torchlens.capture.kernel is deprecated: the kernel/ledger/projector "
+    "layer was removed and live capture commits ops on the straight-line "
+    "backend path. This import shim will be dropped in a future release.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 InterventionTarget = Callable[[Any], Any]
 ProducerTarget = Callable[..., None]
 ObservationTarget = Callable[["OpObservation"], None]
-SelectionTarget = Callable[["OpObservation"], EnrichmentLevel]
 
 
 @dataclass(slots=True)
 class OpObservation:
-    """Transient live values observed for one backend operation.
+    """DEPRECATED inert shim: transient live values for one backend operation.
 
-    Parameters
-    ----------
-    operation_key
-        Backend-normalized operation name used for enrichment lookup.
-    value
-        Live output value.  This object must not escape into the durable journal.
+    Nothing in TorchLens constructs or processes these anymore; the class
+    exists only so the historical import keeps resolving.
     """
 
     operation_key: str
     value: Any
     normalize_metadata: ObservationTarget | None = None
-    select: SelectionTarget | None = None
+    select: Callable[[OpObservation], Any] | None = None
     retain_payload: ObservationTarget | None = None
     append: ObservationTarget | None = None
     update_indexes_history: ObservationTarget | None = None
@@ -39,205 +46,55 @@ class OpObservation:
     facts: dict[str, Any] = field(default_factory=dict)
 
 
-def _run_observation_stages(
-    observation: OpObservation,
-    demanded: EnrichmentLevel,
-    *,
-    mark_metadata: Callable[[], None] | None = None,
-    mark_payload: Callable[[], None] | None = None,
-    mark_append: Callable[[], None] | None = None,
-    mark_update_indexes_history: Callable[[], None] | None = None,
-    mark_nonfinite_halt: Callable[[], None] | None = None,
-) -> None:
-    """Run the fixed post-selection observation stages in kernel order.
-
-    Parameters
-    ----------
-    observation
-        Backend observation whose callbacks implement the current stage hooks.
-    demanded
-        Enrichment tier already selected for ``observation``.
-    mark_metadata
-        Optional bookkeeping callback for the metadata stage.
-    mark_payload
-        Optional bookkeeping callback for the payload stage.
-    mark_append
-        Optional bookkeeping callback for the append stage.
-    mark_update_indexes_history
-        Optional bookkeeping callback for the index/history stage.
-    mark_nonfinite_halt
-        Optional bookkeeping callback for the non-finite/halt stage.
-    """
-
-    metadata_enabled = demanded is not EnrichmentLevel.SHELL
-    payload_enabled = demanded is EnrichmentLevel.PAYLOAD
-    if metadata_enabled and observation.normalize_metadata is not None:
-        if mark_metadata is not None:
-            mark_metadata()
-        observation.normalize_metadata(observation)
-    if payload_enabled and observation.retain_payload is not None:
-        if mark_payload is not None:
-            mark_payload()
-        observation.retain_payload(observation)
-    if observation.append is not None:
-        observation.append(observation)
-    if mark_append is not None:
-        mark_append()
-    if observation.update_indexes_history is not None:
-        observation.update_indexes_history(observation)
-    if mark_update_indexes_history is not None:
-        mark_update_indexes_history()
-    if observation.evaluate_nonfinite_halt is not None:
-        observation.evaluate_nonfinite_halt(observation)
-    if mark_nonfinite_halt is not None:
-        mark_nonfinite_halt()
-
-
 class CaptureKernel:
-    """Run one statically ordered operation pipeline.
+    """DEPRECATED inert shim for the removed fixed-order capture kernel.
 
-    ``process`` gates backend-native enrichment targets on the compiled demand.
-    ``emit`` is the compatibility entry point for legacy producers, which own
-    their enrichment decisions internally and therefore run exactly once.
+    Constructing it is allowed for import compatibility; the behavioral entry
+    points raise because the stage pipeline they drove no longer exists.
     """
 
     __slots__ = ("_session",)
 
-    def __init__(self, session: CaptureSession) -> None:
-        """Bind the mutable capture session used by kernel stages.
-
-        Parameters
-        ----------
-        session
-            Mutable owner of the active capture run.
-        """
+    def __init__(self, session: Any) -> None:
+        """Store the session reference for repr/debug compatibility only."""
 
         self._session = session
 
-    def apply_intervention(
-        self,
-        observation: OpObservation,
-        target: InterventionTarget,
-    ) -> Any:
-        """Apply intervention to a live value before any durable fact freezes.
+    def _removed(self, entry_point: str) -> NoReturn:
+        """Raise the uniform removed-layer error for one entry point."""
 
-        Parameters
-        ----------
-        observation
-            Transient observation holding the live backend value.
-        target
-            Pre-existing live intervention implementation.
-
-        Returns
-        -------
-        Any
-            Original or replaced value to pass to downstream user code.
-        """
-
-        self._reserve_identity_context(observation.operation_key)
-        observation.value = target(observation.value)
-        self._session.counters["kernel_interventions"] = (
-            self._session.counters.get("kernel_interventions", 0) + 1
+        raise RuntimeError(
+            f"CaptureKernel.{entry_point} was removed with the kernel/ledger/"
+            "projector layer: live capture commits each op on the straight-line "
+            "backend path (torchlens.backends.torch.ops) instead."
         )
-        return observation.value
-
-    def emit(
-        self,
-        operation_key: str,
-        producer: ProducerTarget,
-        *producer_args: Any,
-    ) -> None:
-        """Run one legacy producer that owns its enrichment decisions.
-
-        Parameters
-        ----------
-        operation_key
-            Backend-normalized operation name.
-        producer
-            Precompiled exhaustive, predicate, or refresh producer target.
-        *producer_args
-            Existing positional producer inputs, passed through unchanged.
-        """
-
-        del operation_key
-        producer(*producer_args)
 
     def process(self, observation: OpObservation) -> None:
-        """Process one backend observation in the fixed kernel order.
+        """Raise: the fixed-order observation pipeline was removed."""
 
-        Parameters
-        ----------
-        observation
-            Transient live observation and backend-native stage targets.
-        """
+        self._removed("process")
 
-        self._reserve_identity_context(observation.operation_key)
-        demanded = self._session.plan.enrichment_for(observation.operation_key)
-        if observation.select is not None:
-            demanded = observation.select(observation)
-        _run_observation_stages(
-            observation,
-            demanded,
-            mark_metadata=self._normalize_metadata,
-            mark_payload=self._retain_payload,
-            mark_append=self._append_facts_and_sidecars,
-            mark_update_indexes_history=self._update_indexes_history,
-            mark_nonfinite_halt=self._evaluate_nonfinite_halt,
-        )
+    def emit(self, operation_key: str, producer: ProducerTarget, *producer_args: Any) -> None:
+        """Raise: the legacy producer entry point was removed."""
+
+        self._removed("emit")
+
+    def apply_intervention(self, observation: OpObservation, target: InterventionTarget) -> Any:
+        """Raise: kernel-mediated intervention was removed."""
+
+        self._removed("apply_intervention")
 
     def begin_observation(self, operation_key: str) -> None:
-        """Reserve one observation without allocating a callback carrier.
+        """Raise: kernel observation accounting was removed."""
 
-        Parameters
-        ----------
-        operation_key
-            Backend-normalized operation name.
+        self._removed("begin_observation")
 
-        Notes
-        -----
-        Backend-specialized hot paths call this before their selector so the
-        observation counter retains the generic kernel's exception boundary.
-        """
+    def mark_metadata(self, *args: Any, **kwargs: Any) -> None:
+        """Raise: kernel metadata staging was removed."""
 
-        self._reserve_identity_context(operation_key)
+        self._removed("mark_metadata")
 
-    def mark_metadata(self) -> None:
-        """Mark entry into carrier-free metadata normalization."""
+    def mark_payload(self, *args: Any, **kwargs: Any) -> None:
+        """Raise: kernel payload staging was removed."""
 
-        self._normalize_metadata()
-
-    def mark_payload(self) -> None:
-        """Mark entry into carrier-free payload retention."""
-
-        self._retain_payload()
-
-    def _reserve_identity_context(self, operation_key: str) -> None:
-        """Mark entry into identity/context reservation without allocating sidecars."""
-
-        del operation_key
-        self._session.counters["kernel_observations"] = (
-            self._session.counters.get("kernel_observations", 0) + 1
-        )
-
-    def _normalize_metadata(self) -> None:
-        """Enter the demanded metadata normalization tier."""
-
-        self._session.counters["kernel_metadata"] = (
-            self._session.counters.get("kernel_metadata", 0) + 1
-        )
-
-    def _retain_payload(self) -> None:
-        """Enter the demanded payload-retention tier."""
-
-        self._session.counters["kernel_payload"] = (
-            self._session.counters.get("kernel_payload", 0) + 1
-        )
-
-    def _append_facts_and_sidecars(self) -> None:
-        """Mark completion of producer append into journal and sidecars."""
-
-    def _update_indexes_history(self) -> None:
-        """Mark completion of producer index and history updates."""
-
-    def _evaluate_nonfinite_halt(self) -> None:
-        """Mark completion of producer non-finite and halt evaluation."""
+        self._removed("mark_payload")

@@ -100,11 +100,9 @@ class CapturedRun:
         if events is None:
             return ()
         return (
-            *events.module_events,
             *events.module_prep_events,
             *events.module_enter_events,
             *events.module_exit_events,
-            *events.conditional_events,
             *events.output_version_events,
         )
 

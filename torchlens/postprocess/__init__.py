@@ -38,7 +38,8 @@ import torch
 import warnings
 
 from ..capture.session import capture_session_for_events
-from ..capture.projectors import TraceProjector
+from ..captured_run import remember_event_stream
+from ..ir.capture_events import _clone_op_event_for_replay
 from ..backends.torch.ops import _compact_ancestor_sets
 from ..utils.tensor_utils import _is_cuda_available
 from ..utils.hashing import (
@@ -98,7 +99,6 @@ __all__ = [
     "postprocess",
 ]
 from ..utils.display import _vprint, _vtimed
-from ..captured_run import remember_event_stream
 
 
 _POSTPROCESS_ASSERT_ENV = "TORCHLENS_POSTPROCESS_ASSERTIONS"
@@ -457,7 +457,7 @@ def postprocess(
         remember_event_stream(self, capture_events)
         capture_session = capture_session_for_events(capture_events)
         sealed_op_events = (
-            list(TraceProjector(capture_session.seal()).events())
+            [_clone_op_event_for_replay(event) for event in capture_session.seal().events]
             if capture_session is not None
             else list(capture_events.op_events)
         )
@@ -465,9 +465,6 @@ def postprocess(
         working_events.op_events = sealed_op_events
         working_events.op_event_by_label_raw = {
             event.label_raw: event for event in sealed_op_events
-        }
-        working_events.op_event_index_by_label_raw = {
-            event.label_raw: index for index, event in enumerate(sealed_op_events)
         }
         self._capture_events = working_events
         with _vtimed(self, "  Step 0: Materialize capture events"):

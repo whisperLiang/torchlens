@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -17,6 +17,7 @@ from torchlens.backends.torch.backward import (
     _make_grad_fn_prehook,
 )
 from torchlens.data_classes.grad_fn import GradFn
+from torchlens.ir import CaptureEvents
 from torchlens.intervention.errors import HookValueError, HelperMountError, SelectorCompositionError
 from torchlens.intervention.helpers import _helper_spec
 from torchlens.intervention.hooks import _selector_from_target_spec, normalize_hook_plan
@@ -75,6 +76,9 @@ class _TraceStub:
     grad_fn_logs: dict[int, GradFn]
     _grad_op_nums_to_save: str = "all"
     last_run: dict[str, Any] | None = None
+    # A live trace always owns its capture event stream; hooks refuse typed
+    # when it is absent, so the stub must model ownership explicitly.
+    _capture_events: CaptureEvents = field(default_factory=CaptureEvents)
 
 
 @pytest.fixture(autouse=True)

@@ -17,6 +17,16 @@ class TorchLensPostfuncError(CaptureError, RuntimeError):
     """Raised when activation_transform or grad_transform raises."""
 
 
+class BackwardStreamUnavailableError(CaptureError, RuntimeError):
+    """Raised when backward capture needs an event stream the trace no longer owns.
+
+    Historically a missing stream was silently replaced with a fresh empty
+    buffer, so post-hoc backward capture appended into a container nothing
+    read and reported success. A released or never-captured stream is now a
+    typed refusal instead of a silent wrong answer.
+    """
+
+
 class MutatedReferenceError(CaptureError, RuntimeError):
     """Raised when a reference-mode saved tensor changed before it was read."""
 

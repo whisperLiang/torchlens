@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Literal, cast
 
@@ -1343,26 +1343,13 @@ def _backward_pass_observed_forward_position(trace: "Trace", pass_index: int) ->
 def _resolve_op_grad_event_label(trace: "Trace", op_label: str) -> str:
     """Return the final lookup label for an ``OpGradObserved`` label.
 
-    Parameters
-    ----------
-    trace:
-        Trace containing postprocessed label maps.
-    op_label:
-        Raw or final label recorded by the tensor hook.
-
-    Returns
-    -------
-    str
-        Final lookup label when available, otherwise the original label.
+    Delegates to the single implementation next to the event emitter so the
+    validation-side resolution can never drift from the projection-side one.
     """
 
-    raw_to_final_layer = getattr(trace, "_raw_to_final_layer_labels", {})
-    if isinstance(raw_to_final_layer, dict) and op_label in raw_to_final_layer:
-        return str(raw_to_final_layer[op_label])
-    raw_to_final_op = getattr(trace, "_raw_to_final_op_labels", {})
-    if isinstance(raw_to_final_op, dict) and op_label in raw_to_final_op:
-        return str(raw_to_final_op[op_label])
-    return op_label
+    from ..backends.torch.backward import _resolve_op_grad_event_label as _impl
+
+    return _impl(trace, op_label)
 
 
 def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
@@ -1382,7 +1369,14 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
         longer match projected records.
     """
 
-    from ..ir.events import BackwardPassEnd, BackwardPassStart, GradFnFired, OpGradObserved
+    from ..ir.events import (
+        BackwardPassEnd,
+        BackwardPassStart,
+        GradFnDiscovered,
+        GradFnFired,
+        OpGradObserved,
+        ParamGradObserved,
+    )
 
     capture_events = getattr(trace, "_capture_events", None)
     events = list(getattr(capture_events, "backward_events", ()) or ())
@@ -1393,17 +1387,34 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
     ends = [event for event in events if isinstance(event, BackwardPassEnd)]
     op_grad_events = [event for event in events if isinstance(event, OpGradObserved)]
     fired_events = [event for event in events if isinstance(event, GradFnFired)]
+    param_grad_events = [event for event in events if isinstance(event, ParamGradObserved)]
     start_indices = [event.pass_index for event in starts]
     end_indices = [event.pass_index for event in ends]
     if len(start_indices) != len(set(start_indices)):
         raise MetadataInvariantError(name, "backward events contain duplicate pass starts")
     if len(end_indices) != len(set(end_indices)):
         raise MetadataInvariantError(name, "backward events contain duplicate pass ends")
-    bracket_indices = sorted(set(start_indices) | set(end_indices))
-    if bracket_indices != list(range(1, len(bracket_indices) + 1)):
+    # A detached stream (pickle restore / fork over an existing projection)
+    # records ``pass_index_base``: the passes materialized before the stream
+    # existed. Within the stream, brackets must be dense from base + 1 — a
+    # live capture stream has base 0, so this is the historical dense-from-1
+    # check there. The base is written only by the two detach sites; events
+    # at or below it can never appear here (they would break density and the
+    # missing-pass checks below).
+    pass_index_base = int(getattr(capture_events, "pass_index_base", 0) or 0)
+    if pass_index_base < 0:
         raise MetadataInvariantError(
             name,
-            f"backward event pass indices {bracket_indices!r} are not dense from 1",
+            f"backward stream pass-index base {pass_index_base!r} is negative",
+        )
+    bracket_indices = sorted(set(start_indices) | set(end_indices))
+    if bracket_indices != list(
+        range(pass_index_base + 1, pass_index_base + 1 + len(bracket_indices))
+    ):
+        raise MetadataInvariantError(
+            name,
+            f"backward event pass indices {bracket_indices!r} are not dense "
+            f"from {pass_index_base + 1}",
         )
     if set(start_indices) != set(end_indices):
         raise MetadataInvariantError(
@@ -1424,18 +1435,122 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
                 name,
                 f"backward event references missing pass {fired_event.pass_index!r}",
             )
+    for param_grad_event in param_grad_events:
+        if param_grad_event.pass_index not in valid_pass_indices:
+            raise MetadataInvariantError(
+                name,
+                f"backward event references missing pass {param_grad_event.pass_index!r}",
+            )
 
-    seq_values = [event.seq for event in events if isinstance(event, OpGradObserved | GradFnFired)]
+    seq_values = [event.seq for event in events]
     if seq_values != sorted(seq_values) or len(seq_values) != len(set(seq_values)):
         raise MetadataInvariantError(name, "backward event seq values must be unique and monotonic")
 
+    # Exact bracketing: the writer stamps one run-monotonic seq on every
+    # backward event, so every pass-scoped fact must sit strictly between its
+    # pass's start and terminal records. This is a recorded fact, not an
+    # inference from timestamps or list positions.
+    start_seq_by_pass = {event.pass_index: event.seq for event in starts}
+    end_seq_by_pass = {event.pass_index: event.seq for event in ends}
+    pass_scoped_events: list[OpGradObserved | GradFnFired | ParamGradObserved] = [
+        *op_grad_events,
+        *fired_events,
+        *param_grad_events,
+    ]
+    for event in pass_scoped_events:
+        start_seq = start_seq_by_pass.get(event.pass_index)
+        if start_seq is not None and event.seq < start_seq:
+            raise MetadataInvariantError(
+                name,
+                f"backward event seq {event.seq} precedes its pass "
+                f"{event.pass_index} start (seq {start_seq})",
+            )
+        end_seq = end_seq_by_pass.get(event.pass_index)
+        if end_seq is not None and event.seq > end_seq:
+            raise MetadataInvariantError(
+                name,
+                f"backward event seq {event.seq} follows its pass "
+                f"{event.pass_index} end (seq {end_seq})",
+            )
+    for pass_index, start_seq in start_seq_by_pass.items():
+        end_seq = end_seq_by_pass.get(pass_index)
+        if end_seq is not None and end_seq <= start_seq:
+            raise MetadataInvariantError(
+                name,
+                f"backward pass {pass_index} end (seq {end_seq}) does not "
+                f"follow its start (seq {start_seq})",
+            )
+
+    # Higher-order discoveries carry ``created_in_pass``: the writer emits them
+    # during that pass (hook-time terminals and the pre-End rewalk), so their
+    # seq must sit inside the same bracket as every other pass-scoped fact.
+    for discovered_event in events:
+        if (
+            not isinstance(discovered_event, GradFnDiscovered)
+            or discovered_event.created_in_pass is None
+        ):
+            continue
+        created_in_pass = discovered_event.created_in_pass
+        if created_in_pass not in valid_pass_indices:
+            raise MetadataInvariantError(
+                name,
+                f"GradFnDiscovered references missing pass {created_in_pass!r}",
+            )
+        start_seq = start_seq_by_pass.get(created_in_pass)
+        if start_seq is not None and discovered_event.seq < start_seq:
+            raise MetadataInvariantError(
+                name,
+                f"higher-order GradFnDiscovered seq {discovered_event.seq} precedes "
+                f"its pass {created_in_pass} start (seq {start_seq})",
+            )
+        end_seq = end_seq_by_pass.get(created_in_pass)
+        if end_seq is not None and discovered_event.seq > end_seq:
+            raise MetadataInvariantError(
+                name,
+                f"higher-order GradFnDiscovered seq {discovered_event.seq} follows "
+                f"its pass {created_in_pass} end (seq {end_seq})",
+            )
+
+    # Exact bracketing also forbids partial interleaving: with one
+    # run-monotonic seq, pass brackets must be disjoint or properly nested
+    # (a reentrant pass opened inside a hook closes before its outer pass).
+    bracket_intervals = sorted(
+        (start_seq, end_seq_by_pass[pass_index], pass_index)
+        for pass_index, start_seq in start_seq_by_pass.items()
+        if pass_index in end_seq_by_pass
+    )
+    open_bracket_stack: list[tuple[int, int, int]] = []
+    for interval in bracket_intervals:
+        interval_start, interval_end, interval_pass = interval
+        while open_bracket_stack and open_bracket_stack[-1][1] < interval_start:
+            open_bracket_stack.pop()
+        if open_bracket_stack and interval_end > open_bracket_stack[-1][1]:
+            outer_start, outer_end, outer_pass = open_bracket_stack[-1]
+            raise MetadataInvariantError(
+                name,
+                f"backward pass {interval_pass} bracket (seq {interval_start}.."
+                f"{interval_end}) partially overlaps pass {outer_pass} bracket "
+                f"(seq {outer_start}..{outer_end})",
+            )
+        open_bracket_stack.append(interval)
+
+    # Reconcile by MULTIPLICITY, not membership: a duplicated or dropped
+    # record/event PAIR keeps set equality but changes the count, so only a
+    # multiset comparison catches it. Reconciliation is scoped to the
+    # stream's window: records for passes at or below ``pass_index_base`` are
+    # preserved projections whose source events were dropped with the
+    # pre-detach stream by design, so the stream is authoritative (and this
+    # comparison exact) only for passes strictly above the base. With base 0
+    # every record is in scope — the historical full comparison.
     layer_labels = set(getattr(trace, "layer_dict_all_keys", {}))
-    projected_grad_records: set[tuple[str, int]] = set()
+    projected_grad_records: Counter[tuple[str, int]] = Counter()
     for layer in getattr(trace, "layer_list", []):
         for record in getattr(layer, "_grad_records", ()):
-            projected_grad_records.add((layer.layer_label, record.backward_pass_index))
+            if record.backward_pass_index <= pass_index_base:
+                continue
+            projected_grad_records[(layer.layer_label, record.backward_pass_index)] += 1
 
-    event_grad_records: set[tuple[str, int]] = set()
+    event_grad_records: Counter[tuple[str, int]] = Counter()
     for op_grad_event in op_grad_events:
         event_label = _resolve_op_grad_event_label(trace, op_grad_event.op_label)
         if event_label not in layer_labels:
@@ -1444,16 +1559,41 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
                 f"OpGradObserved points to missing op label {op_grad_event.op_label!r}",
             )
         event_op = trace[event_label]
-        event_grad_records.add((event_op.layer_label, op_grad_event.pass_index))
+        event_grad_records[(event_op.layer_label, op_grad_event.pass_index)] += 1
     if projected_grad_records != event_grad_records:
         raise MetadataInvariantError(
             name,
-            "projected op gradient records do not match OpGradObserved events",
+            "projected op gradient records do not match OpGradObserved events by multiplicity",
+        )
+
+    param_addresses = set(getattr(trace, "param_logs", {}).keys())
+    projected_param_records: Counter[tuple[str, int]] = Counter()
+    for param_address, param_log in getattr(trace, "param_logs", {}).items():
+        for record in getattr(param_log, "_grad_records", ()):
+            if record.backward_pass_index <= pass_index_base:
+                continue
+            projected_param_records[(param_address, record.backward_pass_index)] += 1
+    event_param_records: Counter[tuple[str, int]] = Counter()
+    for param_grad_event in param_grad_events:
+        if param_grad_event.param_address not in param_addresses:
+            raise MetadataInvariantError(
+                name,
+                "ParamGradObserved points to missing param address "
+                f"{param_grad_event.param_address!r}",
+            )
+        event_param_records[(param_grad_event.param_address, param_grad_event.pass_index)] += 1
+    if projected_param_records != event_param_records:
+        raise MetadataInvariantError(
+            name,
+            "projected param gradient records do not match ParamGradObserved events "
+            "by multiplicity",
         )
 
     projected_calls: dict[tuple[int, int], int] = defaultdict(int)
     for grad_fn_handle in getattr(trace, "grad_fn_logs", {}).values():
         for call in grad_fn_handle.calls.values():
+            if call.backward_pass_index <= pass_index_base:
+                continue
             projected_calls[(grad_fn_handle.grad_fn_object_id, call.backward_pass_index)] += 1
     event_calls: dict[tuple[int, int], int] = defaultdict(int)
     grad_fn_ids = set(getattr(trace, "grad_fn_logs", {}))

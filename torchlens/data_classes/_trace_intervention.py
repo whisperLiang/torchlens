@@ -2,6 +2,7 @@
 
 import copy
 import copyreg
+import os
 from collections import OrderedDict
 from functools import cached_property
 from pathlib import Path
@@ -34,6 +35,19 @@ from ..options import InterventionOptions, ReplayOptions, merge_intervention_opt
 from .layer import Layer, OpAccessor
 from .op import Op
 from ._state_adapter import state_items, state_new, state_restore
+
+# Session-only backward projection guard/fold fields derived from the event
+# stream. Any operation that replaces a trace's stream (pickle restore, fork)
+# must drop these so the next projection access materializes from the new
+# stream instead of trusting a guard computed over the old one.
+_STREAM_DERIVED_GUARD_FIELDS = frozenset(
+    {
+        "_backward_projection_event_count",
+        "_backward_projection_revision",
+        "_backward_projection_fold_state",
+        "_tl_materializing_backward_projection",
+    }
+)
 
 
 class _ForkMemo(dict):
@@ -508,6 +522,12 @@ def _memoized_deep_copy(
         # entries are discarded rather than handed to the next field.
         if mark is not None:
             cast(_ForkMemo, memo).rollback(mark)
+        # The degradation to ``on_failure`` is intentional for opaque field
+        # values, but it also silences genuine copy bugs (a field that MUST
+        # fork independently silently becoming shared). The opt-in debug
+        # channel re-raises so that failure class is never invisible.
+        if os.environ.get("TORCHLENS_DEBUG_FORK_COPY"):
+            raise
         if fallback is _PROPAGATE:
             return on_failure(value)
         try:
@@ -1279,6 +1299,23 @@ class TraceInterventionMixin(_TraceMixinBase):
             for field_name, value in state_items(self)
         }
         state_restore(fork, fork_state)
+        # Stream-derived guard/fold state must be ABSENT (not None) on the
+        # fork, mirroring pickle restore: the fork's detached stream starts a
+        # new projection window and its first materialize must run cold.
+        for stale_guard_field in _STREAM_DERIVED_GUARD_FIELDS:
+            fork.__dict__.pop(stale_guard_field, None)
+        # The fork gets exactly ONE fresh DETACHED stream — never the
+        # parent's (shared lists let a fork backward corrupt the parent's
+        # projection), and never none (a fork remains a supported
+        # backward-capture target like a restored trace). Whether the parent
+        # held its stream under ``capture_events`` (live capture),
+        # ``_capture_events`` (restored), or only in the captured-run
+        # registry, the fork's stream lives under ``_capture_events`` like a
+        # restored trace's.
+        from ..ir.capture_events import CaptureEvents
+
+        fork.__dict__.pop("capture_events", None)
+        fork.__dict__["_capture_events"] = CaptureEvents.detached_from(self)
         fork.parent_run = weakref.ref(self)
         fork.trace_label = name or self._next_fork_name()
         fork._intervention_spec = copy.deepcopy(self._ensure_intervention_spec(), memo)
@@ -1348,6 +1385,23 @@ class TraceInterventionMixin(_TraceMixinBase):
             # reads them, and mappingproxy does not implement the pickle hooks
             # used by copy/deepcopy.
             return value
+        if field_name in ("capture_events", "_capture_events"):
+            # Event streams never fork by copy: deep-copying one raises on the
+            # frozen ``GradFnDiscovered.source`` proxies, which used to degrade
+            # to a SHALLOW copy — a silently shared ``backward_events`` list
+            # that let a fork's backward corrupt the parent's projection.
+            # ``_fork_trace`` installs ONE fresh detached stream after the
+            # field pass (live captures store the stream under
+            # ``capture_events``, restored traces under ``_capture_events``,
+            # and some parents hold it only in the captured-run registry, so
+            # the single install site lives there).
+            return None
+        if field_name in _STREAM_DERIVED_GUARD_FIELDS:
+            # Projection guard and fold state are derived from the stream that
+            # was just replaced; carrying the parent's values would make the
+            # fork's guard silently skip (or fold onto foreign state) its
+            # first materialize. ``_fork_trace`` pops these after restore.
+            return None
         policy = MODEL_LOG_FIELD_FORK_POLICY.get(field_name)
         if policy is None:
             policy = self._default_fork_policy(value)

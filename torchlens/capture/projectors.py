@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterable, cast
 import warnings
 import weakref
 from weakref import WeakKeyDictionary
 
+from ..ir.capture_events import _clone_op_event_for_replay
 from ..ir.events import OpEvent
 from .session import CapturedRunCore
 
@@ -15,6 +16,69 @@ if TYPE_CHECKING:
     from ..fastlog.types import ActivationRecord
 
 _REFRESH_SOURCES: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
+
+
+@dataclass(frozen=True, slots=True)
+class _DeprecatedTraceProjector:
+    """DEPRECATED delegating shim for the removed ledger-backed TraceProjector.
+
+    The kernel/ledger/projector layer was deleted (its ledgers re-derived
+    every fact from the events themselves), so this shim reads the sealed
+    event spine directly. ``events()`` preserves the old contract: producer
+    order, repeatedly readable, independent mutable dict fields per call.
+    """
+
+    core: CapturedRunCore
+
+    def events(self) -> tuple[OpEvent, ...]:
+        """Return operation events in producer order.
+
+        Returns
+        -------
+        tuple[OpEvent, ...]
+            Cloned operation facts with independent mutable dict fields.
+        """
+
+        return tuple(_clone_op_event_for_replay(event) for event in self.core.events)
+
+
+def __getattr__(name: str) -> object:
+    """Return the deprecated ``TraceProjector`` compatibility shim.
+
+    Parameters
+    ----------
+    name
+        Attribute name requested from :mod:`torchlens.capture.projectors`.
+
+    Returns
+    -------
+    object
+        Delegating compatibility class.
+
+    Raises
+    ------
+    AttributeError
+        If ``name`` is not a deprecated compatibility export.
+    """
+
+    if name == "TraceProjector":
+        if name not in _WARNED_DEPRECATED_NAMES:
+            _WARNED_DEPRECATED_NAMES.add(name)
+            warnings.warn(
+                "torchlens.capture.projectors.TraceProjector is deprecated: the "
+                "ledger-backed projector layer was removed. This delegating shim "
+                "reads the sealed CapturedRunCore event spine directly and will be "
+                "dropped in a future release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return _DeprecatedTraceProjector
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# Deprecated names warn ONCE per process; repeated attribute access stays
+# silent even under an ``always`` warning filter.
+_WARNED_DEPRECATED_NAMES: set[str] = set()
 
 
 def _distinct_label_index_keys(label: str, raw_label: str | None) -> tuple[str, ...]:
@@ -108,66 +172,15 @@ def _format_parent_arg_positions(
     return ", ".join(rendered_parts)
 
 
-def _event_from_core(core: CapturedRunCore, fact_index: int) -> OpEvent:
-    """Resolve one event fact with its authoritative stable-id sidecars.
+def _cloned_core_events(core: CapturedRunCore) -> tuple[OpEvent, ...]:
+    """Return sealed core events with independent mutable dict fields.
 
-    Parameters
-    ----------
-    core
-        Sealed source for the projection.
-    fact_index
-        Producer-order index of the event fact.
-
-    Returns
-    -------
-    OpEvent
-        Immutable event view with decision and payload fields sourced from the
-        ledgers keyed by the fact's stable event identity.
+    Projection consumers may mutate ``transform_config`` and
+    ``parent_arg_positions`` in place, so each event is re-created with fresh
+    copies of those two dicts; every other field is shared by reference.
     """
 
-    fact = core.event_facts[fact_index]
-    event = fact.event
-    decision = core.decisions.get(fact.event_id)
-    payload = core.payloads.get(fact.event_id)
-    return replace(
-        event,
-        predicate_matched=(
-            event.predicate_matched if decision is None else decision.predicate_matched
-        ),
-        intervention_fired=(
-            event.intervention_fired if decision is None else decision.intervention_fired
-        ),
-        intervention_replaced=(
-            event.intervention_replaced if decision is None else decision.intervention_replaced
-        ),
-        fire_results=event.fire_results if decision is None else decision.fire_results,
-        output=event.output if payload is None else payload.output,
-        parent_arg_positions={
-            domain: dict(positions) for domain, positions in event.parent_arg_positions.items()
-        },
-        transform_config=dict(event.transform_config),
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class TraceProjector:
-    """Read Trace Step-0 operation events from a sealed run core."""
-
-    core: CapturedRunCore
-
-    def events(self) -> tuple[OpEvent, ...]:
-        """Return operation events in producer order.
-
-        Returns
-        -------
-        tuple[OpEvent, ...]
-            Repeatedly readable operation facts resolved through stable-id
-            decision and payload ledgers.
-        """
-
-        return tuple(
-            _event_from_core(self.core, index) for index in range(len(self.core.event_facts))
-        )
+    return tuple(_clone_op_event_for_replay(event) for event in core.events)
 
 
 @dataclass(frozen=True, slots=True)
@@ -535,7 +548,7 @@ class RecordingProjector:
         all_events: list[OpEvent] = []
         captured_cores = tuple(cores)
         for core in captured_cores:
-            core_events = TraceProjector(core).events()
+            core_events = _cloned_core_events(core)
             all_events.extend(core_events)
             stored_records = core.projection_facts.get("records", ())
             if stored_records:

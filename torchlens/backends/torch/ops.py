@@ -67,7 +67,6 @@ from ...utils.tensor_utils import (
 )
 from ...utils.collections import index_nested, ensure_iterable
 from ...capture.flops import compute_backward_flops, compute_forward_flops
-from ...capture.kernel import _run_observation_stages
 from ...capture.projections import LiveOpView
 from ...data_classes.op import (
     Op,
@@ -171,7 +170,6 @@ from ...capture.predicates import (
     _is_halt_only_capture,
     build_op_record_context,
 )
-from ...capture.kernel import OpObservation
 from ...capture.plan import EnrichmentLevel
 from ...capture.stop import evaluate_halt_stop, stop_directive_for_trace
 
@@ -2504,11 +2502,7 @@ def _emit_operation_events(
         Appends or updates capture events for the active trace.
     """
 
-    capture_session = capture_session_for(self)
-    if capture_session is not None:
-        capture_session.note_legacy_emission()
-
-    producer_args = (
+    policy.emit(
         self,
         func,
         func_name,
@@ -2521,10 +2515,6 @@ def _emit_operation_events(
         is_bottom_level_func,
         func_call_id,
     )
-    if capture_session is None:
-        policy.emit(*producer_args)
-        return
-    capture_session.kernel.emit(func_name, policy.emit, *producer_args)
 
 
 def apply_live_hooks_to_outputs(
@@ -2582,25 +2572,6 @@ def apply_live_hooks_to_outputs(
     intervention_active = bool(_st._active_hook_plan) or predicate_intervene_active
     if not intervention_active or self.capture_mode not in {"exhaustive", "predicate"}:
         return out_orig
-    capture_session = capture_session_for(self)
-    if capture_session is not None:
-        observation = OpObservation(operation_key=func_name, value=out_orig)
-        return capture_session.kernel.apply_intervention(
-            observation,
-            lambda value: _apply_live_hooks_to_outputs_legacy(
-                self,
-                func,
-                func_name,
-                args,
-                kwargs,
-                value,
-                exec_ctx,
-                is_bottom_level_func,
-                func_call_id,
-                call_input_snapshots,
-                record_is_inplace,
-            ),
-        )
     return _apply_live_hooks_to_outputs_legacy(
         self,
         func,
@@ -2629,7 +2600,7 @@ def _apply_live_hooks_to_outputs_legacy(
     call_input_snapshots: tuple[tuple[Any, ...], dict[str, Any]] | None = None,
     record_is_inplace: bool = False,
 ) -> Any:
-    """Run the byte-compatible live-hook implementation for the kernel."""
+    """Run the live-hook implementation at the pre-commit intervention point."""
 
     predicate_intervene_active = _trace_intervene_options(self) is not None
     if (
@@ -3293,33 +3264,6 @@ def _predicate_function_ref(
     )
 
 
-def _select_predicate_observation(current: OpObservation) -> EnrichmentLevel:
-    """Resolve the predicate into the minimum demanded enrichment tier.
-
-    Parameters
-    ----------
-    current:
-        Predicate-mode observation whose ``facts`` map holds the trace context.
-
-    Returns
-    -------
-    EnrichmentLevel
-        Shell, metadata, or payload demand derived from the keep predicate.
-    """
-
-    ctx = cast(RecordContext, current.facts["ctx"])
-    state = current.facts["state"]
-    spec = _evaluate_keep_op(ctx, state.options)
-    if isinstance(spec, RetroactiveCaptureDecision):
-        raise PredicateError("tl.followed_by(...) retroactive save is only supported by trace")
-    current.facts["spec"] = spec
-    if spec.save_out:
-        return EnrichmentLevel.PAYLOAD
-    if spec.save_metadata:
-        return EnrichmentLevel.METADATA
-    return EnrichmentLevel.SHELL
-
-
 def _predicate_backend_semantics(
     trace: "Trace",
     out: torch.Tensor,
@@ -3524,104 +3468,6 @@ def _alias_free_backend_semantics(grad_fn_handle: Any) -> BackendSemantics:
     )
 
 
-def _normalize_predicate_observation(current: OpObservation) -> None:
-    """Compute backend semantics for a predicate-mode observation on demand.
-
-    Parameters
-    ----------
-    current:
-        Predicate-mode observation whose ``facts`` map holds the trace context.
-    """
-
-    trace = current.facts["trace"]
-    out = current.facts["out"]
-    func = current.facts["func"]
-    func_name = cast(str, current.facts["func_name"])
-    args = cast(tuple[Any, ...], current.facts["args"])
-    kwargs = cast(dict[str, Any], current.facts["kwargs"])
-    out_orig = current.facts["out_orig"]
-    arg_copies = cast(tuple[Any, ...], current.facts["arg_copies"])
-    kwarg_copies = cast(dict[str, Any], current.facts["kwarg_copies"])
-    is_bottom_level_func = cast(bool, current.facts["is_bottom_level_func"])
-    func_call_id = cast(int, current.facts["func_call_id"])
-    expected_output_count = cast(int, current.facts["expected_output_count"])
-    current.facts["backend_semantics"] = _predicate_backend_semantics(
-        trace,
-        out,
-        func,
-        func_name,
-        args,
-        kwargs,
-        out_orig,
-        arg_copies,
-        kwarg_copies,
-        is_bottom_level_func,
-        func_call_id,
-        expected_output_count,
-    )
-
-
-def _retain_predicate_observation_payload(current: OpObservation) -> None:
-    """Retain the selected predicate payload through the active storage policy.
-
-    Parameters
-    ----------
-    current:
-        Predicate-mode observation whose ``facts`` map holds the trace context.
-    """
-
-    ctx = cast(RecordContext, current.facts["ctx"])
-    out = current.facts["out"]
-    spec = cast(CaptureSpec, current.facts["spec"])
-    ram_payload, transformed_ram_payload = _record_predicate_output(ctx, out, spec)
-    current.facts["ram_payload"] = ram_payload
-    current.facts["transformed_ram_payload"] = transformed_ram_payload
-
-
-def _append_predicate_observation(current: OpObservation) -> None:
-    """Append the immutable predicate event and any retained payload sidecars.
-
-    Parameters
-    ----------
-    current:
-        Predicate-mode observation whose ``facts`` map holds the trace context.
-    """
-
-    trace = current.facts["trace"]
-    ctx = cast(RecordContext, current.facts["ctx"])
-    spec = cast(CaptureSpec, current.facts["spec"])
-    out = current.facts["out"]
-    container_path = cast(tuple[OutputPathComponent, ...], current.facts["container_path"])
-    append_projected_event(
-        trace,
-        ctx,
-        spec,
-        tensor=out,
-        ram_payload=current.facts.get("ram_payload"),
-        transformed_ram_payload=current.facts.get("transformed_ram_payload"),
-        predicate_matched=spec.save_out or spec.save_metadata,
-        backend_semantics=current.facts.get("backend_semantics"),
-        function=cast(FunctionCallRef, current.facts["function"]),
-        container_path=container_path,
-    )
-
-
-def _evaluate_predicate_observation_halt(current: OpObservation) -> None:
-    """Evaluate the predicate halt directive after append.
-
-    Parameters
-    ----------
-    current:
-        Predicate-mode observation whose ``facts`` map holds the trace context.
-    """
-
-    trace = current.facts["trace"]
-    ctx = cast(RecordContext, current.facts["ctx"])
-    state = current.facts["state"]
-    out = current.facts["out"]
-    evaluate_halt_stop(trace, ctx, state.options, frontier_output=out)
-
-
 def _emit_predicate_operation_events(
     self: "Trace",
     func: Callable[..., Any],
@@ -3696,92 +3542,60 @@ def _emit_predicate_operation_events(
                 state.grad_fn_to_context[out.grad_fn] = ctx
             if function_ref is None:
                 function_ref = _predicate_function_ref(func, func_name, args, kwargs, func_call_id)
-            capture_session = capture_session_for(self)
-            if capture_session is None:
-                observation = OpObservation(
-                    operation_key=func_name,
-                    value=out,
-                    facts={
-                        "trace": self,
-                        "ctx": ctx,
-                        "state": state,
-                        "func": func,
-                        "func_name": func_name,
-                        "args": args,
-                        "kwargs": kwargs,
-                        "out_orig": out_orig,
-                        "arg_copies": arg_copies,
-                        "kwarg_copies": kwarg_copies,
-                        "is_bottom_level_func": is_bottom_level_func,
-                        "func_call_id": func_call_id,
-                        "expected_output_count": expected_output_count,
-                        "out": out,
-                        "container_path": container_path,
-                        "function": function_ref,
-                    },
+            # One straight-line commit per observed op: select -> demanded
+            # enrichment -> payload disposition -> atomic append -> halt.
+            spec = _evaluate_keep_op(ctx, state.options)
+            if isinstance(spec, RetroactiveCaptureDecision):
+                raise PredicateError(
+                    "tl.followed_by(...) retroactive save is only supported by trace"
                 )
-                observation.select = _select_predicate_observation
-                observation.normalize_metadata = _normalize_predicate_observation
-                observation.retain_payload = _retain_predicate_observation_payload
-                observation.append = _append_predicate_observation
-                observation.evaluate_nonfinite_halt = _evaluate_predicate_observation_halt
-                demanded = _select_predicate_observation(observation)
-                _run_observation_stages(observation, demanded)
+            if spec.save_out:
+                demanded = EnrichmentLevel.PAYLOAD
+            elif spec.save_metadata:
+                demanded = EnrichmentLevel.METADATA
             else:
-                kernel = capture_session.kernel
-                kernel.begin_observation(func_name)
-                spec = _evaluate_keep_op(ctx, state.options)
-                if isinstance(spec, RetroactiveCaptureDecision):
-                    raise PredicateError(
-                        "tl.followed_by(...) retroactive save is only supported by trace"
-                    )
-                if spec.save_out:
-                    demanded = EnrichmentLevel.PAYLOAD
-                elif spec.save_metadata:
-                    demanded = EnrichmentLevel.METADATA
-                else:
-                    demanded = EnrichmentLevel.SHELL
-                bulk_default_ram = bool(
-                    demanded is EnrichmentLevel.PAYLOAD and _is_default_ram_payload(state, spec)
-                )
-                if demanded is not EnrichmentLevel.SHELL:
-                    kernel.mark_metadata()
-                    backend_semantics = _predicate_backend_semantics(
-                        self,
-                        out,
-                        func,
-                        func_name,
-                        args,
-                        kwargs,
-                        out_orig,
-                        arg_copies,
-                        kwarg_copies,
-                        is_bottom_level_func,
-                        func_call_id,
-                        expected_output_count,
-                        bulk_default_ram=bulk_default_ram,
-                    )
-                else:
-                    backend_semantics = None
-                if demanded is EnrichmentLevel.PAYLOAD:
-                    kernel.mark_payload()
-                    ram_payload, transformed_ram_payload = _record_predicate_output(ctx, out, spec)
-                else:
-                    ram_payload = None
-                    transformed_ram_payload = None
-                append_projected_event(
+                demanded = EnrichmentLevel.SHELL
+            bulk_default_ram = bool(
+                demanded is EnrichmentLevel.PAYLOAD
+                and capture_session_for(self) is not None
+                and _is_default_ram_payload(state, spec)
+            )
+            if demanded is not EnrichmentLevel.SHELL:
+                backend_semantics = _predicate_backend_semantics(
                     self,
-                    ctx,
-                    spec,
-                    tensor=out,
-                    ram_payload=ram_payload,
-                    transformed_ram_payload=transformed_ram_payload,
-                    predicate_matched=spec.save_out or spec.save_metadata,
-                    backend_semantics=backend_semantics,
-                    function=function_ref,
-                    container_path=container_path,
+                    out,
+                    func,
+                    func_name,
+                    args,
+                    kwargs,
+                    out_orig,
+                    arg_copies,
+                    kwarg_copies,
+                    is_bottom_level_func,
+                    func_call_id,
+                    expected_output_count,
+                    bulk_default_ram=bulk_default_ram,
                 )
-                evaluate_halt_stop(self, ctx, state.options, frontier_output=out)
+            else:
+                backend_semantics = None
+            if demanded is EnrichmentLevel.PAYLOAD:
+                ram_payload, transformed_ram_payload = _record_predicate_output(ctx, out, spec)
+            else:
+                ram_payload = None
+                transformed_ram_payload = None
+            append_projected_event(
+                self,
+                ctx,
+                spec,
+                tensor=out,
+                ram_payload=ram_payload,
+                transformed_ram_payload=transformed_ram_payload,
+                predicate_matched=spec.save_out or spec.save_metadata,
+                backend_semantics=backend_semantics,
+                function=function_ref,
+                container_path=container_path,
+            )
+            evaluate_halt_stop(self, ctx, state.options, frontier_output=out)
         except HaltSignal:
             raise
         except (TorchLensPostfuncError, TrainingModeConfigError):
