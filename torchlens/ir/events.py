@@ -81,6 +81,20 @@ class OpGradObserved:
 
 
 @dataclass(frozen=True, slots=True)
+class ParamGradObserved:
+    """Core event emitted when an AccumulateGrad hook observes a parameter gradient."""
+
+    param_address: str
+    pass_index: int
+    payload_ref: object | None
+    shape: tuple[int, ...] | None
+    dtype: str | None
+    memory: int | None
+    timestamp: float
+    seq: int
+
+
+@dataclass(frozen=True, slots=True)
 class BackwardPassEnd:
     """Core event marking completion of one autograd engine invocation."""
 

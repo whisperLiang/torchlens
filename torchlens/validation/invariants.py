@@ -1382,7 +1382,13 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
         longer match projected records.
     """
 
-    from ..ir.events import BackwardPassEnd, BackwardPassStart, GradFnFired, OpGradObserved
+    from ..ir.events import (
+        BackwardPassEnd,
+        BackwardPassStart,
+        GradFnFired,
+        OpGradObserved,
+        ParamGradObserved,
+    )
 
     capture_events = getattr(trace, "_capture_events", None)
     events = list(getattr(capture_events, "backward_events", ()) or ())
@@ -1393,6 +1399,7 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
     ends = [event for event in events if isinstance(event, BackwardPassEnd)]
     op_grad_events = [event for event in events if isinstance(event, OpGradObserved)]
     fired_events = [event for event in events if isinstance(event, GradFnFired)]
+    param_grad_events = [event for event in events if isinstance(event, ParamGradObserved)]
     start_indices = [event.pass_index for event in starts]
     end_indices = [event.pass_index for event in ends]
     if len(start_indices) != len(set(start_indices)):
@@ -1424,8 +1431,18 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
                 name,
                 f"backward event references missing pass {fired_event.pass_index!r}",
             )
+    for param_grad_event in param_grad_events:
+        if param_grad_event.pass_index not in valid_pass_indices:
+            raise MetadataInvariantError(
+                name,
+                f"backward event references missing pass {param_grad_event.pass_index!r}",
+            )
 
-    seq_values = [event.seq for event in events if isinstance(event, OpGradObserved | GradFnFired)]
+    seq_values = [
+        event.seq
+        for event in events
+        if isinstance(event, OpGradObserved | GradFnFired | ParamGradObserved)
+    ]
     if seq_values != sorted(seq_values) or len(seq_values) != len(set(seq_values)):
         raise MetadataInvariantError(name, "backward event seq values must be unique and monotonic")
 
@@ -1449,6 +1466,26 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
         raise MetadataInvariantError(
             name,
             "projected op gradient records do not match OpGradObserved events",
+        )
+
+    param_addresses = set(getattr(trace, "param_logs", {}).keys())
+    projected_param_records: set[tuple[str, int]] = set()
+    for param_address, param_log in getattr(trace, "param_logs", {}).items():
+        for record in getattr(param_log, "_grad_records", ()):
+            projected_param_records.add((param_address, record.backward_pass_index))
+    event_param_records: set[tuple[str, int]] = set()
+    for param_grad_event in param_grad_events:
+        if param_grad_event.param_address not in param_addresses:
+            raise MetadataInvariantError(
+                name,
+                "ParamGradObserved points to missing param address "
+                f"{param_grad_event.param_address!r}",
+            )
+        event_param_records.add((param_grad_event.param_address, param_grad_event.pass_index))
+    if projected_param_records != event_param_records:
+        raise MetadataInvariantError(
+            name,
+            "projected param gradient records do not match ParamGradObserved events",
         )
 
     projected_calls: dict[tuple[int, int], int] = defaultdict(int)

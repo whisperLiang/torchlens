@@ -366,6 +366,8 @@ def _reset_backward_projection(log: "Trace") -> None:
     log.__dict__.pop("_backward_projection_revision", None)
     log.__dict__.pop("_backward_projection_fold_state", None)
     log.has_backward_pass = False
+    log.has_gradients = False
+    log._saved_grad_labels = set()
     log.grad_fn_logs = OrderedDict()
     log.grad_fn_order = []
     log.backward_pass_logs = OrderedDict()
@@ -376,10 +378,13 @@ def _reset_backward_projection(log: "Trace") -> None:
     log.total_backward_memory = Bytes(0)
     log.total_gradient_memory = Bytes(0)
     log.saved_gradient_memory = Bytes(0)
+    log.total_param_gradient_memory = Bytes(0)
     log.backward_memory_backend = "unknown"
     log.replay_frontier = {}
     for op in getattr(log, "layer_list", ()):
         _clear_op_gradient_projection(op)
+    for param_log in getattr(log, "param_logs", {}).values():
+        _clear_param_gradient_projection(param_log)
 
 
 def _clear_op_gradient_projection(site: "Op") -> None:
@@ -401,6 +406,21 @@ def _clear_op_gradient_projection(site: "Op") -> None:
     site.transformed_grad_shape = None
     site.transformed_grad_dtype = None
     site.transformed_gradient_memory = Bytes(0)
+
+
+def _clear_param_gradient_projection(param_log: Any) -> None:
+    """Clear inherited captured-gradient state from one replay-fork Param.
+
+    Only the captured AccumulateGrad records and their cached metadata are
+    reset; the lazy live-model ``_check_param_grad`` read-through remains a
+    deliberately distinct view and repopulates from the live parameter.
+    """
+
+    param_log._grad_records = []
+    param_log._has_grad = False
+    param_log._grad_shape = None
+    param_log._grad_dtype = None
+    param_log._grad_memory = Bytes(0)
 
 
 def cone_of_effect(trace: "Trace", origins: Iterable["Op"]) -> list["Op"]:

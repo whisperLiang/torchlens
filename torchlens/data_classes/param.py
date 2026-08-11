@@ -388,7 +388,7 @@ class Param:
         backward_pass_index: int,
         grad: torch.Tensor,
         timestamp: float,
-    ) -> None:
+    ) -> "GradientRecord":
         """Append one AccumulateGrad increment for this parameter.
 
         Parameters
@@ -399,23 +399,29 @@ class Param:
             Incoming gradient increment.
         timestamp:
             Event timestamp.
+
+        Returns
+        -------
+        GradientRecord
+            The appended record, so the caller can emit the matching
+            ``ParamGradObserved`` event without re-deriving metadata.
         """
 
         saved = grad.detach().clone()
         memory = int(saved.nelement() * saved.element_size())
-        self._grad_records.append(
-            GradientRecord(
-                owner=self,
-                ordinal=len(self._grad_records) + 1,
-                backward_pass_index=backward_pass_index,
-                grad=saved,
-                transformed_grad=None,
-                shape=tuple(saved.shape),
-                dtype=str(saved.dtype),
-                memory=memory,
-                timestamp=timestamp,
-            )
+        record = GradientRecord(
+            owner=self,
+            ordinal=len(self._grad_records) + 1,
+            backward_pass_index=backward_pass_index,
+            grad=saved,
+            transformed_grad=None,
+            shape=tuple(saved.shape),
+            dtype=str(saved.dtype),
+            memory=memory,
+            timestamp=timestamp,
         )
+        self._grad_records.append(record)
+        return record
 
     def _check_param_grad(self) -> None:
         """Lazily check if the parameter has a grad and cache the result.

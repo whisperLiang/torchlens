@@ -45,6 +45,7 @@ from ...ir.events import (
     GradFnDiscovered,
     GradFnFired,
     OpGradObserved,
+    ParamGradObserved,
 )
 from ._tl import detached_saved_activation_label, get_tensor_label
 from .tensor_tracking import _ensure_backward_event_stream
@@ -1198,7 +1199,7 @@ def _backward_tail_is_foldable(state: _BackwardFoldState, tail: list[Any]) -> bo
                 return False
             if tuple(event.topology) != tuple(state.latest_topology.get(event.object_id, ())):
                 return False
-        elif isinstance(event, (GradFnFired, OpGradObserved)):
+        elif isinstance(event, (GradFnFired, OpGradObserved, ParamGradObserved)):
             if event.pass_index <= max_built:
                 return False
         else:
@@ -1704,11 +1705,23 @@ def _make_grad_fn_hook(
                 else None
             )
             picked = _first_tensor_from_hook_args(hook_args)
-            if param_log is not None and picked is not None:
-                param_log._record_gradient_increment(
+            if param_log is not None and param_address is not None and picked is not None:
+                grad_record = param_log._record_gradient_increment(
                     backward_pass_index=pass_index,
                     grad=picked[2],
                     timestamp=event_timestamp,
+                )
+                events.append_backward(
+                    ParamGradObserved(
+                        param_address=param_address,
+                        pass_index=pass_index,
+                        payload_ref=grad_record.grad,
+                        shape=grad_record.shape,
+                        dtype=grad_record.dtype,
+                        memory=grad_record.memory,
+                        timestamp=event_timestamp,
+                        seq=events.next_backward_seq(),
+                    )
                 )
             return None
         from ...intervention.runtime import _apply_live_backward_hooks

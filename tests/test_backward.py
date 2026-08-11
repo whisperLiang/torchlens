@@ -377,6 +377,68 @@ def test_backward_reprojection_folds_incrementally() -> None:
 
 
 @pytest.mark.smoke
+def test_param_gradients_enter_the_backward_event_stream() -> None:
+    """Every recorded AccumulateGrad increment has a ParamGradObserved event."""
+    from torchlens.ir.events import ParamGradObserved
+
+    _model, _x, trace = _logged_model()
+    trace.log_backward(_output_loss(trace))
+
+    param_events = [
+        event for event in trace.backward_events if isinstance(event, ParamGradObserved)
+    ]
+    assert param_events
+    event_records = {
+        (event.param_address, event.pass_index) for event in param_events
+    }
+    projected_records = {
+        (address, record.backward_pass_index)
+        for address, param_log in trace.param_logs.items()
+        for record in param_log._grad_records
+    }
+    assert projected_records
+    assert event_records == projected_records
+    for event in param_events:
+        assert event.payload_ref is not None
+        assert event.shape is not None
+        assert event.memory
+        assert event.seq > 0
+
+
+@pytest.mark.smoke
+def test_replay_fork_does_not_inherit_gradient_state() -> None:
+    """A replay fork starts with no captured gradient state; the source keeps its own."""
+    model = _TinyBackwardModel()
+    x = torch.randn(2, 3, requires_grad=True)
+    trace = tl.trace(
+        model,
+        x,
+        capture=CaptureOptions(layers_to_save="all", save_grads="all"),
+        intervention_ready=True,
+        backward_ready=True,
+    )
+    trace.log_backward(_output_loss(trace))
+    assert trace.has_gradients
+    assert trace._saved_grad_labels
+    assert any(param_log._grad_records for param_log in trace.param_logs.values())
+
+    def _identity_hook(out: torch.Tensor, *, hook: object) -> torch.Tensor:
+        return out
+
+    fork = trace.replay(hooks={tl.func("relu"): _identity_hook}, differentiable=True)
+
+    assert fork.has_gradients is False
+    assert fork._saved_grad_labels == set()
+    assert not any(param_log._grad_records for param_log in fork.param_logs.values())
+    assert int(fork.total_param_gradient_memory) == 0
+    assert fork.num_backward_passes == 0
+
+    assert trace.has_gradients
+    assert trace._saved_grad_labels
+    assert any(param_log._grad_records for param_log in trace.param_logs.values())
+
+
+@pytest.mark.smoke
 def test_backward_reprojection_guard_survives_count_preserving_mutation() -> None:
     """A count-preserving event mutation still triggers reprojection."""
     from dataclasses import replace as dataclass_replace

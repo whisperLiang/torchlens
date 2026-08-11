@@ -18,6 +18,7 @@ from .events import (
     ModuleExitEvent,
     ModulePrepEvent,
     OpGradObserved,
+    ParamGradObserved,
     OpEvent,
     OutputVersionEvent,
     PreHookProvenanceEvent,
@@ -76,7 +77,12 @@ class CaptureEvents:
     conditional_events: list[ConditionalEvent] = field(default_factory=list)
     output_version_events: list[OutputVersionEvent] = field(default_factory=list)
     backward_events: list[
-        BackwardPassStart | OpGradObserved | BackwardPassEnd | GradFnDiscovered | GradFnFired
+        BackwardPassStart
+        | OpGradObserved
+        | ParamGradObserved
+        | BackwardPassEnd
+        | GradFnDiscovered
+        | GradFnFired
     ] = field(default_factory=list)
     param_refs: dict[str, ParamRef] = field(default_factory=dict)
     raw_layer_counter: int = 0
@@ -418,6 +424,7 @@ class CaptureEvents:
         self,
         event: BackwardPassStart
         | OpGradObserved
+        | ParamGradObserved
         | BackwardPassEnd
         | GradFnDiscovered
         | GradFnFired,
