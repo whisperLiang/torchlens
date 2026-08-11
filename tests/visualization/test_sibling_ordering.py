@@ -12,7 +12,7 @@ pytest.importorskip("torchvision")
 import torchvision.models as tv_models  # noqa: E402
 
 import torchlens as tl
-from torchlens.visualization.rendering import _strip_sibling_rank_groups
+from torchlens.visualization._render_dot import _strip_sibling_rank_groups
 
 
 def _plain_nodes(dot_source: str) -> dict[str, tuple[float, float]]:

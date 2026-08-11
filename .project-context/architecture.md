@@ -61,7 +61,7 @@ Real-time tensor operation logging during forward pass.
 - `invariants.py` — 18 metadata invariant categories (A-R): structural + semantic
 
 ### `torchlens/visualization/` (3 files, ~2,777+ lines)
-- `rendering.py` — Graphviz rendering: nodes, edges, module subgraphs, IF/THEN labels, override system
+- `_render_dot.py` — Graphviz rendering orchestration (validation, request resolution, RenderIR population, DOT emission); node/edge/subgraph emission lives in `_render_nodes.py`, `_render_edges.py`, `_render_leaf.py`, with IF/THEN labels and the override system in `_render_common.py`
 - `elk_layout.py` — ELK-based layout for large graphs, Worker thread, sfdp fallback
 - `dagua_bridge.py` — ModelLog → DaguaGraph conversion for dagua renderer
 

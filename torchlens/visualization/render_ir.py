@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from .auto_collapse import ModuleRepeatFold
     from ._render_edges import _SegmentLookup
     from .node_universe import NodeUnit
-    from .rendering import RenderedNodeEmission
+    from ._render_common import RenderedNodeEmission
     from .renderers.base import RendererCapabilities
 
 
@@ -297,7 +297,7 @@ def build_render_ir(
         universe = build_node_universe(
             build_source_graph(trace, resolved_context), collapse_fn, repeat_folds
         )
-    from .rendering import _atomic_module_sibling_counts
+    from ._render_nodes import _atomic_module_sibling_counts
 
     sibling_counts = _atomic_module_sibling_counts(trace)
     nodes = tuple(
@@ -421,7 +421,7 @@ def _normalize_backward_nodes(
 ) -> tuple[tuple[RenderIRNode, ...], dict[int, list[tuple[Any, Any]]]]:
     """Normalize visible grad-function handles or calls into IR nodes."""
 
-    from .rendering import (
+    from ._render_leaf import (
         _backward_dot_call_node_name,
         _backward_dot_node_name,
         _grad_fn_call_matches_backward_filter,
@@ -470,7 +470,7 @@ def _normalize_backward_edges(
 ) -> tuple[RenderIREdge, ...]:
     """Normalize visible grad-function dependencies into IR edges."""
 
-    from .rendering import (
+    from ._render_leaf import (
         _backward_dot_call_node_name,
         _backward_dot_node_name,
         _grad_fn_matches_backward_filter,
@@ -532,7 +532,7 @@ def _normalized_grad_edge(
 ) -> RenderIREdge:
     """Create one normalized backward dependency edge."""
 
-    from .rendering import _backward_edge_attrs
+    from ._render_leaf import _backward_edge_attrs
 
     return RenderIREdge(
         source_unit=tail_name,
@@ -553,7 +553,7 @@ def _normalize_correspondence_edges(
 ) -> tuple[RenderIREdge, ...]:
     """Normalize visible forward-to-grad-function correspondence edges."""
 
-    from .rendering import _backward_dot_node_name, _grad_fn_matches_backward_filter
+    from ._render_leaf import _backward_dot_node_name, _grad_fn_matches_backward_filter
 
     edges: list[RenderIREdge] = []
     for grad_fn in trace.grad_fns:
@@ -660,7 +660,7 @@ def _node_from_unit(
     source_label = emission.op_label or emission.call or emission.boundary_kind
     owner_cluster = emission.module_address
     if emission.kind == "module_box" and emission.call is not None:
-        from .rendering import _collapsed_module_owner_key
+        from ._render_edges import _collapsed_module_owner_key
 
         address, _, call_index = emission.call.partition(":")
         owner_cluster = _collapsed_module_owner_key(
@@ -670,7 +670,7 @@ def _node_from_unit(
             context.vis_mode,
         )
     elif emission.kind == "run_fold_ellipsis" and emission.fold is not None:
-        from .rendering import _run_fold_ellipsis_owner_key
+        from ._render_edges import _run_fold_ellipsis_owner_key
 
         owner_cluster = _run_fold_ellipsis_owner_key(trace, emission.fold, context.vis_mode)
     node_calls: tuple[Any, ...] = ()
@@ -739,15 +739,15 @@ def _resolve_node_decision(
     """
     from collections import defaultdict
 
-    from .rendering import (
-        _RenderIRDecisionBuilder,
+    from ._render_common import _RenderIRDecisionBuilder
+    from ._render_edges import _segment_for_node
+    from ._render_flow import _collapsed_container_leaf_nodes
+    from ._render_nodes import (
         _build_collapsed_module_node,
         _build_layer_node,
-        _collapsed_container_leaf_nodes,
         _normalize_buffer_visibility,
-        _segment_for_node,
-        resolve_theme,
     )
+    from .themes import resolve_theme
 
     node = emission.node
     if node is None:
@@ -964,7 +964,7 @@ def finalize_forward_regions(
 
     from ._render_flow import _get_max_call_depth
     from ._render_utils import compute_module_penwidth, make_module_cluster_attrs
-    from .rendering import _collapsed_module_rolling_suffix
+    from ._render_leaf import _collapsed_module_rolling_suffix
 
     captured_by_occurrence = {edge.occurrence_key: edge for edge in captured_edges}
     edges = tuple(

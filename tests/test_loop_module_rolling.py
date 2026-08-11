@@ -11,7 +11,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.options import CaptureOptions
-from torchlens.visualization.rendering import compute_default_node_lines
+from torchlens.visualization._render_nodes import compute_default_node_lines
 
 
 OUTPUT_DIR = Path(__file__).parent / "generated_outputs" / "visualizations" / "loop_module_rolling"

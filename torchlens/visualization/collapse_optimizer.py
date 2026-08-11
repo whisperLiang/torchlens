@@ -3245,12 +3245,10 @@ def _module_render_box_units(
     cached = cached_by_trace.get(context)
     if cached is not None:
         return cached
-    from .rendering import (
-        BoundaryNode,
-        _entries_to_plot_for_context,
-        _is_buffer_visible,
-        _normalize_buffer_visibility,
-    )
+    from ._render_common import BoundaryNode
+    from ._render_edges import _is_buffer_visible
+    from ._render_flow import _entries_to_plot_for_context
+    from ._render_nodes import _normalize_buffer_visibility
 
     show_buffer_layers = _normalize_buffer_visibility(context.show_buffer_layers)
     box_calls: dict[str, dict[str, None]] = {}

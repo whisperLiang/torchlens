@@ -291,7 +291,7 @@ releases; keep the 2.x family locked unless release work explicitly says otherwi
 | Where is `Trace.__getitem__` behavior? | `torchlens/data_classes/interface.py` and `trace.py` |
 | Where is portable save/load? | `torchlens/_io/bundle.py`, `torchlens/_io/tlspec.py` |
 | Where is manifest schema validation? | `torchlens/validation/__init__.py`, `torchlens/schemas/tlspec_manifest_v1.json`, `torchlens/schemas/tlspec_manifest_v2.json` |
-| Where is Graphviz rendering? | `torchlens/visualization/rendering.py` |
+| Where is Graphviz rendering? | `torchlens/visualization/_render_dot.py` (orchestration) + `_render_nodes.py`/`_render_edges.py`/`_render_leaf.py` (emission) |
 | Where is ELK layout? | `torchlens/visualization/_elk_internal/layout.py` |
 | Where is NodeSpec customization? | `torchlens/visualization/node_spec.py`, `torchlens/visualization/modes.py` |
 | Where is bundle diff rendering? | `torchlens/visualization/bundle_diff.py` |

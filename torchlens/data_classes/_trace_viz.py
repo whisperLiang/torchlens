@@ -143,7 +143,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
         show_buffer_layers, direction, vis_node_placement, vis_renderer, vis_theme, \
         vis_intervention_mode, vis_show_cone, code_panel, order_siblings, show_containers,
         container_max_inline, show_input_transform_summary, show_orphans:
-            Forwarded unchanged to :func:`torchlens.visualization.rendering.draw`.
+            Forwarded unchanged to :func:`torchlens.visualization._render_dot.draw`.
             ``show_orphans=True`` renders orphan (island) ops -- captured but unreachable
             from both inputs and outputs -- as a dashed, greyed cluster of edgeless nodes,
             instead of omitting them. Orphans must have been retained at capture time
@@ -174,7 +174,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
             Graphviz DOT source, renderer-specific output, or renderer object
             when ``return_graph=True``.
         """
-        from ..visualization.rendering import draw as _impl
+        from ..visualization._render_dot import draw as _impl
 
         if vis_opt is not MISSING:
             vis_mode = cast(VisModeLiteral, vis_opt)
@@ -408,7 +408,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
         vis_node_mode, vis_edge_overrides, vis_save_only, vis_fileformat, \
         vis_direction, code_panel, vis_mode, bwd:
             Forwarded unchanged to
-            :func:`torchlens.visualization.rendering.render_backward_graph`.
+            :func:`torchlens.visualization._render_entrypoints.render_backward_graph`.
             ``collapsed_node_spec_fn`` and ``vis_node_mode`` are accepted for
             forward-visualization API symmetry but are not applied because
             backward graphs do not render collapsed module nodes.
@@ -418,7 +418,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
         str
             Graphviz DOT source.
         """
-        from ..visualization.rendering import render_backward_graph as _impl
+        from ..visualization._render_entrypoints import render_backward_graph as _impl
 
         return _impl(
             self,
@@ -459,14 +459,14 @@ class TraceVisualizationMixin(_TraceMixinBase):
         vis_edge_overrides, vis_save_only, vis_fileformat, vis_direction, \
         vis_mode, intervening_cluster, show_buffer_layers, bwd:
             Forwarded unchanged to
-            :func:`torchlens.visualization.rendering.render_combined_graph`.
+            :func:`torchlens.visualization._render_entrypoints.render_combined_graph`.
 
         Returns
         -------
         str
             Graphviz DOT source.
         """
-        from ..visualization.rendering import render_combined_graph as _impl
+        from ..visualization._render_entrypoints import render_combined_graph as _impl
 
         return _impl(
             self,

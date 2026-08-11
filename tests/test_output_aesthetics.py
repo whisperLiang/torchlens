@@ -1585,7 +1585,7 @@ class TestVisualizationBugfixes:
     ) -> None:
         """Failed forward rendering keeps the DOT source so the error hint is truthful."""
 
-        from torchlens.visualization.rendering import GraphvizRenderError
+        from torchlens.visualization._render_common import GraphvizRenderError
 
         def _raise_dot_failure(
             cmd: list[str],
@@ -1627,7 +1627,7 @@ class TestVisualizationBugfixes:
         pdf_path = Path(VIS_DIR) / "test_call_depth_0.pdf"
         pdf_path.unlink(missing_ok=True)
         try:
-            from torchlens.visualization.rendering import draw
+            from torchlens.visualization._render_dot import draw
 
             dot = draw(
                 log,
@@ -1682,7 +1682,7 @@ class TestVisualizationBugfixes:
         pdf_path = Path(VIS_DIR) / "test_selective_save.pdf"
         pdf_path.unlink(missing_ok=True)
         try:
-            from torchlens.visualization.rendering import draw
+            from torchlens.visualization._render_dot import draw
 
             dot = draw(log, vis_save_only=True, vis_outpath=opj(VIS_DIR, "test_selective_save"))
         except ImportError:
