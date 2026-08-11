@@ -153,6 +153,7 @@ _LAZY_EXCEPTION_PATHS = {
         "torchlens._distributed",
         "DistributedCaptureUnsupportedError",
     ),
+    "SaveBudgetExceededError": ("torchlens._save_budget", "SaveBudgetExceededError"),
 }
 
 

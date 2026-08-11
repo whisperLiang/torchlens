@@ -16,6 +16,30 @@ Eager dynamic control flow is a feature, not a limitation. TorchLens records the
 module behavior that occurred for the concrete input you supplied. It does not claim to enumerate
 branches that did not execute.
 
+## Retained Activation Footprint
+
+`tl.trace(model, x)` retains every operation's output by default. That is the right default for
+the models TorchLens was designed around and a footgun at frontier shapes, where it means an OOM
+kill (or an allocator error from deep inside torch) rather than an explanation.
+
+Capture therefore enforces a per-device ceiling on retained payload bytes, `save_budget`, which
+defaults to half of each device's *available* memory measured at that device's first save. Crossing
+it stops capture with `torchlens.errors.SaveBudgetExceededError`, naming the bytes committed so far,
+the budget and where it came from, the operation that tripped it, and the remedies.
+
+The reported footprint is an explicitly-labelled **lower bound**: the forward pass was still running
+when the budget tripped, so a completed default capture would have retained more. TorchLens says
+that rather than extrapolating a total it cannot know.
+
+Only payloads actually held in RAM are charged, so `storage=tl.to_disk(...)` and
+`layers_to_save="none"` are never budgeted -- those captures were never going to exhaust memory.
+Devices whose headroom cannot be measured are left unbudgeted and reported as such rather than
+silently assumed infinite.
+
+Tune it with `capture=tl.options.CaptureOptions(save_budget=...)`: a float in `(0, 1]` for another
+fraction of available memory, an int for an absolute per-device byte cap, or `None` to disable the
+guard. A malformed value raises rather than silently unguarding the capture.
+
 ## Distributed and Sharded Execution
 
 TorchLens captures a **rank-local eager forward pass**. Sharded distributed execution is out of

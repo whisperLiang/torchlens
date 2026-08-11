@@ -188,6 +188,26 @@ print(tl.compat.report(model, x).to_markdown())
   the allocator hook costs 1.7x-2.5x total capture time on real CNNs/ViTs. The flag is a
   session-time knob (`FieldPolicy.DROP`, not in `MODEL_LOG_FIELD_ORDER`) and does not survive
   save/load. Never assert `forward_peak_memory > 0` on the default path.
+- Sharded distributed state is REFUSED, not silently mis-captured. `tl.compat.report` carries
+  `dtensor`, `device_mesh`, `tensor_parallel`, and `pipeline_parallel` rows, and capture entry
+  raises `tl.errors.DistributedCaptureUnsupportedError` (structured findings on
+  `exc.fields["findings"]`; branch on `finding.kind`, never message text). DTensor/ShardedTensor
+  work below the `__torch_function__` layer, so an unguarded capture reported 0 modules and 0
+  params. Refusal is narrower than reporting on purpose: only `dtensor` and `pipeline_parallel`
+  refuse, since a bare `DeviceMesh` or a dense-parameter TP wrapper leaves capture correct.
+  Detection lives in `torchlens/_distributed.py` and is shared verbatim by both surfaces; the
+  `HAS_DTENSOR` / `HAS_DEVICE_MESH` / `HAS_PIPELINING` capability flags gate the exact-`isinstance`
+  path and fall back to structural namespace matching.
+- `CaptureOptions(save_budget=...)` bounds retained activation bytes per device, defaulting to
+  `"auto"` (half of each device's available memory measured at its first save). Crossing it raises
+  `tl.errors.SaveBudgetExceededError` naming the committed footprint, the tripping op, and the
+  remedies, instead of letting the default `save="all"` OOM-kill a first-time user at frontier
+  shapes. A float sets another fraction, an int an absolute byte cap, `None` disables it; anything
+  else raises rather than silently unguarding. Only RAM-retained payloads are charged, so
+  `storage=tl.to_disk(...)` and `layers_to_save="none"` are never budgeted. The reported figure is
+  an explicitly-labelled LOWER BOUND (the forward was still running), never an extrapolated total.
+  Like `measure_python_peak_memory` it is a session-time knob (`FieldPolicy.DROP`, not in
+  `MODEL_LOG_FIELD_ORDER`) and load restores the default.
 - `torchlens._io` and `torchlens.io` own portable `.tlspec` save/load helpers. Manifest
   schema v2 is backend-aware; non-torch preview bundles may be audit-only or metadata-only.
 - `torchlens.debug` owns power-user diagnostics such as `bisect_nan` and `hot_path`;

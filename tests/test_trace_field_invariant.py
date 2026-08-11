@@ -89,6 +89,16 @@ def test_trace_field_set_subset_of_user_facing() -> None:
         "_session_param_inventory",
         "_session_buffer_inventory",
         "_session_buffer_identity",
+        # Session-time knobs and runtime accessors that are deliberately
+        # FieldPolicy.DROP (so absent from MODEL_LOG_FIELD_ORDER by design) and
+        # therefore have to be allow-listed here. ``measure_python_peak_memory``
+        # and ``_module_call_accessor`` were a pre-existing lockstep miss, RED on
+        # main before this change; ``save_budget`` and its live accountant are the
+        # honesty/safety phase's per-device retained-bytes ceiling.
+        "measure_python_peak_memory",
+        "_module_call_accessor",
+        "save_budget",
+        "_save_budget_accountant",
     }
 
     actual = set(trace.__dict__.keys())

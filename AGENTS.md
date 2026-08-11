@@ -258,6 +258,18 @@ pytest tests/ -m "not slow" -x --tb=short
   legitimately reads `0` for small models. The `tracemalloc` Python-allocation peak is opt-in via
   `CaptureOptions(measure_python_peak_memory=True)` because the allocator hook costs 1.7x-2.5x
   total capture time. Never assert `forward_peak_memory > 0` on the default path.
+- Distributed/sharded state is detected in `torchlens/_distributed.py` and refused at capture entry
+  with `DistributedCaptureUnsupportedError`; the same detection feeds the `dtensor` / `device_mesh` /
+  `tensor_parallel` / `pipeline_parallel` rows of `tl.compat.report`, so the two cannot drift. Only
+  `dtensor` and `pipeline_parallel` refuse. Detection is capability-probed (`HAS_DTENSOR`,
+  `HAS_DEVICE_MESH`, `HAS_PIPELINING`), never version-parsed, and the module-attribute scan skips
+  torch's own `nn.Module` bookkeeping attributes (probed from a live bare module) because it runs on
+  every capture -- an unhoisted MRO walk there cost 44 ms on resnet50.
+- `CaptureOptions(save_budget=...)` is a per-device running ceiling on retained activation bytes,
+  default `"auto"` = half of available memory. It is charged in `_charge_save_budget` from BOTH
+  torch activation-save paths (`_save_activation_fields` and `_save_predicate_activation_fields`),
+  and only for RAM-retained payloads -- charging disk-streamed payloads would refuse captures that
+  were never going to OOM. Any new activation-save path must charge it too.
 - `__wrapped__` is removed from built-in function wrappers to avoid `inspect.unwrap`
   failures.
 - Fast-path module decoration skips `_handle_module_entry`; alignment state must be

@@ -73,6 +73,7 @@ from .._io import (
     default_fill_state,
     read_tlspec_version,
 )
+from .._save_budget import SaveBudget, SaveBudgetOption
 from ..constants import LAYER_PASS_LOG_FIELD_ORDER, MODEL_LOG_FIELD_ORDER
 from ..captured_run import CapturedRun
 from ..ir.trace_build_state import TraceBuildState
@@ -216,6 +217,7 @@ _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "module_filter": None,
     "emit_nvtx": False,
     "measure_python_peak_memory": False,
+    "save_budget": "auto",
     "raise_on_nan": False,
     "keep_orphans": False,
     "annotations": {},
@@ -1210,6 +1212,11 @@ class Trace(
         # restores the default ``False``, so it stays out of
         # ``MODEL_LOG_FIELD_ORDER`` and out of the portable schema.
         "measure_python_peak_memory": FieldPolicy.DROP,
+        # Session-time resource ceiling: it bounds what THIS process was willing
+        # to retain and has no meaning for a loaded artifact, which retains
+        # nothing. Portable load restores the default, so it stays out of
+        # ``MODEL_LOG_FIELD_ORDER`` and out of the portable schema.
+        "save_budget": FieldPolicy.DROP,
         "raise_on_nan": FieldPolicy.KEEP,
         "annotations": FieldPolicy.KEEP,
         "observer_spans": FieldPolicy.KEEP,
@@ -1395,6 +1402,11 @@ class Trace(
         "_mlx_saved_payloads": FieldPolicy.DROP,
         "_mlx_capture_depth": FieldPolicy.DROP,
         "_out_writer": FieldPolicy.DROP,
+        # Runtime-only: the live per-device accountant that enforces
+        # ``save_budget`` while payloads are being retained. It describes what
+        # THIS process was willing to allocate, so it is never portable; a loaded
+        # artifact retains nothing and rebuilds it from the restored option.
+        "_save_budget_accountant": FieldPolicy.DROP,
         "_keep_outs_in_memory": FieldPolicy.DROP,
         "_grad_stream_retain_in_memory": FieldPolicy.DROP,
         "_defer_streaming_bundle_finalization": FieldPolicy.DROP,
@@ -1469,6 +1481,7 @@ class Trace(
         module_filter: Callable[[Any], bool] | None = None,
         emit_nvtx: bool = False,
         measure_python_peak_memory: bool = False,
+        save_budget: SaveBudgetOption = "auto",
         facet_registry_snapshot: Any | None = None,
         transform: Callable[[Any], Any] | None = None,
         raw_input: Any | None = None,
@@ -1519,6 +1532,12 @@ class Trace(
                 ``tracemalloc`` Python-allocation probe. Off by default because the
                 allocator hook taxes every traced operation. Portable bundle load
                 restores the default ``False`` value.
+            save_budget: Session-time per-device ceiling on retained activation
+                bytes. ``"auto"`` allows half of each device's available memory;
+                a float sets another fraction, an int an absolute byte cap, and
+                ``None`` disables the guard. Crossing it raises
+                ``SaveBudgetExceededError`` mid-capture. Portable bundle load
+                restores the default ``"auto"``.
             facet_registry_snapshot: Immutable facet recipe snapshot captured for
                 this trace.
             transform: Optional callable used to convert raw user input into
@@ -1618,6 +1637,10 @@ class Trace(
         self.module_filter = module_filter
         self.emit_nvtx = emit_nvtx
         self.measure_python_peak_memory = measure_python_peak_memory
+        self.save_budget = save_budget
+        # Built once per capture; ``None`` when budgeting is disabled. Charged on
+        # the hot path by the activation-save paths in the torch backend.
+        self._save_budget_accountant = SaveBudget.from_option(save_budget)
         self.facet_registry_snapshot = facet_registry_snapshot
         self.raise_on_nan: bool = False
         self.annotations: Dict[str, Any] = {}
@@ -2723,6 +2746,11 @@ class Trace(
             state["backward_ready"] = False
         if state.get("measure_python_peak_memory") is None:
             state["measure_python_peak_memory"] = False
+        # ``save_budget`` is FieldPolicy.DROP, so a portable artifact never
+        # carries a real value; it arrives absent or None and is restored to the
+        # default. A loaded trace retains nothing, so there is no ceiling to honor.
+        if state.get("save_budget") is None:
+            state["save_budget"] = "auto"
         if state["inference_only"] is None:
             state["inference_only"] = False
         if state["chunked_forward"] is None:

@@ -5556,6 +5556,7 @@ def _save_activation_fields(
             fields_dict["transformed_out_dtype"] = _dtype_or_none(transformed_out)
             fields_dict["transformed_activation_memory"] = _memory_or_none(transformed_out)
         fields_dict["has_saved_activation"] = True
+        _charge_save_budget(trace, fields_dict)
 
         _stream_activation_fields(trace, fields_dict)
 
@@ -5609,6 +5610,46 @@ def _stream_activation_fields(trace: "Trace", fields_dict: dict[str, Any]) -> No
         blob_id = writer.next_blob_id()
         fields_dict[pending_field] = blob_id
         writer.write_blob(blob_id, tensor, kind=kind, label=label)
+
+
+def _charge_save_budget(trace: "Trace", fields_dict: dict[str, Any]) -> None:
+    """Charge this operation's RAM-retained payload bytes to the save budget.
+
+    Parameters
+    ----------
+    trace:
+        Active trace, carrying the per-capture accountant.
+    fields_dict:
+        Operation fields, already populated with the retained payloads and their
+        byte counts.
+
+    Returns
+    -------
+    None
+        Charges the accountant, which raises when a device budget is crossed.
+
+    Notes
+    -----
+    Only payloads actually held in RAM are charged: a payload streamed to disk
+    costs no process memory, so charging it would refuse captures that were never
+    going to OOM. This runs once per saved activation and is a dict lookup, an
+    integer add, and a compare when the budget holds.
+    """
+
+    budget = getattr(trace, "_save_budget_accountant", None)
+    if budget is None:
+        return
+    label = fields_dict.get("_layer_label_raw") or fields_dict.get("_label_raw") or "<unlabeled>"
+    for payload_key, memory_key in (
+        ("out", "activation_memory"),
+        ("transformed_out", "transformed_activation_memory"),
+    ):
+        payload = fields_dict.get(payload_key)
+        if not isinstance(payload, torch.Tensor):
+            continue
+        num_bytes = fields_dict.get(memory_key) or 0
+        if num_bytes:
+            budget.charge(str(label), payload.device, int(num_bytes))
 
 
 def _save_predicate_activation_fields(
@@ -5684,6 +5725,7 @@ def _save_predicate_activation_fields(
     fields_dict["transformed_out_dtype"] = _dtype_or_none(transformed_metadata)
     fields_dict["transformed_activation_memory"] = _memory_or_none(transformed_metadata)
     fields_dict["has_saved_activation"] = True
+    _charge_save_budget(trace, fields_dict)
     _stream_predicate_payloads(
         trace,
         fields_dict,

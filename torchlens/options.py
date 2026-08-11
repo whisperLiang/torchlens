@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Callable, Final, Literal, Mapping, TypeVa
 import torch
 
 from ._deprecations import MISSING, MissingType, warn_deprecated_alias
+from ._save_budget import SaveBudgetOption
 from ._literals import (
     BufferVisibilityLiteral,
     CollapseLiteral,
@@ -75,6 +76,7 @@ _CAPTURE_FIELDS: Final[tuple[str, ...]] = (
     "save_preview",
     "emit_nvtx",
     "measure_python_peak_memory",
+    "save_budget",
     "raise_on_nan",
     "_module_containment_engine",
 )
@@ -790,6 +792,18 @@ class CaptureOptions:
         but taxes every traced operation (measured at 1.7x-2.5x total capture
         time on torchvision CNNs and ViTs), so it is opt-in. CUDA captures
         report the true device peak and ignore this option.
+    save_budget:
+        Ceiling on the bytes of activation payload a single capture may retain,
+        enforced per device as payloads are committed. ``"auto"`` (the default)
+        allows half of each device's *available* memory measured at that device's
+        first save; a float in ``(0, 1]`` sets a different fraction; an int sets
+        an absolute per-device byte cap; ``None`` disables budgeting. Crossing the
+        budget stops capture with
+        :class:`torchlens.errors.SaveBudgetExceededError`, naming the committed
+        footprint, the tripping operation, and the remedies, instead of letting
+        the default ``save="all"`` OOM-kill the process at frontier shapes.
+        Devices whose headroom cannot be measured are left unbudgeted and
+        reported as such rather than silently assumed infinite.
     raise_on_nan:
         Whether capture should stop at the first NaN or Inf tensor.
 
@@ -842,6 +856,7 @@ class CaptureOptions:
     save_preview: bool = False
     emit_nvtx: bool = False
     measure_python_peak_memory: bool = False
+    save_budget: SaveBudgetOption = "auto"
     raise_on_nan: bool = False
     _module_containment_engine: Literal["thread_replay", "hook_stack", "both"] = "hook_stack"
     _specified_fields: frozenset[str] = field(default_factory=frozenset, init=False, repr=False)
@@ -890,6 +905,7 @@ class CaptureOptions:
         save_preview: bool | MissingType = MISSING,
         emit_nvtx: bool | MissingType = MISSING,
         measure_python_peak_memory: bool | MissingType = MISSING,
+        save_budget: SaveBudgetOption | MissingType = MISSING,
         raise_on_nan: bool | MissingType = MISSING,
         _module_containment_engine: (
             Literal["thread_replay", "hook_stack", "both"] | MissingType
@@ -1048,6 +1064,12 @@ class CaptureOptions:
                 "measure_python_peak_memory",
                 measure_python_peak_memory,
                 False,
+                specified_fields,
+            ),
+            "save_budget": _resolve_option_value(
+                "save_budget",
+                save_budget,
+                "auto",
                 specified_fields,
             ),
             "raise_on_nan": _resolve_option_value(
