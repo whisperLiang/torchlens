@@ -3556,8 +3556,8 @@ def _emit_predicate_operation_events(
             else:
                 demanded = EnrichmentLevel.SHELL
             bulk_default_ram = bool(
-                capture_session_for(self) is not None
-                and demanded is EnrichmentLevel.PAYLOAD
+                demanded is EnrichmentLevel.PAYLOAD
+                and capture_session_for(self) is not None
                 and _is_default_ram_payload(state, spec)
             )
             if demanded is not EnrichmentLevel.SHELL:
