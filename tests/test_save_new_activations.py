@@ -403,7 +403,7 @@ class TestOutputTensorIndependence:
 
 
 class TestFastPathModuleLogs:
-    """postprocess_fast should preserve module logs from exhaustive pass."""
+    """Refresh capture should preserve module logs from the exhaustive pass."""
 
     def test_fast_path_preserves_module_logs(self) -> None:
         model = _SimpleLinear()

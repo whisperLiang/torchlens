@@ -145,9 +145,12 @@ pytest tests/ -m "not slow" -x --tb=short
 4. FIELD_ORDER constants and class definitions must stay in sync.
 5. Module suffixes are appended to `equivalence_class` at op creation before loop detection.
 6. RNG state capture/restore must happen before `active_logging()` context.
-7. `_build_module_logs` must not run in `postprocess_fast`; `_module_build_data` is not
-   populated in fast mode.
-8. `_pass_finished` is not reset between passes; this is intentional for fast-path lookups.
+7. There is no standalone `postprocess_fast()` orchestrator. Refresh captures run the full
+   `postprocess()` entry point against the established Trace state; Step 0 reads the sealed
+   `CapturedRunCore.events` snapshot and `RefreshProjector` applies refreshed payloads onto
+   the existing graph.
+8. `_tracing_finished` is set once at finalization and mirrored onto every retained op
+   (`backends/_finalize.py`); nothing resets it per pass.
 9. Portable `.tlspec` public schema is manifest-only; executable callables are not portable.
 10. `backward_ready=True` rejects contradictory detaching/disk-save settings and preserves user
     `requires_grad` choices.
