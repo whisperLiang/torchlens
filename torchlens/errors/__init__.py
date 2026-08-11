@@ -144,9 +144,21 @@ _LEGACY_EXCEPTION_PATHS = {
     "MetadataInvariantError": ("torchlens.validation.invariants", "MetadataInvariantError"),
 }
 
+_LAZY_EXCEPTION_PATHS = {
+    **_LEGACY_EXCEPTION_PATHS,
+    # Resolved lazily like the legacy names, but for the opposite reason: the
+    # defining modules import ``errors._base``, so eagerly importing them here
+    # would create a cycle.
+    "DistributedCaptureUnsupportedError": (
+        "torchlens._distributed",
+        "DistributedCaptureUnsupportedError",
+    ),
+    "SaveBudgetExceededError": ("torchlens._save_budget", "SaveBudgetExceededError"),
+}
+
 
 def __getattr__(name: str) -> Any:
-    """Resolve legacy exception names lazily from their compatibility modules.
+    """Resolve lazily-bound exception names from their defining modules.
 
     Parameters
     ----------
@@ -164,8 +176,8 @@ def __getattr__(name: str) -> Any:
         If ``name`` is not part of the public error surface.
     """
 
-    if name in _LEGACY_EXCEPTION_PATHS:
-        class_module, attr_name = _LEGACY_EXCEPTION_PATHS[name]
+    if name in _LAZY_EXCEPTION_PATHS:
+        class_module, attr_name = _LAZY_EXCEPTION_PATHS[name]
         module_obj = importlib.import_module(class_module)
         return getattr(module_obj, attr_name)
     raise AttributeError(f"module 'torchlens.errors' has no attribute {name!r}")
@@ -177,10 +189,10 @@ def __dir__() -> list[str]:
     Returns
     -------
     list[str]
-        Sorted eager globals plus lazily-resolved legacy exception names.
+        Sorted eager globals plus lazily-resolved exception names.
     """
 
-    return sorted([*globals(), *_LEGACY_EXCEPTION_PATHS])
+    return sorted([*globals(), *_LAZY_EXCEPTION_PATHS])
 
 
 __all__ = [
@@ -204,5 +216,5 @@ __all__ = [
     "TorchLensWarning",
     "TraceNotReproducibleWarning",
     "ValidationError",
-    *_LEGACY_EXCEPTION_PATHS,
+    *_LAZY_EXCEPTION_PATHS,
 ]

@@ -2,12 +2,12 @@
 
 ## Key Internal Functions
 
-### `draw()` in `rendering.py`
+### `draw()` in `_render_dot.py`
 Main forward graph entry point. It normalizes buffer visibility, applies module focus, skip
 and collapse decisions, builds Graphviz nodes/edges, styles modules, optionally adds legends
 and code panels, and writes/renders output.
 
-### `render_backward_graph()` in `rendering.py`
+### `render_backward_graph()` in `_render_entrypoints.py`
 Renders `GradFn` nodes and grad edges captured by `capture/backward.py`.
 
 ### Collapse and Focus

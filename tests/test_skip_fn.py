@@ -9,7 +9,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.data_classes.layer import Layer
-from torchlens.visualization.rendering import GRADIENT_ARROW_COLOR
+from torchlens.visualization._render_common import GRADIENT_ARROW_COLOR
 
 
 def _render_dot(log: tl.Trace, tmp_path: Any, **kwargs: Any) -> str:

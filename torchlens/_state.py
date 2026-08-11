@@ -649,6 +649,11 @@ _functorch_warning_emitted: bool = False
 the current logging session.  Reset to False at the start of every
 ``active_logging()`` context so each forward pass gets at most one warning."""
 
+_dynamo_warning_emitted: bool = False
+"""True if a warning about ops skipped inside a Dynamo-traced region has been
+emitted for the current logging session.  Reset to False at the start of every
+``active_logging()`` context so each forward pass gets at most one warning."""
+
 _function_call_counts: dict[str, int] = {}
 """func_name -> total calls across all logged forward ops."""
 
@@ -703,6 +708,7 @@ def active_logging(trace: "Trace") -> Iterator[None]:
     clearing it on inner exit) is worse than failing loudly.
     """
     global _logging_enabled, _active_trace, _functorch_warning_emitted, _func_call_id_counter
+    global _dynamo_warning_emitted
     global _active_owner_thread_id
     if _logging_enabled or _active_trace is not None or _hook_reentrancy_depth > 0:
         active_model = getattr(_active_trace, "model_label", None)
@@ -722,6 +728,7 @@ def active_logging(trace: "Trace") -> Iterator[None]:
     _active_trace = trace
     _active_owner_thread_id = threading.get_ident()
     _functorch_warning_emitted = False
+    _dynamo_warning_emitted = False
     _func_call_id_counter = 0
     _logging_enabled = True
     try:

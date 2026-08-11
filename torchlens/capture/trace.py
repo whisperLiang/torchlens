@@ -27,6 +27,7 @@ import contextlib
 import random
 import sys
 import time
+import warnings
 from collections.abc import Callable, Iterator
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, cast
@@ -43,7 +44,8 @@ from ..backends import (
 from ..fastlog._halt import HaltSignal
 from ..ir.container_registry import ModelSite, Phase, Role, walk_container
 from ..quantities import Bytes, Duration
-from .._capture_state_helpers import unwrap_compiled_submodules
+from .. import _state
+from .._capture_state_helpers import prepare_compiled_capture
 from .config import InternalCaptureConfig
 from .session import (
     CaptureSession,
@@ -1265,12 +1267,12 @@ def run_and_log_inputs_through_model(
     compiled_unwrap_exception: tuple[
         type[BaseException] | None, BaseException | None, TracebackType | None
     ] = (None, None, None)
-    compiled_unwrap_context = (
-        unwrap_compiled_submodules(model)
+    compiled_capture_context = (
+        prepare_compiled_capture(model)
         if isinstance(model, nn.Module)
         else contextlib.nullcontext()
     )
-    compiled_unwrap_context.__enter__()
+    compiled_callable_sites = compiled_capture_context.__enter__() or ()
 
     try:
         global _ACTIVE_CAPTURE_BACKEND
@@ -1389,6 +1391,21 @@ def run_and_log_inputs_through_model(
         # automatically by the decorated wrappers.
         _vprint(self, f"Running {self.capture_mode} forward pass...")
         with backend.active_logging(self):
+            if compiled_callable_sites:
+                self._raw_dynamo_region_detected = True
+                self._raw_transform_escape_detected = True
+                _state._dynamo_warning_emitted = True
+                warnings.warn(
+                    "TorchLens detected a torch.compile (Dynamo) region on the captured model "
+                    f"at {', '.join(compiled_callable_sites)}. Operations that run inside the "
+                    "compiled region are not logged: on a cold compile the tensors there are "
+                    "data-free FakeTensors, while a warm-cache execution can bypass Python "
+                    "wrappers entirely. The returned Trace contains only operations that ran "
+                    "OUTSIDE the compiled region. Use the eager callable during capture if you "
+                    "need its interior logged.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             for i, t in enumerate(input_tensors):
                 backend.log_source_tensor(self, t, "input", input_tensor_addresses[i])
             _register_model_input_container_snapshots(self, input_args, input_kwargs)
@@ -1632,4 +1649,4 @@ def run_and_log_inputs_through_model(
                 if capture_session is not None and capture_events is not None:
                     detach_capture_session(self, capture_events, capture_session)
         finally:
-            compiled_unwrap_context.__exit__(*compiled_unwrap_exception)
+            compiled_capture_context.__exit__(*compiled_unwrap_exception)

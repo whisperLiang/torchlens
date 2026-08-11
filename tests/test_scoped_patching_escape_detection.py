@@ -20,6 +20,7 @@ from torch import nn
 import torchlens as tl
 from torchlens import _state
 from torchlens._errors import TorchLensCaptureGapWarning
+from torchlens.options import CaptureOptions
 import example_models
 from torchlens.backends.torch.escape_detection import (
     AUDITED_ESCAPE_EXEMPTIONS,
@@ -713,7 +714,17 @@ def test_external_profile_hook_is_chained_and_restored_on_success_and_error() ->
 
 
 def test_rng_and_escape_profile_detectors_coarm_without_lost_detection() -> None:
-    """The nested RNG profile hook chains the escape detector and restores both."""
+    """The nested RNG profile hook chains the escape detector and restores both.
+
+    The capture must be runnable-capable. ``_runnable_host_rng_channels`` only exists
+    when the host-RNG monitor is ARMED, and a plain ``tl.trace`` deliberately does not
+    arm it -- that fail-closed contract is pinned by
+    ``test_plain_trace_does_not_arm_monitor_and_stamps_fail_closed`` in
+    ``tests/test_rng_witness_gating.py``, which asserts the field is ABSENT after a
+    plain trace. This test previously used a plain trace, so only the escape
+    detector's hook was ever installed and the co-arming it names could not be
+    observed at all.
+    """
 
     if hasattr(sys, "monitoring"):
         pytest.skip("escape detection uses sys.monitoring instead of setprofile on Python 3.12+")
@@ -731,9 +742,30 @@ def test_rng_and_escape_profile_detectors_coarm_without_lost_detection() -> None
 
     wrap_torch(patch_policy="scoped", escape_detector="shadow")
     with pytest.warns(TorchLensCaptureGapWarning, match="relu"):
-        trace = tl.trace(DualDetectionModel(), torch.randn(3))
+        trace = tl.trace(
+            DualDetectionModel(),
+            torch.randn(3),
+            capture=CaptureOptions(
+                intervention_ready=True,
+                capture_container_structure=True,
+                cache=False,
+                random_seed=7,
+            ),
+        )
 
-    assert len(trace.escape_diagnostics) == 1
+    # Assert the property under test -- BOTH receivers fired -- by naming the escape,
+    # not by counting diagnostics. An armed capture also self-reports one escape for
+    # TorchLens's own `completeness_witness._raw_storage_ptr_no_observe` calling
+    # `TensorBase.untyped_storage`, which is absent from a plain capture. That
+    # self-trip is tracked separately; a total-count assertion here would silently
+    # couple this test to it.
+    escaped = {
+        candidate
+        for diagnostic in trace.escape_diagnostics
+        for candidate in diagnostic["callable_candidates"]
+    }
+    assert any("relu" in candidate for candidate in escaped), escaped
+    assert trace._runnable_rng_monitor_uncertain is False
     assert "c_rng_instance_draw" in trace._runnable_host_rng_channels
     assert sys.getprofile() is None
 
@@ -889,3 +921,170 @@ def test_guard_pass_metadata_is_machine_readable() -> None:
         item["owner_thread_id"] == trace.capture_owner_thread_id
         for item in trace.capture_guard_passes
     )
+
+
+def test_witness_internal_storage_read_does_not_self_trip_detector() -> None:
+    """The armed completeness witness never reports its OWN raw storage reads.
+
+    Regression for the reds-lane finding: with scoped wrapping and the shadow
+    escape detector, an armed (runnable-capable) capture reported
+    ``TensorBase.untyped_storage`` from TorchLens's own
+    ``_raw_storage_ptr_no_observe`` frame, degrading otherwise-verified armed
+    captures with user-directed remediation no user action could clear. The
+    witness now authorizes its raw-original reads through the detector's
+    FRAME-BOUND ``expected_original_call`` accounting, so the exemption covers
+    exactly that call site: raw callable reaches anywhere else still trip the
+    detector (see the coarm test above for the positive detection control).
+    """
+
+    from torchlens.options import CaptureOptions
+
+    class Model(nn.Module):
+        """Two represented ops; nothing escapes."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Run a clean forward."""
+
+            return torch.sigmoid(torch.relu(x))
+
+    wrap_torch(patch_policy="scoped", escape_detector="shadow")
+    trace = tl.trace(
+        Model(),
+        torch.randn(3),
+        capture=CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+            random_seed=7,
+        ),
+    )
+    self_trips = [
+        diagnostic
+        for diagnostic in trace.escape_diagnostics
+        if any(
+            "untyped_storage" in str(candidate)
+            for candidate in diagnostic.get("callable_candidates", ())
+        )
+    ]
+    assert not self_trips, f"witness self-trip diagnostics: {self_trips}"
+
+
+def test_user_call_into_witness_storage_helper_degrades_verification() -> None:
+    """User model code calling the witness's raw-storage helper is an escape.
+
+    Inverse control for the self-trip regression above: the helper's
+    authorization is bound to TorchLens's OWN calling frames, not to the
+    helper's identity. User model code that imports and calls
+    ``_raw_storage_ptr_no_observe`` executes pointer-dependent control flow
+    outside every wrapper, so an armed capture must NOT report
+    ``capture_verified`` with empty escape diagnostics.
+    """
+
+    from torchlens.backends.torch.completeness_witness import _raw_storage_ptr_no_observe
+    from torchlens.options import CaptureOptions
+
+    class CallsAuthorizedWitnessFrame(nn.Module):
+        """Branches on a raw storage pointer read through the helper."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Choose an op from an unobserved raw pointer."""
+
+            ptr = _raw_storage_ptr_no_observe(x)
+            if ptr is not None and ((ptr >> 8) & 1):
+                return torch.relu(x)
+            return torch.sigmoid(x)
+
+    wrap_torch(patch_policy="scoped", escape_detector="shadow", completeness_witness=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trace = tl.trace(
+            CallsAuthorizedWitnessFrame(),
+            torch.randn(3),
+            capture=CaptureOptions(
+                intervention_ready=True,
+                capture_container_structure=True,
+                cache=False,
+            ),
+        )
+    assert not (trace.capture_verified and not trace.escape_diagnostics), (
+        trace.capture_verification_reason,
+        trace.escape_diagnostics,
+    )
+    storage_trips = [
+        diagnostic
+        for diagnostic in trace.escape_diagnostics
+        if any(
+            "untyped_storage" in str(candidate) or "data_ptr" in str(candidate)
+            for candidate in diagnostic.get("callable_candidates", ())
+        )
+    ]
+    assert storage_trips
+
+
+def test_forged_frame_metadata_cannot_impersonate_witness_authorization() -> None:
+    """FAIL-AFTER-WHERE-PASSED-BEFORE: frame-metadata forgery gains no authorization.
+
+    Sol be2-closure probe regression: the internal-caller check used to trust
+    the caller frame's ``f_globals['__name__']`` and ``co_filename``, both of
+    which user code controls -- a ``forward`` compiled with a torchlens-ish
+    module name and a fabricated filename under the package directory was
+    granted the witness's detector authorization and produced a verified
+    capture with empty escape diagnostics around pointer-dependent control
+    flow. Authorization is now code-object IDENTITY against the import-time
+    roster, which ``exec``/``compile`` forgery cannot reproduce: the forged
+    frame's raw reads run bare and the shadow detector convicts them exactly
+    like the undisguised user call in the test above.
+    """
+
+    from torchlens.backends.torch.completeness_witness import _raw_storage_ptr_no_observe
+    from torchlens.backends.torch import completeness_witness as witness_module
+    from torchlens.options import CaptureOptions
+
+    forged_globals = {
+        "__name__": "torchlens.user_supplied_model",
+        "__builtins__": __builtins__,
+        "torch": torch,
+        "_raw_storage_ptr_no_observe": _raw_storage_ptr_no_observe,
+    }
+    forged_filename = str(
+        Path(witness_module.__file__).resolve().parent / "user_supplied_model.py"
+    )
+    code = compile(
+        "def forward(self, x):\n"
+        "    ptr = _raw_storage_ptr_no_observe(x)\n"
+        "    if ptr is not None and ((ptr >> 8) & 1):\n"
+        "        return torch.relu(x)\n"
+        "    return torch.sigmoid(x)\n",
+        forged_filename,
+        "exec",
+    )
+    exec(code, forged_globals)
+    ForgedFrameModel = type(
+        "ForgedFrameModel", (nn.Module,), {"forward": forged_globals["forward"]}
+    )
+
+    wrap_torch(patch_policy="scoped", escape_detector="shadow", completeness_witness=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trace = tl.trace(
+            ForgedFrameModel(),
+            torch.randn(3),
+            capture=CaptureOptions(
+                intervention_ready=True,
+                capture_container_structure=True,
+                cache=False,
+            ),
+        )
+    assert not (trace.capture_verified and not trace.escape_diagnostics), (
+        trace.capture_verification_reason,
+        trace.escape_diagnostics,
+    )
+    storage_trips = [
+        diagnostic
+        for diagnostic in trace.escape_diagnostics
+        if any(
+            "untyped_storage" in str(candidate) or "data_ptr" in str(candidate)
+            for candidate in diagnostic.get("callable_candidates", ())
+        )
+    ]
+    assert storage_trips

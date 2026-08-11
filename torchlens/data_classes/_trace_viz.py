@@ -27,7 +27,7 @@ from .._literals import (
 )
 from .._source_links import file_line_text, terminal_file_line_link, vscode_file_line_link
 from ..intervention.types import FireRecord
-from ._nonfinite import first_nonfinite_layer
+from ._nonfinite import coverage_gap_note, first_nonfinite_layer
 from .module import Module
 
 
@@ -143,7 +143,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
         show_buffer_layers, direction, vis_node_placement, vis_renderer, vis_theme, \
         vis_intervention_mode, vis_show_cone, code_panel, order_siblings, show_containers,
         container_max_inline, show_input_transform_summary, show_orphans:
-            Forwarded unchanged to :func:`torchlens.visualization.rendering.draw`.
+            Forwarded unchanged to :func:`torchlens.visualization._render_dot.draw`.
             ``show_orphans=True`` renders orphan (island) ops -- captured but unreachable
             from both inputs and outputs -- as a dashed, greyed cluster of edgeless nodes,
             instead of omitting them. Orphans must have been retained at capture time
@@ -174,7 +174,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
             Graphviz DOT source, renderer-specific output, or renderer object
             when ``return_graph=True``.
         """
-        from ..visualization.rendering import draw as _impl
+        from ..visualization._render_dot import draw as _impl
 
         if vis_opt is not MISSING:
             vis_mode = cast(VisModeLiteral, vis_opt)
@@ -344,7 +344,14 @@ class TraceVisualizationMixin(_TraceMixinBase):
             module, shape, dtype, parents, and source location.
         """
 
-        layer = first_nonfinite_layer(self, kind="trace")
+        # ``kind="saved"`` skips ops that retained no payload. The raising
+        # ``kind="trace"`` gate contradicted this method's own contract ("the first
+        # SAVED non-finite out"): on any selective-save capture it hit an unsaved op
+        # and raised ValueError, which took ``print(trace)``, ``_repr_html_``, and
+        # ``report.explain`` down with it -- in exactly the mode the performance guide
+        # recommends for large models. Skipping is honest only because the clean
+        # answer below names how many ops could not be examined.
+        layer = first_nonfinite_layer(self, kind="saved")
         if layer is not None:
             stack = getattr(layer, "code_context", None) or []
             location = "source unavailable"
@@ -369,7 +376,14 @@ class TraceVisualizationMixin(_TraceMixinBase):
                 f"dtype={getattr(layer, 'dtype', None)}, parents={parents}, "
                 f"source={location}."
             )
-        return "No non-finite tensor values found in saved outs."
+        # A scoped clean answer must not read like a whole-capture one: ops that
+        # retained no payload, and payloads whose dtype has no runnable ``isfinite``
+        # (quantized, sparse), are both named. fp8 is NOT in that class -- it is
+        # widened exactly and really is checked.
+        return (
+            "No non-finite tensor values found in saved outs"
+            f"{coverage_gap_note(self, kind='saved')}."
+        )
 
     def draw_backward(
         self: "Trace",
@@ -394,7 +408,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
         vis_node_mode, vis_edge_overrides, vis_save_only, vis_fileformat, \
         vis_direction, code_panel, vis_mode, bwd:
             Forwarded unchanged to
-            :func:`torchlens.visualization.rendering.render_backward_graph`.
+            :func:`torchlens.visualization._render_entrypoints.render_backward_graph`.
             ``collapsed_node_spec_fn`` and ``vis_node_mode`` are accepted for
             forward-visualization API symmetry but are not applied because
             backward graphs do not render collapsed module nodes.
@@ -404,7 +418,7 @@ class TraceVisualizationMixin(_TraceMixinBase):
         str
             Graphviz DOT source.
         """
-        from ..visualization.rendering import render_backward_graph as _impl
+        from ..visualization._render_entrypoints import render_backward_graph as _impl
 
         return _impl(
             self,
@@ -445,14 +459,14 @@ class TraceVisualizationMixin(_TraceMixinBase):
         vis_edge_overrides, vis_save_only, vis_fileformat, vis_direction, \
         vis_mode, intervening_cluster, show_buffer_layers, bwd:
             Forwarded unchanged to
-            :func:`torchlens.visualization.rendering.render_combined_graph`.
+            :func:`torchlens.visualization._render_entrypoints.render_combined_graph`.
 
         Returns
         -------
         str
             Graphviz DOT source.
         """
-        from ..visualization.rendering import render_combined_graph as _impl
+        from ..visualization._render_entrypoints import render_combined_graph as _impl
 
         return _impl(
             self,

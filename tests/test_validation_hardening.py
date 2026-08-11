@@ -169,7 +169,9 @@ def test_w32_forged_placeholder_in_plain_capture_fails() -> None:
     object.__setattr__(relu_op, "func", None)
     object.__setattr__(relu_op, "func_name", "intervention_replacement")
     object.__setattr__(relu_op, "intervention_replaced", True)
-    assert getattr(trace, "_replacement_event_labels", None) in (None, set())
+    # No journal edit record exists for a plain capture: the forged per-op
+    # stamps below have no corroborating InterventionAppliedEvent.
+    assert not getattr(getattr(trace, "_capture_events", None), "intervention_events", ())
 
     status = validate_saved_outs(trace, [ground_truth], validate_metadata=False)
     assert status.state == "failed"
@@ -355,7 +357,11 @@ def test_w34_census_unverified_outcome_is_recorded_not_discarded() -> None:
 
     from torchlens.validation.diagnostics import get_validation_diagnostics
 
-    trace, ground_truth = _capture(_Tiny(), torch.randn(3, 4))
+    # Bind the model: replay reads parameters through TorchLens' weak model
+    # reference, so a temporary model can be collected mid-test and turn the
+    # replay into PostTraceParamUnavailable.
+    model = _Tiny()
+    trace, ground_truth = _capture(model, torch.randn(3, 4))
     status = validate_saved_outs(trace, [ground_truth], validate_metadata=False)
     assert status.state == "passed"
     diagnostics = get_validation_diagnostics(trace)
@@ -369,7 +375,9 @@ def test_w34_census_unverified_outcome_is_recorded_not_discarded() -> None:
 def test_w34_census_validated_outcome_recorded_in_decisions() -> None:
     """A matched census is positive verdict evidence, not silence."""
 
-    trace, ground_truth = _capture(_Tiny(), torch.randn(3, 4))
+    # Bind the model for the duration of the replay (see the sibling test).
+    model = _Tiny()
+    trace, ground_truth = _capture(model, torch.randn(3, 4))
     # Simulate the public path's collected census: counts agree.
     trace._validation_dispatch_op_count = 3
     trace._validation_captured_dispatchable_op_count = 3
@@ -731,3 +739,162 @@ def test_geometric_ladder_scoped_to_value_discretizing_children() -> None:
         "unit_step_up",
         "unit_step_down",
     ]
+
+
+def test_genuine_raw_hook_replacement_mints_journal_edit_and_validates() -> None:
+    """A genuine untraceable replacement is a journal EDIT and validates.
+
+    The user's raw ``register_forward_hook`` returns a tensor TorchLens never
+    traced (built outside the forward), so capture synthesizes a functionless
+    boundary op. The observing site appends an ``InterventionAppliedEvent``
+    to the journal — the ONLY authority the functionless-op carve-out
+    accepts — so metadata invariants pass for the genuine case while the
+    forged plain-capture case (previous test) still fails.
+    """
+
+    from torchlens.ir.events import InterventionAppliedEvent
+    from torchlens.validation.invariants import check_metadata_invariants
+
+    model = _Tiny()
+    injected = torch.ones(3, 4) * 7.0
+
+    def raw_hook(
+        module: torch.nn.Module,
+        args: tuple[torch.Tensor, ...],
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        del module, args, output
+        return injected
+
+    handle = model.lin.register_forward_hook(raw_hook)
+    try:
+        trace, _ = _capture(model, torch.randn(3, 4))
+    finally:
+        handle.remove()
+
+    boundary_layers = [
+        layer for layer in trace.layer_list if layer.func_name == "intervention_replacement"
+    ]
+    assert boundary_layers, "the untraceable replacement must synthesize a boundary op"
+    edits = [
+        event
+        for event in getattr(trace._capture_events, "intervention_events", ())
+        if isinstance(event, InterventionAppliedEvent)
+    ]
+    assert edits, "the observing site must append a journal edit record"
+    assert {event.kind for event in edits} == {"replaced"}
+    assert all(event.seq >= 1 for event in edits)
+    edited_labels = {event.label_raw for event in edits}
+    assert {layer._label_raw for layer in boundary_layers} & edited_labels
+    # The journal edit is the corroboration the carve-out requires: the
+    # genuine case validates; no side ledger exists anymore. Instance-level
+    # hasattr covers both the removed instance ledger and any class-level
+    # reintroduction (the old type-level check missed instance attributes).
+    assert not hasattr(trace, "_replacement_event_labels")
+    check_metadata_invariants(trace)
+
+
+def test_forged_journal_edit_does_not_bless_plain_placeholder() -> None:
+    """FAIL-AFTER-WHERE-PASSED-BEFORE: a forged edit record stays inert.
+
+    Sol probe regression (extends the round-26 pin to the edit-record
+    surface): appending a bare ``InterventionAppliedEvent`` through the
+    ordinary journal writer used to bless the exact plain-capture placeholder
+    the 2026-06-02 lesson exists to fail, because corroboration matched on
+    the label string alone. An edit with no causal binding (no run token, no
+    target event) must be refused by both nets.
+    """
+
+    import dataclasses
+
+    from torchlens.ir.events import InterventionAppliedEvent
+
+    trace, ground_truth = _capture(_Tiny(), torch.randn(3, 4))
+    relu_op = [op for op in trace.layer_list if op.func_name == "relu"][0]
+    object.__setattr__(relu_op, "func", None)
+    object.__setattr__(relu_op, "func_name", "intervention_replacement")
+    object.__setattr__(relu_op, "intervention_replaced", True)
+    trace._capture_events.append_intervention(
+        InterventionAppliedEvent(
+            label_raw=relu_op._label_raw,
+            kind="replaced",
+            origin="raw_forward_hook",
+            timestamp=2.0,
+        )
+    )
+
+    status = validate_saved_outs(trace, [ground_truth], validate_metadata=False)
+    assert status.state == "failed"
+    with pytest.raises(MetadataInvariantError):
+        check_metadata_invariants(trace)
+
+    # A forged binding built from stale facts (a plausible-looking target seq
+    # that names no real op event in this journal) is refused the same way.
+    trace2, ground_truth2 = _capture(_Tiny(), torch.randn(3, 4))
+    relu_op2 = [op for op in trace2.layer_list if op.func_name == "relu"][0]
+    object.__setattr__(relu_op2, "func", None)
+    object.__setattr__(relu_op2, "func_name", "intervention_replacement")
+    object.__setattr__(relu_op2, "intervention_replaced", True)
+    trace2._capture_events.append_intervention(
+        dataclasses.replace(
+            InterventionAppliedEvent(
+                label_raw=relu_op2._label_raw,
+                kind="replaced",
+                origin="raw_forward_hook",
+                timestamp=2.0,
+            ),
+            run_token=trace2._capture_events.run_nonce,
+            target_seq=10_000,
+        )
+    )
+    status2 = validate_saved_outs(trace2, [ground_truth2], validate_metadata=False)
+    assert status2.state == "failed"
+    with pytest.raises(MetadataInvariantError):
+        check_metadata_invariants(trace2)
+
+
+def test_cross_run_replayed_edit_does_not_bless_placeholder() -> None:
+    """A GENUINE edit record replayed into another run's journal stays inert.
+
+    The edit is causally bound to its own run (run token + target event
+    instance); replaying it against a different capture -- even relabelled to
+    name the victim op -- must not corroborate a placeholder there.
+    """
+
+    import dataclasses
+
+    from torchlens.ir.events import InterventionAppliedEvent
+
+    # Run A: a genuine raw-hook replacement mints a BOUND edit record.
+    model_a = _Tiny()
+    injected = torch.ones(3, 4) * 7.0
+    handle = model_a.lin.register_forward_hook(lambda _m, _a, _o: injected)
+    try:
+        trace_a, _ = _capture(model_a, torch.randn(3, 4))
+    finally:
+        handle.remove()
+    genuine_edits = [
+        event
+        for event in trace_a._capture_events.intervention_events
+        if isinstance(event, InterventionAppliedEvent)
+    ]
+    assert genuine_edits, "run A must mint a genuine journal edit"
+    assert all(
+        event.run_token == trace_a._capture_events.run_nonce and event.target_seq
+        for event in genuine_edits
+    ), "genuine edits must be causally bound at the observation site"
+
+    # Run B: plain capture; forge the placeholder and replay run A's edit.
+    trace_b, ground_truth_b = _capture(_Tiny(), torch.randn(3, 4))
+    relu_op = [op for op in trace_b.layer_list if op.func_name == "relu"][0]
+    object.__setattr__(relu_op, "func", None)
+    object.__setattr__(relu_op, "func_name", "intervention_replacement")
+    object.__setattr__(relu_op, "intervention_replaced", True)
+    trace_b._capture_events.append_intervention(
+        dataclasses.replace(genuine_edits[0], label_raw=relu_op._label_raw)
+    )
+
+    status = validate_saved_outs(trace_b, [ground_truth_b], validate_metadata=False)
+    assert status.state == "failed"
+    with pytest.raises(MetadataInvariantError):
+        check_metadata_invariants(trace_b)

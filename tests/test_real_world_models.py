@@ -4742,7 +4742,17 @@ def test_tag_pyg():
 
 @pytest.mark.slow
 def test_recurrent_gemma():
-    """RecurrentGemma: Griffin architecture — linear recurrence + local attention hybrid."""
+    """RecurrentGemma: Griffin architecture — linear recurrence + local attention hybrid.
+
+    ``num_hidden_layers`` must complete the Griffin block cycle. RecurrentGemma tiles
+    ``block_types == ('recurrent', 'recurrent', 'attention')``, so the config's derived
+    ``layers_block_type`` truncates: 2 layers yields ``['recurrent', 'recurrent']`` with
+    NO attention layer, and transformers' own forward then unconditionally evaluates
+    ``layers_block_type.index("attention")`` and raises
+    ``ValueError: 'attention' is not in list``. That reproduces with no TorchLens
+    involvement, and a 2-layer config also cannot cover the recurrence plus
+    local-attention hybrid this test names. Use one full cycle.
+    """
     pytest.importorskip("transformers")
     from transformers import RecurrentGemmaConfig, RecurrentGemmaModel
 
@@ -4750,7 +4760,7 @@ def test_recurrent_gemma():
         vocab_size=256,
         hidden_size=64,
         intermediate_size=128,
-        num_hidden_layers=2,
+        num_hidden_layers=3,
         num_attention_heads=2,
         num_key_value_heads=2,
         lru_width=64,
@@ -4758,6 +4768,16 @@ def test_recurrent_gemma():
     )
     model = RecurrentGemmaModel(config).eval()
     input_ids = torch.randint(0, 256, (2, 16))
+    # Validate BEFORE rendering. RecurrentGemma caches recurrent state on itself as
+    # NON-LEAF tensors (`RecurrentGemmaRecurrentBlock.conv1d_state`,
+    # `RecurrentGemmaRglru.recurrent_states`), so after any forward -- with no
+    # TorchLens involvement -- `copy.deepcopy(model)` raises "Only Tensors created
+    # explicitly by the user (graph leaves) support the deepcopy protocol", and
+    # `release_model` does not clear it. Validating an already-run instance therefore
+    # forces the deepcopy-failed fallback, which cannot prove restoration of the
+    # opaque HuggingFace `config` plain attributes and correctly returns False rather
+    # than reporting unverified success. Order the run so the proof is obtainable.
+    assert validate_forward_pass(model, [], input_kwargs={"input_ids": input_ids})
     show_model_graph(
         model,
         [],
@@ -4766,7 +4786,6 @@ def test_recurrent_gemma():
         vis_mode="unrolled",
         vis_outpath=opj(VIS_OUTPUT_DIR, "linear-recurrence", "recurrent_gemma"),
     )
-    assert validate_forward_pass(model, [], input_kwargs={"input_ids": input_ids})
 
 
 # =============================================================================

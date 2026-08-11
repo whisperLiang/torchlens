@@ -36,6 +36,10 @@ from typing import Any, Callable, Iterator, NamedTuple
 
 import torch
 
+from .._state import pause_logging
+from ..utils._torch_compat import get_fp8_dtypes
+from ..utils.tensor_utils import fp8_widen_for_numeric_ops
+
 
 class _ScanMemo(NamedTuple):
     """One recorded scan: what it examined, what it found, how far it got."""
@@ -43,6 +47,7 @@ class _ScanMemo(NamedTuple):
     keys: tuple[tuple[weakref.ref, int | None], ...]
     hits: tuple[int, ...]
     complete: bool
+    unchecked: tuple[int, ...] = ()
 
 
 # Keyed by log object so a memo never keeps a Trace alive, and holding only
@@ -82,6 +87,18 @@ def _saved_out(layer: Any) -> Any:
 
     if not bool(getattr(layer, "has_saved_activation", False)):
         return None
+    if getattr(layer, "out_ref", None) is not None:
+        slot = getattr(layer, "_slot", None)
+        if callable(slot):
+            try:
+                resident = slot("out")
+            except (AttributeError, KeyError, TypeError):
+                resident = None
+            if resident is None:
+                # Repr/report surfaces are metadata queries. A disk-backed value
+                # remains explicitly unexamined until the user requests it.
+                return None
+            return resident
     try:
         return getattr(layer, "out", None)
     except ValueError:
@@ -122,13 +139,45 @@ def _examined(log: Any, kind: str) -> Iterator[tuple[Any, torch.Tensor]]:
         yield layer, out
 
 
-def _has_nonfinite(out: torch.Tensor) -> bool:
-    """Return whether a tensor holds any NaN or Inf, ``False`` if uncheckable."""
+def _has_nonfinite(out: torch.Tensor) -> bool | None:
+    """Return whether a tensor holds any NaN or Inf, ``None`` if unrunnable.
 
+    ``None`` means torch ships no ``isfinite`` kernel for this payload's dtype, so
+    the scan has no evidence either way. It is deliberately NOT ``False``: this
+    function used to swallow the ``NotImplementedError`` (a ``RuntimeError``
+    subclass) and answer "finite", which made a whole-capture CLEAN verdict out of a
+    payload nobody looked at. An all-NaN ``float8_e4m3fn`` activation read as clean
+    that way, and ``float8_e8m0fnu`` is worse still -- torch's own ``isfinite``
+    returns ``True`` for its NaN pattern, so the native kernel answers wrongly
+    rather than refusing.
+
+    fp8 is therefore widened to float32 first. The widening is exact (all 256 bit
+    patterns of every variant round-trip bit-identically; see
+    ``fp8_widen_for_numeric_ops``), so the verdict is the one a real fp8 kernel
+    would give. Dtypes with no runnable check even after widening -- quantized and
+    sparse payloads -- return ``None`` and are disclosed by
+    :func:`uncheckable_payload_count`.
+
+    Parameters
+    ----------
+    out:
+        Saved activation payload to test.
+
+    Returns
+    -------
+    bool | None
+        True/False when the check ran, ``None`` when no kernel exists for it.
+    """
+
+    tensor = out.detach()
+    if tensor.dtype in get_fp8_dtypes():
+        # ``.to()`` is a decorated method; never let the widening log itself.
+        with pause_logging():
+            tensor = fp8_widen_for_numeric_ops(tensor)
     try:
-        return bool((~torch.isfinite(out.detach())).any().item())
+        return bool((~torch.isfinite(tensor)).any().item())
     except (RuntimeError, TypeError):
-        return False
+        return None
 
 
 def _ref(tensor: torch.Tensor) -> weakref.ref | None:
@@ -146,16 +195,26 @@ def _scan(log: Any, kind: str, stop_at_first: bool) -> tuple[list[Any], _ScanMem
     layers: list[Any] = []
     keys: list[tuple[weakref.ref | None, int | None]] = []
     hits: list[int] = []
+    unchecked: list[int] = []
     complete = True
     for layer, out in _examined(log, kind):
         layers.append(layer)
         keys.append((_ref(out), getattr(out, "_version", None)))
-        if _has_nonfinite(out):
+        verdict = _has_nonfinite(out)
+        if verdict is None:
+            unchecked.append(len(layers) - 1)
+            continue
+        if verdict:
             hits.append(len(layers) - 1)
             if stop_at_first:
                 complete = False
                 break
-    return layers, _ScanMemo(tuple(keys), tuple(hits), complete)  # type: ignore[arg-type]
+    return layers, _ScanMemo(
+        tuple(keys),  # type: ignore[arg-type]
+        tuple(hits),
+        complete,
+        tuple(unchecked),
+    )
 
 
 def _revalidate(log: Any, kind: str, memo: _ScanMemo) -> list[Any] | None:
@@ -205,8 +264,8 @@ def _store(log: Any, kind: str, memo: _ScanMemo) -> None:
     memos[kind] = memo
 
 
-def _resolve(log: Any, kind: str, stop_at_first: bool) -> list[Any]:
-    """Return the non-finite layers of a scan, from the memo when it still holds."""
+def _resolve_memo(log: Any, kind: str, stop_at_first: bool) -> tuple[list[Any], _ScanMemo]:
+    """Return the examined layers plus the memo, scanning only when needed."""
 
     try:
         memos = _MEMOS.get(log)
@@ -216,9 +275,16 @@ def _resolve(log: Any, kind: str, stop_at_first: bool) -> list[Any]:
     if memo is not None and (memo.complete or stop_at_first):
         cached_layers = _revalidate(log, kind, memo)
         if cached_layers is not None:
-            return [cached_layers[index] for index in memo.hits]
+            return cached_layers, memo
     layers, memo = _scan(log, kind, stop_at_first)
     _store(log, kind, memo)
+    return layers, memo
+
+
+def _resolve(log: Any, kind: str, stop_at_first: bool) -> list[Any]:
+    """Return the non-finite layers of a scan, from the memo when it still holds."""
+
+    layers, memo = _resolve_memo(log, kind, stop_at_first)
     return [layers[index] for index in memo.hits]
 
 
@@ -241,6 +307,162 @@ def first_nonfinite_layer(log: Any, *, kind: str = "trace") -> Any | None:
 
     hits = _resolve(log, kind, stop_at_first=True)
     return hits[0] if hits else None
+
+
+def unexamined_payload_count(log: Any, *, kind: str = "saved") -> int:
+    """Return how many ops a scan of this kind cannot look at.
+
+    A selective-save capture retains payloads for a chosen subset of ops, so a
+    non-finite scan genuinely cannot speak for the rest. Callers report this count
+    rather than letting a scoped clean answer read as a whole-capture one.
+
+    Parameters
+    ----------
+    log:
+        Trace-like object to inspect.
+    kind:
+        Scan contract whose sequence and gate to use.
+
+    Returns
+    -------
+    int
+        Number of ops in the scan sequence holding no readable out payload.
+
+    Notes
+    -----
+    Counts payload availability only -- it never reads tensor values, so it adds no
+    scan cost and cannot invalidate the scan memo.
+    """
+
+    sequence, gate = _KINDS[kind]
+    unexamined = 0
+    for layer in sequence(log):
+        try:
+            out = gate(layer)
+        except ValueError:
+            unexamined += 1
+            continue
+        if out is None:
+            unexamined += 1
+    return unexamined
+
+
+def _unmaterialized_disk_payload_count(log: Any, *, kind: str) -> int:
+    """Return disk-backed payloads deliberately not read by reporting.
+
+    Parameters
+    ----------
+    log:
+        Trace-like object to inspect.
+    kind:
+        Scan contract whose sequence is counted.
+
+    Returns
+    -------
+    int
+        Number of saved outs represented only by an unmaterialized disk ref.
+    """
+
+    sequence, _gate = _KINDS[kind]
+    count = 0
+    for layer in sequence(log):
+        if not bool(getattr(layer, "has_saved_activation", False)):
+            continue
+        if getattr(layer, "out_ref", None) is None:
+            continue
+        slot = getattr(layer, "_slot", None)
+        if not callable(slot):
+            continue
+        try:
+            if slot("out") is None:
+                count += 1
+        except (AttributeError, KeyError, TypeError):
+            continue
+    return count
+
+
+def uncheckable_payload_count(log: Any, *, kind: str = "saved") -> int:
+    """Return how many examined payloads hold a dtype with no finiteness check.
+
+    A retained payload whose dtype torch cannot run ``isfinite`` on (a quantized or
+    sparse activation) yields no evidence at all. Counting it here lets a clean
+    verdict say so, instead of the scan silently treating "could not look" as
+    "looked and it was finite" -- the same disarmed-tripwire shape as the fp8
+    ``raise_on_nan`` swallow, one layer up. fp8 payloads are NOT counted: they are
+    widened exactly and really are checked (see :func:`_has_nonfinite`).
+
+    Parameters
+    ----------
+    log:
+        Trace-like object to inspect.
+    kind:
+        Scan contract whose sequence and gate to use.
+
+    Returns
+    -------
+    int
+        Number of examined payloads whose finiteness check could not run.
+
+    Notes
+    -----
+    Reuses the scan memo, so asking after a clean
+    :func:`first_nonfinite_layer` costs a revalidation, not a second pass. When the
+    scan stopped early on a hit the count covers only what it examined, which is
+    why callers report it on the clean path.
+    """
+
+    _, memo = _resolve_memo(log, kind, stop_at_first=False)
+    return len(memo.unchecked)
+
+
+def coverage_gap_note(log: Any, *, kind: str = "saved") -> str:
+    """Return a parenthetical naming what a clean scan could not examine.
+
+    Both reporting surfaces that publish a clean non-finite verdict --
+    ``Trace.first_nonfinite`` (and through it ``print(trace)`` / ``_repr_html_``) and
+    ``report.explain``'s anomaly bullet -- must disclose the same two coverage gaps,
+    so the wording lives here rather than being written twice and drifting.
+
+    Parameters
+    ----------
+    log:
+        Trace-like object to inspect.
+    kind:
+        Scan contract whose sequence and gate to use.
+
+    Returns
+    -------
+    str
+        Leading-space parenthetical, or ``""`` when the scan examined everything.
+
+    Notes
+    -----
+    Call this only on the clean path. A scan that found a non-finite payload names
+    that payload, which is a complete answer on its own.
+    """
+
+    unexamined = unexamined_payload_count(log, kind=kind)
+    disk_backed = _unmaterialized_disk_payload_count(log, kind=kind)
+    unsaved = max(0, unexamined - disk_backed)
+    uncheckable = uncheckable_payload_count(log, kind=kind)
+    if not unexamined and not uncheckable:
+        return ""
+    if not uncheckable and not disk_backed:
+        # Unchanged wording for the save=-scoped case, which is the common one.
+        return (
+            f" ({unexamined} op(s) retained no payload and could not be examined; "
+            "re-run with a wider save= to cover them)"
+        )
+    gaps = [f"{uncheckable} op(s) hold a dtype with no runnable finiteness check"]
+    if not uncheckable:
+        gaps = []
+    if disk_backed:
+        gaps.append(
+            f"{disk_backed} disk-backed payload(s) were not materialized by reporting"
+        )
+    if unsaved:
+        gaps.insert(0, f"{unsaved} op(s) retained no payload")
+    return f" ({'; '.join(gaps)}, so they could not be examined)"
 
 
 def nonfinite_layers(log: Any, *, kind: str = "saved") -> list[Any]:

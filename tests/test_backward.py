@@ -1639,3 +1639,318 @@ def test_cleanup_disarms_backward_triggers() -> None:
     # graph fire during this backward; disarmed, they must silently no-op.
     out.sum().backward()
     assert x.grad is not None
+
+
+@pytest.mark.smoke
+def test_journal_seq_spans_forward_and_backward_lanes() -> None:
+    """Every retained lane is writer-stamped from ONE run-monotonic counter."""
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+
+    _model, _x, trace = _logged_model()
+    trace.log_backward(_output_loss(trace))
+    stream = _ensure_backward_event_stream(trace)
+    lanes = (
+        stream.op_events,
+        stream.module_prep_events,
+        stream.module_enter_events,
+        stream.module_exit_events,
+        stream.pre_hook_events,
+        stream.output_version_events,
+        stream.backward_events,
+    )
+    all_seqs = [event.seq for lane in lanes for event in lane]
+    assert all(isinstance(seq, int) and seq >= 1 for seq in all_seqs)
+    assert len(all_seqs) == len(set(all_seqs)), "journal seq values must be unique across lanes"
+    for lane in lanes:
+        lane_seqs = [event.seq for event in lane]
+        assert lane_seqs == sorted(lane_seqs)
+    assert max(all_seqs) <= stream.event_seq
+    # Forward ops were observed before this post-hoc backward pass, so the
+    # recorded order must say so exactly.
+    max_op_seq = max(event.seq for event in stream.op_events)
+    assert all(event.seq > max_op_seq for event in stream.backward_events)
+
+
+@pytest.mark.smoke
+def test_journal_seq_invariant_fires_on_planted_mutations() -> None:
+    """The journal-wide seq invariant is independently armed per failure mode."""
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+    from torchlens.validation.invariants import (
+        MetadataInvariantError,
+        _check_journal_seq_invariants,
+    )
+
+    _model, _x, trace = _logged_model()
+    trace.log_backward(_output_loss(trace))
+    stream = _ensure_backward_event_stream(trace)
+
+    def check() -> None:
+        _check_journal_seq_invariants(trace, "backward_graph_invariants")
+
+    check()  # positive control: the real stream passes
+
+    first_op = stream.op_events[0]
+    second_op = stream.op_events[1]
+
+    # Unstamped event (bypassed the writer).
+    original_seq = first_op.seq
+    object.__setattr__(first_op, "seq", 0)
+    with pytest.raises(MetadataInvariantError, match="missing a writer-stamped seq"):
+        check()
+    object.__setattr__(first_op, "seq", original_seq)
+    check()
+
+    # Lane reorder (strictly-increasing violated).
+    original_second_seq = second_op.seq
+    object.__setattr__(second_op, "seq", original_seq)
+    with pytest.raises(MetadataInvariantError, match="appears in both|does not increase"):
+        check()
+    object.__setattr__(second_op, "seq", original_seq - 1 if original_seq > 1 else 0)
+    with pytest.raises(MetadataInvariantError):
+        check()
+    object.__setattr__(second_op, "seq", original_second_seq)
+    check()
+
+    # Cross-lane duplicate (module lane forging an op's seq).
+    enter_event = stream.module_enter_events[0]
+    original_enter_seq = enter_event.seq
+    object.__setattr__(enter_event, "seq", original_seq)
+    with pytest.raises(MetadataInvariantError, match="appears in both"):
+        check()
+    object.__setattr__(enter_event, "seq", original_enter_seq)
+    check()
+
+    # Counter bypass (an event stamped past the writer counter).
+    backward_event = stream.backward_events[-1]
+    original_backward_seq = backward_event.seq
+    object.__setattr__(backward_event, "seq", stream.event_seq + 7)
+    with pytest.raises(MetadataInvariantError, match="exceeds the writer counter"):
+        check()
+    object.__setattr__(backward_event, "seq", original_backward_seq)
+    check()
+
+
+@pytest.mark.smoke
+def test_aliased_label_registrations_emit_one_grad_event_per_pass() -> None:
+    """One logical op output emits exactly ONE OpGradObserved per pass.
+
+    An identity-output module relabels the SAME live tensor under a second
+    raw label and also hooks its own logged entry, so the same logical
+    gradient used to be emitted twice under one final label — caught by the
+    events<->projection multiplicity reconciliation. The label-owner rule
+    (one gradient owner per raw label; live registrations take ownership)
+    keeps exactly one emission.
+    """
+    import collections
+
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+    from torchlens.ir.events import OpGradObserved
+    from torchlens.validation.invariants import check_metadata_invariants
+
+    class IdentityWrapper(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = nn.Linear(3, 3)
+            self.identity = nn.Identity()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.identity(self.linear(x))
+
+    torch.manual_seed(42)
+    trace = tl.trace(
+        IdentityWrapper(),
+        torch.randn(2, 3),
+        capture=CaptureOptions(layers_to_save="all", save_grads="all", random_seed=42),
+    )
+    # Arming proof for the owner rule itself: the identity label is owned by
+    # exactly one hooked tensor even though two registrations happened.
+    owners = trace.__dict__.get("_tl_grad_hook_owner_by_label", {})
+    identity_labels = [label for label in owners if label.startswith("identity")]
+    assert identity_labels, "identity op label must be gradient-hooked"
+
+    trace.log_backward(trace[trace.output_layers[0]].out.sum())
+    events = _ensure_backward_event_stream(trace).backward_events
+    op_grad_counts = collections.Counter(
+        (event.op_label, event.pass_index)
+        for event in events
+        if isinstance(event, OpGradObserved)
+    )
+    assert op_grad_counts, "backward must observe op gradients"
+    duplicated = {key: count for key, count in op_grad_counts.items() if count > 1}
+    assert not duplicated, f"duplicate OpGradObserved emissions: {duplicated}"
+    # The reconciliation tripwire stays green on the fixed producer.
+    check_metadata_invariants(trace)
+
+
+@pytest.mark.smoke
+def test_failed_backward_walk_keeps_start_and_gains_failed_end() -> None:
+    """A failed graph walk is evidence: Start stays, a failed End closes it."""
+    from torchlens.backends.torch import backward as backward_mod
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+    from torchlens.ir.events import BackwardPassEnd as _End
+    from torchlens.validation.invariants import check_metadata_invariants
+
+    _model, _x, trace = _logged_model()
+    loss = _output_loss(trace)
+
+    with mock.patch.object(
+        backward_mod,
+        "_walk_and_hook_backward_graph",
+        side_effect=RuntimeError("planted walk failure"),
+    ):
+        with pytest.raises(RuntimeError, match="planted walk failure"):
+            trace.log_backward(loss)
+
+    events = _ensure_backward_event_stream(trace).backward_events
+    starts = [e for e in events if isinstance(e, BackwardPassStart)]
+    ends = [e for e in events if isinstance(e, _End)]
+    assert [s.pass_index for s in starts] == [1], "the attempted pass keeps its start"
+    assert [e.pass_index for e in ends] == [1], "the attempted pass gains a terminal end"
+    assert ends[0].status == "error"
+    assert trace.num_backward_passes == 1
+    check_metadata_invariants(trace)
+
+    # A later real backward numbers itself after the failed attempt and the
+    # whole stream still satisfies the exact bracketing invariants.
+    trace.log_backward(_output_loss(trace))
+    assert trace.num_backward_passes == 2
+    check_metadata_invariants(trace)
+
+
+@pytest.mark.smoke
+def test_hook_registration_failure_records_typed_coverage_gap() -> None:
+    """A registration skip is a typed BackwardCoverageGap, and validation fails closed."""
+    from torchlens.backends.torch import backward as backward_mod
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+    from torchlens.ir.events import BackwardCoverageGap
+    from torchlens.validation.invariants import check_metadata_invariants
+
+    _model, _x, trace = _logged_model()
+    with mock.patch.object(
+        backward_mod,
+        "_make_grad_fn_hook",
+        side_effect=RuntimeError("planted registration failure"),
+    ):
+        trace.log_backward(_output_loss(trace))
+
+    events = _ensure_backward_event_stream(trace).backward_events
+    gaps = [e for e in events if isinstance(e, BackwardCoverageGap)]
+    assert gaps, "every skipped registration must record a typed gap"
+    assert {gap.reason for gap in gaps} == {"registration_error"}
+    assert {gap.pass_index for gap in gaps} == {1}
+    for gap in gaps:
+        assert gap.class_qualname
+        assert "planted registration failure" in (gap.detail or "")
+    # Gaps sit inside their pass bracket and the stream stays invariant-green.
+    check_metadata_invariants(trace)
+
+
+@pytest.mark.smoke
+def test_validate_backward_fails_closed_on_coverage_gaps() -> None:
+    """validate_backward_pass returns False when any unexplained gap exists."""
+    from torchlens.backends.torch import backward as backward_mod
+    from torchlens.validation import backward as backward_validation
+
+    model = _TinyBackwardModel()
+    x = torch.randn(2, 3)
+    with mock.patch.object(
+        backward_mod,
+        "_make_grad_fn_hook",
+        side_effect=RuntimeError("planted registration failure"),
+    ):
+        with pytest.warns(RuntimeWarning, match="coverage gap"):
+            passed = backward_validation.validate_backward_pass(
+                model,
+                x,
+                loss_fn=lambda output: output.sum(),
+                random_seed=11,
+            )
+    assert passed is False
+
+
+class _ForeachInplaceModel(nn.Module):
+    """Model whose live tensor is mutated by a list-returning in-place op."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Double, foreach-increment in place, then scale."""
+
+        values = [x * 2.0]
+        torch._foreach_add_(values, 1.0)
+        return values[0] * 3.0
+
+
+def test_foreach_inplace_live_member_owns_its_gradient() -> None:
+    """The live member of a foreach in-place op emits its real gradient.
+
+    Regression: the logged safe copy hooked first and owned the label, and the
+    genuinely live (mutated) member was hooked WITHOUT ownership transfer --
+    its hook fired and returned without emitting, so a real ``_foreach_add_``
+    gradient produced zero journal events and ``has_grad`` stayed False while
+    native autograd delivered the gradient to the live tensor.
+    """
+
+    model = _ForeachInplaceModel()
+    x = torch.randn(2, 3, requires_grad=True)
+    trace = tl.trace(
+        model,
+        x,
+        capture=CaptureOptions(layers_to_save="all", save_grads="all", random_seed=4),
+    )
+    layer = next(op for op in trace.layer_list if "_foreach_add_" in str(op.func_name))
+    trace.log_backward(trace[trace.output_layers[0]].out.sum())
+
+    observed = [
+        event
+        for event in trace._capture_events.backward_events
+        if isinstance(event, OpGradObserved) and event.op_label == layer.layer_label
+    ]
+    assert len(observed) == 1
+    assert layer.has_grad
+    assert torch.equal(layer.grad, torch.full_like(x, 3.0))
+
+
+class _InplaceReluModel(nn.Module):
+    """Model with a same-object in-place mutation on the live path."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = nn.Linear(3, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Linear, in-place relu, then scale."""
+
+        hidden = self.fc(x)
+        torch.relu_(hidden)
+        return hidden * 2.0
+
+
+def test_refresh_projection_with_inplace_op_keeps_one_grad_owner_per_label() -> None:
+    """After save_new_outs, each label emits exactly one gradient observation.
+
+    Regression: the one-owner check ran against the hook's OWN trace's owner
+    map BEFORE the refresh-projection redirect, so a stale source-trace hook
+    on the in-place live tensor and the rebound target hook could both pass
+    their own maps and emit duplicate OpGradObserved events for one label on
+    the same final target.
+    """
+
+    from collections import Counter
+
+    model = _InplaceReluModel()
+    trace = tl.trace(
+        model,
+        torch.randn(2, 3, requires_grad=True),
+        capture=CaptureOptions(layers_to_save="all", save_grads="all", random_seed=0),
+    )
+    trace.save_new_outs(model, torch.randn(2, 3, requires_grad=True), random_seed=1)
+    trace.log_backward(trace[trace.output_layers[0]].out.sum())
+
+    pass_index = trace.num_backward_passes
+    per_label = Counter(
+        event.op_label
+        for event in trace._capture_events.backward_events
+        if isinstance(event, OpGradObserved) and event.pass_index == pass_index
+    )
+    assert per_label, "backward produced no gradient observations"
+    duplicated = {label: count for label, count in per_label.items() if count > 1}
+    assert not duplicated, duplicated

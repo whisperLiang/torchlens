@@ -391,6 +391,7 @@ class RefreshProjector:
         from ..backends.torch.tensor_tracking import _add_tensor_backward_hook
 
         self.target.__dict__["_tl_backward_hooked_tensor_keys"] = set()
+        self.target.__dict__["_tl_grad_hook_owner_by_label"] = {}
         for layer in self.target.layer_list:
             _register_forward_grad_fn(
                 self.target,

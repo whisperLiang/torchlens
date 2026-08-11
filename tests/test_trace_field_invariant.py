@@ -24,7 +24,6 @@ def test_trace_field_set_subset_of_user_facing() -> None:
     allowed_runtime_useful = {
         "_buffer_accessor",
         "_buffer_initial_values",
-        "_buffer_write_events",
         "_buffer_write_tracker",
         "_intervention_spec",
         "_layer_nums_to_save",
@@ -53,6 +52,10 @@ def test_trace_field_set_subset_of_user_facing() -> None:
         "_param_log_by_pid",
         "_capture_events",
         "_tl_backward_hooked_tensor_keys",
+        # One-gradient-owner-per-label bookkeeping (FieldPolicy.DROP,
+        # trace.py PORTABLE_STATE_SPEC): session-only, stripped from pickle
+        # state, reset by refresh rebind and replay resets.
+        "_tl_grad_hook_owner_by_label",
         "_backward_gradfn_refs",
         # Backward projection guard trio: session-only fold watermark, all
         # declared FieldPolicy.DROP in Trace.PORTABLE_STATE_SPEC and stripped
@@ -67,6 +70,13 @@ def test_trace_field_set_subset_of_user_facing() -> None:
         "_replay_arg_version_data_complete",
         "_capture_config",
         "_raw_transform_escape_detected",
+        # Honesty/safety phase: the bypassed-torch.compile-region marker that owns
+        # the top-precedence capture_verification_reason. Runtime-only and
+        # FieldPolicy.DROP for the same reason as the transform-escape flag above.
+        "_raw_dynamo_region_detected",
+        # Honesty/safety phase: warn-once flag for activations whose NaN/Inf check
+        # could not run under raise_on_nan (an unrunnable check is not a clean tensor).
+        "_warned_nonfinite_check_unavailable",
         "_stop_directive",
         # r65-r81 buffer-rung/RNG-registry sprint: capture-scratch that
         # legitimately survives on a finished Trace (host-RNG monitor state,
@@ -94,12 +104,19 @@ def test_trace_field_set_subset_of_user_facing() -> None:
         "_session_param_inventory",
         "_session_buffer_inventory",
         "_session_buffer_identity",
-        # Pre-existing lockstep misses (RED at baseline 4c33555d before the
-        # backend branch): both are declared FieldPolicy.DROP in
-        # Trace.PORTABLE_STATE_SPEC but were never added here. The session-time
-        # tracemalloc knob and the cached module-call accessor.
-        "measure_python_peak_memory",
+        # Session-time knobs and lazily built accessor caches that Trace
+        # DECLARES with an explicit ``FieldPolicy.DROP`` (see
+        # ``data_classes/trace.py``): deliberately live on a finished Trace and
+        # deliberately absent from MODEL_LOG_FIELD_ORDER because they do not
+        # survive save/load. ``_module_call_accessor`` is the exact sibling of
+        # the allowlisted ``_buffer_accessor``; ``measure_python_peak_memory``
+        # is the documented tracemalloc opt-in read back by capture/trace.py;
+        # ``save_budget`` and its live accountant are the honesty/safety
+        # phase's per-device retained-bytes ceiling.
         "_module_call_accessor",
+        "measure_python_peak_memory",
+        "save_budget",
+        "_save_budget_accountant",
     }
 
     actual = set(trace.__dict__.keys())

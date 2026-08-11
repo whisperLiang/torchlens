@@ -357,6 +357,7 @@ def _reset_backward_projection(log: "Trace") -> None:
     _purge_trace_from_backward_registry(log)
     log._capture_events = CaptureEvents()
     log.__dict__.pop("_tl_backward_hooked_tensor_keys", None)
+    log.__dict__.pop("_tl_grad_hook_owner_by_label", None)
     log.__dict__.pop("_active_backward_pass_index", None)
     log.__dict__.pop("_implicit_backward_pass_open", None)
     log.__dict__.pop("_warned_implicit_backward_pass", None)

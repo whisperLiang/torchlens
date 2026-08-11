@@ -6,6 +6,7 @@ import ast
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 import inspect
+import itertools
 import multiprocessing
 import textwrap
 import threading
@@ -14,9 +15,11 @@ from typing import Any, Literal
 import torch
 from torch import nn
 
+from torchlens._distributed import DistributedFinding, detect_distributed_state
 from torchlens._robustness import _iter_tensors
 from torchlens.utils._torch_compat import (
     get_dynamo_optimized_module_type,
+    get_fp8_dtypes,
     get_fx_graph_module_type,
     get_torch_capability_snapshot,
 )
@@ -193,6 +196,7 @@ def report(model: nn.Module, input: Any) -> CompatReport:  # noqa: A002
         _data_parallel_row(model),
         _ddp_row(model),
         _fsdp_row(model),
+        *_distributed_rows(model, input),
         _deepspeed_row(model),
         _torch_compile_row(model),
         _fx_row(model),
@@ -200,6 +204,7 @@ def report(model: nn.Module, input: Any) -> CompatReport:  # noqa: A002
         _lightning_row(model),
         _functorch_row(model),
         _quantized_row(model, input),
+        _fp8_dtype_row(model, input),
         _device_context_row(),
         _single_thread_row(),
     )
@@ -726,6 +731,109 @@ def _fsdp_row(model: nn.Module) -> CompatRow:
     )
 
 
+# Stable row order and labels for the distributed-detection block. Each key
+# matches a DistributedFinding.kind so the report and the capture-entry refusal
+# can never drift apart.
+_DISTRIBUTED_ROW_SPECS: tuple[tuple[str, str, str], ...] = (
+    (
+        "dtensor",
+        "DTensor / sharded tensors",
+        "No DTensor or sharded tensor state detected by the bounded entry scan. "
+        "It covers registered state, builtin/instance-__dict__ input containers, and plain "
+        "module attributes; descriptor-only or slots-only containers and tensors created "
+        "inside forward remain outside entry-time detection.",
+    ),
+    ("device_mesh", "Device mesh", "No device mesh detected."),
+    (
+        "tensor_parallel",
+        "Tensor parallel (TP)",
+        "No tensor-parallel state or direct TP-namespace forward hook detected by the bounded "
+        "entry scan; user-wrapped or opaque hook callables remain outside structural detection.",
+    ),
+    (
+        "pipeline_parallel",
+        "Pipeline parallel (PP)",
+        "No pipeline-parallel stage or schedule detected by the bounded instance-state scan; "
+        "descriptor-only or slots-only holders remain opaque.",
+    ),
+)
+
+
+def _distributed_rows(model: nn.Module, input_value: Any) -> tuple[CompatRow, ...]:
+    """Build the DTensor / device-mesh / TP / PP rows.
+
+    Parameters
+    ----------
+    model:
+        Model to inspect.
+    input_value:
+        Example input tree to inspect for distributed tensors.
+
+    Returns
+    -------
+    tuple[CompatRow, ...]
+        One row per distributed condition, in stable order, whether or not the
+        condition was detected.
+
+    Notes
+    -----
+    Detection is shared verbatim with the capture-entry refusal in
+    :func:`torchlens._distributed.check_distributed_capture`, so a row reporting
+    a refusing condition and the error the user then hits cannot disagree.
+    """
+
+    findings = {finding.kind: finding for finding in detect_distributed_state(model, input_value)}
+    return tuple(
+        _distributed_row(key, label, clear_details, findings.get(key))
+        for key, label, clear_details in _DISTRIBUTED_ROW_SPECS
+    )
+
+
+def _distributed_row(
+    key: str,
+    label: str,
+    clear_details: str,
+    finding: DistributedFinding | None,
+) -> CompatRow:
+    """Build one distributed-detection row from an optional finding.
+
+    Parameters
+    ----------
+    key:
+        Stable row key, equal to the matching ``DistributedFinding.kind``.
+    label:
+        Human-readable row label.
+    clear_details:
+        Details text used when the condition was not detected.
+    finding:
+        Detected finding, or ``None`` when the condition is absent.
+
+    Returns
+    -------
+    CompatRow
+        Report row.
+    """
+
+    if finding is None:
+        return CompatRow(key, label, "pass", "ok", False, clear_details, "")
+    details = finding.detail
+    sites = finding.describe_sites()
+    if sites:
+        details = f"{details} Sites: {sites}."
+    if not finding.exact:
+        details = (
+            f"{details} Detected structurally (by type namespace), because this torch build "
+            "did not expose the exact class for an isinstance check."
+        )
+    if finding.refuses_capture:
+        details = (
+            f"{details} torchlens.trace() refuses this model with "
+            "DistributedCaptureUnsupportedError rather than returning a wrong trace."
+        )
+        return CompatRow(key, label, "scope", "error", True, details, finding.suggestion)
+    return CompatRow(key, label, "scope", "warning", True, details, finding.suggestion)
+
+
 def _deepspeed_row(model: nn.Module) -> CompatRow:
     """Build the DeepSpeed row.
 
@@ -772,15 +880,32 @@ def _torch_compile_row(model: nn.Module) -> CompatRow:
         Report row.
     """
 
+    from .._capture_state_helpers import compiled_plain_callable_sites
+
     optimized_module_type = get_dynamo_optimized_module_type()
-    detected = optimized_module_type is not None and isinstance(model, optimized_module_type)
-    status: Status = "scope" if detected else "pass"
-    details = (
-        "torch.compile OptimizedModule detected; compiled graph capture is outside TorchLens' "
-        "primary scope."
-        if detected
-        else "torch.compile wrapper not detected."
+    optimized_detected = optimized_module_type is not None and isinstance(
+        model, optimized_module_type
     )
+    plain_callable_sites = compiled_plain_callable_sites(model)
+    detected = optimized_detected or bool(plain_callable_sites)
+    status: Status = "scope" if detected else "pass"
+    if optimized_detected:
+        details = (
+            "torch.compile OptimizedModule detected; compiled graph capture is outside "
+            "TorchLens' primary scope."
+        )
+    elif plain_callable_sites:
+        details = (
+            "torch.compile callable detected on a plain module attribute at "
+            f"{', '.join(plain_callable_sites)}. Capture marks its compiled interior incomplete, "
+            "including on warm-cache execution."
+        )
+    else:
+        details = (
+            "No OptimizedModule or direct plain-attribute compiled callable detected. Compiled "
+            "callables reached only through globals/free-function references remain outside "
+            "this structural preflight."
+        )
     return CompatRow(
         "torch_compile",
         "torch.compile",
@@ -888,7 +1013,11 @@ def _functorch_row(model: nn.Module) -> CompatRow:
         "forward source references vmap/functorch; TorchLens skips logging inside active "
         "functorch transforms and will produce an incomplete log."
         if detected
-        else "No static vmap/functorch marker detected in forward source."
+        else (
+            "No static vmap/functorch marker detected in forward source. Functional tensors "
+            "already present in inspectable input/state containers are refused at entry; private "
+            "functional tensors created inside forward remain outside that preflight."
+        )
     )
     return CompatRow(
         "vmap_functorch",
@@ -981,6 +1110,88 @@ def _quantized_row(model: nn.Module, input_value: Any) -> CompatRow:
         detected,
         details,
         "Use a float reference model for bugs involving exact out validation." if detected else "",
+    )
+
+
+def _fp8_dtype_row(model: nn.Module, input_value: Any) -> CompatRow:
+    """Build the fp8 (``float8_*``) dtype row.
+
+    Parameters
+    ----------
+    model:
+        Model to inspect.
+    input_value:
+        Input tree to inspect.
+
+    Returns
+    -------
+    CompatRow
+        Report row.
+
+    Notes
+    -----
+    Reports parameters, buffers, and inputs only -- the same pre-capture surface every
+    other row inspects. An fp8 tensor produced *inside* the forward (the common case,
+    since fp8 is usually a cast of a float32 activation) cannot be seen from here, so
+    the row's ``detected=False`` never claims a capture contains no fp8, and the
+    passing detail says which scopes were checked.
+    """
+
+    fp8_dtypes = get_fp8_dtypes(force_probe=True)
+    if not fp8_dtypes:
+        return CompatRow(
+            "fp8_dtype",
+            "fp8 (float8_*) tensors",
+            "pass",
+            "ok",
+            False,
+            "This torch build exposes no float8 dtypes.",
+        )
+    fp8_input = any(tensor.dtype in fp8_dtypes for tensor in _iter_tensors(input_value))
+    inspected_state = True
+    fp8_state = False
+    try:
+        fp8_state = any(
+            tensor.dtype in fp8_dtypes
+            for tensor in itertools.chain(model.parameters(), model.buffers())
+        )
+    except Exception:  # noqa: BLE001 - a model may override enumeration and raise
+        inspected_state = False
+    detected = fp8_input or fp8_state
+    if not detected:
+        # Same fail-open-honestly contract as the tied-parameters row: say that the
+        # scope could not be read rather than reporting a clean pass over it.
+        unread = (
+            ""
+            if inspected_state
+            else " Parameter/buffer enumeration failed, so model state was NOT inspected."
+        )
+        return CompatRow(
+            "fp8_dtype",
+            "fp8 (float8_*) tensors",
+            "pass" if inspected_state else "not_tested",
+            "ok" if inspected_state else "info",
+            False,
+            "No float8 parameters, buffers, or inputs detected (an fp8 cast performed "
+            f"inside the forward is not visible before capture).{unread}",
+        )
+    where = " and ".join(
+        label for label, hit in (("inputs", fp8_input), ("parameters/buffers", fp8_state)) if hit
+    )
+    return CompatRow(
+        "fp8_dtype",
+        "fp8 (float8_*) tensors",
+        "scope",
+        "warning",
+        True,
+        f"float8 tensors detected in {where}. Capture, metadata, and validation replay "
+        "handle them: torch implements no isinf/nan_to_num/allclose/isfinite/reduction "
+        "kernels for fp8, so TorchLens widens those comparisons to float32, which is "
+        "exact for every fp8 bit pattern. Saving an fp8 activation to a portable "
+        "`.tlspec` is refused with a typed error, because safetensors has no fp8 "
+        "transport this release.",
+        "Nothing to change for in-RAM analysis. To persist an fp8 activation, cast it "
+        "to float32/bfloat16 before the save, or save at metadata level.",
     )
 
 

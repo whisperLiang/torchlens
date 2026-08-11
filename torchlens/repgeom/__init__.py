@@ -21,6 +21,7 @@ from ..intervention.errors import MultiMatchWarning
 from ..viz.node_plots import render_heatmap, render_image_scatter, render_lineplot
 
 DistanceMetric: TypeAlias = Literal["euclidean", "cosine", "correlation"]
+MDSInputKind: TypeAlias = Literal["auto", "distances", "features"]
 MDSInfo: TypeAlias = dict[str, int | float | bool | str]
 MDSEvolution: TypeAlias = "OrderedDict[str, np.ndarray]"
 RDMEvolution: TypeAlias = "OrderedDict[str, np.ndarray]"
@@ -387,14 +388,19 @@ def classical_mds(
     n_components: int = 2,
     *,
     min_n: int = 8,
+    input_kind: MDSInputKind = "auto",
 ) -> tuple[np.ndarray, MDSInfo]:
     """Embed pairwise distances or row-wise features with classical MDS.
 
-    Square symmetric inputs with zero diagonal are interpreted as precomputed
-    distances. Other inputs are treated as ``[N, ...]`` features and converted
-    to Euclidean distances first. Negative centered-Gram eigenvalues are clipped
-    to zero and reported because non-PSD dissimilarities are expected for some
-    visualization metrics.
+    Under the default ``input_kind="auto"``, square symmetric inputs with zero
+    diagonal are interpreted as precomputed distances and other inputs are
+    treated as ``[N, ...]`` features and converted to Euclidean distances first.
+    Because a square symmetric zero-diagonal *feature* matrix is
+    indistinguishable from a distance matrix by content alone, ``"auto"`` warns
+    whenever it has to make that guess; declare ``input_kind="distances"`` or
+    ``input_kind="features"`` to state the intent and silence the guess.
+    Negative centered-Gram eigenvalues are clipped to zero and reported because
+    non-PSD dissimilarities are expected for some visualization metrics.
 
     Parameters
     ----------
@@ -404,6 +410,11 @@ def classical_mds(
         Number of embedding axes to return.
     min_n:
         Minimum number of stimuli required for visualization-oriented MDS.
+    input_kind:
+        How to read ``data``: ``"auto"`` detects a distance matrix from
+        structure (and warns when the structure is ambiguous), ``"distances"``
+        declares a precomputed pairwise distance matrix, and ``"features"``
+        declares row-wise feature data even when it is square and symmetric.
 
     Returns
     -------
@@ -420,26 +431,40 @@ def classical_mds(
         raise ValueError("n_components must be at least 1.")
     if min_n < 3:
         raise ValueError("min_n must be at least 3.")
+    if input_kind not in ("auto", "distances", "features"):
+        raise ValueError(
+            "input_kind must be one of 'auto', 'distances', or 'features'; "
+            f"received {input_kind!r}."
+        )
 
     array = _as_numpy_array(data)
     _validate_finite(array, "data")
-    input_is_distances = _looks_like_distance_matrix(array)
-    if input_is_distances and not np.allclose(
-        activation_distance_matrix(array, metric="euclidean"),
-        array,
-        atol=_SYMMETRY_TOLERANCE,
-        rtol=0.0,
-    ):
-        warnings.warn(
-            (
-                "classical_mds received an ambiguous square input with symmetric zero diagonal; "
-                "treating it as a precomputed distance matrix. Square activation matrices must "
-                "be converted explicitly to distances to avoid ambiguous square input handling."
-            ),
-            UserWarning,
-            stacklevel=2,
-        )
-    distances = _as_distance_matrix_or_activations(data, metric="euclidean")
+    if input_kind == "auto":
+        input_is_distances = _looks_like_distance_matrix(array)
+        if input_is_distances and not np.allclose(
+            activation_distance_matrix(array, metric="euclidean"),
+            array,
+            atol=_SYMMETRY_TOLERANCE,
+            rtol=0.0,
+        ):
+            warnings.warn(
+                (
+                    "classical_mds received an ambiguous square input with symmetric zero "
+                    "diagonal; treating it as a precomputed distance matrix. Pass "
+                    "input_kind='distances' or input_kind='features' to declare the intent "
+                    "and avoid ambiguous square input handling."
+                ),
+                UserWarning,
+                stacklevel=2,
+            )
+    else:
+        input_is_distances = input_kind == "distances"
+    if input_is_distances:
+        distances = array.copy()
+        _check_square_distances(distances)
+    else:
+        distances = activation_distance_matrix(array, metric="euclidean")
+        _check_square_distances(distances)
     n_stimuli = distances.shape[0]
     _check_stimulus_count(n_stimuli, min_n)
     if _has_duplicate_distances(distances):
@@ -645,7 +670,9 @@ def mds_evolution(
     previous_coords: np.ndarray | None = None
     for key, site, activations in selected:
         distances = activation_distance_matrix(activations, metric=metric)
-        coords, _info = classical_mds(distances, n_components=2, min_n=min_n)
+        coords, _info = classical_mds(
+            distances, n_components=2, min_n=min_n, input_kind="distances"
+        )
         if align and previous_coords is not None:
             coords = procrustes_align(coords, previous_coords)
         _annotate_mds_coords(trace, key, coords)

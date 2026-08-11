@@ -175,6 +175,34 @@ class FailingLiveRunModel(nn.Module):
         return staged * 2
 
 
+class MultipassFunctionalFastModel(nn.Module):
+    """Repeat one functional site enough times for recurrent grouping."""
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Apply four value-changing passes through one functional ReLU site."""
+
+        for _ in range(4):
+            value = torch.relu(value + 1)
+        return value
+
+
+class MultipassModuleFastModel(nn.Module):
+    """Repeat one module instance enough times for recurrent grouping."""
+
+    def __init__(self) -> None:
+        """Initialize the shared atomic module."""
+
+        super().__init__()
+        self.shared = nn.ReLU()
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Apply four value-changing passes through the shared module."""
+
+        for _ in range(4):
+            value = self.shared(value + 1)
+        return value
+
+
 class RunnableNamedOutput(NamedTuple):
     """Named output container used to verify portable kind reconstruction."""
 
@@ -608,6 +636,50 @@ def test_live_fast_run_refuses_same_shape_function_path_divergence() -> None:
 
     with pytest.raises(PathDivergenceError):
         captured.run(inputs=-torch.ones(2), fast=True)
+
+
+@pytest.mark.parametrize("plan_kind", ["functional", "module"])
+def test_live_fast_run_refreshes_every_multipass_activation(plan_kind: str) -> None:
+    """Refresh each pass distinctly in both functional and module fast plans."""
+
+    model: nn.Module
+    save: Any
+    if plan_kind == "functional":
+        model = MultipassFunctionalFastModel()
+        save = tl.func("relu")
+    else:
+        model = MultipassModuleFastModel()
+        save = tl.module("shared")
+    captured = tl.trace(model, torch.tensor([-5.0, 1.0]), save=save)
+    selected = [
+        op
+        for op in captured.layer_list
+        if op.has_saved_activation and op.func_name == "relu"
+    ]
+    captured_first = selected[0].out.clone()
+
+    runtime_input = torch.tensor([-2.0, 3.0])
+    expected_passes = []
+    expected = runtime_input
+    for _ in range(4):
+        expected = torch.relu(expected + 1)
+        expected_passes.append(expected.clone())
+
+    result = captured.run(inputs=runtime_input, fast=True)
+    refreshed = [
+        op
+        for op in result.trace.layer_list
+        if op.has_saved_activation and op.func_name == "relu"
+    ]
+
+    assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert len(refreshed) == 4
+    assert len({op.layer_label for op in refreshed}) == 1
+    assert not torch.equal(refreshed[0].out, captured_first)
+    assert all(
+        torch.equal(op.out, expected_value)
+        for op, expected_value in zip(refreshed, expected_passes, strict=True)
+    )
 
 
 def test_loaded_sparse_fast_run_keeps_control_witness_guard(honesty_artifact: Path) -> None:
@@ -1302,13 +1374,18 @@ def _save_alias_runnable(path: Path, *, aliased_capture: bool = True) -> Path:
 
     t = torch.tensor([1.0, 2.0])
     inputs = [t, t] if aliased_capture else [t, t.clone()]
-    capture_call = lambda: tl.trace(
-        _AliasInplaceModel(),
-        inputs,
-        capture=CaptureOptions(
-            intervention_ready=True, capture_container_structure=True, cache=False
-        ),
-    )
+
+    def capture_call() -> tl.Trace:
+        """Capture the prepared alias topology."""
+
+        return tl.trace(
+            _AliasInplaceModel(),
+            inputs,
+            capture=CaptureOptions(
+                intervention_ready=True, capture_container_structure=True, cache=False
+            ),
+        )
+
     if aliased_capture:
         with pytest.warns(TorchLensCaptureGapWarning, match="sparse descriptor cannot encode"):
             trace = capture_call()

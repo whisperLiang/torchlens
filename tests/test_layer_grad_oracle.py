@@ -14,7 +14,6 @@ import torch
 from torch import nn
 
 from torchlens.validation import backward as backward_validation
-from torchlens.validation.invariants import MetadataInvariantError
 from torchlens.validation._layer_grad_report import (
     LayerGradReport,
     _compare_module_output_grads,
@@ -164,7 +163,12 @@ class TensorBox:
 class SyntheticTrace:
     """Minimal trace stub consumed by ``_compare_module_output_grads``."""
 
-    def __init__(self, call_logs: list[Any], layers: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        call_logs: list[Any],
+        layers: dict[str, Any],
+        exit_leaf_counts: dict[tuple[str, int], int] | None = None,
+    ) -> None:
         """Initialize the synthetic trace.
 
         Parameters
@@ -173,11 +177,24 @@ class SyntheticTrace:
             Synthetic module-call logs.
         layers:
             Layer mapping by label.
+        exit_leaf_counts:
+            Recorded ``ModuleExitEvent.output_tensor_leaf_count`` proof per
+            ``(address, call_index)``; omitted calls have no exit event.
         """
 
         self.modules = SimpleNamespace(_pass_dict={call.call_label: call for call in call_logs})
         self._layers = layers
         self.layer_list = list(layers.values())
+        self._capture_events = SimpleNamespace(
+            module_exit_events=[
+                SimpleNamespace(
+                    address=address,
+                    call_index=call_index,
+                    output_tensor_leaf_count=leaf_count,
+                )
+                for (address, call_index), leaf_count in (exit_leaf_counts or {}).items()
+            ]
+        )
 
     def __getitem__(self, label: str) -> Any:
         """Return one synthetic layer by label."""
@@ -191,25 +208,19 @@ def _loss(output: torch.Tensor) -> torch.Tensor:
     return output.sum()
 
 
-def _coverage_ratio(report: LayerGradReport) -> float:
-    """Return PATH E module-output coverage ratio."""
-
-    denom = (
-        report.covered_count
-        + report.mismatched_count
-        + report.skipped_no_first_leaf_count
-        + report.skipped_no_grad_count
-    )
-    return report.covered_count / denom if denom else 0.0
-
-
 def _assert_acceptance(report: LayerGradReport) -> None:
-    """Assert the P5 module-output acceptance criteria."""
+    """Assert the eligibility-classifier module-output acceptance criteria.
+
+    100% of the classified-eligible denominator must be covered: any
+    mismatch, uncaptured-eligible gradient, or unresolved output label sinks
+    the verdict (the former 0.80 ratio tolerance is gone).
+    """
 
     assert report.overall_passed
-    assert _coverage_ratio(report) >= 0.80
+    assert report.covered_count > 0
     assert report.mismatched_count == 0
     assert report.skipped_no_grad_count == 0
+    assert report.unresolved_output_label_count == 0
 
 
 def _run_public_layer_grad_validation(
@@ -221,7 +232,6 @@ def _run_public_layer_grad_validation(
     atol: float,
     rtol: float,
     random_seed: int,
-    validate_metadata: bool = True,
 ) -> LayerGradReport:
     """Run the shipped backward path and return its captured layer-grad report.
 
@@ -241,13 +251,6 @@ def _run_public_layer_grad_validation(
         Relative tolerance for parameter and layer gradients.
     random_seed:
         Seed shared by stock and captured passes.
-    validate_metadata:
-        Whether the shipped path should additionally run metadata invariants.
-        The deleted private ``_validate_layer_grads`` copy these tests used to
-        call never ran them, so passing ``False`` reproduces the ORIGINAL
-        coverage exactly for the two real-world models that trip a PRE-EXISTING
-        backward-metadata bug (see
-        ``test_shipped_backward_path_resnet50_metadata_invariant_is_broken``).
 
     Returns
     -------
@@ -276,7 +279,7 @@ def _run_public_layer_grad_validation(
             random_seed=random_seed,
             atol=atol,
             rtol=rtol,
-            validate_metadata=validate_metadata,
+            validate_metadata=True,
             validate_layer_grads=True,
             layer_grad_atol=atol,
             layer_grad_rtol=rtol,
@@ -461,16 +464,145 @@ def test_compare_excludes_root_and_identity_from_denominator() -> None:
     assert report.overall_passed
 
 
-def test_compare_counts_no_first_leaf() -> None:
-    """Module calls with no output layer receive the no-first-leaf bucket."""
+def test_compare_counts_no_tensor_output() -> None:
+    """A PROVEN no-tensor-output module call is a classified exclusion.
 
+    Proven means the exit event recorded zero real tensor leaves and stock
+    autograd observed nothing for the call.
+    """
+
+    grad = torch.ones(2)
     report = _compare_module_output_grads(
-        SyntheticTrace([_synthetic_call("empty", 1, [])], {}),
-        {},
+        SyntheticTrace(
+            [
+                _synthetic_call("linear", 1, ["linear_out"]),
+                _synthetic_call("empty", 1, []),
+            ],
+            {"linear_out": _synthetic_layer("linear_out", grad)},
+            exit_leaf_counts={("empty", 1): 0},
+        ),
+        {("linear", 1, 0): grad},
         set(),
     )
-    assert report.skipped_no_first_leaf_count == 1
-    assert report.coverage["empty:1"] == "skipped_no_first_leaf"
+    assert report.skipped_no_tensor_output_count == 1
+    assert report.coverage["empty:1"] == "skipped_no_tensor_output"
+    assert report.overall_passed
+
+
+def test_no_tensor_output_cannot_launder_a_stock_observed_call() -> None:
+    """A stock-observed gradient contradicts a no-tensor-output exclusion.
+
+    Sol probe regression: a candidate call with an empty ``output_ops`` list
+    used to be classified out of the denominator even when stock autograd
+    captured a real gradient for that exact call, so a missed module output
+    passed as long as one other module was covered.
+    """
+
+    grad = torch.ones(1)
+    report = _compare_module_output_grads(
+        SyntheticTrace(
+            [
+                _synthetic_call("covered", 1, ["covered_out"]),
+                _synthetic_call("missed", 1, []),
+            ],
+            {"covered_out": _synthetic_layer("covered_out", grad)},
+            exit_leaf_counts={("missed", 1): 0},
+        ),
+        {("covered", 1, 0): grad, ("missed", 1, 0): grad * 9},
+        set(),
+    )
+    assert report.coverage["missed:1"] == "uncaptured_module_output"
+    assert report.uncaptured_module_output_count == 1
+    assert not report.overall_passed
+
+
+def test_identity_node_regression_mass_no_first_leaf_fails() -> None:
+    """The 055af048 identity-node scenario must FAIL the check.
+
+    When identity-node minting breaks, boundary nodes never attach to module
+    ``output_ops`` while the exit events still record real tensor leaves. A
+    mass of such calls used to sink a 0.80 ratio; the eligibility classifier
+    must not launder them out of the denominator either.
+    """
+
+    grad = torch.ones(3)
+    report = _compare_module_output_grads(
+        SyntheticTrace(
+            [
+                _synthetic_call("covered", 1, ["covered_out"]),
+                _synthetic_call("broken_a", 1, []),
+                _synthetic_call("broken_b", 1, []),
+                _synthetic_call("broken_c", 1, []),
+            ],
+            {"covered_out": _synthetic_layer("covered_out", grad)},
+            exit_leaf_counts={
+                ("broken_a", 1): 1,
+                ("broken_b", 1): 1,
+                ("broken_c", 1): 1,
+            },
+        ),
+        {("covered", 1, 0): grad},
+        set(),
+    )
+    assert report.uncaptured_module_output_count == 3
+    assert not report.overall_passed
+
+
+def test_empty_output_ops_without_exit_event_proof_fails_closed() -> None:
+    """No exit event means no proof: the exclusion is refused."""
+
+    grad = torch.ones(1)
+    report = _compare_module_output_grads(
+        SyntheticTrace(
+            [
+                _synthetic_call("covered", 1, ["covered_out"]),
+                _synthetic_call("unproven", 1, []),
+            ],
+            {"covered_out": _synthetic_layer("covered_out", grad)},
+        ),
+        {("covered", 1, 0): grad},
+        set(),
+    )
+    assert report.coverage["unproven:1"] == "uncaptured_module_output"
+    assert not report.overall_passed
+
+
+def test_reverse_census_flags_wholly_absent_module_calls() -> None:
+    """A stock-observed call with no candidate module-call log fails closed."""
+
+    grad = torch.ones(1)
+    report = _compare_module_output_grads(
+        SyntheticTrace(
+            [_synthetic_call("covered", 1, ["covered_out"])],
+            {"covered_out": _synthetic_layer("covered_out", grad)},
+        ),
+        {("covered", 1, 0): grad, ("ghost", 1, 0): grad * 2},
+        set(),
+    )
+    assert report.coverage["ghost:1"] == "missing_module_call"
+    assert report.missing_module_call_count == 1
+    assert not report.overall_passed
+
+
+def test_unresolved_output_label_fails_closed() -> None:
+    """A module call naming an unresolvable output layer sinks the verdict."""
+
+    grad = torch.ones(1)
+    trace = SyntheticTrace(
+        [
+            _synthetic_call("linear", 1, ["linear_out"]),
+            _synthetic_call("ghost", 1, ["missing_label"]),
+        ],
+        {"linear_out": _synthetic_layer("linear_out", grad)},
+    )
+    report = _compare_module_output_grads(trace, {("linear", 1, 0): grad}, set())
+    # Positive control: the resolvable output is covered...
+    assert report.coverage["linear:1"] == "covered"
+    # ...but the unresolvable label is an internal inconsistency, not an
+    # exclusion, and no ratio tolerance can absorb it.
+    assert report.coverage["ghost:1"] == "unresolved_output_label"
+    assert report.unresolved_output_label_count == 1
+    assert not report.overall_passed
 
 
 def test_compare_counts_module_less_layers_diagnostically() -> None:
@@ -720,39 +852,36 @@ def test_oracle_resnet50_eval() -> None:
         atol=1e-4,
         rtol=1e-3,
         random_seed=42,
-        # Metadata invariants are OFF here only to hold coverage exactly where
-        # the deleted private copy had it. The shipped path DOES run them, and
-        # on this model they fail for a PRE-EXISTING backward-metadata capture
-        # bug that has nothing to do with the layer-grad oracle -- pinned by
-        # ``test_shipped_backward_path_resnet50_metadata_invariant_is_broken``.
-        validate_metadata=False,
     )
     _assert_acceptance(report)
 
 
 @pytest.mark.slow
-def test_shipped_backward_path_resnet50_metadata_invariant_is_broken() -> None:
-    """Pin a PRE-EXISTING backward-metadata bug the shipped path trips.
+def test_shipped_backward_path_resnet50_metadata_invariant_holds() -> None:
+    """Guard the repaired backward layer-to-GradFn backpointer on a real ResNet.
 
-    Surfaced by repointing the layer-grad oracle at the shipped
-    ``validate_backward_pass``: a real ResNet backward capture leaves a layer
-    whose ``grad_fn_handle`` has no reciprocal GradFn backpointer. Reproduced
-    unchanged at base commit ``e7f036fe``, so this is a capture bug in the
-    backward backend, NOT a validation defect -- the invariant is doing its job.
-    Delete this test (and the ``validate_metadata=False`` opt-outs above) once
-    the capture bug is fixed.
+    This replaces a pin that asserted the INVERSE: a real ResNet backward capture
+    used to leave a layer whose ``grad_fn_handle`` had no reciprocal GradFn
+    backpointer, and the pin recorded that as a known capture bug to be deleted
+    once fixed. It is fixed. On the pinned torch the shipped path now records 341
+    GradFn logs, and of the 177 layers carrying a ``grad_fn_object_id`` exactly
+    zero are severed and zero dangle, so ``_check_backward_layer_backpointers``
+    passes on real data rather than through its structural carve-out (the
+    post-trigger exemption is never consulted -- there is nothing to exempt).
+
+    Assert the invariant HOLDS instead of deleting the coverage, so a regression
+    that re-severs the backpointer fails here on the same model that caught it.
     """
 
     torchvision_models = pytest.importorskip("torchvision.models")
     model = torchvision_models.resnet50(weights=None).eval()
-    with pytest.raises(MetadataInvariantError, match="missing its GradFn backpointer"):
-        backward_validation.validate_backward_pass(
-            model,
-            torch.randn(1, 3, 32, 32),
-            random_seed=42,
-            validate_metadata=True,
-            validate_layer_grads=False,
-        )
+    backward_validation.validate_backward_pass(
+        model,
+        torch.randn(1, 3, 32, 32),
+        random_seed=42,
+        validate_metadata=True,
+        validate_layer_grads=False,
+    )
 
 
 @pytest.mark.slow
@@ -786,8 +915,6 @@ def test_oracle_gpt2_small_forward_backward() -> None:
         atol=1e-4,
         rtol=1e-3,
         random_seed=42,
-        # Same PRE-EXISTING backward-metadata capture bug as the ResNet fixture.
-        validate_metadata=False,
     )
     _assert_acceptance(report)
 
@@ -832,7 +959,10 @@ def test_path_e_module_exports_expected_surface() -> None:
         overall_passed=True,
         coverage={},
         covered_count=1,
-        skipped_no_first_leaf_count=0,
+        skipped_no_tensor_output_count=0,
+        uncaptured_module_output_count=0,
+        missing_module_call_count=0,
+        unresolved_output_label_count=0,
         skipped_module_less_count=0,
         skipped_no_grad_count=0,
         skipped_identity_output_count=0,

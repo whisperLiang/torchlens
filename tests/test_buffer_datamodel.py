@@ -37,7 +37,20 @@ def test_buffer_write_tracker_uninstall_restores_class_after_model_gc() -> None:
             super().__init__()
             self.register_buffer("buf", torch.tensor([1.0]))
 
-    trace = SimpleNamespace(_buffer_initial_values={})
+    class _TraceStub:
+        """Weak-referenceable stand-in for a Trace.
+
+        The tracker registers the trace in module-level ``WeakSet`` witness
+        ledgers (``_PARAM_BYTE_WITNESS_NOT_ARMED``), which a ``SimpleNamespace``
+        cannot join.
+        """
+
+        def __init__(self) -> None:
+            """Seed only the attribute the tracker reads at install time."""
+
+            self._buffer_initial_values: dict[str, torch.Tensor] = {}
+
+    trace = _TraceStub()
     model = _TrackerModel()
     tracker = buffer_writes.BufferWriteTracker(trace, model)
     original = _TrackerModel.__setattr__
@@ -652,7 +665,7 @@ def test_reassignment_double_count_is_exact() -> None:
     """Assert N top-level reassignments produce exactly N write events."""
 
     trace = tl.trace(RecurrentReassign(steps=5), torch.ones(2), save_arg_values=True)
-    events = [event for event in trace._buffer_write_events if event.address == "h"]
+    events = [event for event in trace.event_stream.buffer_write_events if event.address == "h"]
     assert len(events) == 5
     assert trace.buffers["h"].num_overwrites == 5
 

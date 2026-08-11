@@ -73,6 +73,7 @@ from .._io import (
     default_fill_state,
     read_tlspec_version,
 )
+from .._save_budget import SaveBudget, SaveBudgetOption
 from ..constants import LAYER_PASS_LOG_FIELD_ORDER, MODEL_LOG_FIELD_ORDER
 from ..captured_run import CapturedRun
 from ..ir.trace_build_state import TraceBuildState
@@ -201,6 +202,7 @@ _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "_has_direct_writes": False,
     "_warned_direct_write": False,
     "_warned_mutate_in_place": False,
+    "_warned_nonfinite_check_unavailable": False,
     "_spec_revision": 0,
     "_out_recipe_revision": 0,
     "_annotation_blobs": None,
@@ -217,6 +219,7 @@ _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "module_filter": None,
     "emit_nvtx": False,
     "measure_python_peak_memory": False,
+    "save_budget": "auto",
     "raise_on_nan": False,
     "keep_orphans": False,
     "annotations": {},
@@ -367,6 +370,35 @@ _BUILD_STATE_ATTR_MAP: dict[str, str] = {
     "_input_tensor_addresses": "input_tensor_addresses",
 }
 _BUILD_STATE_ATTR_MAP_GET = _BUILD_STATE_ATTR_MAP.get
+
+# Plausible-but-absent attribute names, mapped to the fields that answer them. A
+# frontier-scale user's first question is "how big is this capture?", and the
+# singular ``activation_memory`` spelling (which IS an ``Op`` field, meaning that
+# one op's payload bytes) has no single correct Trace-level meaning: the whole
+# forward's tensors and the subset ``save=`` retained are different numbers, and
+# collapsing them into one alias would make the answer ambiguous rather than
+# available. So the names route to the real fields instead of becoming one.
+_MISSING_ATTR_HINTS: dict[str, str] = {
+    "activation_memory": (
+        "use total_activation_memory for every tensor computed in the forward, or "
+        "saved_activation_memory for just the payloads save= retained "
+        "(Op.activation_memory is the per-op figure; forward_peak_memory is the "
+        "measured runtime peak)."
+    ),
+    "memory": (
+        "use total_activation_memory / saved_activation_memory for activations, "
+        "total_param_memory for parameters, or forward_peak_memory for the measured "
+        "runtime peak."
+    ),
+    "total_memory": (
+        "use total_activation_memory for activations and total_param_memory for "
+        "parameters; forward_peak_memory is the measured runtime peak."
+    ),
+    "footprint": (
+        "use total_activation_memory / saved_activation_memory / total_param_memory, "
+        "or forward_peak_memory for the measured runtime peak."
+    ),
+}
 # Traces whose Op metadata has already been pooled by ``_compact_op_metadata``.
 # Held weakly and OFF the Trace itself so no new field enters ``__dict__``,
 # pickle state, or a portable artifact.
@@ -951,8 +983,23 @@ class Trace(
             events = self.event_stream
             if events is not None:
                 return events
+        if name == "_buffer_write_events":
+            # Buffer writes live in the capture journal now; this read-through
+            # keeps capture-time internals and diagnostics working unchanged.
+            stream = self.__dict__.get("capture_events") or self.__dict__.get("_capture_events")
+            return list(getattr(stream, "buffer_write_events", ()) or ())
         state_field = _BUILD_STATE_ATTR_MAP_GET(name)
         if state_field is None:
+            # A trace CAN self-report its footprint, but not under the singular name
+            # a user at scale reaches for first, and a bare AttributeError reads as
+            # "TorchLens does not know". One dict lookup on the miss path (which is
+            # hot: 30-40k internal misses per capture) routes the guessed names to
+            # the real fields instead.
+            hint = _MISSING_ATTR_HINTS.get(name)
+            if hint is not None:
+                raise AttributeError(
+                    f"{type(self).__name__!s} object has no attribute {name!r}; {hint}"
+                )
             raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
         # Hot path: during capture every mapped-attribute read lands here
         # (30-40k misses per trace), and the build state is already the healthy
@@ -1027,7 +1074,9 @@ class Trace(
         if name == "_capture_events":
             from ..captured_run import forget_event_stream
 
-            self.__dict__.pop(name, None)
+            # forget_event_stream pops the attribute itself and releases the
+            # stream's working lanes; popping here first would hand it nothing
+            # to release (the pre-migration weak registry used to find it).
             forget_event_stream(self)
             return
         state_field = _BUILD_STATE_ATTR_MAP_GET(name)
@@ -1095,6 +1144,7 @@ class Trace(
     _receptive_field_solution: Any
     _rf_source_solutions: Any
     _rf_target_solutions: Any
+    _tl_rf_probe_active: Any
 
     PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
         "trace_label": FieldPolicy.KEEP,
@@ -1104,6 +1154,12 @@ class Trace(
         "backend_runtime_config": FieldPolicy.KEEP,
         "backend_runtime_device_summary": FieldPolicy.KEEP,
         "backend_runtime_version": FieldPolicy.KEEP,
+        # Provenance marker for traces cooked from a Recording: postprocess
+        # runs exhaustive-style (capture_mode stays "exhaustive" for behavior
+        # compatibility), but the marker records the true origin so gates and
+        # diagnostics never mistake a cooked projection for a live exhaustive
+        # capture. Session-only; not a portable fact.
+        "_cooked_from": FieldPolicy.DROP,
         "_paddle_capture_depth": FieldPolicy.DROP,
         "_paddle_op_captures": FieldPolicy.DROP,
         "_paddle_alias_annotations": FieldPolicy.DROP,
@@ -1117,6 +1173,7 @@ class Trace(
         "_receptive_field_solution": FieldPolicy.DROP,
         "_rf_source_solutions": FieldPolicy.DROP,
         "_rf_target_solutions": FieldPolicy.DROP,
+        "_tl_rf_probe_active": FieldPolicy.DROP,
         "module_identity_mode": FieldPolicy.KEEP,
         "param_source": FieldPolicy.KEEP,
         "derived_grads": FieldPolicy.KEEP,
@@ -1213,6 +1270,11 @@ class Trace(
         # restores the default ``False``, so it stays out of
         # ``MODEL_LOG_FIELD_ORDER`` and out of the portable schema.
         "measure_python_peak_memory": FieldPolicy.DROP,
+        # Session-time resource ceiling: it bounds what THIS process was willing
+        # to retain and has no meaning for a loaded artifact, which retains
+        # nothing. Portable load restores the default, so it stays out of
+        # ``MODEL_LOG_FIELD_ORDER`` and out of the portable schema.
+        "save_budget": FieldPolicy.DROP,
         "raise_on_nan": FieldPolicy.KEEP,
         "annotations": FieldPolicy.KEEP,
         "observer_spans": FieldPolicy.KEEP,
@@ -1260,6 +1322,7 @@ class Trace(
         "_has_direct_writes": FieldPolicy.KEEP,
         "_warned_direct_write": FieldPolicy.DROP,
         "_warned_mutate_in_place": FieldPolicy.DROP,
+        "_warned_nonfinite_check_unavailable": FieldPolicy.DROP,
         "_spec_revision": FieldPolicy.KEEP,
         "_out_recipe_revision": FieldPolicy.KEEP,
         "_append_sequence_id": FieldPolicy.KEEP,
@@ -1277,6 +1340,7 @@ class Trace(
         "_predicate_lookback_candidates": FieldPolicy.DROP,
         "_postprocessing_active": FieldPolicy.DROP,
         "_raw_transform_escape_detected": FieldPolicy.DROP,
+        "_raw_dynamo_region_detected": FieldPolicy.DROP,
         "_raw_event_shape_hash": FieldPolicy.DROP,
         "_replay_arg_version_data_complete": FieldPolicy.KEEP,
         "state": FieldPolicy.KEEP,
@@ -1310,7 +1374,6 @@ class Trace(
         "buffer_layers": FieldPolicy.KEEP,
         "buffer_num_calls": FieldPolicy.KEEP,
         "_buffer_accessor": FieldPolicy.DROP,
-        "_buffer_write_events": FieldPolicy.DROP,
         "_buffer_write_tracker": FieldPolicy.DROP,
         "_param_storage_addresses": FieldPolicy.DROP,
         "_buffer_initial_values": FieldPolicy.BLOB_RECURSIVE,
@@ -1398,6 +1461,11 @@ class Trace(
         "_mlx_saved_payloads": FieldPolicy.DROP,
         "_mlx_capture_depth": FieldPolicy.DROP,
         "_out_writer": FieldPolicy.DROP,
+        # Runtime-only: the live per-device accountant that enforces
+        # ``save_budget`` while payloads are being retained. It describes what
+        # THIS process was willing to allocate, so it is never portable; a loaded
+        # artifact retains nothing and rebuilds it from the restored option.
+        "_save_budget_accountant": FieldPolicy.DROP,
         "_keep_outs_in_memory": FieldPolicy.DROP,
         "_grad_stream_retain_in_memory": FieldPolicy.DROP,
         "_defer_streaming_bundle_finalization": FieldPolicy.DROP,
@@ -1405,9 +1473,19 @@ class Trace(
         # Runtime-only: the set of dispatchable op func-call-ids the orphan-removal
         # pass pruned, read by the validation dispatch-count backstop. Never portable.
         "_orphan_pruned_func_call_ids": FieldPolicy.DROP,
+        # Runtime-only (r29 F3b): the capture-time (slot -> producer) parent-edge
+        # truth keyed by raw label, read by the capture_edge_survival metadata
+        # invariant. Registered in _io/scrub.py's runtime-only list; declared here
+        # so the portable-state cover stays exhaustive. Never portable.
+        "_capture_parent_edge_truth": FieldPolicy.DROP,
         "_capture_events": FieldPolicy.DROP,
         "_capture_session": FieldPolicy.DROP,
         "_tl_backward_hooked_tensor_keys": FieldPolicy.DROP,
+        "_tl_grad_hook_owner_by_label": FieldPolicy.DROP,
+        # RF probe suppression flag: declared statically so a Trace serialized
+        # BEFORE any receptive-field probe has the same class spec as one
+        # serialized after (the probe used to setdefault this at call time).
+        "_tl_rf_probe_active": FieldPolicy.DROP,
         "_active_backward_pass_index": FieldPolicy.DROP,
         "_backward_roots_by_pass": FieldPolicy.DROP,
         "_backward_projection_event_count": FieldPolicy.DROP,
@@ -1475,6 +1553,7 @@ class Trace(
         module_filter: Callable[[Any], bool] | None = None,
         emit_nvtx: bool = False,
         measure_python_peak_memory: bool = False,
+        save_budget: SaveBudgetOption = "auto",
         facet_registry_snapshot: Any | None = None,
         transform: Callable[[Any], Any] | None = None,
         raw_input: Any | None = None,
@@ -1525,6 +1604,12 @@ class Trace(
                 ``tracemalloc`` Python-allocation probe. Off by default because the
                 allocator hook taxes every traced operation. Portable bundle load
                 restores the default ``False`` value.
+            save_budget: Session-time per-device ceiling on retained activation
+                bytes. ``"auto"`` allows half of each device's available memory;
+                a float sets another fraction, an int an absolute byte cap, and
+                ``None`` disables the guard. Crossing it raises
+                ``SaveBudgetExceededError`` mid-capture. Portable bundle load
+                restores the default ``"auto"``.
             facet_registry_snapshot: Immutable facet recipe snapshot captured for
                 this trace.
             transform: Optional callable used to convert raw user input into
@@ -1625,6 +1710,10 @@ class Trace(
         self.module_filter = module_filter
         self.emit_nvtx = emit_nvtx
         self.measure_python_peak_memory = measure_python_peak_memory
+        self.save_budget = save_budget
+        # Built once per capture; ``None`` when budgeting is disabled. Charged on
+        # the hot path by the activation-save paths in the torch backend.
+        self._save_budget_accountant = SaveBudget.from_option(save_budget)
         self.facet_registry_snapshot = facet_registry_snapshot
         self.raise_on_nan: bool = False
         self.annotations: Dict[str, Any] = {}
@@ -1670,7 +1759,9 @@ class Trace(
         self._has_direct_writes = False
         self._warned_direct_write = False
         self._warned_mutate_in_place = False
+        self._warned_nonfinite_check_unavailable = False
         self._raw_transform_escape_detected = False
+        self._raw_dynamo_region_detected = False
         self._spec_revision = 0
         self._out_recipe_revision = 0
         self._append_sequence_id = 0
@@ -1722,7 +1813,6 @@ class Trace(
         self.buffer_layers: List[str] = []
         self.buffer_num_calls: Dict[str, int] = {}
         self._buffer_accessor = None
-        self._buffer_write_events: list[Any] = []
         self._buffer_write_tracker: Any | None = None
         self._buffer_initial_values: Dict[str, Any] = {}
         self.internal_source_ops: List[str] = []
@@ -2450,9 +2540,7 @@ class Trace(
         if getattr(self, "num_saved_ops", 0) == 0:
             save_level = "metadata only"
         nonfinite = self.first_nonfinite(link_format="html")
-        nonfinite_summary = (
-            "No non-finite saved outs" if nonfinite.startswith("No non-finite") else nonfinite
-        )
+        nonfinite_summary = nonfinite
         title = escape(str(getattr(self, "trace_label", None) or self.model_label))
         state = escape(str(getattr(getattr(self, "state", None), "name", "UNKNOWN")))
         return (
@@ -2579,6 +2667,7 @@ class Trace(
         state.pop("_build_state", None)
         state["_backward_gradfn_refs"] = []
         state["_tl_backward_hooked_tensor_keys"] = set()
+        state.pop("_tl_grad_hook_owner_by_label", None)
         state["_pending_live_fire_records"] = []
         state["_last_hook_handle_ids"] = ()
         state["_activation_transform_repr"] = (
@@ -2740,6 +2829,11 @@ class Trace(
             state["backward_ready"] = False
         if state.get("measure_python_peak_memory") is None:
             state["measure_python_peak_memory"] = False
+        # ``save_budget`` is FieldPolicy.DROP, so a portable artifact never
+        # carries a real value; it arrives absent or None and is restored to the
+        # default. A loaded trace retains nothing, so there is no ceiling to honor.
+        if state.get("save_budget") is None:
+            state["save_budget"] = "auto"
         if state["inference_only"] is None:
             state["inference_only"] = False
         if state["chunked_forward"] is None:
@@ -2933,9 +3027,16 @@ class Trace(
         if old_raw_labels != new_raw_labels or old_final_labels != new_final_labels:
             return False
 
-        new_by_raw = {layer._layer_label_raw: layer for layer in new_log.layer_list}
-        for layer in self.layer_list:
-            self._refresh_rerun_op_from(layer, new_by_raw[layer._layer_label_raw])
+        # Pair the two op sequences POSITIONALLY, never through a label -> op map.
+        # Neither `_layer_label_raw` nor `layer_label` is pass-qualified, so every
+        # pass of a multi-pass (recurrent) layer shares both keys: a dict keyed by
+        # either collapses an N-pass layer to its last pass and then refreshes all
+        # N existing passes from that one op, silently overwriting the earlier
+        # passes' activations and pass labels. The label-sequence equality checked
+        # just above is exactly the precondition that makes index i of one list the
+        # same op as index i of the other.
+        for layer, new_layer in zip(self.layer_list, new_log.layer_list):
+            self._refresh_rerun_op_from(layer, new_layer)
         self._refresh_rerun_layer_logs_from(new_log)
         self._refresh_rerun_trace_fields_from(new_log)
         self.__dict__.pop("_validation_replay_status", None)

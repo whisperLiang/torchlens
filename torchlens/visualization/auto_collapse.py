@@ -2636,12 +2636,10 @@ def _rendered_module_hidden_counts(trace: "Trace", context: RenderContext) -> di
         rendered nodes with one box contributes ``n - 1``.
     """
 
-    from .rendering import (
-        BoundaryNode,
-        _entries_to_plot_for_context,
-        _is_buffer_visible,
-        _normalize_buffer_visibility,
-    )
+    from ._render_common import BoundaryNode
+    from ._render_edges import _is_buffer_visible
+    from ._render_flow import _entries_to_plot_for_context
+    from ._render_nodes import _normalize_buffer_visibility
 
     absorbed_counts: dict[str, int] = defaultdict(int)
     show_buffer_layers = _normalize_buffer_visibility(context.show_buffer_layers)

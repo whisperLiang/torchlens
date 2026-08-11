@@ -3,7 +3,8 @@
 # ruff: noqa: F403, F405
 
 import warnings
-from dataclasses import replace
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 
 from ._render_common import *
 from ._render_leaf import *
@@ -32,6 +33,44 @@ if TYPE_CHECKING:
     from ..data_classes.module import Module
     from ..data_classes.trace import Trace
     from .auto_collapse import ModuleRepeatFold
+    from .node_universe import NodeUniverse
+    from .render_ir import RenderIR
+    from .source_graph import SourceGraph
+
+
+@dataclass(frozen=True)
+class _ForwardRenderContext:
+    """Resolved state shared by forward-IR construction and emission."""
+
+    request: ResolvedRenderRequest
+    target: RenderTarget
+    theme: VisualizationTheme
+    repeat_folds: dict[str, "ModuleRepeatFold"]
+    segments: dict[str, SegmentDescriptor]
+    segment_lookup: Any
+    source_graph: "SourceGraph"
+    node_universe: "NodeUniverse"
+    rankdir: str
+    source_text: str | None
+    num_nodes: int
+    layout_cost: int
+    engine: str
+    graph_caption: str
+    dot: graphviz.Digraph
+    site_labels: set[str]
+
+
+@dataclass
+class _ForwardIRWork:
+    """Mutable forward-IR assembly state passed into region finalization."""
+
+    render_ir: "RenderIR"
+    builder: _RenderIRDecisionBuilder
+    module_clusters: dict[str, Any]
+    top_level_sibling_rank_groups: list[SiblingOrderChain]
+    captured_edges: list[CapturedForwardEdge]
+    container_regions: list[ContainerClusterSpec]
+    container_overlay_edges: list[ContainerOverlayEdge]
 
 
 def _strip_render_extension(vis_outpath: str) -> str:
@@ -147,6 +186,661 @@ def _raise_graphviz_failure(
     ) from error
 
 
+def _validate_draw_options(
+    node_mode: VisNodeModeLiteral,
+    intervention_mode: VisInterventionModeLiteral,
+    collapse: CollapseLiteral,
+    fold_repeats: FoldRepeatsLiteral,
+) -> None:
+    """Validate the closed-vocabulary forward-render options.
+
+    Raises
+    ------
+    ValueError
+        If any option falls outside its supported vocabulary.
+    """
+
+    if node_mode not in MODE_REGISTRY:
+        raise ValueError(
+            "Visualization node_style/node_mode must be one of 'default', "
+            "'profiling', 'vision', or 'attention'."
+        )
+    if node_mode in DOMAIN_NODE_MODES:
+        warnings.warn(
+            f"node_style={node_mode!r} is moving out of core; use the equivalent "
+            f"recipe at examples/recipes/{node_mode}.py or wait for the "
+            f"torchlens.{node_mode} plugin",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+    if intervention_mode not in {"node_mark", "as_node"}:
+        raise ValueError("vis_intervention_mode must be either 'node_mark' or 'as_node'.")
+    if isinstance(collapse, float):
+        if not 0.0 <= collapse <= 1.0:
+            raise ValueError("collapse float level must be in [0.0, 1.0].")
+    elif collapse not in {"none", "auto", "max"}:
+        raise ValueError("collapse must be 'none', 'auto', 'max', or a float in [0.0, 1.0].")
+    if fold_repeats not in {None, True, False}:
+        raise ValueError("fold_repeats must be None, True, or False.")
+
+
+def _resolve_draw_request(
+    trace: "Trace",
+    request: ResolvedRenderRequest,
+) -> tuple[ResolvedRenderRequest, VisualizationTheme, set[str]]:
+    """Resolve buffer, theme, override, overlay, and intervention options.
+
+    Returns
+    -------
+    tuple
+        Updated request, resolved theme, and intervention site labels.
+    """
+
+    show_buffer_layers = _normalize_buffer_visibility(request.show_buffer_layers)
+    theme = resolve_theme(request.theme, for_paper=request.for_paper)
+    node_overlay = request.node_overlay
+    if node_overlay is None:
+        node_overlay = getattr(trace, "_node_overlay_scores", None)
+    elif isinstance(node_overlay, str) and node_overlay == getattr(
+        trace, "_node_overlay_name", None
+    ):
+        node_overlay = getattr(trace, "_node_overlay_scores", None)
+    overrides = VisualizationOverrides(
+        graph=graphviz_graph_overrides(cast(Optional[Dict[str, Any]], request.graph_overrides)),
+        edge=cast(Optional[Dict[str, Any]], request.edge_overrides) or {},
+        grad_edge=cast(Optional[Dict[str, Any]], request.grad_edge_overrides) or {},
+        module=cast(Optional[Dict[str, Any]], request.module_overrides) or {},
+    )
+    request = replace(
+        request,
+        show_buffer_layers=show_buffer_layers,
+        node_overlay=cast("str | OverlayScores | None", node_overlay),
+        overrides=overrides,
+    )
+    site_labels, _ = intervention_site_and_cone_labels(trace, show_cone=request.show_cone)
+    intervention_node_spec_fn = make_intervention_node_spec_fn(
+        trace,
+        show_cone=request.show_cone,
+        graph_overrides=cast(Optional[Dict[str, Any]], request.graph_overrides),
+        user_node_spec_fn=request.node_spec_fn,
+    )
+    return replace(request, node_spec_fn=intervention_node_spec_fn), theme, site_labels
+
+
+def _resolve_collapse_request(
+    trace: "Trace",
+    request: ResolvedRenderRequest,
+) -> tuple[
+    ResolvedRenderRequest,
+    dict[str, "ModuleRepeatFold"],
+    dict[str, SegmentDescriptor],
+    Any,
+]:
+    """Resolve smart-collapse predicates, repeat folds, and segment lookup data.
+
+    Returns
+    -------
+    tuple
+        Updated request, repeat folds, segments, and segment lookup.
+
+    Raises
+    ------
+    ValueError
+        If the trace no longer retains the complete layer graph.
+    """
+
+    render_context = request
+    collapse_fn = request.collapse_fn
+    if request.collapse != "none" and collapse_fn is None:
+        from .auto_collapse import resolve_collapse_fn
+
+        collapse_fn = resolve_collapse_fn(
+            trace,
+            request.collapse,
+            request.vis_mode,
+            context=render_context,
+        )
+    request = request.with_resolved_collapse(collapse_fn)
+    render_context = request
+    repeat_folds: dict[str, ModuleRepeatFold] = {}
+    collapse_uses_default_folds = request.collapse in {"auto", "max"} or (
+        isinstance(request.collapse, float) and request.collapse > 0.0
+    )
+    if request.fold_repeats is not False and (
+        request.fold_repeats is True or collapse_uses_default_folds
+    ):
+        from .auto_collapse import resolve_repeat_folds
+
+        repeat_folds = resolve_repeat_folds(
+            trace,
+            collapse_fn,
+            context=render_context,
+            fold_repeats=request.fold_repeats,
+        )
+    segments: dict[str, SegmentDescriptor] = {}
+    if collapse_fn is not None:
+        segments = dict(getattr(collapse_fn, "_torchlens_v2_segments", {}) or {})
+    segment_lookup = _build_segment_lookup(segments)
+    if not trace._layers_logged:
+        raise ValueError(
+            "Must have all layers logged in order to render the graph; use show_model_graph."
+        )
+    return request, repeat_folds, segments, segment_lookup
+
+
+def _build_graphviz_shell(
+    trace: "Trace",
+    request: ResolvedRenderRequest,
+    target: RenderTarget,
+    theme: VisualizationTheme,
+    rankdir: str,
+) -> tuple[str, graphviz.Digraph]:
+    """Build the caption and configured Graphviz graph shell.
+
+    Returns
+    -------
+    tuple
+        Graph caption and configured empty Graphviz graph.
+    """
+
+    if trace.num_params == 0:
+        params_detail = "0 params"
+    elif trace.num_params_frozen == 0:
+        params_detail = f"{trace.num_params} params (all trainable, {trace.total_param_memory})"
+    elif trace.num_params_trainable == 0:
+        params_detail = f"{trace.num_params} params (all frozen, {trace.total_param_memory})"
+    else:
+        params_detail = (
+            f"{trace.num_params} params "
+            f"({trace.num_params_trainable}/{trace.num_params} trainable, "
+            f"{trace.total_param_memory})"
+        )
+
+    caption_body = (
+        f"<B>{html_escape(trace.model_class_name)}</B>"
+        f"<br align='left'/>{trace.num_tensors} tensors total ({trace.total_activation_memory})"
+        f"<br align='left'/>{params_detail}<br align='left'/>"
+    )
+    if getattr(trace, "_has_direct_writes", False):
+        caption_body += "Direct writes detected - recipe propagation will overlay<br align='left'/>"
+    graph_caption = f"<<FONT COLOR='{theme.default_font}'>{caption_body}</FONT>>"
+
+    dot = graphviz.Digraph(
+        name=trace.model_class_name,
+        comment="Computational graph for the feedforward sweep",
+        format=target.fileformat,
+    )
+    graph_args = {
+        "rankdir": rankdir,
+        "label": graph_caption,
+        "labelloc": "t",
+        "labeljust": "left",
+        "ordering": "out",
+    }
+    if request.collapse_fn is not None:
+        graph_args["newrank"] = "true"
+    graph_args.update(theme_graph_attrs(theme, font_size=request.font_size, dpi=request.dpi))
+    overrides = cast(VisualizationOverrides, request.overrides)
+    for arg_name, arg_val in overrides.graph.items():  # type: ignore[union-attr]
+        if callable(arg_val):
+            graph_args[arg_name] = str(arg_val(trace))
+        else:
+            graph_args[arg_name] = str(arg_val)
+    dot.graph_attr.update(graph_args)
+    dot.node_attr.update(
+        {"ordering": "out", **theme_node_attrs(theme, font_size=request.font_size)}
+    )
+    dot.edge_attr.update(theme_edge_attrs(theme, font_size=request.font_size))
+    return graph_caption, dot
+
+
+def _resolve_forward_context(
+    trace: "Trace",
+    request: ResolvedRenderRequest,
+    target: RenderTarget,
+    theme: VisualizationTheme,
+    repeat_folds: dict[str, "ModuleRepeatFold"],
+    segments: dict[str, SegmentDescriptor],
+    segment_lookup: Any,
+    site_labels: set[str],
+) -> _ForwardRenderContext:
+    """Resolve the source graph, layout, caption, and Graphviz shell.
+
+    Returns
+    -------
+    _ForwardRenderContext
+        State shared by IR construction and final renderer dispatch.
+    """
+
+    source_graph = build_source_graph(trace, request)
+    from .node_universe import build_node_universe
+
+    node_universe = build_node_universe(
+        source_graph,
+        request.collapse_fn,
+        repeat_folds,
+        segments,
+        request.show_containers,
+    )
+    entries_to_plot = source_graph.entries_to_plot
+    rankdir = direction_to_rankdir(request.direction)
+
+    from ._rank_layout_internal.layout import (
+        RANK_LAYOUT_COST_THRESHOLD,
+        RANK_LAYOUT_NOTICE,
+        estimate_rank_layout_cost,
+        get_node_placement_engine,
+    )
+
+    source_text = resolve_code_panel_source(
+        request.code_panel,
+        getattr(trace, "_source_code_blob", {}),
+        getattr(trace, "_source_model_ref", None),
+    )
+    num_nodes = len(entries_to_plot) - len(source_graph.skipped_labels)
+    cost_node_labels, cost_edges = _rank_layout_cost_inputs(
+        trace,
+        entries_to_plot,
+        source_graph.edge_map,
+        vis_mode=request.vis_mode,
+        vis_call_depth=request.vis_call_depth,
+        collapse_fn=request.collapse_fn,
+    )
+    layout_cost = estimate_rank_layout_cost(cost_node_labels, cost_edges)
+    engine = get_node_placement_engine(request.engine, layout_cost)
+    if request.show_containers:
+        engine = "dot"
+    trace._last_sibling_ordering_decision = SiblingOrderDecision(0, 0, {}, ())
+    if request.engine == "auto" and engine == "rank":
+        warnings.warn(
+            RANK_LAYOUT_NOTICE.format(
+                cost=layout_cost,
+                threshold=RANK_LAYOUT_COST_THRESHOLD,
+            )
+        )
+    _vprint(
+        trace,
+        f"Rendering {request.vis_mode} graph ({num_nodes} nodes, format={target.fileformat})",
+    )
+    _vprint(trace, f"Layout engine: {engine} (estimated cost={layout_cost})")
+    graph_caption, dot = _build_graphviz_shell(trace, request, target, theme, rankdir)
+    return _ForwardRenderContext(
+        request=request,
+        target=target,
+        theme=theme,
+        repeat_folds=repeat_folds,
+        segments=segments,
+        segment_lookup=segment_lookup,
+        source_graph=source_graph,
+        node_universe=node_universe,
+        rankdir=rankdir,
+        source_text=source_text,
+        num_nodes=num_nodes,
+        layout_cost=layout_cost,
+        engine=engine,
+        graph_caption=graph_caption,
+        dot=dot,
+        site_labels=site_labels,
+    )
+
+
+def _populate_forward_ir(trace: "Trace", context: _ForwardRenderContext) -> _ForwardIRWork:
+    """Materialize forward nodes, edge decisions, and container overlays.
+
+    Returns
+    -------
+    _ForwardIRWork
+        Mutable IR assembly state ready for region finalization.
+    """
+
+    request = context.request
+    overrides = cast(VisualizationOverrides, request.overrides)
+    forward_ir_builder = _RenderIRDecisionBuilder()
+    module_cluster_dict: Dict[str, Any] = defaultdict(
+        lambda: {
+            "edges": [],
+            "has_input_ancestor": False,
+            "rank_groups": [],
+            "container_clusters": [],
+        }
+    )
+    top_level_sibling_rank_groups: list[SiblingOrderChain] = []
+    collapsed_modules: Set[str] = set()
+    edges_used: Set[tuple[str, str, tuple[Any, ...]]] = set()
+    run_fold_ellipsis_nodes: set[str] = set()
+    emitted_segment_nodes: set[str] = set()
+    captured_forward_edges: list[CapturedForwardEdge] = []
+    pending_container_collapse_nodes: list[dict[str, Any]] = []
+    container_clusters: list[ContainerClusterSpec] = []
+    collapsed_container_nodes = _collapsed_container_leaf_nodes(
+        trace,
+        context.source_graph.entries_to_plot,
+        vis_mode=request.vis_mode,
+        show_containers=request.show_containers,
+        container_max_inline=request.container_max_inline,
+        pending_nodes=pending_container_collapse_nodes,
+    )
+    forward_render_ir = build_render_ir(
+        trace,
+        collapse_fn=request.collapse_fn,
+        repeat_folds=context.repeat_folds,
+        context=request,
+        universe=context.node_universe,
+        segments=context.segments,
+        segment_lookup=context.segment_lookup,
+    )
+    antiparallel_projected_edges = projected_antiparallel_endpoint_pairs(forward_render_ir)
+    decisions_by_name = {node.name: node for node in forward_render_ir.nodes}
+    rolled_maps = _RolledEdgeMaps() if request.vis_mode == "rolled" else None
+    node_label_fields = (
+        list(request.node_label_fields) if request.node_label_fields is not None else None
+    )
+    for unit in context.node_universe.units:
+        node_record = decisions_by_name[unit.unit_id]
+        for source_index, node in enumerate(unit.source_nodes):
+            _add_node_to_graphviz(
+                trace,
+                node,
+                cast(graphviz.Digraph, forward_ir_builder),
+                module_cluster_dict,
+                edges_used,
+                request.vis_mode,
+                collapsed_modules,
+                request.vis_call_depth,
+                request.show_buffer_layers,
+                overrides,
+                request.node_mode,
+                request.node_spec_fn,
+                request.collapsed_node_spec_fn,
+                request.collapse_fn,
+                context.source_graph.edge_map,
+                request.intervention_mode,
+                context.site_labels,
+                context.theme,
+                cast("str | OverlayScores | None", request.node_overlay),
+                node_label_fields,
+                captured_forward_edges,
+                context.rankdir,
+                request.show_containers,
+                collapsed_container_nodes,
+                request.show_input_transform_summary,
+                context.repeat_folds,
+                run_fold_ellipsis_nodes,
+                context.segment_lookup,
+                emitted_segment_nodes,
+                antiparallel_projected_edges,
+                node_record
+                if source_index == 0
+                else replace(node_record, node_calls=(), owned_node_args=()),
+                rolled_maps,
+            )
+    for node_args in pending_container_collapse_nodes:
+        forward_ir_builder.node(**node_args)
+
+    container_overlay_edges: list[ContainerOverlayEdge] = []
+    if request.show_containers == "nodes" and request.vis_mode == "unrolled":
+        context.dot.graph_attr.update({"pad": "0.20"})
+        container_overlay_nodes, container_overlay_edges = _container_nodes_and_overlay_edges(
+            trace,
+            collapsed_container_nodes,
+            vis_call_depth=request.vis_call_depth,
+            collapse_fn=request.collapse_fn,
+        )
+        for overlay_node in container_overlay_nodes:
+            if overlay_node.owner_key is None:
+                forward_ir_builder.node(**overlay_node.args)
+            else:
+                module_cluster_dict[overlay_node.owner_key].setdefault("nodes", []).append(
+                    overlay_node.args
+                )
+    if request.show_containers in {"cluster", "nodes"}:
+        container_clusters = _container_clusters_for_graphviz(
+            trace,
+            context.source_graph.entries_to_plot,
+            vis_mode=request.vis_mode,
+            vis_call_depth=request.vis_call_depth,
+            collapse_fn=request.collapse_fn,
+            collapsed_container_nodes=collapsed_container_nodes,
+        )
+        _queue_container_clusters(module_cluster_dict, container_clusters)
+    if request.intervention_mode == "as_node":
+        _add_intervention_hook_nodes(
+            cast(graphviz.Digraph, forward_ir_builder),
+            context.site_labels,
+            cast(Optional[Dict[str, Any]], request.graph_overrides),
+        )
+    return _ForwardIRWork(
+        render_ir=forward_render_ir,
+        builder=forward_ir_builder,
+        module_clusters=module_cluster_dict,
+        top_level_sibling_rank_groups=top_level_sibling_rank_groups,
+        captured_edges=captured_forward_edges,
+        container_regions=container_clusters,
+        container_overlay_edges=container_overlay_edges,
+    )
+
+
+def _finalize_forward_ir(
+    trace: "Trace",
+    context: _ForwardRenderContext,
+    work: _ForwardIRWork,
+) -> "RenderIR":
+    """Resolve sibling constraints, nested regions, and ordered statements.
+
+    Returns
+    -------
+    RenderIR
+        Decision-complete forward IR ready for renderer dispatch.
+    """
+
+    from ._rank_layout_internal.layout import RANK_LAYOUT_COST_THRESHOLD
+
+    request = context.request
+    sibling_order_chains: tuple[SiblingOrderChain, ...] = ()
+    if _should_order_siblings(
+        order_siblings=request.order_siblings,
+        engine=context.engine,
+        vis_mode=request.vis_mode,
+        num_nodes=context.num_nodes,
+        module=request.module,
+        vis_intervention_mode=request.intervention_mode,
+        collapse_fn=request.collapse_fn,
+        vis_call_depth=request.vis_call_depth,
+    ):
+        sibling_order_chains = _build_sibling_order_chains(work.captured_edges)
+        if sibling_order_chains and (
+            context.layout_cost * SIBLING_ORDER_VERIFY_LAYOUT_BUDGET > RANK_LAYOUT_COST_THRESHOLD
+        ):
+            warnings.warn(
+                SIBLING_ORDER_COST_NOTICE.format(
+                    cost=context.layout_cost,
+                    budget=SIBLING_ORDER_VERIFY_LAYOUT_BUDGET,
+                    threshold=RANK_LAYOUT_COST_THRESHOLD,
+                )
+            )
+            sibling_order_chains = ()
+        if sibling_order_chains:
+            for chain in sibling_order_chains:
+                _queue_sibling_rank_group(
+                    work.module_clusters,
+                    work.top_level_sibling_rank_groups,
+                    chain,
+                )
+    forward_render_ir = replace(
+        work.render_ir,
+        ordering_constraints=tuple(
+            RenderIROrderingConstraint(
+                kind="sibling_order",
+                source_label=chain.source_label,
+                source_name=chain.source_name,
+                targets=chain.targets,
+                target_labels=chain.target_labels,
+                lca_key=chain.lca_key,
+            )
+            for chain in sibling_order_chains
+        ),
+    )
+    overrides = cast(VisualizationOverrides, request.overrides)
+    forward_render_ir = finalize_forward_regions(
+        forward_render_ir,
+        trace,
+        vis_mode=request.vis_mode,
+        module_payloads=work.module_clusters,
+        container_regions=tuple(work.container_regions),
+        captured_edges=tuple(work.captured_edges),
+        overrides=overrides,
+    )
+    _setup_subgraphs(
+        trace,
+        cast(graphviz.Digraph, work.builder),
+        request.vis_mode,
+        work.module_clusters,
+        overrides,
+        list(forward_render_ir.ordering_constraints),
+        forward_render_ir.regions,
+    )
+    return replace(forward_render_ir, dot_statements=tuple(work.builder.calls))
+
+
+def _emit_and_finish_forward(
+    trace: "Trace",
+    context: _ForwardRenderContext,
+    work: _ForwardIRWork,
+    forward_render_ir: "RenderIR",
+) -> Any:
+    """Dispatch completed forward IR and finish output handling.
+
+    Returns
+    -------
+    Any
+        Rank-renderer result, Graphviz graph, or final DOT source.
+    """
+
+    request = context.request
+    target = context.target
+    overrides = cast(VisualizationOverrides, request.overrides)
+    if context.engine == "rank":
+        from ._rank_layout_internal.layout import render_rank_layout
+
+        resolved_graph_overrides = {
+            key: str(val(trace)) if callable(val) else str(val)
+            for key, val in overrides.graph.items()  # type: ignore[union-attr]
+        }
+        with _timed_phase(trace, "render:graphviz:forward"):
+            result = render_rank_layout(
+                forward_render_ir,
+                request.vis_mode,
+                target.outpath,
+                target.fileformat,
+                target.save_only,
+                context.graph_caption,
+                context.rankdir,
+                context.source_text,
+                show_legend=request.show_legend,
+                theme=context.theme,
+                dpi=request.dpi,
+                graph_overrides=resolved_graph_overrides,
+            )
+        _vprint(trace, f"Graph saved to {target.outpath}.{target.fileformat}")
+        return result
+
+    dot = context.dot
+    GraphvizRenderer().emit(forward_render_ir, dot)
+    for overlay_edge in work.container_overlay_edges:
+        dot.edge(
+            tail_name=overlay_edge.tail_name,
+            head_name=overlay_edge.head_name,
+            **overlay_edge.attrs,
+        )
+    if request.show_orphans:
+        _add_orphan_island_nodes(trace, dot, request.vis_mode, context.theme)
+    if request.show_legend:
+        _add_legend_to_graphviz(dot, context.theme)
+    compose_code_panel = context.source_text is not None and _code_panel_composition_available(
+        target.fileformat, context.engine
+    )
+    if context.source_text is not None and not compose_code_panel:
+        render_code_panel_subgraph(dot, context.source_text)
+
+    if in_notebook() and not target.save_only:
+        try:
+            from IPython.display import SVG, display  # #72: lazy import
+        except ImportError as error:
+            raise ImportError(
+                "IPython is required for this feature. Install with "
+                "`pip install torchlens[notebook]`."
+            ) from error
+
+        display_fn = cast(Any, display)
+        if compose_code_panel:
+            graph_svg = _inline_svg_local_images(dot.pipe(format="svg").decode("utf-8"))
+            combined_svg = compose_graph_with_code_panel(
+                graph_svg,
+                cast(str, context.source_text),
+            )
+            display_fn(SVG(combined_svg))
+        else:
+            display_fn(dot)
+
+    render_timeout = 120
+    source_override = None
+    trace._last_sibling_ordering_decision = SiblingOrderDecision(0, 0, {}, ())
+    if forward_render_ir.ordering_constraints:
+        try:
+            source_override, decision = _verify_and_apply_sibling_ordering(
+                dot.source,
+                forward_render_ir.ordering_constraints,
+                work.captured_edges,
+                context.rankdir,
+            )
+            trace._last_sibling_ordering_decision = decision
+        except (subprocess.SubprocessError, OSError) as exc:
+            if _strict_sibling_order_checks_enabled():
+                raise
+            _warn_sibling_order_fallback_once(exc)
+
+    final_source = source_override if source_override is not None else dot.source
+    source_path = dot.save(target.outpath)
+    with open(source_path, "w", encoding="utf-8") as source_file:
+        source_file.write(final_source)
+    with _timed_phase(trace, "render:graphviz:forward"):
+        try:
+            rendered_path = f"{target.outpath}.{target.fileformat}"
+            if compose_code_panel:
+                _write_composed_code_panel(
+                    dot.engine,
+                    source_path,
+                    cast(str, context.source_text),
+                    rendered_path,
+                    target.fileformat,
+                    render_timeout,
+                )
+            else:
+                cmd = [dot.engine, f"-T{target.fileformat}", "-o", rendered_path, source_path]
+                subprocess.run(cmd, timeout=render_timeout, check=True, capture_output=True)
+                if target.fileformat == "svg":
+                    _inline_svg_file_local_images(rendered_path)
+            _validate_rendered_output(rendered_path, source_path, "forward graph")
+            if not target.save_only:
+                _view_rendered_file(rendered_path)
+            _vprint(trace, f"Graph saved to {target.outpath}.{target.fileformat}")
+            if os.path.exists(source_path):
+                os.remove(source_path)
+        except subprocess.TimeoutExpired as error:
+            _raise_graphviz_timeout(
+                "forward graph",
+                f"{trace.num_tensors} nodes",
+                source_path,
+                render_timeout,
+                error,
+            )
+        except subprocess.CalledProcessError as error:
+            _raise_graphviz_failure("forward graph", source_path, error)
+    if request.return_graph:
+        return dot
+    return final_source
+
+
 @_with_per_draw_collapse_cache
 def draw(
     self: "Trace",
@@ -188,152 +882,22 @@ def draw(
     show_input_transform_summary: bool = False,
     show_orphans: bool = False,
 ) -> Any:
-    """Render the computational graph as a Graphviz Digraph.
+    """Render the computational graph through the resolved forward IR pipeline.
 
-    Orchestrates the full rendering pipeline:
-    1. Validates that all layers are logged (``_layers_logged`` guard).
-    2. Iterates over entries_to_plot, building nodes and edges.
-    3. Groups edges into module subgraph clusters.
-    4. Renders to file and optionally displays.
+    Notes
+    -----
+    ``Trace.draw`` owns the public parameter documentation. This internal
+    implementation validates and resolves one request before renderer dispatch.
 
-    Args:
-        vis_mode: ``'unrolled'`` (each pass is a separate node) or ``'rolled'``
-            (multi-pass layers collapsed into one node with pass annotations).
-        vis_call_depth: Maximum module nesting levels to show before
-            collapsing deeper layers into ``box3d`` module summary nodes.
-            Use 0 to show all layers without collapsing.
-        vis_outpath: Output file path (extension auto-stripped).
-        vis_graph_overrides: Graphviz graph-level attribute overrides.
-        module: Optional module focus. A Module focuses that module; a string
-            is interpreted as a module address.
-        node_mode: Preset applied to default ``NodeSpec`` objects before
-            user callbacks run.
-        node_spec_fn: Optional callback receiving ``(layer_log, default_spec)``.
-            In unrolled mode, ``layer_log`` is the parent aggregate Layer for
-            the rendered Op.
-        collapsed_node_spec_fn: Optional callback receiving
-            ``(module_log, default_spec)`` for collapsed module nodes.
-        collapse_fn: Optional predicate receiving a Module. When provided,
-            it replaces ``vis_call_depth`` collapse decisions.
-        collapse: Smart module-collapse mode. ``"none"`` preserves existing
-            rendering, ``"auto"`` targets a readable overview, and ``"max"``
-            aggressively collapses eligible modules. The v2 engine supports
-            rolled and unrolled rendering, may emit segment boxes in ``"max"``,
-            and uses honest labels for ``(xN)`` collapsed calls, ellipsis
-            repeat-folds, and segment summaries. A float in ``[0.0, 1.0]`` selects
-            the public monotone collapse schedule: ``0.0`` is equivalent to
-            ``"none"``, ``1.0`` is equivalent to ``"max"``, and larger values
-            never increase the visible node count or uncollapse a collapsed
-            unit. ``"auto"`` is the schedule point where the visible count first
-            enters the readable band; the existing ``"auto"`` implementation is
-            unchanged for compatibility.
-        fold_repeats: Repeat-fold policy. ``None`` preserves the collapse mode
-            default: off for ``collapse="none"`` and band-pressure two-pass
-            folding for ``"auto"``/``"max"``. ``True`` folds every eligible
-            repeated run, including standalone run folding when
-            ``collapse="none"``. ``False`` disables run folding.
-        skip_fn: Optional predicate receiving a Layer. Skipped nodes are
-            elided and edges are chained through them.
-        vis_edge_overrides: Overrides for forward edges.
-        vis_grad_edge_overrides: Overrides for backward (grad) edges.
-        vis_module_overrides: Overrides for module subgraph boxes.
-        vis_save_only: If True, save without opening a viewer.
-        vis_fileformat: Output format (pdf, png, svg, etc.).
-        show_buffer_layers: Buffer visibility mode. ``"never"`` hides all
-            buffers, ``"meaningful"`` hides hardcoded BatchNorm running-stat
-            noise buffers, and ``"always"`` shows all buffers. Legacy bools are
-            deprecated but supported: ``True`` maps to ``"always"`` and
-            ``False`` maps to ``"never"``.
-        direction: Layout direction: ``'bottomup'``, ``'topdown'``, or ``'leftright'``.
-        vis_node_placement: Layout engine: ``'auto'`` (default), ``'dot'``,
-            or ``'rank'``.
-        vis_renderer: Renderer backend: ``'graphviz'`` or experimental
-            ``'dagua'``. Import ``torchlens.experimental.dagua`` before using
-            the Dagua renderer.
-        vis_theme: Renderer theme name for backends that support themes.
-        vis_intervention_mode: Intervention overlay mode. ``"node_mark"``
-            marks sites and cones; ``"as_node"`` inserts hook nodes after
-            intervention sites.
-        vis_show_cone: Whether ``"node_mark"`` mode marks downstream cone
-            members.
-        code_panel: Optional source-code panel. ``True`` is equivalent to
-            ``"forward"``; callable values receive the live model object when
-            it is still available.
-        node_overlay: Built-in overlay name or external mapping from node label
-            to score. Supported built-ins include ``"flops"``, ``"time"``,
-            ``"bytes"``, ``"magnitude"``, ``"grad_norm"``, ``"nan"``,
-            ``"intervention"``, and ``"bundle_delta"``.
-        node_label_fields: Optional label field picker. When omitted, the
-            default TorchLens label rows are used.
-        show_legend: Whether to render a compact colorblind-safe legend with
-            the graph.
-        font_size: Optional Graphviz font size.
-        dpi: Optional Graphviz output DPI.
-        for_paper: Whether to force the paper theme preset.
-        return_graph: If True, return the underlying ``graphviz.Digraph`` on
-            the Graphviz path or DOT text for direct text renderers.
-        order_siblings: Whether Graphviz ``dot`` renders should add verified invisible
-            rank constraints so true parallel sibling fanouts follow execution order.
-        show_containers: Optional output-container overlay. ``False`` preserves
-            the default render. ``"labels"`` adds midpoint key/index labels on
-            container leaf edges. ``"cluster"`` also clusters single-owner
-            containers. ``"collapsed"`` and ``"auto"`` collapse large
-            homogeneous containers to one summary node. ``"nodes"`` adds
-            collapsed labeled container nodes for source/sink boundaries and
-            dashed member-of ties for mid-graph output containers.
-        container_max_inline: Maximum homogeneous container leaves to inline in
-            ``"collapsed"``/``"auto"`` modes.
-        show_input_transform_summary: Whether to show input preprocessing
-            provenance next to the raw input node when available. Defaults to
-            ``False`` to preserve existing raw-input node rendering.
-
-    Returns:
-        The Graphviz DOT source string.
-
-    Raises:
-        ValueError: If ``_layers_logged`` is False (layers were discarded
-            by missing final lookup containers).
+    Returns
+    -------
+    Any
+        Renderer-specific result, Graphviz graph, or final DOT source.
     """
-    if node_mode not in MODE_REGISTRY:
-        raise ValueError(
-            "Visualization node_style/node_mode must be one of 'default', "
-            "'profiling', 'vision', or 'attention'."
-        )
-    if node_mode in DOMAIN_NODE_MODES:
-        warnings.warn(
-            f"node_style={node_mode!r} is moving out of core; use the equivalent "
-            f"recipe at examples/recipes/{node_mode}.py or wait for the "
-            f"torchlens.{node_mode} plugin",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-    if vis_intervention_mode not in {"node_mark", "as_node"}:
-        raise ValueError("vis_intervention_mode must be either 'node_mark' or 'as_node'.")
-    if isinstance(collapse, float):
-        if not 0.0 <= collapse <= 1.0:
-            raise ValueError("collapse float level must be in [0.0, 1.0].")
-    elif collapse not in {"none", "auto", "max"}:
-        raise ValueError("collapse must be 'none', 'auto', 'max', or a float in [0.0, 1.0].")
-    if fold_repeats not in {None, True, False}:
-        raise ValueError("fold_repeats must be None, True, or False.")
-    show_buffer_layers = _normalize_buffer_visibility(show_buffer_layers)
-    theme = resolve_theme(vis_theme, for_paper=for_paper)
-    if node_overlay is None:
-        node_overlay = getattr(self, "_node_overlay_scores", None)
-    elif isinstance(node_overlay, str) and node_overlay == getattr(
-        self, "_node_overlay_name", None
-    ):
-        node_overlay = getattr(self, "_node_overlay_scores", None)
-    resolved_node_overlay = cast("str | OverlayScores | None", node_overlay)
-    overrides = VisualizationOverrides(
-        graph=graphviz_graph_overrides(vis_graph_overrides),
-        edge=vis_edge_overrides or {},
-        grad_edge=vis_grad_edge_overrides or {},
-        module=vis_module_overrides or {},
-    )
+    _validate_draw_options(node_mode, vis_intervention_mode, collapse, fold_repeats)
     request = ResolvedRenderRequest(
         vis_mode=vis_mode,
-        show_buffer_layers=show_buffer_layers,
+        show_buffer_layers=cast(BufferVisibilityLiteral, show_buffer_layers),
         show_containers=show_containers,
         engine=vis_node_placement,
         skip_fn=skip_fn,
@@ -349,12 +913,12 @@ def draw(
         edge_overrides=vis_edge_overrides,
         grad_edge_overrides=vis_grad_edge_overrides,
         module_overrides=vis_module_overrides,
-        overrides=overrides,
+        overrides=None,
         theme=vis_theme,
         intervention_mode=vis_intervention_mode,
         show_cone=vis_show_cone,
         code_panel=code_panel,
-        node_overlay=resolved_node_overlay,
+        node_overlay=node_overlay,
         node_label_fields=tuple(node_label_fields) if node_label_fields is not None else None,
         show_legend=show_legend,
         font_size=font_size,
@@ -367,14 +931,8 @@ def draw(
         show_orphans=show_orphans,
         direction=direction,
     )
-    site_labels, _ = intervention_site_and_cone_labels(self, show_cone=vis_show_cone)
-    intervention_node_spec_fn = make_intervention_node_spec_fn(
-        self,
-        show_cone=vis_show_cone,
-        graph_overrides=vis_graph_overrides,
-        user_node_spec_fn=node_spec_fn,
-    )
-    request = replace(request, node_spec_fn=intervention_node_spec_fn)
+    request, theme, site_labels = _resolve_draw_request(self, request)
+    show_buffer_layers = request.show_buffer_layers
 
     if vis_renderer == "dagua":
         opted_in_module = sys.modules.get("torchlens.experimental.dagua")
@@ -398,35 +956,7 @@ def draw(
         )
     if vis_renderer not in {"graphviz", "dagua"}:
         raise ValueError("vis_renderer must be 'graphviz' or 'dagua'")
-    render_context = request
-    if collapse != "none" and collapse_fn is None:
-        from .auto_collapse import resolve_collapse_fn
-
-        collapse_fn = resolve_collapse_fn(self, collapse, vis_mode, context=render_context)
-    request = request.with_resolved_collapse(collapse_fn)
-    render_context = request
-    repeat_folds: dict[str, ModuleRepeatFold] = {}
-    collapse_uses_default_folds = collapse in {"auto", "max"} or (
-        isinstance(collapse, float) and collapse > 0.0
-    )
-    if fold_repeats is not False and (fold_repeats is True or collapse_uses_default_folds):
-        from .auto_collapse import resolve_repeat_folds
-
-        repeat_folds = resolve_repeat_folds(
-            self,
-            collapse_fn,
-            context=render_context,
-            fold_repeats=fold_repeats,
-        )
-    segments: dict[str, SegmentDescriptor] = {}
-    if collapse_fn is not None:
-        segments = dict(getattr(collapse_fn, "_torchlens_v2_segments", {}) or {})
-    segment_lookup = _build_segment_lookup(segments)
-    # THE _layers_logged guard: protects all downstream rendering code from missing-layer lookups.
-    if not self._layers_logged:
-        raise ValueError(
-            "Must have all layers logged in order to render the graph; use show_model_graph."
-        )
+    request, repeat_folds, segments, segment_lookup = _resolve_collapse_request(self, request)
 
     target = RenderTarget(
         outpath=_strip_render_extension(vis_outpath),
@@ -435,448 +965,20 @@ def draw(
         viewer=not vis_save_only,
         renderer_name=vis_renderer,
     )
-    vis_outpath = target.outpath
-    vis_fileformat = target.fileformat
-    vis_save_only = target.save_only
-    vis_renderer = target.renderer_name
-    source_graph = build_source_graph(self, request)
-    from .node_universe import build_node_universe
-
-    node_universe = build_node_universe(
-        source_graph,
-        collapse_fn,
+    context = _resolve_forward_context(
+        self,
+        request,
+        target,
+        theme,
         repeat_folds,
         segments,
-        show_containers,
+        segment_lookup,
+        site_labels,
     )
-    entries_to_plot = source_graph.entries_to_plot
+    work = _populate_forward_ir(self, context)
 
-    rankdir = direction_to_rankdir(direction)
-
-    # Resolve the layout engine early to potentially skip graphviz.Digraph construction.
-    from ._rank_layout_internal.layout import (
-        RANK_LAYOUT_COST_THRESHOLD,
-        RANK_LAYOUT_NOTICE,
-        estimate_rank_layout_cost,
-        get_node_placement_engine,
-    )
-
-    edge_map = source_graph.edge_map
-    skipped_labels = source_graph.skipped_labels
-    source_text = resolve_code_panel_source(
-        code_panel,
-        getattr(self, "_source_code_blob", {}),
-        getattr(self, "_source_model_ref", None),
-    )
-    num_nodes = len(entries_to_plot) - len(skipped_labels)
-    cost_node_labels, cost_edges = _rank_layout_cost_inputs(
-        self,
-        entries_to_plot,
-        edge_map,
-        vis_mode=vis_mode,
-        vis_call_depth=vis_call_depth,
-        collapse_fn=collapse_fn,
-    )
-    layout_cost = estimate_rank_layout_cost(cost_node_labels, cost_edges)
-    engine = get_node_placement_engine(vis_node_placement, layout_cost)
-    if show_containers:
-        engine = "dot"
-    # The sibling-ordering post-pass only runs on the dot engine; set the
-    # trivial decision up front so the attribute exists on every path.
-    self._last_sibling_ordering_decision = SiblingOrderDecision(0, 0, {}, ())
-    if vis_node_placement == "auto" and engine == "rank":
-        warnings.warn(
-            RANK_LAYOUT_NOTICE.format(
-                cost=layout_cost,
-                threshold=RANK_LAYOUT_COST_THRESHOLD,
-            )
-        )
-    _vprint(self, f"Rendering {vis_mode} graph ({num_nodes} nodes, format={vis_fileformat})")
-    _vprint(self, f"Layout engine: {engine} (estimated cost={layout_cost})")
-
-    if self.num_params == 0:
-        params_detail = "0 params"
-    elif self.num_params_frozen == 0:
-        params_detail = f"{self.num_params} params (all trainable, {self.total_param_memory})"
-    elif self.num_params_trainable == 0:
-        params_detail = f"{self.num_params} params (all frozen, {self.total_param_memory})"
-    else:
-        params_detail = (
-            f"{self.num_params} params "
-            f"({self.num_params_trainable}/{self.num_params} trainable, "
-            f"{self.total_param_memory})"
-        )
-
-    # Build the caption body first, then wrap it in the single FONT element.
-    # The optional direct-writes line must go INSIDE the FONT element, before
-    # the closing tags. Splicing it in by trimming the finished string (the old
-    # ``graph_caption[:-2]``) removed only ``>>`` and left ``</FONT`` unterminated,
-    # producing invalid DOT and a GraphvizRenderError on every direct-writes trace.
-    caption_body = (
-        f"<B>{html_escape(self.model_class_name)}</B>"
-        f"<br align='left'/>{self.num_tensors} tensors total ({self.total_activation_memory})"
-        f"<br align='left'/>{params_detail}<br align='left'/>"
-    )
-    if getattr(self, "_has_direct_writes", False):
-        caption_body += "Direct writes detected - recipe propagation will overlay<br align='left'/>"
-    graph_caption = f"<<FONT COLOR='{theme.default_font}'>{caption_body}</FONT>>"
-
-    dot = graphviz.Digraph(
-        name=self.model_class_name,
-        comment="Computational graph for the feedforward sweep",
-        format=vis_fileformat,
-    )
-
-    graph_args = {
-        "rankdir": rankdir,
-        "label": graph_caption,
-        "labelloc": "t",
-        "labeljust": "left",
-        "ordering": "out",
-    }
-    if collapse_fn is not None:
-        graph_args["newrank"] = "true"
-    graph_args.update(theme_graph_attrs(theme, font_size=font_size, dpi=dpi))
-
-    # Override system: callers can pass dicts of Graphviz attributes to
-    # customize rendering.  Values can be static (str) or dynamic (callable
-    # receiving the Trace, evaluated at render time).
-    for arg_name, arg_val in overrides.graph.items():  # type: ignore[union-attr]
-        if callable(arg_val):
-            graph_args[arg_name] = str(arg_val(self))
-        else:
-            graph_args[arg_name] = str(arg_val)
-
-    dot.graph_attr.update(graph_args)
-    dot.node_attr.update({"ordering": "out", **theme_node_attrs(theme, font_size=font_size)})
-    dot.edge_attr.update(theme_edge_attrs(theme, font_size=font_size))
-    forward_ir_builder = _RenderIRDecisionBuilder()
-
-    # Accumulate edges per module cluster; actual Graphviz subgraphs are
-    # created at the end in _setup_subgraphs to ensure proper nesting.
-    module_cluster_dict: Dict[str, Any] = defaultdict(
-        lambda: {
-            "edges": [],
-            "has_input_ancestor": False,
-            "rank_groups": [],
-            "container_clusters": [],
-        }
-    )
-    top_level_sibling_rank_groups: list[SiblingOrderChain] = []
-    # Track which collapsed module nodes have been added to avoid duplicates
-    # (multiple layers in the same collapsed module would otherwise each try
-    # to create the same box3d node).
-    collapsed_modules: Set[str] = set()
-    # Edge deduplication: (tail_name, head_name) pairs already added.
-    # Critical when collapsed modules cause many layers to map to the same
-    # node name -- without this, we'd get duplicate edges.
-    edges_used: Set[tuple[str, str, tuple[Any, ...]]] = set()
-    run_fold_ellipsis_nodes: set[str] = set()
-    emitted_segment_nodes: set[str] = set()
-    captured_forward_edges: list[CapturedForwardEdge] = []
-    pending_container_collapse_nodes: list[dict[str, Any]] = []
-    container_clusters: list[ContainerClusterSpec] = []
-    collapsed_container_nodes = _collapsed_container_leaf_nodes(
-        self,
-        entries_to_plot,
-        vis_mode=vis_mode,
-        show_containers=show_containers,
-        container_max_inline=container_max_inline,
-        pending_nodes=pending_container_collapse_nodes,
-    )
-    forward_render_ir = build_render_ir(
-        self,
-        collapse_fn=collapse_fn,
-        repeat_folds=repeat_folds,
-        context=request,
-        universe=node_universe,
-        segments=segments,
-        segment_lookup=segment_lookup,
-    )
-    antiparallel_projected_edges = projected_antiparallel_endpoint_pairs(forward_render_ir)
-
-    decisions_by_name = {node.name: node for node in forward_render_ir.nodes}
-    # One rolled draw reads the Layer rolled-edge map properties O(edges)
-    # times; share one per-draw memo so each layer computes them once.
-    rolled_maps = _RolledEdgeMaps() if vis_mode == "rolled" else None
-    for unit in node_universe.units:
-        node_record = decisions_by_name[unit.unit_id]
-        for source_index, node in enumerate(unit.source_nodes):
-            _add_node_to_graphviz(
-                self,
-                node,
-                cast(graphviz.Digraph, forward_ir_builder),
-                module_cluster_dict,
-                edges_used,
-                vis_mode,
-                collapsed_modules,
-                vis_call_depth,
-                show_buffer_layers,
-                overrides,
-                node_mode,
-                intervention_node_spec_fn,
-                collapsed_node_spec_fn,
-                collapse_fn,
-                edge_map,
-                vis_intervention_mode,
-                site_labels,
-                theme,
-                resolved_node_overlay,
-                node_label_fields,
-                captured_forward_edges,
-                rankdir,
-                show_containers,
-                collapsed_container_nodes,
-                show_input_transform_summary,
-                repeat_folds,
-                run_fold_ellipsis_nodes,
-                segment_lookup,
-                emitted_segment_nodes,
-                antiparallel_projected_edges,
-                node_record
-                if source_index == 0
-                else replace(node_record, node_calls=(), owned_node_args=()),
-                rolled_maps,
-            )
-
-    for node_args in pending_container_collapse_nodes:
-        forward_ir_builder.node(**node_args)
-
-    container_overlay_edges: list[ContainerOverlayEdge] = []
-    if show_containers == "nodes" and vis_mode == "unrolled":
-        dot.graph_attr.update({"pad": "0.20"})
-        container_overlay_nodes, container_overlay_edges = _container_nodes_and_overlay_edges(
-            self,
-            collapsed_container_nodes,
-            vis_call_depth=vis_call_depth,
-            collapse_fn=collapse_fn,
-        )
-        for overlay_node in container_overlay_nodes:
-            if overlay_node.owner_key is None:
-                forward_ir_builder.node(**overlay_node.args)
-            else:
-                module_cluster_dict[overlay_node.owner_key].setdefault("nodes", []).append(
-                    overlay_node.args
-                )
-
-    if show_containers in {"cluster", "nodes"}:
-        container_clusters = _container_clusters_for_graphviz(
-            self,
-            entries_to_plot,
-            vis_mode=vis_mode,
-            vis_call_depth=vis_call_depth,
-            collapse_fn=collapse_fn,
-            collapsed_container_nodes=collapsed_container_nodes,
-        )
-        _queue_container_clusters(module_cluster_dict, container_clusters)
-
-    if vis_intervention_mode == "as_node":
-        _add_intervention_hook_nodes(
-            cast(graphviz.Digraph, forward_ir_builder),
-            site_labels,
-            vis_graph_overrides,
-        )
-
-    sibling_order_chains: tuple[SiblingOrderChain, ...] = ()
-    if _should_order_siblings(
-        order_siblings=order_siblings,
-        engine=engine,
-        vis_mode=vis_mode,
-        num_nodes=num_nodes,
-        module=module,
-        vis_intervention_mode=vis_intervention_mode,
-        collapse_fn=collapse_fn,
-        vis_call_depth=vis_call_depth,
-    ):
-        sibling_order_chains = _build_sibling_order_chains(captured_forward_edges)
-        if sibling_order_chains and (
-            layout_cost * SIBLING_ORDER_VERIFY_LAYOUT_BUDGET > RANK_LAYOUT_COST_THRESHOLD
-        ):
-            # Verification pays up to SIBLING_ORDER_VERIFY_LAYOUT_BUDGET full dot
-            # layouts on top of the final render, so its workload is priced
-            # against the same threshold that already degrades over-budget
-            # graphs to rank layout. Siblings stay unordered (never
-            # unverified-ordered) on such graphs.
-            warnings.warn(
-                SIBLING_ORDER_COST_NOTICE.format(
-                    cost=layout_cost,
-                    budget=SIBLING_ORDER_VERIFY_LAYOUT_BUDGET,
-                    threshold=RANK_LAYOUT_COST_THRESHOLD,
-                )
-            )
-            sibling_order_chains = ()
-        if sibling_order_chains:
-            for chain in sibling_order_chains:
-                _queue_sibling_rank_group(
-                    module_cluster_dict,
-                    top_level_sibling_rank_groups,
-                    chain,
-                )
-    forward_render_ir = replace(
-        forward_render_ir,
-        ordering_constraints=tuple(
-            RenderIROrderingConstraint(
-                kind="sibling_order",
-                source_label=chain.source_label,
-                source_name=chain.source_name,
-                targets=chain.targets,
-                target_labels=chain.target_labels,
-                lca_key=chain.lca_key,
-            )
-            for chain in sibling_order_chains
-        ),
-    )
-    forward_render_ir = finalize_forward_regions(
-        forward_render_ir,
-        self,
-        vis_mode=vis_mode,
-        module_payloads=module_cluster_dict,
-        container_regions=tuple(container_clusters),
-        captured_edges=tuple(captured_forward_edges),
-        overrides=overrides,
-    )
-
-    # Resolve the complete nested region statement tree before renderer dispatch.
-    _setup_subgraphs(
-        self,
-        cast(graphviz.Digraph, forward_ir_builder),
-        vis_mode,
-        module_cluster_dict,
-        overrides,
-        list(forward_render_ir.ordering_constraints),
-        forward_render_ir.regions,
-    )
-    forward_render_ir = replace(
-        forward_render_ir,
-        dot_statements=tuple(forward_ir_builder.calls),
-    )
-    if engine == "rank":
-        from ._rank_layout_internal.layout import render_rank_layout
-
-        # Resolve graph overrides to plain strings here (callables need the
-        # Trace, which the raw-DOT rank renderer does not receive) so the rank
-        # path honors vis_graph_overrides / dpi / show_legend like the dot path.
-        resolved_graph_overrides = {
-            key: str(val(self)) if callable(val) else str(val)
-            for key, val in overrides.graph.items()  # type: ignore[union-attr]
-        }
-        with _timed_phase(self, "render:graphviz:forward"):
-            result = render_rank_layout(
-                forward_render_ir,
-                vis_mode,
-                vis_outpath,
-                vis_fileformat,
-                vis_save_only,
-                graph_caption,
-                rankdir,
-                source_text,
-                show_legend=show_legend,
-                theme=theme,
-                dpi=dpi,
-                graph_overrides=resolved_graph_overrides,
-            )
-        _vprint(self, f"Graph saved to {vis_outpath}.{vis_fileformat}")
-        return result
-    GraphvizRenderer().emit(forward_render_ir, dot)
-    for overlay_edge in container_overlay_edges:
-        dot.edge(
-            tail_name=overlay_edge.tail_name,
-            head_name=overlay_edge.head_name,
-            **overlay_edge.attrs,
-        )
-    if show_orphans:
-        _add_orphan_island_nodes(self, dot, vis_mode, theme)
-    if show_legend:
-        _add_legend_to_graphviz(dot, theme)
-    # A code panel is composed side by side (separate render) when the output
-    # format supports it, so the code never distorts the graph's layout. Only
-    # fall back to an in-graph subgraph for formats we cannot compose.
-    compose_code_panel = source_text is not None and _code_panel_composition_available(
-        vis_fileformat, engine
-    )
-    if source_text is not None and not compose_code_panel:
-        render_code_panel_subgraph(dot, source_text)
-
-    if in_notebook() and not vis_save_only:
-        try:
-            from IPython.display import SVG, display  # #72: lazy import
-        except ImportError as e:
-            raise ImportError(
-                "IPython is required for this feature. Install with "
-                "`pip install torchlens[notebook]`."
-            ) from e
-
-        display_fn = cast(Any, display)
-        if compose_code_panel:
-            # Compose the graph SVG beside a standalone code panel so the inline
-            # preview matches the saved output and leaves the graph undistorted.
-            graph_svg = _inline_svg_local_images(dot.pipe(format="svg").decode("utf-8"))
-            combined_svg = compose_graph_with_code_panel(graph_svg, cast(str, source_text))
-            display_fn(SVG(combined_svg))
-        else:
-            display_fn(dot)
-
-    # Rank was already handled above (early return). Only dot reaches here.
-    _RENDER_TIMEOUT = 120  # seconds
-    source_override = None
-    self._last_sibling_ordering_decision = SiblingOrderDecision(0, 0, {}, ())
-    if forward_render_ir.ordering_constraints:
-        try:
-            source_override, decision = _verify_and_apply_sibling_ordering(
-                dot.source,
-                forward_render_ir.ordering_constraints,
-                captured_forward_edges,
-                rankdir,
-            )
-            self._last_sibling_ordering_decision = decision
-        except (subprocess.SubprocessError, OSError) as exc:
-            if _strict_sibling_order_checks_enabled():
-                raise
-            _warn_sibling_order_fallback_once(exc)
-
-    final_source = source_override if source_override is not None else dot.source
-    source_path = dot.save(vis_outpath)
-    with open(source_path, "w", encoding="utf-8") as source_file:
-        source_file.write(final_source)
-    with _timed_phase(self, "render:graphviz:forward"):
-        try:
-            # dot engine (default for local-topology graphs)
-            rendered_path = f"{vis_outpath}.{vis_fileformat}"
-            if compose_code_panel:
-                _write_composed_code_panel(
-                    dot.engine,
-                    source_path,
-                    cast(str, source_text),
-                    rendered_path,
-                    vis_fileformat,
-                    _RENDER_TIMEOUT,
-                )
-            else:
-                cmd = [dot.engine, f"-T{vis_fileformat}", "-o", rendered_path, source_path]
-                subprocess.run(cmd, timeout=_RENDER_TIMEOUT, check=True, capture_output=True)
-                if vis_fileformat == "svg":
-                    _inline_svg_file_local_images(rendered_path)
-            _validate_rendered_output(rendered_path, source_path, "forward graph")
-            if not vis_save_only:
-                _view_rendered_file(rendered_path)
-            _vprint(self, f"Graph saved to {vis_outpath}.{vis_fileformat}")
-            # Success: remove the intermediate DOT source. On FAILURE we keep it so
-            # the error's "DOT source was saved to ..." hint points to a real file.
-            if os.path.exists(source_path):
-                os.remove(source_path)
-        except subprocess.TimeoutExpired as e:
-            _raise_graphviz_timeout(
-                "forward graph",
-                f"{self.num_tensors} nodes",
-                source_path,
-                _RENDER_TIMEOUT,
-                e,
-            )
-        except subprocess.CalledProcessError as e:
-            _raise_graphviz_failure("forward graph", source_path, e)
-    if return_graph:
-        return dot
-    return final_source
+    forward_render_ir = _finalize_forward_ir(self, context, work)
+    return _emit_and_finish_forward(self, context, work, forward_render_ir)
 
 
 def _add_orphan_island_nodes(

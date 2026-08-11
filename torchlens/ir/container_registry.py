@@ -293,6 +293,27 @@ class ContainerRegistry:
     id_to_entry: dict[int, IdentityEntry] = field(default_factory=dict)
     records: dict[int, ContainerRecord] = field(default_factory=dict)
     next_ordinal: int = 0
+    # Capture-only: ``new_label -> root_label`` for value-PRESERVING relabels
+    # (module-boundary identity mints advance a live tensor's label without
+    # changing its value — W3 F6). Snapshot dedup resolves producer labels
+    # through this map so an unchanged container threaded across module
+    # boundaries still collapses to one snapshot body plus site aliases, while
+    # a genuine mutation (whose label advance is never reported here) still
+    # breaks dedup. Never persisted.
+    value_identity_roots: dict[str, str] = field(default_factory=dict)
+
+    def note_value_preserving_relabel(self, old_label: str, new_label: str) -> None:
+        """Record that ``new_label`` relabels ``old_label`` without a value change.
+
+        Parameters
+        ----------
+        old_label:
+            Label the live tensor carried before the identity mint.
+        new_label:
+            Label the mint advanced the live tensor to.
+        """
+
+        self.value_identity_roots[new_label] = self.value_identity_roots.get(old_label, old_label)
 
     def register_snapshot(
         self,
@@ -346,7 +367,9 @@ class ContainerRegistry:
             leaf_occurrences=leaf_occurrences,
             reconstructable=reconstructable,
         )
-        if record.snapshots and _snapshots_dedup_equivalent(record.snapshots[-1], snapshot):
+        if record.snapshots and _snapshots_dedup_equivalent(
+            record.snapshots[-1], snapshot, self.value_identity_roots
+        ):
             previous = record.snapshots[-1]
             record.snapshots[-1] = ContainerSnapshot(
                 site=previous.site,
@@ -370,6 +393,7 @@ class ContainerRegistry:
         """Release capture-only strong references and identity indexes."""
 
         self.id_to_entry.clear()
+        self.value_identity_roots.clear()
 
     def _entry_for(self, container: object, *, observed_at_event_index: int) -> IdentityEntry:
         """Return or create the identity entry for ``container``.
@@ -491,15 +515,37 @@ def _spec_is_reconstructable(spec: ContainerSpec) -> bool:
     return all(_spec_is_reconstructable(child) for _component, child in spec.child_specs)
 
 
-def _snapshots_dedup_equivalent(left: ContainerSnapshot, right: ContainerSnapshot) -> bool:
-    """Return whether two consecutive snapshots can share one snapshot body."""
+def _snapshots_dedup_equivalent(
+    left: ContainerSnapshot,
+    right: ContainerSnapshot,
+    value_identity_roots: dict[str, str],
+) -> bool:
+    """Return whether two consecutive snapshots can share one snapshot body.
 
-    return (
+    Leaf producer labels are compared through ``value_identity_roots``: a
+    module-boundary identity mint advances a live tensor's label without
+    changing its value, so an unchanged container threaded through repeated
+    modules still dedups. A mutation's label advance is never registered as
+    value-preserving, so mutated observations keep distinct snapshots.
+    """
+
+    if not (
         left.role == right.role
         and left.phase == right.phase
         and left.spec == right.spec
-        and left.leaf_occurrences == right.leaf_occurrences
         and left.reconstructable == right.reconstructable
+        and len(left.leaf_occurrences) == len(right.leaf_occurrences)
+    ):
+        return False
+
+    def _value_root(occurrence: ContainerLeafOccurrence) -> tuple[object, ...]:
+        label = occurrence.producer_op_label
+        root = value_identity_roots.get(label, label) if label is not None else None
+        return (occurrence.path, occurrence.occ_index, root)
+
+    return all(
+        _value_root(left_occ) == _value_root(right_occ)
+        for left_occ, right_occ in zip(left.leaf_occurrences, right.leaf_occurrences)
     )
 
 

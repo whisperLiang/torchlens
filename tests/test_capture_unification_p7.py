@@ -132,6 +132,10 @@ def test_recording_to_trace_matches_trace_structure_and_unsaved_out_fails() -> N
     full = tl.trace(model, x, random_seed=23)
 
     assert _structure(cooked) == _structure(full)
+    # Provenance honesty: the cooked projection runs exhaustive-style
+    # postprocess but records its true origin; a live capture carries no marker.
+    assert getattr(cooked, "_cooked_from", None) == "recording"
+    assert getattr(full, "_cooked_from", None) is None
     saved = [op for op in cooked.layer_list if op.has_saved_activation]
     assert saved
     assert {op.layer_type for op in saved} == {"conv2d"}

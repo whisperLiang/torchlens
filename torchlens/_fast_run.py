@@ -815,21 +815,27 @@ class _FastLiveSession:
         self.failure: ContractCheck | None = None
         self.module_plans = self._build_module_plans(trace)
         self.function_plans = self._build_function_plans(trace)
+        boundary_layer_labels = set(getattr(trace, "input_layers", ())) | set(
+            getattr(trace, "output_layers", ())
+        )
         supported_labels = (
             {
                 label
                 for plan in (*self.module_plans, *self.function_plans)
                 for label in plan.save_labels
             }
-            | set(getattr(trace, "input_layers", ()))
-            | set(getattr(trace, "output_layers", ()))
+            | {
+                op.label
+                for op in trace.layer_list
+                if op.layer_label in boundary_layer_labels
+            }
         )
         unsupported_function_labels = tuple(
-            op.layer_label
+            op.label
             for op in trace.layer_list
             if bool(getattr(op, "has_saved_activation", False))
             and str(getattr(op, "func_name", "none")) not in {"none", "identity"}
-            and op.layer_label not in supported_labels
+            and op.label not in supported_labels
         )
         if unsupported_function_labels:
             raise RunCapabilityUnavailableError(
@@ -842,7 +848,7 @@ class _FastLiveSession:
         for op in trace.layer_list:
             if (
                 bool(getattr(op, "has_saved_activation", False))
-                and op.layer_label not in supported_labels
+                and op.label not in supported_labels
             ):
                 op._internal_set("out", None)
                 op._internal_set("transformed_out", None)
@@ -896,7 +902,7 @@ class _FastLiveSession:
             resolved = tuple(trace.layer_dict_all_keys[label] for label in module_call.output_ops)
             if not any(bool(getattr(item, "has_saved_activation", False)) for item in resolved):
                 continue
-            labels = tuple(item.layer_label for item in resolved)
+            labels = tuple(item.label for item in resolved)
             plans.append(
                 _FastOutputPlan(
                     address_or_name=call_label.rsplit(":", 1)[0],
@@ -945,7 +951,7 @@ class _FastLiveSession:
                 ):
                     group.append(ops[next_index])
                     next_index += 1
-            labels = tuple(item.layer_label for item in group)
+            labels = tuple(item.label for item in group)
             plans.append(
                 _FastOutputPlan(
                     address_or_name=str(first.func_name),
@@ -957,7 +963,7 @@ class _FastLiveSession:
                         str(item.dtype) if item.dtype is not None else None for item in group
                     ),
                     save_labels=frozenset(
-                        item.layer_label
+                        item.label
                         for item in group
                         if bool(getattr(item, "has_saved_activation", False))
                         and not bool(getattr(item, "is_atomic_module", False))

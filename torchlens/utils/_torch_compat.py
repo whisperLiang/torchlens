@@ -70,6 +70,12 @@ __all__ = [
     "write_fill_uninitialized_memory",
     "HAS_DEVICE_CONTEXT_DISPATCH",
     "HAS_DEVICE_CONSTRUCTORS",
+    "HAS_DEVICE_MESH",
+    "HAS_DTENSOR",
+    "HAS_DYNAMO_IS_COMPILING",
+    "HAS_FP8_DTYPES",
+    "HAS_PIPELINING",
+    "HAS_TRACING_TENSOR_TYPES",
     "HAS_FUNCTORCH_APIS",
     "HAS_FUNCTORCH_LEVEL_API",
     "HAS_FUNCTORCH_WRAPPED_TENSOR_API",
@@ -103,6 +109,12 @@ __all__ = [
     "get_current_function_mode_stack",
     "get_device_constructors",
     "get_device_context_type",
+    "get_device_mesh_type",
+    "get_dtensor_type",
+    "get_pipelining_module_types",
+    "get_fp8_dtypes",
+    "get_tracing_tensor_types",
+    "dynamo_is_compiling",
     "get_dynamo_optimized_module_type",
     "get_dynamo_explain",
     "get_functorch_maybe_current_level",
@@ -1097,6 +1109,24 @@ _DYNAMO_ORIG_CALLABLE_MARKER_PROBED: bool = False
 HAS_FSDP_WRAPPER: bool = False
 _FSDP_WRAPPER_TYPE: type[Any] | None = None
 _FSDP_WRAPPER_PROBED: bool = False
+HAS_DTENSOR: bool = False
+_DTENSOR_TYPE: type[Any] | None = None
+_DTENSOR_PROBED: bool = False
+HAS_DEVICE_MESH: bool = False
+_DEVICE_MESH_TYPE: type[Any] | None = None
+_DEVICE_MESH_PROBED: bool = False
+HAS_PIPELINING: bool = False
+_PIPELINING_TYPES: tuple[type[Any], ...] = ()
+_PIPELINING_PROBED: bool = False
+HAS_DYNAMO_IS_COMPILING: bool = False
+_DYNAMO_IS_COMPILING_FN: Callable[[], bool] | None = None
+_DYNAMO_IS_COMPILING_PROBED: bool = False
+HAS_TRACING_TENSOR_TYPES: bool = False
+_TRACING_TENSOR_TYPES: tuple[type[Any], ...] = ()
+_TRACING_TENSOR_TYPES_PROBED: bool = False
+HAS_FP8_DTYPES: bool = False
+_FP8_DTYPES: frozenset[Any] = frozenset()
+_FP8_DTYPES_PROBED: bool = False
 
 _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_AUTOCAST_DEVICE_TYPE_ARG",
@@ -1117,6 +1147,12 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_DYNAMO_ORIG_CALLABLE_MARKER",
     "HAS_DYNAMO_EXPLAIN",
     "HAS_FSDP_WRAPPER",
+    "HAS_DTENSOR",
+    "HAS_DEVICE_MESH",
+    "HAS_PIPELINING",
+    "HAS_DYNAMO_IS_COMPILING",
+    "HAS_TRACING_TENSOR_TYPES",
+    "HAS_FP8_DTYPES",
     "HAS_GENERATOR_CLONE_STATE",
     "HAS_GENERATOR_GRAPHSAFE_GET_STATE",
     "HAS_GENERATOR_GRAPHSAFE_SET_STATE",
@@ -1178,14 +1214,22 @@ def get_torch_capability_snapshot() -> TorchCapabilitySnapshot:
         ``AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED`` alias, to boolean availability.
     """
 
-    # HAS_DYNAMO_OPTIMIZED_MODULE and HAS_FSDP_WRAPPER are lazily probed (see
-    # get_dynamo_optimized_module_type / get_fsdp_wrapper_type) to avoid
-    # unconditional torch._dynamo / torch.distributed.fsdp imports on the
+    # HAS_DYNAMO_OPTIMIZED_MODULE, HAS_FSDP_WRAPPER, HAS_DTENSOR,
+    # HAS_DEVICE_MESH, and HAS_PIPELINING are lazily probed (see
+    # get_dynamo_optimized_module_type / get_fsdp_wrapper_type /
+    # get_dtensor_type / get_device_mesh_type / get_pipelining_module_types) to
+    # avoid unconditional torch._dynamo / torch.distributed imports on the
     # capture hot path. Diagnostic snapshot consumers (tl.compat.report(),
     # tl.utils.doctor()) are not on that hot path, so force the probes here to
     # report the real capabilities instead of the pre-probe placeholders.
     get_dynamo_optimized_module_type(force_probe=True)
     get_fsdp_wrapper_type(force_probe=True)
+    get_dtensor_type(force_probe=True)
+    get_device_mesh_type(force_probe=True)
+    get_pipelining_module_types(force_probe=True)
+    get_tracing_tensor_types(force_probe=True)
+    get_fp8_dtypes(force_probe=True)
+    dynamo_is_compiling()
     _ensure_dynamo_orig_callable_marker_probed()
     get_dynamo_explain()
     snapshot = {name: bool(globals()[name]) for name in _CAPABILITY_ATTRS}
@@ -1506,6 +1550,322 @@ def get_fsdp_wrapper_type(*, force_probe: bool = False) -> type[Any] | None:
         )
         return None
     return fsdp_wrapper_type
+
+
+# Module paths that must already be in ``sys.modules`` for a live DTensor /
+# DeviceMesh / pipeline-stage object to exist. ``torch.distributed._tensor`` is
+# the pre-2.5 spelling and ``torch.distributed.tensor`` the current one; both
+# resolve to the same class object on torch that has the alias, so probing both
+# is a capability probe, not a version parse.
+_DTENSOR_MODULE_CANDIDATES: tuple[str, ...] = (
+    "torch.distributed.tensor",
+    "torch.distributed._tensor",
+)
+_PIPELINING_MODULE_CANDIDATES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("torch.distributed.pipelining", ("PipelineStage", "_PipelineStageBase")),
+    ("torch.distributed.pipeline.sync", ("Pipe",)),
+)
+
+
+def get_dtensor_type(*, force_probe: bool = False) -> type[Any] | None:
+    """Return torch's ``DTensor`` type without paying an eager import.
+
+    Parameters
+    ----------
+    force_probe:
+        Import the DTensor namespace even when it has never been imported in
+        this process. Diagnostic surfaces set this to report the real build
+        capability; capture paths keep the default.
+
+    Returns
+    -------
+    type[Any] | None
+        ``DTensor`` type, or ``None`` when unavailable or when the lazy default
+        defers the probe.
+
+    Notes
+    -----
+    Mirrors :func:`get_fsdp_wrapper_type`: a live tensor can only *be* a
+    ``DTensor`` if its defining module is already in ``sys.modules``, because
+    Python registers a module before any class from it can be instantiated. So
+    when no candidate module has been imported, the default path reports
+    ``None`` without paying the ``torch.distributed`` import cost.
+    """
+
+    global HAS_DTENSOR, _DTENSOR_PROBED, _DTENSOR_TYPE
+
+    if not _DTENSOR_PROBED:
+        if not force_probe and not any(name in sys.modules for name in _DTENSOR_MODULE_CANDIDATES):
+            return None
+        dtensor_type: Any = None
+        for module_name in _DTENSOR_MODULE_CANDIDATES:
+            try:
+                dtensor_type = _import_module_attr_or_none(module_name, "DTensor")
+            except RuntimeError:
+                dtensor_type = None
+            if isinstance(dtensor_type, type):
+                break
+        _DTENSOR_TYPE = dtensor_type if isinstance(dtensor_type, type) else None
+        HAS_DTENSOR = _DTENSOR_TYPE is not None
+        _DTENSOR_PROBED = True
+    if _DTENSOR_TYPE is None:
+        mark_torch_capability_missing(
+            "HAS_DTENSOR",
+            "exact DTensor detection falls back to structural tensor-subclass matching",
+        )
+        return None
+    return _DTENSOR_TYPE
+
+
+def get_device_mesh_type(*, force_probe: bool = False) -> type[Any] | None:
+    """Return torch's ``DeviceMesh`` type without paying an eager import.
+
+    Parameters
+    ----------
+    force_probe:
+        Import ``torch.distributed.device_mesh`` even when it has never been
+        imported in this process.
+
+    Returns
+    -------
+    type[Any] | None
+        ``DeviceMesh`` type, or ``None`` when unavailable or when the lazy
+        default defers the probe.
+    """
+
+    global HAS_DEVICE_MESH, _DEVICE_MESH_PROBED, _DEVICE_MESH_TYPE
+
+    if not _DEVICE_MESH_PROBED:
+        if not force_probe and "torch.distributed.device_mesh" not in sys.modules:
+            return None
+        try:
+            mesh_type = _import_module_attr_or_none("torch.distributed.device_mesh", "DeviceMesh")
+        except RuntimeError:
+            mesh_type = None
+        _DEVICE_MESH_TYPE = mesh_type if isinstance(mesh_type, type) else None
+        HAS_DEVICE_MESH = _DEVICE_MESH_TYPE is not None
+        _DEVICE_MESH_PROBED = True
+    if _DEVICE_MESH_TYPE is None:
+        mark_torch_capability_missing(
+            "HAS_DEVICE_MESH",
+            "exact device-mesh detection falls back to structural attribute matching",
+        )
+        return None
+    return _DEVICE_MESH_TYPE
+
+
+def get_pipelining_module_types(*, force_probe: bool = False) -> tuple[type[Any], ...]:
+    """Return torch pipeline-parallel stage/schedule types without eager import.
+
+    Parameters
+    ----------
+    force_probe:
+        Import the pipelining namespaces even when they have never been
+        imported in this process.
+
+    Returns
+    -------
+    tuple[type[Any], ...]
+        Available pipeline-stage types. Empty when pipelining is unavailable or
+        when the lazy default defers the probe.
+
+    Notes
+    -----
+    Covers both the current ``torch.distributed.pipelining`` namespace and the
+    removed-in-2.5 ``torch.distributed.pipeline.sync.Pipe`` wrapper, so a model
+    built on either spelling is detected on the torch that has it.
+    """
+
+    global HAS_PIPELINING, _PIPELINING_PROBED, _PIPELINING_TYPES
+
+    if not _PIPELINING_PROBED:
+        candidate_modules = tuple(name for name, _attrs in _PIPELINING_MODULE_CANDIDATES)
+        if not force_probe and not any(name in sys.modules for name in candidate_modules):
+            return ()
+        found: list[type[Any]] = []
+        for module_name, attr_names in _PIPELINING_MODULE_CANDIDATES:
+            for attr_name in attr_names:
+                try:
+                    candidate = _import_module_attr_or_none(module_name, attr_name)
+                except RuntimeError:
+                    candidate = None
+                if isinstance(candidate, type):
+                    found.append(candidate)
+        _PIPELINING_TYPES = tuple(found)
+        HAS_PIPELINING = bool(_PIPELINING_TYPES)
+        _PIPELINING_PROBED = True
+    if not _PIPELINING_TYPES:
+        mark_torch_capability_missing(
+            "HAS_PIPELINING",
+            "exact pipeline-parallel detection falls back to structural namespace matching",
+        )
+        return ()
+    return _PIPELINING_TYPES
+
+
+# Tracing tensor subclasses: tensors that carry no real data, so every TorchLens
+# operation that reads a value (safe_copy, torch.equal, .item(), memory
+# accounting) is meaningless or fatal on them. ``FakeTensor`` backs Dynamo/AOT
+# tracing and ``torch.export``; ``FunctionalTensor`` backs functionalization.
+_TRACING_TENSOR_CANDIDATES: tuple[tuple[str, str], ...] = (
+    ("torch._subclasses.fake_tensor", "FakeTensor"),
+    ("torch._subclasses.functional_tensor", "FunctionalTensor"),
+)
+
+_DYNAMO_IS_COMPILING_CANDIDATES: tuple[tuple[str, str], ...] = (
+    # Public since torch 2.0; preferred so behavior tracks the canonical impl.
+    ("torch.compiler", "is_compiling"),
+    ("torch._dynamo", "is_compiling"),
+)
+
+
+def dynamo_is_compiling() -> bool:
+    """Return whether Dynamo is currently tracing this frame.
+
+    Returns
+    -------
+    bool
+        True while a ``torch.compile`` region is being traced. False when the
+        capability is unavailable, so an absent probe degrades to "not
+        compiling" rather than disabling capture.
+
+    Notes
+    -----
+    Probed once and cached as a bound callable, because this is consulted on the
+    capture logging path once per operation. Measured at ~0.5 us per call, which
+    is under 1% of the per-op logging cost.
+    """
+
+    global HAS_DYNAMO_IS_COMPILING, _DYNAMO_IS_COMPILING_FN, _DYNAMO_IS_COMPILING_PROBED
+
+    if not _DYNAMO_IS_COMPILING_PROBED:
+        for module_name, attr_name in _DYNAMO_IS_COMPILING_CANDIDATES:
+            try:
+                candidate = _import_module_attr_or_none(module_name, attr_name)
+            except RuntimeError:
+                candidate = None
+            if callable(candidate):
+                _DYNAMO_IS_COMPILING_FN = candidate
+                break
+        HAS_DYNAMO_IS_COMPILING = _DYNAMO_IS_COMPILING_FN is not None
+        _DYNAMO_IS_COMPILING_PROBED = True
+    probe = _DYNAMO_IS_COMPILING_FN
+    if probe is None:
+        mark_torch_capability_missing(
+            "HAS_DYNAMO_IS_COMPILING",
+            "Dynamo-tracing detection is disabled; compiled regions may fail inside the wrappers",
+        )
+        return False
+    try:
+        return bool(probe())
+    except Exception:
+        return False
+
+
+def get_tracing_tensor_types(*, force_probe: bool = False) -> tuple[type[Any], ...]:
+    """Return the data-free tracing tensor subclasses available in this build.
+
+    Parameters
+    ----------
+    force_probe:
+        Import the tracing-subclass namespaces even when they have never been
+        imported in this process.
+
+    Returns
+    -------
+    tuple[type[Any], ...]
+        ``FakeTensor`` / ``FunctionalTensor`` types, empty when unavailable or
+        when the lazy default defers the probe.
+
+    Notes
+    -----
+    Same never-import-on-the-hot-path contract as :func:`get_fsdp_wrapper_type`:
+    a live tensor can only *be* one of these classes if its defining module is
+    already in ``sys.modules``.
+    """
+
+    global HAS_TRACING_TENSOR_TYPES, _TRACING_TENSOR_TYPES, _TRACING_TENSOR_TYPES_PROBED
+
+    if not _TRACING_TENSOR_TYPES_PROBED:
+        candidate_modules = tuple(name for name, _attr in _TRACING_TENSOR_CANDIDATES)
+        if not force_probe and not any(name in sys.modules for name in candidate_modules):
+            return ()
+        found: list[type[Any]] = []
+        for module_name, attr_name in _TRACING_TENSOR_CANDIDATES:
+            try:
+                candidate = _import_module_attr_or_none(module_name, attr_name)
+            except RuntimeError:
+                candidate = None
+            if isinstance(candidate, type):
+                found.append(candidate)
+        _TRACING_TENSOR_TYPES = tuple(found)
+        HAS_TRACING_TENSOR_TYPES = bool(_TRACING_TENSOR_TYPES)
+        _TRACING_TENSOR_TYPES_PROBED = True
+    if not _TRACING_TENSOR_TYPES:
+        mark_torch_capability_missing(
+            "HAS_TRACING_TENSOR_TYPES",
+            "fake/functional tracing-tensor detection falls back to structural name matching",
+        )
+        return ()
+    return _TRACING_TENSOR_TYPES
+
+
+# Narrow-width float dtypes whose elementwise kernel coverage is incomplete.
+# Every one of these is ``dtype.is_floating_point == True``, so code that branches
+# on that flag reaches ops torch cannot run for them: on torch 2.13 CPU, ``isinf``,
+# ``nan_to_num``, ``allclose``, and every reduction raise ``NotImplementedError``
+# while ``isnan``, ``torch.equal``, ``abs``, and ``.float()`` work. Probed by name
+# off ``torch`` (no submodule import, no version parsing) because the set grew over
+# 2.x: e4m3fn/e5m2 arrived first, the "fnuz" variants next, e8m0fnu latest.
+_NARROW_FLOAT_DTYPE_NAMES: tuple[str, ...] = (
+    "float8_e4m3fn",
+    "float8_e4m3fnuz",
+    "float8_e5m2",
+    "float8_e5m2fnuz",
+    "float8_e8m0fnu",
+)
+
+
+def get_fp8_dtypes(*, force_probe: bool = False) -> frozenset[Any]:
+    """Return the fp8 dtypes this torch build exposes.
+
+    Parameters
+    ----------
+    force_probe:
+        Accepted for symmetry with the other capability probes. The fp8 dtypes are
+        plain ``torch`` attributes, so there is never a module to import and the
+        probe is unconditional.
+
+    Returns
+    -------
+    frozenset[Any]
+        ``torch.dtype`` objects for the fp8 variants present, empty on a build with
+        none. An empty set degrades every caller to its pre-fp8 behavior.
+
+    Notes
+    -----
+    Probed once and cached; membership is checked per comparison on the validation
+    path, so it must stay a hash lookup.
+    """
+
+    global HAS_FP8_DTYPES, _FP8_DTYPES, _FP8_DTYPES_PROBED
+
+    del force_probe  # No import is required; the probe is always safe to run.
+    if not _FP8_DTYPES_PROBED:
+        found = []
+        for name in _NARROW_FLOAT_DTYPE_NAMES:
+            candidate = torch_attr(name)
+            if isinstance(candidate, torch.dtype):
+                found.append(candidate)
+        _FP8_DTYPES = frozenset(found)
+        HAS_FP8_DTYPES = bool(_FP8_DTYPES)
+        _FP8_DTYPES_PROBED = True
+    if not _FP8_DTYPES:
+        mark_torch_capability_missing(
+            "HAS_FP8_DTYPES",
+            "fp8 dtypes are absent from this torch build; no fp8 comparison upcast is needed",
+        )
+    return _FP8_DTYPES
 
 
 def get_dynamo_optimized_module_type(*, force_probe: bool = False) -> type[Any] | None:

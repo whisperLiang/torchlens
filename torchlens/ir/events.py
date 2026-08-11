@@ -14,7 +14,11 @@ if TYPE_CHECKING:
     from .refs import ParamRef, TensorRef
     from .semantics import BackendSemantics, CapturePolicy
 
-OpEventKind = Literal["op", "source", "synthetic_output", "intervention_replacement"]
+# "intervention_replacement" is deliberately NOT an operation kind: an
+# intervention is an EDIT (an InterventionAppliedEvent referencing its target),
+# never a synthetic operation, so a functionless op can no longer be expressed
+# as a legal kind. (No producer ever constructed the retired literal.)
+OpEventKind = Literal["op", "source", "synthetic_output"]
 EdgeUseKind = Literal["arg", "kwarg", "container", "module", "buffer", "output", "control"]
 JaxEquationKind = Literal[
     "primitive",
@@ -132,6 +136,36 @@ class GradFnDiscovered:
     seq: int = 0
 
 
+BackwardCoverageGapReason = Literal[
+    "registration_error",
+    "framework_unhookable",
+    "dead_node",
+    "unsupported_kind",
+    "capture_exception",
+    "suppressed",
+    "unknown",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class BackwardCoverageGap:
+    """Core event recording one autograd node the walk could not observe.
+
+    A hook-registration or discovery skip is a typed journal fact, never a
+    silent ``continue``: only proven framework-contract exclusions preserve a
+    complete-coverage claim, and validation fails closed on every other
+    reason.
+    """
+
+    pass_index: int
+    object_id: int | None
+    class_qualname: str | None
+    reason: BackwardCoverageGapReason
+    detail: str | None
+    timestamp: float
+    seq: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class GradFnFired:
     """Torch enrichment event emitted from an autograd node hook."""
@@ -173,6 +207,7 @@ class OutputVersionEvent:
     payload: object
     transform_state: object | None
     detach_grad_policy: bool
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,6 +327,47 @@ class ModuleFrame:
     entry_argnames: tuple[str, ...]
 
 
+InterventionEditKind = Literal["replaced", "fired"]
+InterventionEditOrigin = Literal["raw_forward_hook", "live_fire", "push"]
+
+
+@dataclass(frozen=True, slots=True)
+class InterventionAppliedEvent:
+    """Journal edit record for one observed intervention on a captured value.
+
+    Interventions are EDITS referencing an existing identity, never op kinds:
+    the record is appended only by the capture sites that directly observed
+    the edit (a raw ``register_forward_hook`` returning a new object, or a
+    live-fire hook reporting ``replaced=True`` while intervention machinery
+    is armed for this capture), so it is the trace-level ground truth the
+    functionless-op validation carve-out requires. A placeholder minted
+    during PLAIN capture can never mint one of these and must still fail
+    validation (2026-06-02 lesson).
+
+    Causal binding: the observing site stamps ``run_token`` (the owning
+    stream's run nonce), ``target_seq`` (the journal seq of the edited op's
+    event at observation time), and ``target_func_call_id``. Validation
+    accepts an edit only when the token matches the validated stream's nonce
+    AND the journal really contains the bound target event, so a bare record
+    appended through the ordinary writer (a forged edit) and a genuine record
+    replayed into a DIFFERENT run's journal both stay refused. The sanctioned
+    merge path (``CaptureEvents.concat``) re-binds tokens and target seqs for
+    events that were genuinely bound to their source run. An in-process
+    forger who also copies a live stream's nonce and a real target binding is
+    outside this record's threat model (coherent reauthoring), the same
+    documented boundary the runnable contract draws.
+    """
+
+    label_raw: str
+    kind: InterventionEditKind
+    origin: InterventionEditOrigin
+    timestamp: float
+    seq: int = 0
+    run_token: int | None = None
+    target_seq: int = 0
+    target_func_call_id: int | None = None
+
+
 BufferWriteKind = Literal["reassign", "inplace", "fused", "data_reassign"]
 
 
@@ -309,6 +385,7 @@ class BufferWriteEvent:
     storage_key: tuple[Any, ...] | None
     buffer_version: int | None
     source_func_name: str | None
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +418,7 @@ class ModulePrepEvent:
     training_at_prep: bool
     custom_attributes: tuple[tuple[str, object], ...]
     custom_methods: tuple[str, ...]
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +438,7 @@ class ModuleEnterEvent:
     forward_kwargs_template: object | None
     layer_argnames: tuple[tuple[str, object], ...]
     input_labels: tuple[str, ...] = ()
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,6 +452,7 @@ class PreHookProvenanceEvent:
     effects: tuple[object, ...]
     capture_complete: bool
     incomplete_reasons: tuple[str, ...]
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,6 +471,14 @@ class ModuleExitEvent:
     # an empty-tuple default so the field stays trailing (defaulted) and all
     # consumers guard on a falsy value; absent == "no paths captured".
     output_paths: tuple[tuple[object, ...], ...] = ()
+    # TRUE tensor-leaf count of the module's real output object, recorded from
+    # the output walk BEFORE labeling/boundary minting can fail. This is the
+    # proof the gradient-coverage classifier uses to distinguish "the module
+    # genuinely produced no tensor output" (a legitimate exclusion) from
+    # "capture failed to attach the output" (a fail-closed gap). ``-1`` means
+    # unrecorded (unknown), which consumers treat as unproven.
+    output_tensor_leaf_count: int = -1
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,6 +538,7 @@ class OpEvent:
     unattributed_tensor_args: tuple[str, ...] = ()
     dropped_edge_tensor_args: tuple[str, ...] = ()
     input_was_parameter: bool = False
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)

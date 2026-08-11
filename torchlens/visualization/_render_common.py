@@ -10,7 +10,7 @@ import sys
 import tempfile
 import warnings
 from collections import defaultdict
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
@@ -85,7 +85,6 @@ from ._render_utils import _open_file_quietly
 from .themes import (
     VisualizationTheme,
     apply_theme_to_spec,
-    legend_lines,
     resolve_theme,
     theme_edge_attrs,
     theme_graph_attrs,
@@ -653,7 +652,6 @@ __all__ = [
     "BufferVisibilityLiteral",
     "COLLAPSED_MODE_REGISTRY",
     "COMMUTE_FUNCS",
-    "Callable",
     "CapturedForwardEdge",
     "CodePanelOption",
     "CollapseFn",
@@ -687,7 +685,6 @@ __all__ = [
     "Image",
     "InterveningClusterMode",
     "Iterable",
-    "Iterator",
     "Layer",
     "List",
     "Literal",
@@ -740,7 +737,6 @@ __all__ = [
     "_EDGE_LABEL_FONT_SIZE",
     "_EDGE_LABEL_PAD",
     "_RenderIRDecisionBuilder",
-    "_RenderIRSubgraphDecisionBuilder",
     "_GRAPHVIZ_ESCAPE_HINT",
     "_NOISE_BUFFER_NAMES",
     "_ROLLED_CYCLE_HEAD_LABEL_PLACEMENT",
@@ -781,7 +777,6 @@ __all__ = [
     "int_list_to_compact_str",
     "intervention_graph_override",
     "intervention_site_and_cone_labels",
-    "legend_lines",
     "make_intervention_node_spec_fn",
     "make_module_cluster_attrs",
     "os",

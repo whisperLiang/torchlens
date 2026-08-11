@@ -135,7 +135,7 @@ import torch
 from torch import nn
 import torchlens as tl
 
-result = tl.debug.infer_input_shape(nn.Linear(3, 2), spatial_rank=0, max_probes=4)
+result = tl.debug.infer_input_shape(nn.Linear(3, 2), max_probes=4)
 print(result.found, result.shape)
 ```
 

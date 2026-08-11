@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 
 from ..utils.rng import execute_with_restored_rng_autocast
 from ..utils.collections import assign_to_sequence_or_dict
-from ..utils.tensor_utils import tensor_nanequal, tensor_all_nan
+from ..utils.tensor_utils import fp8_safe_comparison_pair, tensor_nanequal, tensor_all_nan
 from .exemptions import (
     SKIP_VALIDATION_ENTIRELY,
     SKIP_PERTURBATION_ENTIRELY,
@@ -736,6 +736,11 @@ def _ground_truth_output_matches_saved(
     from .._state import pause_logging
 
     with pause_logging():
+        # fp8 lacks isinf/nan_to_num/allclose kernels; widening is exact, so the
+        # tolerance below stays the float32-grade one (see fp8_safe_comparison_pair).
+        saved_output, ground_truth_output = fp8_safe_comparison_pair(
+            saved_output, ground_truth_output
+        )
         if not torch.equal(saved_output.isnan(), ground_truth_output.isnan()):
             return False
         if not torch.equal(saved_output.isinf(), ground_truth_output.isinf()):
@@ -2903,6 +2908,10 @@ def _deep_numeric_replay_matches_saved(
     from .._state import pause_logging
 
     with pause_logging():
+        # Same exact fp8 widening as the ground-truth comparison above; every op from
+        # here down (isinf, nan_to_num, allclose, isclose, and the scaled-diff
+        # reductions) is missing for fp8 dtypes.
+        recomputed_output, saved_output = fp8_safe_comparison_pair(recomputed_output, saved_output)
         if not torch.equal(recomputed_output.isnan(), saved_output.isnan()):
             return False
         if not torch.equal(recomputed_output.isinf(), saved_output.isinf()):

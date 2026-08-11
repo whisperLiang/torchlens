@@ -59,6 +59,7 @@ from ...utils.introspection import (
 )
 from ...utils.display import _timed_phase
 from ...utils.tensor_utils import (
+    fp8_widen_for_numeric_ops,
     get_memory_amount_from_metadata,
     is_functorch_wrapped_tensor,
     safe_copy,
@@ -950,8 +951,14 @@ def _op_event_from_log(
         raw_index=fields_dict["raw_index"],
         type_index=fields_dict["type_index"],
         step_index=fields_dict["step_index"] or 0,
-        source_trace=trace,
-        source_trace_id=str(id(trace)),
+        # Durable records are trace-backref-free from birth: every consumer of
+        # OpEvent.source_trace resolves ``event.source_trace or trace`` with the
+        # materializing trace in scope, so the backref carried no information on
+        # the torch path and only created Trace<->event cycles (the reason the
+        # sealed stream needed a weak side registry). Preview backends still
+        # populate the compatibility field; its deletion is ports-phase work.
+        source_trace=None,
+        source_trace_id=None,
         tracing_finished=fields_dict["_tracing_finished"],
         construction_done=fields_dict["_construction_done"],
         function=FunctionCallRef(
@@ -4440,7 +4447,11 @@ def _emit_exhaustive_operation_events(
             from .wrappers import _propagate_mutation_label_to_storage_aliases
 
             set_tensor_label(live_member, new_tensor_label)
-            _add_tensor_backward_hook(self, live_member, new_tensor_label)
+            # The live member is what downstream ops consume, so it takes
+            # gradient ownership of the label (the logged safe copy's hook
+            # stops emitting) -- the same transfer the scalar same-object
+            # in-place path performs in _register_inplace_live_grad_hook.
+            _add_tensor_backward_hook(self, live_member, new_tensor_label, take_ownership=True)
             _propagate_mutation_label_to_storage_aliases(self, live_member, new_tensor_label)
         options = getattr(self, "_predicate_save_options", None)
         if options is not None and options.halt is not None:
@@ -5301,6 +5312,17 @@ def _save_activation_fields(
             func_name=fields_dict.get("func_name"),
             is_inplace=bool(fields_dict.get("is_inplace", False)),
         )
+        budget_reservation = _admit_save_budget(
+            trace,
+            t,
+            fields_dict,
+            target_device=(
+                torch.device("cpu")
+                if save_mode == "cpu_async"
+                else _retention_device(t, fields_dict.get("output_device"))
+            ),
+            retain_in_ram=True,
+        )
         raw_out = safe_copy(
             t,
             fields_dict["detach_saved_activations"],
@@ -5370,6 +5392,7 @@ def _save_activation_fields(
             fields_dict["transformed_out_dtype"] = _dtype_or_none(transformed_out)
             fields_dict["transformed_activation_memory"] = _memory_or_none(transformed_out)
         fields_dict["has_saved_activation"] = True
+        _commit_save_budget(trace, fields_dict, budget_reservation)
 
         _stream_activation_fields(trace, fields_dict)
 
@@ -5425,6 +5448,103 @@ def _stream_activation_fields(trace: "Trace", fields_dict: dict[str, Any]) -> No
         writer.write_blob(blob_id, tensor, kind=kind, label=label)
 
 
+def _retention_device(tensor: torch.Tensor, configured: Any) -> torch.device:
+    """Return the projected RAM retention device for one activation.
+
+    Parameters
+    ----------
+    tensor:
+        Live source tensor.
+    configured:
+        User-configured output device or ``"same"``.
+
+    Returns
+    -------
+    torch.device
+        Device used for pre-allocation admission.
+    """
+
+    if configured in (None, "same", str(tensor.device)):
+        return tensor.device
+    return torch.device(configured)
+
+
+def _admit_save_budget(
+    trace: "Trace",
+    tensor: torch.Tensor,
+    fields_dict: dict[str, Any],
+    *,
+    target_device: torch.device,
+    retain_in_ram: bool,
+) -> Any:
+    """Pre-admit a source-sized retained payload before any copy allocation.
+
+    Parameters
+    ----------
+    trace:
+        Active trace carrying the accountant.
+    tensor:
+        Live source tensor whose copy would be retained.
+    fields_dict:
+        Current operation fields used to name the admission site.
+    target_device:
+        Projected device of the retained payload.
+    retain_in_ram:
+        Whether this storage route keeps a RAM payload.
+
+    Returns
+    -------
+    Any
+        Opaque reservation reconciled after allocation, or ``None``.
+    """
+
+    budget = getattr(trace, "_save_budget_accountant", None)
+    if budget is None or not retain_in_ram:
+        return None
+    label = fields_dict.get("_layer_label_raw") or fields_dict.get("_label_raw") or "<unlabeled>"
+    shape = tuple(tensor.shape)
+    num_bytes = get_memory_amount_from_metadata(tensor, shape, tensor.dtype)
+    return budget.admit(str(label), target_device, int(num_bytes))
+
+
+def _commit_save_budget(
+    trace: "Trace",
+    fields_dict: dict[str, Any],
+    reservation: Any,
+) -> None:
+    """Reconcile admission against alias-aware retained physical storage.
+
+    Parameters
+    ----------
+    trace:
+        Active trace, carrying the per-capture accountant.
+    fields_dict:
+        Operation fields populated with retained payloads.
+    reservation:
+        Opaque pre-allocation reservation returned by :func:`_admit_save_budget`.
+
+    Returns
+    -------
+    None
+        Reconciles the accountant, which raises when added transform storage crosses
+        the budget.
+
+    Notes
+    -----
+    Storage identity, not logical field identity, is charged. An identity transform
+    therefore counts once. A transform's output size cannot be known before user
+    code runs; any storage beyond the source-sized admission is charged here.
+    """
+
+    budget = getattr(trace, "_save_budget_accountant", None)
+    if budget is None or reservation is None:
+        return
+    budget.commit(
+        reservation,
+        (fields_dict.get("out"), fields_dict.get("transformed_out")),
+    )
+
+
 def _save_predicate_activation_fields(
     trace: "Trace",
     fields_dict: dict[str, Any],
@@ -5456,6 +5576,13 @@ def _save_predicate_activation_fields(
     intent = StorageIntent(
         in_ram=streaming is None or streaming.bundle_path is None or streaming.retain_in_memory,
         on_disk=streaming is not None and streaming.bundle_path is not None,
+    )
+    budget_reservation = _admit_save_budget(
+        trace,
+        tensor,
+        fields_dict,
+        target_device=_retention_device(tensor, spec.device),
+        retain_in_ram=intent.in_ram,
     )
     (
         ram_payload,
@@ -5498,6 +5625,7 @@ def _save_predicate_activation_fields(
     fields_dict["transformed_out_dtype"] = _dtype_or_none(transformed_metadata)
     fields_dict["transformed_activation_memory"] = _memory_or_none(transformed_metadata)
     fields_dict["has_saved_activation"] = True
+    _commit_save_budget(trace, fields_dict, budget_reservation)
     _stream_predicate_payloads(
         trace,
         fields_dict,
@@ -6107,10 +6235,33 @@ def _raise_if_nonfinite_requested(self: Any, tensor: torch.Tensor, entry: Any) -
         return
     try:
         with pause_logging():
+            # fp8 has no ``isfinite`` kernel, and ``NotImplementedError`` is a
+            # ``RuntimeError`` subclass -- so without the exact float32 widening this
+            # tripwire SILENTLY declined to check every fp8 activation. Widening keeps
+            # the verdict identical (see fp8_widen_for_numeric_ops).
             has_nonfinite = bool(
-                (~torch.isfinite(safe_copy(tensor, detach_tensor=True))).any().item()
+                (~torch.isfinite(fp8_widen_for_numeric_ops(safe_copy(tensor, detach_tensor=True))))
+                .any()
+                .item()
             )
-    except (RuntimeError, TypeError):
+    except (RuntimeError, TypeError) as exc:
+        # An unrunnable check is NOT a clean tensor. fp8 was the known real case and
+        # is handled above, but any dtype/layout without an ``isfinite`` kernel lands
+        # here -- and the user explicitly asked for NaN checking, so silence would let
+        # them read an unchecked forward as a checked one. Warn once per capture
+        # (naming the first skipped op) and keep going: an opt-in diagnostic must not
+        # convert an exotic dtype into a failed capture.
+        if not getattr(self, "_warned_nonfinite_check_unavailable", False):
+            self._warned_nonfinite_check_unavailable = True
+            warnings.warn(
+                "raise_on_nan could not check at least one activation: "
+                f"{type(exc).__name__}: {exc}. First skipped op "
+                f"{getattr(entry, 'func_name', 'unknown')!r} has dtype {tensor.dtype} on "
+                f"{tensor.device}. Those activations are UNCHECKED for NaN/Inf; a clean "
+                "capture does not mean they were finite.",
+                UserWarning,
+                stacklevel=2,
+            )
         return
     if not has_nonfinite:
         return

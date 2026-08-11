@@ -15,6 +15,11 @@ Sparse tensor     ``safe_copy``/print-override paths assume dense    raise Runti
 Symbolic shape   Dimensions that are ``torch.SymInt`` /              raise RuntimeError
                   ``torch.SymFloat`` break shape-dependent metadata
                   (flops, tensor memory, counter alignment).
+Tracing tensor    ``FakeTensor`` / ``FunctionalTensor`` carry no      raise RuntimeError
+                  data, so every value-reading step (``safe_copy``,
+                  ``torch.equal``, ``.item()``, ``data_ptr()``) is
+                  meaningless; torch's own fake machinery aborts
+                  mid-forward with a bare ``AssertionError``.
 Quantized model   Partial support: logging works but FLOPs are        warn (keep going)
                   computed as zero/wrong for quantized ops.
 ================  =================================================  =================
@@ -34,7 +39,9 @@ from typing import Any, Iterator, List, Tuple
 import torch
 from torch import nn
 
+from ._distributed import check_distributed_capture
 from .errors._base import CompatibilityError
+from .utils._torch_compat import get_tracing_tensor_types
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +65,46 @@ def _is_sparse_tensor(t: torch.Tensor) -> bool:
     except Exception:
         return False
     return layout is not torch.strided
+
+
+def _tracing_tensor_kind(t: torch.Tensor) -> str | None:
+    """Return the data-free tracing-subclass name for ``t``, if it is one.
+
+    ``FakeTensor`` and ``FunctionalTensor`` are tensor subclasses used by Dynamo,
+    AOTAutograd, ``torch.export``, and functionalization. They carry shape and
+    dtype but no storage, so every TorchLens step that reads a value is either
+    meaningless or fatal: ``data_ptr()`` on a FakeTensor is a torch-flagged bug,
+    and torch's own fake machinery aborts the forward with a bare
+    ``AssertionError`` ("Please convert all Tensors to FakeTensors first") the
+    moment a real parameter meets a fake activation.
+
+    Parameters
+    ----------
+    t:
+        Tensor to classify.
+
+    Returns
+    -------
+    str | None
+        Class name of the tracing tensor, or ``None`` for an ordinary tensor.
+    """
+    functional_predicate = getattr(torch, "_is_functional_tensor", None)
+    if callable(functional_predicate):
+        try:
+            if bool(functional_predicate(t)):
+                return "FunctionalTensor"
+        except (RuntimeError, TypeError):
+            pass
+    if type(t) is torch.Tensor:
+        return None
+    tracing_types = get_tracing_tensor_types()
+    if tracing_types and isinstance(t, tracing_types):
+        return type(t).__name__
+    # Structural fallback for builds where the exact classes could not be probed.
+    type_name = type(t).__name__
+    if type_name in {"FakeTensor", "FunctionalTensor"}:
+        return type_name
+    return None
 
 
 def _has_symbolic_shape(t: torch.Tensor) -> bool:
@@ -118,29 +165,69 @@ def _model_has_quantized_modules(model: nn.Module) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _iter_tensors(obj: Any, _seen: set[int] | None = None) -> Iterator[torch.Tensor]:
-    """Yield every ``torch.Tensor`` reachable through builtin containers.
+def _iter_tensors(
+    obj: Any,
+    _seen: set[int] | None = None,
+    *,
+    _depth: int = 0,
+    _nodes: list[int] | None = None,
+) -> Iterator[torch.Tensor]:
+    """Yield tensors through builtin and inspectable user containers.
 
-    Doesn't descend into ``nn.Module`` instances (those are handled by
-    ``model.parameters()`` / ``model.buffers()``). Dedupe applies to every
-    visited object id, so shared tensors and cyclic containers are visited
-    safely at most once.
+    Parameters
+    ----------
+    obj:
+        Current object to inspect.
+    _seen:
+        Shared object-identity set for cycle prevention.
+    _depth:
+        Internal recursion depth.
+    _nodes:
+        Internal bounded-work counter.
+
+    Yields
+    ------
+    torch.Tensor
+        Reachable tensor values.
+
+    Notes
+    -----
+    ``nn.Module`` instances are not descended into because registered state is
+    handled separately. Instance ``__dict__`` is read directly, so properties and
+    descriptors never execute. Traversal is capped at 12 levels / 4096 objects;
+    opaque slots-only objects and tensors created later inside ``forward`` remain
+    outside entry-time detection and are disclosed in the compatibility report.
     """
     if _seen is None:
         _seen = set()
-    if id(obj) in _seen:
+    if _nodes is None:
+        _nodes = [0]
+    if _depth > 12 or _nodes[0] >= 4096:
         return
-    _seen.add(id(obj))
+    obj_id = id(obj)
+    if obj_id in _seen:
+        return
+    _seen.add(obj_id)
+    _nodes[0] += 1
     if isinstance(obj, torch.Tensor):
         yield obj
         return
+    if isinstance(obj, nn.Module):
+        return
     if isinstance(obj, (list, tuple, set, frozenset)):
         for item in obj:
-            yield from _iter_tensors(item, _seen)
+            yield from _iter_tensors(item, _seen, _depth=_depth + 1, _nodes=_nodes)
         return
     if isinstance(obj, dict):
         for item in obj.values():
-            yield from _iter_tensors(item, _seen)
+            yield from _iter_tensors(item, _seen, _depth=_depth + 1, _nodes=_nodes)
+        return
+    try:
+        attributes = vars(obj)
+    except (TypeError, AttributeError):
+        return
+    for item in attributes.values():
+        yield from _iter_tensors(item, _seen, _depth=_depth + 1, _nodes=_nodes)
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +257,10 @@ def check_model_and_input_variants(
     """Pre-flight check for ``trace``.
 
     Raises :class:`UnsupportedTensorVariantError` when a fundamentally
-    incompatible tensor variant is detected on the model or its inputs.
+    incompatible tensor variant is detected on the model or its inputs, and
+    :class:`torchlens._distributed.DistributedCaptureUnsupportedError` when the
+    model holds distributed/sharded state that capture would record incorrectly
+    rather than fail on.
     Emits :class:`UserWarning` for variants with partial / degraded support
     (quantization) so the user knows what to treat with skepticism in the log.
 
@@ -182,6 +272,11 @@ def check_model_and_input_variants(
     """
     if input_kwargs is None:
         input_kwargs = {}
+
+    # Distributed/sharded state is checked first: DTensor parameters otherwise
+    # sail past every dense-tensor check below (a DTensor reports a real device
+    # and a strided layout) and capture then silently reports zero parameters.
+    check_distributed_capture(model, input_args, input_kwargs)
 
     offenses: List[Tuple[str, str]] = []
 
@@ -219,6 +314,17 @@ def check_model_and_input_variants(
                     "counter alignment.",
                 )
             )
+        tracing_kind = _tracing_tensor_kind(t)
+        if tracing_kind is not None:
+            offenses.append(
+                (
+                    f"{tracing_kind} in input",
+                    "Tracing tensors carry shape and dtype but no data, so saved "
+                    "activations would be empty and torch's own fake-tensor machinery "
+                    "aborts the forward as soon as a real parameter meets a fake "
+                    "activation. Capture the eager forward on real tensors instead.",
+                )
+            )
     for t in _iter_tensors(dict(input_kwargs)):
         if _is_meta_tensor(t):
             offenses.append(("meta tensor in keyword input", ""))
@@ -226,6 +332,9 @@ def check_model_and_input_variants(
             offenses.append((f"sparse tensor ({t.layout}) in keyword input", ""))
         if _has_symbolic_shape(t):
             offenses.append(("symbolic tensor shape in keyword input", ""))
+        tracing_kind = _tracing_tensor_kind(t)
+        if tracing_kind is not None:
+            offenses.append((f"{tracing_kind} in keyword input", ""))
 
     # Model params + buffers (dedupe across both generators).
     seen_ids: set[int] = set()
@@ -242,6 +351,16 @@ def check_model_and_input_variants(
                 )
             )
             break  # one message is enough — don't list every param.
+        tracing_kind = _tracing_tensor_kind(t)
+        if tracing_kind is not None:
+            offenses.append(
+                (
+                    f"{tracing_kind} among model parameters/buffers",
+                    "The model was constructed under a fake/functional tracing mode and "
+                    "holds no real weights. Build it on a real device before logging.",
+                )
+            )
+            break
 
     if offenses:
         # Dedupe while preserving order of first appearance.

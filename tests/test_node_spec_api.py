@@ -114,18 +114,26 @@ def test_node_spec_fn_returning_none_uses_default(tmp_path: Any) -> None:
     assert callback_dot == default_dot
 
 
-def test_intervention_node_spec_matches_short_label(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Intervention styling accepts short layer labels."""
+# ``intervention_site_and_cone_labels`` supplies the CONE labels only; site labels
+# come from ``intervention_sites_for_log`` and match by exact pass-qualified label
+# (unrolled Op nodes) or exact aggregate ``layer_label`` (rolled Layer nodes), which
+# ``test_r18j_recurrent_render.py::test_h9_intervention_colors_only_intervened_pass``
+# covers end to end. Short labels and per-pass call labels are cone-matching keys, so
+# these two tests exercise them there.
+def test_intervention_node_spec_cone_matches_short_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cone styling accepts short layer labels."""
 
     def fake_labels(trace: Any, *, show_cone: bool) -> tuple[set[str], set[str]]:
-        """Return a short-label intervention site."""
+        """Return a short-label cone member and no sites."""
 
-        return {"relu"}, set()
+        return set(), {"relu"}
 
     monkeypatch.setattr(node_spec_mod, "intervention_site_and_cone_labels", fake_labels)
     node_spec_fn = node_spec_mod.make_intervention_node_spec_fn(
         object(),
-        show_cone=False,
+        show_cone=True,
         graph_overrides=None,
         user_node_spec_fn=None,
     )
@@ -135,22 +143,24 @@ def test_intervention_node_spec_matches_short_label(monkeypatch: pytest.MonkeyPa
     assert node_spec_fn is not None
     styled = node_spec_fn(layer, default)
 
-    assert styled.color == node_spec_mod.INTERVENTION_SITE_COLOR
-    assert styled.penwidth == 3.0
+    assert styled.color == node_spec_mod.INTERVENTION_CONE_COLOR
+    assert styled.penwidth == 1.75
 
 
-def test_intervention_node_spec_matches_call_labels(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Intervention styling accepts real per-pass call labels on rolled layers."""
+def test_intervention_node_spec_cone_matches_call_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cone styling accepts real per-pass call labels on rolled layers."""
 
     def fake_labels(trace: Any, *, show_cone: bool) -> tuple[set[str], set[str]]:
-        """Return a per-pass intervention site label."""
+        """Return a per-pass cone label that matches no aggregate label."""
 
-        return {"relu_1_2"}, set()
+        return set(), {"relu_1_2"}
 
     monkeypatch.setattr(node_spec_mod, "intervention_site_and_cone_labels", fake_labels)
     node_spec_fn = node_spec_mod.make_intervention_node_spec_fn(
         object(),
-        show_cone=False,
+        show_cone=True,
         graph_overrides=None,
         user_node_spec_fn=None,
     )
@@ -164,8 +174,15 @@ def test_intervention_node_spec_matches_call_labels(monkeypatch: pytest.MonkeyPa
     assert node_spec_fn is not None
     styled = node_spec_fn(layer, default)
 
-    assert styled.color == node_spec_mod.INTERVENTION_SITE_COLOR
-    assert styled.penwidth == 3.0
+    assert styled.color == node_spec_mod.INTERVENTION_CONE_COLOR
+    assert styled.penwidth == 1.75
+
+    unrelated = SimpleNamespace(
+        layer_label="linear_1",
+        layer_label_short="linear",
+        call_labels=["linear_1_1"],
+    )
+    assert node_spec_fn(unrelated, default).color == "black"
 
 
 def test_external_overlay_value_matches_short_label() -> None:
