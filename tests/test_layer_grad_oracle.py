@@ -14,7 +14,6 @@ import torch
 from torch import nn
 
 from torchlens.validation import backward as backward_validation
-from torchlens.validation.invariants import MetadataInvariantError
 from torchlens.validation._layer_grad_report import (
     LayerGradReport,
     _compare_module_output_grads,
@@ -221,7 +220,6 @@ def _run_public_layer_grad_validation(
     atol: float,
     rtol: float,
     random_seed: int,
-    validate_metadata: bool = True,
 ) -> LayerGradReport:
     """Run the shipped backward path and return its captured layer-grad report.
 
@@ -241,13 +239,6 @@ def _run_public_layer_grad_validation(
         Relative tolerance for parameter and layer gradients.
     random_seed:
         Seed shared by stock and captured passes.
-    validate_metadata:
-        Whether the shipped path should additionally run metadata invariants.
-        The deleted private ``_validate_layer_grads`` copy these tests used to
-        call never ran them, so passing ``False`` reproduces the ORIGINAL
-        coverage exactly for the two real-world models that trip a PRE-EXISTING
-        backward-metadata bug (see
-        ``test_shipped_backward_path_resnet50_metadata_invariant_is_broken``).
 
     Returns
     -------
@@ -276,7 +267,7 @@ def _run_public_layer_grad_validation(
             random_seed=random_seed,
             atol=atol,
             rtol=rtol,
-            validate_metadata=validate_metadata,
+            validate_metadata=True,
             validate_layer_grads=True,
             layer_grad_atol=atol,
             layer_grad_rtol=rtol,
@@ -720,39 +711,36 @@ def test_oracle_resnet50_eval() -> None:
         atol=1e-4,
         rtol=1e-3,
         random_seed=42,
-        # Metadata invariants are OFF here only to hold coverage exactly where
-        # the deleted private copy had it. The shipped path DOES run them, and
-        # on this model they fail for a PRE-EXISTING backward-metadata capture
-        # bug that has nothing to do with the layer-grad oracle -- pinned by
-        # ``test_shipped_backward_path_resnet50_metadata_invariant_is_broken``.
-        validate_metadata=False,
     )
     _assert_acceptance(report)
 
 
 @pytest.mark.slow
-def test_shipped_backward_path_resnet50_metadata_invariant_is_broken() -> None:
-    """Pin a PRE-EXISTING backward-metadata bug the shipped path trips.
+def test_shipped_backward_path_resnet50_metadata_invariant_holds() -> None:
+    """Guard the repaired backward layer-to-GradFn backpointer on a real ResNet.
 
-    Surfaced by repointing the layer-grad oracle at the shipped
-    ``validate_backward_pass``: a real ResNet backward capture leaves a layer
-    whose ``grad_fn_handle`` has no reciprocal GradFn backpointer. Reproduced
-    unchanged at base commit ``e7f036fe``, so this is a capture bug in the
-    backward backend, NOT a validation defect -- the invariant is doing its job.
-    Delete this test (and the ``validate_metadata=False`` opt-outs above) once
-    the capture bug is fixed.
+    This replaces a pin that asserted the INVERSE: a real ResNet backward capture
+    used to leave a layer whose ``grad_fn_handle`` had no reciprocal GradFn
+    backpointer, and the pin recorded that as a known capture bug to be deleted
+    once fixed. It is fixed. On the pinned torch the shipped path now records 341
+    GradFn logs, and of the 177 layers carrying a ``grad_fn_object_id`` exactly
+    zero are severed and zero dangle, so ``_check_backward_layer_backpointers``
+    passes on real data rather than through its structural carve-out (the
+    post-trigger exemption is never consulted -- there is nothing to exempt).
+
+    Assert the invariant HOLDS instead of deleting the coverage, so a regression
+    that re-severs the backpointer fails here on the same model that caught it.
     """
 
     torchvision_models = pytest.importorskip("torchvision.models")
     model = torchvision_models.resnet50(weights=None).eval()
-    with pytest.raises(MetadataInvariantError, match="missing its GradFn backpointer"):
-        backward_validation.validate_backward_pass(
-            model,
-            torch.randn(1, 3, 32, 32),
-            random_seed=42,
-            validate_metadata=True,
-            validate_layer_grads=False,
-        )
+    backward_validation.validate_backward_pass(
+        model,
+        torch.randn(1, 3, 32, 32),
+        random_seed=42,
+        validate_metadata=True,
+        validate_layer_grads=False,
+    )
 
 
 @pytest.mark.slow
@@ -786,8 +774,6 @@ def test_oracle_gpt2_small_forward_backward() -> None:
         atol=1e-4,
         rtol=1e-3,
         random_seed=42,
-        # Same PRE-EXISTING backward-metadata capture bug as the ResNet fixture.
-        validate_metadata=False,
     )
     _assert_acceptance(report)
 
