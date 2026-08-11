@@ -37,8 +37,10 @@ with `_io.streaming.BundleStreamWriter` and lazy out refs. Never evict graph-con
 training outs. Step 20 then releases live parameter references.
 
 ## Refresh Projection
-There is no `postprocess_fast()` orchestrator. `CaptureSession` and `TraceProjector`
-prepare refresh events, and the single `postprocess()` entry point preserves the ordered
+There is no `postprocess_fast()` orchestrator. Step 0 reads the sealed
+`CapturedRunCore.events` snapshot (cloned with independent mutable dict fields) when a
+`CaptureSession` is attached, `RefreshProjector` applies refreshed payloads onto the
+existing graph, and the single `postprocess()` entry point preserves the ordered
 Step 0-20 contracts. Saved-output summaries are refreshed after Step 11 finalizes the
 retained op list.
 
