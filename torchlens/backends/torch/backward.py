@@ -13,6 +13,7 @@ import os
 import re
 import threading
 import time
+import warnings
 import weakref
 from collections import OrderedDict, deque
 from collections.abc import Sequence
@@ -2928,6 +2929,7 @@ class RecordingBackward:
         self.trace = trace
         self.save_grads = save_grads
         self._original_backward: Callable[..., Any] | None = None
+        self._wrapped_backward: Callable[..., Any] | None = None
 
     def __enter__(self) -> "RecordingBackward":
         """Patch ``torch.Tensor.backward`` and return this context object."""
@@ -2946,6 +2948,13 @@ class RecordingBackward:
                         return original_backward(tensor_self, *args, **kwargs)  # type: ignore[no-untyped-call]
                 return original_backward(tensor_self, *args, **kwargs)  # type: ignore[no-untyped-call]
 
+            # A backward on a graph that does not reach this trace's pinned
+            # forward grad-fns is unrelated PyTorch work: delegate it
+            # untouched instead of corrupting the selected trace with a
+            # foreign backward pass.
+            if not any(matched is trace for matched in _traces_for_roots(tensor_self)):
+                return run()
+
             return _run_backward_with_capture(
                 trace,
                 tensor_self,
@@ -2955,13 +2964,23 @@ class RecordingBackward:
                 save_grads=self.save_grads,
             )
 
+        self._wrapped_backward = wrapped_backward
         torch.Tensor.backward = wrapped_backward  # type: ignore[assignment, method-assign]
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
-        """Restore ``torch.Tensor.backward``."""
+        """Restore ``torch.Tensor.backward`` unless someone patched over us."""
         if self._original_backward is not None:
-            torch.Tensor.backward = self._original_backward  # type: ignore[method-assign]
+            if torch.Tensor.backward is self._wrapped_backward:
+                torch.Tensor.backward = self._original_backward  # type: ignore[method-assign]
+            else:
+                warnings.warn(
+                    "recording_backward() exited while torch.Tensor.backward was "
+                    "patched by another party inside the block; leaving the "
+                    "interleaved patch in place instead of clobbering it.",
+                    UserWarning,
+                    stacklevel=2,
+                )
         if exc_type is None:
             _finalize_grad_streaming(self.trace)
 

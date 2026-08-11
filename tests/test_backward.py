@@ -279,6 +279,58 @@ def test_recording_backward_context_manager() -> None:
 
 
 @pytest.mark.smoke
+def test_recording_backward_delegates_foreign_graphs() -> None:
+    """A backward on an unrelated graph inside the context never enters the trace."""
+    _model, _x, trace = _logged_model()
+    loss = _output_loss(trace)
+    foreign = torch.randn(3, 3, requires_grad=True)
+    with trace.recording_backward():
+        (foreign * 2).sum().backward()
+        loss.backward()
+    assert foreign.grad is not None
+    assert trace.num_backward_passes == 1
+
+    control_model, _control_x, control_trace = _logged_model()
+    control_loss = _output_loss(control_trace)
+    with control_trace.recording_backward():
+        control_loss.backward()
+    trace_labels = sorted(grad_fn.label for grad_fn in trace.grad_fn_logs.values())
+    control_labels = sorted(grad_fn.label for grad_fn in control_trace.grad_fn_logs.values())
+    assert trace_labels == control_labels
+
+
+@pytest.mark.smoke
+def test_recording_backward_foreign_only_block_stays_empty() -> None:
+    """A context that only sees foreign backward calls records no passes."""
+    _model, _x, trace = _logged_model()
+    foreign = torch.randn(2, 2, requires_grad=True)
+    with trace.recording_backward():
+        (foreign * foreign).sum().backward()
+    assert foreign.grad is not None
+    assert trace.num_backward_passes == 0
+    assert len(trace.grad_fn_logs) == 0
+
+
+@pytest.mark.smoke
+def test_recording_backward_exit_preserves_interleaved_patch() -> None:
+    """__exit__ never clobbers a Tensor.backward patch installed inside the block."""
+    _model, _x, trace = _logged_model()
+
+    def interloper_backward(tensor_self: torch.Tensor, *args: object, **kwargs: object) -> None:
+        raise AssertionError("interloper should never run in this test")
+
+    context = trace.recording_backward()
+    context.__enter__()
+    try:
+        torch.Tensor.backward = interloper_backward  # type: ignore[assignment, method-assign]
+        with pytest.warns(UserWarning, match="Tensor.backward"):
+            context.__exit__(None, None, None)
+        assert torch.Tensor.backward is interloper_backward
+    finally:
+        torch.Tensor.backward = context._original_backward  # type: ignore[assignment, method-assign]
+
+
+@pytest.mark.smoke
 def test_backward_graph_walk_includes_intervening_grad_fns() -> None:
     """The backward DAG includes grad_fns without forward Layer matches."""
     _model, _x, trace = _logged_model()
