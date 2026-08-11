@@ -987,3 +987,72 @@ def test_user_call_into_witness_storage_helper_degrades_verification() -> None:
         )
     ]
     assert storage_trips
+
+
+def test_forged_frame_metadata_cannot_impersonate_witness_authorization() -> None:
+    """FAIL-AFTER-WHERE-PASSED-BEFORE: frame-metadata forgery gains no authorization.
+
+    Sol be2-closure probe regression: the internal-caller check used to trust
+    the caller frame's ``f_globals['__name__']`` and ``co_filename``, both of
+    which user code controls -- a ``forward`` compiled with a torchlens-ish
+    module name and a fabricated filename under the package directory was
+    granted the witness's detector authorization and produced a verified
+    capture with empty escape diagnostics around pointer-dependent control
+    flow. Authorization is now code-object IDENTITY against the import-time
+    roster, which ``exec``/``compile`` forgery cannot reproduce: the forged
+    frame's raw reads run bare and the shadow detector convicts them exactly
+    like the undisguised user call in the test above.
+    """
+
+    from torchlens.backends.torch.completeness_witness import _raw_storage_ptr_no_observe
+    from torchlens.backends.torch import completeness_witness as witness_module
+    from torchlens.options import CaptureOptions
+
+    forged_globals = {
+        "__name__": "torchlens.user_supplied_model",
+        "__builtins__": __builtins__,
+        "torch": torch,
+        "_raw_storage_ptr_no_observe": _raw_storage_ptr_no_observe,
+    }
+    forged_filename = str(
+        Path(witness_module.__file__).resolve().parent / "user_supplied_model.py"
+    )
+    code = compile(
+        "def forward(self, x):\n"
+        "    ptr = _raw_storage_ptr_no_observe(x)\n"
+        "    if ptr is not None and ((ptr >> 8) & 1):\n"
+        "        return torch.relu(x)\n"
+        "    return torch.sigmoid(x)\n",
+        forged_filename,
+        "exec",
+    )
+    exec(code, forged_globals)
+    ForgedFrameModel = type(
+        "ForgedFrameModel", (nn.Module,), {"forward": forged_globals["forward"]}
+    )
+
+    wrap_torch(patch_policy="scoped", escape_detector="shadow", completeness_witness=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trace = tl.trace(
+            ForgedFrameModel(),
+            torch.randn(3),
+            capture=CaptureOptions(
+                intervention_ready=True,
+                capture_container_structure=True,
+                cache=False,
+            ),
+        )
+    assert not (trace.capture_verified and not trace.escape_diagnostics), (
+        trace.capture_verification_reason,
+        trace.escape_diagnostics,
+    )
+    storage_trips = [
+        diagnostic
+        for diagnostic in trace.escape_diagnostics
+        if any(
+            "untyped_storage" in str(candidate) or "data_ptr" in str(candidate)
+            for candidate in diagnostic.get("callable_candidates", ())
+        )
+    ]
+    assert storage_trips

@@ -781,8 +781,10 @@ def test_genuine_raw_hook_replacement_mints_journal_edit_and_validates() -> None
     edited_labels = {event.label_raw for event in edits}
     assert {layer._label_raw for layer in boundary_layers} & edited_labels
     # The journal edit is the corroboration the carve-out requires: the
-    # genuine case validates; no side ledger exists anymore.
-    assert not hasattr(type(trace), "_replacement_event_labels")
+    # genuine case validates; no side ledger exists anymore. Instance-level
+    # hasattr covers both the removed instance ledger and any class-level
+    # reintroduction (the old type-level check missed instance attributes).
+    assert not hasattr(trace, "_replacement_event_labels")
     check_metadata_invariants(trace)
 
 

@@ -795,3 +795,60 @@ def test_concat_clones_events_and_never_mutates_the_source_stream() -> None:
         for event in (*target.module_prep_events, *target.pre_hook_events)
     ]
     assert len(all_target_seqs) == len(set(all_target_seqs))
+
+
+@pytest.mark.smoke
+def test_concat_rejects_invalid_source_sequencing() -> None:
+    """FAIL-AFTER-WHERE-PASSED-BEFORE: an invalid source seq domain refuses to merge.
+
+    Sol be2-closure probe regression: a source whose cross-lane seq domain is
+    invalid (a duplicate, unstamped, or counter-bypassing stamp -- exactly what
+    the journal seq invariants reject on a standalone stream) used to be
+    silently sorted with dict-lane-order tie-breaking and re-stamped into a
+    green target journal, laundering the producer defect. ``concat`` must
+    reject the source typed and fail-closed, BEFORE any event moves.
+    """
+
+    from torchlens.ir.capture_events import CaptureEvents, SourceSequencingError
+    from torchlens.ir.events import InterventionAppliedEvent
+
+    def _duplicate_cross_lane_source() -> CaptureEvents:
+        source = CaptureEvents()
+        source.append_intervention(
+            InterventionAppliedEvent(
+                label_raw="edited_raw", kind="replaced", origin="raw_forward_hook", timestamp=1.0
+            )
+        )
+        source.append_pre_hook(_merge_pre_hook_event("mod"))
+        # Simulate a producer/writer regression: cross-lane duplicate stamps.
+        object.__setattr__(
+            source.pre_hook_events[0], "seq", source.intervention_events[0].seq
+        )
+        return source
+
+    target = CaptureEvents()
+    with pytest.raises(SourceSequencingError, match="appears in both"):
+        target.concat(_duplicate_cross_lane_source())
+    # Fail-closed atomicity: nothing merged and the target journal is untouched.
+    assert not target.intervention_events
+    assert not target.pre_hook_events
+    assert target.event_seq == 0
+
+    unstamped = CaptureEvents()
+    unstamped.pre_hook_events.append(_merge_pre_hook_event("hand_built"))
+    with pytest.raises(SourceSequencingError, match="unstamped"):
+        CaptureEvents().concat(unstamped)
+
+    counter_bypass = CaptureEvents()
+    counter_bypass.append_pre_hook(_merge_pre_hook_event("mod"))
+    object.__setattr__(counter_bypass.pre_hook_events[0], "seq", 7)
+    with pytest.raises(SourceSequencingError, match="writer counter"):
+        CaptureEvents().concat(counter_bypass)
+
+    non_monotone = CaptureEvents()
+    non_monotone.append_pre_hook(_merge_pre_hook_event("a"))
+    non_monotone.append_pre_hook(_merge_pre_hook_event("b"))
+    events = list(non_monotone.pre_hook_events)
+    non_monotone.pre_hook_events[:] = [events[1], events[0]]
+    with pytest.raises(SourceSequencingError, match="does not increase"):
+        CaptureEvents().concat(non_monotone)

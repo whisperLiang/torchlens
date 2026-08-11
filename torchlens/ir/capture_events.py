@@ -81,6 +81,20 @@ class LaneMergePolicyError(RuntimeError):
     """
 
 
+class SourceSequencingError(RuntimeError):
+    """A concat source's global seq domain is invalid.
+
+    Raised by :meth:`CaptureEvents.concat` BEFORE any event moves when the
+    source stream holds an unstamped event, a duplicate cross-lane seq, a
+    non-monotone lane, or a stamp beyond the source's writer counter. Sorting
+    such a stream on its seq domain would substitute dict-lane-order
+    tie-breaking for real chronology, laundering a producer defect (an
+    unstamped, duplicate, reordered, or counter-bypassing writer) into a
+    merged journal that then passes the seq invariants the source itself
+    would have failed.
+    """
+
+
 # Process-monotonic run-nonce source: every CaptureEvents stream is one
 # capture run's journal, and intervention-edit records are causally bound to
 # their run through this token (streams never serialize, so an in-process
@@ -533,6 +547,11 @@ class CaptureEvents:
             policy but has no registered single-writer appender. The check
             runs before any event moves, so a declared-but-unwired lane fails
             closed even while empty.
+        SourceSequencingError
+            When the source's global seq domain is invalid: an unstamped
+            event, a duplicate cross-lane seq, a non-monotone lane, or a
+            stamp beyond the source's writer counter. The check runs before
+            any event moves, so an invalid source never partially merges.
 
         Parameters
         ----------
@@ -555,6 +574,45 @@ class CaptureEvents:
                     f"{LANE_MERGE_POLICIES[lane_name]!r} but has no registered appender; "
                     "wire it into _LANE_APPENDERS before it can merge"
                 )
+        # Source seq-domain gate: sorting an invalid domain would replace real
+        # chronology with dict-lane-order tie-breaking, so the source must
+        # PROVE its stamps are unique, per-lane monotone, and counter-covered
+        # before anything moves. This mirrors the journal seq invariants a
+        # standalone stream is held to; concat must not launder a stream that
+        # validation would reject. Skipped (``first_run_only``-satisfied)
+        # lanes still validate: a corrupt lane in the source is a producer
+        # defect regardless of whether its events merge this round.
+        seen_lane_by_seq: dict[int, str] = {}
+        for lane_name in lane_names:
+            if LANE_MERGE_POLICIES[lane_name] == "run_local":
+                continue
+            previous_seq = 0
+            for event in getattr(other, lane_name):
+                seq = int(getattr(event, "seq", 0) or 0)
+                if seq < 1:
+                    raise SourceSequencingError(
+                        f"concat source lane {lane_name!r} holds an unstamped event "
+                        f"(seq {seq}): only single-writer-stamped streams may merge"
+                    )
+                if seq <= previous_seq:
+                    raise SourceSequencingError(
+                        f"concat source lane {lane_name!r} seq {seq} does not "
+                        f"increase past {previous_seq}"
+                    )
+                previous_seq = seq
+                duplicate_lane = seen_lane_by_seq.get(seq)
+                if duplicate_lane is not None:
+                    raise SourceSequencingError(
+                        f"concat source seq {seq} appears in both "
+                        f"{duplicate_lane!r} and {lane_name!r}"
+                    )
+                seen_lane_by_seq[seq] = lane_name
+        if seen_lane_by_seq and max(seen_lane_by_seq) > int(other.event_seq or 0):
+            raise SourceSequencingError(
+                f"concat source seq {max(seen_lane_by_seq)} exceeds the source "
+                f"writer counter {other.event_seq}: an event bypassed the "
+                "single-writer append path"
+            )
         merge_rows: list[tuple[int, str, Any]] = []
         for lane_name in lane_names:
             policy = LANE_MERGE_POLICIES[lane_name]
@@ -566,9 +624,9 @@ class CaptureEvents:
             if policy == "first_run_only" and getattr(self, lane_name):
                 continue
             merge_rows.extend((event.seq, lane_name, event) for event in source_events)
-        # Stable sort on the source seq domain: cross-lane chronology is
-        # preserved exactly; never-stamped events (seq 0, hand-built streams)
-        # keep their lane arrival order.
+        # Sort on the source seq domain: cross-lane chronology is preserved
+        # exactly (the gate above proved every stamp unique and monotone, so
+        # the sort never has to tie-break).
         merge_rows.sort(key=lambda row: row[0])
         seq_map: dict[int, int] = {}
         for source_seq, lane_name, event in merge_rows:

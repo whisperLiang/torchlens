@@ -2360,18 +2360,81 @@ _ORIG_UNTYPED_STORAGE_DATA_PTR = torch.UntypedStorage.data_ptr
 _ORIG_UNTYPED_STORAGE_NBYTES = torch.UntypedStorage.nbytes
 
 
-_TORCHLENS_PACKAGE_ROOT = str(Path(__file__).resolve().parents[2])
+# Authorization roster for the witness's internal-caller check: the code
+# objects (held STRONGLY, so their ids can never be reused) of every function
+# textually owned by the modules that legitimately call
+# ``_raw_storage_ptr_no_observe``. Collected once at import time, BEFORE any
+# user code runs, by walking each module's namespace (functions, methods,
+# properties, and their nested code constants) and keeping only code compiled
+# from that module's own source file. Membership is tested by OBJECT IDENTITY
+# (``id``), never by name/path strings or code-object value equality: a frame
+# authenticates only when it is executing one of TorchLens's own code objects,
+# and neither ``f_globals['__name__']``, ``co_filename``, nor a byte-identical
+# recompilation of the source can forge that.
+_AUTHORIZED_INTERNAL_CALLER_CODE: list[types.CodeType] = []
+_AUTHORIZED_INTERNAL_CALLER_CODE_IDS: set[int] = set()
+
+
+def _register_authorized_caller_namespace(
+    namespace: Mapping[str, Any], module_file: str
+) -> None:
+    """Collect a module namespace's own code objects into the witness roster.
+
+    Only code objects whose ``co_filename`` is ``module_file`` register (read
+    at import time from real code objects, before user code can interpose),
+    so imported foreign helpers and decorator-wrapper code from other modules
+    never widen the roster. Nested code constants (closures, comprehensions)
+    and ``__wrapped__`` chains are followed so a decorated or nested internal
+    caller still authenticates.
+    """
+
+    def _collect(code: types.CodeType) -> None:
+        if code.co_filename != module_file or id(code) in _AUTHORIZED_INTERNAL_CALLER_CODE_IDS:
+            return
+        _AUTHORIZED_INTERNAL_CALLER_CODE.append(code)
+        _AUTHORIZED_INTERNAL_CALLER_CODE_IDS.add(id(code))
+        for const in code.co_consts:
+            if isinstance(const, types.CodeType):
+                _collect(const)
+
+    def _walk(value: Any, seen: set[int]) -> None:
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, (staticmethod, classmethod)):
+            value = value.__func__
+        if isinstance(value, property):
+            for accessor in (value.fget, value.fset, value.fdel):
+                if accessor is not None:
+                    _walk(accessor, seen)
+            return
+        if isinstance(value, types.FunctionType):
+            _collect(value.__code__)
+            wrapped = getattr(value, "__wrapped__", None)
+            if wrapped is not None:
+                _walk(wrapped, seen)
+            return
+        if isinstance(value, type):
+            for member in vars(value).values():
+                _walk(member, seen)
+
+    seen: set[int] = set()
+    for value in namespace.values():
+        _walk(value, seen)
 
 
 def _caller_frame_is_torchlens_internal(depth: int = 2) -> bool:
-    """Return whether the frame ``depth`` levels up belongs to TorchLens itself.
+    """Return whether the frame ``depth`` levels up is executing TorchLens's own code.
 
     The witness's detector authorization is bound to TorchLens's OWN calling
     frames, never to a helper's identity: user model code that imports and
     calls an internal helper must not inherit the authorization (its raw
     reads then run bare and the shadow detector convicts them normally).
-    Both the caller's module name and its code file location must sit inside
-    the installed ``torchlens`` package.
+    Authentication is code-object IDENTITY against the import-time roster --
+    a frame qualifies only when its ``f_code`` IS one of the roster's own
+    code objects. Frame metadata (``f_globals['__name__']``,
+    ``co_filename``) is forgeable by ``exec``/``compile`` from user code and
+    is deliberately never consulted.
 
     Parameters
     ----------
@@ -2385,16 +2448,7 @@ def _caller_frame_is_torchlens_internal(depth: int = 2) -> bool:
         caller = sys._getframe(depth)
     except ValueError:
         return False
-    module_name = caller.f_globals.get("__name__")
-    if not isinstance(module_name, str) or not (
-        module_name == "torchlens" or module_name.startswith("torchlens.")
-    ):
-        return False
-    try:
-        code_path = str(Path(caller.f_code.co_filename).resolve())
-    except (OSError, ValueError):
-        return False
-    return code_path.startswith(_TORCHLENS_PACKAGE_ROOT)
+    return id(caller.f_code) in _AUTHORIZED_INTERNAL_CALLER_CODE_IDS
 
 
 def _raw_storage_ptr_no_observe(tensor: Any) -> int | None:
@@ -6657,3 +6711,24 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
                 _finalize_census(state)
             else:
                 _finalize_input_semantics_without_census(trace)
+
+
+# Import-time roster collection for the witness's internal-caller
+# authorization (see ``_caller_frame_is_torchlens_internal``). Runs at the
+# BOTTOM of the module so every function above is already defined, and before
+# any user code can run a capture. ``buffer_writes`` is the one other module
+# whose functions legitimately call ``_raw_storage_ptr_no_observe`` (the
+# journaled-write alias prefilter); this module imports from it at the top,
+# so its namespace is guaranteed complete here.
+def _collect_authorized_internal_caller_modules() -> None:
+    """Register the witness and buffer-write modules' own code objects."""
+
+    from . import buffer_writes as _buffer_writes_module
+
+    _register_authorized_caller_namespace(globals(), __file__)
+    buffer_writes_file = _buffer_writes_module.__file__
+    assert buffer_writes_file is not None, "a real source module always has a file"
+    _register_authorized_caller_namespace(vars(_buffer_writes_module), buffer_writes_file)
+
+
+_collect_authorized_internal_caller_modules()
