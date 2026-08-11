@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -377,12 +378,28 @@ def test_conditional_then_invariant_catches_derived_view_corruption() -> None:
 
 
 def test_short_barcode_uses_stable_sha256_prefix() -> None:
-    """Deterministic barcodes are stable SHA-256 prefixes."""
+    """Deterministic barcodes are SHA-256 prefixes of the type-tagged encoding.
+
+    The pre-fcd3172e encoding (``str()`` joined by a raw NUL byte) is the
+    collision bug that commit fixed — ``1`` vs ``"1"`` and ``["a\\x00b"]`` vs
+    ``["a", "b"]`` hashed identically — so this pins the current type-tagged
+    JSON construction and the collision cases the fix exists to keep distinct.
+    """
 
     payload = ["ab", "c", 123]
-    expected = hashlib.sha256("\x00".join(str(x) for x in payload).encode("utf-8")).hexdigest()
+    expected = hashlib.sha256(
+        json.dumps(
+            [[type(x).__name__, repr(x)] for x in payload],
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
 
     assert make_short_barcode_from_input(payload, barcode_len=16) == expected[:16]
+
+    # The collisions the type-tagged encoding exists to prevent stay distinct.
+    assert make_short_barcode_from_input([1]) != make_short_barcode_from_input(["1"])
+    assert make_short_barcode_from_input(["a\x00b"]) != make_short_barcode_from_input(["a", "b"])
 
 
 def test_validate_forward_pass_restores_state_after_exception() -> None:
