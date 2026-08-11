@@ -1093,6 +1093,7 @@ class Trace(
     _receptive_field_solution: Any
     _rf_source_solutions: Any
     _rf_target_solutions: Any
+    _tl_rf_probe_active: Any
 
     PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
         "trace_label": FieldPolicy.KEEP,
@@ -1115,6 +1116,7 @@ class Trace(
         "_receptive_field_solution": FieldPolicy.DROP,
         "_rf_source_solutions": FieldPolicy.DROP,
         "_rf_target_solutions": FieldPolicy.DROP,
+        "_tl_rf_probe_active": FieldPolicy.DROP,
         "module_identity_mode": FieldPolicy.KEEP,
         "param_source": FieldPolicy.KEEP,
         "derived_grads": FieldPolicy.KEEP,

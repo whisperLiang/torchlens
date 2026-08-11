@@ -12,7 +12,6 @@ import warnings
 
 import torch
 
-from .._io import FieldPolicy
 from ..backends import BackendUnsupportedError, get_backend_spec
 from . import _engine
 from . import _rules
@@ -232,6 +231,13 @@ def _probe_suppressed(trace: Trace) -> Iterator[None]:
     autograd or user code raises. A post-condition tripwire rejects any mutation
     of TorchLens backward-pass state.
 
+    The flag's ``FieldPolicy.DROP`` scrub policy is declared statically on
+    ``Trace``, alongside the other lazily-populated receptive-field state. It is
+    deliberately not registered from here: mutating the class-level
+    ``PORTABLE_STATE_SPEC`` per probe is a process-global side effect of a
+    per-instance operation, and it desynchronizes that spec from the
+    ``FIELD_POLICY`` table it is generated from.
+
     Parameters
     ----------
     trace:
@@ -243,7 +249,6 @@ def _probe_suppressed(trace: Trace) -> Iterator[None]:
         Control while both backward-capture gates are suppressed.
     """
 
-    type(trace).PORTABLE_STATE_SPEC.setdefault("_tl_rf_probe_active", FieldPolicy.DROP)
     trace_dict = trace.__dict__
     flag_was_present = "_tl_rf_probe_active" in trace_dict
     previous_flag = trace_dict.get("_tl_rf_probe_active")
