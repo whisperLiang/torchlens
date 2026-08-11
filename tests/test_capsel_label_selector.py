@@ -1,7 +1,7 @@
 """Regression tests for capture-time short/friendly label selector matching.
 
 These lock the fix for the class of capture-time ``save=`` selectors that resolve
-through ``_context_labels`` (``tl.label``, ``tl.contains``, ``tl.regex``). At capture
+through the capture label universe (``tl.label``, ``tl.contains``, ``tl.regex``). At capture
 time the base ``RecordContext`` only carries the RAW label (e.g. ``"conv2d_2_4_raw"``);
 the short/friendly ``"{layer_type}_{type_index}"`` label (e.g. ``"conv2d_2"``) is
 synthesized only by the alias retry in
@@ -120,7 +120,7 @@ def test_func_selector_control_is_unaffected() -> None:
 def test_alias_retry_covers_label_matching_selector_kinds() -> None:
     """Lock the precise contract: label-matching kinds need the alias retry.
 
-    ``label``/``contains``/``regex`` resolve through ``_context_labels`` and can target
+    ``label``/``contains``/``regex`` resolve through the capture label universe and can target
     the short label only visible in the alias context, so they need the retry; selectors
     that match non-label fields (``func``/``module``/``in_module``/``output``) do not.
     """

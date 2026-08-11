@@ -168,7 +168,7 @@ def test_disk_only_predicate_keep_grad_rejected_before_record_write(
         tl.fastlog.record(
             StorageModel(),
             torch.ones(1, 3),
-            keep_op=keep_op,
+            save=keep_op,
             streaming=StreamingOptions(bundle_path=bundle_path, retain_in_memory=False),
         )
 

@@ -10,7 +10,7 @@ prepares the model and calls `wrap_torch()` from `backends/torch/`.
 
 ```
 import torchlens
-  |- exposes 93 top-level public names in __all__
+  |- exposes 94 top-level public names in __all__
   |- eagerly imports the core capture/intervention surface, fastlog/options, and
   |  the HuggingFace autoroute bridge; compat, export, report, stats,
   |  validation, and viz stay lazy
@@ -35,8 +35,10 @@ negative indexes, integer selectors, output labels, identity labels, and gradien
 selection. String selectors keep the legacy substring contract. Unqualified recurrent
 labels save all passes; pass-qualified labels such as `"attn:2"` save one 1-based pass.
 Prefer `save=tl.func(...)`, `save=tl.in_module(...)`, and composed predicates for new
-single-pass selective capture. `keep_op=` and `keep_module=` remain deprecated
-`record()` aliases for `save=`.
+single-pass selective capture. The old `keep_op=`/`keep_module=` `record()` alias
+kwargs are removed; `save=` is the only predicate spelling and `default_module=`
+gates module-boundary event recording (uniformly — ALL module enter/exit events;
+predicate-gated module-event selection has no public spelling).
 
 Common unified capture examples:
 
@@ -113,7 +115,7 @@ exclusive with backward-related capture because it discards the autograd graph.
 
 | Path | Purpose |
 |------|---------|
-| `__init__.py` | Top-level API, 93-name `__all__`, deprecation shims, `peek`/`extract` helpers |
+| `__init__.py` | Top-level API, 90-name `__all__`, deprecation shims, `peek`/`extract` helpers |
 | `_state.py` | Global logging toggle, active log, decoration maps, prepared-model registry; no torchlens imports |
 | `_trace_state.py` | Small runtime state enum exposed through `torchlens.io` |
 | `_errors.py`, `errors/` | Public and legacy exception classes |

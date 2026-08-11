@@ -20,8 +20,9 @@ from torchlens.data_classes.grad_fn import GradFn
 from torchlens.ir import CaptureEvents
 from torchlens.intervention.errors import HookValueError, HelperMountError, SelectorCompositionError
 from torchlens.intervention.helpers import _helper_spec
-from torchlens.intervention.hooks import _selector_from_target_spec, normalize_hook_plan
-from torchlens.intervention.resolver import _selector_from_spec, _selector_resolution_direction
+from torchlens.intervention.hooks import normalize_hook_plan
+from torchlens.intervention.resolver import _selector_resolution_direction
+from torchlens.ir.selector_eval import selector_from_spec
 from torchlens.intervention.types import FireRecord, InterventionSpec, TargetSpec
 
 
@@ -929,12 +930,18 @@ def test_backward_selector_target_spec_round_trip(selector: Any) -> None:
 
     target = selector.to_target_spec()
     frozen = target.freeze()
-    rebuilt_resolver = _selector_from_spec(
+    rebuilt_resolver = selector_from_spec(
         frozen.selector_kind,
         frozen.selector_value,
         dict(frozen.metadata),
+        lifecycle="site",
     )
-    rebuilt_hook = _selector_from_target_spec(target)
+    rebuilt_hook = selector_from_spec(
+        target.selector_kind,
+        target.selector_value,
+        target.metadata,
+        lifecycle="live",
+    )
     assert rebuilt_resolver.selector_kind == selector.selector_kind
     assert rebuilt_resolver.selector_value == selector.selector_value
     assert rebuilt_hook.selector_kind == selector.selector_kind

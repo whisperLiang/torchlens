@@ -6,12 +6,8 @@ from collections.abc import Callable
 from typing import Any
 
 from .registry import BackendUnsupportedError
-from ..intervention.selectors import (
-    BaseSelector,
-    CompositeSelector,
-    NotSelector,
-    SelectorLike,
-)
+from ..intervention.selectors import BaseSelector
+from ..ir.selector_eval import first_selector_kind_outside
 from ..postprocess.saved_summary import refresh_saved_module_call_count
 from ..quantities import Bytes
 
@@ -63,7 +59,7 @@ def reject_selector_outside_kinds(
             "and bool_value without per-op evaluation; use the PyTorch backend for "
             "value-dependent predicates."
         )
-    unsupported = _first_selector_outside_kinds(predicate, allowed=allowed)
+    unsupported = first_selector_kind_outside(predicate, allowed=allowed)
     if unsupported is None:
         return
     if unsupported in {"module", "in_module"}:
@@ -283,7 +279,7 @@ def _reject_non_static_save_predicate(
             "Use static-label save= selectors or the PyTorch backend for value-dependent "
             "predicates, intervene=, and halt=."
         )
-    unsupported = _first_non_static_selector(predicate)
+    unsupported = first_selector_kind_outside(predicate, allowed=_STATIC_SELECTOR_KINDS)
     if unsupported is None:
         return
     raise BackendUnsupportedError(
@@ -294,66 +290,3 @@ def _reject_non_static_save_predicate(
         "execution. Use the PyTorch backend for value-dependent predicates, intervene=, and "
         "halt=."
     )
-
-
-def _first_non_static_selector(selector: SelectorLike) -> str | None:
-    """Return the first non-static selector kind in a selector tree.
-
-    Parameters
-    ----------
-    selector
-        Selector or target spec to classify.
-
-    Returns
-    -------
-    str | None
-        Unsupported selector kind, or ``None`` if the whole tree is static-label only.
-    """
-
-    if not isinstance(selector, BaseSelector):
-        return "target_spec"
-    kind = selector.selector_kind
-    if kind not in _STATIC_SELECTOR_KINDS:
-        return kind
-    if isinstance(selector, CompositeSelector):
-        left, right = selector.selectors
-        return _first_non_static_selector(left) or _first_non_static_selector(right)
-    if isinstance(selector, NotSelector):
-        return _first_non_static_selector(selector.selector)
-    return None
-
-
-def _first_selector_outside_kinds(
-    selector: SelectorLike,
-    *,
-    allowed: frozenset[str],
-) -> str | None:
-    """Return the first selector kind outside ``allowed`` in a selector tree.
-
-    Parameters
-    ----------
-    selector
-        Selector or target spec to classify.
-    allowed
-        Selector kinds accepted by the caller.
-
-    Returns
-    -------
-    str | None
-        Unsupported selector kind, or ``None`` if the whole tree is allowed.
-    """
-
-    if not isinstance(selector, BaseSelector):
-        return "target_spec"
-    kind = selector.selector_kind
-    if kind not in allowed:
-        return kind
-    if isinstance(selector, CompositeSelector):
-        left, right = selector.selectors
-        return _first_selector_outside_kinds(
-            left,
-            allowed=allowed,
-        ) or _first_selector_outside_kinds(right, allowed=allowed)
-    if isinstance(selector, NotSelector):
-        return _first_selector_outside_kinds(selector.selector, allowed=allowed)
-    return None

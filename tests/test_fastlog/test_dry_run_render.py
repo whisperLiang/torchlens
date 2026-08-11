@@ -30,7 +30,7 @@ def _keep_relu(ctx: RecordContext) -> bool:
 def test_print_tree_outputs_unicode_rows() -> None:
     """Dry-run print_tree returns non-empty unicode-indented text."""
 
-    trace = tl.fastlog.dry_run(_mlp(), torch.randn(1, 4), keep_op=_keep_linear)
+    trace = tl.fastlog.dry_run(_mlp(), torch.randn(1, 4), save=_keep_linear)
     text = trace.print_tree()
     assert text
     assert "└─" in text
@@ -39,7 +39,7 @@ def test_print_tree_outputs_unicode_rows() -> None:
 def test_to_pandas_expected_columns() -> None:
     """Dry-run to_pandas returns the public event columns."""
 
-    trace = tl.fastlog.dry_run(_mlp(), torch.randn(1, 4), keep_op=_keep_linear)
+    trace = tl.fastlog.dry_run(_mlp(), torch.randn(1, 4), save=_keep_linear)
     frame = trace.to_pandas()
     assert list(frame.columns) == [
         "call_index",
@@ -55,7 +55,7 @@ def test_to_pandas_expected_columns() -> None:
 def test_repredicate_updates_decisions_without_replacing_events() -> None:
     """Repredicate returns a new trace with shared events and changed decisions."""
 
-    trace = tl.fastlog.dry_run(_mlp(), torch.randn(1, 4), keep_op=_keep_linear)
+    trace = tl.fastlog.dry_run(_mlp(), torch.randn(1, 4), save=_keep_linear)
     updated = trace.repredicate(other_keep_op=_keep_relu)
 
     assert updated is not trace

@@ -116,10 +116,27 @@ unless a narrower policy is later set.
 
 | Old name | New name | Since-version | Planned removal |
 | --- | --- | --- | --- |
-| `record(keep_op=...)` | `record(save=...)` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
-| `record(keep_module=...)` | `record(save=...)` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
-| `Recorder(keep_op=...)` | `Recorder(save=...)` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
-| `Recorder(keep_module=...)` | `Recorder(save=...)` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
+| `record(keep_op=...)` | `record(save=...)` | REMOVED (predicate consolidation) | removed; raises TypeError |
+| `record(keep_module=...)` | no equivalent; see note below | REMOVED (predicate consolidation) | removed; raises TypeError |
+| `Recorder(keep_op=...)` | `Recorder(save=...)` | REMOVED (predicate consolidation) | removed; raises TypeError |
+| `Recorder(keep_module=...)` | no equivalent; see note below | REMOVED (predicate consolidation) | removed; raises TypeError |
+| `dry_run(keep_op=...)` | `dry_run(save=...)` | RENAMED (predicate consolidation; was never deprecation-warned) | removed; raises TypeError |
+| `dry_run(keep_module=...)` | no equivalent; see note below | REMOVED (predicate consolidation) | removed; raises TypeError |
+
+**`keep_module` note (honest capability statement).** Predicate-gated
+module-event selection was REMOVED, not migrated: `save=` routes to the op
+predicate only, and `default_module=` records ALL module enter/exit boundary
+events uniformly — it is not a per-module predicate. A module predicate passed
+via `save=` selects zero module events. Two simulators still accept module
+predicates for a configuration capture can no longer produce
+(`Trace.preview_fastlog(keep_module=...)` and
+`RecordingTrace.repredicate(other_keep_module=...)`); whether to re-expose a
+public module-predicate kwarg or delete the internal slot and simulators
+together is an open maintainer decision.
+
+`record(save=...)` and `dry_run(save=...)` now default to `None` (previously an
+internal `MISSING` sentinel that existed only to arbitrate against the removed
+`keep_op=` alias); omitted and `save=None` are equivalent.
 
 ## Trace And Conditional Aliases
 

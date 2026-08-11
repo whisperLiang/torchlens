@@ -17,7 +17,7 @@ def test_train_mode_grad_flows_through_saved_tensor() -> None:
     recording = tl.fastlog.record(
         model,
         x,
-        keep_op=lambda ctx: ctx.func_name == "linear",
+        save=lambda ctx: ctx.func_name == "linear",
         backward_ready=True,
     )
     saved = next(record.ram_payload for record in recording if record.ram_payload is not None)

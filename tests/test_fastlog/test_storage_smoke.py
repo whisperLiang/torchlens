@@ -154,7 +154,7 @@ def test_keep_grad_disk_only_predicate_raises_at_runtime(tmp_path: Path) -> None
         tl.fastlog.record(
             TinyModel(),
             torch.ones(1, 3),
-            keep_op=keep_first,
+            save=keep_first,
             streaming=tl.StreamingOptions(bundle_path=bundle_path, retain_in_memory=False),
         )
 

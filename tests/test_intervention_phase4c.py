@@ -405,7 +405,7 @@ def test_zero_match_capture_selectors_warn() -> None:
 def test_unsupported_capture_selector_kind_fails_loudly() -> None:
     """Unsupported selector kinds raise instead of silently matching nothing."""
 
-    with pytest.raises(SiteResolutionError, match="Unsupported capture-time selector kind"):
+    with pytest.raises(SiteResolutionError, match="resolve through intervention mutators"):
         tl.trace(
             _ReluReturnModel(),
             torch.randn(2, 3),

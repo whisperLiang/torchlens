@@ -22,7 +22,7 @@ def test_predicate_exception_propagates() -> None:
         tl.fastlog.record(
             nn.Sequential(nn.Linear(3, 3), nn.ReLU()),
             torch.ones(1, 3),
-            keep_op=keep_op,
+            save=keep_op,
             on_predicate_error="fail-fast",
         )
 
@@ -39,5 +39,5 @@ def test_predicate_exception_accumulate_preserved() -> None:
         tl.fastlog.record(
             nn.Sequential(nn.Linear(3, 3), nn.ReLU()),
             torch.ones(1, 3),
-            keep_op=keep_op,
+            save=keep_op,
         )

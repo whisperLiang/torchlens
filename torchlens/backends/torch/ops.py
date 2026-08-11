@@ -120,8 +120,6 @@ from ...ir.predicate import RetroactiveCaptureDecision
 from ...ir.semantics import BackendSemantics, CapturePolicy
 from ...intervention.selectors import (
     BaseSelector,
-    CompositeSelector,
-    FollowedBySelector,
     label as make_label_selector,
 )
 from ...intervention.types import (
@@ -5731,16 +5729,14 @@ def _append_trace_predicate_context(trace: "Trace", ctx: RecordContext) -> None:
 def _trace_followed_by_candidate_selector(trace: "Trace") -> BaseSelector | None:
     """Return the candidate selector for ``candidate & followed_by(successor)``."""
 
+    from ...ir.selector_eval import split_followed_by_conjunction
+
     options = getattr(trace, "_predicate_save_options", None)
     predicate = None if options is None else options.keep_op
-    if not isinstance(predicate, CompositeSelector) or predicate.operator != "and":
+    split = split_followed_by_conjunction(predicate)
+    if split is None:
         return None
-    left, right = predicate.selectors
-    if isinstance(right, FollowedBySelector) and isinstance(left, BaseSelector):
-        return left
-    if isinstance(left, FollowedBySelector) and isinstance(right, BaseSelector):
-        return right
-    return None
+    return split[1]
 
 
 def _retain_lookback_candidate(

@@ -6,21 +6,21 @@ import time
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from ..fastlog.exceptions import PredicateError
 from ..fastlog.types import CaptureSpec, ModuleStackFrame, RecordContext
 from ..intervention.predicates import as_intervention_decision
-from ..intervention.selectors import (
-    BaseSelector,
-    CompositeSelector,
-    FollowedBySelector,
-    _selector_contains_kind,
-)
+from ..intervention.selectors import BaseSelector
 from ..intervention.types import InterventionDecision
 from ..ir.predicate import RetroactiveCaptureDecision
+from ..ir.selector_eval import (
+    contains_followed_by,
+    selector_contains_kind,
+    split_followed_by_conjunction,
+)
 
 if TYPE_CHECKING:
     from ..fastlog.options import RecordingOptions
@@ -119,9 +119,9 @@ def _evaluate_keep_op(
 
 #: Capture-time selector kinds whose short/friendly ``{layer_type}_{type_index}``
 #: label is only visible through the :func:`_evaluate_keep_op` alias retry. ``label``,
-#: ``contains``, and ``regex`` all resolve through ``_context_labels`` (which on the base
-#: context exposes only the raw label such as ``"conv2d_2_4_raw"``); ``predicate`` trees
-#: read ``ctx.label`` directly.
+#: ``contains``, and ``regex`` all resolve through the capture label universe in
+#: ``ir.selector_eval`` (which on the base context exposes only the raw label such as
+#: ``"conv2d_2_4_raw"``); ``predicate`` trees read ``ctx.label`` directly.
 _ALIAS_RETRY_SELECTOR_KINDS: tuple[str, ...] = ("predicate", "label", "contains", "regex")
 
 
@@ -144,8 +144,8 @@ def _keep_op_needs_alias_retry(predicate: object | None) -> bool:
     -----
     The base capture-time ``RecordContext`` only carries the RAW label (such as
     ``"conv2d_2_4_raw"``); the short/friendly label is synthesized ONLY by the alias
-    retry in :func:`_evaluate_keep_op`. Every selector that resolves through
-    ``_context_labels`` (``label``, ``contains``, ``regex``) can therefore target a
+    retry in :func:`_evaluate_keep_op`. Every selector that resolves through the
+    capture label universe (``label``, ``contains``, ``regex``) can therefore target a
     short label that is invisible on the first evaluation, so those kinds need the
     retry too -- not just ``tl.predicate(...)`` trees whose inner callable observes
     ``ctx.label`` directly. Structured selectors that match non-label fields
@@ -157,7 +157,7 @@ def _keep_op_needs_alias_retry(predicate: object | None) -> bool:
 
     if not isinstance(predicate, BaseSelector):
         return True
-    return any(_selector_contains_kind(predicate, kind) for kind in _ALIAS_RETRY_SELECTOR_KINDS)
+    return any(selector_contains_kind(predicate, kind) for kind in _ALIAS_RETRY_SELECTOR_KINDS)
 
 
 def _evaluate_intervene_op(
@@ -249,24 +249,14 @@ def _evaluate_retroactive_followed_by(
 ) -> RetroactiveCaptureDecision | None:
     """Evaluate supported ``candidate & followed_by(successor)`` predicate sugar."""
 
-    predicate = options.keep_op
-    if not isinstance(predicate, CompositeSelector) or predicate.operator != "and":
+    split = split_followed_by_conjunction(options.keep_op)
+    if split is None:
         return None
-    left, right = predicate.selectors
-    followed_selector: FollowedBySelector | None = None
-    candidate_selector: Any | None = None
-    if isinstance(right, FollowedBySelector):
-        followed_selector = right
-        candidate_selector = left
-    elif isinstance(left, FollowedBySelector):
-        followed_selector = left
-        candidate_selector = right
-    if followed_selector is None or candidate_selector is None:
-        return None
+    followed_selector, candidate_selector = split
     inner = followed_selector.inner
     if not callable(inner) or not bool(inner(ctx)):
         return None
-    target_labels = _matching_recent_parent_labels(ctx, cast(BaseSelector, candidate_selector))
+    target_labels = _matching_recent_parent_labels(ctx, candidate_selector)
     if not target_labels:
         return None
     return RetroactiveCaptureDecision(
@@ -292,15 +282,7 @@ def _is_supported_followed_by_predicate(predicate: Any) -> bool:
     selector = getattr(predicate, "selector", None)
     if selector is not None:
         return _is_supported_followed_by_predicate(selector)
-    if not isinstance(predicate, CompositeSelector) or predicate.operator != "and":
-        return False
-    left, right = predicate.selectors
-    return (
-        isinstance(right, FollowedBySelector)
-        and isinstance(left, BaseSelector)
-        or isinstance(left, FollowedBySelector)
-        and isinstance(right, BaseSelector)
-    )
+    return split_followed_by_conjunction(predicate) is not None
 
 
 def validate_followed_by_capability(
@@ -326,7 +308,7 @@ def validate_followed_by_capability(
         Raises only for unsupported ``followed_by`` usage.
     """
 
-    if not _predicate_contains_followed_by(predicate):
+    if not contains_followed_by(predicate, unwrap=True):
         return
     if not _is_supported_followed_by_predicate(predicate):
         raise PredicateError(
@@ -338,20 +320,6 @@ def validate_followed_by_capability(
             f"{api_name} does not support tl.followed_by(...) retroactive capture; "
             "use trace(save=...) with lookback and lookback_payload_policy instead."
         )
-
-
-def _predicate_contains_followed_by(predicate: Any) -> bool:
-    """Return whether a predicate tree contains ``FollowedBySelector``."""
-
-    if isinstance(predicate, FollowedBySelector):
-        return True
-    if isinstance(predicate, CompositeSelector):
-        left, right = predicate.selectors
-        return _predicate_contains_followed_by(left) or _predicate_contains_followed_by(right)
-    selector = getattr(predicate, "selector", None)
-    if selector is not None:
-        return _predicate_contains_followed_by(selector)
-    return False
 
 
 def _matching_recent_parent_labels(

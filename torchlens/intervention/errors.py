@@ -238,6 +238,16 @@ class SelectorCompositionError(SiteResolutionError):
     """Raised when selectors from incompatible graph directions are composed."""
 
 
+class SelectorCapabilityError(SiteResolutionError):
+    """Raised when a selector kind cannot be evaluated in a lifecycle.
+
+    The one typed refusal for unsupported ``(kind, lifecycle)`` pairs: for
+    example ``tl.followed_by(...)`` in post-hoc ``find_sites`` (no retroactive
+    window exists on a finished trace) or ``tl.input_at(...)`` as a live hook
+    application site.
+    """
+
+
 class UnclassifiedSelectorError(SiteResolutionError):
     """Raised when a selector is missing an explicit direction taxonomy bucket."""
 
@@ -350,6 +360,7 @@ __all__ = [
     "Severity",
     "SiteAmbiguityError",
     "SiteResolutionError",
+    "SelectorCapabilityError",
     "SelectorCompositionError",
     "SpecMutationError",
     "SpecPortabilityError",

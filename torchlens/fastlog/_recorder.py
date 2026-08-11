@@ -74,25 +74,6 @@ def _rank_prefixed_streaming_options(
     )
 
 
-def _resolve_save_alias(
-    *,
-    save: PredicateFn | None | MissingType,
-    keep_op: PredicateFn | None | MissingType,
-) -> PredicateFn | None | MissingType:
-    """Resolve ``save=`` and deprecated ``keep_op=`` recorder predicates."""
-
-    if save is not MISSING and keep_op is not MISSING:
-        raise ValueError("Recorder received both save= and deprecated keep_op=.")
-    if keep_op is not MISSING:
-        warnings.warn(
-            "Recorder(keep_op=...) is deprecated; use Recorder(save=...) instead.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-        return keep_op
-    return save
-
-
 def _warn_zero_match_capture_selectors(state: RecordingState) -> None:
     """Warn when sparse capture selectors matched no sites.
 
@@ -207,8 +188,6 @@ class Recorder:
         model: nn.Module,
         *,
         save: PredicateFn | None | MissingType = MISSING,
-        keep_op: PredicateFn | None | MissingType = MISSING,
-        keep_module: PredicateFn | None | MissingType = MISSING,
         default_op: bool | CaptureSpec | MissingType = MISSING,
         default_module: bool | CaptureSpec | MissingType = MISSING,
         history_size: int | MissingType = MISSING,
@@ -237,7 +216,7 @@ class Recorder:
         ----------
         model:
             PyTorch module to record.
-        save, keep_op, keep_module, default_op, default_module, history_size,
+        save, default_op, default_module, history_size,
         lookback, lookback_payload_policy, include_source_events, max_predicate_failures,
         on_predicate_error, storage, streaming, random_seed:
             Fastlog recording options.
@@ -269,13 +248,6 @@ class Recorder:
         if storage_supplied and streaming_supplied:
             raise TypeError("Do not pass both `storage` and `streaming`.")
         resolved_streaming = storage if storage_supplied else streaming
-        keep_op = _resolve_save_alias(save=save, keep_op=keep_op)
-        if keep_module is not MISSING:
-            warnings.warn(
-                "Recorder(keep_module=...) is deprecated; use Recorder(save=...) instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
         unwrapped_model, streaming = _unwrap_ddp_for_fastlog(model, resolved_streaming)
         default_op = _resolve_train_mode_default(
             field_name="default_op",
@@ -290,8 +262,8 @@ class Recorder:
         self.model = unwrapped_model
         self.options = merge_recording_options(
             recording=None,
-            keep_op=keep_op,
-            keep_module=keep_module,
+            keep_op=save,
+            keep_module=MISSING,
             default_op=default_op,
             default_module=default_module,
             history_size=history_size,
