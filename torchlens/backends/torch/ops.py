@@ -4446,7 +4446,11 @@ def _emit_exhaustive_operation_events(
             from .wrappers import _propagate_mutation_label_to_storage_aliases
 
             set_tensor_label(live_member, new_tensor_label)
-            _add_tensor_backward_hook(self, live_member, new_tensor_label)
+            # The live member is what downstream ops consume, so it takes
+            # gradient ownership of the label (the logged safe copy's hook
+            # stops emitting) -- the same transfer the scalar same-object
+            # in-place path performs in _register_inplace_live_grad_hook.
+            _add_tensor_backward_hook(self, live_member, new_tensor_label, take_ownership=True)
             _propagate_mutation_label_to_storage_aliases(self, live_member, new_tensor_label)
         options = getattr(self, "_predicate_save_options", None)
         if options is not None and options.halt is not None:

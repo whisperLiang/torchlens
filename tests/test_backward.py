@@ -1866,3 +1866,91 @@ def test_validate_backward_fails_closed_on_coverage_gaps() -> None:
                 random_seed=11,
             )
     assert passed is False
+
+
+class _ForeachInplaceModel(nn.Module):
+    """Model whose live tensor is mutated by a list-returning in-place op."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Double, foreach-increment in place, then scale."""
+
+        values = [x * 2.0]
+        torch._foreach_add_(values, 1.0)
+        return values[0] * 3.0
+
+
+def test_foreach_inplace_live_member_owns_its_gradient() -> None:
+    """The live member of a foreach in-place op emits its real gradient.
+
+    Regression: the logged safe copy hooked first and owned the label, and the
+    genuinely live (mutated) member was hooked WITHOUT ownership transfer --
+    its hook fired and returned without emitting, so a real ``_foreach_add_``
+    gradient produced zero journal events and ``has_grad`` stayed False while
+    native autograd delivered the gradient to the live tensor.
+    """
+
+    model = _ForeachInplaceModel()
+    x = torch.randn(2, 3, requires_grad=True)
+    trace = tl.trace(
+        model,
+        x,
+        capture=CaptureOptions(layers_to_save="all", save_grads="all", random_seed=4),
+    )
+    layer = next(op for op in trace.layer_list if "_foreach_add_" in str(op.func_name))
+    trace.log_backward(trace[trace.output_layers[0]].out.sum())
+
+    observed = [
+        event
+        for event in trace._capture_events.backward_events
+        if isinstance(event, OpGradObserved) and event.op_label == layer.layer_label
+    ]
+    assert len(observed) == 1
+    assert layer.has_grad
+    assert torch.equal(layer.grad, torch.full_like(x, 3.0))
+
+
+class _InplaceReluModel(nn.Module):
+    """Model with a same-object in-place mutation on the live path."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = nn.Linear(3, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Linear, in-place relu, then scale."""
+
+        hidden = self.fc(x)
+        torch.relu_(hidden)
+        return hidden * 2.0
+
+
+def test_refresh_projection_with_inplace_op_keeps_one_grad_owner_per_label() -> None:
+    """After save_new_outs, each label emits exactly one gradient observation.
+
+    Regression: the one-owner check ran against the hook's OWN trace's owner
+    map BEFORE the refresh-projection redirect, so a stale source-trace hook
+    on the in-place live tensor and the rebound target hook could both pass
+    their own maps and emit duplicate OpGradObserved events for one label on
+    the same final target.
+    """
+
+    from collections import Counter
+
+    model = _InplaceReluModel()
+    trace = tl.trace(
+        model,
+        torch.randn(2, 3, requires_grad=True),
+        capture=CaptureOptions(layers_to_save="all", save_grads="all", random_seed=0),
+    )
+    trace.save_new_outs(model, torch.randn(2, 3, requires_grad=True), random_seed=1)
+    trace.log_backward(trace[trace.output_layers[0]].out.sum())
+
+    pass_index = trace.num_backward_passes
+    per_label = Counter(
+        event.op_label
+        for event in trace._capture_events.backward_events
+        if isinstance(event, OpGradObserved) and event.pass_index == pass_index
+    )
+    assert per_label, "backward produced no gradient observations"
+    duplicated = {label: count for label, count in per_label.items() if count > 1}
+    assert not duplicated, duplicated

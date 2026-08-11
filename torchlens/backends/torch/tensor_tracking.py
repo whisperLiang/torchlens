@@ -167,6 +167,21 @@ def _add_tensor_backward_hook(
         ):
             active_trace = managed_trace
         if active_trace is not None:
+            # One-owner-per-label must hold on the FINAL emission target, not
+            # just the hook's own trace: after a refresh-projection or fork
+            # redirect, a stale source-trace hook (e.g. on an in-place live
+            # tensor) can own the label in the SOURCE map while the target's
+            # rebound map names a different tensor -- both passing their own
+            # map would emit duplicate observations for one label. A target
+            # map with no entry for the label stays permissive so redirected
+            # gradients are not silently dropped.
+            if active_trace is not trace_ref():
+                target_owner_map = active_trace.__dict__.get("_tl_grad_hook_owner_by_label")
+                if (
+                    target_owner_map is not None
+                    and target_owner_map.get(tensor_label, hooked_tensor_id) != hooked_tensor_id
+                ):
+                    return
             _emit_tensor_grad_event(active_trace, grad, tensor_label)
             if getattr(active_trace, "save_grads", None) not in (None, False):
                 _log_tensor_grad(active_trace, grad, tensor_label)
