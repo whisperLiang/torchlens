@@ -116,7 +116,7 @@ RENDER_TIMEOUT_SECONDS = 120
 # -- Module subgraph border widths (shared between Trace and bundle paths)
 # Outermost modules get the thickest border; deeper modules thin out by depth
 # fraction so visual hierarchy reads at a glance.  These constants are the
-# canonical source for both ``rendering.py`` and the bundle renderer.
+# canonical source for both ``_render_dot.py`` and the bundle renderer.
 MAX_MODULE_PENWIDTH = 5
 MIN_MODULE_PENWIDTH = 2
 PENWIDTH_RANGE = MAX_MODULE_PENWIDTH - MIN_MODULE_PENWIDTH
@@ -193,7 +193,7 @@ def make_module_cluster_label(
 ) -> str:
     """Return the HTML-style label string for a module cluster.
 
-    Mirrors the legacy format used by ``rendering._setup_subgraphs_recurse``:
+    Mirrors the legacy format used by ``_render_flow._setup_subgraphs_recurse``:
     ``<<B>@title</B><br align='left'/>(type)<br align='left'/>>``.  The
     ``module_type`` line is omitted when no type information is available
     (which is the case for bundle clusters because the supergraph stores

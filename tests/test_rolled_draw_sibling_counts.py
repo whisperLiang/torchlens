@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.visualization import _render_nodes, rendering
+from torchlens.visualization import _render_nodes
 
 
 class _SplitReuse(nn.Module):
@@ -45,7 +45,7 @@ def test_rolled_draw_reuses_atomic_module_sibling_counts(
 
     built_counts: list[Mapping[str, int]] = []
     received_counts: list[Mapping[str, int] | None] = []
-    original_build = rendering._atomic_module_sibling_counts
+    original_build = _render_nodes._atomic_module_sibling_counts
     original_split = _render_nodes._atomic_module_split_range
 
     def spy_build(owning_trace: Any) -> dict[str, int]:
@@ -66,7 +66,7 @@ def test_rolled_draw_reuses_atomic_module_sibling_counts(
         received_counts.append(sibling_counts)
         return original_split(owning_trace, layer_log, address, sibling_counts)
 
-    monkeypatch.setattr(rendering, "_atomic_module_sibling_counts", spy_build)
+    monkeypatch.setattr(_render_nodes, "_atomic_module_sibling_counts", spy_build)
     monkeypatch.setattr(_render_nodes, "_atomic_module_split_range", spy_split)
 
     trace.draw(vis_mode="rolled", return_graph=True, vis_save_only=True)
