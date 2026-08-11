@@ -1664,7 +1664,6 @@ def _make_grad_fn_hook(
                     grad_output_refs=stored_grad_outputs,
                     intervention_fire_ref=fire_ref,
                     timestamp=event_timestamp,
-                    seq=events.next_backward_seq(),
                 )
             )
             param_address = getattr(live_trace, "_grad_fn_param_refs_by_object_id", {}).get(
@@ -1691,7 +1690,6 @@ def _make_grad_fn_hook(
                         dtype=grad_record.dtype,
                         memory=grad_record.memory,
                         timestamp=event_timestamp,
-                        seq=events.next_backward_seq(),
                     )
                 )
             return None
@@ -1717,7 +1715,6 @@ def _make_grad_fn_hook(
                 grad_output_refs=stored_grad_outputs,
                 intervention_fire_ref=fire_ref,
                 timestamp=event_timestamp,
-                seq=events.next_backward_seq(),
             )
         )
         return result

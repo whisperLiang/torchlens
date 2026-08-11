@@ -362,8 +362,16 @@ class CaptureEvents:
         | GradFnDiscovered
         | GradFnFired,
     ) -> None:
-        """Append a backward sidecar event."""
+        """Append a backward sidecar event, stamping the global backward seq.
 
+        The append path is the single writer for the backward stream, so it is
+        also the single sequencing authority: every appended event of every
+        kind receives the next value of one run-monotonic counter, making
+        cross-kind ordering an exact recorded fact rather than an inference
+        from timestamps or list positions.
+        """
+
+        object.__setattr__(event, "seq", self.next_backward_seq())
         self.backward_events.append(event)
         self.backward_revision += 1
 

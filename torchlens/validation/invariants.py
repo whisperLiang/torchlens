@@ -1425,13 +1425,44 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
                 f"backward event references missing pass {param_grad_event.pass_index!r}",
             )
 
-    seq_values = [
-        event.seq
-        for event in events
-        if isinstance(event, OpGradObserved | GradFnFired | ParamGradObserved)
-    ]
+    seq_values = [event.seq for event in events]
     if seq_values != sorted(seq_values) or len(seq_values) != len(set(seq_values)):
         raise MetadataInvariantError(name, "backward event seq values must be unique and monotonic")
+
+    # Exact bracketing: the writer stamps one run-monotonic seq on every
+    # backward event, so every pass-scoped fact must sit strictly between its
+    # pass's start and terminal records. This is a recorded fact, not an
+    # inference from timestamps or list positions.
+    start_seq_by_pass = {event.pass_index: event.seq for event in starts}
+    end_seq_by_pass = {event.pass_index: event.seq for event in ends}
+    pass_scoped_events: list[OpGradObserved | GradFnFired | ParamGradObserved] = [
+        *op_grad_events,
+        *fired_events,
+        *param_grad_events,
+    ]
+    for event in pass_scoped_events:
+        start_seq = start_seq_by_pass.get(event.pass_index)
+        if start_seq is not None and event.seq < start_seq:
+            raise MetadataInvariantError(
+                name,
+                f"backward event seq {event.seq} precedes its pass "
+                f"{event.pass_index} start (seq {start_seq})",
+            )
+        end_seq = end_seq_by_pass.get(event.pass_index)
+        if end_seq is not None and event.seq > end_seq:
+            raise MetadataInvariantError(
+                name,
+                f"backward event seq {event.seq} follows its pass "
+                f"{event.pass_index} end (seq {end_seq})",
+            )
+    for pass_index, start_seq in start_seq_by_pass.items():
+        end_seq = end_seq_by_pass.get(pass_index)
+        if end_seq is not None and end_seq <= start_seq:
+            raise MetadataInvariantError(
+                name,
+                f"backward pass {pass_index} end (seq {end_seq}) does not "
+                f"follow its start (seq {start_seq})",
+            )
 
     layer_labels = set(getattr(trace, "layer_dict_all_keys", {}))
     projected_grad_records: set[tuple[str, int]] = set()

@@ -241,7 +241,6 @@ def _emit_tensor_grad_event(trace: "Trace", grad: torch.Tensor, tensor_label: st
             dtype=str(grad.dtype),
             memory=memory,
             timestamp=time.time(),
-            seq=events.next_backward_seq(),
         )
     )
     _record_phase_timing(

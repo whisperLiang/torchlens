@@ -12,7 +12,7 @@ import torchlens.validation as tl_validation
 import torchlens.validation.backward as backward_validation
 import torchlens.validation.consolidated as consolidated_validation
 from torchlens.data_classes.grad_fn import GradFn
-from torchlens.ir.events import BackwardPassStart
+from torchlens.ir.events import BackwardPassStart, OpGradObserved
 from torchlens.options import CaptureOptions, SaveOptions
 
 _NO_GRAD_AUTOGRAD_ERROR = "element 0 of tensors does not require grad and does not have a grad_fn"
@@ -374,6 +374,91 @@ def test_backward_reprojection_folds_incrementally() -> None:
     trace.__dict__.pop("_backward_projection_event_count", None)
     backward_mod._materialize_backward_projections(trace)
     assert _backward_projection_snapshot(trace) == incremental_snapshot
+
+
+@pytest.mark.smoke
+def test_backward_events_share_one_monotonic_seq_domain() -> None:
+    """Every backward event kind carries one writer-stamped monotonic seq."""
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+    from torchlens.ir.events import BackwardPassEnd as _End
+
+    _model, _x, trace = _logged_model()
+    trace.log_backward(_output_loss(trace))
+    events = _ensure_backward_event_stream(trace).backward_events
+    seqs = [event.seq for event in events]
+    assert seqs == sorted(seqs)
+    assert len(seqs) == len(set(seqs))
+    assert all(seq > 0 for seq in seqs)
+    start = next(e for e in events if isinstance(e, BackwardPassStart))
+    end = next(e for e in events if isinstance(e, _End))
+    assert start.seq < end.seq
+    for event in events:
+        if getattr(event, "pass_index", None) == 1 and event is not start and event is not end:
+            assert start.seq < event.seq < end.seq
+
+
+def _invariant_check(trace: tl.Trace) -> None:
+    """Run the backward event-flow invariant directly."""
+    from torchlens.validation.invariants import _check_backward_event_flow_invariants
+
+    _check_backward_event_flow_invariants(trace, "backward_graph_invariants")
+
+
+@pytest.mark.smoke
+def test_backward_seq_invariants_fire_on_planted_mutations() -> None:
+    """Each rewritten exact-seq assertion still fails on a planted misorder."""
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+    from torchlens.ir.events import BackwardPassEnd as _End
+    from torchlens.validation.invariants import MetadataInvariantError
+
+    _model, _x, trace = _logged_model()
+    trace.log_backward(_output_loss(trace))
+    events = _ensure_backward_event_stream(trace).backward_events
+    _invariant_check(trace)  # positive control: the real stream passes
+
+    start = next(e for e in events if isinstance(e, BackwardPassStart))
+    end = next(e for e in events if isinstance(e, _End))
+    op_grad = next(e for e in events if isinstance(e, OpGradObserved))
+
+    original_op_grad_seq = op_grad.seq
+    object.__setattr__(op_grad, "seq", end.seq + 1)
+    with pytest.raises(MetadataInvariantError, match="follows its pass|unique and monotonic"):
+        _invariant_check(trace)
+    object.__setattr__(op_grad, "seq", start.seq - 1 if start.seq > 1 else 0)
+    with pytest.raises(MetadataInvariantError, match="precedes its pass|unique and monotonic"):
+        _invariant_check(trace)
+    object.__setattr__(op_grad, "seq", original_op_grad_seq)
+    _invariant_check(trace)
+
+    original_end_seq = end.seq
+    object.__setattr__(end, "seq", start.seq)
+    with pytest.raises(MetadataInvariantError, match="unique and monotonic|does not"):
+        _invariant_check(trace)
+    object.__setattr__(end, "seq", original_end_seq)
+    _invariant_check(trace)
+
+    original_start_seq = start.seq
+    object.__setattr__(start, "seq", original_end_seq + 5)
+    with pytest.raises(MetadataInvariantError):
+        _invariant_check(trace)
+    object.__setattr__(start, "seq", original_start_seq)
+    _invariant_check(trace)
+
+    # A monotonic-but-misbracketed stream (End reordered before the pass's
+    # facts, all seqs renumbered in list order) must fail on bracketing
+    # alone, proving the exact-bracket assertion is independently armed.
+    original_order = list(events)
+    original_seqs = [event.seq for event in events]
+    events.remove(end)
+    events.insert(events.index(start) + 1, end)
+    for renumbered_seq, event in enumerate(events, start=1):
+        object.__setattr__(event, "seq", renumbered_seq)
+    with pytest.raises(MetadataInvariantError, match="follows its pass"):
+        _invariant_check(trace)
+    events[:] = original_order
+    for original_seq, event in zip(original_seqs, events):
+        object.__setattr__(event, "seq", original_seq)
+    _invariant_check(trace)
 
 
 @pytest.mark.smoke

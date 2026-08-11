@@ -63,6 +63,7 @@ class BackwardPassStart:
     engine_flags: dict[str, object] | None
     forward_op_count_at_trigger: int | None
     timestamp: float
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +78,7 @@ class OpGradObserved:
     dtype: str | None
     memory: int | None
     timestamp: float
-    seq: int
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +92,7 @@ class ParamGradObserved:
     dtype: str | None
     memory: int | None
     timestamp: float
-    seq: int
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +104,7 @@ class BackwardPassEnd:
     peak_memory: int | None
     status: BackwardStatus
     order_attribution_coverage: float | None
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +121,7 @@ class GradFnDiscovered:
     creator_object_id: int | None
     source: dict[str, object | None]
     topology: tuple[int, ...]
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,7 +134,7 @@ class GradFnFired:
     grad_output_refs: object | None
     intervention_fire_ref: object | None
     timestamp: float
-    seq: int
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
