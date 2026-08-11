@@ -2360,6 +2360,43 @@ _ORIG_UNTYPED_STORAGE_DATA_PTR = torch.UntypedStorage.data_ptr
 _ORIG_UNTYPED_STORAGE_NBYTES = torch.UntypedStorage.nbytes
 
 
+_TORCHLENS_PACKAGE_ROOT = str(Path(__file__).resolve().parents[2])
+
+
+def _caller_frame_is_torchlens_internal(depth: int = 2) -> bool:
+    """Return whether the frame ``depth`` levels up belongs to TorchLens itself.
+
+    The witness's detector authorization is bound to TorchLens's OWN calling
+    frames, never to a helper's identity: user model code that imports and
+    calls an internal helper must not inherit the authorization (its raw
+    reads then run bare and the shadow detector convicts them normally).
+    Both the caller's module name and its code file location must sit inside
+    the installed ``torchlens`` package.
+
+    Parameters
+    ----------
+    depth:
+        Stack depth of the frame to authenticate, counted from this
+        function's own frame (``2`` = the immediate caller of the helper
+        that invoked this check).
+    """
+
+    try:
+        caller = sys._getframe(depth)
+    except ValueError:
+        return False
+    module_name = caller.f_globals.get("__name__")
+    if not isinstance(module_name, str) or not (
+        module_name == "torchlens" or module_name.startswith("torchlens.")
+    ):
+        return False
+    try:
+        code_path = str(Path(caller.f_code.co_filename).resolve())
+    except (OSError, ValueError):
+        return False
+    return code_path.startswith(_TORCHLENS_PACKAGE_ROOT)
+
+
 def _raw_storage_ptr_no_observe(tensor: Any) -> int | None:
     """Return a tensor's untyped-storage data pointer via the true originals, ptr 0 -> None (r43).
 
@@ -2367,12 +2404,19 @@ def _raw_storage_ptr_no_observe(tensor: Any) -> int | None:
     or a logging toggle, so it is safe to call from ANY thread. ``0`` (a meta / storageless
     tensor) normalizes to ``None`` so distinct storageless tensors never alias one synthetic
     pointer.
+
+    Detector authorization is granted only to TorchLens-internal callers: the
+    frame-bound tokens below exist so the WITNESS's own instrumentation reads
+    never self-trip the shadow detector. User code that imports and calls this
+    helper does not inherit that authorization -- its reads run bare through
+    the true originals and the detector observes and convicts them as the
+    unwrapped raw reaches they are.
     """
 
     if not isinstance(tensor, torch.Tensor):
         return None
     try:
-        if _state._escape_detector_mode != "off":
+        if _state._escape_detector_mode != "off" and _caller_frame_is_torchlens_internal():
             # The witness's own raw-original reads are instrumentation, not an
             # escaped user op: authorize each one through the detector's typed
             # per-call accounting so the shadow detector never reports

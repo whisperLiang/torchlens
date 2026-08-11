@@ -935,3 +935,55 @@ def test_witness_internal_storage_read_does_not_self_trip_detector() -> None:
         )
     ]
     assert not self_trips, f"witness self-trip diagnostics: {self_trips}"
+
+
+def test_user_call_into_witness_storage_helper_degrades_verification() -> None:
+    """User model code calling the witness's raw-storage helper is an escape.
+
+    Inverse control for the self-trip regression above: the helper's
+    authorization is bound to TorchLens's OWN calling frames, not to the
+    helper's identity. User model code that imports and calls
+    ``_raw_storage_ptr_no_observe`` executes pointer-dependent control flow
+    outside every wrapper, so an armed capture must NOT report
+    ``capture_verified`` with empty escape diagnostics.
+    """
+
+    from torchlens.backends.torch.completeness_witness import _raw_storage_ptr_no_observe
+    from torchlens.options import CaptureOptions
+
+    class CallsAuthorizedWitnessFrame(nn.Module):
+        """Branches on a raw storage pointer read through the helper."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Choose an op from an unobserved raw pointer."""
+
+            ptr = _raw_storage_ptr_no_observe(x)
+            if ptr is not None and ((ptr >> 8) & 1):
+                return torch.relu(x)
+            return torch.sigmoid(x)
+
+    wrap_torch(patch_policy="scoped", escape_detector="shadow", completeness_witness=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        trace = tl.trace(
+            CallsAuthorizedWitnessFrame(),
+            torch.randn(3),
+            capture=CaptureOptions(
+                intervention_ready=True,
+                capture_container_structure=True,
+                cache=False,
+            ),
+        )
+    assert not (trace.capture_verified and not trace.escape_diagnostics), (
+        trace.capture_verification_reason,
+        trace.escape_diagnostics,
+    )
+    storage_trips = [
+        diagnostic
+        for diagnostic in trace.escape_diagnostics
+        if any(
+            "untyped_storage" in str(candidate) or "data_ptr" in str(candidate)
+            for candidate in diagnostic.get("callable_candidates", ())
+        )
+    ]
+    assert storage_trips
