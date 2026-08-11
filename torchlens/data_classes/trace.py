@@ -1402,6 +1402,11 @@ class Trace(
         # Runtime-only: the set of dispatchable op func-call-ids the orphan-removal
         # pass pruned, read by the validation dispatch-count backstop. Never portable.
         "_orphan_pruned_func_call_ids": FieldPolicy.DROP,
+        # Runtime-only (r29 F3b): the capture-time (slot -> producer) parent-edge
+        # truth keyed by raw label, read by the capture_edge_survival metadata
+        # invariant. Registered in _io/scrub.py's runtime-only list; declared here
+        # so the portable-state cover stays exhaustive. Never portable.
+        "_capture_parent_edge_truth": FieldPolicy.DROP,
         "_capture_events": FieldPolicy.DROP,
         "_tl_backward_hooked_tensor_keys": FieldPolicy.DROP,
         "_active_backward_pass_index": FieldPolicy.DROP,
