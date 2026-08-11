@@ -20,6 +20,7 @@ from torch import nn
 import torchlens as tl
 from torchlens import _state
 from torchlens._errors import TorchLensCaptureGapWarning
+from torchlens.options import CaptureOptions
 import example_models
 from torchlens.backends.torch.escape_detection import (
     AUDITED_ESCAPE_EXEMPTIONS,
@@ -713,7 +714,17 @@ def test_external_profile_hook_is_chained_and_restored_on_success_and_error() ->
 
 
 def test_rng_and_escape_profile_detectors_coarm_without_lost_detection() -> None:
-    """The nested RNG profile hook chains the escape detector and restores both."""
+    """The nested RNG profile hook chains the escape detector and restores both.
+
+    The capture must be runnable-capable. ``_runnable_host_rng_channels`` only exists
+    when the host-RNG monitor is ARMED, and a plain ``tl.trace`` deliberately does not
+    arm it -- that fail-closed contract is pinned by
+    ``test_plain_trace_does_not_arm_monitor_and_stamps_fail_closed`` in
+    ``tests/test_rng_witness_gating.py``, which asserts the field is ABSENT after a
+    plain trace. This test previously used a plain trace, so only the escape
+    detector's hook was ever installed and the co-arming it names could not be
+    observed at all.
+    """
 
     if hasattr(sys, "monitoring"):
         pytest.skip("escape detection uses sys.monitoring instead of setprofile on Python 3.12+")
@@ -731,9 +742,30 @@ def test_rng_and_escape_profile_detectors_coarm_without_lost_detection() -> None
 
     wrap_torch(patch_policy="scoped", escape_detector="shadow")
     with pytest.warns(TorchLensCaptureGapWarning, match="relu"):
-        trace = tl.trace(DualDetectionModel(), torch.randn(3))
+        trace = tl.trace(
+            DualDetectionModel(),
+            torch.randn(3),
+            capture=CaptureOptions(
+                intervention_ready=True,
+                capture_container_structure=True,
+                cache=False,
+                random_seed=7,
+            ),
+        )
 
-    assert len(trace.escape_diagnostics) == 1
+    # Assert the property under test -- BOTH receivers fired -- by naming the escape,
+    # not by counting diagnostics. An armed capture also self-reports one escape for
+    # TorchLens's own `completeness_witness._raw_storage_ptr_no_observe` calling
+    # `TensorBase.untyped_storage`, which is absent from a plain capture. That
+    # self-trip is tracked separately; a total-count assertion here would silently
+    # couple this test to it.
+    escaped = {
+        candidate
+        for diagnostic in trace.escape_diagnostics
+        for candidate in diagnostic["callable_candidates"]
+    }
+    assert any("relu" in candidate for candidate in escaped), escaped
+    assert trace._runnable_rng_monitor_uncertain is False
     assert "c_rng_instance_draw" in trace._runnable_host_rng_channels
     assert sys.getprofile() is None
 
