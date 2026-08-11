@@ -1032,7 +1032,9 @@ class Trace(
         if name == "_capture_events":
             from ..captured_run import forget_event_stream
 
-            self.__dict__.pop(name, None)
+            # forget_event_stream pops the attribute itself and releases the
+            # stream's working lanes; popping here first would hand it nothing
+            # to release (the pre-migration weak registry used to find it).
             forget_event_stream(self)
             return
         state_field = _BUILD_STATE_ATTR_MAP_GET(name)

@@ -14,10 +14,13 @@ ActivationT = TypeVar("ActivationT")
 def forget_event_stream(run: object) -> None:
     """Release the run-owned raw event stream for an explicitly cleaned run.
 
-    The run (Trace/Recording) is the sole strong owner of its event stream
-    through the ``_capture_events`` instance attribute; the former module-level
-    ``_EVENT_STREAMS`` weak side registry is gone. Releasing pops the instance
-    attribute and clears the stream's working lanes.
+    The run (Trace/Recording) strongly owns its event stream through instance
+    attributes -- ``_capture_events``, and on capture-time traces also the
+    ``capture_events`` attribute holding the same stream; the former
+    module-level ``_EVENT_STREAMS`` weak side registry is gone. Releasing pops
+    the ``_capture_events`` instance attribute and clears the stream's working
+    lanes, so a ``capture_events`` alias (or any outside holder) is left with
+    an empty buffer rather than a live projection.
     """
 
     run_dict = getattr(run, "__dict__", None)
