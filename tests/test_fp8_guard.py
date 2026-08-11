@@ -23,6 +23,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens.data_classes._nonfinite import nonfinite_layers, uncheckable_payload_count
 from torchlens.errors import CaptureError
 from torchlens.utils._torch_compat import get_fp8_dtypes, get_torch_capability_snapshot
 from torchlens.utils.tensor_utils import (
@@ -431,3 +432,239 @@ def test_saving_an_fp8_activation_refuses_typed(tmp_path) -> None:
     with pytest.raises(TorchLensIOError) as excinfo:
         tl.save(trace, str(tmp_path / "fp8.tlspec"))
     assert "float8_e4m3fn" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# The reporting-side non-finite scan: a dtype nobody can check is NOT "clean"
+# ---------------------------------------------------------------------------
+
+
+def _first_nonfinite_bit_pattern(dtype: torch.dtype) -> int:
+    """Return a byte value that decodes to a non-finite value in ``dtype``.
+
+    Derived by widening all 256 patterns rather than hardcoding per-variant NaN
+    encodings (e4m3fn NaN is ``0x7F``, e4m3fnuz's is ``0x80``, e8m0fnu's is ``0xFF``),
+    so the test cannot drift from the dtype it claims to cover.
+
+    Parameters
+    ----------
+    dtype:
+        fp8 dtype to search.
+
+    Returns
+    -------
+    int
+        Byte value whose fp8 interpretation is NaN or Inf.
+    """
+
+    widened = torch.arange(256, dtype=torch.uint8).view(dtype).to(torch.float32)
+    nonfinite = torch.nonzero(~torch.isfinite(widened)).flatten()
+    if nonfinite.numel() == 0:  # pragma: no cover - every shipped variant has one
+        pytest.skip(f"{dtype} encodes no non-finite value")
+    return int(nonfinite[0].item())
+
+
+class _Fp8NanBitPattern(nn.Module):
+    """Bit-view a finite integer payload into an fp8 non-finite value.
+
+    The fp8 activation is the ONLY non-finite payload in the capture: the input, the
+    integer arithmetic, and the float32 tail are all finite, so a scan that cannot
+    check fp8 has nothing else to trip on and answers "clean". That is what makes
+    this a test of the fp8 check and not of the float32 one.
+    """
+
+    def __init__(self, dtype: torch.dtype, bit_pattern: int) -> None:
+        """Store the fp8 dtype and the byte value to reinterpret.
+
+        Parameters
+        ----------
+        dtype:
+            fp8 dtype to view the bytes as.
+        bit_pattern:
+            Byte value that decodes to NaN or Inf in ``dtype``.
+        """
+
+        super().__init__()
+        self.dtype = dtype
+        self.bit_pattern = bit_pattern
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return a finite float32 tensor via a non-finite fp8 intermediate.
+
+        Parameters
+        ----------
+        x:
+            Input batch.
+
+        Returns
+        -------
+        torch.Tensor
+            Finite float32 activation.
+        """
+
+        bits = (x * 0 + float(self.bit_pattern)).to(torch.uint8)
+        return bits.view(self.dtype).to(torch.uint8).float() + 1.0
+
+
+@pytest.mark.heavy
+def test_report_scan_finds_an_fp8_nan_the_native_kernel_cannot_see() -> None:
+    """``print(trace)``'s verdict must not read "clean" over an unchecked fp8 payload.
+
+    The scan behind ``Trace.first_nonfinite`` / ``_repr_html_`` / ``report.explain``
+    swallowed ``RuntimeError`` and answered ``False``, so an all-NaN fp8 activation
+    produced the whole-capture verdict "No non-finite tensor values found in saved
+    outs" -- a false clean, the same disarmed tripwire as the ``raise_on_nan``
+    swallow one layer down.
+    """
+
+    for dtype in _fp8_dtypes():
+        pattern = _first_nonfinite_bit_pattern(dtype)
+        trace = tl.trace(_Fp8NanBitPattern(dtype, pattern), torch.ones(4))
+        answer = trace.first_nonfinite(link_format="text")
+        assert "First non-finite saved out" in answer, f"{dtype} read as clean: {answer}"
+        assert str(dtype) in answer, f"{dtype} was not named as the culprit: {answer}"
+        assert len(nonfinite_layers(trace, kind="saved")) == 1, (
+            f"{dtype}: exactly the fp8 activation should be flagged"
+        )
+        assert uncheckable_payload_count(trace, kind="saved") == 0, (
+            f"{dtype} is checked by widening, so it must not be reported as unchecked"
+        )
+
+
+def test_no_fp8_variant_can_be_trusted_to_its_native_finiteness_kernel() -> None:
+    """Pin the premise the scan fix rests on, per variant.
+
+    For every fp8 dtype torch exposes, the native ``isfinite`` either raises
+    ``NotImplementedError`` or -- ``float8_e8m0fnu`` -- returns ``True`` for a NaN
+    pattern, i.e. answers WRONGLY. The exact float32 widening is right for all of
+    them. If a future torch ships correct fp8 kernels this test fails loudly, which
+    is the intended signal to revisit the widening rather than to keep it by inertia.
+    """
+
+    trustworthy: list[str] = []
+    for dtype in _fp8_dtypes():
+        pattern = _first_nonfinite_bit_pattern(dtype)
+        payload = torch.tensor([pattern], dtype=torch.uint8).view(dtype)
+        assert bool((~torch.isfinite(fp8_widen_for_numeric_ops(payload))).all()), (
+            f"the widened check must see {dtype}'s non-finite pattern"
+        )
+        try:
+            native_ok = bool((~torch.isfinite(payload)).all())
+        except NotImplementedError:
+            continue
+        if native_ok:
+            trustworthy.append(str(dtype))
+    assert trustworthy == ["torch.float8_e5m2"], (
+        "native fp8 finiteness support changed; revisit the widening deliberately, "
+        f"trustworthy variants now: {trustworthy}"
+    )
+
+
+@pytest.mark.heavy
+def test_a_dtype_with_no_finiteness_kernel_is_disclosed_not_called_finite() -> None:
+    """A quantized payload yields no evidence, and the verdict must say so.
+
+    Widening fixes fp8, but quantized and sparse payloads still have no runnable
+    ``isfinite``. Silently folding "could not look" into a clean answer is exactly
+    the dishonesty this phase removes, so the count is disclosed instead.
+    """
+
+    class Quantized(nn.Module):
+        """Model that produces a qint8 activation mid-forward."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return a float32 activation via a quantized intermediate.
+
+            Parameters
+            ----------
+            x:
+                Input batch.
+
+            Returns
+            -------
+            torch.Tensor
+                Dequantized float32 activation.
+            """
+
+            quantized = torch.quantize_per_tensor(x, 0.1, 0, torch.qint8)
+            return quantized.dequantize() + 1.0
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+        trace = tl.trace(Quantized(), torch.ones(4))
+    assert uncheckable_payload_count(trace, kind="saved") == 1
+    answer = trace.first_nonfinite()
+    assert "no runnable finiteness check" in answer, answer
+    assert answer != "No non-finite tensor values found in saved outs.", (
+        "an unhedged clean verdict must not cover a payload that was never checked"
+    )
+    # ``report.explain``'s anomaly bullet publishes the same verdict standalone.
+    anomaly = [
+        line
+        for line in tl.report.explain(trace).splitlines()
+        if "NaN or Inf" in line or "no runnable finiteness check" in line
+    ]
+    assert anomaly, "the report must still carry an anomaly verdict"
+    assert all("no runnable finiteness check" in line for line in anomaly), (
+        f"report.explain published an unhedged clean bill of health: {anomaly}"
+    )
+
+
+@pytest.mark.heavy
+def test_both_coverage_gaps_are_disclosed_together() -> None:
+    """An unsaved op and an uncheckable dtype in one capture are both named."""
+
+    class Quantized(nn.Module):
+        """Model with a qint8 activation and several float32 ops around it."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return a float32 activation via a quantized intermediate.
+
+            Parameters
+            ----------
+            x:
+                Input batch.
+
+            Returns
+            -------
+            torch.Tensor
+                Dequantized float32 activation.
+            """
+
+            quantized = torch.quantize_per_tensor(torch.relu(x), 0.1, 0, torch.qint8)
+            return quantized.dequantize() + 1.0
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+        trace = tl.trace(
+            Quantized(),
+            torch.ones(4),
+            save=tl.func("quantize_per_tensor") | tl.func("relu"),
+        )
+    answer = trace.first_nonfinite()
+    assert "retained no payload" in answer, answer
+    assert "no runnable finiteness check" in answer, answer
+
+
+@pytest.mark.heavy
+def test_a_clean_fp8_capture_keeps_the_unhedged_clean_answer() -> None:
+    """fp8 is really checked, so it adds no hedge to an otherwise clean capture.
+
+    This is the other half of honesty: the disclosure must not fire for payloads the
+    scan genuinely examined, or every fp8 capture would read as partially unchecked.
+    """
+
+    trace = tl.trace(_Fp8CastModel(torch.float8_e4m3fn), torch.randn(2, 4))
+    assert uncheckable_payload_count(trace, kind="saved") == 0
+    assert trace.first_nonfinite() == "No non-finite tensor values found in saved outs."
+
+
+@pytest.mark.heavy
+def test_the_memo_never_serves_a_stale_clean_verdict_for_fp8() -> None:
+    """The scan is memoized per log; the second question must agree with the first."""
+
+    dtype = torch.float8_e4m3fn
+    trace = tl.trace(_Fp8NanBitPattern(dtype, _first_nonfinite_bit_pattern(dtype)), torch.ones(4))
+    first = trace.first_nonfinite(link_format="text")
+    assert first == trace.first_nonfinite(link_format="text")
+    assert "First non-finite saved out" in first

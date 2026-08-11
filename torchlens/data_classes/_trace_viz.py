@@ -27,7 +27,7 @@ from .._literals import (
 )
 from .._source_links import file_line_text, terminal_file_line_link, vscode_file_line_link
 from ..intervention.types import FireRecord
-from ._nonfinite import first_nonfinite_layer, unexamined_payload_count
+from ._nonfinite import coverage_gap_note, first_nonfinite_layer
 from .module import Module
 
 
@@ -376,15 +376,14 @@ class TraceVisualizationMixin(_TraceMixinBase):
                 f"dtype={getattr(layer, 'dtype', None)}, parents={parents}, "
                 f"source={location}."
             )
-        unexamined = unexamined_payload_count(self, kind="saved")
-        if unexamined:
-            # A scoped clean answer must not read like a whole-capture one.
-            return (
-                "No non-finite tensor values found in saved outs "
-                f"({unexamined} op(s) retained no payload and could not be examined; "
-                "re-run with a wider save= to cover them)."
-            )
-        return "No non-finite tensor values found in saved outs."
+        # A scoped clean answer must not read like a whole-capture one: ops that
+        # retained no payload, and payloads whose dtype has no runnable ``isfinite``
+        # (quantized, sparse), are both named. fp8 is NOT in that class -- it is
+        # widened exactly and really is checked.
+        return (
+            "No non-finite tensor values found in saved outs"
+            f"{coverage_gap_note(self, kind='saved')}."
+        )
 
     def draw_backward(
         self: "Trace",
