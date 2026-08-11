@@ -1316,7 +1316,9 @@ def _materialize_backward_projections_impl(
             base_ordinals = [
                 call_ordinal
                 for call_ordinal, prior_call in prior_calls.items()
-                if prior_call.backward_pass_index <= pass_index_base
+                # A call with no recorded pass index counts as pre-base so its
+                # ordinal is reserved (never reused), the conservative reading.
+                if (prior_call.backward_pass_index or 0) <= pass_index_base
             ]
             if base_ordinals:
                 state.per_object_ordinals[object_id] = max(

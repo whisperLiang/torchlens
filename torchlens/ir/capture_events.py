@@ -576,18 +576,20 @@ class CaptureEvents:
                 clone = _clone_op_event_for_replay(event)
             else:
                 clone = replace(event)
-            if lane_name == "intervention_events":
-                # Sanctioned chain of custody: an edit genuinely bound to the
-                # SOURCE run re-binds to this journal (its run token and the
-                # re-stamped seq of its already-merged target op, which sorts
-                # earlier by chronology). A forged/unbound edit or one bound
-                # to a foreign run keeps its stale binding and stays refused
-                # by validation.
-                if getattr(event, "run_token", None) == other.run_nonce:
-                    object.__setattr__(clone, "run_token", self.run_nonce)
-                    object.__setattr__(
-                        clone, "target_seq", seq_map.get(getattr(event, "target_seq", 0), 0)
-                    )
+            # Sanctioned chain of custody: an edit genuinely bound to the
+            # SOURCE run re-binds to this journal (its run token and the
+            # re-stamped seq of its already-merged target op, which sorts
+            # earlier by chronology). A forged/unbound edit or one bound to
+            # a foreign run keeps its stale binding and stays refused by
+            # validation.
+            if (
+                lane_name == "intervention_events"
+                and getattr(event, "run_token", None) == other.run_nonce
+            ):
+                object.__setattr__(clone, "run_token", self.run_nonce)
+                object.__setattr__(
+                    clone, "target_seq", seq_map.get(getattr(event, "target_seq", 0), 0)
+                )
             getattr(self, _LANE_APPENDERS[lane_name])(clone)
             if source_seq:
                 seq_map[source_seq] = clone.seq
