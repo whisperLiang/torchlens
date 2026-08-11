@@ -229,7 +229,7 @@ def test_ram_disk_mirror_invokes_transform_once_per_selected_event(tmp_path: Pat
     recording = tl.fastlog.record(
         _PostfuncModel(),
         torch.ones(1, 3),
-        keep_op=lambda ctx: ctx.kind == "op" and ctx.func_name == "relu",
+        save=lambda ctx: ctx.kind == "op" and ctx.func_name == "relu",
         activation_transform=counting_transform,
         streaming=tl.StreamingOptions(
             bundle_path=tmp_path / "mirror_once.tlfast", retain_in_memory=True
@@ -333,7 +333,7 @@ def test_predicate_transform_invocation_count_matches_kept_events() -> None:
     recording = tl.fastlog.record(
         _PostfuncModel(),
         torch.ones(1, 3),
-        keep_op=keep_op,
+        save=keep_op,
         activation_transform=counting_transform,
     )
 
@@ -359,7 +359,7 @@ def test_dry_run_does_not_invoke_transform() -> None:
     trace = tl.fastlog.dry_run(
         _PostfuncModel(),
         torch.ones(1, 3),
-        keep_op=lambda ctx: ctx.kind == "op",
+        save=lambda ctx: ctx.kind == "op",
     )
 
     assert trace.contexts

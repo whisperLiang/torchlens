@@ -29,13 +29,12 @@ class DefaultsModel(nn.Module):
 def test_default_op_accepts_bool_and_capture_spec(default_op: bool | CaptureSpec) -> None:
     """Operation defaults accept bool and CaptureSpec values."""
 
-    with pytest.warns(DeprecationWarning, match="keep_module"):
-        recording = tl.fastlog.record(
-            DefaultsModel(),
-            torch.ones(1, 2),
-            keep_module=lambda ctx: False,
-            default_op=default_op,
-        )
+    recording = tl.fastlog.record(
+        DefaultsModel(),
+        torch.ones(1, 2),
+        default_module=True,
+        default_op=default_op,
+    )
 
     expected_any_ops = default_op is not False
     assert any(record.ctx.kind == "op" for record in recording) is expected_any_ops
@@ -50,7 +49,7 @@ def test_default_module_accepts_bool_and_capture_spec(
     recording = tl.fastlog.record(
         DefaultsModel(),
         torch.ones(1, 2),
-        keep_op=lambda ctx: False,
+        save=lambda ctx: False,
         default_module=default_module,
     )
 
@@ -64,7 +63,7 @@ def test_none_abstain_uses_default_op() -> None:
     recording = tl.fastlog.record(
         DefaultsModel(),
         torch.ones(1, 2),
-        keep_op=lambda ctx: None,
+        save=lambda ctx: None,
         default_op=CaptureSpec(save_out=False, save_metadata=True),
     )
 
@@ -79,8 +78,7 @@ def test_noop_recorder_configuration_errors_at_construction() -> None:
     with pytest.raises(RecordingConfigError, match="requires a predicate"):
         tl.fastlog.Recorder(
             DefaultsModel(),
-            keep_op=None,
-            keep_module=None,
+            save=None,
             default_op=False,
             default_module=False,
         )

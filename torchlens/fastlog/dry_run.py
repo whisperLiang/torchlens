@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from typing import Any
 
 from torch import nn
@@ -18,8 +17,7 @@ def dry_run(
     input_args: Any,
     input_kwargs: dict[str, Any] | None = None,
     *,
-    keep_op: PredicateFn | None = None,
-    keep_module: PredicateFn | None = None,
+    save: PredicateFn | None = None,
     history_size: int = 8,
     include_source_events: bool = False,
     random_seed: int | None = None,
@@ -34,7 +32,7 @@ def dry_run(
         Tensor, list, or tuple of positional model inputs.
     input_kwargs:
         Optional keyword arguments for the model call.
-    keep_op, keep_module, history_size, include_source_events, random_seed:
+    save, history_size, include_source_events, random_seed:
         Fastlog dry-run options. Predicate exceptions propagate immediately.
 
     Returns
@@ -45,26 +43,17 @@ def dry_run(
 
     input_args = _coerce_input_args(model, input_args)
     recorder_kwargs: dict[str, Any] = {
-        "save": keep_op,
+        "save": save,
         "history_size": history_size,
         "include_source_events": include_source_events,
         "on_predicate_error": "fail-fast",
         "streaming": None,
         "random_seed": random_seed,
     }
-    if keep_module is not None:
-        recorder_kwargs["keep_module"] = keep_module
-
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            r"Recorder\(keep_module=\.\.\.\) is deprecated; use Recorder\(save=\.\.\.\) instead\.",
-            DeprecationWarning,
-        )
-        recorder_cm = Recorder(
-            model,
-            **recorder_kwargs,
-        )
+    recorder_cm = Recorder(
+        model,
+        **recorder_kwargs,
+    )
 
     with recorder_cm as recorder:
         if recorder._state is None:  # noqa: SLF001

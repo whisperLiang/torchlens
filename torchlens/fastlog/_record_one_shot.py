@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
-import warnings
+from typing import Any
 
 from torch import nn
 
@@ -28,37 +27,12 @@ from .options import (
 from .types import CaptureSpec, Recording
 
 
-def _resolve_save_alias(
-    *,
-    save: PredicateFn | None | MissingType,
-    keep_op: PredicateFn | None | MissingType,
-) -> PredicateFn | None:
-    """Resolve ``record(save=...)`` and deprecated ``keep_op=...`` spelling."""
-
-    save_supplied = not isinstance(save, MissingType)
-    keep_op_supplied = not isinstance(keep_op, MissingType)
-    if save_supplied and keep_op_supplied:
-        raise ValueError("record() received both save= and deprecated keep_op=.")
-    if keep_op_supplied:
-        warnings.warn(
-            "record(keep_op=...) is deprecated; use record(save=...) instead.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-        return cast("PredicateFn | None", keep_op)
-    if not save_supplied:
-        return None
-    return cast("PredicateFn | None", save)
-
-
 def record(
     model: nn.Module,
     input_args: Any,
     input_kwargs: dict[str, Any] | None = None,
     *,
-    save: PredicateFn | None | MissingType = MISSING,
-    keep_op: PredicateFn | None | MissingType = MISSING,
-    keep_module: PredicateFn | None | MissingType = MISSING,
+    save: PredicateFn | None = None,
     default_op: bool | CaptureSpec | MissingType = MISSING,
     default_module: bool | CaptureSpec | MissingType = MISSING,
     history_size: int = 8,
@@ -86,11 +60,8 @@ def record(
 ) -> Recording | tuple[Any, Recording]:
     """Record one model forward pass with capture predicates.
 
-    Migration note
-    --------------
-    ``record(save=...)`` is the canonical predicate spelling and matches
-    ``trace(save=...)``. ``keep_op=`` and ``keep_module=`` are deprecated
-    compatibility aliases; ``tl.fastlog.record`` remains a shim to this API.
+    ``record(save=...)`` is the one predicate spelling and matches
+    ``trace(save=...)``; ``tl.fastlog.record`` remains a shim to this API.
 
     Parameters
     ----------
@@ -100,8 +71,8 @@ def record(
         Tensor, list, or tuple of positional model inputs.
     input_kwargs:
         Optional keyword arguments for the model call.
-    save, keep_op, keep_module, default_op, default_module, history_size,
-    lookback, lookback_payload_policy, include_source_events, max_predicate_failures,
+    save, default_op, default_module, history_size, lookback,
+    lookback_payload_policy, include_source_events, max_predicate_failures,
     on_predicate_error, storage, streaming, random_seed:
         Fastlog recording options.
     on_forward_error:
@@ -147,13 +118,6 @@ def record(
     if storage is not None and streaming is not None:
         raise TypeError("Do not pass both `storage` and `streaming`.")
     validate_postprocess(postprocess)
-    resolved_keep_op = _resolve_save_alias(save=save, keep_op=keep_op)
-    if keep_module is not MISSING:
-        warnings.warn(
-            "record(keep_module=...) is deprecated; use record(save=...) instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
     input_args = _coerce_input_args(model, input_args)
     # Fail fast on tensor variants the logging pipeline cannot handle (meta tensors have no
     # storage, sparse layouts break copy/print/FLOPs paths, symbolic shapes break metadata).
@@ -162,9 +126,7 @@ def record(
     check_model_and_input_variants(model, input_args, input_kwargs)
     with Recorder(
         model,
-        save=resolved_keep_op,
-        keep_op=MISSING,
-        keep_module=keep_module,
+        save=save,
         default_op=default_op,
         default_module=default_module,
         history_size=history_size,

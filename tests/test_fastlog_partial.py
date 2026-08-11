@@ -325,22 +325,21 @@ def test_missing_failed_event_snapshot_reraises_original(
 def test_model_error_wins_over_module_exit_predicate_error() -> None:
     """The original model exception wins over a module-exit predicate failure."""
 
-    def keep_module(ctx: RecordContext) -> bool:
+    def module_exit_halt(ctx: RecordContext) -> bool:
         """Raise from module-exit predicates while the model is unwinding."""
 
         if ctx.kind == "module_exit":
             raise ValueError("module exit predicate boom")
         return False
 
-    with pytest.warns(DeprecationWarning, match="record\\(keep_module="):
-        recording = tl.record(
-            ParentWithFailingChild(),
-            torch.tensor(1.0),
-            save=_save_ops,
-            keep_module=keep_module,
-            on_predicate_error="fail-fast",
-            on_forward_error="return_partial",
-        )
+    recording = tl.record(
+        ParentWithFailingChild(),
+        torch.tensor(1.0),
+        save=_save_ops,
+        halt=module_exit_halt,
+        on_predicate_error="fail-fast",
+        on_forward_error="return_partial",
+    )
 
     _assert_failed_partial(recording)
     assert "child model boom" in str(recording.error_repr)
@@ -476,22 +475,21 @@ def test_disk_partial_bundle_path_points_to_recoverable_temp_dir(tmp_path: Path)
 def test_accumulated_predicate_error_suppressed_after_failed_forward() -> None:
     """Recorder.__exit__ suppresses accumulated predicate errors after failure."""
 
-    def keep_module(ctx: RecordContext) -> bool:
+    def module_exit_halt(ctx: RecordContext) -> bool:
         """Accumulate a predicate failure on module exit."""
 
         if ctx.kind == "module_exit":
             raise ValueError("accumulated predicate boom")
         return False
 
-    with pytest.warns(DeprecationWarning, match="record\\(keep_module="):
-        recording = tl.record(
-            ParentWithFailingChild(),
-            torch.tensor(1.0),
-            save=_save_ops,
-            keep_module=keep_module,
-            on_predicate_error="accumulate",
-            on_forward_error="return_partial",
-        )
+    recording = tl.record(
+        ParentWithFailingChild(),
+        torch.tensor(1.0),
+        save=_save_ops,
+        halt=module_exit_halt,
+        on_predicate_error="accumulate",
+        on_forward_error="return_partial",
+    )
 
     _assert_failed_partial(recording)
     assert recording.predicate_failures
@@ -500,21 +498,18 @@ def test_accumulated_predicate_error_suppressed_after_failed_forward() -> None:
 def test_accumulated_predicate_error_still_raises_without_forward_failure() -> None:
     """The suppression is limited to failed-forward recorders."""
 
-    def keep_module(ctx: RecordContext) -> bool:
+    def module_exit_halt(ctx: RecordContext) -> bool:
         """Accumulate a predicate failure on module exit."""
 
         if ctx.kind == "module_exit":
             raise ValueError("healthy predicate boom")
         return False
 
-    with (
-        pytest.warns(DeprecationWarning, match="record\\(keep_module="),
-        pytest.raises(PredicateError, match="fastlog predicate failed"),
-    ):
+    with pytest.raises(PredicateError, match="fastlog predicate failed"):
         tl.record(
             HealthyModel(),
             torch.tensor(1.0),
             save=_save_ops,
-            keep_module=keep_module,
+            halt=module_exit_halt,
             on_predicate_error="accumulate",
         )

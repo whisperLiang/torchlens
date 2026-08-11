@@ -290,19 +290,16 @@ def test_recording_to_trace_module_tree_matches_exhaustive(model_factory) -> Non
     assert _module_call_stacks(cooked) == _module_call_stacks(exhaustive)
 
 
-def test_record_save_matches_deprecated_keep_op_alias() -> None:
-    """record(save=...) and deprecated record(keep_op=...) retain the same ops."""
+def test_removed_keep_aliases_raise_type_error() -> None:
+    """The removed keep_op=/keep_module= aliases fail loudly, never silently."""
 
     model = ConvReluAdd()
     x = torch.randn(1, 1, 4, 4)
 
-    save_recording = tl.record(model, x, save=tl.func("conv2d"), random_seed=29)
-    with pytest.warns(DeprecationWarning, match="keep_op"):
-        alias_recording = tl.record(model, x, keep_op=tl.func("conv2d"), random_seed=29)
-
-    assert [record.ctx.raw_label for record in save_recording] == [
-        record.ctx.raw_label for record in alias_recording
-    ]
+    with pytest.raises(TypeError, match="keep_op"):
+        tl.record(model, x, keep_op=tl.func("conv2d"), random_seed=29)
+    with pytest.raises(TypeError, match="keep_module"):
+        tl.record(model, x, keep_module=lambda ctx: True, random_seed=29)
 
 
 # ---------------------------------------------------------------------------

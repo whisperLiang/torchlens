@@ -40,7 +40,7 @@ def test_recording_log_backward_grad_fn_id_link() -> None:
     out, recording = tl.fastlog.record(
         TinyRelu(),
         _input(),
-        keep_op=lambda ctx: ctx.label == "relu_1",
+        save=lambda ctx: ctx.label == "relu_1",
         save_grads=True,
         return_output=True,
     )
@@ -59,7 +59,7 @@ def test_recording_log_backward_intervening_grad_fn() -> None:
     out, recording = tl.fastlog.record(
         TinyRelu(),
         _input(),
-        keep_op=lambda ctx: ctx.label == "relu_1",
+        save=lambda ctx: ctx.label == "relu_1",
         return_output=True,
     )
 
@@ -79,7 +79,7 @@ def test_recording_log_backward_disk_only_rejects_save_grads(tmp_path: Path) -> 
     out, recording = tl.fastlog.record(
         TinyRelu(),
         _input(),
-        keep_op=lambda ctx: ctx.label == "relu_1",
+        save=lambda ctx: ctx.label == "relu_1",
         storage=tl.to_disk(tmp_path / "grad.tlfast"),
         return_output=True,
     )
@@ -95,7 +95,7 @@ def test_recording_log_backward_disk_only_dynamic_save_grads_resolves(tmp_path: 
     out, recording = tl.fastlog.record(
         TinyRelu(),
         _input(),
-        keep_op=lambda ctx: ctx.label == "relu_1",
+        save=lambda ctx: ctx.label == "relu_1",
         storage=tl.to_disk(tmp_path / "grad.tlfast"),
         return_output=True,
     )
@@ -110,7 +110,7 @@ def test_recording_log_backward_grad_fn_id_reuse_does_not_misjoin() -> None:
     model = TinyRelu()
     with tl.fastlog.Recorder(
         model,
-        keep_op=lambda ctx: ctx.label == "relu_1",
+        save=lambda ctx: ctx.label == "relu_1",
         save_grads=True,
     ) as recorder:
         out_1 = recorder.log(_input())
@@ -131,7 +131,7 @@ def test_fastlog_keep_grad_selector_is_removed() -> None:
         tl.fastlog.record(
             TinyRelu(),
             _input(),
-            keep_op=lambda ctx: ctx.label == "relu_1",
+            save=lambda ctx: ctx.label == "relu_1",
             keep_grad=True,
             return_output=True,
         )
@@ -139,7 +139,7 @@ def test_fastlog_keep_grad_selector_is_removed() -> None:
     out, recording = tl.fastlog.record(
         TinyRelu(),
         _input(),
-        keep_op=lambda ctx: ctx.label == "relu_1",
+        save=lambda ctx: ctx.label == "relu_1",
         return_output=True,
     )
     with pytest.raises(TypeError, match="keep_grad"):
