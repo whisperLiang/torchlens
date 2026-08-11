@@ -20,7 +20,7 @@ from torchlens.visualization._render_dot import _strip_render_extension
 from torchlens.visualization._render_utils import render_dot_to_file
 from torchlens.visualization.collapse_plan import RenderContext
 from torchlens.visualization.render_ir import build_render_ir
-from torchlens.visualization.rendering import GraphvizRenderError
+from torchlens.visualization._render_common import GraphvizRenderError
 
 
 class _TinyRenderModel(nn.Module):

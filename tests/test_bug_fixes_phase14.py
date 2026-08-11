@@ -23,7 +23,7 @@ from torchlens.validation import (
 )
 from torchlens.validation.core import _check_arglocs_correct_for_arg
 from torchlens.validation.exemptions import _check_interpolate_exempt, _check_lstm_exempt
-from torchlens.visualization.rendering import GRADIENT_ARROW_COLOR
+from torchlens.visualization._render_common import GRADIENT_ARROW_COLOR
 
 
 def _sample_func_for_location(x: torch.Tensor) -> torch.Tensor:

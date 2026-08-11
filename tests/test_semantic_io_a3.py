@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.visualization.rendering import _render_raw_output
+from torchlens.visualization._render_nodes import _render_raw_output
 
 
 class _Config:

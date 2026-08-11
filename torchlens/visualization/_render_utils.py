@@ -8,7 +8,7 @@ translation, module cluster styling, and HTML label escaping.
 Keep this module narrow on purpose -- only primitives that take no
 Trace/Bundle context and can be reasoned about as pure utilities.
 The orchestration that knows WHICH nodes / edges / module paths to use
-lives in the per-input-shape callers, such as ``rendering.draw`` for
+lives in the per-input-shape callers, such as ``_render_dot.draw`` for
 Trace.
 """
 
@@ -105,12 +105,12 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only
 
 
 # Recognised file extensions that callers may include on ``vis_outpath``.
-# Mirrors the legacy list in ``rendering.draw`` (kept as a tuple
+# Mirrors the legacy list in ``_render_dot.draw`` (kept as a tuple
 # so it stays cheap and immutable).
 _KNOWN_EXTS = ("pdf", "png", "jpg", "svg", "jpeg", "bmp", "pic", "tif", "tiff", "dot")
 
 # Default subprocess timeout for Graphviz render calls. Mirrors the
-# legacy literal that lived inside ``rendering.draw``.
+# legacy literal that lived inside ``_render_dot.draw``.
 RENDER_TIMEOUT_SECONDS = 120
 
 # -- Module subgraph border widths (shared between Trace and bundle paths)
@@ -349,7 +349,7 @@ def render_dot_to_file(
     """Render ``dot`` to ``outpath.<file_format>``, optionally previewing it.
 
     Mirrors the dot/save/subprocess/view flow used internally by
-    ``rendering.draw`` and ``rendering.render_backward_graph``,
+    ``_render_dot.draw`` and ``_render_entrypoints.render_backward_graph``,
     factored out so the multi-trace renderer can share the same plumbing.
 
     Returns the DOT source string (``dot.source``) regardless of whether

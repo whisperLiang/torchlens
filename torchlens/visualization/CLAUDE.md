@@ -16,8 +16,9 @@ SourceGraph -> NodeUniverse -> RenderIR -> renderers/{base,graphviz}
 - `renderers/base.py` defines the renderer protocol and capability checks; `renderers/graphviz.py`
   serializes and executes Graphviz. The rank layout backend also consumes the resolved IR.
 
-`rendering.py` remains the compatibility facade used by `Trace.draw()` and `show_model_graph()`.
-The graphviz renderer is the primary backend; `vis_node_placement="auto"` selects dot or the rank
+`Trace.draw()` dispatches directly to `_render_dot.py`; backward and combined entrypoints dispatch
+to `_render_entrypoints.py`. The graphviz renderer is the primary backend;
+`vis_node_placement="auto"` selects dot or the rank
 layout according to the resolved graph cost. Forward sibling ordering is a Graphviz-only post-layout
 operation and conservatively no-ops outside its supported forward/unrolled/dot cases.
 

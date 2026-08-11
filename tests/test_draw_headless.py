@@ -16,7 +16,7 @@ def test_view_rendered_file_skips_open_in_headless_context(
     """Headless Linux draw paths should skip viewer launch with one stderr note."""
 
     from torchlens.visualization import _render_utils
-    from torchlens.visualization.rendering import _view_rendered_file
+    from torchlens.visualization._render_dot import _view_rendered_file
 
     rendered_path = str(tmp_path / "modelgraph.pdf")
     monkeypatch.setattr(_render_utils.sys, "platform", "linux")
@@ -50,7 +50,7 @@ def test_view_rendered_file_silent_in_notebook(
     """In a notebook the figure shows inline: no viewer launch, no headless note."""
 
     from torchlens.visualization import _render_utils
-    from torchlens.visualization.rendering import _view_rendered_file
+    from torchlens.visualization._render_dot import _view_rendered_file
 
     rendered_path = str(tmp_path / "modelgraph.pdf")
     # Headless Linux remote kernel (no DISPLAY) but inside a notebook: the
