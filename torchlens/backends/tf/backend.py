@@ -22,7 +22,7 @@ from .._selective_save import reject_selector_outside_kinds
 from .._options import TF_EXTRA_KWARG_POLICY, TF_PREVIEW_TRACE_OPTION_POLICY
 from .._options import default_if_missing, reject_extra_trace_kwargs
 from .._options import reject_unsupported_trace_options
-from ..registry import BackendUnsupportedError
+from ..registry import BackendUnsupportedError, get_backend_spec
 from .funcgraph import capture_static_funcgraph
 from .modules import TFModuleTree, discover_tf_module_tree, tf_param_logs
 from .op_callback_capture import TFEagerCaptureSession, warm_up_tf_callable
@@ -84,6 +84,7 @@ class TFBackend:
         save_code_context: bool = False,
         save_rng_states: bool = False,
         recurrence_detection: bool = True,
+        compute_input_output_distances: bool = True,
         verbose: bool = False,
         backward_ready: bool = False,
         name: str | None = None,
@@ -131,6 +132,11 @@ class TFBackend:
         save_code_context = default_if_missing(save_code_context, False)
         save_rng_states = default_if_missing(save_rng_states, False)
         recurrence_detection = default_if_missing(recurrence_detection, True)
+        # Torch-parity default: the depth flood runs unless explicitly disabled.
+        # This line was the one omission from this normalization block, so the
+        # public MISSING sentinel reached bool() truthy and the flood was
+        # unconditionally on with no off switch.
+        compute_input_output_distances = default_if_missing(compute_input_output_distances, True)
         verbose = default_if_missing(verbose, False)
         backward_ready = default_if_missing(backward_ready, False)
         name = default_if_missing(name, None)
@@ -184,6 +190,7 @@ class TFBackend:
                 save_code_context=save_code_context,
                 save_rng_states=save_rng_states,
                 recurrence_detection=recurrence_detection,
+                compute_input_output_distances=compute_input_output_distances,
                 verbose=verbose,
                 backward_ready=backward_ready,
                 name=name,
@@ -251,6 +258,7 @@ class TFBackend:
             save_code_context=save_code_context,
             save_rng_states=save_rng_states,
             recurrence_detection=recurrence_detection,
+            compute_input_output_distances=compute_input_output_distances,
             verbose=verbose,
             backward_ready=backward_ready,
             name=name,
@@ -376,6 +384,7 @@ class TFBackend:
         backward_ready: bool,
         name: str | None,
         module_filter: object | None,
+        compute_input_output_distances: bool = True,
         transform: object | None,
         raw_input: object | None,
         save_raw_input: str | bool,
@@ -458,7 +467,7 @@ class TFBackend:
             save_arg_values=save_arg_values,
             save_grads=save_grads,
             detach_saved_activations=detach_saved_activations,
-            mark_layer_depths=False,
+            mark_layer_depths=compute_input_output_distances,
             num_context_lines=num_context_lines,
             optimizer=None,
             save_code_context=save_code_context,
@@ -781,7 +790,11 @@ def _reject_extra_kwargs(kwargs: dict[str, Any]) -> None:
         Returns when all extras are missing/default.
     """
 
-    reject_extra_trace_kwargs(kwargs, TF_EXTRA_KWARG_POLICY)
+    reject_extra_trace_kwargs(
+        kwargs,
+        TF_EXTRA_KWARG_POLICY,
+        spec=get_backend_spec("tf"),
+    )
 
 
 def _pop_tf_save_predicate(kwargs: dict[str, Any]) -> BaseSelector | None:
@@ -893,6 +906,7 @@ def _reject_unsupported_options(
             "save_raw_activations": save_raw_activations,
         },
         TF_PREVIEW_TRACE_OPTION_POLICY,
+        spec=get_backend_spec("tf"),
     )
 
 

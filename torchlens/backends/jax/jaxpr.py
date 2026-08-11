@@ -2182,7 +2182,14 @@ def _write_env(env: dict[Any, Any], var: Any, value: Any, core: Any) -> None:
         The environment is updated in place.
     """
 
-    if not isinstance(var, core.DropVar):
+    drop_var_type = getattr(core, "DropVar", None)
+    if drop_var_type is not None:
+        is_drop = isinstance(var, drop_var_type)
+    else:
+        # jax >= 0.6 removed DropVar from jax.extend.core; the sentinel class
+        # still exists internally, so fall back to a name check.
+        is_drop = type(var).__name__ == "DropVar"
+    if not is_drop:
         env[var] = value
 
 

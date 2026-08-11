@@ -555,6 +555,77 @@ def _torch_capture_trace(*args: Any, **kwargs: Any) -> Any:
     return _trace_torch_model(*args, **kwargs)
 
 
+def _torch_interventions_implementation() -> object:
+    """Resolve the torch live-intervention implementing surface.
+
+    Returns
+    -------
+    object
+        The live hook applier the torch capture hot path invokes for
+        ``trace(intervene=...)`` sites.
+    """
+
+    from .torch.ops import apply_live_hooks_to_outputs
+
+    return apply_live_hooks_to_outputs
+
+
+def _torch_fastlog_implementation() -> object:
+    """Resolve the torch sparse-recording implementing surface.
+
+    Returns
+    -------
+    object
+        The ``Recorder`` class ``tl.record()`` actually runs.
+    """
+
+    from ..fastlog._recorder import Recorder
+
+    return Recorder
+
+
+def _torch_streaming_implementation() -> object:
+    """Resolve the torch streaming-save implementing surface.
+
+    Returns
+    -------
+    object
+        The disk storage backend behind ``storage=`` / ``streaming=`` saves.
+    """
+
+    from ..fastlog.storage_disk import DiskStorageBackend
+
+    return DiskStorageBackend
+
+
+def _torch_backward_capture_implementation() -> object:
+    """Resolve the torch backward-capture implementing surface.
+
+    Returns
+    -------
+    object
+        The torch backward capture module.
+    """
+
+    from .torch import backward
+
+    return backward
+
+
+def _torch_rng_replay_implementation() -> object:
+    """Resolve the torch RNG snapshot/replay implementing surface.
+
+    Returns
+    -------
+    object
+        The RNG snapshot entry on the torch capture adapter.
+    """
+
+    from .torch.backend import TorchBackend
+
+    return TorchBackend.snapshot_rng
+
+
 def _torch_capture_backend() -> CaptureBackend:
     """Return the torch Protocol adapter registered for shared capture orchestration.
 
@@ -583,8 +654,10 @@ def _mlx_capture_trace(*args: Any, **kwargs: Any) -> Any:
         Captured trace.
     """
 
+    from ._options import resolve_public_depth_alias
     from ..user_funcs import _trace_mlx_model_from_public_kwargs
 
+    resolve_public_depth_alias(kwargs)
     return _trace_mlx_model_from_public_kwargs(*args, **kwargs)
 
 
@@ -602,8 +675,10 @@ def _jax_capture_trace(*args: Any, **kwargs: Any) -> Any:
         Captured trace.
     """
 
+    from ._options import resolve_public_depth_alias
     from .jax import JAXBackend
 
+    resolve_public_depth_alias(kwargs)
     return JAXBackend().capture_trace(*args, **kwargs)
 
 
@@ -621,8 +696,10 @@ def _tinygrad_capture_trace(*args: Any, **kwargs: Any) -> Any:
         Captured trace.
     """
 
+    from ._options import resolve_public_depth_alias
     from .tinygrad import TinygradBackend
 
+    resolve_public_depth_alias(kwargs)
     return TinygradBackend().capture_trace(*args, **kwargs)
 
 
@@ -640,8 +717,10 @@ def _paddle_capture_trace(*args: Any, **kwargs: Any) -> Any:
         Captured trace.
     """
 
+    from ._options import resolve_public_depth_alias
     from .paddle import PaddleBackend
 
+    resolve_public_depth_alias(kwargs)
     return PaddleBackend().capture_trace(*args, **kwargs)
 
 
@@ -659,8 +738,10 @@ def _tf_capture_trace(*args: Any, **kwargs: Any) -> Any:
         Captured trace.
     """
 
+    from ._options import resolve_public_depth_alias
     from .tf import TFBackend
 
+    resolve_public_depth_alias(kwargs)
     return TFBackend().capture_trace(*args, **kwargs)
 
 
@@ -852,6 +933,44 @@ def _tinygrad_validate_trace(*args: Any, **kwargs: Any) -> Any:
     return TinygradBackend().validate_trace(*args, **kwargs)
 
 
+def _mlx_validate_entry(*args: Any, **kwargs: Any) -> bool:
+    """Dispatch to MLX capture-then-validate.
+
+    Parameters
+    ----------
+    *args, **kwargs:
+        Public validation arguments.
+
+    Returns
+    -------
+    bool
+        Validation result.
+    """
+
+    from .mlx import MLXBackend
+
+    return MLXBackend().validate_entry(*args, **kwargs)
+
+
+def _mlx_validate_trace(*args: Any, **kwargs: Any) -> Any:
+    """Dispatch to MLX trace replay validation.
+
+    Parameters
+    ----------
+    *args, **kwargs:
+        Trace validation arguments.
+
+    Returns
+    -------
+    Any
+        Validation result.
+    """
+
+    from .mlx import MLXBackend
+
+    return MLXBackend().validate_trace(*args, **kwargs)
+
+
 def _paddle_validate_trace(*args: Any, **kwargs: Any) -> Any:
     """Dispatch to Paddle trace replay validation.
 
@@ -918,9 +1037,17 @@ def register_default_backend_specs() -> None:
                 input_container_structure="full_spec",
                 output_container_structure="full_spec",
                 module_identity_modes=("torch_module",),
+                save_levels=("audit", "executable_with_callables", "portable", "runnable"),
                 trace_options=TORCH_TRACE_OPTIONS,
             ),
             capture_backend=_torch_capture_backend,
+            capability_implementations={
+                "backward_capture": _torch_backward_capture_implementation,
+                "fastlog": _torch_fastlog_implementation,
+                "interventions": _torch_interventions_implementation,
+                "rng_replay": _torch_rng_replay_implementation,
+                "streaming": _torch_streaming_implementation,
+            },
             serialization_policy=SerializationPolicy(
                 payload_policy="full",
                 body_format="safetensors",
@@ -936,11 +1063,11 @@ def register_default_backend_specs() -> None:
             name="mlx",
             can_handle=_mlx_can_handle,
             capture_trace=_mlx_capture_trace,
-            validate_entry=_unsupported_validate_entry,
-            validate_trace=_unsupported_validate_trace,
+            validate_entry=_mlx_validate_entry,
+            validate_trace=_mlx_validate_trace,
             capabilities=BackendCapabilities(
                 backward_capture=False,
-                validation_replay=False,
+                validation_replay=True,
                 fastlog=False,
                 interventions=False,
                 rng_replay=False,

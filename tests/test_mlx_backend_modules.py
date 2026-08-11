@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.backend_mlx
+
 mlx = pytest.importorskip("mlx")
 import mlx.core as mx  # noqa: E402
 import mlx.nn as nn  # noqa: E402

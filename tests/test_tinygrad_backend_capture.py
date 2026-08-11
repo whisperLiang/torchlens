@@ -550,12 +550,14 @@ def test_tinygrad_rejects_tinyjit_callable() -> None:
         ({"save": tl.where(lambda op: op.out is not None)}, "concrete activation values"),
         ({"layers_to_save": ["relu"]}, "full-save only.*save shaping"),
         ({"lookback": 1}, "full-save only.*save-window"),
+        # Gated options refuse through the central capability gate, whose
+        # canonical message names the owning flag and the refused option.
         (
             {"intervene": tl.when(tl.func("relu"), tl.zero_ablate())},
-            "lazy UOp descendants.*intervention",
+            "interventions=False.*intervene",
         ),
-        ({"halt": tl.func("relu")}, "lazy UOp descendants.*halt"),
-        ({"save_grads": True}, "save_grads.*full-save forward capture"),
+        ({"halt": tl.func("relu")}, "interventions=False.*halt"),
+        ({"save_grads": True}, "backward_capture=False.*save_grads"),
     ),
 )
 def test_tinygrad_save_shaping_rejected(kwargs: dict[str, Any], pattern: str) -> None:

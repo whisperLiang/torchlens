@@ -69,6 +69,7 @@ from .._save_budget import SaveBudgetExceededError
 from .._trace_state import TraceState
 from .._training_validation import _NON_GRAD_DTYPES, TrainingModeConfigError
 from ..constants import ARG_EXPRESSIONS_FIELD, LAYER_PASS_LOG_FIELD_ORDER, RAW_LABEL_SUFFIX
+from ._backend_capability_guards import raise_if_no_backward_capture
 from ..intervention.types import (
     EdgeUseRecord,
     FunctionRegistryKey,
@@ -2083,13 +2084,7 @@ class Op:
         """Per-pass gradient records saved for this Op."""
 
         trace = self.source_trace
-        if getattr(trace, "backend", "torch") in {"jax", "mlx", "tinygrad"}:
-            raise ValueError(
-                f"{getattr(trace, 'backend', 'backend')} traces do not expose op.grads or "
-                "saved_grad_ops because they do not capture true backward graphs. Use "
-                "trace.derived_grads for leaf-level derived gradients and "
-                "op.derived_grad for exact op-level derived gradients when available."
-            )
+        raise_if_no_backward_capture(trace, plural_subject="op.grads or saved_grad_ops")
         records = self._slot("_grad_records")
         if records is None:
             records = []

@@ -389,7 +389,14 @@ and cannot handle dynamic architectures.
 | Static-label `save=` | yes | yes | yes | yes | yes | yes |
 | Portable array `.tlspec` payloads | full | forward/derived arrays | forward/derived arrays | forward/derived arrays | forward/derived arrays | forward arrays |
 | Gradients | full backward graph | leaf-level + zero-tap T1 intermediate derived | leaf-level + T1 intermediate derived | leaf-level + custom-VJP-tap T1 intermediate derived | leaf-level + T1 intermediate derived | deferred |
+| Recurrence grouping (multi-pass layers) | yes | yes | -- | -- | -- | -- |
+| Validation oracle (live) | whole-forward replay | per-equation replay + perturbation | per-UOp replay + perturbation | per-op replay + perturbation | replay + perturbation + coverage guard | per-op replay (allowlisted) + self-consistency |
 | Interventions / halt / fastlog | yes | -- | -- | -- | -- | -- |
+
+Preview `save=` selectors filter what is exposed, not what is captured (no memory
+reduction); preview `tl.validate(...)` returns a status whose `bool()` raises for
+partial coverage; and every preview auto-routes genuine framework models on
+`backend=None`. See `docs/backends.md` for the per-backend contract.
 
 ```python
 # API sketch; supply compatible models and input in an application context.

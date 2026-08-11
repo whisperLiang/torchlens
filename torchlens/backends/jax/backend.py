@@ -15,7 +15,7 @@ from operator import mul
 from typing import Any, Final, cast
 
 from ..._deprecations import MISSING, MissingType
-from ...backends import BackendName, BackendUnsupportedError
+from ...backends import BackendName, BackendUnsupportedError, get_backend_spec
 from ...data_classes.layer import Layer
 from ...data_classes.derived_grad import (
     DerivedGradAccessor,
@@ -250,6 +250,7 @@ class JAXBackend:
         save_code_context: bool | MissingType = MISSING,
         save_rng_states: bool | MissingType = MISSING,
         recurrence_detection: bool | MissingType = MISSING,
+        compute_input_output_distances: bool | MissingType = MISSING,
         verbose: bool | MissingType = MISSING,
         backward_ready: bool | MissingType = MISSING,
         name: str | None | MissingType = MISSING,
@@ -379,6 +380,10 @@ class JAXBackend:
         save_code_context = _default_if_missing(save_code_context, False)
         save_rng_states = _default_if_missing(save_rng_states, False)
         recurrence_detection = _default_if_missing(recurrence_detection, True)
+        # Torch-parity default: the depth flood runs unless explicitly disabled.
+        compute_input_output_distances = _default_if_missing(
+            compute_input_output_distances, True
+        )
         verbose = _default_if_missing(verbose, False)
         backward_ready = _default_if_missing(backward_ready, False)
         name = _default_if_missing(name, None)
@@ -444,6 +449,7 @@ class JAXBackend:
             keep_orphans=cast(bool, keep_orphans),
             num_context_lines=cast(int, num_context_lines),
             recurrence_detection=cast(bool, recurrence_detection),
+            compute_input_output_distances=cast(bool, compute_input_output_distances),
             verbose=cast(bool, verbose),
             name=cast(str | None, name),
             raw_input=raw_input,
@@ -789,6 +795,7 @@ class JAXBackend:
         batch_render: str,
         output_transform: object | None,
         save_raw_output: str | bool,
+        compute_input_output_distances: bool = True,
     ) -> Trace:
         """Construct an empty JAX trace.
 
@@ -834,7 +841,7 @@ class JAXBackend:
             save_arg_values=False,
             save_grads=None,
             detach_saved_activations=False,
-            mark_layer_depths=False,
+            mark_layer_depths=compute_input_output_distances,
             num_context_lines=num_context_lines,
             optimizer=None,
             save_code_context=False,
@@ -2107,6 +2114,16 @@ class JAXBackend:
             trace.module_identity_mode = "pytree_module"
             self._attach_pytree_module_logs(trace, module_tree)
         trace._tracing_finished = True
+        # The depth flood deliberately resolves ops through its own explicit
+        # label index, NOT Trace.__getitem__ (finished-mode lookup returns
+        # Layer objects, not the ops the flood must mutate); running it after
+        # the finished flag flips is still required so relabeled child edges
+        # are present on the ops the index collects.
+        trace.mark_layer_depths = bool(getattr(trace, "mark_layer_depths", False))
+        if trace.mark_layer_depths:
+            from .._finalize import compute_preview_input_output_distances
+
+            compute_preview_input_output_distances(trace)
 
     def _attach_pytree_op_params(
         self,
@@ -2621,7 +2638,11 @@ class JAXBackend:
                 "JAX backend preview requires explicit PRNG keys as params/input leaves; "
                 "save_rng_states and torch-style RNG replay are unsupported."
             )
-        reject_unsupported_trace_options(options, JAX_PREVIEW_TRACE_OPTION_POLICY)
+        reject_unsupported_trace_options(
+            options,
+            JAX_PREVIEW_TRACE_OPTION_POLICY,
+            spec=get_backend_spec("jax"),
+        )
 
     def _reject_extra_kwargs(self, kwargs: Mapping[str, Any]) -> None:
         """Reject unrecognized kwargs reaching the backend.
@@ -2637,7 +2658,11 @@ class JAXBackend:
             Returns when no extras are present.
         """
 
-        reject_extra_trace_kwargs(dict(kwargs), JAX_EXTRA_KWARG_POLICY)
+        reject_extra_trace_kwargs(
+            dict(kwargs),
+            JAX_EXTRA_KWARG_POLICY,
+            spec=get_backend_spec("jax"),
+        )
 
 
 def _normalize_static_argnums(value: object, num_args: int) -> tuple[int, ...]:

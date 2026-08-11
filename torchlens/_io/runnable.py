@@ -17,6 +17,7 @@ import torch
 
 from .. import __version__ as TORCHLENS_VERSION
 from . import TorchLensIOError
+from ..backends.registry import BackendRegistryError, get_backend_spec
 from .._runnable_state import runnable_tensor_byte_digest
 from ..utils._callable_safety import _STORAGE_UNSAFE_NAMES
 from ..data_classes._state_adapter import state_items
@@ -322,7 +323,11 @@ def build_sparse_run_descriptor(trace: Any) -> SparseRunDescriptor:
     _normalize_trace_numpy_scalar_metadata(trace)
     diagnostics: list[RunnableDiagnostic] = []
     backend = str(getattr(trace, "backend", "torch"))
-    if backend != "torch":
+    try:
+        runnable_supported = "runnable" in get_backend_spec(backend).capabilities.save_levels
+    except BackendRegistryError:
+        runnable_supported = False
+    if not runnable_supported:
         diagnostics.append(
             _diagnostic(
                 RunnableErrorCode.UNSUPPORTED_BACKEND_REPLAY,

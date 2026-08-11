@@ -14,7 +14,7 @@ from typing import Any, Callable, cast
 import numpy as np
 
 from ... import _state
-from ...backends import BackendName, BackendUnsupportedError
+from ...backends import BackendName, BackendUnsupportedError, get_backend_spec
 from ...data_classes.derived_grad import (
     DerivedGradAccessor,
     DerivedGradRecord,
@@ -41,9 +41,11 @@ from ...ir.trace_build_state import TraceBuildState
 from ...postprocess._materialize import materialize_from_events
 from ...quantities import Duration
 from .._finalize import attach_function_root_module, attach_object_module_logs
+from ...validation.status import ValidationReplaySource, ValidationReplayStatus  # noqa: TC001
 from .._finalize import finalize_single_pass_trace
 from .._options import MLX_PREVIEW_TRACE_OPTION_POLICY, reject_unsupported_trace_options
 from . import capabilities
+from .validation import MLXOpCapture
 from .model_prep import (
     MLXModuleTree,
     cleanup_model_session,
@@ -480,6 +482,44 @@ class _MLXBoundaryReplacementObserver:
         return _replace_mlx_array_leaves(self.backend, output, replacements)
 
 
+def _mlx_loaded_replay_unavailable(trace: Trace) -> bool:
+    """Return whether a loaded MLX trace lacks live replay artifacts.
+
+    Parameters
+    ----------
+    trace
+        Trace being validated.
+
+    Returns
+    -------
+    bool
+        True when replay must report unavailable instead of a pass/fail bool.
+    """
+
+    if not bool(getattr(trace, "_loaded_from_bundle", False)):
+        return False
+    if not bool(getattr(trace, "_mlx_op_captures", ())):
+        return True
+    return str(getattr(trace, "payload_load_status", "")).startswith("audit_only")
+
+
+def _mlx_validation_source(trace: Trace) -> ValidationReplaySource:
+    """Return the validation source label for ``trace``.
+
+    Parameters
+    ----------
+    trace
+        Trace being validated.
+
+    Returns
+    -------
+    ValidationReplaySource
+        ``"loaded"`` for bundle-loaded traces, otherwise ``"live"``.
+    """
+
+    return "loaded" if getattr(trace, "_loaded_from_bundle", False) else "live"
+
+
 class MLXBackend:
     """MLX adapter for the backend-neutral capture Protocol."""
 
@@ -883,6 +923,7 @@ class MLXBackend:
         save_code_context: bool = False,
         save_rng_states: bool = False,
         recurrence_detection: bool = True,
+        compute_input_output_distances: bool = True,
         verbose: bool = False,
         backward_ready: bool = False,
         name: str | None = None,
@@ -917,6 +958,7 @@ class MLXBackend:
                 "save_visualizations": save_visualizations,
             },
             MLX_PREVIEW_TRACE_OPTION_POLICY,
+            spec=get_backend_spec("mlx"),
         )
         if random_seed is not None:
             raise BackendUnsupportedError(
@@ -936,7 +978,7 @@ class MLXBackend:
             save_arg_values=save_arg_values,
             save_grads=None,
             detach_saved_activations=detach_saved_activations,
-            mark_layer_depths=False,
+            mark_layer_depths=compute_input_output_distances,
             num_context_lines=num_context_lines,
             optimizer=None,
             save_code_context=save_code_context,
@@ -1301,6 +1343,109 @@ class MLXBackend:
             param.has_grad = True
             param.grad_shape = tuple(getattr(record.grad, "shape", ()))
 
+    def validate_entry(self, *args: Any, **kwargs: Any) -> bool:
+        """Capture then validate an MLX forward pass.
+
+        Parameters
+        ----------
+        *args, **kwargs
+            Public validation arguments forwarded to ``capture_trace``.
+
+        Returns
+        -------
+        bool
+            True when live replay validation passes.
+        """
+
+        validate_metadata = bool(kwargs.pop("validate_metadata", True))
+        trace = self.capture_trace(*args, **kwargs)
+        result = self.validate_trace(trace, validate_metadata=validate_metadata)
+        if isinstance(result, ValidationReplayStatus):
+            return result.passed
+        return result
+
+    def validate_trace(
+        self,
+        trace: Trace,
+        *_args: Any,
+        **kwargs: Any,
+    ) -> bool | ValidationReplayStatus:
+        """Validate an MLX trace with per-op replay and perturbation.
+
+        Parameters
+        ----------
+        trace
+            MLX trace to validate.
+        *_args
+            Ignored compatibility arguments.
+        **kwargs
+            Compatibility keyword arguments. ``validate_metadata`` controls
+            whether backend-neutral invariant checks run.
+
+        Returns
+        -------
+        bool or ValidationReplayStatus
+            True for a verified live pass, False for a verified live failure,
+            or an explicit unavailable status for loaded payload-stripped
+            traces.
+        """
+
+        status = trace.validation_replay_status
+        if not status.available or _mlx_loaded_replay_unavailable(trace):
+            status_result = ValidationReplayStatus.unavailable_loaded_runtime_stripped(
+                backend=self.name,
+                payload_load_status=getattr(trace, "payload_load_status", None),
+            )
+            setattr(trace, "_validation_replay_status", status_result)
+            return status_result
+        replayed_count = 0
+        failed_count = 0
+        try:
+            from ...validation.invariants import check_metadata_invariants
+            from ...validation.status import count_importer_region_annotations
+            from .validation import validate_mlx_captures
+
+            perturbation_gaps: tuple[str, ...] = ()
+            if kwargs.get("validate_metadata", True) and not check_metadata_invariants(trace):
+                failed_count = 1
+            else:
+                replayed_count, failed_count, perturbation_gaps = validate_mlx_captures(trace)
+            if failed_count == 0 and replayed_count < 1:
+                failed_count = 1
+            unverified_count = 0
+            reason_counts: dict[str, int] | None = None
+            if failed_count == 0:
+                # Perturbation gaps are honest UNVERIFIED evidence, never a
+                # silent pass: a constant producer's parent dependency cannot
+                # be perturbation-proven.
+                unverified_count = count_importer_region_annotations(trace) + len(
+                    perturbation_gaps
+                )
+                if perturbation_gaps:
+                    reason_counts = {
+                        "mlx_perturbation_no_perturbable_input": len(perturbation_gaps)
+                    }
+            status_result = ValidationReplayStatus.from_replay_counts(
+                backend=self.name,
+                source=_mlx_validation_source(trace),
+                replayed_node_count=replayed_count,
+                unverified_node_count=unverified_count,
+                failed_node_count=failed_count,
+                payload_load_status=getattr(trace, "payload_load_status", None),
+                unverified_reason_counts=reason_counts,
+            )
+        except Exception:
+            status_result = ValidationReplayStatus.result(
+                passed=False,
+                backend=self.name,
+                source=_mlx_validation_source(trace),
+                payload_load_status=getattr(trace, "payload_load_status", None),
+                replayed_node_count=replayed_count,
+                failed_node_count=max(1, failed_count),
+            )
+        setattr(trace, "_validation_replay_status", status_result)
+        return status_result if status_result.state == "unverified" else status_result.passed
+
     def emit_mlx_operation(
         self,
         trace: Trace,
@@ -1314,14 +1459,67 @@ class MLXBackend:
     ) -> None:
         """Append one MLX operation event to ``trace``."""
 
-        if not self.is_tensor(output):
+        # Container outputs (e.g. mx.split's list of arrays) materialize one
+        # op per array leaf; dropping them here would silently disconnect the
+        # graph (downstream consumers lose their parents) while keeping the
+        # call absent from BOTH sides of the replay inventory, so validation
+        # would bless the missing wiring.
+        outputs = tuple(self._iter_arrays(output))
+        if not outputs:
             return
         events = getattr(trace, "capture_events", None)
         if events is None:
             events = CaptureEvents()
             trace.capture_events = events
-        outputs = tuple(self._iter_arrays(output))
         reserved = events.reserve_label_block(op_name, len(outputs))
+        op_captures = getattr(trace, "_mlx_op_captures", None)
+        if op_captures is None:
+            op_captures = []
+            trace._mlx_op_captures = op_captures
+        labels_raw = tuple(entry.label_raw for entry in reserved)
+        # Parent labels are recorded per array leaf BEFORE outputs are labeled,
+        # so aliasing outputs cannot shadow their own parents.
+        arg_leaf_labels = tuple(
+            tuple(self.tensor_store.get_label(leaf) for leaf in self._iter_arrays(value))
+            for value in args
+        )
+        kwarg_leaf_labels = {
+            key: tuple(self.tensor_store.get_label(leaf) for leaf in self._iter_arrays(value))
+            for key, value in kwargs.items()
+        }
+        op_captures.append(
+            MLXOpCapture(
+                labels_raw=labels_raw,
+                op_name=op_name,
+                func=func,
+                args=args,
+                kwargs=dict(kwargs),
+                output=output,
+                arg_leaf_labels=arg_leaf_labels,
+                kwarg_leaf_labels=kwarg_leaf_labels,
+            )
+        )
+        # Independent replay inventory: the validation oracle's denominator.
+        # Losing a subset of _mlx_op_captures can then never shrink the
+        # expected-coverage set along with the evidence. Each record also
+        # snapshots the emit-time per-leaf parent labels, so stripping a
+        # capture's recorded provenance (to launder emit-time argument values
+        # through replay) fails coverage instead of replaying vacuously.
+        # Appended to a list — O(1) per op on the capture hot path; wholesale
+        # attribute replacement is coherent reauthoring, outside the threat
+        # model, so a tuple rebuild bought no protection.
+        inventory = getattr(trace, "_mlx_replay_inventory", None)
+        if inventory is None:
+            inventory = []
+            trace._mlx_replay_inventory = inventory
+        inventory.append(
+            (
+                op_name,
+                labels_raw,
+                arg_leaf_labels,
+                tuple(sorted((key, labels) for key, labels in kwarg_leaf_labels.items())),
+            )
+        )
         func_call_id = events.func_call_id_counter + 1
         events.func_call_id_counter = func_call_id
         emitted = self.emit_function_outputs(

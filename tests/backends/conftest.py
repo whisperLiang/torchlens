@@ -51,7 +51,14 @@ def _unsupported_tensorflow_reason() -> str | None:
         Skip reason for unsupported stacks, or ``None`` when the stack is supported.
     """
 
-    tensorflow_version = _installed_version("tensorflow")
+    tensorflow_version = next(
+        (
+            found
+            for dist_name in ("tensorflow", "tensorflow-cpu", "tensorflow-aarch64")
+            if (found := _installed_version(dist_name)) is not None
+        ),
+        None,
+    )
     keras_version = _installed_version("keras")
 
     if tensorflow_version is None:

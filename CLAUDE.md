@@ -163,9 +163,10 @@ print(tl.compat.report(model, x).to_markdown())
 - TensorFlow is available as `backend="tf"` / `backend="tensorflow"` for the Keras-3 / TF>=2.16
   preview when `keras.backend.backend() == "tensorflow"`. The shipped path is eager live capture
   with `op_callbacks` as the primary mechanism: real values, real taken-branch control flow,
-  op-level records, and Keras/`tf.Module` module stacks. Graph-only FuncGraph fallback is the
-  static-mode design; interventions, true backward capture, and T1 derived gradients remain
-  deferred like sibling preview gaps.
+  op-level records, and Keras/`tf.Module` module stacks. The graph-only FuncGraph static path is
+  implemented for compiled/SavedModel entries (opaque regions stay honestly unverified);
+  interventions, true backward capture, and T1 derived gradients remain deferred like sibling
+  preview gaps.
 - `Trace.draw(order_siblings=True)` is the default Graphviz sibling-ordering pass for
   forward unrolled graphs; set it to `False` to render the raw dot layout.
 - `Trace.draw(collapse="none"|"auto"|"max"|t, fold_repeats=None|True|False)` controls v2 smart

@@ -6,8 +6,68 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .._deprecations import MISSING
-from .registry import BackendUnsupportedError
+from .._deprecations import MISSING, warn_deprecated_alias
+from .registry import (
+    BackendCapabilityConformanceError,
+    BackendSpec,
+    BackendUnsupportedError,
+    require_capability_implementation,
+)
+
+TRACE_OPTION_CAPABILITY_GATES: dict[str, str] = {
+    "intervene": "interventions",
+    "halt": "interventions",
+    "recipes": "interventions",
+    "storage": "streaming",
+    "streaming": "streaming",
+    "save_grads": "backward_capture",
+    "backward_ready": "backward_capture",
+    "save_rng_states": "rng_replay",
+    "random_seed": "rng_replay",
+}
+"""Public trace options whose support is owned by a ``BackendCapabilities`` flag.
+
+The rejection helpers below consult this map so the registered capability table
+is the load-bearing authority: an option listed here is rejected for a backend
+exactly when the named capability flag is ``False``. The ``True`` direction is
+also fail-closed: a backend whose declarative policy rejects an option has a
+capture path that provably never dispatches it, so a ``True`` flag on such a
+backend is a self-contradictory registration and raises
+``BackendCapabilityConformanceError`` — whether or not an implementation
+factory is bound. A binding the capture path never consumes must not admit the
+option (it would be silently ignored); the only way a gated option is admitted
+is through a backend whose capture path actually consumes it, i.e. whose
+policy does not reject it."""
+
+
+def _undispatched_capability_error(
+    spec: BackendSpec, gate: str, option_name: str
+) -> BackendCapabilityConformanceError:
+    """Build the refusal for a True flag whose option the policy still rejects.
+
+    Parameters
+    ----------
+    spec:
+        Backend spec whose registration is self-contradictory.
+    gate:
+        Gated capability flag name.
+    option_name:
+        Public trace option owned by ``gate``.
+
+    Returns
+    -------
+    BackendCapabilityConformanceError
+        Typed refusal explaining that the bound implementation is never
+        dispatched by this backend's capture path.
+    """
+
+    return BackendCapabilityConformanceError(
+        f"Backend {spec.name!r} declares capability {gate!r} as True, but its "
+        f"registered capture path rejects option {option_name!r} and never "
+        "dispatches the bound implementation. A binding the backend does not "
+        "consume must not admit the option; keep the flag False or implement "
+        "real dispatch in the capture path."
+    )
 
 
 @dataclass(frozen=True)
@@ -194,9 +254,7 @@ MLX_EXTRA_KWARG_POLICY = ExtraKwargPolicy(
         "save_mode": "copy",
         "capture_tensor_grad_hooks": True,
         "save_raw_gradients": True,
-        "mark_layer_depths": False,
         "source_context_lines": 7,
-        "compute_input_output_distances": False,
         "unwrap_when_done": False,
         "reconstruction_ready": False,
     },
@@ -436,7 +494,47 @@ def default_if_missing(value: Any, default: Any) -> Any:
     return default if is_missing(value) else value
 
 
-def reject_extra_trace_kwargs(kwargs: dict[str, Any], policy: ExtraKwargPolicy) -> None:
+def resolve_public_depth_alias(kwargs: dict[str, Any]) -> None:
+    """Resolve the deprecated ``mark_layer_depths`` trace kwarg for previews.
+
+    Torch resolves this public alias inside ``CaptureOptions``; preview
+    backends receive the raw public kwarg bundle and must honor the same
+    opt-in surface instead of classifying the alias as an unsupported extra.
+
+    Parameters
+    ----------
+    kwargs:
+        Mutable public ``trace`` keyword bundle. When ``mark_layer_depths``
+        is explicitly set, its value moves to
+        ``compute_input_output_distances`` with the standard deprecation
+        warning; passing both explicitly raises the same ``TypeError`` the
+        torch path raises.
+
+    Returns
+    -------
+    None
+        ``kwargs`` is updated in place.
+    """
+
+    alias_value = kwargs.get("mark_layer_depths", MISSING)
+    if is_missing(alias_value):
+        return
+    if not is_missing(kwargs.get("compute_input_output_distances", MISSING)):
+        raise TypeError(
+            "kwarg mark_layer_depths deprecated, use "
+            "compute_input_output_distances; do not pass both"
+        )
+    warn_deprecated_alias("mark_layer_depths", "capture.compute_input_output_distances")
+    kwargs["compute_input_output_distances"] = alias_value
+    kwargs["mark_layer_depths"] = MISSING
+
+
+def reject_extra_trace_kwargs(
+    kwargs: dict[str, Any],
+    policy: ExtraKwargPolicy,
+    *,
+    spec: BackendSpec | None = None,
+) -> None:
     """Reject non-default extra public trace kwargs for a backend.
 
     Parameters
@@ -445,6 +543,13 @@ def reject_extra_trace_kwargs(kwargs: dict[str, Any], policy: ExtraKwargPolicy) 
         Extra keyword arguments that reached the backend object entry.
     policy:
         Declarative backend rejection policy.
+    spec:
+        Registered backend spec. When provided, options in
+        ``TRACE_OPTION_CAPABILITY_GATES`` refuse typed in BOTH flag states:
+        flag ``False`` uses the policy message, and flag ``True`` raises
+        ``BackendCapabilityConformanceError`` because this policy's rejection
+        list proves the backend's capture path never dispatches the option —
+        a bound implementation the backend does not consume must not admit it.
 
     Returns
     -------
@@ -459,6 +564,11 @@ def reject_extra_trace_kwargs(kwargs: dict[str, Any], policy: ExtraKwargPolicy) 
             continue
         if key in inert_values and inert_values[key] == value:
             continue
+        if spec is not None:
+            gate = TRACE_OPTION_CAPABILITY_GATES.get(key)
+            if gate is not None and getattr(spec.capabilities, gate):
+                require_capability_implementation(spec, gate)
+                raise _undispatched_capability_error(spec, gate, key)
         rejected[key] = value
     if not rejected:
         return
@@ -471,6 +581,8 @@ def reject_extra_trace_kwargs(kwargs: dict[str, Any], policy: ExtraKwargPolicy) 
 def reject_unsupported_trace_options(
     options: dict[str, Any],
     policy: PreviewTraceOptionPolicy,
+    *,
+    spec: BackendSpec | None = None,
 ) -> None:
     """Reject unsupported normalized public trace options.
 
@@ -480,6 +592,13 @@ def reject_unsupported_trace_options(
         Normalized public trace options keyed by option name.
     policy:
         Declarative backend rejection policy.
+    spec:
+        Registered backend spec. When provided, options in
+        ``TRACE_OPTION_CAPABILITY_GATES`` refuse typed in BOTH flag states:
+        flag ``False`` uses the policy message, and flag ``True`` raises
+        ``BackendCapabilityConformanceError`` because this policy's rejection
+        list proves the backend's capture path never dispatches the option —
+        a bound implementation the backend does not consume must not admit it.
 
     Returns
     -------
@@ -493,6 +612,11 @@ def reject_unsupported_trace_options(
         raise BackendUnsupportedError(policy.full_save_message)
     for option_name, message in (policy.rejected_truthy_messages or {}).items():
         if options.get(option_name):
+            if spec is not None:
+                gate = TRACE_OPTION_CAPABILITY_GATES.get(option_name)
+                if gate is not None and getattr(spec.capabilities, gate):
+                    require_capability_implementation(spec, gate)
+                    raise _undispatched_capability_error(spec, gate, option_name)
             raise BackendUnsupportedError(message)
     if policy.output_device_message is not None and options.get("output_device") != "same":
         raise policy.output_device_error(policy.output_device_message)

@@ -124,6 +124,25 @@ class BackendRuntimeCompatibilityError(BackendRegistryError):
     code = "backend_runtime_compatibility"
 
 
+class BackendCapabilityConformanceError(BackendUnsupportedError):
+    """Raised when a ``True`` capability flag has no registered implementation.
+
+    The capability table is a public promise: ``True`` means supported. A
+    flag flipped to ``True`` on a spec that registers no implementing surface
+    for that capability must refuse typed instead of silently admitting the
+    option and dropping the behavior.
+    """
+
+    code = "backend_capability_conformance"
+
+
+GATED_CAPABILITY_FLAGS: frozenset[str] = frozenset(
+    {"backward_capture", "fastlog", "interventions", "rng_replay", "streaming"}
+)
+"""Capability flags that open behavior gates and therefore require a bound
+implementing surface (see ``BackendSpec.capability_implementations``)."""
+
+
 @dataclass(frozen=True)
 class BackendCapabilities:
     """Consolidated capability flags for a registered backend.
@@ -232,6 +251,12 @@ class BackendSpec:
         Whether explicit resolution may accept inputs ``can_handle`` returns false for.
     aliases:
         Alternate explicit names.
+    capability_implementations:
+        Lazy factories for the implementing surface of each ``True`` gated
+        capability flag (``GATED_CAPABILITY_FLAGS``). Gates open only through
+        :func:`require_capability_implementation`, never through the boolean
+        alone, so a flag flip without a registered implementation refuses
+        typed instead of silently admitting unimplemented behavior.
     """
 
     name: BackendName
@@ -245,6 +270,11 @@ class BackendSpec:
     priority: int = 0
     coercible: bool = False
     aliases: tuple[str, ...] = ()
+    # compare=False keeps the frozen spec hashable (dicts are not) and
+    # registry replacement uses identity, not binding equality.
+    capability_implementations: dict[str, Callable[[], object]] | None = field(
+        default=None, compare=False
+    )
 
 
 _REGISTRY: dict[str, BackendSpec] = {}
@@ -322,6 +352,91 @@ def _validate_capture_backend_factory(spec: BackendSpec) -> None:
         )
 
 
+def _validate_capability_implementations(spec: BackendSpec) -> None:
+    """Require an implementation factory for every ``True`` gated flag.
+
+    Parameters
+    ----------
+    spec:
+        Backend spec being registered.
+
+    Returns
+    -------
+    None
+        Returns when every ``True`` gated capability flag has a factory.
+
+    Raises
+    ------
+    BackendCapabilityConformanceError
+        If a gated flag is ``True`` without a registered implementation
+        factory. Factories are not called here so registration stays
+        import-light; :func:`require_capability_implementation` resolves them
+        at gate time.
+    """
+
+    implementations = spec.capability_implementations or {}
+    missing = [
+        flag
+        for flag in sorted(GATED_CAPABILITY_FLAGS)
+        if getattr(spec.capabilities, flag) and implementations.get(flag) is None
+    ]
+    if missing:
+        names = ", ".join(missing)
+        raise BackendCapabilityConformanceError(
+            f"Backend {spec.name!r} declares capability flag(s) {names} as True "
+            "without binding an implementing surface in "
+            "capability_implementations. A boolean flip alone must not admit "
+            "unimplemented behavior; register the implementation factory or "
+            "keep the flag False."
+        )
+
+
+def require_capability_implementation(spec: BackendSpec, flag: str) -> object:
+    """Resolve the implementing surface behind a ``True`` gated capability flag.
+
+    Parameters
+    ----------
+    spec:
+        Backend spec whose gate is being opened.
+    flag:
+        Gated capability flag name from ``GATED_CAPABILITY_FLAGS``.
+
+    Returns
+    -------
+    object
+        The non-``None`` implementing surface the factory resolves to.
+
+    Raises
+    ------
+    BackendCapabilityConformanceError
+        If the flag has no bound factory, the factory raises, or it resolves
+        to ``None`` — i.e. the flag promises support the backend does not
+        actually register.
+    """
+
+    implementations = spec.capability_implementations or {}
+    factory = implementations.get(flag)
+    if factory is None:
+        raise BackendCapabilityConformanceError(
+            f"Backend {spec.name!r} reports capability {flag!r} as True but "
+            "registers no implementing surface for it; refusing instead of "
+            "silently ignoring the requested behavior."
+        )
+    try:
+        implementation = factory()
+    except Exception as exc:
+        raise BackendCapabilityConformanceError(
+            f"Backend {spec.name!r} capability {flag!r} implementation factory "
+            f"failed to resolve: {exc}"
+        ) from exc
+    if implementation is None:
+        raise BackendCapabilityConformanceError(
+            f"Backend {spec.name!r} capability {flag!r} implementation factory "
+            "resolved to None; the capability is not actually implemented."
+        )
+    return implementation
+
+
 def register_backend_spec(spec: BackendSpec, *, replace: bool = False) -> None:
     """Register a backend spec.
 
@@ -343,6 +458,7 @@ def register_backend_spec(spec: BackendSpec, *, replace: bool = False) -> None:
         if not replace and name in _REGISTRY:
             raise ValueError(f"Backend {name!r} is already registered.")
     _validate_capture_backend_factory(spec)
+    _validate_capability_implementations(spec)
     if replace:
         replaced_specs = {
             existing_spec for name in names if (existing_spec := _REGISTRY.get(name)) is not None
