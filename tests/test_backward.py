@@ -1,5 +1,6 @@
 """Smoke tests for first-class backward-pass capture."""
 
+import warnings
 from types import MethodType
 from unittest import mock
 
@@ -326,11 +327,20 @@ def _backward_projection_snapshot(trace: tl.Trace) -> dict:
         for op in trace.layer_list
         if getattr(op, "has_grad", False)
     }
+    param_grads = {
+        address: [
+            (record.ordinal, record.backward_pass_index, record.shape, record.memory)
+            for record in param_log._grad_records
+        ]
+        for address, param_log in trace.param_logs.items()
+        if param_log._grad_records
+    }
     return {
         "grad_fns": grad_fns,
         "calls": calls,
         "passes": passes,
         "op_grads": op_grads,
+        "param_grads": param_grads,
         "order": list(trace.grad_fn_order),
         "num_passes": trace.num_backward_passes,
         "num_calls": trace.num_saved_grad_fn_calls,
@@ -585,11 +595,21 @@ def test_recording_backward_delegates_foreign_graphs() -> None:
 
 @pytest.mark.smoke
 def test_recording_backward_foreign_only_block_stays_empty() -> None:
-    """A context that only sees foreign backward calls records no passes."""
+    """A foreign-only block records no passes and warns once, not silently."""
     _model, _x, trace = _logged_model()
     foreign = torch.randn(2, 2, requires_grad=True)
-    with trace.recording_backward():
-        (foreign * foreign).sum().backward()
+    with warnings.catch_warnings(record=True) as warning_records:
+        warnings.simplefilter("always")
+        with trace.recording_backward():
+            (foreign * foreign).sum().backward()
+            (foreign * 2.0).sum().backward()
+    unmatched_warnings = [
+        record
+        for record in warning_records
+        if issubclass(record.category, RuntimeWarning)
+        and "did not reach any grad-fn" in str(record.message)
+    ]
+    assert len(unmatched_warnings) == 1, "unmatched-backward warning must fire exactly once"
     assert foreign.grad is not None
     assert trace.num_backward_passes == 0
     assert len(trace.grad_fn_logs) == 0
@@ -1023,3 +1043,294 @@ def test_higher_order_grads_basic_support() -> None:
     _model, _x, trace = _logged_model()
     trace.log_backward(_output_loss(trace), create_graph=True)
     assert trace.num_backward_passes == 1
+
+
+# ---------------------------------------------------------------------------
+# Dual-review fix round: param-grad event authority, event immutability,
+# exact bracketing, restored-trace streams, and cleanup disarm.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.smoke
+def test_param_grad_records_rebuild_from_event_spine() -> None:
+    """A forced scratch rebuild reconstructs Param._grad_records from events."""
+    from torchlens.backends.torch import backward as backward_mod
+
+    _model, _x, trace = _logged_model()
+    loss = _output_loss(trace)
+    with trace.recording_backward():
+        loss.backward(retain_graph=True)
+        loss.backward()
+
+    before = {
+        address: [
+            (record.ordinal, record.backward_pass_index, record.shape, record.memory)
+            for record in param_log._grad_records
+        ]
+        for address, param_log in trace.param_logs.items()
+    }
+    payloads_before = {
+        address: [record.grad for record in param_log._grad_records]
+        for address, param_log in trace.param_logs.items()
+    }
+    assert any(before.values()), "expected captured param gradient records"
+    assert all(len(records) == 2 for records in before.values() if records)
+
+    for param_log in trace.param_logs.values():
+        param_log._grad_records = []
+    trace.__dict__.pop("_backward_projection_fold_state", None)
+    trace.__dict__.pop("_backward_projection_revision", None)
+    trace.__dict__.pop("_backward_projection_event_count", None)
+    backward_mod._materialize_backward_projections(trace)
+
+    after = {
+        address: [
+            (record.ordinal, record.backward_pass_index, record.shape, record.memory)
+            for record in param_log._grad_records
+        ]
+        for address, param_log in trace.param_logs.items()
+    }
+    assert after == before
+    for address, param_log in trace.param_logs.items():
+        for record, payload in zip(param_log._grad_records, payloads_before[address]):
+            assert record.grad is payload, "rebuild must reuse the event-held payload"
+
+
+@pytest.mark.smoke
+def test_param_grad_incremental_fold_matches_scratch_rebuild() -> None:
+    """The param-inclusive snapshot proves fold == scratch across passes."""
+    from torchlens.backends.torch import backward as backward_mod
+
+    _model, _x, trace = _logged_model()
+    loss = _output_loss(trace)
+    with trace.recording_backward():
+        loss.backward(retain_graph=True)
+        loss.backward(retain_graph=True)
+        loss.backward()
+
+    incremental_snapshot = _backward_projection_snapshot(trace)
+    assert incremental_snapshot["param_grads"], "oracle must include parameter state"
+    trace.__dict__.pop("_backward_projection_fold_state", None)
+    trace.__dict__.pop("_backward_projection_revision", None)
+    trace.__dict__.pop("_backward_projection_event_count", None)
+    backward_mod._materialize_backward_projections(trace)
+    assert _backward_projection_snapshot(trace) == incremental_snapshot
+
+
+@pytest.mark.smoke
+def test_param_grad_reconciliation_counts_multiplicity() -> None:
+    """Duplicating one projected param record now fails reconciliation."""
+    from torchlens.validation.invariants import MetadataInvariantError
+
+    _model, _x, trace = _logged_model()
+    trace.log_backward(_output_loss(trace))
+    _invariant_check(trace)  # positive control
+
+    param_log = next(
+        param_log for param_log in trace.param_logs.values() if param_log._grad_records
+    )
+    duplicated = param_log._grad_records[0]
+    param_log._grad_records.append(duplicated)
+    with pytest.raises(MetadataInvariantError, match="by multiplicity"):
+        _invariant_check(trace)
+    param_log._grad_records.pop()
+    _invariant_check(trace)
+
+
+@pytest.mark.smoke
+def test_op_grad_reconciliation_counts_multiplicity() -> None:
+    """Duplicating one projected op record now fails reconciliation."""
+    from torchlens.validation.invariants import MetadataInvariantError
+
+    _model, _x, trace = _logged_model()
+    trace.log_backward(_output_loss(trace))
+    _invariant_check(trace)  # positive control
+
+    victim = next(op for op in trace.layer_list if op._slot("_grad_records"))
+    records = victim._slot("_grad_records")
+    records.append(records[0])
+    with pytest.raises(MetadataInvariantError, match="by multiplicity"):
+        _invariant_check(trace)
+    records.pop()
+    _invariant_check(trace)
+
+
+@pytest.mark.smoke
+def test_grad_fn_discovered_source_is_frozen_by_the_writer() -> None:
+    """In-place mutation of GradFnDiscovered.source raises instead of biting."""
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+    from torchlens.ir.events import GradFnDiscovered
+
+    _model, _x, trace = _logged_model()
+    trace.log_backward(_output_loss(trace))
+    events = _ensure_backward_event_stream(trace).backward_events
+    discovered = next(event for event in events if isinstance(event, GradFnDiscovered))
+    with pytest.raises(TypeError):
+        discovered.source["class_source_file"] = "/tmp/planted-mutation.py"  # type: ignore[index]
+    assert dict(discovered.source) is not discovered.source  # copies still work
+
+
+@pytest.mark.smoke
+def test_higher_order_discovery_bracketing_is_armed() -> None:
+    """A created_in_pass discovery moved past its pass end fails the invariant."""
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+    from torchlens.ir.events import BackwardPassEnd, GradFnDiscovered
+    from torchlens.validation.invariants import MetadataInvariantError
+
+    class _HigherOrderModel(nn.Module):
+        """Tiny nonlinear model with differentiable first gradients."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Return a scalar nonlinear output."""
+
+            return (torch.tanh(x) ** 3).sum()
+
+    torch.manual_seed(0)
+    x = torch.randn(3, requires_grad=True)
+    trace = tl.trace(_HigherOrderModel(), x, save_grads="all")
+    loss = trace[trace.output_layers[0]].out
+    first_grad = torch.autograd.grad(loss, x, create_graph=True, retain_graph=True)[0]
+    torch.autograd.grad(first_grad.sum(), x, retain_graph=True)
+    events = _ensure_backward_event_stream(trace).backward_events
+    _invariant_check(trace)  # positive control
+
+    created = [
+        event
+        for event in events
+        if isinstance(event, GradFnDiscovered) and event.created_in_pass is not None
+    ]
+    assert created, "create_graph autograd.grad must discover higher-order grad-fns"
+    victim = created[0]
+    end = next(
+        event
+        for event in events
+        if isinstance(event, BackwardPassEnd) and event.pass_index == victim.created_in_pass
+    )
+    # Move ONLY the discovery after its pass end and renumber every event
+    # monotonically in list order (the sol probe): all other pass-scoped
+    # events stay inside their brackets, so a failure here proves the new
+    # created_in_pass bracket check specifically is armed.
+    original_order = list(events)
+    original_seqs = [event.seq for event in events]
+    events.remove(victim)
+    events.insert(events.index(end) + 1, victim)
+    for renumbered_seq, event in enumerate(events, start=1):
+        object.__setattr__(event, "seq", renumbered_seq)
+    with pytest.raises(MetadataInvariantError, match="higher-order GradFnDiscovered"):
+        _invariant_check(trace)
+    events[:] = original_order
+    for original_seq, event in zip(original_seqs, events):
+        object.__setattr__(event, "seq", original_seq)
+    _invariant_check(trace)
+
+
+@pytest.mark.smoke
+def test_pass_brackets_reject_partial_interleaving() -> None:
+    """Two pass brackets that partially overlap fail the invariant."""
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+    from torchlens.ir.events import BackwardPassEnd
+    from torchlens.validation.invariants import MetadataInvariantError
+
+    _model, _x, trace = _logged_model()
+    loss = _output_loss(trace)
+    with trace.recording_backward():
+        loss.backward(retain_graph=True)
+        loss.backward()
+    events = _ensure_backward_event_stream(trace).backward_events
+    _invariant_check(trace)  # positive control
+
+    end_one = next(
+        event for event in events if isinstance(event, BackwardPassEnd) and event.pass_index == 1
+    )
+    start_two = next(
+        event
+        for event in events
+        if isinstance(event, BackwardPassStart) and event.pass_index == 2
+    )
+    # Interleave: end(1) slides just after start(2) and every seq is
+    # renumbered monotonically -> [1 .. [2 .. 1] .. 2]. Each pass-scoped fact
+    # still sits inside its own bracket, so only the new partial-overlap
+    # check can fire.
+    original_order = list(events)
+    original_seqs = [event.seq for event in events]
+    events.remove(end_one)
+    events.insert(events.index(start_two) + 1, end_one)
+    for renumbered_seq, event in enumerate(events, start=1):
+        object.__setattr__(event, "seq", renumbered_seq)
+    with pytest.raises(MetadataInvariantError, match="partially overlaps"):
+        _invariant_check(trace)
+    events[:] = original_order
+    for original_seq, event in zip(original_seqs, events):
+        object.__setattr__(event, "seq", original_seq)
+    _invariant_check(trace)
+
+
+@pytest.mark.smoke
+def test_restored_trace_supports_backward_capture() -> None:
+    """A pickled-and-restored trace records a fresh backward correctly."""
+    import pickle
+
+    model = _TinyBackwardModel()
+    x = torch.randn(2, 3, requires_grad=True)
+    trace = tl.trace(
+        model,
+        x,
+        capture=CaptureOptions(backward_ready=True, save_grads="all"),
+        save_mode="reference",
+    )
+    loss = _output_loss(trace)
+    restored = pickle.loads(pickle.dumps(trace))
+    assert len(restored._capture_events.backward_events) == 0
+    assert "_backward_projection_revision" not in restored.__dict__
+    assert "_backward_projection_fold_state" not in restored.__dict__
+
+    restored.log_backward(loss)
+    assert restored.num_backward_passes == 1
+    assert restored.grad_fn_logs
+    assert restored.backward_pass_logs[1].status == "ok"
+    _invariant_check(restored)
+
+
+@pytest.mark.smoke
+def test_double_restore_replaces_stale_stream() -> None:
+    """__setstate__ replaces a reused object's stream based on incoming state."""
+    import pickle
+
+    _model, _x, trace = _logged_model()
+    trace.log_backward(_output_loss(trace))
+    assert trace._capture_events.backward_events
+
+    pickled_state = pickle.dumps(trace)
+    restored = pickle.loads(pickled_state)
+    # Plant an event on the fresh stream, then restore AGAIN onto the same
+    # object: the stale stream (and its planted event) must not survive.
+    restored._capture_events.backward_events.append("SENTINEL")
+    restored.__setstate__(trace.__getstate__())
+    assert len(restored._capture_events.backward_events) == 0
+
+    # And the stream never leaks into later pickle state.
+    assert "_capture_events" not in restored.__getstate__()
+    assert "_capture_events" not in trace.__getstate__()
+    assert "_backward_projection_revision" not in trace.__getstate__()
+    assert "_backward_projection_fold_state" not in trace.__getstate__()
+
+
+@pytest.mark.smoke
+def test_cleanup_disarms_backward_triggers() -> None:
+    """A user backward after cleanup() must not raise from lingering hooks."""
+    model = _TinyBackwardModel()
+    x = torch.randn(2, 3, requires_grad=True)
+    trace = tl.trace(
+        model,
+        x,
+        capture=CaptureOptions(backward_ready=True),
+        save_mode="reference",
+    )
+    out = trace[trace.output_layers[0]].out
+    trace.log_backward(out.sum(), retain_graph=True)
+    trace.cleanup()
+
+    # The tensor hooks and grad_fn hooks registered on the user's still-live
+    # graph fire during this backward; disarmed, they must silently no-op.
+    out.sum().backward()
+    assert x.grad is not None

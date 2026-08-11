@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -109,7 +110,14 @@ class BackwardPassEnd:
 
 @dataclass(frozen=True, slots=True)
 class GradFnDiscovered:
-    """Torch enrichment event for a discovered autograd node object."""
+    """Torch enrichment event for a discovered autograd node object.
+
+    ``source`` is deep-frozen by the stream writer
+    (:meth:`~torchlens.ir.capture_events.CaptureEvents.append_backward`
+    snapshots it into a read-only mapping): the backward projection copies it
+    by value at materialize time, so it must be immutable on the event or an
+    in-place mutation could bypass ``backward_revision``.
+    """
 
     object_id: int
     class_name: str
@@ -119,7 +127,7 @@ class GradFnDiscovered:
     param_ref: object | None
     created_in_pass: int | None
     creator_object_id: int | None
-    source: dict[str, object | None]
+    source: Mapping[str, object | None]
     topology: tuple[int, ...]
     seq: int = 0
 

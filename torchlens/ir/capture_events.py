@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Iterable, NoReturn
 import weakref
 
@@ -369,8 +370,22 @@ class CaptureEvents:
         kind receives the next value of one run-monotonic counter, making
         cross-kind ordering an exact recorded fact rather than an inference
         from timestamps or list positions.
+
+        It is also the single freezing authority for nested mutable event
+        state: ``GradFnDiscovered.source`` is the one nested container the
+        projection copies BY VALUE at materialize time, so an in-place
+        mutation of it would diverge a guarded (already-folded) projection
+        from a scratch rebuild without moving ``backward_revision``. The
+        writer therefore snapshots it into a read-only mapping here; every
+        other nested reference (payload refs, ``engine_flags``, ``root_meta``
+        elements) is shared BY REFERENCE between the event and both projection
+        paths, so mutating it cannot make folded and scratch state diverge.
         """
 
+        if isinstance(event, GradFnDiscovered) and not isinstance(
+            event.source, MappingProxyType
+        ):
+            object.__setattr__(event, "source", MappingProxyType(dict(event.source)))
         object.__setattr__(event, "seq", self.next_backward_seq())
         self.backward_events.append(event)
         self.backward_revision += 1

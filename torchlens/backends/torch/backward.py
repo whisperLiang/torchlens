@@ -1136,6 +1136,7 @@ class _BackwardFoldState:
     resolved_pass_orders: dict[int, int] = field(default_factory=dict)
     built_pass_indices: set[int] = field(default_factory=set)
     op_grad_passes: set[int] = field(default_factory=set)
+    param_grad_passes: set[int] = field(default_factory=set)
 
 
 def _backward_tail_is_foldable(state: _BackwardFoldState, tail: list[Any]) -> bool:
@@ -1238,6 +1239,7 @@ def _materialize_backward_projections_impl(trace: Any, events: list[Any]) -> Non
     fired_events: list[GradFnFired] = []
     op_grad_passes = state.op_grad_passes
     op_grad_events: list[OpGradObserved] = []
+    param_grad_events: list[ParamGradObserved] = []
     for event in events:
         if isinstance(event, BackwardPassStart):
             starts[event.pass_index] = event
@@ -1263,6 +1265,9 @@ def _materialize_backward_projections_impl(trace: Any, events: list[Any]) -> Non
         elif isinstance(event, OpGradObserved):
             op_grad_passes.add(event.pass_index)
             op_grad_events.append(event)
+        elif isinstance(event, ParamGradObserved):
+            state.param_grad_passes.add(event.pass_index)
+            param_grad_events.append(event)
 
     grad_fn_logs: OrderedDict[int, GradFn] = OrderedDict()
     type_counter: dict[str, int] = {}
@@ -1336,8 +1341,14 @@ def _materialize_backward_projections_impl(trace: Any, events: list[Any]) -> Non
         op._clear_gradient_records()
     _fold_op_grad_events(trace, state, op_grad_events)
 
+    for param_log in getattr(trace, "param_logs", {}).values():
+        param_log._clear_gradient_records()
+    _fold_param_grad_events(trace, param_grad_events)
+
     backward_pass_logs: OrderedDict[int, BackwardPass] = OrderedDict()
-    pass_indices = sorted(set(starts) | set(ends) | set(pass_to_calls) | op_grad_passes)
+    pass_indices = sorted(
+        set(starts) | set(ends) | set(pass_to_calls) | op_grad_passes | state.param_grad_passes
+    )
     _build_backward_pass_records(trace, state, pass_indices, pass_to_calls, backward_pass_logs)
     trace.backward_pass_logs = backward_pass_logs
     _refresh_backward_pass_counters(trace, state)
@@ -1373,6 +1384,7 @@ def _fold_backward_projection_tail(
 
     fired_events: list[GradFnFired] = []
     op_grad_events: list[OpGradObserved] = []
+    param_grad_events: list[ParamGradObserved] = []
     new_pass_candidates: set[int] = set()
     for event in tail:
         if isinstance(event, BackwardPassStart):
@@ -1389,11 +1401,16 @@ def _fold_backward_projection_tail(
             state.op_grad_passes.add(event.pass_index)
             new_pass_candidates.add(event.pass_index)
             op_grad_events.append(event)
+        elif isinstance(event, ParamGradObserved):
+            state.param_grad_passes.add(event.pass_index)
+            new_pass_candidates.add(event.pass_index)
+            param_grad_events.append(event)
 
     pass_to_calls: dict[int, list[GradFnCall]] = {}
     _fold_fired_events(trace, state, fired_events, pass_to_calls)
     new_pass_candidates.update(pass_to_calls)
     _fold_op_grad_events(trace, state, op_grad_events)
+    _fold_param_grad_events(trace, param_grad_events)
     new_pass_indices = sorted(new_pass_candidates - state.built_pass_indices)
     _build_backward_pass_records(
         trace, state, new_pass_indices, pass_to_calls, trace.backward_pass_logs
@@ -1486,6 +1503,37 @@ def _fold_op_grad_events(
     trace.saved_gradient_memory = Bytes(state.total_gradient_memory)
     trace.total_gradient_memory = Bytes(state.total_gradient_memory)
     trace.total_backward_memory = Bytes(state.total_backward_memory)
+
+
+def _fold_param_grad_events(
+    trace: Any,
+    param_grad_events: list["ParamGradObserved"],
+) -> None:
+    """Fold parameter-gradient events into per-Param accumulating records.
+
+    The ``ParamGradObserved`` event spine is the single authoritative source
+    for ``Param._grad_records``: the full rebuild clears every Param's records
+    before calling this, and the incremental fold hands only strictly-newer
+    passes (guaranteed by ``_backward_tail_is_foldable``), so folded and
+    scratch-rebuilt records are identical.
+    """
+
+    param_logs = getattr(trace, "param_logs", None)
+    if param_logs is None:
+        return
+    for event in sorted(
+        param_grad_events, key=lambda item: (item.pass_index, item.timestamp, item.seq)
+    ):
+        if event.param_address not in param_logs:
+            continue
+        param_logs[event.param_address]._append_gradient_record(
+            backward_pass_index=event.pass_index,
+            grad=event.payload_ref,
+            shape=event.shape,
+            dtype=event.dtype,
+            memory=event.memory,
+            timestamp=event.timestamp,
+        )
 
 
 def _build_backward_pass_records(
@@ -1620,7 +1668,12 @@ def _make_grad_fn_hook(
         live_trace = trace_ref()
         if live_trace is None:
             return None
-        grad_fn_handle = live_trace.grad_fn_logs.get(grad_fn_object_id)
+        # A cleaned-up trace disarms its triggers but cannot remove hooks
+        # already registered on the user's live graph; firing must no-op
+        # rather than raise inside the user's autograd engine.
+        if getattr(live_trace, "_tl_backward_triggers_disarmed", False):
+            return None
+        grad_fn_handle = getattr(live_trace, "grad_fn_logs", {}).get(grad_fn_object_id)
         if grad_fn_handle is None:
             return None
         grad_inputs = hook_args[0] if len(hook_args) >= 1 else None
@@ -1676,19 +1729,19 @@ def _make_grad_fn_hook(
             )
             picked = _first_tensor_from_hook_args(hook_args)
             if param_log is not None and param_address is not None and picked is not None:
-                grad_record = param_log._record_gradient_increment(
-                    backward_pass_index=pass_index,
-                    grad=picked[2],
-                    timestamp=event_timestamp,
-                )
+                # Event-only emission: the projection fold is the single writer
+                # of Param._grad_records, so a forced scratch rebuild from the
+                # event spine reconstructs the exact same records.
+                with pause_logging():
+                    saved_grad = picked[2].detach().clone()
                 events.append_backward(
                     ParamGradObserved(
                         param_address=param_address,
                         pass_index=pass_index,
-                        payload_ref=grad_record.grad,
-                        shape=grad_record.shape,
-                        dtype=grad_record.dtype,
-                        memory=grad_record.memory,
+                        payload_ref=saved_grad,
+                        shape=tuple(saved_grad.shape),
+                        dtype=str(saved_grad.dtype),
+                        memory=int(saved_grad.nelement() * saved_grad.element_size()),
                         timestamp=event_timestamp,
                     )
                 )
@@ -3078,6 +3131,7 @@ class RecordingBackward:
         self.save_grads = save_grads
         self._original_backward: Callable[..., Any] | None = None
         self._wrapped_backward: Callable[..., Any] | None = None
+        self._warned_unmatched_backward = False
 
     def __enter__(self) -> "RecordingBackward":
         """Patch ``torch.Tensor.backward`` and return this context object."""
@@ -3099,8 +3153,23 @@ class RecordingBackward:
             # A backward on a graph that does not reach this trace's pinned
             # forward grad-fns is unrelated PyTorch work: delegate it
             # untouched instead of corrupting the selected trace with a
-            # foreign backward pass.
+            # foreign backward pass. The user explicitly asked this block to
+            # record, so an unmatched backward warns once instead of looking
+            # like a successfully-recorded empty pass (e.g. a graph rebuilt
+            # under no_grad by reentrant checkpointing pins zero grad-fns).
             if not any(matched is trace for matched in _traces_for_roots(tensor_self)):
+                if not self._warned_unmatched_backward:
+                    self._warned_unmatched_backward = True
+                    warnings.warn(
+                        "A Tensor.backward() inside recording_backward() did not "
+                        "reach any grad-fn pinned by this trace, so no backward "
+                        "pass was recorded for it. This happens when the backward "
+                        "graph does not include the traced forward (e.g. the model "
+                        "ran entirely under torch.no_grad or reentrant "
+                        "checkpointing rebuilt the graph outside the capture).",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
                 return run()
 
             return _run_backward_with_capture(

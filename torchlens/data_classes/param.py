@@ -382,46 +382,61 @@ class Param:
 
         return GradientRecordAccessor(self._grad_records)
 
-    def _record_gradient_increment(
+    def _append_gradient_record(
         self,
         *,
         backward_pass_index: int,
-        grad: torch.Tensor,
+        grad: Any | None,
+        shape: tuple[int, ...] | None,
+        dtype: str | None,
+        memory: int | None,
         timestamp: float,
     ) -> "GradientRecord":
-        """Append one AccumulateGrad increment for this parameter.
+        """Append one projected AccumulateGrad increment for this parameter.
+
+        Called only by the backward projection fold: the ``ParamGradObserved``
+        event stream is the single authoritative source for these records, so
+        the live AccumulateGrad hook never writes them directly.
 
         Parameters
         ----------
         backward_pass_index:
             One-based global backward pass number.
         grad:
-            Incoming gradient increment.
+            Retained gradient payload from the event, already detached.
+        shape:
+            Observed gradient shape from the event.
+        dtype:
+            Observed gradient dtype string from the event.
+        memory:
+            Observed gradient memory in bytes from the event.
         timestamp:
             Event timestamp.
 
         Returns
         -------
         GradientRecord
-            The appended record, so the caller can emit the matching
-            ``ParamGradObserved`` event without re-deriving metadata.
+            The appended record.
         """
 
-        saved = grad.detach().clone()
-        memory = int(saved.nelement() * saved.element_size())
         record = GradientRecord(
             owner=self,
             ordinal=len(self._grad_records) + 1,
             backward_pass_index=backward_pass_index,
-            grad=saved,
+            grad=grad,
             transformed_grad=None,
-            shape=tuple(saved.shape),
-            dtype=str(saved.dtype),
+            shape=shape,
+            dtype=dtype,
             memory=memory,
             timestamp=timestamp,
         )
         self._grad_records.append(record)
         return record
+
+    def _clear_gradient_records(self) -> None:
+        """Reset projected gradient records ahead of a full projection rebuild."""
+
+        self._grad_records = []
 
     def _check_param_grad(self) -> None:
         """Lazily check if the parameter has a grad and cache the result.
