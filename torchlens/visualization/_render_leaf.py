@@ -1275,28 +1275,77 @@ def _same_layer_dependency_components(layer_log: "Layer") -> tuple[tuple[int, ..
         Pass-index components, sorted by first pass.
     """
 
-    reachability = _same_layer_reachability(layer_log)
-    adjacency: dict[int, set[int]] = {pass_index: set() for pass_index in layer_log.ops}
-    for source, targets in reachability.items():
-        for target in targets:
-            adjacency[source].add(target)
-            adjacency[target].add(source)
+    trace = layer_log.source_trace
+    same_layer_pass = {op.label: pass_index for pass_index, op in layer_log.ops.items()}
 
-    components: list[tuple[int, ...]] = []
-    seen: set[int] = set()
-    for pass_index in sorted(layer_log.ops):
-        if pass_index in seen:
+    # Build the descendant interior once for the whole layer. Same-layer nodes are
+    # boundaries: their outgoing edges are handled from their own seeded traversal,
+    # matching the historical per-pass walk's stop-at-first-same-layer rule.
+    forward: dict[str, tuple[str, ...]] = {}
+    reverse: dict[str, set[str]] = {}
+    pending = deque(same_layer_pass)
+    expanded: set[str] = set()
+    while pending:
+        label = pending.popleft()
+        if label in expanded:
             continue
-        stack = [pass_index]
-        component: set[int] = set()
-        while stack:
-            current = stack.pop()
-            if current in seen:
+        expanded.add(label)
+        node = _node_for_label(trace, label)
+        children = tuple(node.children) if node is not None else ()
+        forward[label] = children
+        for child_label in children:
+            reverse.setdefault(child_label, set()).add(label)
+            if child_label not in same_layer_pass:
+                pending.append(child_label)
+
+    # Only interior nodes lying on a path to a same-layer boundary can contribute
+    # an edge in the historical reachability graph. Pruning dead descendant tails
+    # avoids falsely joining passes that merely converge after their final use.
+    productive = set(same_layer_pass)
+    pending = deque(same_layer_pass)
+    while pending:
+        label = pending.popleft()
+        for parent_label in reverse.get(label, ()):
+            if parent_label in productive:
                 continue
-            seen.add(current)
-            component.add(current)
-            stack.extend(sorted(adjacency[current] - seen, reverse=True))
-        components.append(tuple(sorted(component)))
+            productive.add(parent_label)
+            pending.append(parent_label)
+
+    parents = {label: label for label in productive}
+
+    def find(label: str) -> str:
+        """Return the canonical union-find root for one productive node."""
+
+        root = label
+        while parents[root] != root:
+            root = parents[root]
+        while parents[label] != label:
+            next_label = parents[label]
+            parents[label] = root
+            label = next_label
+        return root
+
+    def union(left: str, right: str) -> None:
+        """Join two productive nodes with deterministic lexical-root ownership."""
+
+        left_root = find(left)
+        right_root = find(right)
+        if left_root == right_root:
+            return
+        smaller, larger = sorted((left_root, right_root))
+        parents[larger] = smaller
+
+    # Weak components of the productive descendant interior induce exactly the
+    # weak transitive closure of the historical direct same-layer reachability.
+    for label in productive:
+        for child_label in forward.get(label, ()):
+            if child_label in productive:
+                union(label, child_label)
+
+    components_by_root: dict[str, list[int]] = {}
+    for label, pass_index in sorted(same_layer_pass.items(), key=lambda item: item[1]):
+        components_by_root.setdefault(find(label), []).append(pass_index)
+    components = (tuple(values) for values in components_by_root.values())
     return tuple(sorted(components, key=lambda values: values[0]))
 
 

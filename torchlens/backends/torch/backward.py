@@ -656,6 +656,9 @@ def _sync_grad_fn_graph_relations(trace: Any) -> None:
     parent_map: dict[str, list[str]] = {
         grad_fn.label: [] for grad_fn in trace.grad_fn_logs.values()
     }
+    parent_membership: dict[str, set[str]] = {
+        grad_fn.label: set() for grad_fn in trace.grad_fn_logs.values()
+    }
 
     for grad_fn in trace.grad_fn_logs.values():
         children = [
@@ -665,24 +668,29 @@ def _sync_grad_fn_graph_relations(trace: Any) -> None:
         ]
         child_map[grad_fn.label] = children
         for child_label in children:
-            if grad_fn.label not in parent_map[child_label]:
+            if grad_fn.label not in parent_membership[child_label]:
                 parent_map[child_label].append(grad_fn.label)
+                parent_membership[child_label].add(grad_fn.label)
 
     for grad_fn in trace.grad_fn_logs.values():
         grad_fn.children = child_map[grad_fn.label]
         grad_fn.parents = parent_map[grad_fn.label]
         sibling_labels: list[str] = []
+        sibling_membership: set[str] = set()
         for parent_label in grad_fn.parents:
             for sibling_label in child_map.get(parent_label, []):
-                if sibling_label != grad_fn.label and sibling_label not in sibling_labels:
+                if sibling_label != grad_fn.label and sibling_label not in sibling_membership:
                     sibling_labels.append(sibling_label)
+                    sibling_membership.add(sibling_label)
         grad_fn.siblings = sibling_labels
 
         co_parent_labels: list[str] = []
+        co_parent_membership: set[str] = set()
         for child_label in grad_fn.children:
             for co_parent_label in parent_map.get(child_label, []):
-                if co_parent_label != grad_fn.label and co_parent_label not in co_parent_labels:
+                if co_parent_label != grad_fn.label and co_parent_label not in co_parent_membership:
                     co_parent_labels.append(co_parent_label)
+                    co_parent_membership.add(co_parent_label)
         grad_fn.co_parents = co_parent_labels
 
 
