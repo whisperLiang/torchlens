@@ -2898,9 +2898,16 @@ class Trace(
         if old_raw_labels != new_raw_labels or old_final_labels != new_final_labels:
             return False
 
-        new_by_raw = {layer._layer_label_raw: layer for layer in new_log.layer_list}
-        for layer in self.layer_list:
-            self._refresh_rerun_op_from(layer, new_by_raw[layer._layer_label_raw])
+        # Pair the two op sequences POSITIONALLY, never through a label -> op map.
+        # Neither `_layer_label_raw` nor `layer_label` is pass-qualified, so every
+        # pass of a multi-pass (recurrent) layer shares both keys: a dict keyed by
+        # either collapses an N-pass layer to its last pass and then refreshes all
+        # N existing passes from that one op, silently overwriting the earlier
+        # passes' activations and pass labels. The label-sequence equality checked
+        # just above is exactly the precondition that makes index i of one list the
+        # same op as index i of the other.
+        for layer, new_layer in zip(self.layer_list, new_log.layer_list):
+            self._refresh_rerun_op_from(layer, new_layer)
         self._refresh_rerun_layer_logs_from(new_log)
         self._refresh_rerun_trace_fields_from(new_log)
         self.__dict__.pop("_validation_replay_status", None)
