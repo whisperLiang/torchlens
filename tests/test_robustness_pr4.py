@@ -359,16 +359,11 @@ def test_torch_export_exported_program_raises_at_entry() -> None:
     example = (torch.randn(2, 4),)
     exported = export(model, example)
 
-    with pytest.raises((RuntimeError, AttributeError, TypeError)) as excinfo:
+    # The entry guard rejects any non-``nn.Module`` input with the documented
+    # typed refusal (an ``ExportedProgram`` is not an ``nn.Module``); the old
+    # accidental AttributeError leak this test used to match was itself a bug.
+    with pytest.raises(ValueError, match="Unsupported model type"):
         tl.trace(exported, torch.randn(2, 4), layers_to_save="none")
-    # Our guard is the preferred failure path; other failures (e.g. exported
-    # program lacking .modules()) also satisfy the 'don't silently succeed'
-    # contract.
-    assert (
-        "ExportedProgram" in str(excinfo.value)
-        or "has no attribute" in str(excinfo.value)
-        or "torch.export" in str(excinfo.value)
-    )
 
 
 # ---------------------------------------------------------------------------
