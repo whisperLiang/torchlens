@@ -46,6 +46,12 @@ donated inputs, or explicit shardings remain rejected. tinygrad, Paddle, TensorF
 unimplemented option families reject explicit use with `BackendUnsupportedError` until the matching
 backend phase implements the capability.
 
+Capability-gated options are fail-closed in both directions: a `False` flag rejects with the
+backend's policy message, and a `True` flag admits only through the implementing surface the spec
+binds in `BackendSpec.capability_implementations`. A capability flag flipped to `True` on a backend
+that registers no implementation raises `BackendCapabilityConformanceError` (at registration and at
+the gate) instead of silently admitting and ignoring the option.
+
 Declared future options:
 
 | Option | Planned owner |

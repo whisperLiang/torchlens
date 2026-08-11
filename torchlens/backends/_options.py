@@ -6,8 +6,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .._deprecations import MISSING
-from .registry import BackendCapabilities, BackendUnsupportedError
+from .._deprecations import MISSING, warn_deprecated_alias
+from .registry import (
+    BackendSpec,
+    BackendUnsupportedError,
+    require_capability_implementation,
+)
 
 TRACE_OPTION_CAPABILITY_GATES: dict[str, str] = {
     "intervene": "interventions",
@@ -24,8 +28,12 @@ TRACE_OPTION_CAPABILITY_GATES: dict[str, str] = {
 
 The rejection helpers below consult this map so the registered capability table
 is the load-bearing authority: an option listed here is rejected for a backend
-exactly when the named capability flag is ``False``. Flipping the flag to
-``True`` opens the gate without editing any per-backend message policy."""
+exactly when the named capability flag is ``False``. The ``True`` direction is
+fail-closed: the gate opens only through the spec's registered implementing
+surface (``BackendSpec.capability_implementations``), so a bare boolean flip on
+a backend that implements nothing raises
+``BackendCapabilityConformanceError`` instead of silently admitting and
+ignoring the option."""
 
 
 @dataclass(frozen=True)
@@ -454,11 +462,46 @@ def default_if_missing(value: Any, default: Any) -> Any:
     return default if is_missing(value) else value
 
 
+def resolve_public_depth_alias(kwargs: dict[str, Any]) -> None:
+    """Resolve the deprecated ``mark_layer_depths`` trace kwarg for previews.
+
+    Torch resolves this public alias inside ``CaptureOptions``; preview
+    backends receive the raw public kwarg bundle and must honor the same
+    opt-in surface instead of classifying the alias as an unsupported extra.
+
+    Parameters
+    ----------
+    kwargs:
+        Mutable public ``trace`` keyword bundle. When ``mark_layer_depths``
+        is explicitly set, its value moves to
+        ``compute_input_output_distances`` with the standard deprecation
+        warning; passing both explicitly raises the same ``TypeError`` the
+        torch path raises.
+
+    Returns
+    -------
+    None
+        ``kwargs`` is updated in place.
+    """
+
+    alias_value = kwargs.get("mark_layer_depths", MISSING)
+    if is_missing(alias_value):
+        return
+    if not is_missing(kwargs.get("compute_input_output_distances", MISSING)):
+        raise TypeError(
+            "kwarg mark_layer_depths deprecated, use "
+            "compute_input_output_distances; do not pass both"
+        )
+    warn_deprecated_alias("mark_layer_depths", "capture.compute_input_output_distances")
+    kwargs["compute_input_output_distances"] = alias_value
+    kwargs["mark_layer_depths"] = MISSING
+
+
 def reject_extra_trace_kwargs(
     kwargs: dict[str, Any],
     policy: ExtraKwargPolicy,
     *,
-    capabilities: BackendCapabilities | None = None,
+    spec: BackendSpec | None = None,
 ) -> None:
     """Reject non-default extra public trace kwargs for a backend.
 
@@ -468,11 +511,13 @@ def reject_extra_trace_kwargs(
         Extra keyword arguments that reached the backend object entry.
     policy:
         Declarative backend rejection policy.
-    capabilities:
-        Registered capability table for the backend. When provided, options in
+    spec:
+        Registered backend spec. When provided, options in
         ``TRACE_OPTION_CAPABILITY_GATES`` whose owning flag is ``True`` are
-        accepted instead of rejected; the table, not the message policy, is the
-        support authority for those options.
+        admitted only after the spec's implementing surface for that
+        capability resolves; a bare flag flip raises
+        ``BackendCapabilityConformanceError`` instead of silently admitting
+        unimplemented behavior.
 
     Returns
     -------
@@ -487,9 +532,10 @@ def reject_extra_trace_kwargs(
             continue
         if key in inert_values and inert_values[key] == value:
             continue
-        if capabilities is not None:
+        if spec is not None:
             gate = TRACE_OPTION_CAPABILITY_GATES.get(key)
-            if gate is not None and getattr(capabilities, gate):
+            if gate is not None and getattr(spec.capabilities, gate):
+                require_capability_implementation(spec, gate)
                 continue
         rejected[key] = value
     if not rejected:
@@ -504,7 +550,7 @@ def reject_unsupported_trace_options(
     options: dict[str, Any],
     policy: PreviewTraceOptionPolicy,
     *,
-    capabilities: BackendCapabilities | None = None,
+    spec: BackendSpec | None = None,
 ) -> None:
     """Reject unsupported normalized public trace options.
 
@@ -514,11 +560,13 @@ def reject_unsupported_trace_options(
         Normalized public trace options keyed by option name.
     policy:
         Declarative backend rejection policy.
-    capabilities:
-        Registered capability table for the backend. When provided, options in
+    spec:
+        Registered backend spec. When provided, options in
         ``TRACE_OPTION_CAPABILITY_GATES`` whose owning flag is ``True`` are
-        accepted instead of rejected; the table, not the message policy, is the
-        support authority for those options.
+        admitted only after the spec's implementing surface for that
+        capability resolves; a bare flag flip raises
+        ``BackendCapabilityConformanceError`` instead of silently admitting
+        unimplemented behavior.
 
     Returns
     -------
@@ -532,9 +580,10 @@ def reject_unsupported_trace_options(
         raise BackendUnsupportedError(policy.full_save_message)
     for option_name, message in (policy.rejected_truthy_messages or {}).items():
         if options.get(option_name):
-            if capabilities is not None:
+            if spec is not None:
                 gate = TRACE_OPTION_CAPABILITY_GATES.get(option_name)
-                if gate is not None and getattr(capabilities, gate):
+                if gate is not None and getattr(spec.capabilities, gate):
+                    require_capability_implementation(spec, gate)
                     continue
             raise BackendUnsupportedError(message)
     if policy.output_device_message is not None and options.get("output_device") != "same":

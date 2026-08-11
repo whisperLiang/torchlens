@@ -2,8 +2,10 @@
 
 The registered ``BackendCapabilities`` table must be the single authority for
 backend feature support: every flag must gate production behavior, and the
-gates must be biconditional (flag ``False`` rejects; flag ``True`` admits)
-without editing any per-backend message policy.
+gates must be fail-closed biconditionals — flag ``False`` rejects with the
+backend's policy message, and flag ``True`` admits ONLY through the spec's
+bound implementing surface. A bare boolean flip on a backend that registers
+no implementation must refuse typed, never silently admit-and-ignore.
 """
 
 from __future__ import annotations
@@ -18,11 +20,14 @@ import torch.nn as nn
 
 import torchlens as tl
 from torchlens.backends import (
+    GATED_CAPABILITY_FLAGS,
     BackendCapabilities,
+    BackendCapabilityConformanceError,
     BackendUnsupportedError,
     get_backend_spec,
     register_backend_spec,
     registered_backend_specs,
+    require_capability_implementation,
 )
 from torchlens.backends._options import (
     JAX_EXTRA_KWARG_POLICY,
@@ -89,27 +94,47 @@ def test_every_capability_flag_has_a_production_consumer() -> None:
         )
 
 
-@pytest.mark.parametrize("name", _PREVIEW_NAMES)
-def test_extra_kwarg_gates_are_biconditional(name: str) -> None:
-    """intervene/storage/streaming reject on flag False and admit on flag True."""
+def _spec_with_flag(name: str, flag: str, *, implementation: bool) -> Any:
+    """Return the registered spec with ``flag`` flipped True, optionally bound."""
 
-    capabilities = get_backend_spec(name).capabilities
+    original = get_backend_spec(name)
+    implementations = dict(original.capability_implementations or {})
+    if implementation:
+        implementations[flag] = lambda: object()
+    else:
+        implementations.pop(flag, None)
+    return dataclasses.replace(
+        original,
+        capabilities=dataclasses.replace(original.capabilities, **{flag: True}),
+        capability_implementations=implementations or None,
+    )
+
+
+@pytest.mark.parametrize("name", _PREVIEW_NAMES)
+def test_extra_kwarg_gates_are_fail_closed_biconditional(name: str) -> None:
+    """intervene/storage/streaming: False rejects; a bare True flip refuses typed;
+    True WITH a bound implementation admits."""
+
+    spec = get_backend_spec(name)
     policy = _EXTRA_POLICIES[name]
     sentinel = object()
     for option, flag in (("intervene", "interventions"), ("storage", "streaming"),
                          ("streaming", "streaming")):
-        assert not getattr(capabilities, flag)
+        assert not getattr(spec.capabilities, flag)
         with pytest.raises(BackendUnsupportedError):
-            reject_extra_trace_kwargs({option: sentinel}, policy, capabilities=capabilities)
-        opened = dataclasses.replace(capabilities, **{flag: True})
-        reject_extra_trace_kwargs({option: sentinel}, policy, capabilities=opened)
+            reject_extra_trace_kwargs({option: sentinel}, policy, spec=spec)
+        bare_flip = _spec_with_flag(name, flag, implementation=False)
+        with pytest.raises(BackendCapabilityConformanceError):
+            reject_extra_trace_kwargs({option: sentinel}, policy, spec=bare_flip)
+        implemented = _spec_with_flag(name, flag, implementation=True)
+        reject_extra_trace_kwargs({option: sentinel}, policy, spec=implemented)
 
 
 @pytest.mark.parametrize("name", _PREVIEW_NAMES)
-def test_option_policy_gates_are_biconditional(name: str) -> None:
-    """save_grads/backward_ready/save_rng_states follow the capability table."""
+def test_option_policy_gates_are_fail_closed_biconditional(name: str) -> None:
+    """save_grads/backward_ready/save_rng_states follow the flag AND the binding."""
 
-    capabilities = get_backend_spec(name).capabilities
+    spec = get_backend_spec(name)
     policy = _OPTION_POLICIES[name]
     cases = [("save_grads", "backward_capture"), ("backward_ready", "backward_capture")]
     if "save_rng_states" in (policy.rejected_truthy_messages or {}):
@@ -117,15 +142,42 @@ def test_option_policy_gates_are_biconditional(name: str) -> None:
     for option, flag in cases:
         options = dict(_OPTION_POLICY_DEFAULTS)
         options[option] = True
-        assert not getattr(capabilities, flag)
+        assert not getattr(spec.capabilities, flag)
         with pytest.raises(BackendUnsupportedError):
-            reject_unsupported_trace_options(options, policy, capabilities=capabilities)
-        opened = dataclasses.replace(capabilities, **{flag: True})
-        reject_unsupported_trace_options(options, policy, capabilities=opened)
+            reject_unsupported_trace_options(options, policy, spec=spec)
+        bare_flip = _spec_with_flag(name, flag, implementation=False)
+        with pytest.raises(BackendCapabilityConformanceError):
+            reject_unsupported_trace_options(options, policy, spec=bare_flip)
+        implemented = _spec_with_flag(name, flag, implementation=True)
+        reject_unsupported_trace_options(options, policy, spec=implemented)
+
+
+def test_registration_refuses_bare_capability_flips() -> None:
+    """Re-registering a spec whose True gated flag has no binding refuses typed."""
+
+    for name in _PREVIEW_NAMES:
+        for flag in sorted(GATED_CAPABILITY_FLAGS):
+            with pytest.raises(BackendCapabilityConformanceError):
+                register_backend_spec(
+                    _spec_with_flag(name, flag, implementation=False), replace=True
+                )
+            assert not getattr(get_backend_spec(name).capabilities, flag)
+
+
+def test_in_place_capability_flip_refuses_end_to_end() -> None:
+    """Sol probe: mutating the frozen table in place must refuse typed at trace()."""
+
+    spec = get_backend_spec("mlx")
+    object.__setattr__(spec.capabilities, "interventions", True)
+    try:
+        with pytest.raises(BackendCapabilityConformanceError):
+            require_capability_implementation(spec, "interventions")
+    finally:
+        object.__setattr__(spec.capabilities, "interventions", False)
 
 
 def test_record_gate_reads_the_capability_table() -> None:
-    """tl.record's torch-only gate is owned by capabilities.fastlog."""
+    """tl.record's torch-only gate is owned by capabilities.fastlog + its binding."""
 
     model = nn.Linear(2, 2)
     inputs = torch.randn(1, 2)
@@ -134,26 +186,47 @@ def test_record_gate_reads_the_capability_table() -> None:
         with pytest.raises(BackendUnsupportedError, match="torch-only"):
             tl.record(model, inputs, backend=name)
 
+
+def test_record_bare_fastlog_flip_never_runs_torch_recorder() -> None:
+    """Sol probe: fastlog=True flipped in place must refuse typed, never return a
+    torch Recording for a non-torch backend."""
+
+    model = nn.Linear(2, 2)
+    inputs = torch.randn(1, 2)
+    spec = get_backend_spec("tinygrad")
+    object.__setattr__(spec.capabilities, "fastlog", True)
+    try:
+        with pytest.raises(BackendCapabilityConformanceError):
+            tl.record(model, inputs, backend="tinygrad")
+    finally:
+        object.__setattr__(spec.capabilities, "fastlog", False)
+        tl.release_model(model)
+
+
+def test_record_foreign_fastlog_implementation_refuses() -> None:
+    """A registered non-torch fastlog binding still refuses: record() only runs
+    the torch Recorder and must not silently substitute it."""
+
+    model = nn.Linear(2, 2)
+    inputs = torch.randn(1, 2)
     original = get_backend_spec("tinygrad")
-    opened = dataclasses.replace(
-        original,
-        capabilities=dataclasses.replace(original.capabilities, fastlog=True),
-    )
+    opened = _spec_with_flag("tinygrad", "fastlog", implementation=True)
     register_backend_spec(opened, replace=True)
     try:
-        try:
-            tl.record(model, inputs, backend="tinygrad", save=tl.func("linear"))
-        except BackendUnsupportedError as exc:
-            assert "torch-only" not in str(exc), (
-                "fastlog gate ignored capabilities.fastlog=True; the table is not "
-                "the gate authority."
-            )
-        except Exception:
-            # Any non-gate failure means the call got PAST the fastlog gate,
-            # which is exactly the arming proof this test needs.
-            pass
+        with pytest.raises(BackendUnsupportedError, match="no non-torch dispatch path"):
+            tl.record(model, inputs, backend="tinygrad")
     finally:
         register_backend_spec(original, replace=True)
+        tl.release_model(model)
+
+
+def test_torch_capability_bindings_resolve() -> None:
+    """Torch's declared True flags all resolve to real implementing surfaces."""
+
+    spec = get_backend_spec("torch")
+    for flag in sorted(GATED_CAPABILITY_FLAGS):
+        assert getattr(spec.capabilities, flag), flag
+        assert require_capability_implementation(spec, flag) is not None
 
 
 def test_runnable_producer_gate_reads_save_levels() -> None:

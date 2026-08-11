@@ -346,7 +346,7 @@ class PaddleBackend:
                 "lookback_payload_policy": "metadata_only",
             },
             PADDLE_PREVIEW_TRACE_OPTION_POLICY,
-            capabilities=get_backend_spec("paddle").capabilities,
+            spec=get_backend_spec("paddle"),
         )
         module_tree = discover_paddle_module_tree(model)
         use_object_module = _resolve_paddle_module_identity_mode(module_identity_mode, module_tree)
@@ -1903,7 +1903,7 @@ def _reject_extra_kwargs(extra_kwargs: dict[str, Any]) -> None:
     reject_extra_trace_kwargs(
         extra_kwargs,
         PADDLE_EXTRA_KWARG_POLICY,
-        capabilities=get_backend_spec("paddle").capabilities,
+        spec=get_backend_spec("paddle"),
     )
 
 

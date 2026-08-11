@@ -1,29 +1,55 @@
 """Preview parity for compute_input_output_distances (torch Step 4).
 
-Every preview backend must honor the same public opt-in torch honors:
-input/output hop distances plus ancestor/descendant lineage sets, with the
-effective value stored on ``trace.mark_layer_depths``. Single-pass previews
-must also store the EFFECTIVE ``recurrence_detection`` (False — they never
-group), while JAX keeps its real grouping value.
+Every preview backend must honor the same public opt-in surface torch honors —
+the canonical ``compute_input_output_distances`` AND the deprecated public
+``mark_layer_depths`` alias — with input/output hop distances plus
+ancestor/descendant lineage sets and the effective value stored on
+``trace.mark_layer_depths``. Distances are asserted EXACTLY, including
+min/max splits on branch/merge graphs, not just non-emptiness. Single-pass
+previews must also store the EFFECTIVE ``recurrence_detection`` (False — they
+never group), while JAX keeps its real grouping value.
 """
 
 from __future__ import annotations
+
+import warnings
 
 import pytest
 
 pytestmark = pytest.mark.backend_parity
 
 
-def _assert_depths(trace, expect_recurrence: bool) -> None:
+def _assert_depths(trace, expect_recurrence: bool, expected_max_depth: int) -> None:
     ops = list(trace.layer_list)
-    with_depth = [
-        op for op in ops if getattr(op, "min_distance_from_input", None) is not None
-    ]
-    assert with_depth, "depth flood populated no op"
+    depths = {
+        op._label_raw: (op.min_distance_from_input, op.max_distance_from_input)
+        for op in ops
+        if getattr(op, "min_distance_from_input", None) is not None
+    }
+    assert depths, "depth flood populated no op"
     assert trace.mark_layer_depths is True
     assert trace.recurrence_detection is expect_recurrence
+    assert max(min_d for min_d, _max_d in depths.values()) == expected_max_depth
     assert any(getattr(op, "input_ancestors", None) for op in ops)
     assert any(getattr(op, "output_descendants", None) for op in ops)
+
+
+def _depth_by_prefix(trace, prefix: str) -> tuple[int, int]:
+    op = next(op for op in trace.layer_list if op._label_raw.startswith(prefix))
+    return op.min_distance_from_input, op.max_distance_from_input
+
+
+def _assert_alias_matches(trace_fn) -> None:
+    """The deprecated public mark_layer_depths alias must behave identically."""
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        alias_trace = trace_fn()
+    assert alias_trace.mark_layer_depths is True
+    assert any(
+        getattr(op, "min_distance_from_input", None) is not None
+        for op in alias_trace.layer_list
+    )
 
 
 @pytest.mark.backend_paddle
@@ -43,7 +69,11 @@ def test_paddle_depth_parity() -> None:
     trace = tl.trace(
         M(), paddle.ones([1, 4]), backend="paddle", compute_input_output_distances=True
     )
-    _assert_depths(trace, expect_recurrence=False)
+    _assert_depths(trace, expect_recurrence=False, expected_max_depth=3)
+    assert _depth_by_prefix(trace, "functional.relu") == (2, 2)
+    _assert_alias_matches(
+        lambda: tl.trace(M(), paddle.ones([1, 4]), backend="paddle", mark_layer_depths=True)
+    )
     base = tl.trace(M(), paddle.ones([1, 4]), backend="paddle")
     assert base.mark_layer_depths is False
     assert base.recurrence_detection is False
@@ -64,7 +94,15 @@ def test_tinygrad_depth_parity() -> None:
         backend="tinygrad",
         compute_input_output_distances=True,
     )
-    _assert_depths(trace, expect_recurrence=False)
+    _assert_depths(trace, expect_recurrence=False, expected_max_depth=5)
+    # relu decomposes through where; mul merges the where branch (depth 3)
+    # with the broadcast constant path, so its min/max split is exact.
+    assert _depth_by_prefix(trace, "mul_1") == (3, 4)
+    _assert_alias_matches(
+        lambda: tl.trace(
+            model, Tensor([1.0, -2.0, 3.0]), backend="tinygrad", mark_layer_depths=True
+        )
+    )
 
 
 @pytest.mark.backend_jax
@@ -73,12 +111,22 @@ def test_jax_depth_parity() -> None:
     import torchlens as tl
 
     def model(x):
-        return jnp.tanh(x @ jnp.ones((4, 3))) @ jnp.ones((3, 2))
+        hidden = jnp.tanh(x @ jnp.ones((4, 3)))
+        return hidden + jnp.tanh(hidden)
 
     trace = tl.trace(
         model, jnp.ones((1, 4)), backend="jax", compute_input_output_distances=True
     )
-    _assert_depths(trace, expect_recurrence=True)
+    _assert_depths(trace, expect_recurrence=True, expected_max_depth=3)
+    # Branch/merge exactness: dot(1) -> tanh(2) -> tanh(3); the merge add sees
+    # the short path (tanh#1 + 1 = 3) and the long path (tanh#2 + 1 = 4).
+    assert _depth_by_prefix(trace, "dot_general_1") == (1, 1)
+    assert _depth_by_prefix(trace, "tanh_1") == (2, 2)
+    assert _depth_by_prefix(trace, "tanh_2") == (3, 3)
+    assert _depth_by_prefix(trace, "add_1") == (3, 4)
+    _assert_alias_matches(
+        lambda: tl.trace(model, jnp.ones((1, 4)), backend="jax", mark_layer_depths=True)
+    )
 
 
 @pytest.mark.backend_mlx
@@ -99,7 +147,38 @@ def test_mlx_depth_parity() -> None:
     trace = tl.trace(
         M(), mx.ones((1, 4)), backend="mlx", compute_input_output_distances=True
     )
-    _assert_depths(trace, expect_recurrence=False)
+    _assert_depths(trace, expect_recurrence=False, expected_max_depth=3)
+    assert _depth_by_prefix(trace, "linear_1") == (1, 1)
+    assert _depth_by_prefix(trace, "relu_1") == (2, 2)
+    assert _depth_by_prefix(trace, "linear_2") == (3, 3)
+    _assert_alias_matches(
+        lambda: tl.trace(M(), mx.ones((1, 4)), backend="mlx", mark_layer_depths=True)
+    )
+
+
+@pytest.mark.backend_mlx
+def test_mlx_depth_branch_merge_exact() -> None:
+    """Merge nodes carry an exact min/max split, not just any value."""
+
+    mx = pytest.importorskip("mlx.core")
+    mnn = pytest.importorskip("mlx.nn")
+    import torchlens as tl
+
+    class M(mnn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.l1 = mnn.Linear(4, 4)
+
+        def __call__(self, x):
+            hidden = self.l1(x)
+            return mx.add(mnn.relu(hidden), hidden)
+
+    trace = tl.trace(
+        M(), mx.ones((1, 4)), backend="mlx", compute_input_output_distances=True
+    )
+    assert _depth_by_prefix(trace, "linear_1") == (1, 1)
+    assert _depth_by_prefix(trace, "relu_1") == (2, 2)
+    assert _depth_by_prefix(trace, "add_1") == (2, 3)
 
 
 @pytest.mark.tf_backend
@@ -116,4 +195,9 @@ def test_tf_depth_parity() -> None:
     trace = tl.trace(
         model, inputs, backend="tf", compute_input_output_distances=True
     )
-    _assert_depths(trace, expect_recurrence=False)
+    # matmul(1) -> biasadd(2) -> relu(3) -> matmul(4) -> biasadd(5)
+    _assert_depths(trace, expect_recurrence=False, expected_max_depth=5)
+    assert _depth_by_prefix(trace, "relu_1") == (3, 3)
+    _assert_alias_matches(
+        lambda: tl.trace(model, inputs, backend="tf", mark_layer_depths=True)
+    )

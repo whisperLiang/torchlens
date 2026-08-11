@@ -788,7 +788,7 @@ def _reject_extra_kwargs(kwargs: dict[str, Any]) -> None:
     reject_extra_trace_kwargs(
         kwargs,
         TF_EXTRA_KWARG_POLICY,
-        capabilities=get_backend_spec("tf").capabilities,
+        spec=get_backend_spec("tf"),
     )
 
 
@@ -901,7 +901,7 @@ def _reject_unsupported_options(
             "save_raw_activations": save_raw_activations,
         },
         TF_PREVIEW_TRACE_OPTION_POLICY,
-        capabilities=get_backend_spec("tf").capabilities,
+        spec=get_backend_spec("tf"),
     )
 
 

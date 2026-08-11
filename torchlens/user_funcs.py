@@ -385,7 +385,7 @@ def _trace_mlx_model_from_public_kwargs(**kwargs: Any) -> Trace:
             "reconstruction_ready": kwargs.get("reconstruction_ready", MISSING),
         },
         MLX_EXTRA_KWARG_POLICY,
-        capabilities=get_backend_spec("mlx").capabilities,
+        spec=get_backend_spec("mlx"),
     )
     save_options, save_predicate = _split_save_options_and_predicate(kwargs["save"])
     if save_predicate is not None:

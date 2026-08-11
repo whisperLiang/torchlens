@@ -11,7 +11,12 @@ from .._deprecations import MISSING, MissingType
 from .._input_coerce import _coerce_input_args
 from .._capture_state_helpers import unwrap_compiled_model
 from .._robustness import check_model_and_input_variants
-from ..backends import BackendName, BackendUnsupportedError, get_backend_spec
+from ..backends import (
+    BackendName,
+    BackendUnsupportedError,
+    get_backend_spec,
+    require_capability_implementation,
+)
 from ..intervention.predicates import InterventionPredicate
 from ..options import StreamingOptions
 from ..types import ActivationPostfunc, GradientPostfunc
@@ -138,11 +143,23 @@ def record(
         Fastlog recording, optionally with the model output.
     """
 
-    if backend is not None and not get_backend_spec(str(backend)).capabilities.fastlog:
-        raise BackendUnsupportedError(
-            "tl.record() is torch-only in backend v1. Use tl.trace(..., backend='jax') "
-            "for the JAX full-save preview."
-        )
+    if backend is not None:
+        backend_spec = get_backend_spec(str(backend))
+        if not backend_spec.capabilities.fastlog:
+            raise BackendUnsupportedError(
+                "tl.record() is torch-only in backend v1. Use tl.trace(..., backend='jax') "
+                "for the JAX full-save preview."
+            )
+        # The flag alone never opens the gate: the spec must bind the fastlog
+        # implementing surface, and this entry only runs the torch Recorder —
+        # a foreign implementation cannot be silently substituted with it.
+        fastlog_implementation = require_capability_implementation(backend_spec, "fastlog")
+        if fastlog_implementation is not Recorder:
+            raise BackendUnsupportedError(
+                f"tl.record() cannot dispatch backend {backend_spec.name!r}: its "
+                "registered fastlog implementation is not the torch one-shot "
+                "Recorder, and backend v1 record() has no non-torch dispatch path."
+            )
     model = unwrap_compiled_model(model)
     if storage is not None and streaming is not None:
         raise TypeError("Do not pass both `storage` and `streaming`.")

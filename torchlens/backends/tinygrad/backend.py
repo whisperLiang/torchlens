@@ -1647,7 +1647,7 @@ class TinygradBackend:
         reject_unsupported_trace_options(
             options,
             TINYGRAD_PREVIEW_TRACE_OPTION_POLICY,
-            capabilities=get_backend_spec("tinygrad").capabilities,
+            spec=get_backend_spec("tinygrad"),
         )
 
     def _reject_extra_kwargs(self, kwargs: Mapping[str, Any]) -> None:
@@ -1667,7 +1667,7 @@ class TinygradBackend:
         reject_extra_trace_kwargs(
             dict(kwargs),
             TINYGRAD_EXTRA_KWARG_POLICY,
-            capabilities=get_backend_spec("tinygrad").capabilities,
+            spec=get_backend_spec("tinygrad"),
         )
 
 

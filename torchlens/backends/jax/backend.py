@@ -2638,7 +2638,7 @@ class JAXBackend:
         reject_unsupported_trace_options(
             options,
             JAX_PREVIEW_TRACE_OPTION_POLICY,
-            capabilities=get_backend_spec("jax").capabilities,
+            spec=get_backend_spec("jax"),
         )
 
     def _reject_extra_kwargs(self, kwargs: Mapping[str, Any]) -> None:
@@ -2658,7 +2658,7 @@ class JAXBackend:
         reject_extra_trace_kwargs(
             dict(kwargs),
             JAX_EXTRA_KWARG_POLICY,
-            capabilities=get_backend_spec("jax").capabilities,
+            spec=get_backend_spec("jax"),
         )
 
 
