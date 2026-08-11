@@ -2572,8 +2572,8 @@ def apply_ambient_execution_context(values: dict[str, Any]) -> None:
 # --- r35 hon1_4: repr-independent torch structseq field discovery -----------------
 #
 # The ONLY sanctioned sources for ``torch.return_types`` structseq field names are
-# the TYPE's ``__match_args__`` declaration (CPython 3.10+) and, on 3.9, an
-# identity round-trip over the type's member descriptors. ``repr()`` parsing is
+# the TYPE's ``__match_args__`` declaration and, for types that do not declare one,
+# an identity round-trip over the type's member descriptors. ``repr()`` parsing is
 # FORBIDDEN: console wrap position injects phantom fields (``dtype=`` /
 # ``grad_fn=`` at line start), flipping witness verdicts on tensor size alone.
 
@@ -2613,7 +2613,7 @@ def torch_structseq_field_names(value: Any) -> tuple[str, ...]:
         )
     ):
         return tuple(str(name) for name in match_args)
-    # CPython 3.9 fallback: derive the name -> index bijection by IDENTITY
+    # No usable ``__match_args__``: derive the name -> index bijection by IDENTITY
     # round-trip over the type's descriptors (``getattr(value, name) is
     # value[i]`` for exactly one ``i``). Refuse on any ambiguity or
     # non-bijection -- fail closed, never repr.

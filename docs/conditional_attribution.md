@@ -12,7 +12,7 @@ are always captured.
 - Graphviz forward-edge labels for `THEN`, `ELIF`, and `ELSE`
 
 Ternary attribution uses `(line, col_offset)` matching. On Python 3.11+ this gives full
-same-line arm attribution; on Python 3.9/3.10 ambiguous same-line ternaries fail closed
+same-line arm attribution; on Python 3.10 ambiguous same-line ternaries fail closed
 instead of guessing.
 
 ## Classified Only, Not Branch-Attributed

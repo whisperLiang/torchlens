@@ -1087,7 +1087,7 @@ def _torch_return_type_fields(value: Any) -> tuple[str, ...]:
 
     r35 hon1_4: delegates to the shared repr-independent helper in
     ``utils/_torch_compat.py`` (``__match_args__`` primary; identity round-trip
-    fallback on 3.9; refusal otherwise). Structural facts must NEVER derive
+    fallback when it is absent; refusal otherwise). Structural facts must NEVER derive
     from ``repr()``/``str()`` of tensor-bearing values -- a wrapped tensor repr
     used to inject phantom ``dtype=`` fields and flip witness verdicts on
     tensor size alone.

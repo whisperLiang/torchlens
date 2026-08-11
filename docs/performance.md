@@ -161,7 +161,7 @@ the more specific `capture_verification_reason="dynamo_region_not_logged"` in pr
 above, since Dynamo's compile threads and unaccounted aten dispatches are symptoms of that one region.
 
 The honest rollout comparison is **legacy with no guard** versus **scoped with the requested
-guard**, not crawl time in isolation. On Python 3.9–3.11, shadow mode uses `sys.setprofile` and can
+guard**, not crawl time in isolation. On Python 3.10–3.11, shadow mode uses `sys.setprofile` and can
 be expensive for Python-call-heavy models: a representative call-heavy 16-layer MLP measurement on
 Python 3.11 was **+371%** versus the unguarded capture. Treat shadow as an expensive, diagnostic-only
 soak tool, not a production capture setting. On Python 3.12+ it prefers local Python-start monitoring
