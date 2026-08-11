@@ -34,6 +34,7 @@ from typing import Any, Iterator, List, Tuple
 import torch
 from torch import nn
 
+from ._distributed import check_distributed_capture
 from .errors._base import CompatibilityError
 
 
@@ -170,7 +171,10 @@ def check_model_and_input_variants(
     """Pre-flight check for ``trace``.
 
     Raises :class:`UnsupportedTensorVariantError` when a fundamentally
-    incompatible tensor variant is detected on the model or its inputs.
+    incompatible tensor variant is detected on the model or its inputs, and
+    :class:`torchlens._distributed.DistributedCaptureUnsupportedError` when the
+    model holds distributed/sharded state that capture would record incorrectly
+    rather than fail on.
     Emits :class:`UserWarning` for variants with partial / degraded support
     (quantization) so the user knows what to treat with skepticism in the log.
 
@@ -182,6 +186,11 @@ def check_model_and_input_variants(
     """
     if input_kwargs is None:
         input_kwargs = {}
+
+    # Distributed/sharded state is checked first: DTensor parameters otherwise
+    # sail past every dense-tensor check below (a DTensor reports a real device
+    # and a strided layout) and capture then silently reports zero parameters.
+    check_distributed_capture(model, input_args, input_kwargs)
 
     offenses: List[Tuple[str, str]] = []
 

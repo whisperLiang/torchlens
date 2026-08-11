@@ -14,6 +14,7 @@ from typing import Any, Literal
 import torch
 from torch import nn
 
+from torchlens._distributed import DistributedFinding, detect_distributed_state
 from torchlens._robustness import _iter_tensors
 from torchlens.utils._torch_compat import (
     get_dynamo_optimized_module_type,
@@ -193,6 +194,7 @@ def report(model: nn.Module, input: Any) -> CompatReport:  # noqa: A002
         _data_parallel_row(model),
         _ddp_row(model),
         _fsdp_row(model),
+        *_distributed_rows(model, input),
         _deepspeed_row(model),
         _torch_compile_row(model),
         _fx_row(model),
@@ -724,6 +726,100 @@ def _fsdp_row(model: nn.Module) -> CompatRow:
         details,
         "Log a rank-local unsharded copy before FSDP wrapping." if detected else "",
     )
+
+
+# Stable row order and labels for the distributed-detection block. Each key
+# matches a DistributedFinding.kind so the report and the capture-entry refusal
+# can never drift apart.
+_DISTRIBUTED_ROW_SPECS: tuple[tuple[str, str, str], ...] = (
+    ("dtensor", "DTensor / sharded tensors", "No DTensor or sharded tensor state detected."),
+    ("device_mesh", "Device mesh", "No device mesh detected."),
+    (
+        "tensor_parallel",
+        "Tensor parallel (TP)",
+        "No tensor-parallel sharding detected.",
+    ),
+    (
+        "pipeline_parallel",
+        "Pipeline parallel (PP)",
+        "No pipeline-parallel stage or schedule detected.",
+    ),
+)
+
+
+def _distributed_rows(model: nn.Module, input_value: Any) -> tuple[CompatRow, ...]:
+    """Build the DTensor / device-mesh / TP / PP rows.
+
+    Parameters
+    ----------
+    model:
+        Model to inspect.
+    input_value:
+        Example input tree to inspect for distributed tensors.
+
+    Returns
+    -------
+    tuple[CompatRow, ...]
+        One row per distributed condition, in stable order, whether or not the
+        condition was detected.
+
+    Notes
+    -----
+    Detection is shared verbatim with the capture-entry refusal in
+    :func:`torchlens._distributed.check_distributed_capture`, so a row reporting
+    a refusing condition and the error the user then hits cannot disagree.
+    """
+
+    findings = {finding.kind: finding for finding in detect_distributed_state(model, input_value)}
+    return tuple(
+        _distributed_row(key, label, clear_details, findings.get(key))
+        for key, label, clear_details in _DISTRIBUTED_ROW_SPECS
+    )
+
+
+def _distributed_row(
+    key: str,
+    label: str,
+    clear_details: str,
+    finding: DistributedFinding | None,
+) -> CompatRow:
+    """Build one distributed-detection row from an optional finding.
+
+    Parameters
+    ----------
+    key:
+        Stable row key, equal to the matching ``DistributedFinding.kind``.
+    label:
+        Human-readable row label.
+    clear_details:
+        Details text used when the condition was not detected.
+    finding:
+        Detected finding, or ``None`` when the condition is absent.
+
+    Returns
+    -------
+    CompatRow
+        Report row.
+    """
+
+    if finding is None:
+        return CompatRow(key, label, "pass", "ok", False, clear_details, "")
+    details = finding.detail
+    sites = finding.describe_sites()
+    if sites:
+        details = f"{details} Sites: {sites}."
+    if not finding.exact:
+        details = (
+            f"{details} Detected structurally (by type namespace), because this torch build "
+            "did not expose the exact class for an isinstance check."
+        )
+    if finding.refuses_capture:
+        details = (
+            f"{details} torchlens.trace() refuses this model with "
+            "DistributedCaptureUnsupportedError rather than returning a wrong trace."
+        )
+        return CompatRow(key, label, "scope", "error", True, details, finding.suggestion)
+    return CompatRow(key, label, "scope", "warning", True, details, finding.suggestion)
 
 
 def _deepspeed_row(model: nn.Module) -> CompatRow:

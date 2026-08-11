@@ -70,6 +70,9 @@ __all__ = [
     "write_fill_uninitialized_memory",
     "HAS_DEVICE_CONTEXT_DISPATCH",
     "HAS_DEVICE_CONSTRUCTORS",
+    "HAS_DEVICE_MESH",
+    "HAS_DTENSOR",
+    "HAS_PIPELINING",
     "HAS_FUNCTORCH_APIS",
     "HAS_FUNCTORCH_LEVEL_API",
     "HAS_FUNCTORCH_WRAPPED_TENSOR_API",
@@ -103,6 +106,9 @@ __all__ = [
     "get_current_function_mode_stack",
     "get_device_constructors",
     "get_device_context_type",
+    "get_device_mesh_type",
+    "get_dtensor_type",
+    "get_pipelining_module_types",
     "get_dynamo_optimized_module_type",
     "get_dynamo_explain",
     "get_functorch_maybe_current_level",
@@ -1097,6 +1103,15 @@ _DYNAMO_ORIG_CALLABLE_MARKER_PROBED: bool = False
 HAS_FSDP_WRAPPER: bool = False
 _FSDP_WRAPPER_TYPE: type[Any] | None = None
 _FSDP_WRAPPER_PROBED: bool = False
+HAS_DTENSOR: bool = False
+_DTENSOR_TYPE: type[Any] | None = None
+_DTENSOR_PROBED: bool = False
+HAS_DEVICE_MESH: bool = False
+_DEVICE_MESH_TYPE: type[Any] | None = None
+_DEVICE_MESH_PROBED: bool = False
+HAS_PIPELINING: bool = False
+_PIPELINING_TYPES: tuple[type[Any], ...] = ()
+_PIPELINING_PROBED: bool = False
 
 _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_AUTOCAST_DEVICE_TYPE_ARG",
@@ -1117,6 +1132,9 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_DYNAMO_ORIG_CALLABLE_MARKER",
     "HAS_DYNAMO_EXPLAIN",
     "HAS_FSDP_WRAPPER",
+    "HAS_DTENSOR",
+    "HAS_DEVICE_MESH",
+    "HAS_PIPELINING",
     "HAS_GENERATOR_CLONE_STATE",
     "HAS_GENERATOR_GRAPHSAFE_GET_STATE",
     "HAS_GENERATOR_GRAPHSAFE_SET_STATE",
@@ -1178,14 +1196,19 @@ def get_torch_capability_snapshot() -> TorchCapabilitySnapshot:
         ``AUTOCAST_DEVICE_TYPE_ARG_SUPPORTED`` alias, to boolean availability.
     """
 
-    # HAS_DYNAMO_OPTIMIZED_MODULE and HAS_FSDP_WRAPPER are lazily probed (see
-    # get_dynamo_optimized_module_type / get_fsdp_wrapper_type) to avoid
-    # unconditional torch._dynamo / torch.distributed.fsdp imports on the
+    # HAS_DYNAMO_OPTIMIZED_MODULE, HAS_FSDP_WRAPPER, HAS_DTENSOR,
+    # HAS_DEVICE_MESH, and HAS_PIPELINING are lazily probed (see
+    # get_dynamo_optimized_module_type / get_fsdp_wrapper_type /
+    # get_dtensor_type / get_device_mesh_type / get_pipelining_module_types) to
+    # avoid unconditional torch._dynamo / torch.distributed imports on the
     # capture hot path. Diagnostic snapshot consumers (tl.compat.report(),
     # tl.utils.doctor()) are not on that hot path, so force the probes here to
     # report the real capabilities instead of the pre-probe placeholders.
     get_dynamo_optimized_module_type(force_probe=True)
     get_fsdp_wrapper_type(force_probe=True)
+    get_dtensor_type(force_probe=True)
+    get_device_mesh_type(force_probe=True)
+    get_pipelining_module_types(force_probe=True)
     _ensure_dynamo_orig_callable_marker_probed()
     get_dynamo_explain()
     snapshot = {name: bool(globals()[name]) for name in _CAPABILITY_ATTRS}
@@ -1506,6 +1529,161 @@ def get_fsdp_wrapper_type(*, force_probe: bool = False) -> type[Any] | None:
         )
         return None
     return fsdp_wrapper_type
+
+
+# Module paths that must already be in ``sys.modules`` for a live DTensor /
+# DeviceMesh / pipeline-stage object to exist. ``torch.distributed._tensor`` is
+# the pre-2.5 spelling and ``torch.distributed.tensor`` the current one; both
+# resolve to the same class object on torch that has the alias, so probing both
+# is a capability probe, not a version parse.
+_DTENSOR_MODULE_CANDIDATES: tuple[str, ...] = (
+    "torch.distributed.tensor",
+    "torch.distributed._tensor",
+)
+_PIPELINING_MODULE_CANDIDATES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("torch.distributed.pipelining", ("PipelineStage", "_PipelineStageBase")),
+    ("torch.distributed.pipeline.sync", ("Pipe",)),
+)
+
+
+def get_dtensor_type(*, force_probe: bool = False) -> type[Any] | None:
+    """Return torch's ``DTensor`` type without paying an eager import.
+
+    Parameters
+    ----------
+    force_probe:
+        Import the DTensor namespace even when it has never been imported in
+        this process. Diagnostic surfaces set this to report the real build
+        capability; capture paths keep the default.
+
+    Returns
+    -------
+    type[Any] | None
+        ``DTensor`` type, or ``None`` when unavailable or when the lazy default
+        defers the probe.
+
+    Notes
+    -----
+    Mirrors :func:`get_fsdp_wrapper_type`: a live tensor can only *be* a
+    ``DTensor`` if its defining module is already in ``sys.modules``, because
+    Python registers a module before any class from it can be instantiated. So
+    when no candidate module has been imported, the default path reports
+    ``None`` without paying the ``torch.distributed`` import cost.
+    """
+
+    global HAS_DTENSOR, _DTENSOR_PROBED, _DTENSOR_TYPE
+
+    if not _DTENSOR_PROBED:
+        if not force_probe and not any(
+            name in sys.modules for name in _DTENSOR_MODULE_CANDIDATES
+        ):
+            return None
+        dtensor_type: Any = None
+        for module_name in _DTENSOR_MODULE_CANDIDATES:
+            try:
+                dtensor_type = _import_module_attr_or_none(module_name, "DTensor")
+            except RuntimeError:
+                dtensor_type = None
+            if isinstance(dtensor_type, type):
+                break
+        _DTENSOR_TYPE = dtensor_type if isinstance(dtensor_type, type) else None
+        HAS_DTENSOR = _DTENSOR_TYPE is not None
+        _DTENSOR_PROBED = True
+    if _DTENSOR_TYPE is None:
+        mark_torch_capability_missing(
+            "HAS_DTENSOR",
+            "exact DTensor detection falls back to structural tensor-subclass matching",
+        )
+        return None
+    return _DTENSOR_TYPE
+
+
+def get_device_mesh_type(*, force_probe: bool = False) -> type[Any] | None:
+    """Return torch's ``DeviceMesh`` type without paying an eager import.
+
+    Parameters
+    ----------
+    force_probe:
+        Import ``torch.distributed.device_mesh`` even when it has never been
+        imported in this process.
+
+    Returns
+    -------
+    type[Any] | None
+        ``DeviceMesh`` type, or ``None`` when unavailable or when the lazy
+        default defers the probe.
+    """
+
+    global HAS_DEVICE_MESH, _DEVICE_MESH_PROBED, _DEVICE_MESH_TYPE
+
+    if not _DEVICE_MESH_PROBED:
+        if not force_probe and "torch.distributed.device_mesh" not in sys.modules:
+            return None
+        try:
+            mesh_type = _import_module_attr_or_none(
+                "torch.distributed.device_mesh", "DeviceMesh"
+            )
+        except RuntimeError:
+            mesh_type = None
+        _DEVICE_MESH_TYPE = mesh_type if isinstance(mesh_type, type) else None
+        HAS_DEVICE_MESH = _DEVICE_MESH_TYPE is not None
+        _DEVICE_MESH_PROBED = True
+    if _DEVICE_MESH_TYPE is None:
+        mark_torch_capability_missing(
+            "HAS_DEVICE_MESH",
+            "exact device-mesh detection falls back to structural attribute matching",
+        )
+        return None
+    return _DEVICE_MESH_TYPE
+
+
+def get_pipelining_module_types(*, force_probe: bool = False) -> tuple[type[Any], ...]:
+    """Return torch pipeline-parallel stage/schedule types without eager import.
+
+    Parameters
+    ----------
+    force_probe:
+        Import the pipelining namespaces even when they have never been
+        imported in this process.
+
+    Returns
+    -------
+    tuple[type[Any], ...]
+        Available pipeline-stage types. Empty when pipelining is unavailable or
+        when the lazy default defers the probe.
+
+    Notes
+    -----
+    Covers both the current ``torch.distributed.pipelining`` namespace and the
+    removed-in-2.5 ``torch.distributed.pipeline.sync.Pipe`` wrapper, so a model
+    built on either spelling is detected on the torch that has it.
+    """
+
+    global HAS_PIPELINING, _PIPELINING_PROBED, _PIPELINING_TYPES
+
+    if not _PIPELINING_PROBED:
+        candidate_modules = tuple(name for name, _attrs in _PIPELINING_MODULE_CANDIDATES)
+        if not force_probe and not any(name in sys.modules for name in candidate_modules):
+            return ()
+        found: list[type[Any]] = []
+        for module_name, attr_names in _PIPELINING_MODULE_CANDIDATES:
+            for attr_name in attr_names:
+                try:
+                    candidate = _import_module_attr_or_none(module_name, attr_name)
+                except RuntimeError:
+                    candidate = None
+                if isinstance(candidate, type):
+                    found.append(candidate)
+        _PIPELINING_TYPES = tuple(found)
+        HAS_PIPELINING = bool(_PIPELINING_TYPES)
+        _PIPELINING_PROBED = True
+    if not _PIPELINING_TYPES:
+        mark_torch_capability_missing(
+            "HAS_PIPELINING",
+            "exact pipeline-parallel detection falls back to structural namespace matching",
+        )
+        return ()
+    return _PIPELINING_TYPES
 
 
 def get_dynamo_optimized_module_type(*, force_probe: bool = False) -> type[Any] | None:

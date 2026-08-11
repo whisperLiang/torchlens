@@ -357,6 +357,15 @@ def test_torch_capability_snapshot_contract() -> None:
         # torch.distributed.fsdp on plain captures); distributed availability is
         # build-dependent, so mirror the live post-snapshot capability.
         "HAS_FSDP_WRAPPER": tc.HAS_FSDP_WRAPPER,
+        # Honest-distributed-detection probes, lazily resolved on the same
+        # never-import-on-the-hot-path contract as FSDP above. Each one names the
+        # graceful degradation it gates: without it, DTensor / device-mesh /
+        # pipeline-stage detection falls back from an exact isinstance check to
+        # structural namespace matching. Build-dependent, so mirror the live
+        # post-snapshot capability.
+        "HAS_DTENSOR": tc.HAS_DTENSOR,
+        "HAS_DEVICE_MESH": tc.HAS_DEVICE_MESH,
+        "HAS_PIPELINING": tc.HAS_PIPELINING,
         "HAS_GENERATOR_CLONE_STATE": hasattr(torch.Generator, "clone_state"),
         "HAS_GENERATOR_GRAPHSAFE_GET_STATE": hasattr(torch.Generator, "graphsafe_get_state"),
         "HAS_GENERATOR_GRAPHSAFE_SET_STATE": hasattr(torch.Generator, "graphsafe_set_state"),
