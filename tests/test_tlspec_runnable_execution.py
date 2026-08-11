@@ -82,6 +82,33 @@ class InplaceActivationModel(nn.Module):
         return preserved + activated
 
 
+class InplaceInputModel(nn.Module):
+    """Graph that mutates its model-input tensor directly."""
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Increment the input in place before returning a derived result."""
+
+        value.add_(2)
+        return value * 3
+
+
+class AliasedViewStateMutationModel(nn.Module):
+    """Graph that mutates declared state through a storage-sharing view."""
+
+    def __init__(self) -> None:
+        """Register one buffer whose view is mutated during the forward pass."""
+
+        super().__init__()
+        self.register_buffer("offset", torch.arange(4.0).reshape(2, 2))
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Mutate a flattened state view before consuming the base buffer."""
+
+        flattened = self.offset.view(-1)
+        flattened.add_(1)
+        return value + self.offset
+
+
 class FailingLiveRunModel(nn.Module):
     """Model whose live refresh forward can deliberately raise."""
 
@@ -376,6 +403,123 @@ def test_loaded_sparse_fast_run_reseeds_rng_after_verify_once(tmp_path: Path) ->
     assert verified.report.path_faithfulness is PathFaithfulness.VERIFIED
     assert repeated.report.path_faithfulness is PathFaithfulness.VERIFIED
     assert torch.equal(repeated.output, verified.output)
+
+
+def test_loaded_sparse_fast_run_refuses_training_batchnorm_state_drift(
+    tmp_path: Path,
+) -> None:
+    """Refuse cached execution when BatchNorm functionally updates running stats."""
+
+    model = nn.BatchNorm1d(3).train()
+    inputs = torch.randn(4, 3)
+    captured = tl.trace(
+        model,
+        inputs,
+        capture=CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+        ),
+    )
+    path = tmp_path / "training-batchnorm-fast.tlspec"
+    captured.save(path, level="runnable", include_weights=True)
+
+    oracle = tl.load(path).run(inputs=inputs)
+    assert oracle.report.path_faithfulness is PathFaithfulness.VERIFIED
+    loaded = tl.load(path)
+    for _ in range(4):
+        with pytest.raises(
+            RunCapabilityUnavailableError,
+            match="running-stat updates",
+        ):
+            loaded.run(inputs=inputs, fast=True)
+
+
+def test_loaded_sparse_fast_run_keeps_eval_batchnorm_static_path(tmp_path: Path) -> None:
+    """Keep eval-mode BatchNorm eligible when its running stats are read-only."""
+
+    model = nn.BatchNorm1d(3).eval()
+    inputs = torch.randn(4, 3)
+    captured = tl.trace(
+        model,
+        inputs,
+        capture=CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+        ),
+    )
+    path = tmp_path / "eval-batchnorm-fast.tlspec"
+    captured.save(path, level="runnable", include_weights=True)
+
+    oracle = tl.load(path).run(inputs=inputs)
+    loaded = tl.load(path)
+    first = loaded.run(inputs=inputs, fast=True)
+    second = loaded.run(inputs=inputs, fast=True)
+
+    assert first.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert second.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert torch.equal(first.output, oracle.output)
+    assert torch.equal(second.output, oracle.output)
+
+
+def test_loaded_sparse_fast_run_refuses_state_view_inplace_mutation(
+    tmp_path: Path,
+) -> None:
+    """Refuse cached execution when an in-place target aliases declared state."""
+
+    model = AliasedViewStateMutationModel().eval()
+    inputs = torch.ones(2, 2)
+    captured = tl.trace(
+        model,
+        inputs,
+        capture=CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+        ),
+    )
+    path = tmp_path / "state-view-inplace-fast.tlspec"
+    captured.save(path, level="runnable", include_weights=True)
+
+    oracle = tl.load(path).run(inputs=inputs)
+    assert oracle.report.path_faithfulness is PathFaithfulness.VERIFIED
+    with pytest.raises(
+        RunCapabilityUnavailableError,
+        match="aliased view",
+    ):
+        tl.load(path).run(inputs=inputs, fast=True)
+
+
+def test_loaded_sparse_fast_run_does_not_mutate_caller_input(tmp_path: Path) -> None:
+    """Mirror runtime inputs before compiled in-place recipes execute."""
+
+    inputs = torch.arange(4.0)
+    captured = tl.trace(
+        InplaceInputModel(),
+        inputs,
+        capture=CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+        ),
+    )
+    path = tmp_path / "inplace-input-fast.tlspec"
+    captured.save(path, level="runnable")
+    loaded = tl.load(path)
+
+    first_input = torch.arange(4.0)
+    expected_first = (first_input + 2) * 3
+    first = loaded.run(inputs=first_input, fast=True)
+    second_input = torch.arange(4.0, 8.0)
+    expected_second = (second_input + 2) * 3
+    second = loaded.run(inputs=second_input, fast=True)
+
+    assert torch.equal(first_input, torch.arange(4.0))
+    assert torch.equal(second_input, torch.arange(4.0, 8.0))
+    assert torch.equal(first.output, expected_first)
+    assert torch.equal(second.output, expected_second)
+    assert second.report.path_faithfulness is PathFaithfulness.VERIFIED
 
 
 def test_live_fast_run_refuses_same_shape_function_path_divergence() -> None:
@@ -1090,7 +1234,7 @@ def _save_alias_runnable(path: Path, *, aliased_capture: bool = True) -> Path:
 
     t = torch.tensor([1.0, 2.0])
     inputs = [t, t] if aliased_capture else [t, t.clone()]
-    capture_call = lambda: tl.trace(  # noqa: E731 - scoped warning assertion helper
+    capture_call = lambda: tl.trace(
         _AliasInplaceModel(),
         inputs,
         capture=CaptureOptions(

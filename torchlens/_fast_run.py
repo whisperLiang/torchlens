@@ -14,6 +14,7 @@ from torch import nn
 
 from . import _state
 from ._runnable_execution import (
+    _VIEW_OP_QUALNAMES,
     _ambient_execution_context_restored,
     _call_execution_context_entered,
     _call_witness_checks,
@@ -35,6 +36,7 @@ from ._runnable_execution import (
     _raise_failed_contract_as_divergence,
     _raise_first_divergence,
     _require_loaded_sparse_provider,
+    _runtime_mirror_clone,
     _seed_run_generators,
     _seeded_fork_devices,
     _split_mixed_inputs,
@@ -44,7 +46,7 @@ from ._runnable_execution import (
     _write_argument,
     run_loaded_sparse_trace,
 )
-from ._runnable_state import PreparedRunnableState, prepare_runnable_state
+from ._runnable_state import PreparedRunnableState, RunResourceCeiling, prepare_runnable_state
 from .errors import RunCapabilityUnavailableError, RuntimeSignatureDriftError
 from .ir.container import ContainerSpec, rebuild_container_from_spec
 from .runnable import (
@@ -62,6 +64,7 @@ from .runnable import (
     StateSource,
     TensorSlotDescriptor,
     TensorSlotRole,
+    is_mode_sensitive_qualname,
 )
 from .utils._torch_compat import tensor_has_named_dims
 from .utils.rng import restore_host_rng, set_random_seed, snapshot_host_rng
@@ -281,6 +284,156 @@ def _fast_input_check(
     )
 
 
+def _state_storage_closure(
+    descriptor: SparseRunDescriptor,
+    state_slot_ids: set[str],
+) -> set[str]:
+    """Return state slots plus every slot reachable through alias-producing calls.
+
+    Parameters
+    ----------
+    descriptor:
+        Frozen sparse replay descriptor.
+    state_slot_ids:
+        Parameter and buffer slot identifiers that seed sparse execution.
+
+    Returns
+    -------
+    set[str]
+        State-derived slots whose storage may alias cached staged state.
+    """
+
+    registry_qualnames = {
+        entry.registry_id: entry.key.qualname for entry in descriptor.callable_registry
+    }
+    closure = set(state_slot_ids)
+    changed = True
+    while changed:
+        changed = False
+        for slot in descriptor.tensor_slots:
+            if slot.version_of in closure and slot.slot_id not in closure:
+                closure.add(slot.slot_id)
+                changed = True
+        for call in descriptor.calls:
+            if registry_qualnames.get(call.registry_id) not in _VIEW_OP_QUALNAMES:
+                continue
+            if not any(argument.slot_id in closure for argument in call.tensor_arguments):
+                continue
+            for output_slot_id in call.output_slot_ids:
+                if output_slot_id not in closure:
+                    closure.add(output_slot_id)
+                    changed = True
+    return closure
+
+
+def _literal_bool_argument(call: RunnableCallDescriptor, name: str) -> bool | None:
+    """Return a recorded boolean call argument by keyword or positional name.
+
+    Parameters
+    ----------
+    call:
+        Frozen sparse call recipe.
+    name:
+        Callable parameter name to resolve.
+
+    Returns
+    -------
+    bool | None
+        Recorded boolean value, or ``None`` when absent or non-boolean.
+    """
+
+    try:
+        positional_index = call.argument_names.index(name)
+    except ValueError:
+        positional_index = None
+    for literal in call.literal_arguments:
+        path = tuple(literal.argument_path)
+        is_keyword = len(path) == 2 and path == ("kwargs", name)
+        is_positional = (
+            positional_index is not None and len(path) == 2 and path == ("args", positional_index)
+        )
+        if not (is_keyword or is_positional):
+            continue
+        value = _decode_literal(literal.value)
+        return value if isinstance(value, bool) else None
+    return None
+
+
+def _normalization_call_may_mutate_state(
+    call: RunnableCallDescriptor,
+    qualname: str | None,
+    state_slot_ids: set[str],
+) -> bool:
+    """Return whether a functional normalization call may update running state.
+
+    Parameters
+    ----------
+    call:
+        Frozen sparse call recipe.
+    qualname:
+        Resolved callable qualname from the registry.
+    state_slot_ids:
+        Parameter and buffer slot identifiers that seed sparse execution.
+
+    Returns
+    -------
+    bool
+        ``True`` when cached running statistics could be updated as a hidden
+        side effect. Unknown mode flags fail closed.
+    """
+
+    if not is_mode_sensitive_qualname(qualname):
+        return False
+    if not any(argument.slot_id in state_slot_ids for argument in call.tensor_arguments):
+        return False
+    tail = (qualname or "").rsplit(".", 1)[-1].removesuffix("_")
+    mode_argument = "use_input_stats" if tail.endswith("instance_norm") else "training"
+    return _literal_bool_argument(call, mode_argument) is not False
+
+
+def _state_mutating_call_ids(
+    descriptor: SparseRunDescriptor,
+    state_slot_ids: set[str],
+) -> tuple[str, ...]:
+    """Return calls that make cached sparse state unsafe across iterations.
+
+    Parameters
+    ----------
+    descriptor:
+        Frozen sparse replay descriptor.
+    state_slot_ids:
+        Parameter and buffer slot identifiers that seed sparse execution.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Ordered call identifiers that explicitly or implicitly mutate state.
+    """
+
+    registry_qualnames = {
+        entry.registry_id: entry.key.qualname for entry in descriptor.callable_registry
+    }
+    state_storage_ids = _state_storage_closure(descriptor, state_slot_ids)
+    return tuple(
+        call.call_id
+        for call in descriptor.calls
+        if (call.is_inplace and _mutation_target_slot_id(call) in state_storage_ids)
+        or _normalization_call_may_mutate_state(
+            call,
+            registry_qualnames.get(call.registry_id),
+            state_slot_ids,
+        )
+    )
+
+
+def _remove_fast_live_hooks(handles: list[Any]) -> None:
+    """Remove and discard module-hook handles without retaining their session."""
+
+    for handle in handles:
+        handle.remove()
+    handles.clear()
+
+
 class _FastSparseSession:
     """Verify-once loaded sparse executor with staged state and compiled binders."""
 
@@ -350,15 +503,12 @@ class _FastSparseSession:
             for slot in descriptor.tensor_slots
             if slot.role in {TensorSlotRole.PARAMETER, TensorSlotRole.BUFFER}
         }
-        mutating_state_calls = tuple(
-            call.call_id
-            for call in descriptor.calls
-            if call.is_inplace and _mutation_target_slot_id(call) in state_ids
-        )
+        mutating_state_calls = _state_mutating_call_ids(descriptor, state_ids)
         if mutating_state_calls:
             raise RunCapabilityUnavailableError(
-                "fast=True cannot cache state for a sparse recipe that explicitly mutates "
-                f"declared state ({', '.join(mutating_state_calls)}). Use ordinary run().",
+                "fast=True cannot cache state for a sparse recipe that may mutate declared "
+                "state directly, through an aliased view, or through running-stat updates "
+                f"({', '.join(mutating_state_calls)}). Use ordinary run().",
                 code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
                 detection_stage="fast_state_static_guard",
             )
@@ -385,7 +535,7 @@ class _FastSparseSession:
     def _bind_inputs(
         self, inputs: Any
     ) -> tuple[dict[str, torch.Tensor], tuple[ContractCheck, ...]]:
-        """Bind raw runtime inputs without the default provider's defensive clones."""
+        """Validate raw runtime inputs and bind independent defensive mirrors."""
 
         values: dict[str, torch.Tensor] = {}
         checks: list[ContractCheck] = []
@@ -405,7 +555,6 @@ class _FastSparseSession:
             checks.extend(_fast_input_check(slot, value))
             if isinstance(value, torch.Tensor):
                 raw_values[slot.slot_id] = value
-                values[slot.slot_id] = value
         checks.extend(_input_tree_contract_checks(self.descriptor, inputs))
         checks.extend(_input_literal_contract_checks(self.descriptor, inputs, self.positions))
         checks.extend(_input_metadata_contract_checks(self.descriptor, inputs, self.positions))
@@ -416,6 +565,12 @@ class _FastSparseSession:
             self.descriptor, self.input_slots, raw_values
         )
         checks.extend(alias_checks)
+        if all(check.passed for check in checks):
+            ceiling = RunResourceCeiling(self.descriptor)
+            for slot in self.input_slots:
+                raw = raw_values.get(slot.slot_id)
+                if isinstance(raw, torch.Tensor):
+                    values[slot.slot_id] = _runtime_mirror_clone(raw, ceiling, slot)
         return values, tuple(checks)
 
     def _bind_outputs(
@@ -694,32 +849,37 @@ class _FastLiveSession:
                 op._internal_set("has_saved_activation", False)
         self.function_names = frozenset(plan.address_or_name for plan in self.function_plans)
         self.handles: list[Any] = []
+        self._hook_finalizer = weakref.finalize(self, _remove_fast_live_hooks, self.handles)
         modules = dict(model.named_modules())
         session_ref = weakref.ref(self)
-        for address in dict.fromkeys(plan.address_or_name for plan in self.module_plans):
-            module = modules.get("" if address == "self" else address)
-            if module is None:
-                raise RunCapabilityUnavailableError(
-                    f"Captured module address {address!r} is absent from the live model.",
-                    code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
-                    detection_stage="fast_live_module_plan",
-                )
+        try:
+            for address in dict.fromkeys(plan.address_or_name for plan in self.module_plans):
+                module = modules.get("" if address == "self" else address)
+                if module is None:
+                    raise RunCapabilityUnavailableError(
+                        f"Captured module address {address!r} is absent from the live model.",
+                        code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+                        detection_stage="fast_live_module_plan",
+                    )
 
-            def hook(
-                _module: nn.Module,
-                _args: tuple[Any, ...],
-                output: Any,
-                *,
-                module_address: str = address,
-                ref: weakref.ReferenceType[_FastLiveSession] = session_ref,
-            ) -> None:
-                """Forward one module boundary to the active session."""
+                def hook(
+                    _module: nn.Module,
+                    _args: tuple[Any, ...],
+                    output: Any,
+                    *,
+                    module_address: str = address,
+                    ref: weakref.ReferenceType[_FastLiveSession] = session_ref,
+                ) -> None:
+                    """Forward one module boundary to the active session."""
 
-                session = ref()
-                if session is not None:
-                    session.capture_module(module_address, output)
+                    session = ref()
+                    if session is not None:
+                        session.capture_module(module_address, output)
 
-            self.handles.append(module.register_forward_hook(hook))
+                self.handles.append(module.register_forward_hook(hook))
+        except BaseException:
+            self._hook_finalizer()
+            raise
 
     @staticmethod
     def _build_module_plans(trace: Any) -> tuple[_FastOutputPlan, ...]:
@@ -810,9 +970,7 @@ class _FastLiveSession:
     def close(self) -> None:
         """Remove persistent module hooks owned by this session."""
 
-        for handle in self.handles:
-            handle.remove()
-        self.handles.clear()
+        self._hook_finalizer()
 
     def wants_function(self, func_name: str) -> bool:
         """Return whether the active scoped collector needs this function type."""
