@@ -6,8 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 import itertools
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Iterable, NoReturn
-import weakref
+from typing import Any, Iterable
 
 from .events import (
     BackwardCoverageGap,
@@ -29,11 +28,6 @@ from .events import (
 from .live_index import LiveIndex
 from .predicate import RecordContext
 from .refs import ParamRef, ReservedLabel
-
-if TYPE_CHECKING:
-    import torch
-
-    from .intervention import FireResult
 
 
 # Declared merge law: how each journal lane combines when one run's stream is
@@ -747,35 +741,7 @@ class CaptureEvents:
         return tuple(labels)
 
 
-@dataclass(slots=True)
-class LiveOpRecord:
-    """Mutable capture-time projection for one raw op label.
-
-    Parameters
-    ----------
-    event
-        Capture event for this operation, if emitted.
-    fields
-        Mutable pre-postprocess field mapping used by live capture consumers.
-    tensor_ref
-        Weak reference to the live output tensor, when weak-referenceable.
-    t_args
-        Positional call arguments used for activation saving.
-    t_kwargs
-        Keyword call arguments used for activation saving.
-    fire_results
-        Intervention hook results recorded for this operation.
-    """
-
-    event: OpEvent | None
-    fields: dict[str, Any]
-    tensor_ref: "weakref.ReferenceType[torch.Tensor] | None"
-    t_args: tuple[Any, ...]
-    t_kwargs: dict[str, Any]
-    fire_results: "tuple[FireResult, ...]" = ()
-
-
-def register_live_event(trace: Any, event: OpEvent, live_record: LiveOpRecord) -> None:
+def register_live_event(trace: Any, event: OpEvent) -> None:
     """Register an emitted operation event on a trace.
 
     Appends ``event`` to ``trace.capture_events`` (allocating the buffer on
@@ -789,11 +755,6 @@ def register_live_event(trace: Any, event: OpEvent, live_record: LiveOpRecord) -
         Active trace receiving capture events.
     event
         Operation event emitted for the new raw label.
-    live_record
-        Accepted only for historical signature compatibility and intentionally
-        ignored: the mutable live-record projection lane is retired, so no
-        ``LiveOpRecord`` is stored. Dropping this parameter is an owner-reserved
-        signature change.
 
     Returns
     -------
@@ -841,32 +802,3 @@ def replace_op_event(trace: Any, label_raw: str, **updates: Any) -> OpEvent | No
     events.op_events[index] = updated_event
     events.live_index.replace(updated_event)
     return updated_event
-
-
-def live_record_for_label(trace: Any, label_raw: str) -> NoReturn:
-    """Always raise: the mutable per-label live-record lane is retired.
-
-    Capture no longer materializes a mutable :class:`LiveOpRecord` per raw
-    label; capture-time consumers read the event-backed
-    :class:`~torchlens.ir.live_index.LiveIndex` instead. This function is a
-    retained compatibility stub with no callers in the tree and never returns a
-    record. It is intentionally kept off the mutable-live-record hot path (see
-    ``tests/test_capture_unification_p2.py``); removing it or its
-    ``torchlens.ir`` export is an owner-reserved public-surface change.
-
-    Parameters
-    ----------
-    trace
-        Active trace (unused).
-    label_raw
-        Raw operation label included in the raised message.
-
-    Raises
-    ------
-    KeyError
-        Always, because no mutable live record exists for any label.
-    """
-
-    raise KeyError(
-        f"{label_raw!r} has no mutable live record; use CaptureEvents.live_index instead."
-    )
