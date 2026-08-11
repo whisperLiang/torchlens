@@ -30,6 +30,8 @@ from .selectors import (
 )
 from .types import HelperSpec, HookSpec, InterventionSpec, TargetSpec, TargetValueSpec
 from ..ir.selector_eval import (
+    _UPFRONT_UNSUPPORTED_KINDS,
+    _capability_error,
     evaluate,
     live_label_error_message,
     looks_like_finalized_label,
@@ -264,6 +266,11 @@ def normalize_hook_plan(
 def _validate_live_site_target(site_target: Any) -> None:
     """Reject selector targets that cannot be live hook application sites.
 
+    Refusal happens upfront, before any per-site evaluation, so a capability
+    error can never hide behind a short-circuiting non-matching sibling.
+    Facet targets pass through: the mutator path expands them to home-op
+    label targets before matching.
+
     Parameters
     ----------
     site_target:
@@ -271,11 +278,11 @@ def _validate_live_site_target(site_target: Any) -> None:
     """
 
     selector = _normalize_live_selector(site_target)
-    _reject_input_at_selector(selector)
+    _reject_live_incapable_selector(selector)
 
 
-def _reject_input_at_selector(selector: BaseSelector) -> None:
-    """Raise for ``input_at`` selectors nested in a live hook target.
+def _reject_live_incapable_selector(selector: BaseSelector) -> None:
+    """Raise for live-incapable selector kinds nested in a live hook target.
 
     Parameters
     ----------
@@ -283,17 +290,14 @@ def _reject_input_at_selector(selector: BaseSelector) -> None:
         Normalized selector to inspect.
     """
 
-    if selector.selector_kind == "input_at":
-        raise SiteResolutionError(
-            "tl.input_at(...) resolves saved input placeholders, but model inputs are not live "
-            "hook application sites. Use trace(..., intervene=...) on downstream ops or mutate "
-            "the model input before capture."
-        )
+    kind = str(selector.selector_kind)
+    if kind in _UPFRONT_UNSUPPORTED_KINDS["live"]:
+        raise _capability_error(kind, "live")
     if isinstance(selector, CompositeSelector):
         for child in selector.selectors:
-            _reject_input_at_selector(_normalize_live_selector(child))
+            _reject_live_incapable_selector(_normalize_live_selector(child))
     if isinstance(selector, NotSelector):
-        _reject_input_at_selector(_normalize_live_selector(selector.selector))
+        _reject_live_incapable_selector(_normalize_live_selector(selector.selector))
 
 
 def _hook_directions(
@@ -893,24 +897,16 @@ def _live_backward_context_matches(
     """Return whether live-only backward selector facets match this callback."""
 
     if isinstance(selector, CompositeSelector):
-        left, right = selector.selectors
-        left_matches = _live_backward_context_matches(
-            _normalize_live_selector(left),
-            grad_fn_handle=grad_fn_handle,
-            grad_input=grad_input,
-            grad_output=grad_output,
+        child_matches = (
+            _live_backward_context_matches(
+                _normalize_live_selector(child),
+                grad_fn_handle=grad_fn_handle,
+                grad_input=grad_input,
+                grad_output=grad_output,
+            )
+            for child in selector.selectors
         )
-        right_matches = _live_backward_context_matches(
-            _normalize_live_selector(right),
-            grad_fn_handle=grad_fn_handle,
-            grad_input=grad_input,
-            grad_output=grad_output,
-        )
-        return (
-            (left_matches and right_matches)
-            if selector.operator == "and"
-            else (left_matches or right_matches)
-        )
+        return all(child_matches) if selector.operator == "and" else any(child_matches)
     if isinstance(selector, NotSelector):
         return not _live_backward_context_matches(
             _normalize_live_selector(selector.selector),

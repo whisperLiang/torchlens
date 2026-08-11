@@ -786,19 +786,22 @@ class BackwardPassSelector(BaseSelector):
 class CompositeSelector(BaseSelector):
     """Selector composed with ``&`` or ``|``.
 
+    ``&`` / ``|`` build nested binary composites; deserialized target specs
+    may carry a flat n-ary child tuple. Both shapes evaluate identically.
+
     Parameters
     ----------
     operator:
         ``"and"`` for intersection or ``"or"`` for union.
     selectors:
-        Pair of selectors to combine.
+        Two or more selectors to combine.
     """
 
     operator: Literal["and", "or"]
-    selectors: tuple[SelectorLike, SelectorLike]
+    selectors: tuple[SelectorLike, ...]
 
     def __init__(
-        self, operator: Literal["and", "or"], selectors: tuple[SelectorLike, SelectorLike]
+        self, operator: Literal["and", "or"], selectors: tuple[SelectorLike, ...]
     ) -> None:
         """Create a composite selector.
 
@@ -807,7 +810,7 @@ class CompositeSelector(BaseSelector):
         operator:
             ``"and"`` for intersection or ``"or"`` for union.
         selectors:
-            Pair of selectors to combine.
+            Two or more selectors to combine.
         """
 
         object.__setattr__(self, "selector_kind", operator)
@@ -840,8 +843,8 @@ class CompositeSelector(BaseSelector):
         """
 
         symbol = "&" if self.operator == "and" else "|"
-        left, right = self.selectors
-        return f"({left!r} {symbol} {right!r})"
+        joined = f" {symbol} ".join(repr(child) for child in self.selectors)
+        return f"({joined})"
 
 
 @dataclass(frozen=True, repr=False)

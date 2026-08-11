@@ -18,13 +18,19 @@ Decided unified semantics (see the consolidation report for the enumerated
 behavior changes):
 
 - ``contains`` is case-INSENSITIVE in every lifecycle; ``regex`` is
-  case-sensitive ``re.search``; ``label`` is an exact literal.
+  case-sensitive ``re.search``; ``label`` is an exact literal. Post-hoc
+  substring/regex search runs over ``layer_label`` only (the historical
+  contract); exact ``label`` keeps the wide universe including raw and short
+  spellings.
 - ``func`` matches the captured function name OR the normalized layer type in
   every lifecycle (live module-boundary proxies match on function name only,
   so an op-level hook never double-fires on the module-exit pseudo-site).
-- ``and`` / ``or`` composites are n-ary.
+- ``and`` / ``or`` composites are n-ary, and they SHORT-CIRCUIT per subject in
+  every lifecycle: a ``tl.where`` predicate must not rely on being invoked for
+  subjects a sibling already decided.
 - ``followed_by`` / ``preceded_by`` are capture-time-only and refuse post-hoc
-  or live evaluation through the capability path.
+  or live evaluation through the capability path — upfront (before any
+  short-circuit) for post-hoc resolution and live hook attachment alike.
 - ``grad_fn_label`` is its own selector kind (backward exact grad_fn label).
 
 This module is deliberately NOT exported from ``torchlens.ir.__init__``:
@@ -90,6 +96,13 @@ _STRING_LABEL_ATTRS: dict[str, tuple[str, ...]] = {
     "capture": ("label", "raw_label", "label_raw", "layer_label", "layer_label_short"),
     "site": ("layer_label", "label", "layer_label_short", "label_short", "_layer_label_raw"),
     "live": ("_layer_label_raw", "_label_raw", "layer_label"),
+}
+
+#: Substring/regex universes. Post-hoc search stays on the final label only:
+#: matching raw/short spellings would make ``contains("raw")`` match every op.
+_SUBSTRING_LABEL_ATTRS: dict[str, tuple[str, ...]] = {
+    **_STRING_LABEL_ATTRS,
+    "site": ("layer_label",),
 }
 
 _FINAL_LABEL_PATTERN = re.compile(r"(?:_\d+_\d+(?::\d+)?$|:\d+$)")
@@ -176,6 +189,41 @@ def contains_followed_by(selector: Any, *, unwrap: bool = False) -> bool:
         isinstance(node, FollowedBySelector)
         for node in walk_selector(selector, unwrap=unwrap)
     )
+
+
+def split_followed_by_conjunction(
+    predicate: Any,
+) -> tuple[FollowedBySelector, BaseSelector] | None:
+    """Split a supported ``candidate & tl.followed_by(successor)`` conjunction.
+
+    Composites are n-ary, so the supported retroactive shape is one
+    ``followed_by`` child among otherwise ordinary selector children; the
+    candidate is the single other child, or the conjunction of all of them.
+
+    Parameters
+    ----------
+    predicate:
+        Candidate save predicate.
+
+    Returns
+    -------
+    tuple[FollowedBySelector, BaseSelector] | None
+        ``(followed_by, candidate)`` for the supported shape, else ``None``.
+    """
+
+    if not isinstance(predicate, CompositeSelector) or predicate.operator != "and":
+        return None
+    followed = [c for c in predicate.selectors if isinstance(c, FollowedBySelector)]
+    others = [c for c in predicate.selectors if not isinstance(c, FollowedBySelector)]
+    if len(followed) != 1 or not others:
+        return None
+    if not all(isinstance(child, BaseSelector) for child in others):
+        return None
+    if any(contains_followed_by(child) for child in others):
+        return None
+    if len(others) == 1:
+        return followed[0], cast(BaseSelector, others[0])
+    return followed[0], CompositeSelector("and", tuple(others))
 
 
 def first_selector_kind_outside(selector: Any, *, allowed: frozenset[str]) -> str | None:
@@ -403,12 +451,22 @@ def _capability_error(kind: str, lifecycle: str) -> SelectorCapabilityError:
     return SelectorCapabilityError(f"Unsupported selector kind {kind!r} for {where}.")
 
 
+#: Kinds refused UPFRONT per lifecycle. The site set must stay in lockstep
+#: with ``_evaluate_subject``'s site refusals (contract-tested); the live set
+#: names the kinds invalid in EVERY hook direction — backward-only kinds stay
+#: out because backward live hooks route them through the backward matcher.
+_UPFRONT_UNSUPPORTED_KINDS: dict[str, frozenset[str]] = {
+    "site": frozenset({"followed_by", "preceded_by", "facet"}),
+    "live": frozenset({"followed_by", "preceded_by", "input_at"}),
+}
+
+
 def ensure_supported(selector: Any, *, lifecycle: Lifecycle) -> None:
     """Raise upfront when a selector tree contains an unsupported kind.
 
-    Used by post-hoc site resolution so an unsupported kind refuses before
-    per-site evaluation (short-circuit evaluation must never hide a refusal
-    behind a non-matching sibling).
+    Used by post-hoc site resolution and live hook attachment so an
+    unsupported kind refuses before per-subject evaluation (short-circuit
+    evaluation must never hide a refusal behind a non-matching sibling).
 
     Parameters
     ----------
@@ -423,11 +481,12 @@ def ensure_supported(selector: Any, *, lifecycle: Lifecycle) -> None:
         If any node's kind cannot be evaluated in this lifecycle.
     """
 
+    unsupported = _UPFRONT_UNSUPPORTED_KINDS.get(lifecycle, frozenset())
     for node in walk_selector(selector):
         if not isinstance(node, BaseSelector):
             continue
         kind = str(node.selector_kind)
-        if lifecycle == "site" and kind in {"followed_by", "preceded_by", "facet"}:
+        if kind in unsupported:
             raise _capability_error(kind, lifecycle)
 
 
@@ -436,7 +495,11 @@ def ensure_supported(selector: Any, *, lifecycle: Lifecycle) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _string_labels(subject: Any, lifecycle: str) -> tuple[str, ...]:
+def _string_labels(
+    subject: Any,
+    lifecycle: str,
+    attrs: dict[str, tuple[str, ...]] = _STRING_LABEL_ATTRS,
+) -> tuple[str, ...]:
     """Return the label-string universe for one subject.
 
     Parameters
@@ -445,6 +508,9 @@ def _string_labels(subject: Any, lifecycle: str) -> tuple[str, ...]:
         Lifecycle subject (context, site, or live proxy).
     lifecycle:
         Active lifecycle key.
+    attrs:
+        Attribute-universe table; substring/regex matching passes the
+        narrower :data:`_SUBSTRING_LABEL_ATTRS`.
 
     Returns
     -------
@@ -454,7 +520,7 @@ def _string_labels(subject: Any, lifecycle: str) -> tuple[str, ...]:
 
     labels: list[str] = []
     seen: set[str] = set()
-    for attr in _STRING_LABEL_ATTRS[lifecycle]:
+    for attr in attrs[lifecycle]:
         value = getattr(subject, attr, None)
         if value is None:
             continue
@@ -809,13 +875,16 @@ def _evaluate_subject(selector: BaseSelector, subject: Any, lifecycle: str) -> b
         if lifecycle == "live" and bool(getattr(subject, "_tl_module_boundary", False)):
             return False
         needle = str(value).lower()
-        return any(needle in label.lower() for label in _string_labels(subject, lifecycle))
+        return any(
+            needle in label.lower()
+            for label in _string_labels(subject, lifecycle, _SUBSTRING_LABEL_ATTRS)
+        )
     if kind == "regex":
         _maybe_guard_label(kind, str(value), subject, lifecycle)
         pattern = str(value)
         return any(
             re.search(pattern, label) is not None
-            for label in _string_labels(subject, lifecycle)
+            for label in _string_labels(subject, lifecycle, _SUBSTRING_LABEL_ATTRS)
         )
     if kind == "func":
         if isinstance(value, dict):
@@ -1132,15 +1201,14 @@ def selector_from_spec(
     """
 
     from ..intervention.selectors import (
+        FacetSelector,
         contains,
-        facet,
         func,
         func_transform,
         grad_fn,
         grad_fn_label,
         grad_input,
         grad_output,
-        head,
         in_backward_pass,
         in_module,
         input_at,
@@ -1190,10 +1258,13 @@ def selector_from_spec(
         if isinstance(value, dict):
             name = value.get("name")
             head_index = value.get("head_index")
-            if head_index is not None:
-                return head(int(head_index), None if name is None else str(name))
-            if name is not None:
-                return facet(str(name))
+            module_address = value.get("module_address")
+            if name is not None or head_index is not None:
+                return FacetSelector(
+                    None if name is None else str(name),
+                    head_index=None if head_index is None else int(head_index),
+                    module_address=None if module_address is None else str(module_address),
+                )
         raise SiteResolutionError(f"Unsupported facet selector payload {value!r}.")
     if kind == "predicate" and callable(value):
         return where(value, name_hint=metadata.get("name_hint"))
@@ -1224,7 +1295,14 @@ def selector_from_spec(
         )
         return CompositeSelector(cast("Literal['and', 'or']", kind), cast(Any, children))
     if kind in {"followed_by", "preceded_by"}:
-        raise _capability_error(kind, lifecycle)
+        if lifecycle != "capture":
+            raise _capability_error(kind, lifecycle)
+        inner = value
+        if not isinstance(inner, BaseSelector) and not callable(inner):
+            inner = normalize_selector_like(inner, lifecycle="capture")
+        if kind == "followed_by":
+            return FollowedBySelector(inner)
+        return PrecededBySelector(inner)
     raise SiteResolutionError(f"Unsupported target spec selector kind {kind!r}.")
 
 
@@ -1302,5 +1380,6 @@ __all__ = [
     "sanitize_transform_kind",
     "selector_contains_kind",
     "selector_from_spec",
+    "split_followed_by_conjunction",
     "walk_selector",
 ]

@@ -3,8 +3,18 @@
 This is the behavioral oracle for the ONE-predicate-interpreter consolidation:
 every public selector spelling is evaluated through each user-reachable
 lifecycle (capture-time ``save=``, post-hoc ``find_sites``, live hook matching,
-and spec round-trip) against fixed models, and the resulting match sets are
-snapshotted in ``tests/golden/selector_semantics_matrix.json``.
+live backward matching, and spec round-trip) against fixed models, and the
+resulting match sets are snapshotted in
+``tests/golden/selector_semantics_matrix.json``.
+
+Beyond the per-spelling grid, dedicated sections pin the seams the 2026-08-11
+dual review demanded the oracle be able to SEE: typed ``output_at`` /
+``input_at`` container paths against dict/namedtuple models, ``torch.func``
+transform boundary ops, live backward matching (including n-ary composites),
+default-``max_fanout`` resolution for the broadened ``func`` kind, per-site
+short-circuit call semantics for stateful ``tl.where`` predicates, flat n-ary
+target specs, and rebuilt-spec evaluation (spec cells resolve the rebuilt
+selector, not just its repr).
 
 The golden encodes TODAY'S behavior, including known divergences between the
 lifecycles (case sensitivity, label universes, error shapes). A diff against
@@ -13,7 +23,8 @@ explicitly intended, enumerated change or a bug. Regenerate deliberately with::
 
     TL_SELECTOR_MATRIX_REGEN=1 pytest tests/test_selector_semantics_matrix.py
 
-Cell values are either a sorted list of matched labels or ``"ERROR:<Class>"``.
+Cell values are either a sorted list of matched labels, ``"ERROR:<Class>"``,
+or a small dict of named sub-results.
 """
 
 from __future__ import annotations
@@ -23,14 +34,19 @@ import os
 import warnings
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import pytest
 import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.intervention.selectors import BaseSelector, grad_fn_label
+from torchlens.intervention.selectors import (
+    BaseSelector,
+    CompositeSelector,
+    grad_fn_label,
+)
+from torchlens.intervention.types import TargetSpec
 
 _GOLDEN_PATH = Path(__file__).parent / "golden" / "selector_semantics_matrix.json"
 _REGEN = bool(os.environ.get("TL_SELECTOR_MATRIX_REGEN"))
@@ -77,7 +93,52 @@ class LoopNet(nn.Module):
         return x
 
 
-def _model_and_input(model_key: str) -> tuple[nn.Module, torch.Tensor]:
+class DictOutNet(nn.Module):
+    """Dict-plus-tuple output: exercises DictKey/TupleIndex output paths."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        torch.manual_seed(0)
+        self.lin = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> dict[str, Any]:
+        h = self.lin(x)
+        return {"logits": torch.relu(h), "aux": (h * 2, h + 1)}
+
+
+class _Pair(NamedTuple):
+    main: torch.Tensor
+    extra: torch.Tensor
+
+
+class NamedTupleNet(nn.Module):
+    """NamedTuple output: exercises NamedField output paths."""
+
+    def forward(self, x: torch.Tensor) -> _Pair:
+        return _Pair(main=torch.relu(x), extra=x * 2)
+
+
+class DictInNet(nn.Module):
+    """Dict input: exercises MODEL_INPUT container paths for ``input_at``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        torch.manual_seed(0)
+        self.lin = nn.Linear(4, 4)
+
+    def forward(self, d: dict[str, torch.Tensor]) -> torch.Tensor:
+        return self.lin(d["a"]) + d["b"]
+
+
+class VmapNet(nn.Module):
+    """``torch.func.vmap`` boundary op: exercises ``func_transform``."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = torch.func.vmap(torch.sin)(x)
+        return torch.relu(y)
+
+
+def _model_and_input(model_key: str) -> tuple[nn.Module, Any]:
     torch.manual_seed(0)
     if model_key == "conv":
         return TinyConvNet(), torch.randn(1, 1, 8, 8)
@@ -85,7 +146,23 @@ def _model_and_input(model_key: str) -> tuple[nn.Module, torch.Tensor]:
         return SplitNet(), torch.randn(1, 4, 4, 4)
     if model_key == "loop":
         return LoopNet(), torch.randn(2, 4)
+    if model_key == "dictout":
+        return DictOutNet(), torch.randn(2, 4)
+    if model_key == "ntout":
+        return NamedTupleNet(), torch.randn(2, 4)
+    if model_key == "dictin":
+        return DictInNet(), [{"a": torch.randn(2, 4), "b": torch.randn(2, 4)}]
+    if model_key == "vmap":
+        return VmapNet(), torch.randn(3, 4)
     raise KeyError(model_key)
+
+
+def _extra_trace_kwargs(model_key: str) -> dict[str, Any]:
+    """Per-model capture options (input containers need explicit opt-in)."""
+
+    if model_key == "dictin":
+        return {"capture": tl.options.CaptureOptions(capture_container_structure=True)}
+    return {}
 
 
 @lru_cache(maxsize=None)
@@ -93,7 +170,7 @@ def _full_trace(model_key: str) -> Any:
     model, x = _model_and_input(model_key)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        return tl.trace(model, x)
+        return tl.trace(model, x, **_extra_trace_kwargs(model_key))
 
 
 @lru_cache(maxsize=None)
@@ -128,6 +205,7 @@ def _probe_capture(model_key: str, make_selector: Callable[[], Any]) -> Any:
                 save=selector,
                 lookback=4,
                 lookback_payload_policy="detached_raw",
+                **_extra_trace_kwargs(model_key),
             )
     except Exception as exc:  # noqa: BLE001 - characterization records error shape
         return _error_cell(exc)
@@ -166,14 +244,91 @@ def _probe_live(model_key: str, make_selector: Callable[[], Any]) -> Any:
         selector = make_selector()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            tl.trace(model, x, hooks=[(selector, _probe_hook)])
+            tl.trace(
+                model, x, hooks=[(selector, _probe_hook)], **_extra_trace_kwargs(model_key)
+            )
     except Exception as exc:  # noqa: BLE001
         return _error_cell(exc)
     return sorted(fired)
 
 
-def _probe_spec(make_selector: Callable[[], Any]) -> Any:
-    """Round-trip a selector through both spec deserializers."""
+def _probe_sites_default_fanout(model_key: str, make_selector: Callable[[], Any]) -> Any:
+    """``find_sites`` at DEFAULT ``max_fanout`` (pins fanout/ambiguity behavior)."""
+
+    try:
+        selector = make_selector()
+        log = _full_trace(model_key)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            table = log.find_sites(selector)
+    except Exception as exc:  # noqa: BLE001
+        return _error_cell(exc)
+    return sorted(str(label) for label in table.labels())
+
+
+def _probe_live_backward(make_selector: Callable[[], Any]) -> Any:
+    """GradFn labels matched by the live backward matcher on the armed trace.
+
+    Exercises ``live_backward_selector_matches`` (and therefore the live-only
+    backward context matcher) per grad_fn with synthetic grad tuples.
+    """
+
+    from torchlens.intervention.hooks import live_backward_selector_matches
+
+    try:
+        selector = make_selector()
+        log = _backward_trace("conv")
+        grads = (torch.ones(1),)
+        matched = []
+        for site in log.grad_fns:
+            if live_backward_selector_matches(
+                selector, site, 1, grad_input=grads, grad_output=grads
+            ):
+                matched.append(str(site.label))
+    except Exception as exc:  # noqa: BLE001
+        return _error_cell(exc)
+    return sorted(matched)
+
+
+def _probe_where_calls(model_key: str, make_selector: Callable[[Callable[[Any], bool]], Any], *, result: bool) -> Any:
+    """Post-hoc labels plus the exact site set a ``tl.where`` predicate saw.
+
+    Pins the enumerated per-site short-circuit semantics: composite branches
+    are not evaluated over the full site set, so a stateful ``tl.where``
+    predicate observes only the sites its siblings did not already decide.
+    """
+
+    calls: list[str] = []
+
+    def _tracking_predicate(p: Any) -> bool:
+        calls.append(str(getattr(p, "layer_label", "?")))
+        return result
+
+    try:
+        selector = make_selector(_tracking_predicate)
+        log = _full_trace(model_key)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            labels = sorted(
+                str(label) for label in log.find_sites(selector, max_fanout=10**6).labels()
+            )
+    except Exception as exc:  # noqa: BLE001
+        return _error_cell(exc)
+    return {"labels": labels, "where_saw": sorted(calls)}
+
+
+def _probe_spec(
+    make_selector: Callable[[], Any],
+    *,
+    model_key: str | None = None,
+    backward: bool = False,
+) -> Any:
+    """Round-trip a selector through the spec deserializer, all lifecycles.
+
+    Deserializer equivalence is pinned by MATCH SET, not repr alone: when the
+    site-lifecycle rebuild succeeds and a model is given, the rebuilt selector
+    is resolved via ``find_sites`` and the labels are stored in the cell.
+    """
 
     from torchlens.intervention.selectors import _classify_selector_direction
     from torchlens.ir.selector_eval import selector_from_spec
@@ -201,6 +356,10 @@ def _probe_spec(make_selector: Callable[[], Any]) -> Any:
         )
         cell["resolver_repr"] = repr(rebuilt)
         cell["resolver_direction"] = _classify_selector_direction(rebuilt)
+        if model_key is not None:
+            cell["resolver_labels"] = _rebuilt_selector_labels(
+                rebuilt, model_key, backward=backward
+            )
     except Exception as exc:  # noqa: BLE001
         cell["resolver_repr"] = _error_cell(exc)
     try:
@@ -211,7 +370,27 @@ def _probe_spec(make_selector: Callable[[], Any]) -> Any:
         cell["hooks_direction"] = _classify_selector_direction(rebuilt_live)
     except Exception as exc:  # noqa: BLE001
         cell["hooks_repr"] = _error_cell(exc)
+    try:
+        rebuilt_capture = selector_from_spec(
+            spec.selector_kind, spec.selector_value, spec.metadata, lifecycle="capture"
+        )
+        cell["capture_repr"] = repr(rebuilt_capture)
+    except Exception as exc:  # noqa: BLE001
+        cell["capture_repr"] = _error_cell(exc)
     return cell
+
+
+def _rebuilt_selector_labels(rebuilt: Any, model_key: str, *, backward: bool) -> Any:
+    """Resolve a spec-rebuilt selector so equivalence is pinned by match set."""
+
+    try:
+        log = _backward_trace(model_key) if backward else _full_trace(model_key)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            table = log.find_sites(rebuilt, max_fanout=10**6)
+    except Exception as exc:  # noqa: BLE001
+        return _error_cell(exc)
+    return sorted(str(label) for label in table.labels())
 
 
 def _where_relu() -> Any:
@@ -266,7 +445,114 @@ FORWARD_CASES: tuple[tuple[str, str, Callable[[], Any]], ...] = (
     ("loop_in_module_block", "loop", lambda: tl.in_module("block")),
     ("loop_in_module_pass2", "loop", lambda: tl.in_module("block:2")),
     ("loop_module_block", "loop", lambda: tl.module("block")),
+    ("loop_module_pass2", "loop", lambda: tl.module("block:2")),
     ("loop_label_recurrent", "loop", lambda: tl.label("linear_1_1")),
+    # Raw/short spellings live only in the exact-label universe post-hoc:
+    # substring/regex over them would make contains("raw") match every op.
+    ("contains_raw_sub", "conv", lambda: tl.contains("_raw")),
+    ("regex_raw_anchor", "conv", lambda: tl.regex(r"_raw$")),
+    # Typed output-path components against real container outputs.
+    ("dict_output_at_logits", "dictout", lambda: tl.output_at(("logits",))),
+    ("dict_output_at_aux0", "dictout", lambda: tl.output_at(("aux", 0))),
+    ("dict_output_at_aux1", "dictout", lambda: tl.output_at(("aux", 1))),
+    ("dict_output_name", "dictout", lambda: tl.output("logits")),
+    ("nt_output_at_main", "ntout", lambda: tl.output_at(("main",))),
+    ("nt_output_at_extra", "ntout", lambda: tl.output_at(("extra",))),
+    # MODEL_INPUT container paths (positive input_at cells).
+    ("dictin_input_at_a", "dictin", lambda: tl.input_at("a")),
+    ("dictin_input_at_b", "dictin", lambda: tl.input_at("b")),
+    ("dictin_input_at_missing", "dictin", lambda: tl.input_at("zzz")),
+    # torch.func transform boundary ops (positive func_transform cells).
+    ("vmap_transform_any", "vmap", lambda: tl.func_transform()),
+    ("vmap_transform_vmap", "vmap", lambda: tl.func_transform("vmap")),
+    ("vmap_transform_grad", "vmap", lambda: tl.func_transform("grad")),
+)
+
+#: Post-hoc resolution at DEFAULT max_fanout (F-3: the broadened ``func`` kind
+#: must be characterized where SiteAmbiguityError can actually fire).
+DEFAULT_FANOUT_CASES: tuple[tuple[str, str, Callable[[], Any]], ...] = (
+    ("func_relu", "conv", lambda: tl.func("relu")),
+    ("func_conv2d", "conv", lambda: tl.func("conv2d")),
+    ("func_add_type", "conv", lambda: tl.func("add")),
+    ("contains_relu", "conv", lambda: tl.contains("relu")),
+    ("not_func_missing", "conv", lambda: ~tl.func("zzz_missing")),
+)
+
+#: Live BACKWARD matching against the armed conv trace (the second-interpreter
+#: seam: composite handling here crashed on n-ary children pre-fix).
+LIVE_BACKWARD_CASES: tuple[tuple[str, Callable[[], Any]], ...] = (
+    ("grad_input", lambda: tl.grad_input()),
+    ("grad_output", lambda: tl.grad_output()),
+    ("grad_fn_class", lambda: tl.grad_fn("ReluBackward0")),
+    ("without_op", lambda: tl.without_op()),
+    ("func_relu_bridge", lambda: tl.func("relu")),
+    ("bwd_and_binary", lambda: tl.grad_fn("ReluBackward0") & tl.grad_input()),
+    (
+        "bwd_and_nary_flat",
+        lambda: CompositeSelector(
+            "and", (tl.grad_input(), tl.func("relu"), tl.contains("relu"))
+        ),
+    ),
+    ("bwd_not", lambda: ~tl.grad_input()),
+    ("bwd_label_finalized", lambda: tl.label("relu_back_1_9")),
+)
+
+#: Stateful tl.where under composition: pins the enumerated per-site
+#: short-circuit semantics (branches never evaluate over the full site set).
+SHORT_CIRCUIT_CASES: tuple[
+    tuple[str, str, Callable[[Callable[[Any], bool]], Any], bool], ...
+] = (
+    ("and_where", "conv", lambda pred: tl.func("relu") & tl.where(pred), True),
+    ("or_where", "conv", lambda pred: tl.func("relu") | tl.where(pred), False),
+    ("not_where", "conv", lambda pred: ~tl.where(pred), False),
+    (
+        "and_where_left",
+        "conv",
+        lambda pred: tl.where(pred) & tl.func("relu"),
+        True,
+    ),
+)
+
+#: Flat n-ary target specs (deserialized shape unreachable via ``&``/``|``).
+FLAT_SPEC_CASES: tuple[tuple[str, str, Callable[[], Any]], ...] = (
+    (
+        "flat_and_three",
+        "conv",
+        lambda: TargetSpec(
+            selector_kind="and",
+            selector_value=(
+                TargetSpec("func", "relu"),
+                TargetSpec("in_module", "features"),
+                TargetSpec("contains", "relu"),
+            ),
+        ),
+    ),
+    (
+        "flat_or_three",
+        "conv",
+        lambda: TargetSpec(
+            selector_kind="or",
+            selector_value=(
+                TargetSpec("func", "relu"),
+                TargetSpec("func", "conv2d"),
+                TargetSpec("func", "flatten"),
+            ),
+        ),
+    ),
+    (
+        "flat_and_single_child",
+        "conv",
+        lambda: TargetSpec(
+            selector_kind="and", selector_value=(TargetSpec("func", "relu"),)
+        ),
+    ),
+)
+
+#: Scoped facet chains: spec round-trips must not drop ``module_address``.
+FACET_SPEC_CASES: tuple[tuple[str, Callable[[], Any]], ...] = (
+    ("facet_head_scoped", lambda: tl.facet("q").head(3).in_module("encoder.block.0")),
+    ("facet_scoped", lambda: tl.facet("q").in_module("encoder.block.0")),
+    ("facet_head", lambda: tl.facet("q").head(3)),
 )
 
 #: Backward selectors probed with find_sites against the armed conv trace.
@@ -287,6 +573,26 @@ BACKWARD_CASES: tuple[tuple[str, Callable[[], Any]], ...] = (
     ),
     ("bwd_plain_label", lambda: tl.label("relu_back_1_9")),
     ("bwd_not_accumulate", lambda: ~tl.grad_fn("AccumulateGrad")),
+    # Direction-agnostic container kinds must intersect with backward kinds
+    # through the grad_fn boundary-alias bridge (deleted-code invariant).
+    ("bwd_output_at_and_grad_input", lambda: tl.output_at((0,)) & tl.grad_input()),
+    ("bwd_output0_and_grad_input", lambda: tl.output(0) & tl.grad_input()),
+    ("bwd_input_at_and_grad_output", lambda: tl.input_at(0) & tl.grad_output()),
+)
+
+#: Backward composition against container/multi-output models: the
+#: direction-agnostic bridge (paired op + grad_fn boundary aliases) must make
+#: ``output(0) & grad_input()`` and ``output_at(path) & grad_input()``
+#: NON-vacuously intersect (deleted-code invariant; conv-only cells are []).
+BACKWARD_CONTAINER_CASES: tuple[tuple[str, str, Callable[[], Any]], ...] = (
+    ("split_output0_and_grad_input", "split", lambda: tl.output(0) & tl.grad_input()),
+    ("split_output1_and_grad_input", "split", lambda: tl.output(1) & tl.grad_input()),
+    (
+        "dictout_output_at_logits_and_grad_input",
+        "dictout",
+        lambda: tl.output_at(("logits",)) & tl.grad_input(),
+    ),
+    ("dictout_output_at_logits", "dictout", lambda: tl.output_at(("logits",))),
 )
 
 #: Selector compositions expected to be decided at construction time.
@@ -312,12 +618,32 @@ def _compute_matrix() -> dict[str, Any]:
         matrix[f"capture/{model_key}/{name}"] = _probe_capture(model_key, factory)
         matrix[f"sites/{model_key}/{name}"] = _probe_sites(model_key, factory, backward=False)
         matrix[f"live/{model_key}/{name}"] = _probe_live(model_key, factory)
-        matrix[f"spec/{name}"] = _probe_spec(factory)
+        matrix[f"spec/{name}"] = _probe_spec(factory, model_key=model_key)
     for name, factory in BACKWARD_CASES:
         matrix[f"sites_bwd/conv/{name}"] = _probe_sites("conv", factory, backward=True)
-        matrix[f"spec_bwd/{name}"] = _probe_spec(factory)
+        matrix[f"spec_bwd/{name}"] = _probe_spec(factory, model_key="conv", backward=True)
+    for name, model_key, factory in BACKWARD_CONTAINER_CASES:
+        matrix[f"sites_bwd/{model_key}/{name}"] = _probe_sites(
+            model_key, factory, backward=True
+        )
     for name, factory in CONSTRUCT_CASES:
         matrix[f"construct/{name}"] = _construct_cell(factory)
+    for name, model_key, factory in DEFAULT_FANOUT_CASES:
+        matrix[f"sites_default_fanout/{model_key}/{name}"] = _probe_sites_default_fanout(
+            model_key, factory
+        )
+    for name, factory in LIVE_BACKWARD_CASES:
+        matrix[f"live_bwd/conv/{name}"] = _probe_live_backward(factory)
+    for name, model_key, factory, result in SHORT_CIRCUIT_CASES:
+        matrix[f"short_circuit/{model_key}/{name}"] = _probe_where_calls(
+            model_key, factory, result=result
+        )
+    for name, model_key, factory in FLAT_SPEC_CASES:
+        matrix[f"flat_spec/{model_key}/{name}"] = _probe_sites(
+            model_key, factory, backward=False
+        )
+    for name, factory in FACET_SPEC_CASES:
+        matrix[f"facet_spec/{name}"] = _probe_spec(factory)
     return matrix
 
 
@@ -344,8 +670,14 @@ _CELL_KEYS: tuple[str, ...] = tuple(
      for lifecycle in ("capture", "sites", "live")]
     + [f"spec/{name}" for name, _, _ in FORWARD_CASES]
     + [f"sites_bwd/conv/{name}" for name, _ in BACKWARD_CASES]
+    + [f"sites_bwd/{model_key}/{name}" for name, model_key, _ in BACKWARD_CONTAINER_CASES]
     + [f"spec_bwd/{name}" for name, _ in BACKWARD_CASES]
     + [f"construct/{name}" for name, _ in CONSTRUCT_CASES]
+    + [f"sites_default_fanout/{model_key}/{name}" for name, model_key, _ in DEFAULT_FANOUT_CASES]
+    + [f"live_bwd/conv/{name}" for name, _ in LIVE_BACKWARD_CASES]
+    + [f"short_circuit/{model_key}/{name}" for name, model_key, _, _ in SHORT_CIRCUIT_CASES]
+    + [f"flat_spec/{model_key}/{name}" for name, model_key, _ in FLAT_SPEC_CASES]
+    + [f"facet_spec/{name}" for name, _ in FACET_SPEC_CASES]
 )
 
 

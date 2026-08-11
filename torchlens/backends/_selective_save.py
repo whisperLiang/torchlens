@@ -290,5 +290,3 @@ def _reject_non_static_save_predicate(
         "execution. Use the PyTorch backend for value-dependent predicates, intervene=, and "
         "halt=."
     )
-
-

@@ -6,21 +6,21 @@ import time
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from ..fastlog.exceptions import PredicateError
 from ..fastlog.types import CaptureSpec, ModuleStackFrame, RecordContext
 from ..intervention.predicates import as_intervention_decision
-from ..intervention.selectors import (
-    BaseSelector,
-    CompositeSelector,
-    FollowedBySelector,
-)
+from ..intervention.selectors import BaseSelector
 from ..intervention.types import InterventionDecision
 from ..ir.predicate import RetroactiveCaptureDecision
-from ..ir.selector_eval import contains_followed_by, selector_contains_kind
+from ..ir.selector_eval import (
+    contains_followed_by,
+    selector_contains_kind,
+    split_followed_by_conjunction,
+)
 
 if TYPE_CHECKING:
     from ..fastlog.options import RecordingOptions
@@ -249,24 +249,14 @@ def _evaluate_retroactive_followed_by(
 ) -> RetroactiveCaptureDecision | None:
     """Evaluate supported ``candidate & followed_by(successor)`` predicate sugar."""
 
-    predicate = options.keep_op
-    if not isinstance(predicate, CompositeSelector) or predicate.operator != "and":
+    split = split_followed_by_conjunction(options.keep_op)
+    if split is None:
         return None
-    left, right = predicate.selectors
-    followed_selector: FollowedBySelector | None = None
-    candidate_selector: Any | None = None
-    if isinstance(right, FollowedBySelector):
-        followed_selector = right
-        candidate_selector = left
-    elif isinstance(left, FollowedBySelector):
-        followed_selector = left
-        candidate_selector = right
-    if followed_selector is None or candidate_selector is None:
-        return None
+    followed_selector, candidate_selector = split
     inner = followed_selector.inner
     if not callable(inner) or not bool(inner(ctx)):
         return None
-    target_labels = _matching_recent_parent_labels(ctx, cast(BaseSelector, candidate_selector))
+    target_labels = _matching_recent_parent_labels(ctx, candidate_selector)
     if not target_labels:
         return None
     return RetroactiveCaptureDecision(
@@ -292,15 +282,7 @@ def _is_supported_followed_by_predicate(predicate: Any) -> bool:
     selector = getattr(predicate, "selector", None)
     if selector is not None:
         return _is_supported_followed_by_predicate(selector)
-    if not isinstance(predicate, CompositeSelector) or predicate.operator != "and":
-        return False
-    left, right = predicate.selectors
-    return (
-        isinstance(right, FollowedBySelector)
-        and isinstance(left, BaseSelector)
-        or isinstance(left, FollowedBySelector)
-        and isinstance(right, BaseSelector)
-    )
+    return split_followed_by_conjunction(predicate) is not None
 
 
 def validate_followed_by_capability(
