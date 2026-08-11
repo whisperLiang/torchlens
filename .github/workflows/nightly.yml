@@ -129,24 +129,29 @@ jobs:
           - backend: tf
             install: tensorflow-cpu
             marker: tf_backend
+            import_check: "import tensorflow, keras"
           - backend: jax
             install: '"jax[cpu]" equinox flax'
             marker: backend_jax
+            import_check: "import jax, jax.numpy, equinox, flax"
           - backend: tinygrad
             # Pinned to the exact version the backend runtime asserts. The
             # replay/derived-grad oracles require the PYTHON device.
             install: '"tinygrad==0.13.0"'
             marker: backend_tinygrad
             dev: PYTHON
+            import_check: "import tinygrad"
           - backend: paddle
             install: '"paddlepaddle>=3.3,<3.4"'
             marker: backend_paddle
+            import_check: "import paddle"
           - backend: mlx
             # MLX ships manylinux CPU wheels, so its suite runs on Linux CI;
             # pinned to 0.26.3 because the 0.26.5 manylinux wheel is missing
             # libmlx.so. Metal-path coverage still needs Apple silicon.
             install: '"mlx==0.26.3"'
             marker: backend_mlx
+            import_check: "import mlx.core, mlx.nn"
     steps:
       - uses: actions/checkout@v4
 
@@ -161,6 +166,12 @@ jobs:
           uv pip install --system -e ".[dev,test,tabular]"
           uv pip install --system ${{ matrix.install }}
 
+      - name: Verify the ${{ matrix.backend }} runtime imports
+        # A missing or import-broken framework must fail the leg here, not
+        # dissolve into importorskip-skipped tests downstream.
+        run: |
+          python -c '${{ matrix.import_check }}'
+
       - name: Run ${{ matrix.backend }} preview backend tests
         env:
           # MLX's CPU JIT emits _FloatNN typedefs newer g++ rejects; the
@@ -170,7 +181,15 @@ jobs:
           # tinygrad leg only; empty (unread) elsewhere.
           DEV: ${{ matrix.dev || '' }}
         run: |
-          pytest tests/ -m "${{ matrix.marker }} and not slow" --tb=short
+          pytest tests/ -m "${{ matrix.marker }} and not slow" --tb=short \
+            --junitxml="${{ runner.temp }}/preview-${{ matrix.backend }}.junit.xml"
+
+      - name: Fail on a zero-executed ${{ matrix.backend }} suite
+        # Second tripwire: even with the runtime importable, an all-skipped
+        # suite (marker drift, collection regression) must not stay green.
+        run: |
+          python scripts/check_ci_executed_tests.py \
+            "${{ runner.temp }}/preview-${{ matrix.backend }}.junit.xml" 1
 
   wheel:
     name: Wheel package smoke

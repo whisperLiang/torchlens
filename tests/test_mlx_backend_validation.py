@@ -69,6 +69,120 @@ def test_mlx_validation_fails_dropped_capture_material() -> None:
     assert MLXBackend().validate_trace(trace) is False
 
 
+def test_mlx_validation_fails_partial_capture_deletion() -> None:
+    """Deleting a SUBSET of replay records must fail, never shrink the denominator."""
+
+    for index in range(3):
+        trace = _healthy_trace()
+        assert len(trace._mlx_op_captures) == 3
+        del trace._mlx_op_captures[index]
+
+        assert MLXBackend().validate_trace(trace) is False
+
+
+def test_mlx_validation_fails_inventory_tamper() -> None:
+    """Shrinking the immutable inventory itself is caught by trace-op coverage."""
+
+    trace = _healthy_trace()
+    trace._mlx_replay_inventory = trace._mlx_replay_inventory[:-1]
+
+    assert MLXBackend().validate_trace(trace) is False
+
+
+def test_mlx_validation_fails_missing_inventory() -> None:
+    """A live trace without the emit-time inventory can never pass."""
+
+    trace = _healthy_trace()
+    del trace._mlx_replay_inventory
+
+    assert MLXBackend().validate_trace(trace) is False
+
+
+class _BranchMergeNet(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.l1 = nn.Linear(4, 4)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        hidden = self.l1(x)
+        return mx.add(nn.relu(hidden), nn.sigmoid(hidden))
+
+
+def _branch_trace_and_add_tamper_material() -> tuple[tl.Trace, int, str, str]:
+    trace = tl.trace(_BranchMergeNet(), mx.ones((1, 4)), backend="mlx")
+    captures = trace._mlx_op_captures
+    add_index = next(i for i, c in enumerate(captures) if c.op_name == "add")
+    relu_label = next(c.labels_raw[0] for c in captures if c.op_name == "relu")
+    sigmoid_label = next(c.labels_raw[0] for c in captures if c.op_name == "sigmoid")
+    return trace, add_index, relu_label, sigmoid_label
+
+
+def test_mlx_validation_fails_incoherent_wrong_parent_attribution() -> None:
+    """Rewiring only the trace's declared parents fails the structural cross-check."""
+
+    trace, add_index, relu_label, sigmoid_label = _branch_trace_and_add_tamper_material()
+    add_label = trace._mlx_op_captures[add_index].labels_raw[0]
+    add_op = next(op for op in trace.layer_list if op._label_raw == add_label)
+    add_op.parents = [sigmoid_label if p == relu_label else p for p in add_op.parents]
+
+    assert MLXBackend().validate_trace(trace) is False
+
+
+def test_mlx_validation_fails_coherent_wrong_parent_attribution() -> None:
+    """Rewiring trace parents AND capture leaf labels together fails numerically.
+
+    Replay reconstructs arguments from the DECLARED parents' saved payloads, so
+    a coherent wrong-parent story replays with the wrong branch's values and
+    mismatches the saved output.
+    """
+
+    import dataclasses
+
+    trace, add_index, relu_label, sigmoid_label = _branch_trace_and_add_tamper_material()
+    captures = trace._mlx_op_captures
+    capture = captures[add_index]
+    captures[add_index] = dataclasses.replace(
+        capture,
+        arg_leaf_labels=tuple(
+            tuple(sigmoid_label if label == relu_label else label for label in slot)
+            for slot in capture.arg_leaf_labels
+        ),
+    )
+    add_op = next(op for op in trace.layer_list if op._label_raw == capture.labels_raw[0])
+    add_op.parents = [sigmoid_label if p == relu_label else p for p in add_op.parents]
+
+    assert MLXBackend().validate_trace(trace) is False
+
+
+def test_mlx_validation_branch_merge_healthy_passes() -> None:
+    """The branch/merge oracle model itself validates cleanly untampered."""
+
+    trace = tl.trace(_BranchMergeNet(), mx.ones((1, 4)), backend="mlx")
+
+    assert MLXBackend().validate_trace(trace) is True
+
+
+def test_mlx_end_to_end_bare_interventions_flip_refuses_typed() -> None:
+    """Sol probe, live: interventions=True flipped in place on the registered MLX
+    spec must refuse typed at trace() — never return a trace with the
+    intervention silently ignored."""
+
+    from torchlens.backends import BackendCapabilityConformanceError, get_backend_spec
+
+    spec = get_backend_spec("mlx")
+    object.__setattr__(spec.capabilities, "interventions", True)
+    try:
+        with pytest.raises(BackendCapabilityConformanceError):
+            tl.trace(
+                _TwoLayerMLP(),
+                mx.ones((1, 4)),
+                backend="mlx",
+                intervene=tl.when(tl.func("relu"), tl.zero_ablate()),
+            )
+    finally:
+        object.__setattr__(spec.capabilities, "interventions", False)
+
+
 def test_mlx_validation_loaded_payload_stripped_trace_is_unavailable() -> None:
     """Return unavailable status for loaded traces stripped of replay material."""
 

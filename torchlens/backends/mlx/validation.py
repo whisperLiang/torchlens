@@ -35,6 +35,13 @@ class MLXOpCapture:
         Keyword arguments as observed at call time.
     output:
         Raw output object returned by the call.
+    arg_leaf_labels:
+        Per positional argument, the raw parent label of each array leaf in
+        deterministic flatten order (``None`` for unlabeled leaves such as
+        parameters).
+    kwarg_leaf_labels:
+        The same per-leaf parent labels for keyword arguments, keyed by
+        keyword name.
     """
 
     labels_raw: tuple[str, ...]
@@ -43,6 +50,8 @@ class MLXOpCapture:
     args: tuple[Any, ...] = ()
     kwargs: dict[str, Any] = field(default_factory=dict)
     output: Any = None
+    arg_leaf_labels: tuple[tuple[str | None, ...], ...] = ()
+    kwarg_leaf_labels: dict[str, tuple[str | None, ...]] = field(default_factory=dict)
 
 
 def _is_mlx_array(value: Any) -> bool:
@@ -243,8 +252,217 @@ def _saved_payload(trace: Any, ops_by_label: dict[str, Any], label_raw: str) -> 
     return payload
 
 
+def _capture_parent_labels(capture: MLXOpCapture) -> set[str]:
+    """Return every recorded parent label across a capture's argument leaves.
+
+    Parameters
+    ----------
+    capture:
+        Captured call.
+
+    Returns
+    -------
+    set[str]
+        Non-``None`` per-leaf parent labels.
+    """
+
+    labels = {
+        label for slot in capture.arg_leaf_labels for label in slot if label is not None
+    }
+    for slot in capture.kwarg_leaf_labels.values():
+        labels.update(label for label in slot if label is not None)
+    return labels
+
+
+def _declared_parents_consistent(
+    trace: Any,
+    ops_by_label: dict[str, Any],
+    capture: MLXOpCapture,
+) -> bool:
+    """Cross-check a capture's parent labels against the trace's declared graph.
+
+    Parameters
+    ----------
+    trace:
+        Trace being validated.
+    ops_by_label:
+        Label-to-op index from :func:`_ops_by_label`.
+    capture:
+        Captured call whose output ops carry the declared parent edges.
+
+    Returns
+    -------
+    bool
+        ``True`` when, for every materialized output op, the declared parent
+        op set equals the parent op set implied by the recorded argument
+        leaves (the op itself excluded on both sides, so aliasing outputs
+        cannot self-shadow).
+    """
+
+    implied_ops = {
+        id(ops_by_label[label])
+        for label in _capture_parent_labels(capture)
+        if label in ops_by_label
+    }
+    for label_raw in capture.labels_raw:
+        op = ops_by_label.get(label_raw)
+        if op is None:
+            continue
+        declared = getattr(op, "parents", None)
+        if declared is None:
+            return False
+        declared_ops = {
+            id(ops_by_label[parent])
+            for parent in declared
+            if parent in ops_by_label
+        }
+        declared_ops.discard(id(op))
+        implied_without_self = set(implied_ops)
+        implied_without_self.discard(id(op))
+        if declared_ops != implied_without_self:
+            return False
+    return True
+
+
+def _reconstruct_value(
+    trace: Any,
+    ops_by_label: dict[str, Any],
+    value: Any,
+    leaf_labels: tuple[str | None, ...],
+) -> Any:
+    """Rebuild one argument from the trace's saved parent payloads.
+
+    Parameters
+    ----------
+    trace:
+        Trace being validated.
+    ops_by_label:
+        Label-to-op index from :func:`_ops_by_label`.
+    value:
+        Emit-time argument value.
+    leaf_labels:
+        Recorded per-leaf parent labels for ``value`` in flatten order.
+
+    Returns
+    -------
+    Any
+        ``value`` with every labeled array leaf replaced by the saved payload
+        the declared graph stores for that label; unlabeled leaves (parameters,
+        constants) keep their emit-time values.
+    """
+
+    cursor = iter(leaf_labels)
+
+    def _rebuild(node: Any) -> Any:
+        if _is_mlx_array(node):
+            label = next(cursor, None)
+            if label is None:
+                return node
+            return _saved_payload(trace, ops_by_label, label)
+        if isinstance(node, tuple):
+            return tuple(_rebuild(item) for item in node)
+        if isinstance(node, list):
+            return [_rebuild(item) for item in node]
+        if isinstance(node, dict):
+            return {key: _rebuild(item) for key, item in node.items()}
+        return node
+
+    return _rebuild(value)
+
+
+def _reconstruct_call(
+    trace: Any,
+    ops_by_label: dict[str, Any],
+    capture: MLXOpCapture,
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Rebuild a capture's full call material from declared parent payloads.
+
+    Parameters
+    ----------
+    trace:
+        Trace being validated.
+    ops_by_label:
+        Label-to-op index from :func:`_ops_by_label`.
+    capture:
+        Captured call.
+
+    Returns
+    -------
+    tuple[tuple[Any, ...], dict[str, Any]]
+        Positional and keyword arguments with labeled leaves sourced from the
+        trace's saved payloads, so replay exercises the recorded graph wiring
+        rather than trusting emit-time argument objects.
+    """
+
+    args = tuple(
+        _reconstruct_value(
+            trace,
+            ops_by_label,
+            value,
+            capture.arg_leaf_labels[index] if index < len(capture.arg_leaf_labels) else (),
+        )
+        for index, value in enumerate(capture.args)
+    )
+    kwargs = {
+        key: _reconstruct_value(
+            trace,
+            ops_by_label,
+            value,
+            capture.kwarg_leaf_labels.get(key, ()),
+        )
+        for key, value in capture.kwargs.items()
+    }
+    return args, kwargs
+
+
+def _coverage_failure_count(trace: Any, captures: tuple[MLXOpCapture, ...]) -> int:
+    """Count replay-evidence coverage failures against the immutable inventory.
+
+    Parameters
+    ----------
+    trace:
+        Trace carrying the emit-time ``_mlx_replay_inventory``.
+    captures:
+        Surviving replay capture records.
+
+    Returns
+    -------
+    int
+        Zero only when the capture records exactly cover the inventory AND
+        every non-input materialized op label is inventoried. Any missing,
+        extra, or uninventoried entry counts, so partial evidence deletion can
+        never yield a vacuous pass.
+    """
+
+    inventory = getattr(trace, "_mlx_replay_inventory", None)
+    if inventory is None:
+        return 1
+    expected = sorted((name, tuple(labels)) for name, labels in tuple(inventory))
+    observed = sorted((capture.op_name, tuple(capture.labels_raw)) for capture in captures)
+    failures = 0
+    if expected != observed:
+        expected_only = [call for call in expected if call not in observed]
+        observed_only = [call for call in observed if call not in expected]
+        failures += max(1, len(expected_only) + len(observed_only))
+    inventoried_labels = {label for _name, labels in expected for label in labels}
+    for op in getattr(trace, "layer_list", ()):
+        if getattr(op, "is_input", False):
+            continue
+        label = getattr(op, "_label_raw", None)
+        if isinstance(label, str) and label not in inventoried_labels:
+            failures += 1
+    return failures
+
+
 def validate_mlx_captures(trace: Any) -> tuple[int, int]:
     """Replay every captured MLX call against the trace's saved payloads.
+
+    Coverage is fail-closed: the emit-time ``_mlx_replay_inventory`` is the
+    denominator, so partial deletion of replay records fails instead of
+    shrinking the evidence set. Replay arguments are reconstructed from the
+    saved payloads of each op's DECLARED parents, and the declared parent set
+    is cross-checked against the per-leaf labels recorded at emit time, so
+    wrong-parent attribution fails either structurally or numerically.
 
     Parameters
     ----------
@@ -260,13 +478,16 @@ def validate_mlx_captures(trace: Any) -> tuple[int, int]:
     import mlx.core as mx
 
     ops_by_label = _ops_by_label(trace)
+    captures = tuple(getattr(trace, "_mlx_op_captures", ()))
     replayed_count = 0
-    failed_count = 0
-    for capture in tuple(getattr(trace, "_mlx_op_captures", ())):
+    failed_count = _coverage_failure_count(trace, captures)
+    for capture in captures:
         try:
-            replayed = _iter_output_arrays(
-                capture.func(*capture.args, **capture.kwargs)
-            )
+            if not _declared_parents_consistent(trace, ops_by_label, capture):
+                failed_count += 1
+                continue
+            replay_args, replay_kwargs = _reconstruct_call(trace, ops_by_label, capture)
+            replayed = _iter_output_arrays(capture.func(*replay_args, **replay_kwargs))
             mx.eval(*replayed)
             if len(replayed) != len(capture.labels_raw) or not replayed:
                 failed_count += 1
@@ -282,7 +503,15 @@ def validate_mlx_captures(trace: Any) -> tuple[int, int]:
             ):
                 failed_count += 1
                 continue
-            if not _perturbation_changes_output(capture, replayed):
+            perturb_capture = MLXOpCapture(
+                labels_raw=capture.labels_raw,
+                op_name=capture.op_name,
+                func=capture.func,
+                args=replay_args,
+                kwargs=replay_kwargs,
+                output=capture.output,
+            )
+            if not _perturbation_changes_output(perturb_capture, replayed):
                 failed_count += 1
                 continue
             replayed_count += 1

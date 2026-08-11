@@ -753,6 +753,7 @@ def _is_runtime_only_trace_field(field_name: str) -> bool:
         "tinygrad_payload_policy",
         "tinygrad_uop_captures",
         "_mlx_op_captures",
+        "_mlx_replay_inventory",
         "_orphan_pruned_func_call_ids",
     }
 

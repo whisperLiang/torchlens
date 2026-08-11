@@ -958,7 +958,7 @@ class MLXBackend:
                 "save_visualizations": save_visualizations,
             },
             MLX_PREVIEW_TRACE_OPTION_POLICY,
-            capabilities=get_backend_spec("mlx").capabilities,
+            spec=get_backend_spec("mlx"),
         )
         if random_seed is not None:
             raise BackendUnsupportedError(
@@ -1458,15 +1458,35 @@ class MLXBackend:
         if op_captures is None:
             op_captures = []
             trace._mlx_op_captures = op_captures
+        labels_raw = tuple(entry.label_raw for entry in reserved)
+        # Parent labels are recorded per array leaf BEFORE outputs are labeled,
+        # so aliasing outputs cannot shadow their own parents.
+        arg_leaf_labels = tuple(
+            tuple(self.tensor_store.get_label(leaf) for leaf in self._iter_arrays(value))
+            for value in args
+        )
+        kwarg_leaf_labels = {
+            key: tuple(self.tensor_store.get_label(leaf) for leaf in self._iter_arrays(value))
+            for key, value in kwargs.items()
+        }
         op_captures.append(
             MLXOpCapture(
-                labels_raw=tuple(entry.label_raw for entry in reserved),
+                labels_raw=labels_raw,
                 op_name=op_name,
                 func=func,
                 args=args,
                 kwargs=dict(kwargs),
                 output=output,
+                arg_leaf_labels=arg_leaf_labels,
+                kwarg_leaf_labels=kwarg_leaf_labels,
             )
+        )
+        # Independent immutable replay inventory: the validation oracle's
+        # denominator. Losing a subset of _mlx_op_captures can then never
+        # shrink the expected-coverage set along with the evidence.
+        trace._mlx_replay_inventory = (
+            *getattr(trace, "_mlx_replay_inventory", ()),
+            (op_name, labels_raw),
         )
         func_call_id = events.func_call_id_counter + 1
         events.func_call_id_counter = func_call_id
