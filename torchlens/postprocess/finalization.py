@@ -108,21 +108,37 @@ def _finalize_param_logs(self: "Trace") -> None:
     Op entries to reduce memory. Param._param_ref is released after the
     full finalization pipeline, once all finalization-time param reads finish.
     """
+    # Lists remain authoritative and preserve first-seen order. Local sets avoid
+    # repeatedly scanning those growing lists for high-arity parameterized ops.
+    membership_by_param: dict[int, tuple[set[str], set[str], set[str]]] = {}
+
     # Build used_by_ops, used_by_layers, and co_parent_params from Op entries
     for layer_entry in self.layer_list:
         if not layer_entry._param_logs:
             continue
         addresses_in_op = [pl.address for pl in layer_entry._param_logs]
         for pl in layer_entry._param_logs:
-            if layer_entry.label not in pl.used_by_ops:
+            membership = membership_by_param.get(id(pl))
+            if membership is None:
+                membership = (
+                    set(pl.used_by_ops),
+                    set(pl.used_by_layers),
+                    set(pl.co_parent_params),
+                )
+                membership_by_param[id(pl)] = membership
+            used_by_ops, used_by_layers, co_parent_params = membership
+            if layer_entry.label not in used_by_ops:
                 pl.used_by_ops.append(layer_entry.label)
+                used_by_ops.add(layer_entry.label)
             layer_label = layer_entry.layer_label
-            if layer_label not in pl.used_by_layers:
+            if layer_label not in used_by_layers:
                 pl.used_by_layers.append(layer_label)
+                used_by_layers.add(layer_label)
             # Link to other params in the same operation
             for other_addr in addresses_in_op:
-                if other_addr != pl.address and other_addr not in pl.co_parent_params:
+                if other_addr != pl.address and other_addr not in co_parent_params:
                     pl.co_parent_params.append(other_addr)
+                    co_parent_params.add(other_addr)
 
     # Populate num_calls: how many times this parameter was used in the forward pass
     for pl in self.param_logs:
