@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 import pytest
+import torch.nn.functional
 import torchlens as tl
 
 from _module_containment_snapshot import build_snapshot
@@ -19,6 +22,70 @@ SNAPSHOT_DIR = Path(__file__).parent / "snapshots" / "module_containment"
 HOOK_STACK_FIXTURES = {
     "raw_hook_replacement_synthetic",
 }
+# Fixtures whose op sequence depends on which ops UPSTREAM TORCH itself calls, not on
+# anything TorchLens decides. Across the declared torch support range (2.1 -> 2.12+),
+# ``F.multi_head_attention_forward`` spells its output reshape two different ways:
+#   older: attn_output.transpose(0, 1).contiguous().view(...)   -> contiguous + view
+#   newer: attn_output.transpose(0, 1).reshape(...)             -> a single reshape
+# TorchLens faithfully records whichever ops torch actually calls, so one op fewer
+# appears and every later op ordinal shifts by one. Both spellings are pinned
+# BYTE-EXACTLY in their own golden rather than either snapshot being loosened, so the
+# equality tripwire stays fully armed on both sides of the torch matrix.
+TORCH_VARIANT_FIXTURES = {
+    "multihead_attention_demo": "torch_fused_reshape",
+}
+
+
+def _torch_fuses_mha_output_reshape() -> bool:
+    """Report whether torch fuses the MHA output reshape into one ``reshape`` call.
+
+    This is a capability probe against torch's own source, deliberately NOT a
+    ``torch.__version__`` comparison. An unrecognized spelling fails loudly rather
+    than silently selecting a golden, because silently picking the wrong golden is
+    exactly how a real capture regression would be mistaken for torch drift.
+
+    Returns
+    -------
+    bool
+        True when the output path calls a single fused ``reshape``.
+    """
+
+    try:
+        source = inspect.getsource(torch.nn.functional.multi_head_attention_forward)
+    except (OSError, TypeError) as exc:  # pragma: no cover - source always available on CPython
+        raise AssertionError(
+            "cannot read torch.nn.functional.multi_head_attention_forward source, so the "
+            "multihead_attention_demo golden variant cannot be selected; re-audit the fixture"
+        ) from exc
+    if re.search(r"attn_output\s*=\s*attn_output\.\w+\([^()]*\)\.reshape\(", source):
+        return True
+    if "contiguous" in source:
+        return False
+    raise AssertionError(
+        "torch.nn.functional.multi_head_attention_forward spells its output reshape in a "
+        "way this probe does not recognize (neither a fused reshape nor contiguous); "
+        "re-audit the multihead_attention_demo golden instead of trusting either variant"
+    )
+
+
+def _snapshot_path(fixture_name: str) -> Path:
+    """Resolve the golden path for a fixture, honoring torch-spelling variants.
+
+    Parameters
+    ----------
+    fixture_name:
+        Name of the current fixture.
+
+    Returns
+    -------
+    Path
+        Path of the golden this environment must match exactly.
+    """
+
+    suffix = TORCH_VARIANT_FIXTURES.get(fixture_name)
+    if suffix is not None and _torch_fuses_mha_output_reshape():
+        return SNAPSHOT_DIR / f"{fixture_name}.{suffix}.json"
+    return SNAPSHOT_DIR / f"{fixture_name}.json"
 
 
 def _unpack_fixture(result: tuple[Any, ...]) -> tuple[Any, Any, str, Any | None]:
@@ -78,6 +145,26 @@ def _assert_synthetic_replacement_present(actual: dict[str, Any], fixture_name: 
     assert "interventionreplacement" in func_names
 
 
+def test_torch_variant_goldens_are_all_present_and_distinct() -> None:
+    """Both spellings of every torch-variant fixture are pinned on disk.
+
+    ``test_module_containment_snapshot`` GENERATES a golden and skips when the file
+    is absent. A missing variant would therefore silently self-bless instead of
+    comparing, so pin that both files exist and genuinely differ.
+    """
+
+    for fixture_name, suffix in TORCH_VARIANT_FIXTURES.items():
+        base = SNAPSHOT_DIR / f"{fixture_name}.json"
+        variant = SNAPSHOT_DIR / f"{fixture_name}.{suffix}.json"
+        assert base.exists(), f"missing baseline golden {base}"
+        assert variant.exists(), f"missing torch-variant golden {variant}"
+        assert json.loads(base.read_text()) != json.loads(variant.read_text()), (
+            f"{fixture_name} variant goldens are identical; the variant is pointless "
+            "and should be deleted along with its registry entry"
+        )
+        assert _snapshot_path(fixture_name) in {base, variant}
+
+
 @pytest.mark.parametrize("builder", ALL_FIXTURES, ids=lambda builder: builder.__name__)
 def test_module_containment_snapshot(builder: FixtureBuilder) -> None:
     """Compare module-containment snapshot for one fixture."""
@@ -98,7 +185,7 @@ def test_module_containment_snapshot(builder: FixtureBuilder) -> None:
     actual = build_snapshot(trace, fixture_name)
     _assert_synthetic_replacement_present(actual, fixture_name)
 
-    snapshot_path = SNAPSHOT_DIR / f"{fixture_name}.json"
+    snapshot_path = _snapshot_path(fixture_name)
     if not snapshot_path.exists():
         snapshot_path.parent.mkdir(parents=True, exist_ok=True)
         snapshot_path.write_text(json.dumps(actual, indent=2, sort_keys=True, default=str))
