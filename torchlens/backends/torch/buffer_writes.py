@@ -639,12 +639,21 @@ class BufferWriteTracker:
                 value_changed = not _tensor_equal(expected, current_value)
                 if not (object_changed or storage_changed or value_changed):
                     continue
+                # Classify the STORAGE rebind first. The live buffer object keeping its
+                # identity while its storage changed is definitionally a ``.data =``/
+                # ``set_`` swap, never an attribute rebind: rebinding the attribute
+                # (``self.b = x + 1``) installs a NEW tensor object, so it always shows
+                # ``object_changed``. Reading the producer label first mis-sorted this
+                # case as ``reassign`` once the ``Tensor.data`` surface began stamping
+                # the rebound buffer with the ``data`` op's own label -- the two kinds
+                # replay differently (``.data =`` detaches; an attribute rebind keeps the
+                # graph), so the distinction has to key on identity, not on the label.
+                if not object_changed and storage_changed:
+                    self._record_write(address, tensor, "data_reassign", None, value_changed, None)
+                    continue
                 producer = get_tensor_label(tensor)
                 if producer is not None and not producer.startswith("buffer_"):
                     self._record_write(address, tensor, "reassign", producer, True, None)
-                    continue
-                if not object_changed and storage_changed:
-                    self._record_write(address, tensor, "data_reassign", None, value_changed, None)
                     continue
                 # Same object, same storage, changed value, no journal entry (r15-C2): a zero-copy
                 # HOST write-back into the buffer's existing storage -- ``self.b.detach().numpy()[0]
