@@ -108,7 +108,7 @@ def _seed_proven_bool_consumers(self: "Trace") -> None:
     from ..backends.torch.completeness_witness import host_escape_bool_source_labels
 
     proven_labels = host_escape_bool_source_labels(self)
-    for label in self._raw_layer_labels_list:
+    for label in self._build_state.raw_layer_labels_list:
         if label not in proven_labels:
             continue
         layer = self[label]
@@ -498,7 +498,7 @@ def _attribute_branches_forward(
     conditional_arm_entry_edges: Dict[Tuple[int, str], List[Tuple[str, str]]] = defaultdict(list)
     conditional_edge_call_indices: Dict[Tuple[str, str, int, str], List[int]] = defaultdict(list)
 
-    for layer_label in self._raw_layer_labels_list:
+    for layer_label in self._build_state.raw_layer_labels_list:
         layer = self[layer_label]
         if getattr(layer, "is_orphan", False):
             continue
@@ -509,7 +509,7 @@ def _attribute_branches_forward(
         layer.conditional_branch_depth = len(layer.conditional_branch_stack)
         layer.conditional_arm_children = {}
 
-    for parent_label in self._raw_layer_labels_list:
+    for parent_label in self._build_state.raw_layer_labels_list:
         parent_layer = self[parent_label]
         if getattr(parent_layer, "is_orphan", False):
             continue
@@ -555,7 +555,7 @@ def _materialize_derived_views(self: "Trace") -> None:
         for key, call_indexs in self.conditional_edge_call_indices.items()
     }
 
-    for layer_label in self._raw_layer_labels_list:
+    for layer_label in self._build_state.raw_layer_labels_list:
         layer = self[layer_label]
         if getattr(layer, "is_orphan", False):
             continue
@@ -608,7 +608,7 @@ def _iter_terminal_scalar_bool_labels(self: "Trace") -> List[str]:
     terminal_bool_labels = set(self.internally_terminated_bool_ops)
     return [
         layer_label
-        for layer_label in self._raw_layer_labels_list
+        for layer_label in self._build_state.raw_layer_labels_list
         if layer_label in terminal_bool_labels
         and self[layer_label].is_scalar_bool
         and not getattr(self[layer_label], "is_orphan", False)
@@ -925,8 +925,8 @@ def _merge_buffer_entries(self: "Trace", source_buffer: Op, buffer_to_remove: Op
         if parent_layer not in source_buffer.internal_source_parents:
             source_buffer.internal_source_parents.append(parent_layer)
 
-    self._raw_layer_labels_list.remove(buffer_to_remove._label_raw)
-    self._raw_layer_dict.pop(buffer_to_remove._label_raw)
+    self._build_state.raw_layer_labels_list.remove(buffer_to_remove._label_raw)
+    self._build_state.raw_layer_dict.pop(buffer_to_remove._label_raw)
 
     for layer in self:
         if buffer_to_remove._label_raw in layer.root_ancestors:

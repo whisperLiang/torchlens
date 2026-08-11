@@ -251,7 +251,8 @@ def _forward_op_count_at_backward_trigger(trace: "Trace") -> int | None:
     ]
     if step_indices:
         return max(step_indices)
-    raw_count = getattr(trace, "_layer_counter", None)
+    build_state = trace.__dict__.get("_build_state")
+    raw_count = getattr(build_state, "layer_counter", None)
     return raw_count if isinstance(raw_count, int) else None
 
 

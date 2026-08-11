@@ -1051,16 +1051,15 @@ class TorchBackend:
     def finalize_forward_session(
         self,
         session: object,
-        trace_state: TraceBuildState | None = None,
+        trace_state: TraceBuildState,
     ) -> None:
         """Run torch post-forward reconciliation before output extraction."""
-        del trace_state
-        reconcile_buffer_writes(cast("Trace", session))
+        reconcile_buffer_writes(cast("Trace", session), trace_state)
 
     def cleanup_halted_forward_session(self, session: object, prepared_model: object) -> None:
         """Clean up torch metadata after a halted forward capture."""
         self.cleanup_model_session(session, prepared_model)
-        raw_layer_dict = getattr(session, "_raw_layer_dict", {})
+        raw_layer_dict = cast("Trace", session)._build_state.raw_layer_dict
         for label in list(raw_layer_dict.keys()):
             entry = raw_layer_dict.get(label)
             if entry is not None and hasattr(entry, "out") and entry.out is not None:
@@ -1127,7 +1126,7 @@ class TorchBackend:
                         "torchlens.partial.from_failed_capture(exception)."
                     )
         self.cleanup_model_session(session, prepared_model)
-        raw_layer_dict = getattr(session, "_raw_layer_dict", {})
+        raw_layer_dict = cast("Trace", session)._build_state.raw_layer_dict
         for label in list(raw_layer_dict.keys()):
             entry = raw_layer_dict.get(label)
             if entry is not None and hasattr(entry, "out") and entry.out is not None:
@@ -1193,13 +1192,13 @@ def _register_model_output_container_snapshot(
                 occ_index=occ_index,
             )
         )
-    registry = trace._ensure_build_state().container_registry
+    registry = trace._build_state.container_registry
     registry.register_snapshot(
         output,
         site=ModelSite(model_ref="self:1", position="return"),
         role=Role.MODEL_OUTPUT,
         phase=Phase.POST_CALL,
-        observed_at_event_index=int(getattr(trace, "_layer_counter", 0)),
+        observed_at_event_index=trace._build_state.layer_counter,
         spec=spec,
         leaf_occurrences=tuple(occurrences),
         reconstructable=reconstructable,
@@ -1209,7 +1208,7 @@ def _register_model_output_container_snapshot(
         site=ModelSite(model_ref="self:1", position="return"),
         role=Role.CALL_OUTPUT,
         phase=Phase.POST_CALL,
-        observed_at_event_index=int(getattr(trace, "_layer_counter", 0)),
+        observed_at_event_index=trace._build_state.layer_counter,
         spec=spec,
         leaf_occurrences=tuple(occurrences),
         reconstructable=reconstructable,

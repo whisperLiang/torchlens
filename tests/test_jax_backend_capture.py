@@ -957,13 +957,16 @@ def test_synthetic_control_parent_is_retained_by_orphan_pruning() -> None:
                 The raw graph fields are populated in place.
             """
 
+            from torchlens.ir.trace_build_state import TraceBuildState
+
+            self._build_state = TraceBuildState()
             decision = _fake_raw_node("decision")
             child = _fake_raw_node("child", parents=["decision"], children=["output"])
             output = _fake_raw_node("output", parents=["child"], is_output=True)
             orphan = _fake_raw_node("orphan")
             decision.children.append("child")
-            self._raw_layer_labels_list = ["decision", "child", "output", "orphan"]
-            self._raw_layer_dict = OrderedDict(
+            self._build_state.raw_layer_labels_list = ["decision", "child", "output", "orphan"]
+            self._build_state.raw_layer_dict = OrderedDict(
                 (node._label_raw, node) for node in (decision, child, output, orphan)
             )
             self.input_layers: list[str] = []
@@ -996,7 +999,7 @@ def test_synthetic_control_parent_is_retained_by_orphan_pruning() -> None:
 
     _remove_orphan_nodes(fake_trace)  # type: ignore[arg-type]
 
-    assert fake_trace._raw_layer_labels_list == ["decision", "child", "output"]
+    assert fake_trace._build_state.raw_layer_labels_list == ["decision", "child", "output"]
     assert fake_trace._orphan_labels == ["orphan"]
 
 

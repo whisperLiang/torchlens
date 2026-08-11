@@ -278,13 +278,13 @@ class TestTraceGC:
         assert ref() is None
 
     def test_transient_write_after_finish_does_not_recreate_build_state(self) -> None:
-        """Finished traces reject writes to transient build-state aliases."""
+        """Finished traces reject writes after the build-state owner is dropped."""
 
         model = _TwoLayerNet()
         trace = tl.trace(model, torch.randn(1, 5))
 
         with pytest.raises(AttributeError):
-            trace._mod_call_index = {"x": 1}
+            trace._build_state.mod_call_index = {"x": 1}
 
         assert "_build_state" not in trace.__dict__
 

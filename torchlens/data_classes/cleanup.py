@@ -67,15 +67,11 @@ def cleanup(self: "Trace") -> None:
     # These hold back-references (e.g. _module_logs -> Module -> _source_trace)
     # and large data structures (layer_logs, layer_dict_all_keys).
     for attr in [
-        "_raw_layer_dict",
-        "_raw_layer_labels_list",
         "_capture_events",
+        "_build_state",
         "_saved_grad_labels",
         "_module_logs",
         "_buffer_accessor",
-        "_module_metadata",
-        "_module_forward_args",
-        "_module_build_data",
         "_param_logs_by_module",
         "layer_logs",
         "layer_dict_all_keys",

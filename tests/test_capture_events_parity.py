@@ -289,9 +289,6 @@ def _make_trace_pickleable(trace: Any) -> None:
                 state[field_name] = value.detach().cpu()
             elif field_name in {"grad_fn_handle", "grad_fn_handle"}:
                 state[field_name] = None
-    for volatile_field in ("_mod_call_index", "_mod_call_labels", "_mod_entered", "_mod_exited"):
-        if hasattr(trace, volatile_field):
-            setattr(trace, volatile_field, {})
     if hasattr(trace, "input_object_id"):
         trace.input_object_id = 0
     if hasattr(trace, "model_object_id"):

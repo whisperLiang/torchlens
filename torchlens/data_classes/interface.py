@@ -92,9 +92,9 @@ def _getitem_during_pass(self: "Trace", ix: Any) -> Op | LiveOpView:
     if capture_events is not None and ix in capture_events.live_index.by_raw_label:
         return LiveOpView(self, capture_events.live_index.require_event(ix))
     if (capture_events is None or not getattr(capture_events, "op_events", ())) and (
-        ix in self._raw_layer_dict
+        ix in self._build_state.raw_layer_dict
     ):
-        return self._raw_layer_dict[ix]
+        return self._build_state.raw_layer_dict[ix]
     raise ValueError(
         f"{ix!r} is not a known raw label during this forward pass; final labels are not yet built."
     )
@@ -322,7 +322,7 @@ def _str_during_pass(self: "Trace") -> str:
     labels = (
         [event.label_raw for event in capture_events.op_events]
         if capture_events is not None
-        else self._raw_layer_labels_list
+        else self._build_state.raw_layer_labels_list
     )
     for layer in labels:
         s += f"\n\t\t{layer}"

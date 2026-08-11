@@ -9,6 +9,8 @@ import torch
 import torch.nn as nn
 
 import torchlens as tl
+from torchlens.data_classes.trace import Trace
+from torchlens.ir.trace_build_state import LEGACY_TRACE_BUILD_STATE_KEYS, TraceBuildState
 
 V3_GOLDEN = Path(__file__).parent / "golden" / "io_v3_sample.tlspec"
 _DROPPED_CAPTURE_FIELDS = (
@@ -51,3 +53,21 @@ def test_save_load_roundtrip_v4(tmp_path: Path) -> None:
 
     for field_name in _DROPPED_CAPTURE_FIELDS:
         assert field_name not in loaded.__dict__
+
+
+def test_plain_restore_drops_legacy_flat_and_nested_build_scratch() -> None:
+    """Never resurrect legacy capture scratch while restoring a finished Trace."""
+
+    source = tl.trace(nn.Sequential(nn.Linear(2, 2), nn.ReLU()), torch.randn(1, 2))
+    restored = Trace.__new__(Trace)
+    try:
+        state = source.__getstate__()
+        state.update({field_name: object() for field_name in LEGACY_TRACE_BUILD_STATE_KEYS})
+        state["_build_state"] = TraceBuildState()
+        restored.__setstate__(state)
+
+        assert "_build_state" not in restored.__dict__
+        assert not LEGACY_TRACE_BUILD_STATE_KEYS.intersection(restored.__dict__)
+    finally:
+        source.cleanup()
+        restored.cleanup()

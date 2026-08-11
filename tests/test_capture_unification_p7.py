@@ -238,7 +238,7 @@ def test_recording_to_trace_passes_full_metadata_invariants(model_factory) -> No
     so both slipped through:
 
     * ``graph_ordering`` -- ``Recording.to_trace()`` never seeded
-      ``trace._layer_counter`` from the replayed event stream, so postprocess's
+      ``trace._build_state.layer_counter`` from the replayed event stream, so postprocess's
       synthetic output node was stamped ``raw_index=1``, colliding with
       ``input_1`` (fails even for a flat, submodule-free model).
     * ``module_hierarchy`` -- the fastlog recorder dropped the real

@@ -1006,8 +1006,8 @@ def _provisional_inplace_site(func_name: str, trace: Any, func_call_id: int) -> 
 
     layer_type = _normalize_func_name(func_name)
     modules = tuple(_snapshot_exhaustive_module_stack(trace))
-    raw_index = int(getattr(trace, "_layer_counter", 0)) + 1
-    type_index = int(getattr(trace, "_raw_layer_type_counter", {}).get(layer_type, 0)) + 1
+    raw_index = trace._build_state.layer_counter + 1
+    type_index = trace._build_state.raw_layer_type_counter.get(layer_type, 0) + 1
     raw_label = f"{layer_type}_{type_index}_{raw_index}_raw"
     return SimpleNamespace(
         layer_label=raw_label,

@@ -1914,7 +1914,7 @@ class JAXBackend:
         """
 
         assignments = self._jax_recurrence_assignments(trace)
-        raw_labels = tuple(trace._raw_layer_labels_list)
+        raw_labels = tuple(trace._build_state.raw_layer_labels_list)
         raw_to_final_op_label: dict[str, str] = {}
 
         trace.layer_list = []
@@ -1928,7 +1928,7 @@ class JAXBackend:
         trace._layer_num_to_lookup_keys_dict.clear()
 
         for raw_index, label in enumerate(raw_labels):
-            op_log = trace._raw_layer_dict[label]
+            op_log = trace._build_state.raw_layer_dict[label]
             assignment = assignments.get(
                 label,
                 RecurrenceAssignment(
@@ -1964,11 +1964,11 @@ class JAXBackend:
         }
         equivalent_labels_by_key: dict[str, set[str]] = {}
         for label in raw_labels:
-            op_log = trace._raw_layer_dict[label]
+            op_log = trace._build_state.raw_layer_dict[label]
             equivalent_labels_by_key.setdefault(op_log.equivalence_class, set()).add(op_log.label)
 
         for raw_index, label in enumerate(raw_labels):
-            op_log = trace._raw_layer_dict[label]
+            op_log = trace._build_state.raw_layer_dict[label]
             assignment = assignments[label]
             op_log.recurrent_ops = [
                 raw_to_final_op_label[member]
@@ -2099,7 +2099,7 @@ class JAXBackend:
             trace.num_params_trainable = num_params_trainable
             trace.num_params_frozen = num_params - num_params_trainable
         trace.output_layers = [
-            trace._raw_layer_dict[label].layer_label if label in trace._raw_layer_dict else label
+            trace._build_state.raw_layer_dict[label].layer_label if label in trace._build_state.raw_layer_dict else label
             for label in trace.output_layers
         ]
         trace._layers_logged = True
@@ -2150,11 +2150,11 @@ class JAXBackend:
 
         equation_labels = [
             label
-            for label in trace._raw_layer_labels_list
-            if not trace._raw_layer_dict[label].is_input
+            for label in trace._build_state.raw_layer_labels_list
+            if not trace._build_state.raw_layer_dict[label].is_input
         ]
         for label, capture in zip(equation_labels, captures, strict=False):
-            op_log = trace._raw_layer_dict[label]
+            op_log = trace._build_state.raw_layer_dict[label]
             param_addresses: list[str] = []
             for value in capture.input_values:
                 address = tree.param_address_by_value_id.get(id(value))
@@ -2218,10 +2218,10 @@ class JAXBackend:
             ``trace.modules`` is populated by the shared module-log builder.
         """
 
-        trace._module_build_data = _init_module_hierarchy_data()
-        trace._module_forward_args = dict(tree.forward_args_by_call)
-        trace._module_metadata = tree.metadata
-        mbd = trace._module_build_data
+        trace._build_state.module_build_data = _init_module_hierarchy_data()
+        trace._build_state.module_forward_args = dict(tree.forward_args_by_call)
+        trace._build_state.module_metadata = tree.metadata
+        mbd = trace._build_state.module_build_data
         for address, metadata in tree.metadata.items():
             if address not in mbd["addresses"]:
                 mbd["addresses"].append(address)
@@ -2256,10 +2256,10 @@ class JAXBackend:
         Returns
         -------
         None
-            ``trace._module_build_data`` is updated in place.
+            ``trace._build_state.module_build_data`` is updated in place.
         """
 
-        mbd = trace._module_build_data
+        mbd = trace._build_state.module_build_data
         seen_layers: dict[str, set[str]] = defaultdict(set)
         seen_pass_layers: dict[str, set[str]] = defaultdict(set)
         seen_module_ops: set[str] = set()
@@ -2319,13 +2319,13 @@ class JAXBackend:
         if not trace.recurrence_detection:
             return {
                 label: self._jax_singleton_assignment(label, op_log)
-                for label, op_log in trace._raw_layer_dict.items()
+                for label, op_log in trace._build_state.raw_layer_dict.items()
             }
         graph = self._build_jax_recurrence_grouping_graph(trace)
         assignments = group_recurrent_nodes(graph)
         return {
             label: assignments.get(label, self._jax_singleton_assignment(label, op_log))
-            for label, op_log in trace._raw_layer_dict.items()
+            for label, op_log in trace._build_state.raw_layer_dict.items()
         }
 
     def _build_jax_recurrence_grouping_graph(self, trace: Trace) -> RecurrenceGroupingGraph:
@@ -2343,11 +2343,11 @@ class JAXBackend:
         """
 
         nodes: dict[str, RecurrenceNode] = {}
-        raw_labels = tuple(trace._raw_layer_labels_list)
+        raw_labels = tuple(trace._build_state.raw_layer_labels_list)
         raw_label_set = set(raw_labels)
         data_parents_by_label = {
             label: _ordered_jax_data_parent_labels(op_log, raw_label_set)
-            for label, op_log in trace._raw_layer_dict.items()
+            for label, op_log in trace._build_state.raw_layer_dict.items()
         }
         data_children_by_label: dict[str, list[str]] = {label: [] for label in raw_labels}
         for label, parents in data_parents_by_label.items():
@@ -2357,7 +2357,7 @@ class JAXBackend:
         eligible_labels: list[str] = []
         source_labels: list[str] = []
         for label in raw_labels:
-            op_log = trace._raw_layer_dict[label]
+            op_log = trace._build_state.raw_layer_dict[label]
             pruned = bool(getattr(op_log, "is_orphan", False))
             retain = not pruned
             if retain:
@@ -2430,7 +2430,7 @@ class JAXBackend:
             place.
         """
 
-        for op_log in trace._raw_layer_dict.values():
+        for op_log in trace._build_state.raw_layer_dict.values():
             op_log.parents = [
                 raw_to_final.get(parent, parent) if isinstance(parent, str) else parent
                 for parent in op_log.parents
@@ -2462,10 +2462,10 @@ class JAXBackend:
             ``trace.modules`` is populated with ``self``.
         """
 
-        mbd = trace._module_build_data
+        mbd = trace._build_state.module_build_data
         mbd["top_level_modules"] = ["self"]
         mbd["top_level_module_ops"] = ["self:1"]
-        trace._module_metadata = {
+        trace._build_state.module_metadata = {
             "self": {
                 "cls": None,
                 "class_name": trace.model_class_name,
