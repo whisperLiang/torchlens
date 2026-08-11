@@ -61,6 +61,11 @@ def main() -> None:
         print(result.report.state_source.value)
         print(result.report.path_faithfulness.value)
         print(result.report.numeric_attestation.value)
+        # The first fast call runs the ordinary verifier; later iterations reuse
+        # staged state and compiled binders while keeping the static-path guard.
+        for batch in (inputs + 0.1, inputs + 0.2):
+            fast_result = loaded.run(inputs=batch, seed=7, fast=True)
+            print(fast_result.output.shape)
 
 
 if __name__ == "__main__":

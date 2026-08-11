@@ -820,6 +820,9 @@ def load_trace_state_dict(trace: Any, sd: Mapping[str, Any]) -> None:
         allocates, like the staging device failures this stage already types.
     """
 
+    from ._fast_run import close_fast_run_session
+
+    close_fast_run_session(trace)
     staged = _validate_state_mapping(trace, sd)
     readiness = trace.__dict__.get("_runnable_readiness")
     updated_readiness = readiness

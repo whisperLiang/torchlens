@@ -43,9 +43,11 @@ def cleanup(self: "Trace") -> None:
     not be used further. No long-lived safetensors handles need to be
     closed here because lazy materialization opens and closes files per call.
     """
+    from .._fast_run import close_fast_run_session
     from ..backends.torch.backward import _purge_trace_from_backward_registry
     from ..captured_run import forget_event_stream
 
+    close_fast_run_session(self)
     _purge_trace_from_backward_registry(self)
     forget_event_stream(self)
     # GC-1: Release parameter references to allow model GC.
@@ -87,6 +89,7 @@ def cleanup(self: "Trace") -> None:
         "_runnable_readiness",
         "_runnable_callables_by_call_id",
         "_runnable_archived_activations",
+        "_fast_run_session",
         "_validation_replay_status",
     ]:
         if hasattr(self, attr):

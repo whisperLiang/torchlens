@@ -1,0 +1,1173 @@
+"""Explicit guarded fast paths for repeated static-model execution."""
+
+from __future__ import annotations
+
+import threading
+import weakref
+from collections.abc import Callable, Mapping
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
+from typing import Any, cast
+
+import torch
+from torch import nn
+
+from . import _state
+from ._runnable_execution import (
+    _ambient_execution_context_restored,
+    _call_execution_context_entered,
+    _call_witness_checks,
+    _contract_check,
+    _decode_literal,
+    _descriptor_has_seeded_rng,
+    _finalize_provider_run,
+    _first_failed_live_input_check,
+    _input_alias_topology_checks,
+    _input_literal_contract_checks,
+    _input_metadata_contract_checks,
+    _input_nontensor_tree_contract_checks,
+    _input_site_value,
+    _input_tree_contract_checks,
+    _live_runtime_input_leaves,
+    _model_input_arity_positions,
+    _mutation_target_slot_id,
+    _out_argument_slot_id,
+    _raise_failed_contract_as_divergence,
+    _raise_first_divergence,
+    _require_loaded_sparse_provider,
+    _seed_run_generators,
+    _seeded_fork_devices,
+    _split_mixed_inputs,
+    _tensor_leaf_paths,
+    _top_level_input_site_contract_checks,
+    _value_at_path,
+    _write_argument,
+    run_loaded_sparse_trace,
+)
+from ._runnable_state import PreparedRunnableState, prepare_runnable_state
+from .errors import RunCapabilityUnavailableError, RuntimeSignatureDriftError
+from .ir.container import ContainerSpec, rebuild_container_from_spec
+from .runnable import (
+    ContractCheck,
+    DivergencePolicy,
+    NumericAttestationStatus,
+    PathFaithfulness,
+    ReadinessReport,
+    ReadinessStatus,
+    RunnableCallDescriptor,
+    RunnableErrorCode,
+    RunProvider,
+    RunResult,
+    SparseRunDescriptor,
+    StateSource,
+    TensorSlotDescriptor,
+    TensorSlotRole,
+)
+from .utils._torch_compat import tensor_has_named_dims
+from .utils.rng import restore_host_rng, set_random_seed, snapshot_host_rng
+
+
+@dataclass(frozen=True, slots=True)
+class _FastOutputPlan:
+    """Expected tensor leaves for one live module or functional call."""
+
+    address_or_name: str
+    op_labels: tuple[str, ...]
+    shapes: tuple[tuple[int, ...] | None, ...]
+    dtypes: tuple[str | None, ...]
+    save_labels: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _CompiledSparseCall:
+    """One sparse call with decoded literals and pre-indexed tensor bindings."""
+
+    descriptor: RunnableCallDescriptor
+    func: Callable[..., Any]
+    base_args: tuple[Any, ...]
+    base_kwargs: Mapping[str, Any]
+    top_level_tensor_args: tuple[tuple[str, int | str, str], ...]
+    nested_tensor_args: tuple[tuple[tuple[str | int, ...], str], ...]
+    requires_context: bool
+
+    def execute(self, slot_values: Mapping[str, torch.Tensor]) -> Any:
+        """Bind current tensor slots and invoke the resolved callable.
+
+        Parameters
+        ----------
+        slot_values:
+            Runtime tensor slot store.
+
+        Returns
+        -------
+        Any
+            Raw callable output.
+        """
+
+        args = list(self.base_args)
+        kwargs = dict(self.base_kwargs)
+        for root, key, slot_id in self.top_level_tensor_args:
+            try:
+                value = slot_values[slot_id]
+            except KeyError as exc:
+                raise RuntimeSignatureDriftError(
+                    f"Fast sparse call {self.descriptor.call_id!r} references unavailable "
+                    f"slot {slot_id!r}.",
+                    code=RunnableErrorCode.MISSING_TENSOR_SLOT.value,
+                    call_id=self.descriptor.call_id,
+                    slot_id=slot_id,
+                ) from exc
+            if root == "args":
+                args[cast(int, key)] = value
+            else:
+                kwargs[cast(str, key)] = value
+        for path, slot_id in self.nested_tensor_args:
+            try:
+                value = slot_values[slot_id]
+            except KeyError as exc:
+                raise RuntimeSignatureDriftError(
+                    f"Fast sparse call {self.descriptor.call_id!r} references unavailable "
+                    f"slot {slot_id!r}.",
+                    code=RunnableErrorCode.MISSING_TENSOR_SLOT.value,
+                    call_id=self.descriptor.call_id,
+                    slot_id=slot_id,
+                ) from exc
+            _write_argument(args, kwargs, path, value)
+        try:
+            if not self.requires_context:
+                return self.func(*args, **kwargs)
+            with _call_execution_context_entered(self.descriptor.execution_context):
+                return self.func(*args, **kwargs)
+        except RunCapabilityUnavailableError:
+            raise
+        except Exception as exc:
+            raise RuntimeSignatureDriftError(
+                f"Resolved callable rejected compiled fast recipe for "
+                f"{self.descriptor.call_id!r}: {exc}",
+                code=RunnableErrorCode.RUNTIME_SIGNATURE_DRIFT.value,
+                call_id=self.descriptor.call_id,
+                affected_op_labels=self.descriptor.op_labels,
+            ) from exc
+
+
+def _compile_sparse_call(
+    call: RunnableCallDescriptor,
+    func: Callable[..., Any],
+    *,
+    ambient_grad_enabled: bool,
+    ambient_inference_mode: bool,
+) -> _CompiledSparseCall:
+    """Compile a sparse call's invariant literal tree and tensor assignments.
+
+    Parameters
+    ----------
+    call:
+        Frozen call recipe.
+    func:
+        Resolved callable.
+    ambient_grad_enabled:
+        Grad mode already restored around the compiled loop.
+    ambient_inference_mode:
+        Inference mode already restored around the compiled loop.
+
+    Returns
+    -------
+    _CompiledSparseCall
+        Reusable per-call binder.
+    """
+
+    args: list[Any] = [None] * call.num_positional_args
+    kwargs: dict[str, Any] = {}
+    for literal in call.literal_arguments:
+        _write_argument(args, kwargs, literal.argument_path, _decode_literal(literal.value))
+    top_level: list[tuple[str, int | str, str]] = []
+    nested: list[tuple[tuple[str | int, ...], str]] = []
+    for argument in call.tensor_arguments:
+        path = tuple(argument.argument_path)
+        if len(path) == 2 and path[0] in {"args", "kwargs"}:
+            top_level.append((cast(str, path[0]), path[1], argument.slot_id))
+        else:
+            nested.append((path, argument.slot_id))
+    return _CompiledSparseCall(
+        descriptor=call,
+        func=func,
+        base_args=tuple(args),
+        base_kwargs=kwargs,
+        top_level_tensor_args=tuple(top_level),
+        nested_tensor_args=tuple(nested),
+        requires_context=(
+            call.execution_context.grad_enabled != ambient_grad_enabled
+            or call.execution_context.inference_mode != ambient_inference_mode
+            or any(entry.enabled for entry in call.execution_context.autocast)
+        ),
+    )
+
+
+def _input_layout_ok(value: torch.Tensor) -> bool:
+    """Return whether an input is in the fast sparse executor's admitted domain."""
+
+    return (
+        type(value) in {torch.Tensor, torch.nn.Parameter}
+        and value.layout == torch.strided
+        and not value.is_nested
+        and not bool(getattr(value, "is_meta", False))
+        and not bool(getattr(value, "is_quantized", False))
+        and not tensor_has_named_dims(value)
+    )
+
+
+def _fast_input_check(
+    slot: TensorSlotDescriptor,
+    value: Any,
+) -> tuple[ContractCheck, ...]:
+    """Build cheap shape/dtype/device/layout checks for one runtime input leaf.
+
+    Parameters
+    ----------
+    slot:
+        Persisted input slot contract.
+    value:
+        Runtime value resolved at that slot's path.
+
+    Returns
+    -------
+    tuple[ContractCheck, ...]
+        Ordered fast static-guard checks.
+    """
+
+    is_tensor = isinstance(value, torch.Tensor)
+    shape = tuple(value.shape) if is_tensor else None
+    dtype = str(value.dtype) if is_tensor else None
+    device_ok = bool(
+        is_tensor
+        and value.device.type == slot.device_type
+        and (
+            slot.device_index is None
+            or value.device.index is None
+            or value.device.index == slot.device_index
+        )
+    )
+    return (
+        _contract_check(
+            f"fast_input_type:{slot.slot_id}",
+            is_tensor,
+            RunnableErrorCode.INPUT_TREE_MISMATCH,
+            f"Runtime input at {slot.slot_id!r} is not a tensor.",
+        ),
+        _contract_check(
+            f"fast_input_shape:{slot.slot_id}",
+            shape == slot.shape,
+            RunnableErrorCode.INPUT_SHAPE_MISMATCH,
+            f"Runtime input shape {shape} does not match {slot.shape}.",
+        ),
+        _contract_check(
+            f"fast_input_dtype:{slot.slot_id}",
+            dtype == slot.dtype,
+            RunnableErrorCode.INPUT_DTYPE_MISMATCH,
+            f"Runtime input dtype {dtype} does not match {slot.dtype}.",
+        ),
+        _contract_check(
+            f"fast_input_device:{slot.slot_id}",
+            device_ok,
+            RunnableErrorCode.INPUT_TREE_MISMATCH,
+            f"Runtime input device does not match {slot.device_type}:{slot.device_index}.",
+        ),
+        _contract_check(
+            f"fast_input_layout:{slot.slot_id}",
+            bool(is_tensor and _input_layout_ok(value)),
+            RunnableErrorCode.INPUT_TREE_MISMATCH,
+            "Fast sparse execution accepts only plain dense strided tensor inputs.",
+        ),
+    )
+
+
+class _FastSparseSession:
+    """Verify-once loaded sparse executor with staged state and compiled binders."""
+
+    def __init__(
+        self,
+        source: Any,
+        target: Any,
+        descriptor: SparseRunDescriptor,
+        readiness: ReadinessReport,
+        prepared_state: PreparedRunnableState,
+        compiled_calls: tuple[_CompiledSparseCall, ...],
+        *,
+        seed: int | None,
+    ) -> None:
+        """Initialize one trusted sparse loop session."""
+
+        self.source = source
+        self.target = target
+        self.descriptor = descriptor
+        self.readiness = readiness
+        self.prepared_state = prepared_state
+        self.compiled_calls = compiled_calls
+        self.seed = seed
+        self.positions = _model_input_arity_positions(descriptor)
+        self.input_slots = tuple(
+            slot for slot in descriptor.tensor_slots if slot.role is TensorSlotRole.MODEL_INPUT
+        )
+        self.slots_by_id = {slot.slot_id: slot for slot in descriptor.tensor_slots}
+        self.state_slot_ids = frozenset(
+            slot.slot_id
+            for slot in descriptor.tensor_slots
+            if slot.role in {TensorSlotRole.PARAMETER, TensorSlotRole.BUFFER}
+        )
+        self.saved_labels = frozenset(
+            op.layer_label
+            for op in source.layer_list
+            if bool(getattr(op, "has_saved_activation", False))
+        )
+        aliases: dict[str, list[str]] = {}
+        for slot in descriptor.tensor_slots:
+            if slot.version_of is not None and slot.version_of == slot.producer_slot_id:
+                aliases.setdefault(slot.version_of, []).append(slot.slot_id)
+        self.version_alias_ids = {key: tuple(value) for key, value in aliases.items()}
+        self.disabled_autocast_devices = frozenset(
+            entry.device_type
+            for call in descriptor.calls
+            for entry in call.execution_context.autocast
+            if not entry.enabled
+        )
+        self.reseed_torch = _descriptor_has_seeded_rng(descriptor)
+        self.reseed_host = descriptor.rng_profile.host_rng_consumed
+        self.seeded_devices = _seeded_fork_devices(descriptor, seed)
+
+    @classmethod
+    def build(
+        cls,
+        source: Any,
+        target: Any,
+        *,
+        seed: int | None,
+    ) -> _FastSparseSession:
+        """Build a trusted session after a normal run returned verified evidence."""
+
+        descriptor, readiness, callables = _require_loaded_sparse_provider(source)
+        state_ids = {
+            slot.slot_id
+            for slot in descriptor.tensor_slots
+            if slot.role in {TensorSlotRole.PARAMETER, TensorSlotRole.BUFFER}
+        }
+        mutating_state_calls = tuple(
+            call.call_id
+            for call in descriptor.calls
+            if call.is_inplace and _mutation_target_slot_id(call) in state_ids
+        )
+        if mutating_state_calls:
+            raise RunCapabilityUnavailableError(
+                "fast=True cannot cache state for a sparse recipe that explicitly mutates "
+                f"declared state ({', '.join(mutating_state_calls)}). Use ordinary run().",
+                code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+                detection_stage="fast_state_static_guard",
+            )
+        prepared = prepare_runnable_state(source, seed=seed)
+        compiled = tuple(
+            _compile_sparse_call(
+                call,
+                callables[call.call_id],
+                ambient_grad_enabled=descriptor.ambient_context.grad_enabled,
+                ambient_inference_mode=descriptor.ambient_context.inference_mode,
+            )
+            for call in descriptor.calls
+        )
+        return cls(
+            source,
+            target,
+            descriptor,
+            readiness,
+            prepared,
+            compiled,
+            seed=seed,
+        )
+
+    def _bind_inputs(
+        self, inputs: Any
+    ) -> tuple[dict[str, torch.Tensor], tuple[ContractCheck, ...]]:
+        """Bind raw runtime inputs without the default provider's defensive clones."""
+
+        values: dict[str, torch.Tensor] = {}
+        checks: list[ContractCheck] = []
+        checks.extend(
+            _top_level_input_site_contract_checks(self.descriptor, inputs, self.positions)
+        )
+        raw_values: dict[str, torch.Tensor] = {}
+        for slot in self.input_slots:
+            binding = slot.input_binding
+            try:
+                if binding is None:
+                    raise KeyError(slot.slot_id)
+                root = _input_site_value(inputs, binding.model_site_position, self.positions)
+                value = _value_at_path(root, binding.container_path)
+            except (KeyError, IndexError, TypeError, AttributeError):
+                value = None
+            checks.extend(_fast_input_check(slot, value))
+            if isinstance(value, torch.Tensor):
+                raw_values[slot.slot_id] = value
+                values[slot.slot_id] = value
+        checks.extend(_input_tree_contract_checks(self.descriptor, inputs))
+        checks.extend(_input_literal_contract_checks(self.descriptor, inputs, self.positions))
+        checks.extend(_input_metadata_contract_checks(self.descriptor, inputs, self.positions))
+        checks.extend(
+            _input_nontensor_tree_contract_checks(self.descriptor, inputs, self.positions)
+        )
+        alias_checks, _unresolved = _input_alias_topology_checks(
+            self.descriptor, self.input_slots, raw_values
+        )
+        checks.extend(alias_checks)
+        return values, tuple(checks)
+
+    def _bind_outputs(
+        self,
+        compiled: _CompiledSparseCall,
+        output: Any,
+        slot_values: dict[str, torch.Tensor],
+    ) -> tuple[ContractCheck, ...]:
+        """Bind produced tensors and enforce the per-call static guard."""
+
+        call = compiled.descriptor
+        expected_paths = tuple(
+            self.slots_by_id[slot_id].output_path or () for slot_id in call.output_slot_ids
+        )
+        actual_paths: tuple[tuple[str | int, ...], ...]
+        if len(expected_paths) == 1 and not expected_paths[0] and isinstance(output, torch.Tensor):
+            actual_paths = ((),)
+        else:
+            actual_paths = _tensor_leaf_paths(output)
+        if tuple(actual_paths) != expected_paths:
+            return (
+                _contract_check(
+                    f"fast_output_structure:{call.call_id}",
+                    False,
+                    RunnableErrorCode.OUTPUT_STRUCTURE_MISMATCH,
+                    f"Fast call {call.call_id!r} output paths changed from the verified run.",
+                    affected_op_labels=call.op_labels,
+                    details=(("expected", repr(expected_paths)), ("actual", repr(actual_paths))),
+                ),
+            )
+        out_slot = _out_argument_slot_id(call) if call.is_inplace else None
+        for slot_id, op_label, path in zip(call.output_slot_ids, call.op_labels, expected_paths):
+            value = (
+                output
+                if not path and isinstance(output, torch.Tensor)
+                else _value_at_path(output, path)
+            )
+            slot = self.slots_by_id[slot_id]
+            if not isinstance(value, torch.Tensor) or tuple(value.shape) != slot.shape:
+                return (
+                    _contract_check(
+                        f"fast_output_shape:{slot_id}",
+                        False,
+                        RunnableErrorCode.OUTPUT_SHAPE_MISMATCH,
+                        f"Fast output {slot_id!r} shape changed from {slot.shape}.",
+                        affected_op_labels=(op_label,),
+                    ),
+                )
+            if str(value.dtype) != slot.dtype:
+                return (
+                    _contract_check(
+                        f"fast_output_dtype:{slot_id}",
+                        False,
+                        RunnableErrorCode.OUTPUT_DTYPE_MISMATCH,
+                        f"Fast output {slot_id!r} dtype changed from {slot.dtype}.",
+                        affected_op_labels=(op_label,),
+                    ),
+                )
+            if value.device.type != slot.device_type or (
+                slot.device_index is not None and value.device.index != slot.device_index
+            ):
+                return (
+                    _contract_check(
+                        f"fast_output_device:{slot_id}",
+                        False,
+                        RunnableErrorCode.OUTPUT_DTYPE_MISMATCH,
+                        f"Fast output {slot_id!r} device changed from "
+                        f"{slot.device_type}:{slot.device_index}.",
+                        affected_op_labels=(op_label,),
+                    ),
+                )
+            slot_values[slot_id] = value
+            if out_slot is not None:
+                slot_values[out_slot] = value
+            for alias_id in self.version_alias_ids.get(slot_id, ()):
+                slot_values[alias_id] = value
+            if op_label in self.saved_labels:
+                op = self.target.layer_dict_all_keys.get(op_label)
+                if op is not None:
+                    op.save_activation(
+                        value,
+                        (),
+                        {},
+                        False,
+                        activation_transform=getattr(self.target, "activation_transform", None),
+                    )
+        if call.control_obligations:
+            return _call_witness_checks(self.descriptor, call, slot_values)
+        return ()
+
+    def _reconstruct_output(
+        self,
+        slot_values: dict[str, torch.Tensor],
+        call_outputs: Mapping[str, Any],
+    ) -> Any:
+        """Rebuild the model output without cloning every intermediate into a fork."""
+
+        output_slots = tuple(
+            slot for slot in self.descriptor.tensor_slots if slot.role is TensorSlotRole.OUTPUT
+        )
+        values: list[tuple[tuple[str | int, ...], torch.Tensor]] = []
+        for slot in output_slots:
+            source_id = slot.producer_slot_id or slot.version_of
+            if source_id is None or source_id not in slot_values:
+                raise RuntimeSignatureDriftError(
+                    f"Fast output slot {slot.slot_id!r} has no produced source.",
+                    code=RunnableErrorCode.SLOT_PRODUCTION_MISMATCH.value,
+                    slot_id=slot.slot_id,
+                )
+            value = slot_values[source_id]
+            slot_values[slot.slot_id] = value
+            op = next(
+                (
+                    self.target.layer_dict_all_keys.get(label)
+                    for label in self.target.output_layers
+                    if self.target.layer_dict_all_keys.get(label) is not None
+                    and getattr(self.target.layer_dict_all_keys[label], "container_path", ())
+                    == (slot.output_path or ())
+                ),
+                None,
+            )
+            if op is not None:
+                op._internal_set("out", value)
+            values.append((slot.output_path or (), value))
+        spec = next(
+            (
+                getattr(self.target.layer_dict_all_keys[label], "container_spec", None)
+                for label in self.target.output_layers
+                if isinstance(
+                    getattr(self.target.layer_dict_all_keys[label], "container_spec", None),
+                    ContainerSpec,
+                )
+            ),
+            None,
+        )
+        if isinstance(spec, ContainerSpec):
+            last_output = call_outputs.get(self.descriptor.calls[-1].call_id)
+            if spec.type_module == "torch.return_types" and last_output is not None:
+                return last_output
+            return rebuild_container_from_spec(spec, [value for _, value in values])
+        if len(values) == 1 and not values[0][0]:
+            return values[0][1]
+        if values:
+            raise RuntimeSignatureDriftError(
+                "Fast sparse output has multiple leaves without a container contract.",
+                code=RunnableErrorCode.MISSING_OUTPUT_CONTAINER_CONTRACT.value,
+            )
+        return None
+
+    def run(self, inputs: Any, *, seed: int | None) -> RunResult:
+        """Execute one guarded trusted iteration using cached state and binders."""
+
+        if seed != self.seed:
+            raise RunCapabilityUnavailableError(
+                "A fast sparse session pins the seed used by its verify-once run; "
+                "start a new loaded Trace to change seeds.",
+                code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+                detection_stage="fast_seed_guard",
+            )
+        input_values, input_checks = self._bind_inputs(inputs)
+        _raise_first_divergence(input_checks, DivergencePolicy.RAISE, fork=None)
+        slot_values = dict(self.prepared_state.slot_values)
+        slot_values.update(input_values)
+        call_outputs: dict[str, Any] = {}
+        checks: list[ContractCheck] = list(input_checks)
+        from .utils._torch_compat import autocast_is_enabled
+
+        enabled_autocast = tuple(
+            device for device in self.disabled_autocast_devices if bool(autocast_is_enabled(device))
+        )
+        if enabled_autocast:
+            raise RunCapabilityUnavailableError(
+                "fast=True requires the caller's autocast state to match the verified disabled "
+                f"context for {enabled_autocast!r}; use ordinary run() for context conversion.",
+                code=RunnableErrorCode.EXECUTION_CONTEXT_UNAVAILABLE.value,
+                detection_stage="fast_execution_context_guard",
+            )
+        reseed = seed is not None and (self.reseed_torch or self.reseed_host)
+        rng_context = (
+            torch.random.fork_rng(devices=self.seeded_devices) if reseed else nullcontext()
+        )
+        host_rng_saved = snapshot_host_rng() if seed is not None and self.reseed_host else None
+        try:
+            with (
+                _ambient_execution_context_restored(self.descriptor.ambient_context),
+                rng_context,
+                _state.pause_logging(),
+            ):
+                if reseed:
+                    _seed_run_generators(
+                        cast(int, seed), self.seeded_devices, reseed_host=self.reseed_host
+                    )
+                for compiled in self.compiled_calls:
+                    output = compiled.execute(slot_values)
+                    call_outputs[compiled.descriptor.call_id] = output
+                    call_checks = self._bind_outputs(compiled, output, slot_values)
+                    checks.extend(call_checks)
+                    failed = next((check for check in call_checks if not check.passed), None)
+                    if failed is not None:
+                        _raise_failed_contract_as_divergence(failed, fork=None)
+        finally:
+            if host_rng_saved is not None:
+                restore_host_rng(host_rng_saved)
+        output = self._reconstruct_output(slot_values, call_outputs)
+        checks.append(
+            _contract_check(
+                "fast_static_guard",
+                True,
+                RunnableErrorCode.CALL_STRUCTURE_MISMATCH,
+                "Fast static guard passed.",
+            )
+        )
+        return _finalize_provider_run(
+            fork=self.target,
+            output=output,
+            readiness=self.readiness,
+            state_source=self.prepared_state.state_source,
+            initializer_policy_version=self.prepared_state.initializer_policy_version,
+            seed=self.prepared_state.seed,
+            random_filled_slot_ids=self.prepared_state.random_filled_slot_ids,
+            contract_checks=tuple(checks),
+            provisional_path_faithfulness=PathFaithfulness.VERIFIED,
+            provisional_mismatch=None,
+            numeric_attestation=NumericAttestationStatus.NOT_APPLICABLE,
+            divergence_policy=DivergencePolicy.RAISE,
+        )
+
+
+class _FastLiveSession:
+    """Native-forward collector guarded by selected-site and boundary call plans."""
+
+    def __init__(self, trace: Any, model: nn.Module) -> None:
+        """Build and install the targeted live-model collection plan."""
+
+        self.trace = trace
+        self.model_ref = weakref.ref(model)
+        self.owner_thread_id: int | None = None
+        self.active = False
+        self.module_index = 0
+        self.function_index = 0
+        self.last_function_output: tuple[str, int] | None = None
+        self.failure: ContractCheck | None = None
+        self.module_plans = self._build_module_plans(trace)
+        self.function_plans = self._build_function_plans(trace)
+        supported_labels = (
+            {
+                label
+                for plan in (*self.module_plans, *self.function_plans)
+                for label in plan.save_labels
+            }
+            | set(getattr(trace, "input_layers", ()))
+            | set(getattr(trace, "output_layers", ()))
+        )
+        unsupported_function_labels = tuple(
+            op.layer_label
+            for op in trace.layer_list
+            if bool(getattr(op, "has_saved_activation", False))
+            and str(getattr(op, "func_name", "none")) not in {"none", "identity"}
+            and op.layer_label not in supported_labels
+        )
+        if unsupported_function_labels:
+            raise RunCapabilityUnavailableError(
+                "fast=True collects functional operations only when they were explicitly "
+                "requested by the capture save predicate. Recapture with save=tl.func(...) "
+                f"for: {', '.join(unsupported_function_labels[:8])}.",
+                code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+                detection_stage="fast_live_function_plan",
+            )
+        for op in trace.layer_list:
+            if (
+                bool(getattr(op, "has_saved_activation", False))
+                and op.layer_label not in supported_labels
+            ):
+                op._internal_set("out", None)
+                op._internal_set("transformed_out", None)
+                op._internal_set("has_saved_activation", False)
+        self.function_names = frozenset(plan.address_or_name for plan in self.function_plans)
+        self.handles: list[Any] = []
+        modules = dict(model.named_modules())
+        session_ref = weakref.ref(self)
+        for address in dict.fromkeys(plan.address_or_name for plan in self.module_plans):
+            module = modules.get("" if address == "self" else address)
+            if module is None:
+                raise RunCapabilityUnavailableError(
+                    f"Captured module address {address!r} is absent from the live model.",
+                    code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+                    detection_stage="fast_live_module_plan",
+                )
+
+            def hook(
+                _module: nn.Module,
+                _args: tuple[Any, ...],
+                output: Any,
+                *,
+                module_address: str = address,
+                ref: weakref.ReferenceType[_FastLiveSession] = session_ref,
+            ) -> None:
+                """Forward one module boundary to the active session."""
+
+                session = ref()
+                if session is not None:
+                    session.capture_module(module_address, output)
+
+            self.handles.append(module.register_forward_hook(hook))
+
+    @staticmethod
+    def _build_module_plans(trace: Any) -> tuple[_FastOutputPlan, ...]:
+        """Derive the exact atomic-module call sequence from the captured trace."""
+
+        seen: set[str] = set()
+        plans: list[_FastOutputPlan] = []
+        for op in trace.layer_list:
+            call_label = getattr(op, "atomic_module_call", None)
+            if not call_label or call_label in seen:
+                continue
+            seen.add(call_label)
+            module_call = trace.module_calls[call_label]
+            resolved = tuple(trace.layer_dict_all_keys[label] for label in module_call.output_ops)
+            if not any(bool(getattr(item, "has_saved_activation", False)) for item in resolved):
+                continue
+            labels = tuple(item.layer_label for item in resolved)
+            plans.append(
+                _FastOutputPlan(
+                    address_or_name=call_label.rsplit(":", 1)[0],
+                    op_labels=labels,
+                    shapes=tuple(
+                        tuple(item.shape) if item.shape is not None else None for item in resolved
+                    ),
+                    dtypes=tuple(
+                        str(item.dtype) if item.dtype is not None else None for item in resolved
+                    ),
+                    save_labels=frozenset(
+                        label
+                        for label, item in zip(labels, resolved)
+                        if bool(getattr(item, "has_saved_activation", False))
+                    ),
+                )
+            )
+        return tuple(plans)
+
+    @staticmethod
+    def _build_function_plans(trace: Any) -> tuple[_FastOutputPlan, ...]:
+        """Derive scoped functional calls needed by explicitly saved non-module ops."""
+
+        if getattr(trace, "_predicate_save_options", None) is None:
+            return ()
+        target_names = {
+            str(op.func_name)
+            for op in trace.layer_list
+            if bool(getattr(op, "has_saved_activation", False))
+            and not bool(getattr(op, "is_atomic_module", False))
+            and str(getattr(op, "func_name", "none")) not in {"none", "identity"}
+        }
+        plans: list[_FastOutputPlan] = []
+        ops = [op for op in trace.layer_list if str(getattr(op, "func_name", "")) in target_names]
+        index = 0
+        while index < len(ops):
+            first = ops[index]
+            group = [first]
+            spec = getattr(first, "container_spec", None)
+            if spec is not None:
+                next_index = index + 1
+                while (
+                    next_index < len(ops)
+                    and ops[next_index].raw_index == group[-1].raw_index + 1
+                    and getattr(ops[next_index], "container_spec", None) is spec
+                ):
+                    group.append(ops[next_index])
+                    next_index += 1
+            labels = tuple(item.layer_label for item in group)
+            plans.append(
+                _FastOutputPlan(
+                    address_or_name=str(first.func_name),
+                    op_labels=labels,
+                    shapes=tuple(
+                        tuple(item.shape) if item.shape is not None else None for item in group
+                    ),
+                    dtypes=tuple(
+                        str(item.dtype) if item.dtype is not None else None for item in group
+                    ),
+                    save_labels=frozenset(
+                        item.layer_label
+                        for item in group
+                        if bool(getattr(item, "has_saved_activation", False))
+                        and not bool(getattr(item, "is_atomic_module", False))
+                    ),
+                )
+            )
+            index += len(group)
+        return tuple(plans)
+
+    def close(self) -> None:
+        """Remove persistent module hooks owned by this session."""
+
+        for handle in self.handles:
+            handle.remove()
+        self.handles.clear()
+
+    def wants_function(self, func_name: str) -> bool:
+        """Return whether the active scoped collector needs this function type."""
+
+        return (
+            self.active
+            and threading.get_ident() == self.owner_thread_id
+            and func_name in self.function_names
+        )
+
+    def _capture_plan_output(self, plan: _FastOutputPlan, output: Any) -> None:
+        """Check one runtime output tree and save only selected captured labels."""
+
+        paths = _tensor_leaf_paths(output)
+        if len(paths) != len(plan.op_labels):
+            self.failure = _contract_check(
+                f"fast_live_output_count:{plan.address_or_name}",
+                False,
+                RunnableErrorCode.OUTPUT_STRUCTURE_MISMATCH,
+                f"Fast live site {plan.address_or_name!r} produced {len(paths)} tensor leaves; "
+                f"the capture recorded {len(plan.op_labels)}.",
+                affected_op_labels=plan.op_labels,
+            )
+            return
+        for label, expected_shape, expected_dtype, path in zip(
+            plan.op_labels, plan.shapes, plan.dtypes, paths
+        ):
+            value = _value_at_path(output, path)
+            if not isinstance(value, torch.Tensor):
+                self.failure = _contract_check(
+                    f"fast_live_output_type:{label}",
+                    False,
+                    RunnableErrorCode.OUTPUT_STRUCTURE_MISMATCH,
+                    f"Fast live site {label!r} no longer produces a tensor.",
+                    affected_op_labels=(label,),
+                )
+                return
+            if expected_shape is not None and tuple(value.shape) != expected_shape:
+                self.failure = _contract_check(
+                    f"fast_live_output_shape:{label}",
+                    False,
+                    RunnableErrorCode.OUTPUT_SHAPE_MISMATCH,
+                    f"Fast live site {label!r} shape changed from {expected_shape} to "
+                    f"{tuple(value.shape)}.",
+                    affected_op_labels=(label,),
+                )
+                return
+            if expected_dtype is not None and str(value.dtype) != expected_dtype:
+                self.failure = _contract_check(
+                    f"fast_live_output_dtype:{label}",
+                    False,
+                    RunnableErrorCode.OUTPUT_DTYPE_MISMATCH,
+                    f"Fast live site {label!r} dtype changed from {expected_dtype} to "
+                    f"{value.dtype}.",
+                    affected_op_labels=(label,),
+                )
+                return
+            if label in plan.save_labels:
+                op = self.trace.layer_dict_all_keys[label]
+                op.save_activation(
+                    value,
+                    (),
+                    {},
+                    False,
+                    activation_transform=getattr(self.trace, "activation_transform", None),
+                )
+
+    def capture_module(self, address: str, output: Any) -> None:
+        """Collect and guard one atomic-module forward-hook event."""
+
+        if not self.active or threading.get_ident() != self.owner_thread_id or self.failure:
+            return
+        if self.module_index >= len(self.module_plans):
+            self.failure = _contract_check(
+                "fast_live_module_extra",
+                False,
+                RunnableErrorCode.CONDITIONAL_ARM_DIVERGENCE,
+                f"Live model executed unexpected atomic module {address!r}.",
+            )
+            return
+        plan = self.module_plans[self.module_index]
+        if plan.address_or_name != address:
+            self.failure = _contract_check(
+                "fast_live_module_path",
+                False,
+                RunnableErrorCode.CONDITIONAL_ARM_DIVERGENCE,
+                f"Live module path changed: expected {plan.address_or_name!r}, got {address!r}.",
+                affected_op_labels=plan.op_labels,
+            )
+            return
+        self.module_index += 1
+        self._capture_plan_output(plan, output)
+
+    def capture_function(self, func_name: str, output: Any) -> None:
+        """Collect and guard one explicitly requested functional-op event."""
+
+        if not self.wants_function(func_name) or self.failure:
+            return
+        output_identity = (func_name, id(output))
+        if output_identity == self.last_function_output:
+            return
+        self.last_function_output = output_identity
+        if self.function_index >= len(self.function_plans):
+            self.failure = _contract_check(
+                "fast_live_function_extra",
+                False,
+                RunnableErrorCode.CONDITIONAL_ARM_DIVERGENCE,
+                f"Live model executed an extra requested functional op {func_name!r}.",
+            )
+            return
+        plan = self.function_plans[self.function_index]
+        if plan.address_or_name != func_name:
+            self.failure = _contract_check(
+                "fast_live_function_path",
+                False,
+                RunnableErrorCode.CONDITIONAL_ARM_DIVERGENCE,
+                f"Live functional path changed: expected {plan.address_or_name!r}, "
+                f"got {func_name!r}.",
+                affected_op_labels=plan.op_labels,
+            )
+            return
+        self.function_index += 1
+        self._capture_plan_output(plan, output)
+
+    @contextmanager
+    def activated(self) -> Any:
+        """Activate this collector for one owner-thread native forward."""
+
+        prior = _state._active_fast_run_collector
+        if prior is not None:
+            raise RuntimeError("Fast live runs cannot be nested or concurrent.")
+        self.owner_thread_id = threading.get_ident()
+        self.module_index = 0
+        self.function_index = 0
+        self.last_function_output = None
+        self.failure = None
+        self.active = True
+        _state._active_fast_run_collector = self
+        try:
+            yield
+        finally:
+            _state._active_fast_run_collector = prior
+            self.active = False
+            self.owner_thread_id = None
+
+    def run(self, inputs: Any, *, seed: int | None) -> RunResult:
+        """Execute one native forward and enforce the cached static graph guard."""
+
+        model = self.model_ref()
+        if model is None:
+            raise RunCapabilityUnavailableError(
+                "The fast live session's source model is no longer available.",
+                code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+                provider=RunProvider.LIVE,
+            )
+        input_args = inputs
+        input_kwargs: Mapping[str, Any] = {}
+        if (
+            isinstance(inputs, Mapping)
+            and {"args", "kwargs"}.issubset(inputs)
+            and set(inputs).issubset({"args", "kwargs"})
+        ):
+            args, kwargs = _split_mixed_inputs(inputs)
+            input_args = list(args)
+            input_kwargs = dict(kwargs)
+        failed_input = _first_failed_live_input_check(self.trace, input_args, input_kwargs)
+        if failed_input is not None:
+            _raise_failed_contract_as_divergence(failed_input, fork=None)
+        if seed is not None:
+            set_random_seed(seed)
+        with self.activated():
+            if isinstance(input_args, list):
+                output = model(*input_args, **dict(input_kwargs))
+            else:
+                output = model(input_args, **dict(input_kwargs))
+        if self.failure is not None:
+            _raise_failed_contract_as_divergence(self.failure, fork=None)
+        if self.module_index != len(self.module_plans):
+            failed = _contract_check(
+                "fast_live_module_missing",
+                False,
+                RunnableErrorCode.CONDITIONAL_ARM_DIVERGENCE,
+                f"Live module path ended after {self.module_index} of "
+                f"{len(self.module_plans)} captured atomic calls.",
+            )
+            _raise_failed_contract_as_divergence(failed, fork=None)
+        if self.function_index != len(self.function_plans):
+            failed = _contract_check(
+                "fast_live_function_missing",
+                False,
+                RunnableErrorCode.CONDITIONAL_ARM_DIVERGENCE,
+                f"Live functional path ended after {self.function_index} of "
+                f"{len(self.function_plans)} requested calls.",
+            )
+            _raise_failed_contract_as_divergence(failed, fork=None)
+        self._refresh_boundary_payloads(input_args, input_kwargs, output)
+        readiness = ReadinessReport(
+            status=ReadinessStatus.READY,
+            provider=RunProvider.LIVE,
+            backend=str(getattr(self.trace, "backend", "torch")),
+            capability="guarded_static_native_forward",
+            resolver_records=(),
+            state_sources_available=(StateSource.LIVE_MODEL_STATE,),
+            witness_completeness=None,
+            diagnostics=(),
+        )
+        guard_check = _contract_check(
+            "fast_static_guard",
+            True,
+            RunnableErrorCode.CALL_STRUCTURE_MISMATCH,
+            "Fast static guard passed.",
+        )
+        return _finalize_provider_run(
+            fork=self.trace,
+            output=output,
+            readiness=readiness,
+            state_source=StateSource.LIVE_MODEL_STATE,
+            initializer_policy_version=None,
+            seed=seed,
+            random_filled_slot_ids=(),
+            contract_checks=(guard_check,),
+            provisional_path_faithfulness=PathFaithfulness.VERIFIED,
+            provisional_mismatch=None,
+            numeric_attestation=NumericAttestationStatus.NOT_PRESENT,
+            divergence_policy=DivergencePolicy.RAISE,
+        )
+
+    def _refresh_boundary_payloads(
+        self,
+        input_args: Any,
+        input_kwargs: Mapping[str, Any],
+        output: Any,
+    ) -> None:
+        """Refresh saved model-input/output payloads from the native call boundaries."""
+
+        input_leaves = _live_runtime_input_leaves(input_args, input_kwargs)
+        if input_leaves is not None:
+            for label, value in zip(getattr(self.trace, "input_layers", ()), input_leaves):
+                op = self.trace.layer_dict_all_keys[label]
+                if bool(getattr(op, "has_saved_activation", False)):
+                    op.save_activation(value, (), {}, False)
+        output_paths = _tensor_leaf_paths(output)
+        output_labels = tuple(getattr(self.trace, "output_layers", ()))
+        if len(output_paths) != len(output_labels):
+            failed = _contract_check(
+                "fast_live_model_output_structure",
+                False,
+                RunnableErrorCode.OUTPUT_STRUCTURE_MISMATCH,
+                "Native model output tensor structure changed from the captured boundary.",
+                affected_op_labels=output_labels,
+            )
+            _raise_failed_contract_as_divergence(failed, fork=None)
+        for label, path in zip(output_labels, output_paths):
+            value = _value_at_path(output, path)
+            op = self.trace.layer_dict_all_keys[label]
+            expected_shape = tuple(op.shape) if op.shape is not None else None
+            expected_dtype = str(op.dtype) if op.dtype is not None else None
+            if not isinstance(value, torch.Tensor):
+                failed = _contract_check(
+                    f"fast_live_model_output_type:{label}",
+                    False,
+                    RunnableErrorCode.OUTPUT_STRUCTURE_MISMATCH,
+                    f"Native model output {label!r} is no longer a tensor.",
+                    affected_op_labels=(label,),
+                )
+                _raise_failed_contract_as_divergence(failed, fork=None)
+            if expected_shape is not None and tuple(value.shape) != expected_shape:
+                failed = _contract_check(
+                    f"fast_live_model_output_shape:{label}",
+                    False,
+                    RunnableErrorCode.OUTPUT_SHAPE_MISMATCH,
+                    f"Native model output {label!r} shape changed from {expected_shape} to "
+                    f"{tuple(value.shape)}.",
+                    affected_op_labels=(label,),
+                )
+                _raise_failed_contract_as_divergence(failed, fork=None)
+            if expected_dtype is not None and str(value.dtype) != expected_dtype:
+                failed = _contract_check(
+                    f"fast_live_model_output_dtype:{label}",
+                    False,
+                    RunnableErrorCode.OUTPUT_DTYPE_MISMATCH,
+                    f"Native model output {label!r} dtype changed from {expected_dtype} to "
+                    f"{value.dtype}.",
+                    affected_op_labels=(label,),
+                )
+                _raise_failed_contract_as_divergence(failed, fork=None)
+            if isinstance(value, torch.Tensor) and bool(getattr(op, "has_saved_activation", False)):
+                op.save_activation(value, (), {}, False)
+
+
+def run_fast_loaded_trace(trace: Any, inputs: Any, *, seed: int | None) -> RunResult:
+    """Run or initialize the explicit verify-once loaded sparse fast path.
+
+    Parameters
+    ----------
+    trace:
+        Loaded sparse source Trace.
+    inputs:
+        Runtime input tree.
+    seed:
+        Seed pinned for the lifetime of the fast session.
+
+    Returns
+    -------
+    RunResult
+        First ordinary verified result or a later compiled fast result.
+    """
+
+    session = trace.__dict__.get("_fast_run_session")
+    if isinstance(session, _FastSparseSession):
+        return session.run(inputs, seed=seed)
+    result = run_loaded_sparse_trace(
+        trace,
+        inputs,
+        seed=seed,
+        on_divergence=DivergencePolicy.RAISE,
+    )
+    if result.report.path_faithfulness is not PathFaithfulness.VERIFIED:
+        raise RunCapabilityUnavailableError(
+            "fast=True requires a fully verified first sparse run; this artifact settled "
+            f"{result.report.path_faithfulness.value}.",
+            code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+            detection_stage="fast_verify_once",
+        )
+    trace.__dict__["_fast_run_session"] = _FastSparseSession.build(
+        trace,
+        result.trace,
+        seed=seed,
+    )
+    return result
+
+
+def run_fast_live_trace(trace: Any, inputs: Any, *, seed: int | None) -> RunResult:
+    """Run the explicit native-forward targeted-collection live fast path."""
+
+    source_ref = getattr(trace, "_source_model_ref", None)
+    model = source_ref() if source_ref is not None else None
+    if not isinstance(model, nn.Module):
+        raise RunCapabilityUnavailableError(
+            "The live Trace no longer retains its source model.",
+            code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+            provider=RunProvider.LIVE,
+        )
+    session = trace.__dict__.get("_fast_run_session")
+    if not isinstance(session, _FastLiveSession) or session.model_ref() is not model:
+        if hasattr(session, "close"):
+            session.close()
+        session = _FastLiveSession(trace, model)
+        trace.__dict__["_fast_run_session"] = session
+    return session.run(inputs, seed=seed)
+
+
+def close_fast_run_session(trace: Any) -> None:
+    """Close and discard a Trace's internal fast-run session, if present."""
+
+    session = trace.__dict__.pop("_fast_run_session", None)
+    if hasattr(session, "close"):
+        session.close()

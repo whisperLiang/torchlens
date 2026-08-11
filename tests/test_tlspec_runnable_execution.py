@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import NamedTuple
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 import torch
@@ -60,6 +59,15 @@ class HonestyControlModel(nn.Module):
         if value.sum() > 0:
             value = value * 2
         return value
+
+
+class RandomExecutionModel(nn.Module):
+    """Static graph that consumes the seeded PyTorch generator."""
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Add one seeded random draw to the input."""
+
+        return value + torch.rand_like(value)
 
 
 class InplaceActivationModel(nn.Module):
@@ -305,6 +313,100 @@ def test_loaded_sparse_sequential_runs_have_unique_fork_labels(
     second = loaded.run(inputs=torch.ones(2, 3))
 
     assert first.trace.trace_label != second.trace.trace_label
+
+
+@pytest.mark.smoke
+def test_loaded_sparse_fast_run_verifies_once_then_reuses_compiled_result_trace(
+    runnable_execution_artifact: tuple[Path, RunnableExecutionModel, tl.Trace],
+) -> None:
+    """Keep default verification on the first call and reuse one guarded result thereafter."""
+
+    path, model, _ = runnable_execution_artifact
+    loaded = tl.load(path)
+    loaded.load_state_dict(model.state_dict())
+    first_inputs = torch.tensor([[2.0, -1.0, 0.5], [-3.0, 0.25, 4.0]])
+    second_inputs = torch.tensor([[0.5, 1.0, -2.0], [1.25, -0.75, 3.0]])
+
+    first = loaded.run(inputs=first_inputs, seed=73, fast=True)
+    second = loaded.run(inputs=second_inputs, seed=73, fast=True)
+
+    assert first.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert second.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert second.trace is first.trace
+    assert second.trace is not loaded
+    assert torch.equal(second.output, model(second_inputs))
+    assert loaded.__dict__["_fast_run_session"].prepared_state is not None
+
+
+def test_loaded_sparse_fast_run_refuses_seed_drift(
+    runnable_execution_artifact: tuple[Path, RunnableExecutionModel, tl.Trace],
+) -> None:
+    """Pin verify-once evidence to the seed that initialized its cached state."""
+
+    path, model, _ = runnable_execution_artifact
+    loaded = tl.load(path)
+    loaded.load_state_dict(model.state_dict())
+    loaded.run(inputs=torch.ones(2, 3), seed=5, fast=True)
+
+    with pytest.raises(RunCapabilityUnavailableError, match="pins the seed"):
+        loaded.run(inputs=torch.ones(2, 3), seed=6, fast=True)
+
+
+def test_loaded_sparse_fast_run_reseeds_rng_after_verify_once(tmp_path: Path) -> None:
+    """Reproduce seeded random calls on every compiled trusted iteration."""
+
+    inputs = torch.ones(2, 3)
+    captured = tl.trace(
+        RandomExecutionModel(),
+        inputs,
+        capture=CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+            random_seed=31,
+        ),
+    )
+    path = tmp_path / "random-fast.tlspec"
+    captured.save(path, level="runnable")
+    loaded = tl.load(path)
+
+    verified = loaded.run(inputs=inputs, seed=31, fast=True)
+    repeated = loaded.run(inputs=inputs, seed=31, fast=True)
+
+    assert verified.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert repeated.report.path_faithfulness is PathFaithfulness.VERIFIED
+    assert torch.equal(repeated.output, verified.output)
+
+
+def test_live_fast_run_refuses_same_shape_function_path_divergence() -> None:
+    """Never relabel a changed same-shape functional branch as the captured static site."""
+
+    class BranchingFunctionModel(nn.Module):
+        """Choose between two same-shape activation functions from tensor data."""
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            """Apply the branch selected by the runtime sum."""
+
+            if bool((value.sum() > 0).item()):
+                return torch.relu(value)
+            return torch.sigmoid(value)
+
+    model = BranchingFunctionModel().eval()
+    captured = tl.trace(model, torch.ones(2), save=tl.func("relu"))
+
+    with pytest.raises(PathDivergenceError):
+        captured.run(inputs=-torch.ones(2), fast=True)
+
+
+def test_loaded_sparse_fast_run_keeps_control_witness_guard(honesty_artifact: Path) -> None:
+    """Evaluate recorded control witnesses on every trusted compiled iteration."""
+
+    loaded = tl.load(honesty_artifact)
+    verified = loaded.run(inputs=torch.ones(2), seed=19, fast=True)
+    assert verified.report.path_faithfulness is PathFaithfulness.VERIFIED
+
+    with pytest.raises(PathDivergenceError):
+        loaded.run(inputs=-torch.ones(2), seed=19, fast=True)
 
 
 def test_loaded_sparse_execution_pauses_recursive_capture(
