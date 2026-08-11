@@ -357,6 +357,24 @@ def test_torch_capability_snapshot_contract() -> None:
         # torch.distributed.fsdp on plain captures); distributed availability is
         # build-dependent, so mirror the live post-snapshot capability.
         "HAS_FSDP_WRAPPER": tc.HAS_FSDP_WRAPPER,
+        # Honest-distributed-detection probes, lazily resolved on the same
+        # never-import-on-the-hot-path contract as FSDP above. Each one names the
+        # graceful degradation it gates: without it, DTensor / device-mesh /
+        # pipeline-stage detection falls back from an exact isinstance check to
+        # structural namespace matching. Build-dependent, so mirror the live
+        # post-snapshot capability.
+        "HAS_DTENSOR": tc.HAS_DTENSOR,
+        "HAS_DEVICE_MESH": tc.HAS_DEVICE_MESH,
+        "HAS_PIPELINING": tc.HAS_PIPELINING,
+        # Dynamo/fake-mode boundary probes. Without them a compiled region reached
+        # during capture dies inside the wrappers with a raw
+        # InternalTorchDynamoError, and fake/functional tensors fall back to
+        # structural name matching. Build-dependent, so mirror the live values.
+        "HAS_DYNAMO_IS_COMPILING": tc.HAS_DYNAMO_IS_COMPILING,
+        "HAS_TRACING_TENSOR_TYPES": tc.HAS_TRACING_TENSOR_TYPES,
+        # fp8 dtypes exist on every torch build we support, but the set grew across
+        # 2.x, so mirror the live value rather than hardcoding True.
+        "HAS_FP8_DTYPES": tc.HAS_FP8_DTYPES,
         "HAS_GENERATOR_CLONE_STATE": hasattr(torch.Generator, "clone_state"),
         "HAS_GENERATOR_GRAPHSAFE_GET_STATE": hasattr(torch.Generator, "graphsafe_get_state"),
         "HAS_GENERATOR_GRAPHSAFE_SET_STATE": hasattr(torch.Generator, "graphsafe_set_state"),

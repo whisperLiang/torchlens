@@ -67,6 +67,13 @@ def test_trace_field_set_subset_of_user_facing() -> None:
         "_replay_arg_version_data_complete",
         "_capture_config",
         "_raw_transform_escape_detected",
+        # Honesty/safety phase: the bypassed-torch.compile-region marker that owns
+        # the top-precedence capture_verification_reason. Runtime-only and
+        # FieldPolicy.DROP for the same reason as the transform-escape flag above.
+        "_raw_dynamo_region_detected",
+        # Honesty/safety phase: warn-once flag for activations whose NaN/Inf check
+        # could not run under raise_on_nan (an unrunnable check is not a clean tensor).
+        "_warned_nonfinite_check_unavailable",
         "_stop_directive",
         # r65-r81 buffer-rung/RNG-registry sprint: capture-scratch that
         # legitimately survives on a finished Trace (host-RNG monitor state,
@@ -100,9 +107,13 @@ def test_trace_field_set_subset_of_user_facing() -> None:
         # deliberately absent from MODEL_LOG_FIELD_ORDER because they do not
         # survive save/load. ``_module_call_accessor`` is the exact sibling of
         # the allowlisted ``_buffer_accessor``; ``measure_python_peak_memory``
-        # is the documented tracemalloc opt-in read back by capture/trace.py.
+        # is the documented tracemalloc opt-in read back by capture/trace.py;
+        # ``save_budget`` and its live accountant are the honesty/safety
+        # phase's per-device retained-bytes ceiling.
         "_module_call_accessor",
         "measure_python_peak_memory",
+        "save_budget",
+        "_save_budget_accountant",
     }
 
     actual = set(trace.__dict__.keys())

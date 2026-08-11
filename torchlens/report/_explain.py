@@ -8,7 +8,11 @@ import traceback
 
 import torch
 
-from ..data_classes._nonfinite import first_nonfinite_layer, nonfinite_layers
+from ..data_classes._nonfinite import (
+    coverage_gap_note,
+    first_nonfinite_layer,
+    nonfinite_layers,
+)
 
 Audience = Literal["researcher", "practitioner", "auto"]
 ExplainFormat = Literal["text", "json"]
@@ -351,7 +355,10 @@ def _first_nonfinite_summary(log: Any) -> str:
 
     layer = first_nonfinite_layer(log, kind="saved")
     if layer is None:
-        return "No non-finite values found in saved outputs."
+        return (
+            "No non-finite values found in saved outputs"
+            f"{coverage_gap_note(log, kind='saved')}."
+        )
     return _first_nonfinite_detail(log, str(getattr(layer, "layer_label", "unknown")))
 
 
@@ -505,7 +512,11 @@ def _anomaly_lines(log: Any) -> list[str]:
         for layer in nonfinite_layers(log, kind="saved")
     ]
     if not nonfinite_labels:
-        return ["- No NaN or Inf values were found in saved outs."]
+        # This bullet stands alone in the report -- the hedged ``first_nonfinite``
+        # evidence line only appears in the failure diagnosis -- so the scan's
+        # coverage gaps have to be disclosed right here or a selective-save (or
+        # quantized-payload) capture reads as an audited clean bill of health.
+        return [f"- No NaN or Inf values were found in saved outs{coverage_gap_note(log)}."]
     first = nonfinite_labels[0]
     return [
         f"- {len(nonfinite_labels)} saved out(s) contain NaN or Inf values.",

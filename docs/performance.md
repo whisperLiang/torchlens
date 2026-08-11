@@ -94,6 +94,7 @@ with `tl.partial.from_failed_capture(exc)`.
 | Gradients | `save_grads=False` unless needed | Backward-ready captures preserve more state and hooks. |
 | Forward-only autograd | `inference_only=True` | Runs forward capture under `torch.no_grad()`; incompatible with backward capture. |
 | Forward chunking | `chunk_size=N` | Reduces forward-pass peak memory for single-batch tensor inputs; final saved activations are still accumulated in memory. |
+| Recurrence detection | `capture=CaptureOptions(recurrence_detection=False)` | Measured 39-42% of capture time off models with thousands of repeated ops (hand-rolled top-level loops, unrolled decodes). Repeated ops stay separate layers instead of rolling into one multi-pass layer, so a 6-iteration loop yields `relu_1_2 ... relu_6_7` (each `num_passes=1`) instead of one `relu_1_2` with `num_passes=6`. `is_recurrent` and `max_layer_op_count` are still reported. It is a TIME knob only: retained activation bytes are unchanged. |
 | Visualization | Call `trace.draw()` after capture, not during hot loops | Rendering is separate from activation collection. |
 
 ### Scoped detached-reference diagnostics
@@ -155,7 +156,9 @@ the census result `True` while setting `capture_verified=False` with
 `capture_verification_reason="transform_call_route_unverified"`. `escape_detector_verified=True` makes
 the separate claim that the callable detector saw no observable raw-call escape. `capture_verified=True`
 is the combined result only when the enabled census/detector checks pass, no raw-transform escape was
-detected, and the owner-thread qualification remains valid.
+detected, and the owner-thread qualification remains valid. A bypassed `torch.compile` region reports
+the more specific `capture_verification_reason="dynamo_region_not_logged"` in preference to any of the
+above, since Dynamo's compile threads and unaccounted aten dispatches are symptoms of that one region.
 
 The honest rollout comparison is **legacy with no guard** versus **scoped with the requested
 guard**, not crawl time in isolation. On Python 3.9–3.11, shadow mode uses `sys.setprofile` and can
@@ -265,6 +268,11 @@ assert trace.find_sites(tl.func("conv2d")).first().out.shape == (1, 2, 3, 3)
 ```
 
 Use disk-backed storage for selected payloads that are too large or numerous to keep in memory.
+Trace repr, notebook HTML, and JSON explanation do not materialize lazy disk payloads for their
+NaN/Inf summary; those refs are reported as unexamined until you call ``op.materialize_out()``.
+This exemption applies to predicate-selected disk-only payloads. Exhaustive ``save="all"`` keeps
+RAM copies until postprocess, so combine a narrower ``save=`` with disk streaming to reduce peak
+retained memory.
 Portable `.tlspec/` bundles store manifest data plus tensor sidecars when the backend supports
 materialized payloads; executable Python callables are not portable. Backend-aware manifest schema
 v2 adds `backend`, `backend_runtime`, nullable torch-specific fields, and `payload_policy`.

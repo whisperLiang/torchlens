@@ -27,7 +27,7 @@ from .._literals import (
 )
 from .._source_links import file_line_text, terminal_file_line_link, vscode_file_line_link
 from ..intervention.types import FireRecord
-from ._nonfinite import first_nonfinite_layer
+from ._nonfinite import coverage_gap_note, first_nonfinite_layer
 from .module import Module
 
 
@@ -344,7 +344,14 @@ class TraceVisualizationMixin(_TraceMixinBase):
             module, shape, dtype, parents, and source location.
         """
 
-        layer = first_nonfinite_layer(self, kind="trace")
+        # ``kind="saved"`` skips ops that retained no payload. The raising
+        # ``kind="trace"`` gate contradicted this method's own contract ("the first
+        # SAVED non-finite out"): on any selective-save capture it hit an unsaved op
+        # and raised ValueError, which took ``print(trace)``, ``_repr_html_``, and
+        # ``report.explain`` down with it -- in exactly the mode the performance guide
+        # recommends for large models. Skipping is honest only because the clean
+        # answer below names how many ops could not be examined.
+        layer = first_nonfinite_layer(self, kind="saved")
         if layer is not None:
             stack = getattr(layer, "code_context", None) or []
             location = "source unavailable"
@@ -369,7 +376,14 @@ class TraceVisualizationMixin(_TraceMixinBase):
                 f"dtype={getattr(layer, 'dtype', None)}, parents={parents}, "
                 f"source={location}."
             )
-        return "No non-finite tensor values found in saved outs."
+        # A scoped clean answer must not read like a whole-capture one: ops that
+        # retained no payload, and payloads whose dtype has no runnable ``isfinite``
+        # (quantized, sparse), are both named. fp8 is NOT in that class -- it is
+        # widened exactly and really is checked.
+        return (
+            "No non-finite tensor values found in saved outs"
+            f"{coverage_gap_note(self, kind='saved')}."
+        )
 
     def draw_backward(
         self: "Trace",

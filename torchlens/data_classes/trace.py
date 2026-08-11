@@ -73,6 +73,7 @@ from .._io import (
     default_fill_state,
     read_tlspec_version,
 )
+from .._save_budget import SaveBudget, SaveBudgetOption
 from ..constants import LAYER_PASS_LOG_FIELD_ORDER, MODEL_LOG_FIELD_ORDER
 from ..captured_run import CapturedRun
 from ..ir.trace_build_state import TraceBuildState
@@ -201,6 +202,7 @@ _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "_has_direct_writes": False,
     "_warned_direct_write": False,
     "_warned_mutate_in_place": False,
+    "_warned_nonfinite_check_unavailable": False,
     "_spec_revision": 0,
     "_out_recipe_revision": 0,
     "_annotation_blobs": None,
@@ -217,6 +219,7 @@ _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "module_filter": None,
     "emit_nvtx": False,
     "measure_python_peak_memory": False,
+    "save_budget": "auto",
     "raise_on_nan": False,
     "keep_orphans": False,
     "annotations": {},
@@ -367,6 +370,35 @@ _BUILD_STATE_ATTR_MAP: dict[str, str] = {
     "_input_tensor_addresses": "input_tensor_addresses",
 }
 _BUILD_STATE_ATTR_MAP_GET = _BUILD_STATE_ATTR_MAP.get
+
+# Plausible-but-absent attribute names, mapped to the fields that answer them. A
+# frontier-scale user's first question is "how big is this capture?", and the
+# singular ``activation_memory`` spelling (which IS an ``Op`` field, meaning that
+# one op's payload bytes) has no single correct Trace-level meaning: the whole
+# forward's tensors and the subset ``save=`` retained are different numbers, and
+# collapsing them into one alias would make the answer ambiguous rather than
+# available. So the names route to the real fields instead of becoming one.
+_MISSING_ATTR_HINTS: dict[str, str] = {
+    "activation_memory": (
+        "use total_activation_memory for every tensor computed in the forward, or "
+        "saved_activation_memory for just the payloads save= retained "
+        "(Op.activation_memory is the per-op figure; forward_peak_memory is the "
+        "measured runtime peak)."
+    ),
+    "memory": (
+        "use total_activation_memory / saved_activation_memory for activations, "
+        "total_param_memory for parameters, or forward_peak_memory for the measured "
+        "runtime peak."
+    ),
+    "total_memory": (
+        "use total_activation_memory for activations and total_param_memory for "
+        "parameters; forward_peak_memory is the measured runtime peak."
+    ),
+    "footprint": (
+        "use total_activation_memory / saved_activation_memory / total_param_memory, "
+        "or forward_peak_memory for the measured runtime peak."
+    ),
+}
 # Traces whose Op metadata has already been pooled by ``_compact_op_metadata``.
 # Held weakly and OFF the Trace itself so no new field enters ``__dict__``,
 # pickle state, or a portable artifact.
@@ -953,6 +985,16 @@ class Trace(
                 return events
         state_field = _BUILD_STATE_ATTR_MAP_GET(name)
         if state_field is None:
+            # A trace CAN self-report its footprint, but not under the singular name
+            # a user at scale reaches for first, and a bare AttributeError reads as
+            # "TorchLens does not know". One dict lookup on the miss path (which is
+            # hot: 30-40k internal misses per capture) routes the guessed names to
+            # the real fields instead.
+            hint = _MISSING_ATTR_HINTS.get(name)
+            if hint is not None:
+                raise AttributeError(
+                    f"{type(self).__name__!s} object has no attribute {name!r}; {hint}"
+                )
             raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
         # Hot path: during capture every mapped-attribute read lands here
         # (30-40k misses per trace), and the build state is already the healthy
@@ -1215,6 +1257,11 @@ class Trace(
         # restores the default ``False``, so it stays out of
         # ``MODEL_LOG_FIELD_ORDER`` and out of the portable schema.
         "measure_python_peak_memory": FieldPolicy.DROP,
+        # Session-time resource ceiling: it bounds what THIS process was willing
+        # to retain and has no meaning for a loaded artifact, which retains
+        # nothing. Portable load restores the default, so it stays out of
+        # ``MODEL_LOG_FIELD_ORDER`` and out of the portable schema.
+        "save_budget": FieldPolicy.DROP,
         "raise_on_nan": FieldPolicy.KEEP,
         "annotations": FieldPolicy.KEEP,
         "observer_spans": FieldPolicy.KEEP,
@@ -1262,6 +1309,7 @@ class Trace(
         "_has_direct_writes": FieldPolicy.KEEP,
         "_warned_direct_write": FieldPolicy.DROP,
         "_warned_mutate_in_place": FieldPolicy.DROP,
+        "_warned_nonfinite_check_unavailable": FieldPolicy.DROP,
         "_spec_revision": FieldPolicy.KEEP,
         "_out_recipe_revision": FieldPolicy.KEEP,
         "_append_sequence_id": FieldPolicy.KEEP,
@@ -1279,6 +1327,7 @@ class Trace(
         "_predicate_lookback_candidates": FieldPolicy.DROP,
         "_postprocessing_active": FieldPolicy.DROP,
         "_raw_transform_escape_detected": FieldPolicy.DROP,
+        "_raw_dynamo_region_detected": FieldPolicy.DROP,
         "_raw_event_shape_hash": FieldPolicy.DROP,
         "_replay_arg_version_data_complete": FieldPolicy.KEEP,
         "state": FieldPolicy.KEEP,
@@ -1400,6 +1449,11 @@ class Trace(
         "_mlx_saved_payloads": FieldPolicy.DROP,
         "_mlx_capture_depth": FieldPolicy.DROP,
         "_out_writer": FieldPolicy.DROP,
+        # Runtime-only: the live per-device accountant that enforces
+        # ``save_budget`` while payloads are being retained. It describes what
+        # THIS process was willing to allocate, so it is never portable; a loaded
+        # artifact retains nothing and rebuilds it from the restored option.
+        "_save_budget_accountant": FieldPolicy.DROP,
         "_keep_outs_in_memory": FieldPolicy.DROP,
         "_grad_stream_retain_in_memory": FieldPolicy.DROP,
         "_defer_streaming_bundle_finalization": FieldPolicy.DROP,
@@ -1482,6 +1536,7 @@ class Trace(
         module_filter: Callable[[Any], bool] | None = None,
         emit_nvtx: bool = False,
         measure_python_peak_memory: bool = False,
+        save_budget: SaveBudgetOption = "auto",
         facet_registry_snapshot: Any | None = None,
         transform: Callable[[Any], Any] | None = None,
         raw_input: Any | None = None,
@@ -1532,6 +1587,12 @@ class Trace(
                 ``tracemalloc`` Python-allocation probe. Off by default because the
                 allocator hook taxes every traced operation. Portable bundle load
                 restores the default ``False`` value.
+            save_budget: Session-time per-device ceiling on retained activation
+                bytes. ``"auto"`` allows half of each device's available memory;
+                a float sets another fraction, an int an absolute byte cap, and
+                ``None`` disables the guard. Crossing it raises
+                ``SaveBudgetExceededError`` mid-capture. Portable bundle load
+                restores the default ``"auto"``.
             facet_registry_snapshot: Immutable facet recipe snapshot captured for
                 this trace.
             transform: Optional callable used to convert raw user input into
@@ -1632,6 +1693,10 @@ class Trace(
         self.module_filter = module_filter
         self.emit_nvtx = emit_nvtx
         self.measure_python_peak_memory = measure_python_peak_memory
+        self.save_budget = save_budget
+        # Built once per capture; ``None`` when budgeting is disabled. Charged on
+        # the hot path by the activation-save paths in the torch backend.
+        self._save_budget_accountant = SaveBudget.from_option(save_budget)
         self.facet_registry_snapshot = facet_registry_snapshot
         self.raise_on_nan: bool = False
         self.annotations: Dict[str, Any] = {}
@@ -1677,7 +1742,9 @@ class Trace(
         self._has_direct_writes = False
         self._warned_direct_write = False
         self._warned_mutate_in_place = False
+        self._warned_nonfinite_check_unavailable = False
         self._raw_transform_escape_detected = False
+        self._raw_dynamo_region_detected = False
         self._spec_revision = 0
         self._out_recipe_revision = 0
         self._append_sequence_id = 0
@@ -2457,9 +2524,7 @@ class Trace(
         if getattr(self, "num_saved_ops", 0) == 0:
             save_level = "metadata only"
         nonfinite = self.first_nonfinite(link_format="html")
-        nonfinite_summary = (
-            "No non-finite saved outs" if nonfinite.startswith("No non-finite") else nonfinite
-        )
+        nonfinite_summary = nonfinite
         title = escape(str(getattr(self, "trace_label", None) or self.model_label))
         state = escape(str(getattr(getattr(self, "state", None), "name", "UNKNOWN")))
         return (
@@ -2747,6 +2812,11 @@ class Trace(
             state["backward_ready"] = False
         if state.get("measure_python_peak_memory") is None:
             state["measure_python_peak_memory"] = False
+        # ``save_budget`` is FieldPolicy.DROP, so a portable artifact never
+        # carries a real value; it arrives absent or None and is restored to the
+        # default. A loaded trace retains nothing, so there is no ceiling to honor.
+        if state.get("save_budget") is None:
+            state["save_budget"] = "auto"
         if state["inference_only"] is None:
             state["inference_only"] = False
         if state["chunked_forward"] is None:

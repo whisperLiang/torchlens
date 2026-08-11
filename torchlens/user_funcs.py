@@ -72,6 +72,7 @@ from .options import (
     merge_streaming_options,
 )
 from ._robustness import check_model_and_input_variants
+from ._save_budget import SaveBudgetExceededError, SaveBudgetOption
 from .utils.display import _vprint, warn_parallel
 from .utils.introspection import _get_code_context
 from .utils.tensor_utils import SaveMode
@@ -799,6 +800,7 @@ def _run_model_and_save_specified_outs(
     module_filter: Callable[[Any], bool] | None = None,
     emit_nvtx: bool = False,
     measure_python_peak_memory: bool = False,
+    save_budget: SaveBudgetOption = "auto",
     raise_on_nan: bool = False,
     module_containment_engine: str = "hook_stack",
     transform: Callable[[Any], Any] | None = None,
@@ -905,6 +907,12 @@ def _run_model_and_save_specified_outs(
             Python-allocation peak into the CPU/MPS ``forward_peak_memory``
             measurement. Off by default because the allocator hook taxes every
             traced operation.
+        save_budget: Per-device ceiling on retained activation bytes. ``"auto"``
+            (default) allows half of each device's available memory, a float sets
+            another fraction, an int an absolute byte cap, and ``None`` disables
+            the guard. Crossing it raises ``SaveBudgetExceededError`` naming the
+            projected or committed footprint. The primary retained copy is admitted
+            before allocation; this is not a general OOM-prevention guarantee.
         raise_on_nan: If True, stop capture at the first NaN or Inf tensor and raise
             ``CaptureError`` with the offending operation metadata.
         module_containment_engine: Internal module-containment diagnostic engine selector.
@@ -1062,6 +1070,7 @@ def _run_model_and_save_specified_outs(
             module_filter=module_filter,
             emit_nvtx=emit_nvtx,
             measure_python_peak_memory=measure_python_peak_memory,
+            save_budget=save_budget,
             transform=transform,
             raw_input=raw_input,
             save_raw_input=save_raw_input,
@@ -1219,7 +1228,7 @@ def _run_model_and_save_specified_outs(
                 grads_to_save,
                 random_seed,
             )
-    except (PredicateError, TorchLensIOError, TorchLensPostfuncError):
+    except (PredicateError, SaveBudgetExceededError, TorchLensIOError, TorchLensPostfuncError):
         raise
     except Exception as exc:
         if trace._out_writer is not None:
@@ -2646,6 +2655,7 @@ def _trace_torch_model(
         module_filter=module_filter_value,
         emit_nvtx=capture_options.emit_nvtx,
         measure_python_peak_memory=capture_options.measure_python_peak_memory,
+        save_budget=capture_options.save_budget,
         raise_on_nan=raise_on_nan_value,
         module_containment_engine=module_containment_engine,
         transform=input_transform,
