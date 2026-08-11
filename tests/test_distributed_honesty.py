@@ -240,9 +240,7 @@ def test_synthesized_dtensor_in_nested_input_container_is_detected() -> None:
 def test_synthesized_dtensor_keyword_input_is_detected() -> None:
     """Keyword-argument inputs are walked too."""
 
-    findings = detect_distributed_state(
-        TinyModel(), None, {"mask": _fake_dtensor((2, 4))}
-    )
+    findings = detect_distributed_state(TinyModel(), None, {"mask": _fake_dtensor((2, 4))})
     finding = _find(findings, "dtensor")
     assert finding.sites == ("input['mask']",)
 
@@ -369,9 +367,7 @@ def test_dense_tensor_subclass_is_not_a_false_positive() -> None:
         """Plain user tensor subclass."""
 
     model = TinyModel()
-    model.fc.weight = nn.Parameter(
-        torch.zeros(4, 4).as_subclass(MyTensor), requires_grad=False
-    )
+    model.fc.weight = nn.Parameter(torch.zeros(4, 4).as_subclass(MyTensor), requires_grad=False)
     assert detect_distributed_state(model, torch.randn(2, 4)) == ()
 
 
