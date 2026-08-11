@@ -48,7 +48,10 @@ from ...ir.events import (
     ParamGradObserved,
 )
 from ._tl import detached_saved_activation_label, get_tensor_label
-from .tensor_tracking import _ensure_backward_event_stream
+from .tensor_tracking import (
+    _ensure_backward_event_stream,
+    _forward_op_count_at_backward_trigger,
+)
 from .escape_detection import expected_original_call
 
 _BACKWARD_GRAD_FN_REGISTRY: dict[int, weakref.ReferenceType[Any]] = {}
@@ -208,38 +211,6 @@ def _strong_grad_fn_refs(trace: Any) -> list[Any]:
     """
 
     return trace.__dict__.setdefault("_backward_gradfn_refs", [])
-
-
-def _forward_op_count_at_backward_trigger(trace: Any) -> int | None:
-    """Return the number of forward ops created when a backward trigger starts.
-
-    Parameters
-    ----------
-    trace:
-        Trace being backward-captured.
-
-    Returns
-    -------
-    int | None
-        Active forward op count when available, otherwise the highest finalized
-        layer ``step_index``. ``None`` means no structural count is available.
-    """
-
-    from ...capture import projections
-
-    active_state = getattr(projections, "_active_recording_state", None)
-    if active_state is not None and getattr(active_state, "runtime_trace", None) is trace:
-        return max(0, int(active_state.step_index) - 1)
-
-    step_indices = [
-        int(step_index)
-        for layer in getattr(trace, "layer_list", ())
-        if isinstance((step_index := getattr(layer, "step_index", None)), int) and step_index > 0
-    ]
-    if step_indices:
-        return max(step_indices)
-    raw_count = getattr(trace, "_layer_counter", None)
-    return raw_count if isinstance(raw_count, int) else None
 
 
 def _active_forward_op_count_at_trigger() -> int | None:

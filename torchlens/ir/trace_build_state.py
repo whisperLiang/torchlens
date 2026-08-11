@@ -8,13 +8,6 @@ from typing import Any
 
 from .container import ContainerSpec
 from .container_registry import ContainerRegistry
-from .events import (
-    ConditionalEvent,
-    ModuleEnterEvent,
-    ModuleEvent,
-    ModuleExitEvent,
-    ModulePrepEvent,
-)
 
 
 @dataclass(slots=True)
@@ -41,8 +34,3 @@ class TraceBuildState:
     output_container_specs: tuple[ContainerSpec, ...] = ()
     container_registry: ContainerRegistry = field(default_factory=ContainerRegistry)
     input_tensor_addresses: list[int] = field(default_factory=list)
-    module_events: list[ModuleEvent] = field(default_factory=list)
-    module_prep_events: list[ModulePrepEvent] = field(default_factory=list)
-    module_enter_events: list[ModuleEnterEvent] = field(default_factory=list)
-    module_exit_events: list[ModuleExitEvent] = field(default_factory=list)
-    conditional_events: list[ConditionalEvent] = field(default_factory=list)

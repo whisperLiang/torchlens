@@ -49,8 +49,14 @@ Ordering matters: capture RNG/autocast state, enter `active_logging()`, run mode
 cleanup model session, then postprocess.
 
 ### projections.py
-- `recording_from_capture_events()` - builds sparse `Recording` projections.
-- `trace_from_capture_events()` - materializes a full `Trace` projection.
+- `RecordingState` - live predicate-recording session state (`get_active_recording_state()`,
+  `active_recording_state()`).
+- `_build_record_context()` / `_record_context_from_event()` - predicate-visible
+  `RecordContext` construction for live capture and event replay.
+- `_event_from_record()` / `append_projected_event()` - sparse `OpEvent` emission for the
+  predicate path.
+- `sync_recording_grad_records_from_sidecar()` - rebuilds fastlog gradient records from the
+  unified backward sidecar.
 
 ### predicates.py / stop.py
 - Predicate helpers normalize capture decisions and validate `followed_by` support.

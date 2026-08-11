@@ -476,7 +476,6 @@ def test_postprocess_preserves_repeatedly_readable_capture_lanes() -> None:
     assert events.module_enter_events
     assert events.module_exit_events
     assert events.op_event_by_label_raw
-    assert events.op_event_index_by_label_raw
 
 
 def test_selective_save_oracle_matches_full_trace_for_recurrent_passes() -> None:

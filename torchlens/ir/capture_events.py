@@ -10,11 +10,9 @@ import weakref
 from .events import (
     BackwardPassEnd,
     BackwardPassStart,
-    ConditionalEvent,
     GradFnDiscovered,
     GradFnFired,
     ModuleEnterEvent,
-    ModuleEvent,
     ModuleExitEvent,
     ModulePrepEvent,
     OpGradObserved,
@@ -69,12 +67,10 @@ class CaptureEvents:
     """Mutable event buffer allocated once per capture."""
 
     op_events: list[OpEvent] = field(default_factory=list)
-    module_events: list[ModuleEvent] = field(default_factory=list)
     module_prep_events: list[ModulePrepEvent] = field(default_factory=list)
     module_enter_events: list[ModuleEnterEvent] = field(default_factory=list)
     module_exit_events: list[ModuleExitEvent] = field(default_factory=list)
     pre_hook_events: list[PreHookProvenanceEvent] = field(default_factory=list)
-    conditional_events: list[ConditionalEvent] = field(default_factory=list)
     output_version_events: list[OutputVersionEvent] = field(default_factory=list)
     backward_events: list[
         BackwardPassStart
@@ -90,14 +86,7 @@ class CaptureEvents:
     func_call_id_counter: int = 0
     recent_events: deque[RecordContext] = field(default_factory=deque)
     backend_session: object | None = None
-    live_by_raw_label: dict[str, "LiveOpRecord"] = field(default_factory=dict)
     live_index: LiveIndex = field(default_factory=LiveIndex)
-    parent_op_label_raws: dict[str, list[str]] = field(default_factory=dict)
-    child_op_label_raws: dict[str, list[str]] = field(default_factory=dict)
-    parent_param_label_raws: dict[str, list[str]] = field(default_factory=dict)
-    output_variations_by_label_raw: dict[str, list[tuple[Any, ...]]] = field(default_factory=dict)
-    replacement_template_by_label_raw: dict[str, str] = field(default_factory=dict)
-    module_stack_by_label_raw: dict[str, tuple[str, ...]] = field(default_factory=dict)
     grad_fn_handles_by_label_raw: dict[str, Any] = field(default_factory=dict)
     backward_event_seq: int = 0
     backward_revision: int = 0
@@ -128,38 +117,6 @@ class CaptureEvents:
         self.live_index.by_raw_label = events_by_label
         self.live_index.labels = list(events_by_label)
         self.live_index.rebuild_edges()
-
-    @property
-    def op_event_index_by_label_raw(self) -> dict[str, int]:
-        """Derive the legacy label-to-position view from the canonical spine.
-
-        Returns
-        -------
-        dict[str, int]
-            Event positions keyed by raw label.
-        """
-
-        return {event.label_raw: index for index, event in enumerate(self.op_events)}
-
-    @op_event_index_by_label_raw.setter
-    def op_event_index_by_label_raw(self, indexes: dict[str, int]) -> None:
-        """Accept a legacy derived-index assignment without retaining it.
-
-        Parameters
-        ----------
-        indexes
-            Derived positions supplied by compatibility projectors. The
-            canonical ``op_events`` order remains authoritative.
-
-        Raises
-        ------
-        ValueError
-            If the supplied view disagrees with the canonical event order.
-        """
-
-        expected = {event.label_raw: index for index, event in enumerate(self.op_events)}
-        if indexes != expected:
-            raise ValueError("Operation event indexes must match the canonical event spine.")
 
     def _event_position(self, event: OpEvent) -> int | None:
         """Return one event's canonical list position without a retained index.
@@ -255,12 +212,10 @@ class CaptureEvents:
 
         return CaptureEvents(
             op_events=replay_op_events,
-            module_events=list(self.module_events),
             module_prep_events=list(self.module_prep_events),
             module_enter_events=list(self.module_enter_events),
             module_exit_events=list(self.module_exit_events),
             pre_hook_events=list(self.pre_hook_events),
-            conditional_events=list(self.conditional_events),
             output_version_events=list(self.output_version_events),
             backward_events=list(self.backward_events),
             param_refs=dict(self.param_refs),
@@ -269,22 +224,7 @@ class CaptureEvents:
             func_call_id_counter=self.func_call_id_counter,
             recent_events=deque(self.recent_events),
             backend_session=self.backend_session,
-            live_by_raw_label=dict(self.live_by_raw_label),
             live_index=projected_index,
-            parent_op_label_raws={
-                key: list(value) for key, value in self.parent_op_label_raws.items()
-            },
-            child_op_label_raws={
-                key: list(value) for key, value in self.child_op_label_raws.items()
-            },
-            parent_param_label_raws={
-                key: list(value) for key, value in self.parent_param_label_raws.items()
-            },
-            output_variations_by_label_raw={
-                key: list(value) for key, value in self.output_variations_by_label_raw.items()
-            },
-            replacement_template_by_label_raw=dict(self.replacement_template_by_label_raw),
-            module_stack_by_label_raw=dict(self.module_stack_by_label_raw),
             grad_fn_handles_by_label_raw=dict(self.grad_fn_handles_by_label_raw),
             backward_event_seq=self.backward_event_seq,
             backward_revision=self.backward_revision,
@@ -300,14 +240,11 @@ class CaptureEvents:
         """
 
         self.op_events.clear()
-        self.module_events.clear()
         self.module_prep_events.clear()
         self.module_enter_events.clear()
         self.module_exit_events.clear()
         self.pre_hook_events.clear()
-        self.conditional_events.clear()
         self.output_version_events.clear()
-        self.live_by_raw_label.clear()
         self.live_index.clear()
         self.grad_fn_handles_by_label_raw.clear()
 
@@ -365,9 +302,6 @@ class CaptureEvents:
                 )
             )
         self.op_events = structural_events
-        self.module_events = [
-            replace(event, forward_args=None, forward_kwargs=None) for event in self.module_events
-        ]
         self.module_prep_events = [
             replace(
                 event,
@@ -402,7 +336,6 @@ class CaptureEvents:
             replace(event, payload=None, transform_state=None)
             for event in self.output_version_events
         ]
-        self.live_by_raw_label.clear()
         self.live_index.clear()
         self.live_index.by_raw_label = {event.label_raw: event for event in structural_events}
         self.backend_session = None

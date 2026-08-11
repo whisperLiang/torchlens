@@ -466,9 +466,6 @@ def postprocess(
         working_events.op_event_by_label_raw = {
             event.label_raw: event for event in sealed_op_events
         }
-        working_events.op_event_index_by_label_raw = {
-            event.label_raw: index for index, event in enumerate(sealed_op_events)
-        }
         self._capture_events = working_events
         with _vtimed(self, "  Step 0: Materialize capture events"):
             materialize_from_events(self, working_events)

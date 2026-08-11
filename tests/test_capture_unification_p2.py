@@ -38,7 +38,6 @@ class _MidForwardProbe(nn.Module):
         self.observations = {
             "raw_dict_len": len(trace._raw_layer_dict),
             "raw_labels_len": len(trace._raw_layer_labels_list),
-            "live_by_raw_label_len": len(events.live_by_raw_label),
             "event_count": len(events.op_events),
             "live_index_has_label": label in events.live_index.by_raw_label,
             "getitem_label": live_view._label_raw,
@@ -72,7 +71,6 @@ def test_negative_gate_no_live_mutation_during_forward() -> None:
 
     assert model.observations["raw_dict_len"] == 0
     assert model.observations["raw_labels_len"] == 0
-    assert model.observations["live_by_raw_label_len"] == 0
     assert model.observations["event_count"] > 0
     assert model.observations["live_index_has_label"] is True
 

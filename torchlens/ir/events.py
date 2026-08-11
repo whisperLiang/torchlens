@@ -281,21 +281,6 @@ class ModuleFrame:
     entry_argnames: tuple[str, ...]
 
 
-@dataclass(frozen=True, slots=True)
-class BufferEvent:
-    """Captured module buffer metadata event."""
-
-    address: str
-    name: str
-    module_address: str
-    buffer_pass: int
-    parent_label_raw: str | None
-    shape: tuple[int, ...] | None
-    dtype: str | None
-    memory: int | None
-    module_stack: tuple[ModuleFrame, ...]
-
-
 BufferWriteKind = Literal["reassign", "inplace", "fused", "data_reassign"]
 
 
@@ -313,25 +298,6 @@ class BufferWriteEvent:
     storage_key: tuple[Any, ...] | None
     buffer_version: int | None
     source_func_name: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class ModuleEvent:
-    """Captured module-call event consumed by postprocessing."""
-
-    address: str
-    all_addresses: tuple[str, ...]
-    call_index: int
-    call_label: str
-    layers_raw: tuple[str, ...]
-    input_layers_raw: tuple[str, ...]
-    output_layers_raw: tuple[str, ...]
-    forward_args_summary: object
-    forward_kwargs_summary: object
-    forward_args: object | None
-    forward_kwargs: object | None
-    call_parent: str | None
-    call_children: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
