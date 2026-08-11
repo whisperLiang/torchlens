@@ -212,6 +212,12 @@ pytest tests/ -m "not slow" -x --tb=short
     default divergence raises with rollback, while `return_diverged` is the sole monotonic poisoned
     opt-in. Incomplete witness coverage is `unverifiable`; sparse-only and ineligible activation
     runs report numeric attestation as `not_applicable`.
+18a. `Trace.run(inputs=..., fast=True)` is an explicit stateful static-loop mode: loaded sparse
+    traces must first settle an ordinary run as `verified`, then may reuse staged state, compiled
+    binders, and one result Trace; live traces use native forward plus targeted module hooks and
+    only explicitly requested functional collection. Per-call input, path, output structure/shape/
+    dtype, and control-witness guards remain mandatory; divergence always raises. `fast=False`
+    preserves the full transaction and attestation contract.
 19. Runnable public vocabulary is frozen in `torchlens.runnable`: readiness is `ready|unavailable`,
     faithfulness is `verified|diverged|unverifiable`, state source is
     `live_model_state|embedded_capture_state|user_state_dict|random_initialization|not_applicable`,

@@ -34,9 +34,9 @@ def test_live_run_warns_once_and_batchnorm_stats_mutate() -> None:
 
     with pytest.warns(
         UserWarning,
-        match=r"run\(\) detected training-mode BatchNorm running-stat buffers.*pristine=True",
+        match=r"run\(\) detected training-mode BatchNorm running-stat buffers.*clone the model",
     ) as observed:
-        with pytest.raises(ValueError, match="pristine=True"):
+        with pytest.raises(ValueError, match="fast=True"):
             captured.run(inputs=torch.randn(4, 3))
 
     assert "running_mean, running_var, num_batches_tracked on module '<root>'" in str(
@@ -44,7 +44,7 @@ def test_live_run_warns_once_and_batchnorm_stats_mutate() -> None:
     )
     assert not torch.equal(model.running_mean, before)
     with warnings.catch_warnings(record=True) as observed:
-        with pytest.raises(ValueError, match="pristine=True"):
+        with pytest.raises(ValueError, match="fast=True"):
             captured.run(inputs=torch.randn(4, 3))
     assert not [
         warning for warning in observed if "training-mode BatchNorm" in str(warning.message)
@@ -58,7 +58,7 @@ def test_eval_mode_batchnorm_does_not_warn() -> None:
     captured = tl.trace(model, torch.randn(4, 3))
 
     with warnings.catch_warnings(record=True) as observed:
-        with pytest.raises(ValueError, match="pristine=True"):
+        with pytest.raises(ValueError, match="fast=True"):
             captured.run(inputs=torch.randn(4, 3))
 
     assert not [
@@ -105,4 +105,26 @@ def test_graph_change_error_names_live_state_mutation_and_isolation_hint() -> No
 
     message = str(caught.value)
     assert "Live-model state mutation across run() calls" in message
-    assert "run(..., pristine=True)" in message
+    assert "run(inputs=..., fast=True)" in message
+
+
+@pytest.mark.parametrize("training", [False, True])
+def test_fast_live_run_handles_batchnorm_without_refresh_projection(training: bool) -> None:
+    """Run BatchNorm natively while collecting its explicitly requested functional output."""
+
+    model = nn.BatchNorm1d(3).train(training)
+    captured = tl.trace(model, torch.randn(4, 3), save=tl.func("batch_norm"))
+    inputs = torch.randn(4, 3)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = captured.run(inputs=inputs, fast=True)
+
+    assert result.trace is captured
+    assert result.output.shape == (4, 3)
+    assert result.report.path_faithfulness.value == "verified"
+    selected = [
+        op for op in captured.layer_list if op.func_name == "batch_norm" and op.has_saved_activation
+    ]
+    assert selected
+    assert torch.allclose(selected[-1].out, result.output)

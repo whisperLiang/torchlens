@@ -306,8 +306,9 @@ class RefreshProjector:
             "The computational graph changed for this forward pass compared to the original "
             "call to trace (either due to different inputs or a different "
             "random seed). Live-model state mutation across run() calls (for example "
-            "BatchNorm running stats, caches, or counters) is another likely cause; use "
-            "run(..., pristine=True) to isolate re-execution. save_new_outs failed. Please "
+            "BatchNorm running stats, caches, or counters) is another likely cause. "
+            "For an explicitly static feature-extraction loop, use run(inputs=..., fast=True); "
+            "otherwise save_new_outs failed. Please "
             f"re-run trace with the desired inputs.{detail_suffix}"
         )
         error.partial_log = PartialTrace(refreshed, error)  # type: ignore[attr-defined]

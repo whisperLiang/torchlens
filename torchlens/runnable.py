@@ -1448,6 +1448,7 @@ class RunnableTraceProtocol(Protocol):
         inputs: Any,
         *,
         seed: int | None = None,
+        fast: bool = False,
         on_divergence: DivergencePolicy = DivergencePolicy.RAISE,
     ) -> RunResult:
         """Execute through the provider selected by the Trace.
@@ -1458,6 +1459,9 @@ class RunnableTraceProtocol(Protocol):
             Structured runtime inputs.
         seed:
             Optional isolated state and runtime RNG seed.
+        fast:
+            Explicit guarded static-loop mode. The first loaded run verifies normally;
+            subsequent runs reuse staged state and compiled call binders.
         on_divergence:
             Frozen strict or poison-return divergence policy.
 

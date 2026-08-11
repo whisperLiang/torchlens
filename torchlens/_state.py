@@ -82,6 +82,14 @@ this to know *where* to record tensor operations.  Always None outside a
 logging session.
 """
 
+_active_fast_run_collector: Any | None = None
+"""Explicit fast-run collector active around one native live-model forward.
+
+The slot stays import-free so decorated torch wrappers can cheaply offer selected
+functional-op collection without importing the fast-run implementation. It is non-``None``
+only inside ``Trace.run(inputs=..., fast=True)`` and is restored in ``finally``.
+"""
+
 _active_hook_plan: Any | None = None
 """Hook plan for the active intervention-ready capture.
 
