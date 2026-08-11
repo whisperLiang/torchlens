@@ -111,6 +111,11 @@ class TestFieldOrderSync:
         user_facing = {a for a in public_attrs if Trace.FIELD_POLICY[a].user_facing}
         missing = user_facing - set(MODEL_LOG_FIELD_ORDER)
         assert not missing, f"Trace user-facing fields missing from FIELD_ORDER: {missing}"
+        non_user_facing = public_attrs - user_facing
+        assert non_user_facing == {"measure_python_peak_memory"}, (
+            "Trace public fields classified as non-user-facing changed: "
+            f"{non_user_facing}"
+        )
 
     def test_module_call_log_field_order_covers_init(self):
         from torchlens.data_classes.module import ModuleCall

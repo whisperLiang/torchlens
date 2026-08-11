@@ -250,7 +250,16 @@ def test_quantized_model_emits_warning_but_still_logs() -> None:
     # Run a tiny calibration pass so quantize() has observer stats.
     with torch.no_grad():
         model(torch.randn(8, 4))
-    torch.ao.quantization.convert(model, inplace=True)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=(
+                r"torch\.quantize_per_tensor, torch\.quantize_per_channel and other "
+                r"quantized tensor creation functions.*"
+            ),
+            category=UserWarning,
+        )
+        torch.ao.quantization.convert(model, inplace=True)
 
     x = torch.randn(2, 4)
     with warnings.catch_warnings(record=True) as caught:
@@ -271,6 +280,23 @@ def test_quantized_model_emits_warning_but_still_logs() -> None:
     quantized_ops = [op for op in log.ops if op.func_name.startswith("quantized_")]
     assert quantized_ops
     assert sum(op.flops_forward or 0 for op in quantized_ops) > 0
+
+
+def test_quantized_factory_warning_filter_does_not_exempt_torchlens_warning() -> None:
+    """Keep a same-message warning from a TorchLens module promoted to an error."""
+
+    message = (
+        "torch.quantize_per_tensor, torch.quantize_per_channel and other quantized tensor "
+        "creation functions are deprecated"
+    )
+    with pytest.raises(UserWarning, match="quantized tensor creation functions"):
+        warnings.warn_explicit(
+            message,
+            UserWarning,
+            filename="torchlens/fake.py",
+            lineno=1,
+            module="torchlens.fake",
+        )
 
 
 # ---------------------------------------------------------------------------

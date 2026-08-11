@@ -94,6 +94,37 @@ class CacheLayer(nn.Module):
         return x + 1, past_key_values
 
 
+class ValueMutatingCacheModel(nn.Module):
+    """Thread one fixed-shape cache through value-mutating module calls."""
+
+    def __init__(self) -> None:
+        """Initialize three independent mutation boundaries."""
+
+        super().__init__()
+        self.layers = nn.ModuleList([ValueMutatingCacheLayer() for _ in range(3)])
+
+    def forward(
+        self, x: torch.Tensor, cache: list[torch.Tensor]
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Mutate the same cache tensor at each otherwise identical boundary."""
+
+        for layer in self.layers:
+            x, cache = layer(x, cache)
+        return x, cache
+
+
+class ValueMutatingCacheLayer(nn.Module):
+    """Mutate a cache tensor without changing its container specification."""
+
+    def forward(
+        self, x: torch.Tensor, cache: list[torch.Tensor]
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Advance the cache value and return the same container object."""
+
+        cache[0].add_(1)
+        return x + 1, cache
+
+
 def test_scalar_config_containers_emit_no_input_records() -> None:
     """Shape/dim/conv config tuples stay metadata, not input container records."""
 
@@ -177,6 +208,34 @@ def test_threaded_past_key_values_dedups_identical_snapshots() -> None:
     alias_count = sum(len(snapshot.site_aliases) for snapshot in input_snapshots)
     assert snapshot_count == 1
     assert alias_count >= 2
+
+
+def test_same_role_same_spec_value_mutation_keeps_distinct_snapshots() -> None:
+    """Do not dedup equal-spec CALL_INPUT snapshots whose tensor value mutates."""
+
+    trace = tl.trace(
+        ValueMutatingCacheModel(),
+        (torch.tensor([3.0]), [torch.tensor([0.0])]),
+        capture_container_structure=True,
+    )
+    candidate_snapshot_groups = [
+        [
+            snapshot
+            for snapshot in record.snapshots
+            if snapshot.role is Role.CALL_INPUT
+        ]
+        for record in trace._containers.values()
+    ]
+    input_snapshots = max(candidate_snapshot_groups, key=len)
+    first_spec = input_snapshots[0].spec
+    producer_labels = tuple(
+        snapshot.leaf_occurrences[0].producer_op_label for snapshot in input_snapshots
+    )
+
+    assert len(input_snapshots) == 3
+    assert all(snapshot.role is Role.CALL_INPUT for snapshot in input_snapshots)
+    assert all(snapshot.spec == first_spec for snapshot in input_snapshots)
+    assert len(set(producer_labels)) == 3
 
 
 def test_stack_list_arg_registers_as_consumed_input_container() -> None:

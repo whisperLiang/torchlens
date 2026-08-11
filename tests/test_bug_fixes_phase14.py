@@ -15,6 +15,7 @@ import torch.nn as nn
 import torchlens as tl
 from torchlens.capture.arg_positions import FUNC_ARG_SPECS, extract_tensors_and_params
 from torchlens.data_classes.func_call_location import FuncCallLocation
+from torchlens.options import SaveOptions
 from torchlens.utils.hashing import make_short_barcode_from_input
 from torchlens.utils.tensor_utils import tensor_nanequal
 from torchlens.validation import (
@@ -150,6 +151,17 @@ class _IdentityOutputModel(nn.Module):
         """
 
         return x
+
+
+class _ViewMutationOutputTransformModel(nn.Module):
+    """Return a base tensor after mutating one of its views."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Mutate a two-row view and return its six-row base tensor."""
+
+        base = x + 1
+        base[1:3].zero_()
+        return base
 
 
 class _NewEmptyFilledModel(nn.Module):
@@ -333,6 +345,42 @@ def test_functional_parameter_view_does_not_inflate_param_counts() -> None:
     assert trace.num_params_trainable == model.weight.numel()
     assert trace.num_params_frozen == 0
     assert trace.num_params == trace.num_params_trainable + trace.num_params_frozen
+    assert check_metadata_invariants(trace) is True
+
+
+@pytest.mark.parametrize("save_raw_activations", [True, False])
+def test_view_mutation_output_recomputes_transformed_payload_metadata(
+    *, save_raw_activations: bool
+) -> None:
+    """Describe transformed synthetic outputs from the actual returned base tensor."""
+
+    input_value = torch.arange(18.0).reshape(6, 3)
+    expected_raw = input_value + 1
+    expected_raw[1:3].zero_()
+    expected_transformed = expected_raw + 10
+    trace = tl.trace(
+        _ViewMutationOutputTransformModel(),
+        input_value,
+        save=SaveOptions(
+            activation_transform=lambda value: value + 10,
+            save_raw_activations=save_raw_activations,
+        ),
+    )
+    output_op = trace[trace.output_layers[0]]
+
+    assert output_op.shape == (6, 3)
+    assert output_op.dtype == expected_raw.dtype
+    assert output_op.activation_memory == expected_raw.nelement() * expected_raw.element_size()
+    if save_raw_activations:
+        assert torch.equal(output_op.out, expected_raw)
+    else:
+        assert output_op.out is None
+    assert torch.equal(output_op.transformed_out, expected_transformed)
+    assert output_op.transformed_out_shape == (6, 3)
+    assert output_op.transformed_out_dtype == expected_transformed.dtype
+    assert output_op.transformed_activation_memory == (
+        expected_transformed.nelement() * expected_transformed.element_size()
+    )
     assert check_metadata_invariants(trace) is True
 
 

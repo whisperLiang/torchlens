@@ -57,15 +57,52 @@ def _torch_fuses_mha_output_reshape() -> bool:
             "cannot read torch.nn.functional.multi_head_attention_forward source, so the "
             "multihead_attention_demo golden variant cannot be selected; re-audit the fixture"
         ) from exc
-    if re.search(r"attn_output\s*=\s*attn_output\.\w+\([^()]*\)\.reshape\(", source):
+    transpose_prefix = (
+        r"attn_output\s*=\s*attn_output\.transpose\(\s*0\s*,\s*1\s*\)"
+    )
+    output_extent = r"\(\s*tgt_len\s*\*\s*bsz\s*,\s*embed_dim\s*\)"
+    if re.search(rf"{transpose_prefix}\.reshape{output_extent}", source):
         return True
-    if "contiguous" in source:
+    if re.search(
+        rf"{transpose_prefix}\.contiguous\(\s*\)\.view{output_extent}", source
+    ):
         return False
     raise AssertionError(
         "torch.nn.functional.multi_head_attention_forward spells its output reshape in a "
-        "way this probe does not recognize (neither a fused reshape nor contiguous); "
+        "way this probe does not recognize (neither the fused reshape nor the exact legacy "
+        "transpose/contiguous/view chain); "
         "re-audit the multihead_attention_demo golden instead of trusting either variant"
     )
+
+
+def test_mha_probe_recognizes_exact_legacy_output_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Select the legacy golden only for the exact historical output expression."""
+
+    source = """
+def multi_head_attention_forward():
+    attn_output = attn_output.transpose(0, 1).contiguous().view(tgt_len * bsz, embed_dim)
+"""
+    monkeypatch.setattr(inspect, "getsource", lambda _object: source)
+
+    assert _torch_fuses_mha_output_reshape() is False
+
+
+def test_mha_probe_rejects_unrelated_contiguous_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail closed when an unknown output spelling merely contains ``contiguous``."""
+
+    source = """
+def multi_head_attention_forward():
+    unrelated = query.contiguous()
+    attn_output = attn_output.transpose(0, 1).flatten(0, 1)
+"""
+    monkeypatch.setattr(inspect, "getsource", lambda _object: source)
+
+    with pytest.raises(AssertionError, match="exact legacy transpose/contiguous/view chain"):
+        _torch_fuses_mha_output_reshape()
 
 
 def _snapshot_path(fixture_name: str) -> Path:

@@ -24,7 +24,7 @@ from ..utils.tensor_utils import (
     tensor_nanequal,
 )
 from ..utils.introspection import _get_code_context
-from ..data_classes.op import Op
+from ..data_classes.op import Op, _dtype_or_none, _memory_or_none, _shape_or_none
 from ..ir import replace_op_event
 from ._materialize import _recorded_buffer_address
 
@@ -350,34 +350,44 @@ def _add_output_layers(
         new_output_node.has_out_variations = False
         new_output_node.out_versions_by_child = {}
         if output_node.has_saved_activation:
-            actual_output = safe_copy(output_tensor)
-            if output_node.output_device not in [str(actual_output.device), "same"]:
-                actual_output = safe_to(actual_output, output_node.output_device)
-            actual_output_raw = actual_output
+            actual_output_raw = safe_copy(output_tensor)
+            if output_node.output_device not in [str(actual_output_raw.device), "same"]:
+                actual_output_raw = safe_to(actual_output_raw, output_node.output_device)
+            actual_output_transformed = None
             if self.activation_transform is not None:
-                actual_output = output_node._apply_transform(
-                    actual_output,
+                actual_output_transformed = output_node._apply_transform(
+                    actual_output_raw,
                     self.activation_transform,
                     transform_kind="out",
                     streaming_active=getattr(self, "_out_writer", None) is not None,
                 )
                 output_node._validate_streaming_transform_output(
-                    actual_output,
+                    actual_output_transformed,
                     transform_kind="out",
                     streaming_active=getattr(self, "_out_writer", None) is not None,
                 )
-            comparison_output = (
-                output_node.out if output_node.out is not None else output_node.transformed_out
+            raw_retained = output_node.out is not None
+            new_output_node._internal_set(
+                "out", actual_output_raw if raw_retained else None
             )
-            if comparison_output is not None and not tensor_nanequal(
-                actual_output, comparison_output
+            new_output_node._internal_set("transformed_out", actual_output_transformed)
+            new_output_node.transformed_out_shape = _shape_or_none(actual_output_transformed)
+            new_output_node.transformed_out_dtype = _dtype_or_none(actual_output_transformed)
+            new_output_node.transformed_activation_memory = _memory_or_none(
+                actual_output_transformed
+            )
+
+            comparison_output = output_node.out if raw_retained else output_node.transformed_out
+            actual_comparison = (
+                actual_output_raw if raw_retained else actual_output_transformed
+            )
+            if (
+                comparison_output is not None
+                and actual_comparison is not None
+                and not tensor_nanequal(actual_comparison, comparison_output)
             ):
-                output_node.out_versions_by_child[new_output_node._label_raw] = actual_output
+                output_node.out_versions_by_child[new_output_node._label_raw] = actual_comparison
                 output_node.has_out_variations = True
-                if output_node.out is None:
-                    new_output_node._internal_set("transformed_out", actual_output)
-                else:
-                    new_output_node._internal_set("out", actual_output_raw)
 
         # Change original output node:
 

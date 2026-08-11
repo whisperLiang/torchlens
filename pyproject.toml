@@ -202,11 +202,6 @@ filterwarnings = [
     # from mis-promoting them; genuine TorchLens-originated UserWarnings still error.
     "default:Converting a tensor with requires_grad=True to a scalar.*:UserWarning:torchlens(\\.|$)",
     "default:Sparse invariant checks are implicitly disabled.*:UserWarning:torchlens(\\.|$)",
-    # Same class: torch's own quantized-tensor-creation deprecation, raised from
-    # ATen/quantized/Quantizer.cpp. It reaches this rule only when a quantized factory is
-    # called while torch is already wrapped, so it fires from whichever test first touches a
-    # quantized op in the process and is not per-test assertable.
-    "default:torch.quantize_per_tensor, torch.quantize_per_channel and other quantized tensor creation functions.*:UserWarning:torchlens(\\.|$)",
     "default:`.*` is deprecated; use `.*` instead\\..*:DeprecationWarning",
     "default:Bundle tlspec_version=.* is older than runtime tlspec_version=.*:DeprecationWarning",
     # External: torchvision model init deprecations
