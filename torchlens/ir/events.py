@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -63,6 +64,7 @@ class BackwardPassStart:
     engine_flags: dict[str, object] | None
     forward_op_count_at_trigger: int | None
     timestamp: float
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +79,21 @@ class OpGradObserved:
     dtype: str | None
     memory: int | None
     timestamp: float
-    seq: int
+    seq: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ParamGradObserved:
+    """Core event emitted when an AccumulateGrad hook observes a parameter gradient."""
+
+    param_address: str
+    pass_index: int
+    payload_ref: object | None
+    shape: tuple[int, ...] | None
+    dtype: str | None
+    memory: int | None
+    timestamp: float
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,11 +105,19 @@ class BackwardPassEnd:
     peak_memory: int | None
     status: BackwardStatus
     order_attribution_coverage: float | None
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class GradFnDiscovered:
-    """Torch enrichment event for a discovered autograd node object."""
+    """Torch enrichment event for a discovered autograd node object.
+
+    ``source`` is deep-frozen by the stream writer
+    (:meth:`~torchlens.ir.capture_events.CaptureEvents.append_backward`
+    snapshots it into a read-only mapping): the backward projection copies it
+    by value at materialize time, so it must be immutable on the event or an
+    in-place mutation could bypass ``backward_revision``.
+    """
 
     object_id: int
     class_name: str
@@ -103,8 +127,9 @@ class GradFnDiscovered:
     param_ref: object | None
     created_in_pass: int | None
     creator_object_id: int | None
-    source: dict[str, object | None]
+    source: Mapping[str, object | None]
     topology: tuple[int, ...]
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,7 +142,7 @@ class GradFnFired:
     grad_output_refs: object | None
     intervention_fire_ref: object | None
     timestamp: float
-    seq: int
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,21 +292,6 @@ class ModuleFrame:
     entry_argnames: tuple[str, ...]
 
 
-@dataclass(frozen=True, slots=True)
-class BufferEvent:
-    """Captured module buffer metadata event."""
-
-    address: str
-    name: str
-    module_address: str
-    buffer_pass: int
-    parent_label_raw: str | None
-    shape: tuple[int, ...] | None
-    dtype: str | None
-    memory: int | None
-    module_stack: tuple[ModuleFrame, ...]
-
-
 BufferWriteKind = Literal["reassign", "inplace", "fused", "data_reassign"]
 
 
@@ -299,25 +309,6 @@ class BufferWriteEvent:
     storage_key: tuple[Any, ...] | None
     buffer_version: int | None
     source_func_name: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class ModuleEvent:
-    """Captured module-call event consumed by postprocessing."""
-
-    address: str
-    all_addresses: tuple[str, ...]
-    call_index: int
-    call_label: str
-    layers_raw: tuple[str, ...]
-    input_layers_raw: tuple[str, ...]
-    output_layers_raw: tuple[str, ...]
-    forward_args_summary: object
-    forward_kwargs_summary: object
-    forward_args: object | None
-    forward_kwargs: object | None
-    call_parent: str | None
-    call_children: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)

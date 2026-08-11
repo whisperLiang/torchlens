@@ -94,6 +94,12 @@ def cleanup(self: "Trace") -> None:
     ]:
         if hasattr(self, attr):
             delattr(self, attr)
+    # A cleaned trace no longer owns an event stream, but tensor/grad-fn hooks
+    # already registered on the user's still-live graph cannot be removed and
+    # will keep firing inside the user's own later backward(). Disarm them so
+    # they no-op instead of raising the typed stream-refusal error from within
+    # the autograd engine (which would kill an unrelated user backward).
+    self._tl_backward_triggers_disarmed = True
     # Gated behind cached cuda.is_available() so CPU-only runs don't pay the
     # CUDA driver / NVML probe cost (per profiling audit 2026-04-27 finding #4).
     if _is_cuda_available():

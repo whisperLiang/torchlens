@@ -29,7 +29,6 @@ from .events import (
     BackwardPassEnd,
     BackwardPassStart,
     BlobRef,
-    BufferEvent,
     BufferWriteEvent,
     ConditionalEvent,
     EdgeUseKind,
@@ -38,7 +37,6 @@ from .events import (
     GradFnFired,
     InterventionState,
     ModuleEnterEvent,
-    ModuleEvent,
     ModuleExitEvent,
     ModuleFrame,
     ModulePrepEvent,
@@ -47,6 +45,7 @@ from .events import (
     OpGradObserved,
     OutputRef,
     OutputVersionEvent,
+    ParamGradObserved,
     ParentEdge,
     PreHookProvenanceEvent,
     edge_use_kind,
@@ -72,7 +71,6 @@ __all__ = [
     "BackwardPassEnd",
     "BackwardPassStart",
     "BlobRef",
-    "BufferEvent",
     "BufferWriteEvent",
     "CaptureEvents",
     "CapturePolicy",
@@ -103,7 +101,6 @@ __all__ = [
     "LiveIndexWindowError",
     "MLXValueUnavailableError",
     "ModuleEnterEvent",
-    "ModuleEvent",
     "ModuleExitEvent",
     "ModuleFrame",
     "ModulePrepEvent",
@@ -114,6 +111,7 @@ __all__ = [
     "OpGradObserved",
     "OutputRef",
     "OutputVersionEvent",
+    "ParamGradObserved",
     "ParamRef",
     "ParentEdge",
     "PreHookProvenanceEvent",
@@ -131,4 +129,50 @@ __all__ = [
     "live_record_for_label",
     "register_live_event",
     "replace_op_event",
+    # Deprecated inert shims (warn on access; see __getattr__ below).
+    "BufferEvent",
+    "ModuleEvent",
 ]
+
+
+def __getattr__(name: str) -> object:
+    """Return deprecated event-type shims removed from the live IR.
+
+    Parameters
+    ----------
+    name
+        Attribute name requested from :mod:`torchlens.ir`.
+
+    Returns
+    -------
+    object
+        Inert compatibility class from :mod:`torchlens.ir._deprecated`.
+
+    Raises
+    ------
+    AttributeError
+        If ``name`` is not a deprecated compatibility export.
+    """
+
+    if name in ("ModuleEvent", "BufferEvent"):
+        import warnings
+
+        from . import _deprecated
+
+        if name not in _WARNED_DEPRECATED_NAMES:
+            _WARNED_DEPRECATED_NAMES.add(name)
+            warnings.warn(
+                f"torchlens.ir.{name} is deprecated: TorchLens no longer emits this "
+                "event kind (module containment uses ModuleEnterEvent/ModuleExitEvent; "
+                "buffer capture uses BufferWriteEvent). The class remains importable "
+                "as an inert compatibility shim.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return getattr(_deprecated, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# Deprecated names warn ONCE per process; repeated attribute access stays
+# silent even under an ``always`` warning filter.
+_WARNED_DEPRECATED_NAMES: set[str] = set()

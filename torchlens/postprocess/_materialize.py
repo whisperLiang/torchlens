@@ -22,8 +22,6 @@ from torchlens.ir.events import (
 from torchlens.intervention.types import EdgeUseRecord
 
 from ..backends.torch._tl import get_buffer_address, get_tensor_label, get_tensor_meta
-from ..capture.ledgers import DecisionRecord, EventId, PayloadRecord
-from ..capture.session import capture_session_for
 from ..constants import LAYER_PASS_LOG_FIELD_ORDER
 from ..data_classes._module_role_hints import (
     multi_output_role_from_path,
@@ -126,9 +124,6 @@ def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
         Populates raw trace lookup structures without consuming the sealed source lanes.
     """
 
-    capture_session = capture_session_for(trace)
-    decisions = None if capture_session is None else capture_session.decision_ledger.records
-    payloads = None if capture_session is None else capture_session.payload_ledger.records
     live_module_forward_args = dict(getattr(trace, "_module_forward_args", {}))
     _rebuild_module_side_channels(trace, events)
     module_enter_addresses = _module_enter_addresses(
@@ -174,7 +169,6 @@ def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
     output_versions = _output_versions_by_parent(events)
 
     for event in op_events:
-        event_id = EventId.from_event(event)
         fields_dict = _fields_from_event(
             trace,
             event,
@@ -190,8 +184,6 @@ def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
             input_io_roles.get(event.label_raw),
             output_versions.get(event.label_raw, {}),
             op_events_by_label,
-            None if decisions is None else decisions.get(event_id),
-            None if payloads is None else payloads.get(event_id),
         )
         with _timed_phase(trace, "object_construction:op"):
             op_log = materialize_log_from_fields(fields_dict)
@@ -272,8 +264,6 @@ def _fields_from_event(
     input_io_role: str | None,
     output_versions_by_child: dict[str, object],
     op_events_by_label: Mapping[str, OpEvent],
-    decision: DecisionRecord | None,
-    payload: PayloadRecord | None,
 ) -> dict[str, object]:
     """Build a complete raw ``Op`` field dictionary from one operation event.
 
@@ -307,10 +297,6 @@ def _fields_from_event(
         Child-specific output snapshots keyed by child label.
     op_events_by_label
         Operation events keyed by raw label.
-    decision
-        Stable-id decision sidecar when the event belongs to an active session.
-    payload
-        Stable-id payload sidecar when the event belongs to an active session.
 
     Returns
     -------
@@ -318,7 +304,7 @@ def _fields_from_event(
         Complete pre-postprocess field mapping accepted by ``Op``.
     """
 
-    output = event.output if payload is None else cast(Any, payload.output)
+    output = event.output
     tensor = output.tensor
     transformed = output.transformed_tensor
     function = event.function
@@ -390,11 +376,11 @@ def _fields_from_event(
             "annotations": _annotations_from_event(event),
             "interventions": [
                 result.fire_record
-                for result in (event.fire_results if decision is None else decision.fire_results)
+                for result in event.fire_results
                 if result.fire_record is not None
             ],
             "intervention_replaced": (
-                event.intervention_replaced if decision is None else decision.intervention_replaced
+                event.intervention_replaced
             ),
             "detach_saved_activations": output.detach_saved_activations,
             "has_saved_args": False if templates is None else templates.has_saved_args,

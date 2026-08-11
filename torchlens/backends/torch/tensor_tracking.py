@@ -15,6 +15,7 @@ import torch
 from ._tl import get_param_meta, get_tensor_label, increment_param_call_index, set_param_meta
 from ...ir.events import BackwardPassStart, OpGradObserved
 from ...data_classes.op import Op
+from ... import _state
 from ..._state import pause_logging
 from ...intervention.selectors import BaseSelector
 from ...utils.display import _record_phase_timing
@@ -25,6 +26,40 @@ from ...fastlog.types import CaptureSpec
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace
+
+
+def _is_fork_relative(trace: "Trace", other: "Trace") -> bool:
+    """Return whether two traces are related through the fork parent chain.
+
+    A fork keeps a ``parent_run`` weakref to its source; two traces are
+    relatives when either appears on the other's (bounded) parent chain.
+    Structural corollary relied on by callers: fork relatives share one op
+    label space, because a fork is a structural copy of its parent.
+
+    Parameters
+    ----------
+    trace:
+        First trace.
+    other:
+        Second trace.
+
+    Returns
+    -------
+    bool
+        ``True`` when one trace is a fork ancestor of the other.
+    """
+
+    for start, target in ((trace, other), (other, trace)):
+        current: Any = start
+        for _ in range(64):
+            parent_ref = getattr(current, "parent_run", None)
+            parent = parent_ref() if callable(parent_ref) else None
+            if parent is None:
+                break
+            if parent is target:
+                return True
+            current = parent
+    return False
 
 
 def _add_tensor_backward_hook(trace: "Trace", t: torch.Tensor, tensor_label: str) -> None:
@@ -87,6 +122,22 @@ def _add_tensor_backward_hook(trace: "Trace", t: torch.Tensor, tensor_label: str
             active_trace = refresh_target_ref()
         if active_trace is not None and getattr(active_trace, "_tl_rf_probe_active", False):
             return
+        # A managed backward directed at a FORK RELATIVE (a fork's
+        # ``log_backward`` over the shared forward tensors) owns this
+        # gradient: recording it here would silently mutate the hook trace's
+        # projection with a pass the user directed at the fork. Fork
+        # relatives share one label space, so the observation redirects to
+        # the bracket-holding relative instead. Unrelated traces (e.g. two
+        # composed models) keep the historical implicit-pass recording.
+        managed_trace = _state._active_trace
+        if (
+            active_trace is not None
+            and managed_trace is not None
+            and managed_trace is not active_trace
+            and getattr(managed_trace, "_tl_active_backward_bracket", False)
+            and _is_fork_relative(active_trace, managed_trace)
+        ):
+            active_trace = managed_trace
         if active_trace is not None:
             _emit_tensor_grad_event(active_trace, grad, tensor_label)
             if getattr(active_trace, "save_grads", None) not in (None, False):
@@ -102,7 +153,15 @@ def _add_tensor_backward_hook(trace: "Trace", t: torch.Tensor, tensor_label: str
 
 
 def _ensure_backward_event_stream(trace: "Trace") -> Any:
-    """Return the mutable capture event bundle for backward sidecar emission."""
+    """Return the mutable capture event bundle for backward sidecar emission.
+
+    Raises
+    ------
+    BackwardStreamUnavailableError
+        If the trace no longer owns a capture event stream. Fabricating a
+        fresh empty buffer here would let post-hoc backward capture append
+        into a container nothing reads and report success.
+    """
 
     events = getattr(trace, "event_stream", None)
     if events is None:
@@ -111,11 +170,14 @@ def _ensure_backward_event_stream(trace: "Trace") -> Any:
         events = getattr(trace, "capture_events", None)
     if events is not None:
         return events
-    from ...ir import CaptureEvents
+    from ..._errors import BackwardStreamUnavailableError
 
-    events = CaptureEvents()
-    trace._capture_events = events
-    return events
+    raise BackwardStreamUnavailableError(
+        "This trace no longer owns a capture event stream, so backward "
+        "capture cannot record events. The stream is released by "
+        "trace.cleanup() and is not part of portable artifacts; capture a "
+        "fresh trace before calling backward-capture APIs."
+    )
 
 
 def _forward_op_count_at_backward_trigger(trace: "Trace") -> int | None:
@@ -230,7 +292,6 @@ def _emit_tensor_grad_event(trace: "Trace", grad: torch.Tensor, tensor_label: st
             dtype=str(grad.dtype),
             memory=memory,
             timestamp=time.time(),
-            seq=events.next_backward_seq(),
         )
     )
     _record_phase_timing(

@@ -71,7 +71,9 @@ assignments returned by `loop_grouping_adapter.py`. The adapter owns the live fr
 adjacency, parameter-free false-positive guard, grouping, and pass assignment behavior.
 
 ## Refresh Projection
-There is no standalone `postprocess_fast()` orchestrator. Refresh captures are projected by
-`CaptureSession`/`TraceProjector`, then run through the full `postprocess()` entry point with
-the established Trace state. Saved-output counters are refreshed after retained layers are
-finalized; module aggregation remains part of the ordered full pipeline.
+There is no standalone `postprocess_fast()` orchestrator. Refresh captures run through the
+full `postprocess()` entry point with the established Trace state; Step 0 reads the sealed
+`CapturedRunCore.events` snapshot (cloned with independent mutable dict fields) when a
+`CaptureSession` is attached, and `RefreshProjector` applies refreshed payloads onto the
+existing graph. Saved-output counters are refreshed after retained layers are finalized;
+module aggregation remains part of the ordered full pipeline.

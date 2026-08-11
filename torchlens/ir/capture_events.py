@@ -4,20 +4,20 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Iterable, NoReturn
 import weakref
 
 from .events import (
     BackwardPassEnd,
     BackwardPassStart,
-    ConditionalEvent,
     GradFnDiscovered,
     GradFnFired,
     ModuleEnterEvent,
-    ModuleEvent,
     ModuleExitEvent,
     ModulePrepEvent,
     OpGradObserved,
+    ParamGradObserved,
     OpEvent,
     OutputVersionEvent,
     PreHookProvenanceEvent,
@@ -68,15 +68,18 @@ class CaptureEvents:
     """Mutable event buffer allocated once per capture."""
 
     op_events: list[OpEvent] = field(default_factory=list)
-    module_events: list[ModuleEvent] = field(default_factory=list)
     module_prep_events: list[ModulePrepEvent] = field(default_factory=list)
     module_enter_events: list[ModuleEnterEvent] = field(default_factory=list)
     module_exit_events: list[ModuleExitEvent] = field(default_factory=list)
     pre_hook_events: list[PreHookProvenanceEvent] = field(default_factory=list)
-    conditional_events: list[ConditionalEvent] = field(default_factory=list)
     output_version_events: list[OutputVersionEvent] = field(default_factory=list)
     backward_events: list[
-        BackwardPassStart | OpGradObserved | BackwardPassEnd | GradFnDiscovered | GradFnFired
+        BackwardPassStart
+        | OpGradObserved
+        | ParamGradObserved
+        | BackwardPassEnd
+        | GradFnDiscovered
+        | GradFnFired
     ] = field(default_factory=list)
     param_refs: dict[str, ParamRef] = field(default_factory=dict)
     raw_layer_counter: int = 0
@@ -84,16 +87,58 @@ class CaptureEvents:
     func_call_id_counter: int = 0
     recent_events: deque[RecordContext] = field(default_factory=deque)
     backend_session: object | None = None
-    live_by_raw_label: dict[str, "LiveOpRecord"] = field(default_factory=dict)
     live_index: LiveIndex = field(default_factory=LiveIndex)
-    parent_op_label_raws: dict[str, list[str]] = field(default_factory=dict)
-    child_op_label_raws: dict[str, list[str]] = field(default_factory=dict)
-    parent_param_label_raws: dict[str, list[str]] = field(default_factory=dict)
-    output_variations_by_label_raw: dict[str, list[tuple[Any, ...]]] = field(default_factory=dict)
-    replacement_template_by_label_raw: dict[str, str] = field(default_factory=dict)
-    module_stack_by_label_raw: dict[str, tuple[str, ...]] = field(default_factory=dict)
     grad_fn_handles_by_label_raw: dict[str, Any] = field(default_factory=dict)
     backward_event_seq: int = 0
+    backward_revision: int = 0
+    # Detached-stream baseline: event streams never serialize and forks never
+    # share a stream, so a stream installed on a trace that ALREADY carries a
+    # materialized backward projection records the projection it extends.
+    # ``pass_index_base`` is the number of backward passes materialized before
+    # this stream existed; every event appended here carries a strictly
+    # greater pass index, and the projection/invariant layers treat passes at
+    # or below the base as preserved facts outside this stream's window. The
+    # ``base_*`` constants seed the cumulative counters a full scratch rebuild
+    # would otherwise recompute from the (dropped) pre-detach events. All five
+    # are written only by :meth:`detached_from` at the two detach sites
+    # (pickle restore and fork) and stay 0/empty for live capture streams.
+    pass_index_base: int = 0
+    base_total_gradient_memory: int = 0
+    base_total_backward_memory: int = 0
+    base_saved_grad_labels: frozenset[str] = frozenset()
+    base_root_grad_fn_object_ids: tuple[int, ...] = ()
+
+    @classmethod
+    def detached_from(cls, trace: Any) -> "CaptureEvents":
+        """Return a fresh stream extending ``trace``'s materialized projection.
+
+        Used when a trace keeps its portable backward projection but must
+        drop or replace its event stream (pickle restore, ``Trace.fork()``).
+        The new stream starts empty with the projection baseline recorded so
+        later full rebuilds preserve the pre-detach passes instead of
+        silently erasing them, and so backward pass numbering stays dense
+        from ``pass_index_base + 1`` within this stream.
+
+        Parameters
+        ----------
+        trace
+            Trace whose current backward projection this stream extends.
+
+        Returns
+        -------
+        CaptureEvents
+            Empty event buffer carrying the projection baseline.
+        """
+
+        return cls(
+            pass_index_base=int(getattr(trace, "num_backward_passes", 0) or 0),
+            base_total_gradient_memory=int(getattr(trace, "total_gradient_memory", 0) or 0),
+            base_total_backward_memory=int(getattr(trace, "total_backward_memory", 0) or 0),
+            base_saved_grad_labels=frozenset(getattr(trace, "_saved_grad_labels", ()) or ()),
+            base_root_grad_fn_object_ids=tuple(
+                getattr(trace, "backward_root_grad_fn_object_ids", ()) or ()
+            ),
+        )
 
     @property
     def op_event_by_label_raw(self) -> dict[str, OpEvent]:
@@ -121,38 +166,6 @@ class CaptureEvents:
         self.live_index.by_raw_label = events_by_label
         self.live_index.labels = list(events_by_label)
         self.live_index.rebuild_edges()
-
-    @property
-    def op_event_index_by_label_raw(self) -> dict[str, int]:
-        """Derive the legacy label-to-position view from the canonical spine.
-
-        Returns
-        -------
-        dict[str, int]
-            Event positions keyed by raw label.
-        """
-
-        return {event.label_raw: index for index, event in enumerate(self.op_events)}
-
-    @op_event_index_by_label_raw.setter
-    def op_event_index_by_label_raw(self, indexes: dict[str, int]) -> None:
-        """Accept a legacy derived-index assignment without retaining it.
-
-        Parameters
-        ----------
-        indexes
-            Derived positions supplied by compatibility projectors. The
-            canonical ``op_events`` order remains authoritative.
-
-        Raises
-        ------
-        ValueError
-            If the supplied view disagrees with the canonical event order.
-        """
-
-        expected = {event.label_raw: index for index, event in enumerate(self.op_events)}
-        if indexes != expected:
-            raise ValueError("Operation event indexes must match the canonical event spine.")
 
     def _event_position(self, event: OpEvent) -> int | None:
         """Return one event's canonical list position without a retained index.
@@ -248,12 +261,10 @@ class CaptureEvents:
 
         return CaptureEvents(
             op_events=replay_op_events,
-            module_events=list(self.module_events),
             module_prep_events=list(self.module_prep_events),
             module_enter_events=list(self.module_enter_events),
             module_exit_events=list(self.module_exit_events),
             pre_hook_events=list(self.pre_hook_events),
-            conditional_events=list(self.conditional_events),
             output_version_events=list(self.output_version_events),
             backward_events=list(self.backward_events),
             param_refs=dict(self.param_refs),
@@ -262,24 +273,15 @@ class CaptureEvents:
             func_call_id_counter=self.func_call_id_counter,
             recent_events=deque(self.recent_events),
             backend_session=self.backend_session,
-            live_by_raw_label=dict(self.live_by_raw_label),
             live_index=projected_index,
-            parent_op_label_raws={
-                key: list(value) for key, value in self.parent_op_label_raws.items()
-            },
-            child_op_label_raws={
-                key: list(value) for key, value in self.child_op_label_raws.items()
-            },
-            parent_param_label_raws={
-                key: list(value) for key, value in self.parent_param_label_raws.items()
-            },
-            output_variations_by_label_raw={
-                key: list(value) for key, value in self.output_variations_by_label_raw.items()
-            },
-            replacement_template_by_label_raw=dict(self.replacement_template_by_label_raw),
-            module_stack_by_label_raw=dict(self.module_stack_by_label_raw),
             grad_fn_handles_by_label_raw=dict(self.grad_fn_handles_by_label_raw),
             backward_event_seq=self.backward_event_seq,
+            backward_revision=self.backward_revision,
+            pass_index_base=self.pass_index_base,
+            base_total_gradient_memory=self.base_total_gradient_memory,
+            base_total_backward_memory=self.base_total_backward_memory,
+            base_saved_grad_labels=self.base_saved_grad_labels,
+            base_root_grad_fn_object_ids=self.base_root_grad_fn_object_ids,
         )
 
     def release_working_projection(self) -> None:
@@ -292,14 +294,11 @@ class CaptureEvents:
         """
 
         self.op_events.clear()
-        self.module_events.clear()
         self.module_prep_events.clear()
         self.module_enter_events.clear()
         self.module_exit_events.clear()
         self.pre_hook_events.clear()
-        self.conditional_events.clear()
         self.output_version_events.clear()
-        self.live_by_raw_label.clear()
         self.live_index.clear()
         self.grad_fn_handles_by_label_raw.clear()
 
@@ -357,9 +356,6 @@ class CaptureEvents:
                 )
             )
         self.op_events = structural_events
-        self.module_events = [
-            replace(event, forward_args=None, forward_kwargs=None) for event in self.module_events
-        ]
         self.module_prep_events = [
             replace(
                 event,
@@ -394,7 +390,6 @@ class CaptureEvents:
             replace(event, payload=None, transform_state=None)
             for event in self.output_version_events
         ]
-        self.live_by_raw_label.clear()
         self.live_index.clear()
         self.live_index.by_raw_label = {event.label_raw: event for event in structural_events}
         self.backend_session = None
@@ -416,13 +411,49 @@ class CaptureEvents:
         self,
         event: BackwardPassStart
         | OpGradObserved
+        | ParamGradObserved
         | BackwardPassEnd
         | GradFnDiscovered
         | GradFnFired,
     ) -> None:
-        """Append a backward sidecar event."""
+        """Append a backward sidecar event, stamping the global backward seq.
 
+        The append path is the single writer for the backward stream, so it is
+        also the single sequencing authority: every appended event of every
+        kind receives the next value of one run-monotonic counter, making
+        cross-kind ordering an exact recorded fact rather than an inference
+        from timestamps or list positions.
+
+        It is also the single freezing authority for nested mutable event
+        state: ``GradFnDiscovered.source`` is the one nested container the
+        projection copies BY VALUE at materialize time, so an in-place
+        mutation of it would diverge a guarded (already-folded) projection
+        from a scratch rebuild without moving ``backward_revision``. The
+        writer therefore snapshots it into a read-only mapping over a PRIVATE
+        dict copy here — unconditionally, because a caller-supplied
+        ``MappingProxyType`` still aliases the caller's mutable backing dict,
+        which would reintroduce the exact bypass the freeze exists to close.
+        Every other nested reference (payload refs, ``engine_flags``,
+        ``root_meta`` elements) is shared BY REFERENCE between the event and
+        both projection paths, so mutating it cannot make folded and scratch
+        state diverge.
+        """
+
+        if isinstance(event, GradFnDiscovered):
+            object.__setattr__(event, "source", MappingProxyType(dict(event.source)))
+        object.__setattr__(event, "seq", self.next_backward_seq())
         self.backward_events.append(event)
+        self.backward_revision += 1
+
+    def note_backward_event_removal(self) -> None:
+        """Advance the backward revision after a sanctioned event removal.
+
+        Event count alone cannot distinguish an add-then-remove from an
+        unchanged stream, so every mutation of ``backward_events`` must move
+        the revision forward for the projection guard to stay sound.
+        """
+
+        self.backward_revision += 1
 
     def extend(self, events: tuple[OpEvent, ...] | list[OpEvent]) -> None:
         """Append multiple operation events in order."""
