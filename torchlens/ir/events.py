@@ -173,6 +173,7 @@ class OutputVersionEvent:
     payload: object
     transform_state: object | None
     detach_grad_policy: bool
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,6 +310,7 @@ class BufferWriteEvent:
     storage_key: tuple[Any, ...] | None
     buffer_version: int | None
     source_func_name: str | None
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +343,7 @@ class ModulePrepEvent:
     training_at_prep: bool
     custom_attributes: tuple[tuple[str, object], ...]
     custom_methods: tuple[str, ...]
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +363,7 @@ class ModuleEnterEvent:
     forward_kwargs_template: object | None
     layer_argnames: tuple[tuple[str, object], ...]
     input_labels: tuple[str, ...] = ()
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,6 +377,7 @@ class PreHookProvenanceEvent:
     effects: tuple[object, ...]
     capture_complete: bool
     incomplete_reasons: tuple[str, ...]
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,6 +396,7 @@ class ModuleExitEvent:
     # an empty-tuple default so the field stays trailing (defaulted) and all
     # consumers guard on a falsy value; absent == "no paths captured".
     output_paths: tuple[tuple[object, ...], ...] = ()
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,6 +456,7 @@ class OpEvent:
     unattributed_tensor_args: tuple[str, ...] = ()
     dropped_edge_tensor_args: tuple[str, ...] = ()
     input_was_parameter: bool = False
+    seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)

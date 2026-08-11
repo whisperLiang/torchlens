@@ -1210,14 +1210,22 @@ def sync_recording_grad_records_from_sidecar(state: RecordingState) -> None:
     state.recording.grad_by_label.clear()
     state.recording.grad_by_grad_fn_label.clear()
     backward_passes = getattr(trace, "backward_pass_logs", {})
-    for event in getattr(trace, "backward_events", ()):
+    backward_events = tuple(getattr(trace, "backward_events", ()))
+    # Public grad-record contexts expose the position of an event within the
+    # BACKWARD sidecar (its lane ordinal), not the raw global journal ``seq``:
+    # the journal counter now also spans forward events, so raw ``seq`` values
+    # would renumber public ``event_index`` metadata with capture-size-dependent
+    # gaps. Lane ordinals preserve the historical dense 1..N numbering exactly.
+    lane_ordinals = {id(event): ordinal for ordinal, event in enumerate(backward_events, start=1)}
+    for event in backward_events:
+        ordinal = lane_ordinals[id(event)]
         if not isinstance(event, OpGradObserved):
             if isinstance(event, GradFnFired):
-                _maybe_add_grad_fn_metadata_record(state, trace, event)
+                _maybe_add_grad_fn_metadata_record(state, trace, event, ordinal)
             continue
         if event.payload_ref is None and event.transformed_payload_ref is None:
             continue
-        ctx = _grad_record_context_from_op_grad_event(trace, event, backward_passes)
+        ctx = _grad_record_context_from_op_grad_event(trace, event, backward_passes, ordinal)
         spec = CaptureSpec(
             save_out=event.payload_ref is not None or event.transformed_payload_ref is not None,
             save_metadata=True,
@@ -1235,13 +1243,15 @@ def sync_recording_grad_records_from_sidecar(state: RecordingState) -> None:
                     if isinstance(event.transformed_payload_ref, torch.Tensor)
                     else None
                 ),
-                metadata={"timestamp": event.timestamp, "seq": event.seq},
+                metadata={"timestamp": event.timestamp, "seq": ordinal},
                 recorded_at=event.timestamp,
             )
         )
 
 
-def _maybe_add_grad_fn_metadata_record(state: RecordingState, trace: "Trace", event: Any) -> None:
+def _maybe_add_grad_fn_metadata_record(
+    state: RecordingState, trace: "Trace", event: Any, ordinal: int
+) -> None:
     """Append a metadata-only grad-fn record when the active policy selects it."""
 
     from ..fastlog.types import GradientRecord
@@ -1260,7 +1270,7 @@ def _maybe_add_grad_fn_metadata_record(state: RecordingState, trace: "Trace", ev
         has_op=False,
         pass_index=event.pass_index,
         order=getattr(pass_record, "order", None),
-        event_index=event.seq,
+        event_index=ordinal,
     )
     policy = state.active_save_grads_record_policy
     decision = policy(ctx) if callable(policy) else policy
@@ -1270,7 +1280,7 @@ def _maybe_add_grad_fn_metadata_record(state: RecordingState, trace: "Trace", ev
         GradientRecord(
             ctx=ctx,
             spec=CaptureSpec(save_out=False, save_metadata=True, keep_grad=False),
-            metadata={"timestamp": event.timestamp, "seq": event.seq},
+            metadata={"timestamp": event.timestamp, "seq": ordinal},
             recorded_at=event.timestamp,
         )
     )
@@ -1280,6 +1290,7 @@ def _grad_record_context_from_op_grad_event(
     trace: "Trace",
     event: Any,
     backward_passes: Mapping[int, Any],
+    ordinal: int,
 ) -> GradRecordContext:
     """Build a ``GradRecordContext`` from one op-gradient sidecar event."""
 
@@ -1301,7 +1312,7 @@ def _grad_record_context_from_op_grad_event(
                 has_op=True,
                 pass_index=event.pass_index,
                 order=getattr(pass_record, "order", None),
-                event_index=event.seq,
+                event_index=ordinal,
                 shape=event.shape,
                 dtype=_torch_dtype_from_string(event.dtype),
                 tensor_device=_torch_device_from_string(
@@ -1318,7 +1329,7 @@ def _grad_record_context_from_op_grad_event(
             has_op=False,
             pass_index=event.pass_index,
             order=getattr(pass_record, "order", None),
-            event_index=event.seq,
+            event_index=ordinal,
             shape=event.shape,
             dtype=_torch_dtype_from_string(event.dtype),
             tensor_device=None,
@@ -1338,7 +1349,7 @@ def _grad_record_context_from_op_grad_event(
         has_op=True,
         pass_index=event.pass_index,
         order=getattr(pass_record, "order", None),
-        event_index=event.seq,
+        event_index=ordinal,
         shape=event.shape,
         dtype=_torch_dtype_from_string(event.dtype),
         tensor_device=_torch_device_from_string(getattr(op, "output_device", None)),

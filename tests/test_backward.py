@@ -1639,3 +1639,92 @@ def test_cleanup_disarms_backward_triggers() -> None:
     # graph fire during this backward; disarmed, they must silently no-op.
     out.sum().backward()
     assert x.grad is not None
+
+
+@pytest.mark.smoke
+def test_journal_seq_spans_forward_and_backward_lanes() -> None:
+    """Every retained lane is writer-stamped from ONE run-monotonic counter."""
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+
+    _model, _x, trace = _logged_model()
+    trace.log_backward(_output_loss(trace))
+    stream = _ensure_backward_event_stream(trace)
+    lanes = (
+        stream.op_events,
+        stream.module_prep_events,
+        stream.module_enter_events,
+        stream.module_exit_events,
+        stream.pre_hook_events,
+        stream.output_version_events,
+        stream.backward_events,
+    )
+    all_seqs = [event.seq for lane in lanes for event in lane]
+    assert all(isinstance(seq, int) and seq >= 1 for seq in all_seqs)
+    assert len(all_seqs) == len(set(all_seqs)), "journal seq values must be unique across lanes"
+    for lane in lanes:
+        lane_seqs = [event.seq for event in lane]
+        assert lane_seqs == sorted(lane_seqs)
+    assert max(all_seqs) <= stream.event_seq
+    # Forward ops were observed before this post-hoc backward pass, so the
+    # recorded order must say so exactly.
+    max_op_seq = max(event.seq for event in stream.op_events)
+    assert all(event.seq > max_op_seq for event in stream.backward_events)
+
+
+@pytest.mark.smoke
+def test_journal_seq_invariant_fires_on_planted_mutations() -> None:
+    """The journal-wide seq invariant is independently armed per failure mode."""
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+    from torchlens.validation.invariants import (
+        MetadataInvariantError,
+        _check_journal_seq_invariants,
+    )
+
+    _model, _x, trace = _logged_model()
+    trace.log_backward(_output_loss(trace))
+    stream = _ensure_backward_event_stream(trace)
+
+    def check() -> None:
+        _check_journal_seq_invariants(trace, "backward_graph_invariants")
+
+    check()  # positive control: the real stream passes
+
+    first_op = stream.op_events[0]
+    second_op = stream.op_events[1]
+
+    # Unstamped event (bypassed the writer).
+    original_seq = first_op.seq
+    object.__setattr__(first_op, "seq", 0)
+    with pytest.raises(MetadataInvariantError, match="missing a writer-stamped seq"):
+        check()
+    object.__setattr__(first_op, "seq", original_seq)
+    check()
+
+    # Lane reorder (strictly-increasing violated).
+    original_second_seq = second_op.seq
+    object.__setattr__(second_op, "seq", original_seq)
+    with pytest.raises(MetadataInvariantError, match="appears in both|does not increase"):
+        check()
+    object.__setattr__(second_op, "seq", original_seq - 1 if original_seq > 1 else 0)
+    with pytest.raises(MetadataInvariantError):
+        check()
+    object.__setattr__(second_op, "seq", original_second_seq)
+    check()
+
+    # Cross-lane duplicate (module lane forging an op's seq).
+    enter_event = stream.module_enter_events[0]
+    original_enter_seq = enter_event.seq
+    object.__setattr__(enter_event, "seq", original_seq)
+    with pytest.raises(MetadataInvariantError, match="appears in both"):
+        check()
+    object.__setattr__(enter_event, "seq", original_enter_seq)
+    check()
+
+    # Counter bypass (an event stamped past the writer counter).
+    backward_event = stream.backward_events[-1]
+    original_backward_seq = backward_event.seq
+    object.__setattr__(backward_event, "seq", stream.event_seq + 7)
+    with pytest.raises(MetadataInvariantError, match="exceeds the writer counter"):
+        check()
+    object.__setattr__(backward_event, "seq", original_backward_seq)
+    check()

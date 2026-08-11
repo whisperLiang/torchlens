@@ -563,7 +563,7 @@ def bind_invocation(
                 observation = _observe_state(args, kwargs)
                 snapshot = _snapshot_state(args, kwargs, observation)
             reasons = tuple(sorted({_INCOMPLETE_BYPASS, *observation.incomplete_reasons}))
-            trace.capture_events.pre_hook_events.append(
+            trace.capture_events.append_pre_hook(
                 PreHookProvenanceEvent(
                     address=address or "self",
                     call_index=call_index,
@@ -599,7 +599,7 @@ def _emit_token_event(
     reasons = tuple(sorted(token.incomplete_reasons | set(after_observation.incomplete_reasons)))
     before_snapshot = _snapshot_with_reasons(token.before_snapshot, reasons)
     after_snapshot = _snapshot_with_reasons(after_snapshot, reasons)
-    ledger.trace.capture_events.pre_hook_events.append(
+    ledger.trace.capture_events.append_pre_hook(
         PreHookProvenanceEvent(
             address=address,
             call_index=call_index,

@@ -89,7 +89,12 @@ class CaptureEvents:
     backend_session: object | None = None
     live_index: LiveIndex = field(default_factory=LiveIndex)
     grad_fn_handles_by_label_raw: dict[str, Any] = field(default_factory=dict)
-    backward_event_seq: int = 0
+    # ONE run-monotonic sequence counter spanning every event kind and phase
+    # (forward ops, module/prehook/output-version siblings, buffer writes, and
+    # the whole backward family). The append methods below are the single
+    # sequencing authority: every event receives ``seq`` at append time, so
+    # cross-kind and forward/backward ordering is an exact recorded fact.
+    event_seq: int = 0
     backward_revision: int = 0
     # Detached-stream baseline: event streams never serialize and forks never
     # share a stream, so a stream installed on a trace that ALREADY carries a
@@ -275,7 +280,7 @@ class CaptureEvents:
             backend_session=self.backend_session,
             live_index=projected_index,
             grad_fn_handles_by_label_raw=dict(self.grad_fn_handles_by_label_raw),
-            backward_event_seq=self.backward_event_seq,
+            event_seq=self.event_seq,
             backward_revision=self.backward_revision,
             pass_index_base=self.pass_index_base,
             base_total_gradient_memory=self.base_total_gradient_memory,
@@ -396,16 +401,37 @@ class CaptureEvents:
         self.grad_fn_handles_by_label_raw.clear()
         self.recent_events.clear()
 
-    def next_backward_seq(self) -> int:
-        """Return the next monotonic backward event sequence number."""
+    def next_seq(self) -> int:
+        """Return the next value of the one run-monotonic event sequence."""
 
-        self.backward_event_seq += 1
-        return self.backward_event_seq
+        self.event_seq += 1
+        return self.event_seq
 
     def append(self, event: OpEvent) -> None:
-        """Append a single operation event."""
+        """Append a single operation event, stamping the global seq."""
+        object.__setattr__(event, "seq", self.next_seq())
         self.op_events.append(event)
         self.live_index.append(event)
+
+    def append_module_prep(self, event: ModulePrepEvent) -> None:
+        """Append a module-prep sibling event, stamping the global seq."""
+        object.__setattr__(event, "seq", self.next_seq())
+        self.module_prep_events.append(event)
+
+    def append_module_enter(self, event: ModuleEnterEvent) -> None:
+        """Append a module-entry sibling event, stamping the global seq."""
+        object.__setattr__(event, "seq", self.next_seq())
+        self.module_enter_events.append(event)
+
+    def append_module_exit(self, event: ModuleExitEvent) -> None:
+        """Append a module-exit sibling event, stamping the global seq."""
+        object.__setattr__(event, "seq", self.next_seq())
+        self.module_exit_events.append(event)
+
+    def append_pre_hook(self, event: PreHookProvenanceEvent) -> None:
+        """Append a pre-hook provenance sibling event, stamping the global seq."""
+        object.__setattr__(event, "seq", self.next_seq())
+        self.pre_hook_events.append(event)
 
     def append_backward(
         self,
@@ -441,7 +467,7 @@ class CaptureEvents:
 
         if isinstance(event, GradFnDiscovered):
             object.__setattr__(event, "source", MappingProxyType(dict(event.source)))
-        object.__setattr__(event, "seq", self.next_backward_seq())
+        object.__setattr__(event, "seq", self.next_seq())
         self.backward_events.append(event)
         self.backward_revision += 1
 
@@ -456,12 +482,18 @@ class CaptureEvents:
         self.backward_revision += 1
 
     def extend(self, events: tuple[OpEvent, ...] | list[OpEvent]) -> None:
-        """Append multiple operation events in order."""
+        """Append multiple operation events in order, re-stamping seq.
+
+        Extending moves events into THIS buffer's sequence domain (the
+        recorder's multi-pass accumulation), so each event receives a fresh
+        ``seq`` from this buffer's counter.
+        """
         for event in events:
             self.append(event)
 
     def append_output_version(self, event: OutputVersionEvent) -> None:
-        """Append a parent output-version sibling event."""
+        """Append a parent output-version sibling event, stamping the global seq."""
+        object.__setattr__(event, "seq", self.next_seq())
         self.output_version_events.append(event)
 
     def reserve_label(self, layer_type: str) -> ReservedLabel:

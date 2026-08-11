@@ -558,13 +558,20 @@ class Recorder:
         source = getattr(trace, "capture_events", None)
         if source is None or source is self._capture_events:
             return
+        # Carry through the stamping writer methods: the recorder's buffer is
+        # its own sequence domain, so carried events are re-stamped into it
+        # (per-pass seq values would collide with re-stamped op events).
         if not self._capture_events.module_prep_events:
-            self._capture_events.module_prep_events.extend(source.module_prep_events)
+            for prep_event in source.module_prep_events:
+                self._capture_events.append_module_prep(prep_event)
         if not self._capture_events.module_enter_events:
-            self._capture_events.module_enter_events.extend(source.module_enter_events)
+            for enter_event in source.module_enter_events:
+                self._capture_events.append_module_enter(enter_event)
         if not self._capture_events.module_exit_events:
-            self._capture_events.module_exit_events.extend(source.module_exit_events)
-        self._capture_events.pre_hook_events.extend(source.pre_hook_events)
+            for exit_event in source.module_exit_events:
+                self._capture_events.append_module_exit(exit_event)
+        for pre_hook_event in source.pre_hook_events:
+            self._capture_events.append_pre_hook(pre_hook_event)
 
     def _mark_halted_pass(self, pass_index: int, halt_exc: HaltSignal) -> None:
         """Persist halt state for the given pass."""
@@ -602,13 +609,18 @@ class Recorder:
             )
         combined_events = CaptureEvents()
         combined_events.extend(self._capture_events.op_events)
-        combined_events.module_prep_events.extend(self._capture_events.module_prep_events)
-        combined_events.module_enter_events.extend(self._capture_events.module_enter_events)
-        combined_events.module_exit_events.extend(self._capture_events.module_exit_events)
-        combined_events.pre_hook_events.extend(self._capture_events.pre_hook_events)
+        for prep_event in self._capture_events.module_prep_events:
+            combined_events.append_module_prep(prep_event)
+        for enter_event in self._capture_events.module_enter_events:
+            combined_events.append_module_enter(enter_event)
+        for exit_event in self._capture_events.module_exit_events:
+            combined_events.append_module_exit(exit_event)
+        for pre_hook_event in self._capture_events.pre_hook_events:
+            combined_events.append_pre_hook(pre_hook_event)
         if failed_events is not self._capture_events:
             combined_events.extend(failed_events.op_events)
-            combined_events.pre_hook_events.extend(failed_events.pre_hook_events)
+            for pre_hook_event in failed_events.pre_hook_events:
+                combined_events.append_pre_hook(pre_hook_event)
         self._capture_events = combined_events
         trace.capture_events = combined_events
         trace._capture_events = combined_events

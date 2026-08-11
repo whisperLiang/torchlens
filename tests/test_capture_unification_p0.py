@@ -114,8 +114,11 @@ def test_phase0_op_event_fields_are_populated(monkeypatch: pytest.MonkeyPatch) -
     cat_event = next(event for event in snapshot.op_events if event.function.func_name == "cat")
     add_event = next(event for event in snapshot.op_events if event.function.func_name == "add")
 
-    assert add_event.source_trace is trace
-    assert add_event.source_trace_id == str(id(trace))
+    # Durable records are trace-backref-free from birth on the torch path
+    # (journal handle-freedom): the compatibility fields stay None and every
+    # consumer resolves the materializing trace from context instead.
+    assert add_event.source_trace is None
+    assert add_event.source_trace_id is None
     assert add_event.pass_index == 1
     assert add_event.grad_fn_class_qualname is not None
     assert add_event.grad_fn_handle is not None

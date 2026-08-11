@@ -950,8 +950,14 @@ def _op_event_from_log(
         raw_index=fields_dict["raw_index"],
         type_index=fields_dict["type_index"],
         step_index=fields_dict["step_index"] or 0,
-        source_trace=trace,
-        source_trace_id=str(id(trace)),
+        # Durable records are trace-backref-free from birth: every consumer of
+        # OpEvent.source_trace resolves ``event.source_trace or trace`` with the
+        # materializing trace in scope, so the backref carried no information on
+        # the torch path and only created Trace<->event cycles (the reason the
+        # sealed stream needed a weak side registry). Preview backends still
+        # populate the compatibility field; its deletion is ports-phase work.
+        source_trace=None,
+        source_trace_id=None,
         tracing_finished=fields_dict["_tracing_finished"],
         construction_done=fields_dict["_construction_done"],
         function=FunctionCallRef(

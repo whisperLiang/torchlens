@@ -578,7 +578,7 @@ def _prepare_model_session(
             if capture_events is None:
                 capture_events = CaptureEvents()
                 trace.capture_events = capture_events
-            capture_events.module_prep_events.append(
+            capture_events.append_module_prep(
                 ModulePrepEvent(
                     address=meta_address,
                     all_addresses=tuple(meta["all_addresses"]),
@@ -1199,7 +1199,7 @@ def _record_module_entry_metadata(
 
     # Catch buffers created dynamically (e.g. in forward()) after initial scan.
     _tag_untagged_buffers(trace, module)
-    trace.capture_events.module_enter_events.append(
+    trace.capture_events.append_module_enter(
         ModuleEnterEvent(
             address=module_address,
             call_index=module_call_index,
@@ -1965,7 +1965,7 @@ def _record_module_exit_metadata(
             )
         output_names.append(output_name)
         trace._mod_exited[mod_id].append(tensor_label)
-    trace.capture_events.module_exit_events.append(
+    trace.capture_events.append_module_exit(
         ModuleExitEvent(
             address=address,
             call_index=module_call_index,
@@ -2041,7 +2041,7 @@ def _record_predicate_module_boundary_outputs(
             raw_label = parent_labels[0] if parent_labels else None
         if raw_label is not None:
             labeled_outputs.append((tensor, tuple(container_path), raw_label))
-    trace.capture_events.module_exit_events.append(
+    trace.capture_events.append_module_exit(
         ModuleExitEvent(
             address=module_address,
             call_index=module_call_index,

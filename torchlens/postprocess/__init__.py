@@ -38,7 +38,6 @@ import torch
 import warnings
 
 from ..capture.session import capture_session_for_events
-from ..captured_run import remember_event_stream
 from ..ir.capture_events import _clone_op_event_for_replay
 from ..backends.torch.ops import _compact_ancestor_sets
 from ..utils.tensor_utils import _is_cuda_available
@@ -454,7 +453,6 @@ def postprocess(
     output_parent_labels = _resolve_output_parent_labels(self, output_tensors)
     if capture_events is not None:
         self._raw_event_shape_hash = compute_raw_event_shape_hash(capture_events)
-        remember_event_stream(self, capture_events)
         capture_session = capture_session_for_events(capture_events)
         sealed_op_events = (
             [_clone_op_event_for_replay(event) for event in capture_session.seal().events]
@@ -482,7 +480,9 @@ def postprocess(
         _drop_transient_capture_state(self)
         if capture_events is not None:
             capture_events.release_runtime_sidecars()
-            self.__dict__.pop("_capture_events", None)
+            # The trace is the sole strong owner of its (sidecar-released)
+            # event stream; the former _EVENT_STREAMS weak registry is gone.
+            self.__dict__["_capture_events"] = capture_events
         return
 
     _vprint(
@@ -652,4 +652,8 @@ def postprocess(
     _drop_transient_capture_state(self)
     if capture_events is not None:
         capture_events.release_runtime_sidecars()
-        self.__dict__.pop("_capture_events", None)
+        # The trace is the sole strong owner of its (sidecar-released) event
+        # stream; the former _EVENT_STREAMS weak registry is gone. Sidecar
+        # release already stripped payloads, native handles, and the
+        # source_trace backrefs, so this strong edge closes no new cycle.
+        self.__dict__["_capture_events"] = capture_events

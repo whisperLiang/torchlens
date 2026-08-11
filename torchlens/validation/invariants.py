@@ -660,6 +660,7 @@ def _check_backward_graph_invariants(trace: "Trace") -> None:
     sync_projection = getattr(trace, "_sync_backward_projection_if_needed", None)
     if callable(sync_projection):
         sync_projection()
+    _check_journal_seq_invariants(trace, name)
     _check_backward_event_flow_invariants(trace, name)
     if not trace.grad_fn_logs:
         return
@@ -1350,6 +1351,78 @@ def _resolve_op_grad_event_label(trace: "Trace", op_label: str) -> str:
     from ..backends.torch.backward import _resolve_op_grad_event_label as _impl
 
     return _impl(trace, op_label)
+
+
+def _check_journal_seq_invariants(trace: "Trace", name: str) -> None:
+    """Check one-journal sequencing across every retained event lane.
+
+    The event writer stamps ONE run-monotonic ``seq`` on every event of every
+    kind (forward ops, module prep/enter/exit, pre-hook provenance, output
+    versions, buffer writes, and the whole backward family), so a torch live
+    stream must show writer-stamped (>= 1), lane-monotonic, journal-unique seq
+    values. Preview backends do not yet route every lane through the writer;
+    they join this check in the ports phase.
+
+    Parameters
+    ----------
+    trace:
+        Postprocessed model log to validate.
+    name:
+        Invariant check name to use in raised errors.
+
+    Raises
+    ------
+    MetadataInvariantError
+        If any lane holds an unstamped, reordered, or duplicated seq value.
+    """
+
+    if getattr(trace, "backend", "torch") != "torch":
+        return
+    capture_events = getattr(trace, "_capture_events", None)
+    if capture_events is None:
+        return
+    lane_names = (
+        "op_events",
+        "module_prep_events",
+        "module_enter_events",
+        "module_exit_events",
+        "pre_hook_events",
+        "output_version_events",
+        "buffer_write_events",
+        "backward_events",
+    )
+    seen_lane_by_seq: dict[int, str] = {}
+    for lane_name in lane_names:
+        previous_seq = 0
+        for event in getattr(capture_events, lane_name, ()) or ():
+            seq = getattr(event, "seq", None)
+            if not isinstance(seq, int) or seq < 1:
+                raise MetadataInvariantError(
+                    name,
+                    f"{lane_name} event {event!r:.120} is missing a writer-stamped seq",
+                )
+            if seq <= previous_seq:
+                raise MetadataInvariantError(
+                    name,
+                    f"{lane_name} seq {seq} does not increase past {previous_seq}",
+                )
+            previous_seq = seq
+            duplicate_lane = seen_lane_by_seq.get(seq)
+            if duplicate_lane is not None:
+                raise MetadataInvariantError(
+                    name,
+                    f"journal seq {seq} appears in both {duplicate_lane} and {lane_name}",
+                )
+            seen_lane_by_seq[seq] = lane_name
+    if seen_lane_by_seq:
+        counter = int(getattr(capture_events, "event_seq", 0) or 0)
+        max_seen = max(seen_lane_by_seq)
+        if max_seen > counter:
+            raise MetadataInvariantError(
+                name,
+                f"journal seq {max_seen} exceeds the writer counter {counter}: "
+                "an event bypassed the single-writer append path",
+            )
 
 
 def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
