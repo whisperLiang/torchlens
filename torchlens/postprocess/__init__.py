@@ -38,6 +38,7 @@ import torch
 import warnings
 
 from ..capture.session import capture_session_for_events
+from ..captured_run import remember_event_stream
 from ..ir.capture_events import _clone_op_event_for_replay
 from ..backends.torch.ops import _compact_ancestor_sets
 from ..utils.tensor_utils import _is_cuda_available
@@ -98,7 +99,6 @@ __all__ = [
     "postprocess",
 ]
 from ..utils.display import _vprint, _vtimed
-from ..captured_run import remember_event_stream
 
 
 _POSTPROCESS_ASSERT_ENV = "TORCHLENS_POSTPROCESS_ASSERTIONS"

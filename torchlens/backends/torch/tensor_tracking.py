@@ -102,7 +102,15 @@ def _add_tensor_backward_hook(trace: "Trace", t: torch.Tensor, tensor_label: str
 
 
 def _ensure_backward_event_stream(trace: "Trace") -> Any:
-    """Return the mutable capture event bundle for backward sidecar emission."""
+    """Return the mutable capture event bundle for backward sidecar emission.
+
+    Raises
+    ------
+    BackwardStreamUnavailableError
+        If the trace no longer owns a capture event stream. Fabricating a
+        fresh empty buffer here would let post-hoc backward capture append
+        into a container nothing reads and report success.
+    """
 
     events = getattr(trace, "event_stream", None)
     if events is None:
@@ -111,11 +119,14 @@ def _ensure_backward_event_stream(trace: "Trace") -> Any:
         events = getattr(trace, "capture_events", None)
     if events is not None:
         return events
-    from ...ir import CaptureEvents
+    from ..._errors import BackwardStreamUnavailableError
 
-    events = CaptureEvents()
-    trace._capture_events = events
-    return events
+    raise BackwardStreamUnavailableError(
+        "This trace no longer owns a capture event stream, so backward "
+        "capture cannot record events. The stream is released by "
+        "trace.cleanup() and is not part of portable artifacts; capture a "
+        "fresh trace before calling backward-capture APIs."
+    )
 
 
 def _forward_op_count_at_backward_trigger(trace: "Trace") -> int | None:

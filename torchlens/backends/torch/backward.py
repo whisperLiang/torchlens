@@ -2574,6 +2574,10 @@ def _run_backward_with_capture(
     if getattr(trace, "_tl_active_backward_bracket", False):
         return backward_callable()
     _close_implicit_backward_pass_if_open(trace)
+    # Resolve the event stream BEFORE installing any trace or global capture
+    # state: a stream-less trace raises typed here, and the refusal must not
+    # leave half-installed state that poisons later captures.
+    events = _ensure_backward_event_stream(trace)
     previous_save_grads_policy = getattr(trace, "_active_save_grads_policy", None)
     previous_had_save_grads_policy = "_active_save_grads_policy" in trace.__dict__
     active_save_grads_policy = (
@@ -2586,7 +2590,6 @@ def _run_backward_with_capture(
         *normalize_hooks_from_spec(_state._active_intervention_spec),
     ]
     pass_index = int(getattr(trace, "num_backward_passes", 0)) + 1
-    events = _ensure_backward_event_stream(trace)
     trace._active_backward_pass_index = pass_index
     trace._implicit_backward_pass_open = False
     start_event = BackwardPassStart(

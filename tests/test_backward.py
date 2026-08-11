@@ -377,6 +377,22 @@ def test_backward_reprojection_folds_incrementally() -> None:
 
 
 @pytest.mark.smoke
+def test_backward_capture_refuses_missing_event_stream() -> None:
+    """A trace that lost its event stream gets a typed refusal, not a silent buffer."""
+    from torchlens._errors import BackwardStreamUnavailableError
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+
+    _model, _x, trace = _logged_model()
+    loss = _output_loss(trace)
+    del trace._capture_events
+    assert trace.event_stream is None
+    with pytest.raises(BackwardStreamUnavailableError):
+        _ensure_backward_event_stream(trace)
+    with pytest.raises(BackwardStreamUnavailableError):
+        trace.log_backward(loss)
+
+
+@pytest.mark.smoke
 def test_param_gradients_enter_the_backward_event_stream() -> None:
     """Every recorded AccumulateGrad increment has a ParamGradObserved event."""
     from torchlens.ir.events import ParamGradObserved

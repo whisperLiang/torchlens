@@ -1403,6 +1403,7 @@ class Trace(
         # pass pruned, read by the validation dispatch-count backstop. Never portable.
         "_orphan_pruned_func_call_ids": FieldPolicy.DROP,
         "_capture_events": FieldPolicy.DROP,
+        "_capture_session": FieldPolicy.DROP,
         "_tl_backward_hooked_tensor_keys": FieldPolicy.DROP,
         "_active_backward_pass_index": FieldPolicy.DROP,
         "_backward_roots_by_pass": FieldPolicy.DROP,
@@ -2779,6 +2780,14 @@ class Trace(
 
         refuse_callable_shadowing_state_keys(type(self), state)
         self.__dict__.update(state)
+        # Event streams never serialize (FieldPolicy.DROP), but a restored
+        # trace remains a supported backward-capture target within the live
+        # process, so restore installs a fresh stream EXPLICITLY here rather
+        # than letting backward capture fabricate one silently on demand.
+        if "_capture_events" not in self.__dict__:
+            from ..ir import CaptureEvents
+
+            self.__dict__["_capture_events"] = CaptureEvents()
         if not containers_were_serialized:
             self.__dict__.pop("_containers", None)
         if self.__dict__.get("_module_logs") is None:

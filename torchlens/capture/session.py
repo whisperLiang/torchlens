@@ -8,7 +8,7 @@ import tempfile
 from types import MappingProxyType
 from typing import Any, Callable, Literal, Mapping
 import warnings
-from weakref import ReferenceType, WeakKeyDictionary, ref
+from weakref import ref
 
 from .. import _state
 from ..ir.events import OpEvent
@@ -17,9 +17,6 @@ from .plan import CapturePlan, EnrichmentLevel, RetentionKind, RetentionProfile
 
 TerminalState = Literal["complete", "halted", "failed"]
 CleanupCallback = Callable[[], None]
-
-_LEGACY_CAPTURE_SESSIONS: "WeakKeyDictionary[object, CaptureSession]" = WeakKeyDictionary()
-_LEGACY_EVENT_SESSIONS: dict[int, tuple[ReferenceType[object], ReferenceType[CaptureSession]]] = {}
 
 
 @dataclass(slots=True)
@@ -766,12 +763,14 @@ def attach_legacy_capture_session(
         ),
         backend_token=backend_token,
     )
-    _LEGACY_CAPTURE_SESSIONS[trace] = session
+    # The trace is the SOLE strong owner of its run session; no side registry
+    # may be an ownership head.
+    trace._capture_session = session  # type: ignore[attr-defined]
     return session
 
 
 def capture_session_for(owner: object) -> CaptureSession | None:
-    """Return the stage-2 session attached to a legacy compatibility owner.
+    """Return the run session attached to a trace-like owner.
 
     Parameters
     ----------
@@ -781,82 +780,66 @@ def capture_session_for(owner: object) -> CaptureSession | None:
     Returns
     -------
     CaptureSession | None
-        Attached session when the owner is on the Stage 2 adapter path.
+        Attached session when the owner is on an active capture run.
     """
 
-    try:
-        return _LEGACY_CAPTURE_SESSIONS.get(owner)
-    except TypeError:
-        return None
+    session = getattr(owner, "_capture_session", None)
+    return session if isinstance(session, CaptureSession) else None
 
 
 def detach_capture_session(trace: object, events: object, session: CaptureSession) -> None:
-    """Detach and release a completed legacy compatibility session.
+    """Detach and release a completed capture session.
 
     Parameters
     ----------
     trace
-        Legacy trace compatibility owner for the completed run.
+        Trace owner for the completed run.
     events
-        Legacy event buffer associated with the completed run.
+        Event buffer associated with the completed run.
     session
-        Stage-2 session to detach.  Mismatched registry entries are retained
-        to avoid disturbing a subsequent run.
+        Session to detach.  Mismatched attachments are retained to avoid
+        disturbing a subsequent run.
 
     Returns
     -------
     None
-        Removes both compatibility registrations and clears the session.  The
-        operation is safe to invoke more than once.
+        Removes both attachments and clears the session.  The operation is
+        safe to invoke more than once.
     """
 
-    try:
-        if _LEGACY_CAPTURE_SESSIONS.get(trace) is session:
-            _LEGACY_CAPTURE_SESSIONS.pop(trace, None)
-    except TypeError:
-        pass
-
-    event_id = id(events)
-    entry = _LEGACY_EVENT_SESSIONS.get(event_id)
-    if entry is not None:
-        events_ref, session_ref = entry
-        if events_ref() is events and session_ref() is session:
-            _LEGACY_EVENT_SESSIONS.pop(event_id, None)
+    if getattr(trace, "_capture_session", None) is session:
+        try:
+            trace.__dict__.pop("_capture_session", None)
+        except AttributeError:
+            pass
+    events_session_ref = getattr(events, "_tl_capture_session_ref", None)
+    if events_session_ref is not None and events_session_ref() is session:
+        events.__dict__.pop("_tl_capture_session_ref", None)
     session.release()
 
 
 def attach_capture_events_session(events: object, session: CaptureSession) -> None:
-    """Associate a legacy event buffer with its session outside serialized state.
+    """Associate an event buffer with its owning run session.
 
     Parameters
     ----------
     events
         Existing mutable ``CaptureEvents`` buffer for the active run.
     session
-        Stage-2 run owner that mirrors producer facts into its ledgers.
+        Run owner whose sealed core snapshots this buffer's operation spine.
     """
 
     op_events = getattr(events, "op_events", None)
     if not isinstance(op_events, list):
         raise TypeError("Capture event buffers must expose a mutable op_events list.")
     session.bind_event_spine(op_events)
-    event_id = id(events)
-
-    def discard_events(
-        _events_ref: ReferenceType[object],
-        _registry: dict[int, tuple[ReferenceType[object], ReferenceType[CaptureSession]]] = (
-            _LEGACY_EVENT_SESSIONS
-        ),
-    ) -> None:
-        """Drop the compatibility association when its event buffer is collected."""
-
-        _registry.pop(event_id, None)
-
-    _LEGACY_EVENT_SESSIONS[event_id] = (ref(events, discard_events), ref(session))
+    # Weak backref only: the session (via the trace) owns the run; the buffer
+    # must never keep a completed session alive.
+    events._tl_capture_session_ref = ref(session)  # type: ignore[attr-defined]
 
 
 def capture_session_for_events(events: object) -> CaptureSession | None:
-    """Return the session associated with one legacy event buffer.
+    """Return the session associated with one event buffer.
 
     Parameters
     ----------
@@ -866,16 +849,11 @@ def capture_session_for_events(events: object) -> CaptureSession | None:
     Returns
     -------
     CaptureSession | None
-        Active compatibility session, if one is registered.
+        Active owning session, if the buffer is still attached to one.
     """
 
-    entry = _LEGACY_EVENT_SESSIONS.get(id(events))
-    if entry is None:
+    session_ref = getattr(events, "_tl_capture_session_ref", None)
+    if session_ref is None:
         return None
-    events_ref, session_ref = entry
-    if events_ref() is events:
-        session = session_ref()
-        if session is not None:
-            return session
-    _LEGACY_EVENT_SESSIONS.pop(id(events), None)
-    return None
+    session = session_ref()
+    return session if isinstance(session, CaptureSession) else None
