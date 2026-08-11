@@ -16,6 +16,8 @@ tests below are no longer trustworthy.
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 import torch
 from torch import nn
@@ -257,6 +259,84 @@ def test_raise_on_nan_fires_on_a_non_finite_fp8_activation() -> None:
     message = str(excinfo.value)
     assert "non-finite" in message
     assert "float8_e5m2" in message, f"the fp8 cast should be the flagged op, got: {message}"
+
+
+@pytest.mark.heavy
+def test_unrunnable_nonfinite_check_warns_instead_of_reading_as_clean(monkeypatch) -> None:
+    """An unrunnable check is not a clean tensor.
+
+    fp8 was the known dtype without an ``isfinite`` kernel and is now widened, but the
+    call site still swallows ``RuntimeError`` (which ``NotImplementedError``
+    subclasses). Any future such dtype must be DISCLOSED rather than silently skipped:
+    the user explicitly asked for NaN checking, so silence would let them read an
+    unchecked forward as a checked one.
+
+    Parameters
+    ----------
+    monkeypatch:
+        pytest monkeypatch fixture, used to make ``torch.isfinite`` unavailable for one
+        dtype so the real production fallback runs.
+    """
+
+    real_isfinite = torch.isfinite
+
+    def refusing_isfinite(tensor: torch.Tensor, *args: object, **kwargs: object) -> torch.Tensor:
+        """Reject bfloat16 the way a missing kernel would.
+
+        Parameters
+        ----------
+        tensor:
+            Tensor to test for finiteness.
+        *args:
+            Passed through.
+        **kwargs:
+            Passed through.
+
+        Returns
+        -------
+        torch.Tensor
+            Boolean finiteness mask for every other dtype.
+        """
+
+        if tensor.dtype is torch.bfloat16:
+            raise NotImplementedError("\"isfinite\" not implemented for 'BFloat16'")
+        return real_isfinite(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "isfinite", refusing_isfinite)
+
+    class BFloatModel(nn.Module):
+        """Model producing several bfloat16 activations."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Cast through bfloat16 twice.
+
+            Parameters
+            ----------
+            x:
+                Input batch.
+
+            Returns
+            -------
+            torch.Tensor
+                float32 output.
+            """
+
+            reduced = x.to(torch.bfloat16)
+            return (reduced + 1).to(torch.float32)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        tl.trace(
+            BFloatModel(),
+            torch.randn(2, 4),
+            capture=tl.options.CaptureOptions(raise_on_nan=True),
+        )
+
+    skipped = [item for item in caught if "UNCHECKED for NaN/Inf" in str(item.message)]
+    assert len(skipped) == 1, f"expected exactly one disclosure, got {len(skipped)}"
+    text = str(skipped[0].message)
+    assert "raise_on_nan could not check" in text
+    assert "bfloat16" in text
 
 
 @pytest.mark.heavy

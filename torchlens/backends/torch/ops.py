@@ -6345,7 +6345,24 @@ def _raise_if_nonfinite_requested(self: Any, tensor: torch.Tensor, entry: Any) -
                 .any()
                 .item()
             )
-    except (RuntimeError, TypeError):
+    except (RuntimeError, TypeError) as exc:
+        # An unrunnable check is NOT a clean tensor. fp8 was the known real case and
+        # is handled above, but any dtype/layout without an ``isfinite`` kernel lands
+        # here -- and the user explicitly asked for NaN checking, so silence would let
+        # them read an unchecked forward as a checked one. Warn once per capture
+        # (naming the first skipped op) and keep going: an opt-in diagnostic must not
+        # convert an exotic dtype into a failed capture.
+        if not getattr(self, "_warned_nonfinite_check_unavailable", False):
+            self._warned_nonfinite_check_unavailable = True
+            warnings.warn(
+                "raise_on_nan could not check at least one activation: "
+                f"{type(exc).__name__}: {exc}. First skipped op "
+                f"{getattr(entry, 'func_name', 'unknown')!r} has dtype {tensor.dtype} on "
+                f"{tensor.device}. Those activations are UNCHECKED for NaN/Inf; a clean "
+                "capture does not mean they were finite.",
+                UserWarning,
+                stacklevel=2,
+            )
         return
     if not has_nonfinite:
         return

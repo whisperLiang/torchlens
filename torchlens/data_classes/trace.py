@@ -201,6 +201,7 @@ _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "_has_direct_writes": False,
     "_warned_direct_write": False,
     "_warned_mutate_in_place": False,
+    "_warned_nonfinite_check_unavailable": False,
     "_spec_revision": 0,
     "_out_recipe_revision": 0,
     "_annotation_blobs": None,
@@ -1303,6 +1304,7 @@ class Trace(
         "_has_direct_writes": FieldPolicy.KEEP,
         "_warned_direct_write": FieldPolicy.DROP,
         "_warned_mutate_in_place": FieldPolicy.DROP,
+        "_warned_nonfinite_check_unavailable": FieldPolicy.DROP,
         "_spec_revision": FieldPolicy.KEEP,
         "_out_recipe_revision": FieldPolicy.KEEP,
         "_append_sequence_id": FieldPolicy.KEEP,
@@ -1726,6 +1728,7 @@ class Trace(
         self._has_direct_writes = False
         self._warned_direct_write = False
         self._warned_mutate_in_place = False
+        self._warned_nonfinite_check_unavailable = False
         self._raw_transform_escape_detected = False
         self._raw_dynamo_region_detected = False
         self._spec_revision = 0
