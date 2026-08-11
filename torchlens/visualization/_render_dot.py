@@ -532,6 +532,9 @@ def _populate_forward_ir(trace: "Trace", context: _ForwardRenderContext) -> _For
     antiparallel_projected_edges = projected_antiparallel_endpoint_pairs(forward_render_ir)
     decisions_by_name = {node.name: node for node in forward_render_ir.nodes}
     rolled_maps = _RolledEdgeMaps() if request.vis_mode == "rolled" else None
+    node_label_fields = (
+        list(request.node_label_fields) if request.node_label_fields is not None else None
+    )
     for unit in context.node_universe.units:
         node_record = decisions_by_name[unit.unit_id]
         for source_index, node in enumerate(unit.source_nodes):
@@ -555,7 +558,7 @@ def _populate_forward_ir(trace: "Trace", context: _ForwardRenderContext) -> _For
                 context.site_labels,
                 context.theme,
                 cast("str | OverlayScores | None", request.node_overlay),
-                list(request.node_label_fields) if request.node_label_fields is not None else None,
+                node_label_fields,
                 captured_forward_edges,
                 context.rankdir,
                 request.show_containers,
