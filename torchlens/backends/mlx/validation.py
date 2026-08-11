@@ -1,10 +1,12 @@
 """Live replay validation for the technical-preview MLX backend.
 
 The oracle mirrors the Paddle/tinygrad pattern: every captured operation is
-re-invoked from the exact call material recorded at emit time (function,
-positional/keyword arguments, output), the replayed output must match the
-captured payload, and a parent-perturbation tripwire proves the replay is not
-vacuous. The denominator is the captured (whitelisted) op set — MLX cannot
+re-invoked with arguments reconstructed from its DECLARED parents' saved
+payloads, the replayed output must match the captured payload, and a
+parent-perturbation tripwire proves the replay is not vacuous. Calls with no
+perturbable tensor argument (constant producers) are recorded as explicit
+evidence gaps that surface as UNVERIFIED at the trace level, never as silent
+passes. The denominator is the captured (whitelisted) op set — MLX cannot
 observe unwrapped internals, and that scope is documented rather than hidden.
 """
 
@@ -149,8 +151,18 @@ def _perturb_candidates(value: Any) -> tuple[Any, ...]:
     return ()
 
 
-def _perturbation_changes_output(capture: MLXOpCapture, baseline: tuple[Any, ...]) -> bool:
-    """Return whether perturbing one tensor argument changes the replay output.
+PERTURBATION_PROVED = "proved"
+PERTURBATION_NO_PERTURBABLE_INPUT = "no_perturbable_input"
+PERTURBATION_UNPROVED = "unproved"
+
+
+def _perturbation_evidence(capture: MLXOpCapture, baseline: tuple[Any, ...]) -> str:
+    """Classify the parent-perturbation evidence for one replayed call.
+
+    Both positional AND keyword tensor arguments are scanned; the first array
+    found is perturbed. A call with no array anywhere is a recorded evidence
+    GAP, never a silent pass — the tripwire cannot prove dependency for a
+    constant producer, and claiming it did would be fail-open.
 
     Parameters
     ----------
@@ -161,41 +173,58 @@ def _perturbation_changes_output(capture: MLXOpCapture, baseline: tuple[Any, ...
 
     Returns
     -------
-    bool
-        True when some perturbation candidate produces a different output, or
-        when the call has no perturbable tensor argument (vacuously true —
-        constant producers cannot be perturbed through their inputs).
+    str
+        ``PERTURBATION_PROVED`` when some candidate changes the output,
+        ``PERTURBATION_NO_PERTURBABLE_INPUT`` when the call has no tensor
+        argument to perturb (positional or keyword), and
+        ``PERTURBATION_UNPROVED`` when every candidate left the output
+        unchanged.
     """
 
     import mlx.core as mx
 
-    array_positions = [
-        index for index, value in enumerate(capture.args) if _is_mlx_array(value)
-    ]
-    if not array_positions:
-        return True
-    position = array_positions[0]
-    for candidate in _perturb_candidates(capture.args[position]):
+    arg_position: int | None = next(
+        (index for index, value in enumerate(capture.args) if _is_mlx_array(value)),
+        None,
+    )
+    kwarg_key = ""
+    if arg_position is None:
+        found_key = next(
+            (key for key, value in capture.kwargs.items() if _is_mlx_array(value)),
+            None,
+        )
+        if found_key is None:
+            return PERTURBATION_NO_PERTURBABLE_INPUT
+        kwarg_key = found_key
+    original = (
+        capture.args[arg_position] if arg_position is not None else capture.kwargs[kwarg_key]
+    )
+    for candidate in _perturb_candidates(original):
         try:
-            perturbed_args = (
-                *capture.args[:position],
-                candidate,
-                *capture.args[position + 1 :],
-            )
+            if arg_position is not None:
+                perturbed_args = (
+                    *capture.args[:arg_position],
+                    candidate,
+                    *capture.args[arg_position + 1 :],
+                )
+                perturbed_kwargs = capture.kwargs
+            else:
+                perturbed_args = capture.args
+                perturbed_kwargs = {**capture.kwargs, kwarg_key: candidate}
             perturbed = _iter_output_arrays(
-                capture.func(*perturbed_args, **capture.kwargs)
+                capture.func(*perturbed_args, **perturbed_kwargs)
             )
             mx.eval(*perturbed)
         except Exception:
             continue
         if len(perturbed) != len(baseline):
-            return True
+            return PERTURBATION_PROVED
         if any(
             not _payloads_close(p_out, b_out)
             for p_out, b_out in zip(perturbed, baseline)
         ):
-            return True
-    return False
+            return PERTURBATION_PROVED
+    return PERTURBATION_UNPROVED
 
 
 def _ops_by_label(trace: Any) -> dict[str, Any]:
@@ -348,7 +377,11 @@ def _reconstruct_value(
     Any
         ``value`` with every labeled array leaf replaced by the saved payload
         the declared graph stores for that label; unlabeled leaves (parameters,
-        constants) keep their emit-time values.
+        constants) keep their emit-time values. Emit-time reuse is legitimate
+        ONLY because coverage pins each capture's leaf labels to the immutable
+        emit-time inventory fingerprint first — a label stripped after capture
+        fails coverage instead of laundering the emit-time array through
+        replay.
     """
 
     cursor = iter(leaf_labels)
@@ -428,23 +461,44 @@ def _coverage_failure_count(trace: Any, captures: tuple[MLXOpCapture, ...]) -> i
     Returns
     -------
     int
-        Zero only when the capture records exactly cover the inventory AND
-        every non-input materialized op label is inventoried. Any missing,
-        extra, or uninventoried entry counts, so partial evidence deletion can
-        never yield a vacuous pass.
+        Zero only when the capture records exactly cover the inventory —
+        including each record's emit-time per-leaf parent-label fingerprint —
+        AND every non-input materialized op label is inventoried. Any missing,
+        extra, uninventoried, or label-tampered entry counts, so neither
+        partial evidence deletion nor stripping a capture's recorded
+        provenance (which would let replay silently reuse emit-time argument
+        values) can yield a vacuous pass.
     """
 
     inventory = getattr(trace, "_mlx_replay_inventory", None)
     if inventory is None:
         return 1
-    expected = sorted((name, tuple(labels)) for name, labels in tuple(inventory))
-    observed = sorted((capture.op_name, tuple(capture.labels_raw)) for capture in captures)
+    expected = sorted(
+        (
+            name,
+            tuple(labels),
+            tuple(tuple(slot) for slot in arg_labels),
+            tuple((key, tuple(slot)) for key, slot in kwarg_labels),
+        )
+        for name, labels, arg_labels, kwarg_labels in tuple(inventory)
+    )
+    observed = sorted(
+        (
+            capture.op_name,
+            tuple(capture.labels_raw),
+            tuple(tuple(slot) for slot in capture.arg_leaf_labels),
+            tuple(
+                sorted((key, tuple(slot)) for key, slot in capture.kwarg_leaf_labels.items())
+            ),
+        )
+        for capture in captures
+    )
     failures = 0
     if expected != observed:
         expected_only = [call for call in expected if call not in observed]
         observed_only = [call for call in observed if call not in expected]
         failures += max(1, len(expected_only) + len(observed_only))
-    inventoried_labels = {label for _name, labels in expected for label in labels}
+    inventoried_labels = {label for _name, labels, _args, _kwargs in expected for label in labels}
     for op in getattr(trace, "layer_list", ()):
         if getattr(op, "is_input", False):
             continue
@@ -454,7 +508,7 @@ def _coverage_failure_count(trace: Any, captures: tuple[MLXOpCapture, ...]) -> i
     return failures
 
 
-def validate_mlx_captures(trace: Any) -> tuple[int, int]:
+def validate_mlx_captures(trace: Any) -> tuple[int, int, tuple[str, ...]]:
     """Replay every captured MLX call against the trace's saved payloads.
 
     Coverage is fail-closed: the emit-time ``_mlx_replay_inventory`` is the
@@ -471,8 +525,12 @@ def validate_mlx_captures(trace: Any) -> tuple[int, int]:
 
     Returns
     -------
-    tuple[int, int]
-        ``(replayed_count, failed_count)`` over the captured op set.
+    tuple[int, int, tuple[str, ...]]
+        ``(replayed_count, failed_count, perturbation_gap_labels)`` over the
+        captured op set. Gap labels name replayed calls whose parent
+        dependency could not be perturbation-proven (no tensor argument to
+        perturb); they replayed numerically but must surface as UNVERIFIED
+        evidence, never as a silent pass.
     """
 
     import mlx.core as mx
@@ -481,6 +539,7 @@ def validate_mlx_captures(trace: Any) -> tuple[int, int]:
     captures = tuple(getattr(trace, "_mlx_op_captures", ()))
     replayed_count = 0
     failed_count = _coverage_failure_count(trace, captures)
+    perturbation_gaps: list[str] = []
     for capture in captures:
         try:
             if not _declared_parents_consistent(trace, ops_by_label, capture):
@@ -511,10 +570,14 @@ def validate_mlx_captures(trace: Any) -> tuple[int, int]:
                 kwargs=replay_kwargs,
                 output=capture.output,
             )
-            if not _perturbation_changes_output(perturb_capture, replayed):
+            evidence = _perturbation_evidence(perturb_capture, replayed)
+            if evidence == PERTURBATION_UNPROVED:
                 failed_count += 1
                 continue
+            if evidence == PERTURBATION_NO_PERTURBABLE_INPUT:
+                perturbation_gaps.extend(capture.labels_raw)
             replayed_count += 1
         except Exception:
             failed_count += 1
-    return replayed_count, failed_count
+    trace._mlx_perturbation_gaps = tuple(perturbation_gaps)
+    return replayed_count, failed_count, tuple(perturbation_gaps)

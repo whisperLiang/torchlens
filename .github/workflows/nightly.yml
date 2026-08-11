@@ -126,14 +126,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # executed_floor is a per-leg minimum EXECUTED (non-skipped) test
+          # count, set to roughly half each suite's current size so a mass
+          # importorskip/marker-drift regression fails the leg while normal
+          # test-count churn does not. A floor of 1 would let a 49-of-50 skip
+          # stay green.
           - backend: tf
             install: tensorflow-cpu
             marker: tf_backend
             import_check: "import tensorflow, keras"
+            executed_floor: 18
           - backend: jax
             install: '"jax[cpu]" equinox flax'
             marker: backend_jax
             import_check: "import jax, jax.numpy, equinox, flax"
+            executed_floor: 60
           - backend: tinygrad
             # Pinned to the exact version the backend runtime asserts. The
             # replay/derived-grad oracles require the PYTHON device.
@@ -141,10 +148,16 @@ jobs:
             marker: backend_tinygrad
             dev: PYTHON
             import_check: "import tinygrad"
+            executed_floor: 25
           - backend: paddle
+            # Pinned to the 3.3 minor stream the preview suite is validated
+            # against (paddle 3.3.x in the parity env); paddle minors have
+            # historically shifted C-extension/co-import behavior, so new
+            # minors join the matrix deliberately, not by drift.
             install: '"paddlepaddle>=3.3,<3.4"'
             marker: backend_paddle
             import_check: "import paddle"
+            executed_floor: 22
           - backend: mlx
             # MLX ships manylinux CPU wheels, so its suite runs on Linux CI;
             # pinned to 0.26.3 because the 0.26.5 manylinux wheel is missing
@@ -152,6 +165,7 @@ jobs:
             install: '"mlx==0.26.3"'
             marker: backend_mlx
             import_check: "import mlx.core, mlx.nn"
+            executed_floor: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -184,12 +198,14 @@ jobs:
           pytest tests/ -m "${{ matrix.marker }} and not slow" --tb=short \
             --junitxml="${{ runner.temp }}/preview-${{ matrix.backend }}.junit.xml"
 
-      - name: Fail on a zero-executed ${{ matrix.backend }} suite
-        # Second tripwire: even with the runtime importable, an all-skipped
-        # suite (marker drift, collection regression) must not stay green.
+      - name: Fail on an under-executed ${{ matrix.backend }} suite
+        # Second tripwire: even with the runtime importable, a mostly-skipped
+        # suite (marker drift, collection regression, importorskip cascade)
+        # must not stay green; each leg carries its own executed-test floor.
         run: |
           python scripts/check_ci_executed_tests.py \
-            "${{ runner.temp }}/preview-${{ matrix.backend }}.junit.xml" 1
+            "${{ runner.temp }}/preview-${{ matrix.backend }}.junit.xml" \
+            "${{ matrix.executed_floor }}"
 
   wheel:
     name: Wheel package smoke

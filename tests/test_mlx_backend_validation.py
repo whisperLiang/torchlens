@@ -195,3 +195,113 @@ def test_mlx_validation_loaded_payload_stripped_trace_is_unavailable() -> None:
     assert isinstance(result, ValidationReplayStatus)
     assert result.state == "unavailable"
     assert result.passed is False
+
+
+class _SplitMergeNet(nn.Module):
+    def __call__(self, x: mx.array) -> mx.array:
+        a, b = mx.split(x, 2, axis=1)
+        return mx.add(a, b)
+
+
+def test_mlx_split_container_outputs_wire_into_graph() -> None:
+    """Container outputs (mx.split) materialize ops and parent the consumers.
+
+    Sol probe: at d3861eea the wrapped call's list output was dropped at emit,
+    so the trace held only input+add with no split parents while validation
+    still passed over the missing wiring.
+    """
+
+    trace = tl.trace(_SplitMergeNet(), mx.ones((1, 4)), backend="mlx")
+    split_labels = [
+        op._label_raw for op in trace.layer_list if op._label_raw.startswith("split")
+    ]
+    assert len(split_labels) == 2, "both split output arrays must materialize as ops"
+    add_op = next(op for op in trace.layer_list if op._label_raw.startswith("add"))
+    assert set(add_op.parents) == set(split_labels)
+    assert MLXBackend().validate_trace(trace) is True
+
+
+def test_mlx_validation_fails_stripped_leaf_label_provenance() -> None:
+    """Stripping a capture's recorded parent labels fails even coherently.
+
+    Sol probe: setting a captured parent label to None AND removing the
+    declared parent passed at d3861eea with validate_metadata=False because
+    replay silently reused the emit-time argument array. The emit-time
+    inventory now fingerprints per-leaf labels, so the strip fails coverage.
+    """
+
+    import dataclasses
+
+    trace = _healthy_trace()
+    captures = trace._mlx_op_captures
+    index = next(i for i, capture in enumerate(captures) if capture.op_name == "relu")
+    capture = captures[index]
+    captures[index] = dataclasses.replace(
+        capture,
+        arg_leaf_labels=tuple(tuple(None for _ in slot) for slot in capture.arg_leaf_labels),
+    )
+    relu_op = next(op for op in trace.layer_list if op._label_raw == capture.labels_raw[0])
+    relu_op.parents = []
+
+    assert MLXBackend().validate_trace(trace, validate_metadata=False) is False
+
+
+class _ConstantProducerNet(nn.Module):
+    def __call__(self, x: mx.array) -> mx.array:
+        constant = mx.add(1.0, 2.0)
+        return mx.add(x, constant)
+
+
+def test_mlx_constant_producer_reports_unverified_gap() -> None:
+    """A call with no perturbable tensor argument is a recorded evidence gap
+    surfacing as UNVERIFIED, never the silent vacuous pass shipped before."""
+
+    trace = tl.trace(_ConstantProducerNet(), mx.ones((1, 4)), backend="mlx")
+    result = MLXBackend().validate_trace(trace)
+
+    assert isinstance(result, ValidationReplayStatus)
+    assert result.state == "unverified"
+    assert trace._mlx_perturbation_gaps
+    assert all(label.startswith("add") for label in trace._mlx_perturbation_gaps)
+
+
+def test_mlx_perturbation_scan_includes_kwargs() -> None:
+    """The perturbation tripwire perturbs keyword tensor arguments too."""
+
+    from torchlens.backends.mlx.validation import (
+        PERTURBATION_NO_PERTURBABLE_INPUT,
+        PERTURBATION_PROVED,
+        MLXOpCapture,
+        _perturbation_evidence,
+    )
+
+    value = mx.ones((2, 2))
+
+    def kwarg_only(*, a: mx.array) -> mx.array:
+        return a * 2
+
+    baseline = (kwarg_only(a=value),)
+    mx.eval(*baseline)
+    capture = MLXOpCapture(
+        labels_raw=("kwarg_only_1_raw",),
+        op_name="kwarg_only",
+        func=kwarg_only,
+        args=(),
+        kwargs={"a": value},
+    )
+    assert _perturbation_evidence(capture, baseline) == PERTURBATION_PROVED
+
+    def no_tensor() -> mx.array:
+        return mx.ones((2, 2))
+
+    constant_capture = MLXOpCapture(
+        labels_raw=("no_tensor_1_raw",),
+        op_name="no_tensor",
+        func=no_tensor,
+        args=(),
+        kwargs={},
+    )
+    assert (
+        _perturbation_evidence(constant_capture, (no_tensor(),))
+        == PERTURBATION_NO_PERTURBABLE_INPUT
+    )

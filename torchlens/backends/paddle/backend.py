@@ -316,8 +316,9 @@ class PaddleBackend:
         save_visualizations = _default_if_missing(save_visualizations, False)
         module_identity_mode = _default_if_missing(module_identity_mode, None)
         grad_options = _default_if_missing(grad_options, None)
+        # Torch-parity default: the depth flood runs unless explicitly disabled.
         compute_input_output_distances = _default_if_missing(
-            compute_input_output_distances, False
+            compute_input_output_distances, True
         )
         save_predicate = pop_static_label_save_predicate(extra_kwargs, backend_name="paddle")
         _reject_extra_kwargs(extra_kwargs)

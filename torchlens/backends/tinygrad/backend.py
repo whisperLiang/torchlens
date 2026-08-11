@@ -338,8 +338,9 @@ class TinygradBackend:
         save_rng_states = _default_if_missing(save_rng_states, False)
         random_seed = _default_if_missing(random_seed, None)
         recurrence_detection = _default_if_missing(recurrence_detection, True)
+        # Torch-parity default: the depth flood runs unless explicitly disabled.
         compute_input_output_distances = _default_if_missing(
-            compute_input_output_distances, False
+            compute_input_output_distances, True
         )
         verbose = _default_if_missing(verbose, False)
         backward_ready = _default_if_missing(backward_ready, False)
@@ -625,7 +626,7 @@ class TinygradBackend:
         batch_render: str,
         output_transform: object | None,
         save_raw_output: str | bool,
-        compute_input_output_distances: bool = False,
+        compute_input_output_distances: bool = True,
     ) -> Trace:
         """Construct an empty tinygrad trace.
 

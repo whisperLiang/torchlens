@@ -32,8 +32,15 @@ Two cross-backend honesty notes apply to every preview row above:
   no foreign tensors) to its preview automatically. Pass an explicit `backend=` to pin capture.
 - **Recurrence and depth.** JAX groups recurrent calls into multi-pass layers through the neutral
   grouper; the four single-pass previews (tf/mlx/tinygrad/paddle) do not group, and their traces
-  now store `recurrence_detection=False` to say so. All previews honor
-  `compute_input_output_distances=True` (input/output hop distances plus ancestor/descendant sets).
+  now store `recurrence_detection=False` to say so. `compute_input_output_distances` (input/output
+  hop distances plus ancestor/descendant sets) defaults to `True` on every backend — the same
+  torch `CaptureOptions` default — and `=False` disables the flood on every backend, torch and all
+  five previews alike.
+- **Preview replay validation scope.** Preview `validation_replay` replays each CAPTURED op from
+  its declared parents' saved payloads and perturbation-checks the dependency; unlike torch's
+  validator it does not independently re-run the model against a ground-truth output, so an op the
+  preview failed to wrap is outside the replay denominator entirely. Calls with no perturbable
+  tensor argument surface as `unverified`, never as a silent pass.
 
 ## Public Option Spine
 

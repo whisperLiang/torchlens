@@ -84,7 +84,7 @@ class TFBackend:
         save_code_context: bool = False,
         save_rng_states: bool = False,
         recurrence_detection: bool = True,
-        compute_input_output_distances: bool = False,
+        compute_input_output_distances: bool = True,
         verbose: bool = False,
         backward_ready: bool = False,
         name: str | None = None,
@@ -132,6 +132,11 @@ class TFBackend:
         save_code_context = default_if_missing(save_code_context, False)
         save_rng_states = default_if_missing(save_rng_states, False)
         recurrence_detection = default_if_missing(recurrence_detection, True)
+        # Torch-parity default: the depth flood runs unless explicitly disabled.
+        # This line was the one omission from this normalization block, so the
+        # public MISSING sentinel reached bool() truthy and the flood was
+        # unconditionally on with no off switch.
+        compute_input_output_distances = default_if_missing(compute_input_output_distances, True)
         verbose = default_if_missing(verbose, False)
         backward_ready = default_if_missing(backward_ready, False)
         name = default_if_missing(name, None)
@@ -379,7 +384,7 @@ class TFBackend:
         backward_ready: bool,
         name: str | None,
         module_filter: object | None,
-        compute_input_output_distances: bool = False,
+        compute_input_output_distances: bool = True,
         transform: object | None,
         raw_input: object | None,
         save_raw_input: str | bool,

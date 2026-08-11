@@ -143,23 +143,31 @@ def record(
         Fastlog recording, optionally with the model output.
     """
 
-    if backend is not None:
-        backend_spec = get_backend_spec(str(backend))
-        if not backend_spec.capabilities.fastlog:
+    # The capability table gates this surface for EVERY resolution, including
+    # the default torch path: flipping torch's fastlog flag False must refuse
+    # instead of silently running the Recorder anyway.
+    backend_spec = get_backend_spec(str(backend) if backend is not None else "torch")
+    if not backend_spec.capabilities.fastlog:
+        if str(backend_spec.name) == "torch":
             raise BackendUnsupportedError(
-                "tl.record() is torch-only in backend v1. Use tl.trace(..., backend='jax') "
-                "for the JAX full-save preview."
+                "tl.record() refuses: the resolved 'torch' backend declares "
+                "capabilities.fastlog=False, and the registered capability "
+                "table is the load-bearing gate for this surface."
             )
-        # The flag alone never opens the gate: the spec must bind the fastlog
-        # implementing surface, and this entry only runs the torch Recorder —
-        # a foreign implementation cannot be silently substituted with it.
-        fastlog_implementation = require_capability_implementation(backend_spec, "fastlog")
-        if fastlog_implementation is not Recorder:
-            raise BackendUnsupportedError(
-                f"tl.record() cannot dispatch backend {backend_spec.name!r}: its "
-                "registered fastlog implementation is not the torch one-shot "
-                "Recorder, and backend v1 record() has no non-torch dispatch path."
-            )
+        raise BackendUnsupportedError(
+            "tl.record() is torch-only in backend v1. Use tl.trace(..., backend='jax') "
+            "for the JAX full-save preview."
+        )
+    # The flag alone never opens the gate: the spec must bind the fastlog
+    # implementing surface, and this entry only runs the torch Recorder —
+    # a foreign implementation cannot be silently substituted with it.
+    fastlog_implementation = require_capability_implementation(backend_spec, "fastlog")
+    if fastlog_implementation is not Recorder:
+        raise BackendUnsupportedError(
+            f"tl.record() cannot dispatch backend {backend_spec.name!r}: its "
+            "registered fastlog implementation is not the torch one-shot "
+            "Recorder, and backend v1 record() has no non-torch dispatch path."
+        )
     model = unwrap_compiled_model(model)
     if storage is not None and streaming is not None:
         raise TypeError("Do not pass both `storage` and `streaming`.")

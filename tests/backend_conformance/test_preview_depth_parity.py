@@ -1,13 +1,15 @@
 """Preview parity for compute_input_output_distances (torch Step 4).
 
-Every preview backend must honor the same public opt-in surface torch honors —
-the canonical ``compute_input_output_distances`` AND the deprecated public
-``mark_layer_depths`` alias — with input/output hop distances plus
-ancestor/descendant lineage sets and the effective value stored on
-``trace.mark_layer_depths``. Distances are asserted EXACTLY, including
-min/max splits on branch/merge graphs, not just non-emptiness. Single-pass
-previews must also store the EFFECTIVE ``recurrence_detection`` (False — they
-never group), while JAX keeps its real grouping value.
+Every preview backend must honor the same public surface torch honors — the
+canonical ``compute_input_output_distances`` AND the deprecated public
+``mark_layer_depths`` alias — with the SAME default (torch's
+``CaptureOptions`` default is ``True``) and a working ``=False`` off switch
+on every backend, with input/output hop distances plus ancestor/descendant
+lineage sets and the effective value stored on ``trace.mark_layer_depths``.
+Distances are asserted EXACTLY, including min/max splits on branch/merge
+graphs, not just non-emptiness. Single-pass previews must also store the
+EFFECTIVE ``recurrence_detection`` (False — they never group), while JAX
+keeps its real grouping value.
 """
 
 from __future__ import annotations
@@ -52,6 +54,22 @@ def _assert_alias_matches(trace_fn) -> None:
     )
 
 
+def _assert_default_on_and_off_switch(trace_fn) -> None:
+    """Torch-parity default is True on every preview and =False disables it."""
+
+    default_trace = trace_fn({})
+    assert default_trace.mark_layer_depths is True
+    assert any(
+        getattr(op, "min_distance_from_input", None) is not None
+        for op in default_trace.layer_list
+    )
+    off_trace = trace_fn({"compute_input_output_distances": False})
+    assert off_trace.mark_layer_depths is False
+    assert all(
+        getattr(op, "min_distance_from_input", None) is None for op in off_trace.layer_list
+    )
+
+
 @pytest.mark.backend_paddle
 def test_paddle_depth_parity() -> None:
     paddle = pytest.importorskip("paddle")
@@ -74,8 +92,10 @@ def test_paddle_depth_parity() -> None:
     _assert_alias_matches(
         lambda: tl.trace(M(), paddle.ones([1, 4]), backend="paddle", mark_layer_depths=True)
     )
+    _assert_default_on_and_off_switch(
+        lambda kw: tl.trace(M(), paddle.ones([1, 4]), backend="paddle", **kw)
+    )
     base = tl.trace(M(), paddle.ones([1, 4]), backend="paddle")
-    assert base.mark_layer_depths is False
     assert base.recurrence_detection is False
 
 
@@ -103,6 +123,9 @@ def test_tinygrad_depth_parity() -> None:
             model, Tensor([1.0, -2.0, 3.0]), backend="tinygrad", mark_layer_depths=True
         )
     )
+    _assert_default_on_and_off_switch(
+        lambda kw: tl.trace(model, Tensor([1.0, -2.0, 3.0]), backend="tinygrad", **kw)
+    )
 
 
 @pytest.mark.backend_jax
@@ -126,6 +149,9 @@ def test_jax_depth_parity() -> None:
     assert _depth_by_prefix(trace, "add_1") == (3, 4)
     _assert_alias_matches(
         lambda: tl.trace(model, jnp.ones((1, 4)), backend="jax", mark_layer_depths=True)
+    )
+    _assert_default_on_and_off_switch(
+        lambda kw: tl.trace(model, jnp.ones((1, 4)), backend="jax", **kw)
     )
 
 
@@ -153,6 +179,11 @@ def test_mlx_depth_parity() -> None:
     assert _depth_by_prefix(trace, "linear_2") == (3, 3)
     _assert_alias_matches(
         lambda: tl.trace(M(), mx.ones((1, 4)), backend="mlx", mark_layer_depths=True)
+    )
+    # F1 regression: the public kwarg is threaded through the MLX dispatch, so
+    # =False actually disables the flood instead of being silently dropped.
+    _assert_default_on_and_off_switch(
+        lambda kw: tl.trace(M(), mx.ones((1, 4)), backend="mlx", **kw)
     )
 
 
@@ -200,4 +231,10 @@ def test_tf_depth_parity() -> None:
     assert _depth_by_prefix(trace, "relu_1") == (3, 3)
     _assert_alias_matches(
         lambda: tl.trace(model, inputs, backend="tf", mark_layer_depths=True)
+    )
+    # F2 regression: compute_input_output_distances joins tf's
+    # default_if_missing block, so the flood has a real off switch instead of
+    # a truthy MISSING sentinel keeping it unconditionally on.
+    _assert_default_on_and_off_switch(
+        lambda kw: tl.trace(model, inputs, backend="tf", **kw)
     )

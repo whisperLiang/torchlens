@@ -1065,12 +1065,14 @@ def test_jax_rejects_callback_effects() -> None:
     (
         ({"layers_to_save": ["tanh"]}, "full-save only"),
         ({"lookback": 1}, "full-save only"),
+        # Gated options refuse through the central capability gate, whose
+        # canonical message names the owning flag and the refused option.
         (
             {"intervene": tl.when(tl.func("tanh"), tl.zero_ablate())},
-            "intervene.*predicate-time concrete values",
+            "interventions=False.*intervene",
         ),
-        ({"halt": tl.func("tanh")}, "halt.*predicate-time concrete values"),
-        ({"save_grads": True}, "GradOptions"),
+        ({"halt": tl.func("tanh")}, "interventions=False.*halt"),
+        ({"save_grads": True}, "backward_capture=False.*save_grads"),
     ),
 )
 def test_jax_rejects_save_shaping_kwargs(kwargs: dict[str, Any], pattern: str) -> None:

@@ -1,11 +1,17 @@
 """Capability-table load-bearing conformance.
 
 The registered ``BackendCapabilities`` table must be the single authority for
-backend feature support: every flag must gate production behavior, and the
-gates must be fail-closed biconditionals — flag ``False`` rejects with the
-backend's policy message, and flag ``True`` admits ONLY through the spec's
-bound implementing surface. A bare boolean flip on a backend that registers
-no implementation must refuse typed, never silently admit-and-ignore.
+backend feature support, fail-closed in BOTH directions on EVERY backend:
+
+- Flag ``False`` refuses the corresponding public surface typed — torch
+  included, so an in-place flip of torch's table refuses ``intervene=``,
+  ``random_seed=``, ``backward_ready=``, and ``tl.record()`` instead of
+  silently running them.
+- Flag ``True`` on a preview whose declarative policy rejects the option is a
+  self-contradictory registration and refuses
+  ``BackendCapabilityConformanceError`` whether or not an implementation
+  factory is bound: a binding the backend's capture path never dispatches
+  must not admit the option (it would be silently ignored — the sol probe).
 """
 
 from __future__ import annotations
@@ -112,8 +118,9 @@ def _spec_with_flag(name: str, flag: str, *, implementation: bool) -> Any:
 
 @pytest.mark.parametrize("name", _PREVIEW_NAMES)
 def test_extra_kwarg_gates_are_fail_closed_biconditional(name: str) -> None:
-    """intervene/storage/streaming: False rejects; a bare True flip refuses typed;
-    True WITH a bound implementation admits."""
+    """intervene/storage/streaming: False rejects; a True flip refuses typed
+    with OR without a binding — the preview capture path never dispatches it,
+    so a bound-but-unconsumed implementation must not admit the option."""
 
     spec = get_backend_spec(name)
     policy = _EXTRA_POLICIES[name]
@@ -127,12 +134,14 @@ def test_extra_kwarg_gates_are_fail_closed_biconditional(name: str) -> None:
         with pytest.raises(BackendCapabilityConformanceError):
             reject_extra_trace_kwargs({option: sentinel}, policy, spec=bare_flip)
         implemented = _spec_with_flag(name, flag, implementation=True)
-        reject_extra_trace_kwargs({option: sentinel}, policy, spec=implemented)
+        with pytest.raises(BackendCapabilityConformanceError, match="never\\s+dispatches"):
+            reject_extra_trace_kwargs({option: sentinel}, policy, spec=implemented)
 
 
 @pytest.mark.parametrize("name", _PREVIEW_NAMES)
 def test_option_policy_gates_are_fail_closed_biconditional(name: str) -> None:
-    """save_grads/backward_ready/save_rng_states follow the flag AND the binding."""
+    """save_grads/backward_ready/save_rng_states refuse in every flag state:
+    False via the policy message, True via the undispatched-binding refusal."""
 
     spec = get_backend_spec(name)
     policy = _OPTION_POLICIES[name]
@@ -149,7 +158,8 @@ def test_option_policy_gates_are_fail_closed_biconditional(name: str) -> None:
         with pytest.raises(BackendCapabilityConformanceError):
             reject_unsupported_trace_options(options, policy, spec=bare_flip)
         implemented = _spec_with_flag(name, flag, implementation=True)
-        reject_unsupported_trace_options(options, policy, spec=implemented)
+        with pytest.raises(BackendCapabilityConformanceError, match="never\\s+dispatches"):
+            reject_unsupported_trace_options(options, policy, spec=implemented)
 
 
 def test_registration_refuses_bare_capability_flips() -> None:
@@ -275,11 +285,15 @@ def test_backward_accessor_guard_tf_has_no_derived_redirect() -> None:
         raise_if_no_backward_capture(_StubTrace("tf"), plural_subject="backward_passes")
 
 
-def test_backward_accessor_guard_passes_torch_and_unknown() -> None:
-    """torch and unregistered backends never trip the guard."""
+def test_backward_accessor_guard_torch_passes_unknown_refuses() -> None:
+    """torch passes; an unregistered backend refuses typed instead of
+    restoring the silently-empty accessor behavior the guard removed."""
 
     raise_if_no_backward_capture(_StubTrace("torch"), plural_subject="backward_passes")
-    raise_if_no_backward_capture(_StubTrace("not-a-backend"), plural_subject="backward_passes")
+    with pytest.raises(ValueError, match="not a registered backend"):
+        raise_if_no_backward_capture(
+            _StubTrace("not-a-backend"), plural_subject="backward_passes"
+        )
 
 
 def test_backward_accessors_raise_for_all_non_backward_backends() -> None:
@@ -302,6 +316,72 @@ def test_backward_accessors_raise_for_all_non_backward_backends() -> None:
         _ = trace.layer_list[0].grads
     finally:
         trace.backend = "torch"
+        tl.release_model(model)
+
+
+@pytest.mark.parametrize(
+    ("flag", "trace_kwargs"),
+    [
+        ("interventions", {"intervene": "PREDICATE"}),
+        ("rng_replay", {"random_seed": 0}),
+        ("rng_replay", {"save_rng_states": True}),
+        ("backward_capture", {"backward_ready": True}),
+        ("backward_capture", {"save_grads": "all"}),
+        ("streaming", {"storage": "STORAGE"}),
+    ],
+)
+def test_torch_flag_false_refuses_the_surface(flag: str, trace_kwargs: dict) -> None:
+    """Sol probe (reverse direction): flipping a torch capability flag False in
+    place must refuse the corresponding trace() surface typed — the table is
+    load-bearing on torch too, not only on previews."""
+
+    model = nn.Linear(2, 2)
+    inputs = torch.randn(1, 2)
+    resolved_kwargs: dict[str, Any] = {}
+    for key, value in trace_kwargs.items():
+        if value == "PREDICATE":
+            resolved_kwargs[key] = tl.when(tl.func("linear"), tl.zero_ablate())
+        elif value == "STORAGE":
+            resolved_kwargs[key] = object()
+        else:
+            resolved_kwargs[key] = value
+    spec = get_backend_spec("torch")
+    object.__setattr__(spec.capabilities, flag, False)
+    try:
+        with pytest.raises(BackendUnsupportedError, match=f"{flag}=False"):
+            tl.trace(model, inputs, **resolved_kwargs)
+    finally:
+        object.__setattr__(spec.capabilities, flag, True)
+        tl.release_model(model)
+
+
+def test_torch_flag_false_refuses_capture_options_spelling() -> None:
+    """The capture=CaptureOptions(...) spelling is gated by the same table."""
+
+    model = nn.Linear(2, 2)
+    inputs = torch.randn(1, 2)
+    spec = get_backend_spec("torch")
+    object.__setattr__(spec.capabilities, "backward_capture", False)
+    try:
+        with pytest.raises(BackendUnsupportedError, match="backward_capture=False"):
+            tl.trace(model, inputs, capture=tl.options.CaptureOptions(backward_ready=True))
+    finally:
+        object.__setattr__(spec.capabilities, "backward_capture", True)
+        tl.release_model(model)
+
+
+def test_torch_fastlog_flag_false_refuses_record() -> None:
+    """tl.record() with no backend argument still consults torch's fastlog flag."""
+
+    model = nn.Linear(2, 2)
+    inputs = torch.randn(1, 2)
+    spec = get_backend_spec("torch")
+    object.__setattr__(spec.capabilities, "fastlog", False)
+    try:
+        with pytest.raises(BackendUnsupportedError, match="fastlog=False"):
+            tl.record(model, inputs, save=tl.func("linear"))
+    finally:
+        object.__setattr__(spec.capabilities, "fastlog", True)
         tl.release_model(model)
 
 

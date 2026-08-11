@@ -226,7 +226,7 @@ def test_mlx_intervention_ready_raises() -> None:
 def test_mlx_save_grads_raises() -> None:
     """MLX capture rejects backward-gradient capture explicitly."""
 
-    with pytest.raises(BackendUnsupportedError, match="backward capture"):
+    with pytest.raises(BackendUnsupportedError, match="backward.capture"):
         tl.trace(TinyMLP(), _tiny_mlp_input(), save_grads=True)
 
 

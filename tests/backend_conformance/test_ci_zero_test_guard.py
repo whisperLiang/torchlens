@@ -99,3 +99,23 @@ def test_guard_end_to_end_importorskip_simulation(tmp_path: Path) -> None:
     assert pytest_run.returncode == 0, pytest_run.stdout + pytest_run.stderr
     result = _run_guard(junit, 1)
     assert result.returncode == 1
+
+
+def test_nightly_legs_declare_meaningful_executed_floors() -> None:
+    """Every preview matrix leg carries an executed-test floor well above 1.
+
+    A floor of 1 lets a 49-of-50 skip stay green, adding nothing beyond the
+    import sentinel; each leg must pin a floor sized to its real suite.
+    """
+
+    import re
+
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text(
+        encoding="utf-8"
+    )
+    backends = re.findall(r"- backend: (\w+)", workflow)
+    floors = [int(value) for value in re.findall(r"executed_floor: (\d+)", workflow)]
+    assert sorted(backends) == ["jax", "mlx", "paddle", "tf", "tinygrad"]
+    assert len(floors) == len(backends), "every leg must declare executed_floor"
+    assert all(floor >= 10 for floor in floors), floors
+    assert '"${{ matrix.executed_floor }}"' in workflow

@@ -380,8 +380,9 @@ class JAXBackend:
         save_code_context = _default_if_missing(save_code_context, False)
         save_rng_states = _default_if_missing(save_rng_states, False)
         recurrence_detection = _default_if_missing(recurrence_detection, True)
+        # Torch-parity default: the depth flood runs unless explicitly disabled.
         compute_input_output_distances = _default_if_missing(
-            compute_input_output_distances, False
+            compute_input_output_distances, True
         )
         verbose = _default_if_missing(verbose, False)
         backward_ready = _default_if_missing(backward_ready, False)
@@ -794,7 +795,7 @@ class JAXBackend:
         batch_render: str,
         output_transform: object | None,
         save_raw_output: str | bool,
-        compute_input_output_distances: bool = False,
+        compute_input_output_distances: bool = True,
     ) -> Trace:
         """Construct an empty JAX trace.
 
@@ -2113,9 +2114,11 @@ class JAXBackend:
             trace.module_identity_mode = "pytree_module"
             self._attach_pytree_module_logs(trace, module_tree)
         trace._tracing_finished = True
-        # The depth flood resolves ops through Trace.__getitem__, whose
-        # finished-mode lookup accepts both raw and final labels; run it after
-        # the finished flag flips so relabeled child edges resolve.
+        # The depth flood deliberately resolves ops through its own explicit
+        # label index, NOT Trace.__getitem__ (finished-mode lookup returns
+        # Layer objects, not the ops the flood must mutate); running it after
+        # the finished flag flips is still required so relabeled child edges
+        # are present on the ops the index collects.
         trace.mark_layer_depths = bool(getattr(trace, "mark_layer_depths", False))
         if trace.mark_layer_depths:
             from .._finalize import compute_preview_input_output_distances

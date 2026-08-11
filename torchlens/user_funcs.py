@@ -48,7 +48,12 @@ from .backends import (
     get_backend_spec,
     resolve_backend_spec,
 )
-from .backends._options import MLX_EXTRA_KWARG_POLICY, reject_extra_trace_kwargs
+from .backends._options import (
+    MLX_EXTRA_KWARG_POLICY,
+    TRACE_OPTION_CAPABILITY_GATES,
+    reject_extra_trace_kwargs,
+    resolve_public_depth_alias,
+)
 from .backends._selective_save import apply_static_label_save_policy, reject_selector_outside_kinds
 from .backends.torch._tl import get_tensor_label
 from .bridge import hf as _hf_bridge
@@ -194,6 +199,7 @@ def _trace_mlx_model(
     save_rng_states: bool | MissingType,
     random_seed: int | None | MissingType,
     num_context_lines: int | MissingType,
+    compute_input_output_distances: bool | MissingType,
     recurrence_detection: bool | MissingType,
     intervention_ready: bool | MissingType,
     hooks: Any | None | MissingType,
@@ -245,7 +251,7 @@ def _trace_mlx_model(
         random_seed=random_seed,
         source_context_lines=MISSING,
         num_context_lines=num_context_lines,
-        compute_input_output_distances=MISSING,
+        compute_input_output_distances=compute_input_output_distances,
         mark_layer_depths=MISSING,
         detach_saved_activations=MISSING,
         recurrence_detection=recurrence_detection,
@@ -353,6 +359,9 @@ def _trace_mlx_model_from_public_kwargs(**kwargs: Any) -> Trace:
         Captured MLX trace.
     """
 
+    # Idempotent when the registry entry already resolved it; load-bearing for
+    # direct/autoroute callers so the deprecated alias is honored, not dropped.
+    resolve_public_depth_alias(kwargs)
     reject_extra_trace_kwargs(
         {
             "lookback": kwargs["lookback"],
@@ -379,7 +388,6 @@ def _trace_mlx_model_from_public_kwargs(**kwargs: Any) -> Trace:
             "save_mode": kwargs.get("save_mode", MISSING),
             "capture_tensor_grad_hooks": kwargs.get("capture_tensor_grad_hooks", MISSING),
             "save_raw_gradients": kwargs.get("save_raw_gradients", MISSING),
-            "mark_layer_depths": kwargs.get("mark_layer_depths", MISSING),
             "source_context_lines": kwargs.get("source_context_lines", MISSING),
             "unwrap_when_done": kwargs.get("unwrap_when_done", MISSING),
             "reconstruction_ready": kwargs.get("reconstruction_ready", MISSING),
@@ -434,6 +442,7 @@ def _trace_mlx_model_from_public_kwargs(**kwargs: Any) -> Trace:
         save_rng_states=kwargs["save_rng_states"],
         random_seed=kwargs["random_seed"],
         num_context_lines=kwargs["num_context_lines"],
+        compute_input_output_distances=kwargs["compute_input_output_distances"],
         recurrence_detection=kwargs["recurrence_detection"],
         intervention_ready=kwargs["intervention_ready"],
         hooks=kwargs["hooks"],
@@ -1444,6 +1453,65 @@ def _filter_trace_kwargs_for_backend(
         public_trace_kwargs.pop(option_name, None)
 
 
+def _capability_option_requested(value: Any) -> bool:
+    """Return whether a gated public option value actually requests behavior.
+
+    ``MISSING``, ``None``, and explicit ``False`` are all "off"; identity
+    checks avoid calling ``bool()`` on predicate/selector values.
+    """
+
+    return not (value is MISSING or value is None or value is False)
+
+
+def _enforce_capability_option_gates(
+    public_trace_kwargs: dict[str, Any],
+    resolved_spec: BackendSpec,
+) -> None:
+    """Refuse gated public options whose owning capability flag is ``False``.
+
+    The registered capability table is the load-bearing authority in BOTH
+    directions for EVERY backend, torch included: a flag flipped to ``False``
+    must refuse the corresponding public surface typed instead of silently
+    running (or silently ignoring) it. Options settable through
+    ``capture=CaptureOptions(...)`` are gated on their explicit fields too.
+
+    Parameters
+    ----------
+    public_trace_kwargs:
+        Public trace keyword bundle about to be dispatched.
+    resolved_spec:
+        Backend spec selected for this trace call.
+
+    Returns
+    -------
+    None
+        Returns when every requested gated option's flag is ``True``.
+    """
+
+    capture_value = public_trace_kwargs.get("capture")
+    for option_name, flag in TRACE_OPTION_CAPABILITY_GATES.items():
+        if getattr(resolved_spec.capabilities, flag):
+            continue
+        requested = _capability_option_requested(
+            public_trace_kwargs.get(option_name, MISSING)
+        )
+        if (
+            not requested
+            and isinstance(capture_value, CaptureOptions)
+            and hasattr(capture_value, option_name)
+            and capture_value.is_field_explicit(option_name)
+        ):
+            requested = _capability_option_requested(getattr(capture_value, option_name))
+        if requested:
+            raise BackendUnsupportedError(
+                f"backend {str(resolved_spec.name)!r} declares capability "
+                f"{flag}=False, so explicit {option_name} is refused instead of "
+                "silently ignored or run unsupported. Use a backend whose "
+                f"registered capability table declares {flag}=True (e.g. "
+                "backend='torch')."
+            )
+
+
 def _reject_unsupported_torch_trace_option_values(capture_options: CaptureOptions) -> None:
     """Reject explicit torch trace-option values that torch does not implement.
 
@@ -1869,6 +1937,7 @@ def trace(
         backend, model, input_args, input_kwargs
     )
     _filter_trace_kwargs_for_backend(public_trace_kwargs, resolved_spec)
+    _enforce_capability_option_gates(public_trace_kwargs, resolved_spec)
     return cast("Trace", resolved_spec.capture_trace(**public_trace_kwargs))
 
 
