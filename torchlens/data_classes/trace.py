@@ -1109,6 +1109,12 @@ class Trace(
         "backend_runtime_config": FieldPolicy.KEEP,
         "backend_runtime_device_summary": FieldPolicy.KEEP,
         "backend_runtime_version": FieldPolicy.KEEP,
+        # Provenance marker for traces cooked from a Recording: postprocess
+        # runs exhaustive-style (capture_mode stays "exhaustive" for behavior
+        # compatibility), but the marker records the true origin so gates and
+        # diagnostics never mistake a cooked projection for a live exhaustive
+        # capture. Session-only; not a portable fact.
+        "_cooked_from": FieldPolicy.DROP,
         "_paddle_capture_depth": FieldPolicy.DROP,
         "_paddle_op_captures": FieldPolicy.DROP,
         "_paddle_alias_annotations": FieldPolicy.DROP,

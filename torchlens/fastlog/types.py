@@ -750,7 +750,12 @@ class Recording(CapturedRun):
             raise RuntimeError("Recording.to_trace() core has no replay event facts.")
 
         trace = Trace(model_class_name="RecordedModel")
+        # capture_mode drives exhaustive-style postprocess behavior for the
+        # cooked projection; the honest provenance fact is the marker below,
+        # which records that this Trace was cooked from a Recording rather
+        # than captured live.
         trace.capture_mode = "exhaustive"
+        trace._cooked_from = "recording"
         trace._predicate_save_options = RecordingOptions()
         trace._replay_arg_version_data_complete = False
         # Hand postprocess a STRUCTURAL COPY, never this frozen Recording's own
