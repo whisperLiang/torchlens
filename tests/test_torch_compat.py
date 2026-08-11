@@ -372,6 +372,9 @@ def test_torch_capability_snapshot_contract() -> None:
         # structural name matching. Build-dependent, so mirror the live values.
         "HAS_DYNAMO_IS_COMPILING": tc.HAS_DYNAMO_IS_COMPILING,
         "HAS_TRACING_TENSOR_TYPES": tc.HAS_TRACING_TENSOR_TYPES,
+        # fp8 dtypes exist on every torch build we support, but the set grew across
+        # 2.x, so mirror the live value rather than hardcoding True.
+        "HAS_FP8_DTYPES": tc.HAS_FP8_DTYPES,
         "HAS_GENERATOR_CLONE_STATE": hasattr(torch.Generator, "clone_state"),
         "HAS_GENERATOR_GRAPHSAFE_GET_STATE": hasattr(torch.Generator, "graphsafe_get_state"),
         "HAS_GENERATOR_GRAPHSAFE_SET_STATE": hasattr(torch.Generator, "graphsafe_set_state"),

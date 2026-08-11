@@ -27,6 +27,7 @@ EXPECTED_COMPAT_ROW_KEYS = {
     "deepspeed",
     "device_context_factory",
     "device_mesh",
+    "fp8_dtype",
     "distributed_data_parallel",
     "dtensor",
     "fsdp",

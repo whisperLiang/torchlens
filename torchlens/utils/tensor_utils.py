@@ -25,7 +25,7 @@ from typing import Any, Callable, Iterable, Iterator, Literal, Optional, cast
 
 import torch
 
-from ._torch_compat import get_functorch_wrapped_tensor_checker
+from ._torch_compat import get_fp8_dtypes, get_functorch_wrapped_tensor_checker
 
 from ..backends.torch._tl import get_tensor_label, set_tensor_label
 
@@ -127,6 +127,92 @@ def _tolerances_for_dtype(dtype: torch.dtype) -> tuple[float, float]:
         dtype,
         (REL_FLOATING_POINT_TOLERANCE, MAX_FLOATING_POINT_TOLERANCE),
     )
+
+
+def _is_fp8_tensor(tensor: torch.Tensor) -> bool:
+    """Return True when ``tensor`` has one of this build's fp8 dtypes.
+
+    Parameters
+    ----------
+    tensor:
+        Tensor to classify.
+
+    Returns
+    -------
+    bool
+        True for ``float8_*`` payloads, False on builds with no fp8 dtypes.
+    """
+
+    fp8_dtypes = get_fp8_dtypes()
+    return bool(fp8_dtypes) and tensor.dtype in fp8_dtypes
+
+
+def fp8_safe_comparison_pair(
+    tensor_a: torch.Tensor, tensor_b: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Widen an fp8 tensor pair to float32 so comparison kernels exist.
+
+    fp8 payloads report ``dtype.is_floating_point == True`` yet torch ships no
+    ``isinf`` / ``nan_to_num`` / ``allclose`` / reduction kernels for them, so every
+    numeric comparison helper raised a raw ``NotImplementedError: "isinf" not
+    implemented for 'Float8_e4m3fn'`` out of validation replay.
+
+    Widening is EXACT, not a relaxation: all 256 bit patterns of every fp8 variant
+    torch exposes round-trip bit-identically through float32, and NaN patterns stay
+    NaN (verified exhaustively per variant). The comparison that follows is
+    therefore the same comparison native fp8 kernels would perform, so the
+    validation tripwire keeps its full strength. Callers deliberately keep their
+    float32-grade tolerances afterwards rather than fp8's coarse 2^-3 / 2^-2
+    epsilon, which would let a genuine one-ULP fp8 difference read as equal.
+
+    Parameters
+    ----------
+    tensor_a:
+        First tensor of the pair.
+    tensor_b:
+        Second tensor of the pair.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        float32 copies when the pair is fp8, otherwise the inputs unchanged.
+
+    Notes
+    -----
+    Callers must have already established that both tensors share a dtype, and must
+    call this inside ``pause_logging()`` -- ``.to()`` is a decorated method.
+    """
+
+    if not _is_fp8_tensor(tensor_a):
+        return tensor_a, tensor_b
+    return tensor_a.to(torch.float32), tensor_b.to(torch.float32)
+
+
+def fp8_widen_for_numeric_ops(tensor: torch.Tensor) -> torch.Tensor:
+    """Return a float32 view of an fp8 tensor, or ``tensor`` unchanged.
+
+    The single-tensor form of :func:`fp8_safe_comparison_pair`, for predicates such
+    as ``torch.isfinite`` that torch does not implement for fp8. The widening is
+    exact (see that function), so the predicate's verdict is unchanged.
+
+    Parameters
+    ----------
+    tensor:
+        Tensor to widen when its dtype is fp8.
+
+    Returns
+    -------
+    torch.Tensor
+        float32 copy for fp8 payloads, otherwise the input unchanged.
+
+    Notes
+    -----
+    Call inside ``pause_logging()`` -- ``.to()`` is a decorated method.
+    """
+
+    if not _is_fp8_tensor(tensor):
+        return tensor
+    return tensor.to(torch.float32)
 
 
 def tensor_all_nan(tensor: torch.Tensor) -> bool:
@@ -252,6 +338,13 @@ def tensor_nanequal(
         if tensor_a.layout == torch.strided and tensor_a.dtype.is_floating_point:
             if torch.equal(tensor_a, tensor_b):
                 return True
+
+        # fp8 has no isinf/nan_to_num/allclose kernel, so every line below used to
+        # raise a raw NotImplementedError out of validation replay. The exact-equality
+        # fast path above only hides that while the tensors match bit-for-bit, and one
+        # NaN element defeats it (torch.equal is IEEE, so NaN != NaN). The widening is
+        # exact; see fp8_safe_comparison_pair.
+        tensor_a, tensor_b = fp8_safe_comparison_pair(tensor_a, tensor_b)
 
         # Inf positions must match exactly (inf != -inf).
         if not torch.equal(tensor_a.isinf(), tensor_b.isinf()):

@@ -372,9 +372,7 @@ class SaveBudget:
             enforced for them.
         """
 
-        return tuple(
-            key for key, ledger in self.ledgers.items() if not ledger.measured
-        )
+        return tuple(key for key, ledger in self.ledgers.items() if not ledger.measured)
 
     def _message(self, label: str, device: torch.device, ledger: _DeviceLedger) -> str:
         """Build the refusal message.

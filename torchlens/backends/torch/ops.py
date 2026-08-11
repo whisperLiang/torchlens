@@ -59,6 +59,7 @@ from ...utils.introspection import (
 )
 from ...utils.display import _timed_phase
 from ...utils.tensor_utils import (
+    fp8_widen_for_numeric_ops,
     get_memory_amount_from_metadata,
     is_functorch_wrapped_tensor,
     safe_copy,
@@ -6335,8 +6336,14 @@ def _raise_if_nonfinite_requested(self: Any, tensor: torch.Tensor, entry: Any) -
         return
     try:
         with pause_logging():
+            # fp8 has no ``isfinite`` kernel, and ``NotImplementedError`` is a
+            # ``RuntimeError`` subclass -- so without the exact float32 widening this
+            # tripwire SILENTLY declined to check every fp8 activation. Widening keeps
+            # the verdict identical (see fp8_widen_for_numeric_ops).
             has_nonfinite = bool(
-                (~torch.isfinite(safe_copy(tensor, detach_tensor=True))).any().item()
+                (~torch.isfinite(fp8_widen_for_numeric_ops(safe_copy(tensor, detach_tensor=True))))
+                .any()
+                .item()
             )
     except (RuntimeError, TypeError):
         return

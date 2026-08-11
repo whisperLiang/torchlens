@@ -6,6 +6,7 @@ import ast
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 import inspect
+import itertools
 import multiprocessing
 import textwrap
 import threading
@@ -18,6 +19,7 @@ from torchlens._distributed import DistributedFinding, detect_distributed_state
 from torchlens._robustness import _iter_tensors
 from torchlens.utils._torch_compat import (
     get_dynamo_optimized_module_type,
+    get_fp8_dtypes,
     get_fx_graph_module_type,
     get_torch_capability_snapshot,
 )
@@ -202,6 +204,7 @@ def report(model: nn.Module, input: Any) -> CompatReport:  # noqa: A002
         _lightning_row(model),
         _functorch_row(model),
         _quantized_row(model, input),
+        _fp8_dtype_row(model, input),
         _device_context_row(),
         _single_thread_row(),
     )
@@ -1077,6 +1080,88 @@ def _quantized_row(model: nn.Module, input_value: Any) -> CompatRow:
         detected,
         details,
         "Use a float reference model for bugs involving exact out validation." if detected else "",
+    )
+
+
+def _fp8_dtype_row(model: nn.Module, input_value: Any) -> CompatRow:
+    """Build the fp8 (``float8_*``) dtype row.
+
+    Parameters
+    ----------
+    model:
+        Model to inspect.
+    input_value:
+        Input tree to inspect.
+
+    Returns
+    -------
+    CompatRow
+        Report row.
+
+    Notes
+    -----
+    Reports parameters, buffers, and inputs only -- the same pre-capture surface every
+    other row inspects. An fp8 tensor produced *inside* the forward (the common case,
+    since fp8 is usually a cast of a float32 activation) cannot be seen from here, so
+    the row's ``detected=False`` never claims a capture contains no fp8, and the
+    passing detail says which scopes were checked.
+    """
+
+    fp8_dtypes = get_fp8_dtypes(force_probe=True)
+    if not fp8_dtypes:
+        return CompatRow(
+            "fp8_dtype",
+            "fp8 (float8_*) tensors",
+            "pass",
+            "ok",
+            False,
+            "This torch build exposes no float8 dtypes.",
+        )
+    fp8_input = any(tensor.dtype in fp8_dtypes for tensor in _iter_tensors(input_value))
+    inspected_state = True
+    fp8_state = False
+    try:
+        fp8_state = any(
+            tensor.dtype in fp8_dtypes
+            for tensor in itertools.chain(model.parameters(), model.buffers())
+        )
+    except Exception:  # noqa: BLE001 - a model may override enumeration and raise
+        inspected_state = False
+    detected = fp8_input or fp8_state
+    if not detected:
+        # Same fail-open-honestly contract as the tied-parameters row: say that the
+        # scope could not be read rather than reporting a clean pass over it.
+        unread = (
+            ""
+            if inspected_state
+            else " Parameter/buffer enumeration failed, so model state was NOT inspected."
+        )
+        return CompatRow(
+            "fp8_dtype",
+            "fp8 (float8_*) tensors",
+            "pass" if inspected_state else "not_tested",
+            "ok" if inspected_state else "info",
+            False,
+            "No float8 parameters, buffers, or inputs detected (an fp8 cast performed "
+            f"inside the forward is not visible before capture).{unread}",
+        )
+    where = " and ".join(
+        label for label, hit in (("inputs", fp8_input), ("parameters/buffers", fp8_state)) if hit
+    )
+    return CompatRow(
+        "fp8_dtype",
+        "fp8 (float8_*) tensors",
+        "scope",
+        "warning",
+        True,
+        f"float8 tensors detected in {where}. Capture, metadata, and validation replay "
+        "handle them: torch implements no isinf/nan_to_num/allclose/isfinite/reduction "
+        "kernels for fp8, so TorchLens widens those comparisons to float32, which is "
+        "exact for every fp8 bit pattern. Saving an fp8 activation to a portable "
+        "`.tlspec` is refused with a typed error, because safetensors has no fp8 "
+        "transport this release.",
+        "Nothing to change for in-RAM analysis. To persist an fp8 activation, cast it "
+        "to float32/bfloat16 before the save, or save at metadata level.",
     )
 
 

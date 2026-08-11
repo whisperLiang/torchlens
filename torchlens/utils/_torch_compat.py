@@ -73,6 +73,7 @@ __all__ = [
     "HAS_DEVICE_MESH",
     "HAS_DTENSOR",
     "HAS_DYNAMO_IS_COMPILING",
+    "HAS_FP8_DTYPES",
     "HAS_PIPELINING",
     "HAS_TRACING_TENSOR_TYPES",
     "HAS_FUNCTORCH_APIS",
@@ -111,6 +112,7 @@ __all__ = [
     "get_device_mesh_type",
     "get_dtensor_type",
     "get_pipelining_module_types",
+    "get_fp8_dtypes",
     "get_tracing_tensor_types",
     "dynamo_is_compiling",
     "get_dynamo_optimized_module_type",
@@ -1122,6 +1124,9 @@ _DYNAMO_IS_COMPILING_PROBED: bool = False
 HAS_TRACING_TENSOR_TYPES: bool = False
 _TRACING_TENSOR_TYPES: tuple[type[Any], ...] = ()
 _TRACING_TENSOR_TYPES_PROBED: bool = False
+HAS_FP8_DTYPES: bool = False
+_FP8_DTYPES: frozenset[Any] = frozenset()
+_FP8_DTYPES_PROBED: bool = False
 
 _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_AUTOCAST_DEVICE_TYPE_ARG",
@@ -1147,6 +1152,7 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_PIPELINING",
     "HAS_DYNAMO_IS_COMPILING",
     "HAS_TRACING_TENSOR_TYPES",
+    "HAS_FP8_DTYPES",
     "HAS_GENERATOR_CLONE_STATE",
     "HAS_GENERATOR_GRAPHSAFE_GET_STATE",
     "HAS_GENERATOR_GRAPHSAFE_SET_STATE",
@@ -1222,6 +1228,7 @@ def get_torch_capability_snapshot() -> TorchCapabilitySnapshot:
     get_device_mesh_type(force_probe=True)
     get_pipelining_module_types(force_probe=True)
     get_tracing_tensor_types(force_probe=True)
+    get_fp8_dtypes(force_probe=True)
     dynamo_is_compiling()
     _ensure_dynamo_orig_callable_marker_probed()
     get_dynamo_explain()
@@ -1801,6 +1808,64 @@ def get_tracing_tensor_types(*, force_probe: bool = False) -> tuple[type[Any], .
         )
         return ()
     return _TRACING_TENSOR_TYPES
+
+
+# Narrow-width float dtypes whose elementwise kernel coverage is incomplete.
+# Every one of these is ``dtype.is_floating_point == True``, so code that branches
+# on that flag reaches ops torch cannot run for them: on torch 2.13 CPU, ``isinf``,
+# ``nan_to_num``, ``allclose``, and every reduction raise ``NotImplementedError``
+# while ``isnan``, ``torch.equal``, ``abs``, and ``.float()`` work. Probed by name
+# off ``torch`` (no submodule import, no version parsing) because the set grew over
+# 2.x: e4m3fn/e5m2 arrived first, the "fnuz" variants next, e8m0fnu latest.
+_NARROW_FLOAT_DTYPE_NAMES: tuple[str, ...] = (
+    "float8_e4m3fn",
+    "float8_e4m3fnuz",
+    "float8_e5m2",
+    "float8_e5m2fnuz",
+    "float8_e8m0fnu",
+)
+
+
+def get_fp8_dtypes(*, force_probe: bool = False) -> frozenset[Any]:
+    """Return the fp8 dtypes this torch build exposes.
+
+    Parameters
+    ----------
+    force_probe:
+        Accepted for symmetry with the other capability probes. The fp8 dtypes are
+        plain ``torch`` attributes, so there is never a module to import and the
+        probe is unconditional.
+
+    Returns
+    -------
+    frozenset[Any]
+        ``torch.dtype`` objects for the fp8 variants present, empty on a build with
+        none. An empty set degrades every caller to its pre-fp8 behavior.
+
+    Notes
+    -----
+    Probed once and cached; membership is checked per comparison on the validation
+    path, so it must stay a hash lookup.
+    """
+
+    global HAS_FP8_DTYPES, _FP8_DTYPES, _FP8_DTYPES_PROBED
+
+    del force_probe  # No import is required; the probe is always safe to run.
+    if not _FP8_DTYPES_PROBED:
+        found = []
+        for name in _NARROW_FLOAT_DTYPE_NAMES:
+            candidate = getattr(torch, name, None)
+            if isinstance(candidate, torch.dtype):
+                found.append(candidate)
+        _FP8_DTYPES = frozenset(found)
+        HAS_FP8_DTYPES = bool(_FP8_DTYPES)
+        _FP8_DTYPES_PROBED = True
+    if not _FP8_DTYPES:
+        mark_torch_capability_missing(
+            "HAS_FP8_DTYPES",
+            "fp8 dtypes are absent from this torch build; no fp8 comparison upcast is needed",
+        )
+    return _FP8_DTYPES
 
 
 def get_dynamo_optimized_module_type(*, force_probe: bool = False) -> type[Any] | None:

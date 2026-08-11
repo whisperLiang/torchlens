@@ -325,9 +325,7 @@ def _classify_tensor(value: Any) -> tuple[str | None, bool]:
     # rather than a substring: "dtensor" is a substring of "shardedtensor"
     # ("shar-dtensor"), so a substring test here reported ShardedTensor state as
     # DTensor state. Both refuse capture, but the reported variant must be true.
-    if "shardedtensor" in type_name or (
-        "distributed" in module_name and "shard" in module_name
-    ):
+    if "shardedtensor" in type_name or ("distributed" in module_name and "shard" in module_name):
         return "sharded", False
     if type_name == "dtensor" and "distributed" in module_name:
         return "dtensor", False
@@ -406,9 +404,7 @@ def _is_device_mesh(value: Any) -> tuple[bool, bool]:
     if mesh_type is not None and isinstance(value, mesh_type):
         return True, True
     value_type = type(value)
-    if value_type.__name__ == "DeviceMesh" and "distributed" in (
-        value_type.__module__ or ""
-    ):
+    if value_type.__name__ == "DeviceMesh" and "distributed" in (value_type.__module__ or ""):
         return True, False
     return False, True
 
