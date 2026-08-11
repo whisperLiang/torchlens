@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 from torch import nn
 
@@ -59,9 +60,16 @@ def test_trace_finders_return_matching_modules() -> None:
 
 
 def test_trace_finders_use_available_now_semantics() -> None:
-    """Trace finders skip declared facets whose payloads were not captured."""
+    """Trace finders skip declared facets whose payloads were not captured.
 
-    log = trace_fn(_FinderModel(), torch.randn(2, 3, 8), save=tl.func("relu"))
+    The model has no relu, which is the point: the capture deliberately saves
+    nothing so every declared facet is unavailable. That also trips the
+    zero-match save-selector warning, which is asserted here rather than
+    silenced.
+    """
+
+    with pytest.warns(UserWarning, match="matched zero sites"):
+        log = trace_fn(_FinderModel(), torch.randn(2, 3, 8), save=tl.func("relu"))
 
     assert list(log.attention_blocks()) == []
     assert list(log.modules_with_facet("normalized")) == []
