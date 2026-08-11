@@ -368,6 +368,35 @@ _BUILD_STATE_ATTR_MAP: dict[str, str] = {
     "_input_tensor_addresses": "input_tensor_addresses",
 }
 _BUILD_STATE_ATTR_MAP_GET = _BUILD_STATE_ATTR_MAP.get
+
+# Plausible-but-absent attribute names, mapped to the fields that answer them. A
+# frontier-scale user's first question is "how big is this capture?", and the
+# singular ``activation_memory`` spelling (which IS an ``Op`` field, meaning that
+# one op's payload bytes) has no single correct Trace-level meaning: the whole
+# forward's tensors and the subset ``save=`` retained are different numbers, and
+# collapsing them into one alias would make the answer ambiguous rather than
+# available. So the names route to the real fields instead of becoming one.
+_MISSING_ATTR_HINTS: dict[str, str] = {
+    "activation_memory": (
+        "use total_activation_memory for every tensor computed in the forward, or "
+        "saved_activation_memory for just the payloads save= retained "
+        "(Op.activation_memory is the per-op figure; forward_peak_memory is the "
+        "measured runtime peak)."
+    ),
+    "memory": (
+        "use total_activation_memory / saved_activation_memory for activations, "
+        "total_param_memory for parameters, or forward_peak_memory for the measured "
+        "runtime peak."
+    ),
+    "total_memory": (
+        "use total_activation_memory for activations and total_param_memory for "
+        "parameters; forward_peak_memory is the measured runtime peak."
+    ),
+    "footprint": (
+        "use total_activation_memory / saved_activation_memory / total_param_memory, "
+        "or forward_peak_memory for the measured runtime peak."
+    ),
+}
 # Traces whose Op metadata has already been pooled by ``_compact_op_metadata``.
 # Held weakly and OFF the Trace itself so no new field enters ``__dict__``,
 # pickle state, or a portable artifact.
@@ -954,6 +983,16 @@ class Trace(
                 return events
         state_field = _BUILD_STATE_ATTR_MAP_GET(name)
         if state_field is None:
+            # A trace CAN self-report its footprint, but not under the singular name
+            # a user at scale reaches for first, and a bare AttributeError reads as
+            # "TorchLens does not know". One dict lookup on the miss path (which is
+            # hot: 30-40k internal misses per capture) routes the guessed names to
+            # the real fields instead.
+            hint = _MISSING_ATTR_HINTS.get(name)
+            if hint is not None:
+                raise AttributeError(
+                    f"{type(self).__name__!s} object has no attribute {name!r}; {hint}"
+                )
             raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
         # Hot path: during capture every mapped-attribute read lands here
         # (30-40k misses per trace), and the build state is already the healthy

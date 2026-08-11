@@ -243,6 +243,44 @@ def first_nonfinite_layer(log: Any, *, kind: str = "trace") -> Any | None:
     return hits[0] if hits else None
 
 
+def unexamined_payload_count(log: Any, *, kind: str = "saved") -> int:
+    """Return how many ops a scan of this kind cannot look at.
+
+    A selective-save capture retains payloads for a chosen subset of ops, so a
+    non-finite scan genuinely cannot speak for the rest. Callers report this count
+    rather than letting a scoped clean answer read as a whole-capture one.
+
+    Parameters
+    ----------
+    log:
+        Trace-like object to inspect.
+    kind:
+        Scan contract whose sequence and gate to use.
+
+    Returns
+    -------
+    int
+        Number of ops in the scan sequence holding no readable out payload.
+
+    Notes
+    -----
+    Counts payload availability only -- it never reads tensor values, so it adds no
+    scan cost and cannot invalidate the scan memo.
+    """
+
+    sequence, gate = _KINDS[kind]
+    unexamined = 0
+    for layer in sequence(log):
+        try:
+            out = gate(layer)
+        except ValueError:
+            unexamined += 1
+            continue
+        if out is None:
+            unexamined += 1
+    return unexamined
+
+
 def nonfinite_layers(log: Any, *, kind: str = "saved") -> list[Any]:
     """Return every layer whose out payload holds a NaN or Inf.
 
