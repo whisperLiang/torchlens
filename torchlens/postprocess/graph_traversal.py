@@ -350,7 +350,23 @@ def _add_output_layers(
         new_output_node.has_out_variations = False
         new_output_node.out_versions_by_child = {}
         if output_node.has_saved_activation:
-            actual_output_raw = safe_copy(output_tensor)
+            # The recomputed payload must inherit the PARENT payload's
+            # detachment state: cooked/sparse traces store detached payloads
+            # (a retained graph would poison later captures), while live
+            # traces keep the graph-attached output — it is the very handle
+            # log_backward() differentiates through.
+            _parent_payload = (
+                output_node.out
+                if output_node.out is not None
+                else output_node.transformed_out
+            )
+            _detach_payload = not (
+                torch.is_tensor(_parent_payload)
+                and _parent_payload.grad_fn is not None
+            )
+            actual_output_raw = safe_copy(
+                output_tensor, detach_tensor=_detach_payload
+            )
             if output_node.output_device not in [str(actual_output_raw.device), "same"]:
                 actual_output_raw = safe_to(actual_output_raw, output_node.output_device)
             actual_output_transformed = None
