@@ -951,6 +951,11 @@ class Trace(
             events = self.event_stream
             if events is not None:
                 return events
+        if name == "_buffer_write_events":
+            # Buffer writes live in the capture journal now; this read-through
+            # keeps capture-time internals and diagnostics working unchanged.
+            stream = self.__dict__.get("capture_events") or self.__dict__.get("_capture_events")
+            return list(getattr(stream, "buffer_write_events", ()) or ())
         state_field = _BUILD_STATE_ATTR_MAP_GET(name)
         if state_field is None:
             raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
@@ -1310,7 +1315,6 @@ class Trace(
         "buffer_layers": FieldPolicy.KEEP,
         "buffer_num_calls": FieldPolicy.KEEP,
         "_buffer_accessor": FieldPolicy.DROP,
-        "_buffer_write_events": FieldPolicy.DROP,
         "_buffer_write_tracker": FieldPolicy.DROP,
         "_param_storage_addresses": FieldPolicy.DROP,
         "_buffer_initial_values": FieldPolicy.BLOB_RECURSIVE,
@@ -1722,7 +1726,6 @@ class Trace(
         self.buffer_layers: List[str] = []
         self.buffer_num_calls: Dict[str, int] = {}
         self._buffer_accessor = None
-        self._buffer_write_events: list[Any] = []
         self._buffer_write_tracker: Any | None = None
         self._buffer_initial_values: Dict[str, Any] = {}
         self.internal_source_ops: List[str] = []

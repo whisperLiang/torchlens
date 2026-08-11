@@ -11,6 +11,7 @@ import weakref
 from .events import (
     BackwardPassEnd,
     BackwardPassStart,
+    BufferWriteEvent,
     GradFnDiscovered,
     GradFnFired,
     ModuleEnterEvent,
@@ -73,6 +74,7 @@ class CaptureEvents:
     module_exit_events: list[ModuleExitEvent] = field(default_factory=list)
     pre_hook_events: list[PreHookProvenanceEvent] = field(default_factory=list)
     output_version_events: list[OutputVersionEvent] = field(default_factory=list)
+    buffer_write_events: list[BufferWriteEvent] = field(default_factory=list)
     backward_events: list[
         BackwardPassStart
         | OpGradObserved
@@ -271,6 +273,7 @@ class CaptureEvents:
             module_exit_events=list(self.module_exit_events),
             pre_hook_events=list(self.pre_hook_events),
             output_version_events=list(self.output_version_events),
+            buffer_write_events=list(self.buffer_write_events),
             backward_events=list(self.backward_events),
             param_refs=dict(self.param_refs),
             raw_layer_counter=self.raw_layer_counter,
@@ -304,6 +307,7 @@ class CaptureEvents:
         self.module_exit_events.clear()
         self.pre_hook_events.clear()
         self.output_version_events.clear()
+        self.buffer_write_events.clear()
         self.live_index.clear()
         self.grad_fn_handles_by_label_raw.clear()
 
@@ -432,6 +436,11 @@ class CaptureEvents:
         """Append a pre-hook provenance sibling event, stamping the global seq."""
         object.__setattr__(event, "seq", self.next_seq())
         self.pre_hook_events.append(event)
+
+    def append_buffer_write(self, event: BufferWriteEvent) -> None:
+        """Append a registered-buffer write event, stamping the global seq."""
+        object.__setattr__(event, "seq", self.next_seq())
+        self.buffer_write_events.append(event)
 
     def append_backward(
         self,

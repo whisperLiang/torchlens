@@ -24,7 +24,6 @@ def test_trace_field_set_subset_of_user_facing() -> None:
     allowed_runtime_useful = {
         "_buffer_accessor",
         "_buffer_initial_values",
-        "_buffer_write_events",
         "_buffer_write_tracker",
         "_intervention_spec",
         "_layer_nums_to_save",
