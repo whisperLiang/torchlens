@@ -421,7 +421,7 @@ def _state_mutating_call_ids(
         or _normalization_call_may_mutate_state(
             call,
             registry_qualnames.get(call.registry_id),
-            state_slot_ids,
+            state_storage_ids,
         )
     )
 
@@ -506,8 +506,8 @@ class _FastSparseSession:
         mutating_state_calls = _state_mutating_call_ids(descriptor, state_ids)
         if mutating_state_calls:
             raise RunCapabilityUnavailableError(
-                "fast=True cannot cache state for a sparse recipe that may mutate declared "
-                "state directly, through an aliased view, or through running-stat updates "
+                "fast=True cannot cache state for a sparse recipe with calls that may update "
+                "or mutate declared state "
                 f"({', '.join(mutating_state_calls)}). Use ordinary run().",
                 code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
                 detection_stage="fast_state_static_guard",

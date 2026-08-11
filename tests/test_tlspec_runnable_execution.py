@@ -109,6 +109,44 @@ class AliasedViewStateMutationModel(nn.Module):
         return value + self.offset
 
 
+class FunctionalBatchNormStateMutationModel(nn.Module):
+    """Counter-free functional BatchNorm with direct or view-fed running state."""
+
+    def __init__(self, *, composed_views: bool) -> None:
+        """Register running statistics in direct or composed-view form.
+
+        Parameters
+        ----------
+        composed_views:
+            Whether one buffer should provide sliced running-stat views.
+        """
+
+        super().__init__()
+        self.composed_views = composed_views
+        if composed_views:
+            self.register_buffer("stats", torch.stack((torch.zeros(3), torch.ones(3))))
+        else:
+            self.register_buffer("running_mean", torch.zeros(3))
+            self.register_buffer("running_var", torch.ones(3))
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Update running statistics through functional BatchNorm."""
+
+        if self.composed_views:
+            running_mean = self.stats[0]
+            running_var = self.stats[1]
+        else:
+            running_mean = self.running_mean
+            running_var = self.running_var
+        normalized = torch.nn.functional.batch_norm(
+            value,
+            running_mean,
+            running_var,
+            training=True,
+        )
+        return normalized + running_var
+
+
 class FailingLiveRunModel(nn.Module):
     """Model whose live refresh forward can deliberately raise."""
 
@@ -430,9 +468,39 @@ def test_loaded_sparse_fast_run_refuses_training_batchnorm_state_drift(
     for _ in range(4):
         with pytest.raises(
             RunCapabilityUnavailableError,
-            match="running-stat updates",
+            match="may update or mutate declared state",
         ):
             loaded.run(inputs=inputs, fast=True)
+
+
+@pytest.mark.parametrize("composed_views", [False, True], ids=["direct", "composed-view-fed"])
+def test_loaded_sparse_fast_run_refuses_counter_free_functional_batchnorm_state_drift(
+    tmp_path: Path,
+    *,
+    composed_views: bool,
+) -> None:
+    """Refuse counter-free functional BatchNorm updates, including through state views."""
+
+    inputs = torch.randn(4, 3)
+    captured = tl.trace(
+        FunctionalBatchNormStateMutationModel(composed_views=composed_views),
+        inputs,
+        capture=CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+        ),
+    )
+    path = tmp_path / f"functional-batchnorm-{composed_views}-fast.tlspec"
+    captured.save(path, level="runnable", include_weights=True)
+
+    oracle = tl.load(path).run(inputs=inputs)
+    assert oracle.report.path_faithfulness is PathFaithfulness.VERIFIED
+    with pytest.raises(
+        RunCapabilityUnavailableError,
+        match="may update or mutate declared state",
+    ):
+        tl.load(path).run(inputs=inputs, fast=True)
 
 
 def test_loaded_sparse_fast_run_keeps_eval_batchnorm_static_path(tmp_path: Path) -> None:
@@ -486,7 +554,7 @@ def test_loaded_sparse_fast_run_refuses_state_view_inplace_mutation(
     assert oracle.report.path_faithfulness is PathFaithfulness.VERIFIED
     with pytest.raises(
         RunCapabilityUnavailableError,
-        match="aliased view",
+        match="may update or mutate declared state",
     ):
         tl.load(path).run(inputs=inputs, fast=True)
 
