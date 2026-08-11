@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 from typing import Any
+import warnings
 
 import numpy as np
 import pytest
@@ -299,6 +300,41 @@ def test_classical_mds_warns_on_ambiguous_square_feature_matrix() -> None:
     assert info["input_kind"] == "distances"
 
 
+def test_classical_mds_explicit_input_kind_resolves_the_ambiguity() -> None:
+    """Declaring the input kind silences the guess and picks the stated reading."""
+
+    ambiguous = np.array(
+        [
+            [0.0, 0.81632961, 0.47703871, 0.86999729],
+            [0.81632961, 0.0, 1.886532, 1.35998054],
+            [0.47703871, 1.886532, 0.0, 0.50481297],
+            [0.86999729, 1.35998054, 0.50481297, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        as_distances, distance_info = repgeom.classical_mds(
+            ambiguous, min_n=3, input_kind="distances"
+        )
+        as_features, feature_info = repgeom.classical_mds(
+            ambiguous, min_n=3, input_kind="features"
+        )
+
+    assert distance_info["input_kind"] == "distances"
+    assert feature_info["input_kind"] == "features"
+    assert not np.allclose(as_distances, as_features)
+
+    auto_embedding, _ = repgeom.classical_mds(
+        repgeom.activation_distance_matrix(ambiguous), min_n=3, input_kind="distances"
+    )
+    assert np.allclose(auto_embedding, as_features)
+
+    with pytest.raises(ValueError, match="input_kind must be one of"):
+        repgeom.classical_mds(ambiguous, min_n=3, input_kind="dist")
+
+
 def test_activation_distance_matrix_metrics() -> None:
     """Activation distance helper should flatten rows and support core metrics."""
 
@@ -489,13 +525,28 @@ def test_scree_and_effective_dimensionality_low_rank_fixture() -> None:
 
 
 def test_effective_dimensionality_caps_components_at_spectrum_length() -> None:
-    """Variance-threshold component counts should never exceed the spectrum length."""
+    """Variance-threshold component counts should never exceed the spectrum length.
+
+    A ``variance_threshold`` of 1.0 is the worst case for the cap: the cumulative
+    curve only reaches 1.0 at (or just past, in floating point) its final entry,
+    so an uncapped ``searchsorted`` count would run one past the spectrum. The
+    exact count is BLAS-dependent -- an equilateral 3-point spectrum is
+    ``[1, 1, 0]`` and whether ``cumulative[1]`` lands on exactly 1.0 or a hair
+    below decides between 2 and 3 -- so assert the contract (capped, and the
+    smallest count that reaches the threshold) rather than a pinned integer.
+    """
 
     info = repgeom.effective_dimensionality(
         np.eye(3, dtype=np.float64), min_n=3, variance_threshold=1.0
     )
 
-    assert info["n_components_for_threshold"] == 3
+    n_components = info["n_components_for_threshold"]
+    spectrum_length = info["eigenvalues"].size
+    assert spectrum_length == 3
+    assert 1 <= n_components <= spectrum_length
+    assert info["cumulative_variance"][n_components - 1] >= 1.0 - 1e-12
+    if n_components > 1:
+        assert info["cumulative_variance"][n_components - 2] < 1.0
 
 
 def test_effective_dimensionality_all_zero_fixture_is_safe() -> None:
