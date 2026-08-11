@@ -3,8 +3,8 @@
 ## What This Does
 `torchlens.fastlog` records a predicate-selected subset of forward-pass events. It is a
 sibling path to `trace()`: the same decorated wrappers fire, but fastlog builds
-lightweight `RecordContext` values and stores only records selected by `keep_op` or
-`keep_module` predicates.
+lightweight `RecordContext` values and stores only records selected by the `save=`
+predicate (plus `default_op=`/`default_module=` defaults).
 
 ## Public Surface
 - `record()` - one-shot sparse recording.

@@ -119,9 +119,9 @@ def _evaluate_keep_op(
 
 #: Capture-time selector kinds whose short/friendly ``{layer_type}_{type_index}``
 #: label is only visible through the :func:`_evaluate_keep_op` alias retry. ``label``,
-#: ``contains``, and ``regex`` all resolve through ``_context_labels`` (which on the base
-#: context exposes only the raw label such as ``"conv2d_2_4_raw"``); ``predicate`` trees
-#: read ``ctx.label`` directly.
+#: ``contains``, and ``regex`` all resolve through the capture label universe in
+#: ``ir.selector_eval`` (which on the base context exposes only the raw label such as
+#: ``"conv2d_2_4_raw"``); ``predicate`` trees read ``ctx.label`` directly.
 _ALIAS_RETRY_SELECTOR_KINDS: tuple[str, ...] = ("predicate", "label", "contains", "regex")
 
 
@@ -144,8 +144,8 @@ def _keep_op_needs_alias_retry(predicate: object | None) -> bool:
     -----
     The base capture-time ``RecordContext`` only carries the RAW label (such as
     ``"conv2d_2_4_raw"``); the short/friendly label is synthesized ONLY by the alias
-    retry in :func:`_evaluate_keep_op`. Every selector that resolves through
-    ``_context_labels`` (``label``, ``contains``, ``regex``) can therefore target a
+    retry in :func:`_evaluate_keep_op`. Every selector that resolves through the
+    capture label universe (``label``, ``contains``, ``regex``) can therefore target a
     short label that is invisible on the first evaluation, so those kinds need the
     retry too -- not just ``tl.predicate(...)`` trees whose inner callable observes
     ``ctx.label`` directly. Structured selectors that match non-label fields

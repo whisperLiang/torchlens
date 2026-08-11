@@ -57,8 +57,8 @@ windowed = tl.trace(
 streamed = tl.trace(model, x, save=tl.in_module("encoder"), storage=tl.to_disk("run.tlspec"))
 ```
 
-`tl.fastlog.record(...)` remains available as a torch compatibility path. `keep_op=` and
-`keep_module=` are deprecated aliases; use `record(save=...)` for new code. Keep predicate
+`tl.fastlog.record(...)` remains available as a torch compatibility path; `record(save=...)`
+is the only predicate spelling (the old alias kwargs are removed). Keep predicate
 functions small and deterministic because they run in the logging hot path.
 
 Fastlog forward exceptions default to the historical `on_forward_error="raise"` behavior.

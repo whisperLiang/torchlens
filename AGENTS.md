@@ -156,8 +156,9 @@ pytest tests/ -m "not slow" -x --tb=short
 11. Sibling ordering is forward/unrolled/dot-only; collapsed, rolled, backward, focused,
     conditional, and large graphs must conservatively no-op. Predicate-based smart collapse
     keeps sibling ordering enabled when endpoints survive as rendered nodes.
-12. Predicate `save=` is the primary selective-capture spelling; `record(keep_op=...)` and
-    `record(keep_module=...)` are deprecated aliases.
+12. Predicate `save=` is the ONLY selective-capture spelling; the old
+    `record(keep_op=...)` / `record(keep_module=...)` alias kwargs are removed and raise
+    TypeError. Module-boundary event recording is gated by `default_module=`.
 13. `torch.func` / functorch transforms are captured as boundary ops; do not expect their
     per-element internal eager operations to appear unless a future expand-inside mode exists.
 14. Public backend-neutral state (`Trace.backend`, `module_identity_mode`, `param_source`,

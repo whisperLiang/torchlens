@@ -116,10 +116,10 @@ unless a narrower policy is later set.
 
 | Old name | New name | Since-version | Planned removal |
 | --- | --- | --- | --- |
-| `record(keep_op=...)` | `record(save=...)` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
-| `record(keep_module=...)` | `record(save=...)` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
-| `Recorder(keep_op=...)` | `Recorder(save=...)` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
-| `Recorder(keep_module=...)` | `Recorder(save=...)` | 2.x compatibility shim | 2.0 API freeze - TBD by maintainer |
+| `record(keep_op=...)` | `record(save=...)` | REMOVED (predicate consolidation) | removed; raises TypeError |
+| `record(keep_module=...)` | `record(save=...)` + `default_module=` | REMOVED (predicate consolidation) | removed; raises TypeError |
+| `Recorder(keep_op=...)` | `Recorder(save=...)` | REMOVED (predicate consolidation) | removed; raises TypeError |
+| `Recorder(keep_module=...)` | `Recorder(save=...)` + `default_module=` | REMOVED (predicate consolidation) | removed; raises TypeError |
 
 ## Trace And Conditional Aliases
 

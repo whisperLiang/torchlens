@@ -195,7 +195,8 @@ assert graph is not None
   transform boundaries conservatively.
 - Do not call TorchLens capture from multiple threads or worker processes. Capture is single-process
   and single-threaded because it uses global toggle state.
-- Do not use deprecated `layers_to_save`, `vis_mode`, `hooks`, or `keep_op` spellings in new code
+- Do not use deprecated `layers_to_save`, `vis_mode`, or `hooks` spellings in new code
+  (`keep_op=`/`keep_module=` are fully removed and raise TypeError)
   unless you are intentionally testing compatibility.
 - Do not assume unsaved payloads can be read later. Re-trace with a wider `save=` predicate or use
   torch `tl.record(...).to_trace()` with the records you need. JAX/tinygrad/Paddle/TF `.tlspec` saves

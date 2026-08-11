@@ -10,11 +10,20 @@ Selectors resolve against completed `Trace.layers` records.
 | Selector | Signature | Use |
 | --- | --- | --- |
 | `tl.label` | `label(name: str)` | Exact final, raw, short, or pass-qualified label. |
-| `tl.func` | `func(name: str)` | Match captured function name such as `"relu"` or `"linear"`. |
+| `tl.func` | `func(name: str)` | Match captured function name OR normalized layer type such as `"relu"` or `"add"`. |
 | `tl.module` | `module(address: str)` | Match a module output boundary. |
 | `tl.contains` | `contains(substring: str)` | Case-insensitive label substring search. |
+| `tl.regex` | `regex(pattern: str)` | Case-sensitive `re.search` over labels. |
 | `tl.where` | `where(predicate, *, name_hint=None)` | Predicate over layer pass records; non-portable. |
 | `tl.in_module` | `in_module(address: str)` | Match sites contained in a module address. |
+| `tl.grad_fn_label` | `grad_fn_label(name: str)` | Exact backward grad_fn label (backward sites only). |
+
+One interpreter evaluates every selector in every lifecycle (capture-time
+`save=`, post-hoc `find_sites`, live hooks); `contains` is case-insensitive and
+`regex` case-sensitive everywhere. Capture-only selectors (`tl.followed_by`,
+`tl.preceded_by`) and mutator-only selectors (`tl.facet`, `tl.head`) refuse
+unsupported lifecycles with the typed `SelectorCapabilityError` (a
+`SiteResolutionError` subclass) instead of a generic message.
 
 Selectors compose with `&` and `|` for in-memory discovery:
 
@@ -130,8 +139,9 @@ trace = recording.to_trace()
 streamed = tl.trace(model, x, save=tl.in_module("encoder"), storage=tl.to_disk("run.tlspec"))
 ```
 
-`record(keep_op=...)` and `record(keep_module=...)` are deprecated aliases for
-`record(save=...)`.
+`record(save=...)` is the only predicate spelling; the old `keep_op=` /
+`keep_module=` alias kwargs are removed and raise `TypeError`. Module-boundary
+event recording is gated by `default_module=`.
 
 Forward exceptions keep the historical behavior unless you opt in. With
 `on_forward_error="attach_partial"`, TorchLens attaches `exc.partial_recording` and re-raises

@@ -69,8 +69,8 @@ gelu_site = trace.find_sites(tl.func("gelu")).first()
 assert gelu_site.out.shape == (2, 4)
 ```
 
-`tl.record(save=...)` is the canonical torch sparse-capture spelling. `record(keep_op=...)` and
-`record(keep_module=...)` remain deprecated aliases for older code.
+`tl.record(save=...)` is the only torch sparse-capture spelling; the old
+`keep_op=`/`keep_module=` alias kwargs are removed.
 
 When a fastlog forward raises, the default remains `on_forward_error="raise"`. Opt into
 `on_forward_error="attach_partial"` to attach `exc.partial_recording` and re-raise, or

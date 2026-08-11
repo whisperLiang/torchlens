@@ -140,12 +140,13 @@ print(tl.compat.report(model, x).to_markdown())
 
 ## Current 2.x Surface
 
-- Top-level `torchlens.__all__` has 93 names: capture, save/load, intervention,
+- Top-level `torchlens.__all__` has 94 names: capture, save/load, intervention,
   selectors, helper transforms, observers, validation, and the three main log classes.
 - `tl.record(..., save=...)` is the sparse predicate recorder; it returns `Recording`.
   `Recording.to_trace()` cooks the event stream into a full-structure `Trace`, with unsaved
   payload reads rejected explicitly. `tl.record()`/fastlog is torch-only in the backend-v1
-  registry. `keep_op=` and `keep_module=` are deprecated aliases. Failed forwards default to
+  registry. The old `keep_op=`/`keep_module=` alias kwargs are removed; `save=` is the only
+  predicate spelling. Failed forwards default to
   the historical `on_forward_error="raise"` behavior; opt into
   `on_forward_error="attach_partial"` to attach `exc.partial_recording` and re-raise, or
   `on_forward_error="return_partial"` to return a failed partial `Recording`. Failed partials
