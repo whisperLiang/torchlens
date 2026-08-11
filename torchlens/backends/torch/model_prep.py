@@ -1994,6 +1994,7 @@ def _record_module_exit_metadata(
             output_paths=tuple(output_paths),
             per_output_atomic=tuple(per_output_atomic),
             output_names=tuple(output_names),
+            output_tensor_leaf_count=len(output_entries),
         )
     )
     return tuple(untraceable_output_boundaries)
@@ -2050,7 +2051,9 @@ def _record_predicate_module_boundary_outputs(
     }
     module_call_label = f"{module_address}:{module_call_index}"
     labeled_outputs: list[tuple[torch.Tensor, tuple[Any, ...], str]] = []
+    walked_leaf_count = 0
     for tensor, container_path, _container_spec in _walk_output_tensors_with_paths(out):
+        walked_leaf_count += 1
         raw_label = get_tensor_label(tensor)
         if raw_label is None:
             parent_labels = tuple(
@@ -2070,6 +2073,7 @@ def _record_predicate_module_boundary_outputs(
             output_paths=tuple(path for _tensor, path, _label in labeled_outputs),
             per_output_atomic=(),
             output_names=tuple(None for _tensor, _path, _label in labeled_outputs),
+            output_tensor_leaf_count=walked_leaf_count,
         )
     )
     for tensor, container_path, raw_label in labeled_outputs:

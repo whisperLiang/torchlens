@@ -24,13 +24,21 @@ class LayerGradReport:
     - ``covered`` / ``mismatched``: eligible outputs that were compared;
     - classified LEGITIMATE exclusions (never block passing):
       ``skipped_root_module``, ``skipped_identity_output``,
-      ``skipped_no_tensor_output`` (a module call that produced no captured
-      tensor output has no meaningful first tensor leaf to compare), and the
+      ``skipped_no_tensor_output`` (PROVEN: the module call's
+      ``ModuleExitEvent`` recorded zero tensor leaves in the real output walk
+      AND stock autograd observed nothing for the call — an empty
+      ``output_ops`` list alone is only evidence of no CAPTURED output, the
+      exact symptom of the identity-node capture-bug class), and the
       diagnostic-only ``skipped_module_less`` counter;
     - fail-closed gaps (any occurrence sinks the verdict):
-      ``skipped_no_grad`` (an eligible output whose gradient was not captured)
-      and ``unresolved_output_label`` (a module call names an output layer the
-      trace cannot resolve — an internal inconsistency, not an exclusion).
+      ``skipped_no_grad`` (an eligible output whose gradient was not
+      captured), ``unresolved_output_label`` (a module call names an output
+      layer the trace cannot resolve), ``uncaptured_module_output`` (a module
+      call with no captured output ops whose exclusion could NOT be proven —
+      missing/unknown exit-event leaf count, a nonzero recorded leaf count,
+      or a contradicting stock observation), and ``missing_module_call``
+      (stock autograd observed a module call the candidate trace has no
+      module-call log for at all — the reverse census).
 
     The acceptance rule is EXACT: 100% of the classified-eligible denominator
     must be ``covered``. There is no coverage-ratio tolerance; a tolerance
@@ -42,6 +50,8 @@ class LayerGradReport:
     coverage: dict[str, str]
     covered_count: int
     skipped_no_tensor_output_count: int
+    uncaptured_module_output_count: int
+    missing_module_call_count: int
     unresolved_output_label_count: int
     skipped_module_less_count: int
     skipped_no_grad_count: int
@@ -104,13 +114,33 @@ def _compare_module_output_grads(
     candidate_grad_count = 0
     skipped_module_less_count = 0
 
+    # Exit-event proof source: the ModuleExitEvent leaf count is recorded from
+    # the real output walk at module exit, independent of whether labeling or
+    # boundary minting succeeded, so it can PROVE a no-tensor-output exclusion.
+    events = getattr(trace, "_capture_events", None)
+    if events is None:
+        events = getattr(trace, "capture_events", None)
+    exit_leaf_counts: dict[tuple[str, int], int] = {}
+    for exit_event in getattr(events, "module_exit_events", ()) or ():
+        exit_key = (
+            str(getattr(exit_event, "address", "")),
+            int(getattr(exit_event, "call_index", 0) or 0),
+        )
+        exit_leaf_counts[exit_key] = int(getattr(exit_event, "output_tensor_leaf_count", -1))
+    stock_observed_calls = {(addr, call_index) for addr, call_index, _ in stock_module_grads}
+    stock_observed_calls.update(
+        (addr, call_index) for addr, call_index, _ in stock_identity_addresses
+    )
+
     modules_map = getattr(trace, "modules", None)
     pass_dict = getattr(modules_map, "_pass_dict", {}) if modules_map is not None else {}
+    candidate_calls: set[tuple[str, int]] = set()
     for call_log in list(pass_dict.values()):
         addr = getattr(call_log, "address", None)
         call_index = getattr(call_log, "call_index", None)
         if addr is None or call_index is None:
             continue
+        candidate_calls.add((addr, call_index))
         call_label = f"{addr}:{call_index}"
         if addr == "self":
             coverage[call_label] = "skipped_root_module"
@@ -119,9 +149,18 @@ def _compare_module_output_grads(
             getattr(call_log, "output_ops", None) or getattr(call_log, "output_layers", None) or []
         )
         if not output_ops:
-            # Classified legitimate exclusion: no captured tensor output means
-            # there is no meaningful first tensor leaf to compare.
-            coverage[call_label] = "skipped_no_tensor_output"
+            # An empty output_ops list is only evidence of no CAPTURED tensor
+            # output — the symptom of the identity-node capture-bug class
+            # (see CHANGELOG 055af048) — so the exclusion must be PROVEN:
+            # the exit event recorded zero real tensor leaves AND stock
+            # autograd observed nothing for this call. Anything else is a
+            # fail-closed gap, never a classification.
+            if (addr, call_index) in stock_observed_calls:
+                coverage[call_label] = "uncaptured_module_output"
+            elif exit_leaf_counts.get((addr, call_index)) == 0:
+                coverage[call_label] = "skipped_no_tensor_output"
+            else:
+                coverage[call_label] = "uncaptured_module_output"
             continue
         multi_output = len(output_ops) > 1
         for output_index, output_label in enumerate(output_ops):
@@ -161,6 +200,16 @@ def _compare_module_output_grads(
                 coverage[coverage_label] = "mismatched"
                 mismatched.append(coverage_label)
 
+    # Reverse census: every module call stock autograd observed must exist as
+    # a candidate module-call log. A wholly absent call is invisible to the
+    # forward direction (there is no output_ops list to classify), so it is
+    # reconciled here as a fail-closed gap. Root addresses are excluded (the
+    # root is classified skipped_root_module in the forward direction).
+    for addr, call_index in sorted(stock_observed_calls - candidate_calls):
+        if addr in ("", "self"):
+            continue
+        coverage.setdefault(f"{addr}:{call_index}", "missing_module_call")
+
     for layer in trace.layer_list:
         if not getattr(layer, "has_grad", False):
             continue
@@ -172,6 +221,12 @@ def _compare_module_output_grads(
     mismatched_count = sum(value == "mismatched" for value in coverage.values())
     skipped_no_tensor_output_count = sum(
         value == "skipped_no_tensor_output" for value in coverage.values()
+    )
+    uncaptured_module_output_count = sum(
+        value == "uncaptured_module_output" for value in coverage.values()
+    )
+    missing_module_call_count = sum(
+        value == "missing_module_call" for value in coverage.values()
     )
     unresolved_output_label_count = sum(
         value == "unresolved_output_label" for value in coverage.values()
@@ -185,14 +240,17 @@ def _compare_module_output_grads(
 
     # Eligibility-classifier acceptance (replaces the former 0.80 coverage
     # ratio): the classified-eligible denominator is {covered, mismatched,
-    # skipped_no_grad, unresolved_output_label} and 100% of it must be
-    # covered. Legitimate exclusions were classified out above; any
-    # unexplained gap fails closed rather than hiding inside a tolerance.
+    # skipped_no_grad, unresolved_output_label, uncaptured_module_output,
+    # missing_module_call} and 100% of it must be covered. Legitimate
+    # exclusions were PROVEN out above; any unexplained gap fails closed
+    # rather than hiding inside a tolerance or a classification.
     overall_passed = (
         unexpected_count == 0
         and mismatched_count == 0
         and skipped_no_grad_count == 0
         and unresolved_output_label_count == 0
+        and uncaptured_module_output_count == 0
+        and missing_module_call_count == 0
         and covered_count > 0
     )
 
@@ -202,6 +260,8 @@ def _compare_module_output_grads(
         coverage=coverage,
         covered_count=covered_count,
         skipped_no_tensor_output_count=skipped_no_tensor_output_count,
+        uncaptured_module_output_count=uncaptured_module_output_count,
+        missing_module_call_count=missing_module_call_count,
         unresolved_output_label_count=unresolved_output_label_count,
         skipped_module_less_count=skipped_module_less_count,
         skipped_no_grad_count=skipped_no_grad_count,

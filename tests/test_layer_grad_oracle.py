@@ -164,7 +164,12 @@ class TensorBox:
 class SyntheticTrace:
     """Minimal trace stub consumed by ``_compare_module_output_grads``."""
 
-    def __init__(self, call_logs: list[Any], layers: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        call_logs: list[Any],
+        layers: dict[str, Any],
+        exit_leaf_counts: dict[tuple[str, int], int] | None = None,
+    ) -> None:
         """Initialize the synthetic trace.
 
         Parameters
@@ -173,11 +178,24 @@ class SyntheticTrace:
             Synthetic module-call logs.
         layers:
             Layer mapping by label.
+        exit_leaf_counts:
+            Recorded ``ModuleExitEvent.output_tensor_leaf_count`` proof per
+            ``(address, call_index)``; omitted calls have no exit event.
         """
 
         self.modules = SimpleNamespace(_pass_dict={call.call_label: call for call in call_logs})
         self._layers = layers
         self.layer_list = list(layers.values())
+        self._capture_events = SimpleNamespace(
+            module_exit_events=[
+                SimpleNamespace(
+                    address=address,
+                    call_index=call_index,
+                    output_tensor_leaf_count=leaf_count,
+                )
+                for (address, call_index), leaf_count in (exit_leaf_counts or {}).items()
+            ]
+        )
 
     def __getitem__(self, label: str) -> Any:
         """Return one synthetic layer by label."""
@@ -456,15 +474,123 @@ def test_compare_excludes_root_and_identity_from_denominator() -> None:
 
 
 def test_compare_counts_no_tensor_output() -> None:
-    """Module calls with no captured tensor output are a classified exclusion."""
+    """A PROVEN no-tensor-output module call is a classified exclusion.
 
+    Proven means the exit event recorded zero real tensor leaves and stock
+    autograd observed nothing for the call.
+    """
+
+    grad = torch.ones(2)
     report = _compare_module_output_grads(
-        SyntheticTrace([_synthetic_call("empty", 1, [])], {}),
-        {},
+        SyntheticTrace(
+            [
+                _synthetic_call("linear", 1, ["linear_out"]),
+                _synthetic_call("empty", 1, []),
+            ],
+            {"linear_out": _synthetic_layer("linear_out", grad)},
+            exit_leaf_counts={("empty", 1): 0},
+        ),
+        {("linear", 1, 0): grad},
         set(),
     )
     assert report.skipped_no_tensor_output_count == 1
     assert report.coverage["empty:1"] == "skipped_no_tensor_output"
+    assert report.overall_passed
+
+
+def test_no_tensor_output_cannot_launder_a_stock_observed_call() -> None:
+    """A stock-observed gradient contradicts a no-tensor-output exclusion.
+
+    Sol probe regression: a candidate call with an empty ``output_ops`` list
+    used to be classified out of the denominator even when stock autograd
+    captured a real gradient for that exact call, so a missed module output
+    passed as long as one other module was covered.
+    """
+
+    grad = torch.ones(1)
+    report = _compare_module_output_grads(
+        SyntheticTrace(
+            [
+                _synthetic_call("covered", 1, ["covered_out"]),
+                _synthetic_call("missed", 1, []),
+            ],
+            {"covered_out": _synthetic_layer("covered_out", grad)},
+            exit_leaf_counts={("missed", 1): 0},
+        ),
+        {("covered", 1, 0): grad, ("missed", 1, 0): grad * 9},
+        set(),
+    )
+    assert report.coverage["missed:1"] == "uncaptured_module_output"
+    assert report.uncaptured_module_output_count == 1
+    assert not report.overall_passed
+
+
+def test_identity_node_regression_mass_no_first_leaf_fails() -> None:
+    """The 055af048 identity-node scenario must FAIL the check.
+
+    When identity-node minting breaks, boundary nodes never attach to module
+    ``output_ops`` while the exit events still record real tensor leaves. A
+    mass of such calls used to sink a 0.80 ratio; the eligibility classifier
+    must not launder them out of the denominator either.
+    """
+
+    grad = torch.ones(3)
+    report = _compare_module_output_grads(
+        SyntheticTrace(
+            [
+                _synthetic_call("covered", 1, ["covered_out"]),
+                _synthetic_call("broken_a", 1, []),
+                _synthetic_call("broken_b", 1, []),
+                _synthetic_call("broken_c", 1, []),
+            ],
+            {"covered_out": _synthetic_layer("covered_out", grad)},
+            exit_leaf_counts={
+                ("broken_a", 1): 1,
+                ("broken_b", 1): 1,
+                ("broken_c", 1): 1,
+            },
+        ),
+        {("covered", 1, 0): grad},
+        set(),
+    )
+    assert report.uncaptured_module_output_count == 3
+    assert not report.overall_passed
+
+
+def test_empty_output_ops_without_exit_event_proof_fails_closed() -> None:
+    """No exit event means no proof: the exclusion is refused."""
+
+    grad = torch.ones(1)
+    report = _compare_module_output_grads(
+        SyntheticTrace(
+            [
+                _synthetic_call("covered", 1, ["covered_out"]),
+                _synthetic_call("unproven", 1, []),
+            ],
+            {"covered_out": _synthetic_layer("covered_out", grad)},
+        ),
+        {("covered", 1, 0): grad},
+        set(),
+    )
+    assert report.coverage["unproven:1"] == "uncaptured_module_output"
+    assert not report.overall_passed
+
+
+def test_reverse_census_flags_wholly_absent_module_calls() -> None:
+    """A stock-observed call with no candidate module-call log fails closed."""
+
+    grad = torch.ones(1)
+    report = _compare_module_output_grads(
+        SyntheticTrace(
+            [_synthetic_call("covered", 1, ["covered_out"])],
+            {"covered_out": _synthetic_layer("covered_out", grad)},
+        ),
+        {("covered", 1, 0): grad, ("ghost", 1, 0): grad * 2},
+        set(),
+    )
+    assert report.coverage["ghost:1"] == "missing_module_call"
+    assert report.missing_module_call_count == 1
+    assert not report.overall_passed
 
 
 def test_unresolved_output_label_fails_closed() -> None:
@@ -848,6 +974,8 @@ def test_path_e_module_exports_expected_surface() -> None:
         coverage={},
         covered_count=1,
         skipped_no_tensor_output_count=0,
+        uncaptured_module_output_count=0,
+        missing_module_call_count=0,
         unresolved_output_label_count=0,
         skipped_module_less_count=0,
         skipped_no_grad_count=0,

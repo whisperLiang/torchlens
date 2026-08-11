@@ -455,6 +455,13 @@ class ModuleExitEvent:
     # an empty-tuple default so the field stays trailing (defaulted) and all
     # consumers guard on a falsy value; absent == "no paths captured".
     output_paths: tuple[tuple[object, ...], ...] = ()
+    # TRUE tensor-leaf count of the module's real output object, recorded from
+    # the output walk BEFORE labeling/boundary minting can fail. This is the
+    # proof the gradient-coverage classifier uses to distinguish "the module
+    # genuinely produced no tensor output" (a legitimate exclusion) from
+    # "capture failed to attach the output" (a fail-closed gap). ``-1`` means
+    # unrecorded (unknown), which consumers treat as unproven.
+    output_tensor_leaf_count: int = -1
     seq: int = 0
 
 
