@@ -742,6 +742,16 @@ class Layer:
     def equivalent_ops(self, value: Any) -> None:
         self.__dict__["equivalent_ops"] = value
 
+    @equivalent_ops.deleter
+    def equivalent_ops(self) -> None:
+        # ``state_items`` enumerates the ``__dict__`` storage slot, so cleanup
+        # ``delattr``s this name; without a deleter the property raises
+        # "can't delete attribute", breaking batch removal of finished layers.
+        try:
+            del self.__dict__["equivalent_ops"]
+        except KeyError:
+            raise AttributeError("equivalent_ops") from None
+
     def __getstate__(self) -> Dict[str, Any]:
         """Return pickle state with weakrefs and raw autograd handles stripped."""
         state = self.__dict__.copy()
