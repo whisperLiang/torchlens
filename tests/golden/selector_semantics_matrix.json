@@ -187,7 +187,10 @@
   "resolver_repr": "tl.facet('q').in_module('encoder.block.0')",
   "spec_kind": "facet"
  },
- "flat_spec/conv/flat_and_single_child": "ERROR:SiteResolutionError",
+ "flat_spec/conv/flat_and_single_child": [
+  "relu_1_2",
+  "relu_2_4"
+ ],
  "flat_spec/conv/flat_and_three": [
   "relu_1_2"
  ],

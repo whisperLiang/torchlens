@@ -27,7 +27,10 @@ behavior changes):
   so an op-level hook never double-fires on the module-exit pseudo-site).
 - ``and`` / ``or`` composites are n-ary, and they SHORT-CIRCUIT per subject in
   every lifecycle: a ``tl.where`` predicate must not rely on being invoked for
-  subjects a sibling already decided.
+  subjects a sibling already decided. Degenerate arities keep the standard
+  identity semantics in evaluation AND spec round-trips: an empty ``and``
+  matches everything, an empty ``or`` matches nothing, and a unary composite
+  matches exactly like its child.
 - ``followed_by`` / ``preceded_by`` are capture-time-only and refuse post-hoc
   or live evaluation through the capability path — upfront (before any
   short-circuit) for post-hoc resolution and live hook attachment alike.
@@ -191,14 +194,43 @@ def contains_followed_by(selector: Any, *, unwrap: bool = False) -> bool:
     )
 
 
+def flatten_and_conjuncts(children: Sequence[Any]) -> tuple[Any, ...]:
+    """Return the flat conjunct tuple of a possibly nested ``and`` composite.
+
+    ``&`` builds nested binary composites, so ``a & fb & b`` arrives as
+    ``(a & fb) & b``. Temporal validation and the retroactive split must not
+    be association-sensitive: this expands nested ``and`` children in order so
+    every association sees the same conjunct list as the flat n-ary spec.
+
+    Parameters
+    ----------
+    children:
+        Direct children of a conjunction (or any candidate conjunct list).
+
+    Returns
+    -------
+    tuple[Any, ...]
+        Conjuncts with nested ``and`` composites expanded, in evaluation order.
+    """
+
+    flat: list[Any] = []
+    for child in children:
+        if isinstance(child, CompositeSelector) and child.operator == "and":
+            flat.extend(flatten_and_conjuncts(child.selectors))
+        else:
+            flat.append(child)
+    return tuple(flat)
+
+
 def split_followed_by_conjunction(
     predicate: Any,
 ) -> tuple[FollowedBySelector, BaseSelector] | None:
     """Split a supported ``candidate & tl.followed_by(successor)`` conjunction.
 
-    Composites are n-ary, so the supported retroactive shape is one
-    ``followed_by`` child among otherwise ordinary selector children; the
-    candidate is the single other child, or the conjunction of all of them.
+    Composites are n-ary and ``&`` nests, so the conjunction is flattened
+    first; the supported retroactive shape is one ``followed_by`` conjunct
+    among otherwise ordinary selector conjuncts. The candidate is the single
+    other conjunct, or the conjunction of all of them.
 
     Parameters
     ----------
@@ -213,8 +245,9 @@ def split_followed_by_conjunction(
 
     if not isinstance(predicate, CompositeSelector) or predicate.operator != "and":
         return None
-    followed = [c for c in predicate.selectors if isinstance(c, FollowedBySelector)]
-    others = [c for c in predicate.selectors if not isinstance(c, FollowedBySelector)]
+    conjuncts = flatten_and_conjuncts(predicate.selectors)
+    followed = [c for c in conjuncts if isinstance(c, FollowedBySelector)]
+    others = [c for c in conjuncts if not isinstance(c, FollowedBySelector)]
     if len(followed) != 1 or not others:
         return None
     if not all(isinstance(child, BaseSelector) for child in others):
@@ -1286,9 +1319,9 @@ def selector_from_spec(
     if kind == "not":
         return ~normalize_selector_like(value, lifecycle=lifecycle)
     if kind in {"and", "or"}:
-        if not isinstance(value, Sequence) or len(value) < 2:
+        if not isinstance(value, Sequence) or isinstance(value, str):
             raise SiteResolutionError(
-                f"{kind!r} target specs require at least two nested selectors."
+                f"{kind!r} target specs require a sequence of nested selectors."
             )
         children = tuple(
             normalize_selector_like(child, lifecycle=lifecycle) for child in value
@@ -1298,6 +1331,13 @@ def selector_from_spec(
         if lifecycle != "capture":
             raise _capability_error(kind, lifecycle)
         inner = value
+        if isinstance(inner, str):
+            raise SiteResolutionError(
+                f"tl.{kind}(...) target spec carries an opaque audit payload {inner!r}; "
+                "an inner predicate saved by repr cannot be reconstructed. Rebuild the "
+                "selector in code, or re-save the spec with a structural selector inner "
+                "such as tl.func(...)."
+            )
         if not isinstance(inner, BaseSelector) and not callable(inner):
             inner = normalize_selector_like(inner, lifecycle="capture")
         if kind == "followed_by":
@@ -1372,6 +1412,7 @@ __all__ = [
     "ensure_supported",
     "evaluate",
     "first_selector_kind_outside",
+    "flatten_and_conjuncts",
     "live_label_error_message",
     "looks_like_finalized_label",
     "module_address_matches",

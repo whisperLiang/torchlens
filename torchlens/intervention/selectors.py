@@ -522,6 +522,19 @@ class FollowedBySelector(BaseSelector):
         object.__setattr__(self, "selector_value", inner)
         object.__setattr__(self, "inner", inner)
 
+    def to_target_spec(self) -> TargetSpec:
+        """Convert the successor selector to a target spec.
+
+        Returns
+        -------
+        TargetSpec
+            Target spec with a nested selector payload, so a structural inner
+            serializes structurally instead of as an opaque callable.
+        """
+
+        nested = self.inner.to_target_spec() if isinstance(self.inner, BaseSelector) else self.inner
+        return TargetSpec(selector_kind=self.selector_kind, selector_value=nested)
+
     def __repr__(self) -> str:
         """Return a concise public representation."""
 
@@ -546,6 +559,19 @@ class PrecededBySelector(BaseSelector):
         object.__setattr__(self, "selector_kind", "preceded_by")
         object.__setattr__(self, "selector_value", inner)
         object.__setattr__(self, "inner", inner)
+
+    def to_target_spec(self) -> TargetSpec:
+        """Convert the predecessor selector to a target spec.
+
+        Returns
+        -------
+        TargetSpec
+            Target spec with a nested selector payload, so a structural inner
+            serializes structurally instead of as an opaque callable.
+        """
+
+        nested = self.inner.to_target_spec() if isinstance(self.inner, BaseSelector) else self.inner
+        return TargetSpec(selector_kind=self.selector_kind, selector_value=nested)
 
     def __repr__(self) -> str:
         """Return a concise public representation."""
@@ -788,13 +814,16 @@ class CompositeSelector(BaseSelector):
 
     ``&`` / ``|`` build nested binary composites; deserialized target specs
     may carry a flat n-ary child tuple. Both shapes evaluate identically.
+    Degenerate arities follow the standard identity semantics in evaluation
+    and spec round-trips alike: an empty ``and`` matches everything, an empty
+    ``or`` matches nothing, and a unary composite matches like its child.
 
     Parameters
     ----------
     operator:
         ``"and"`` for intersection or ``"or"`` for union.
     selectors:
-        Two or more selectors to combine.
+        Selectors to combine.
     """
 
     operator: Literal["and", "or"]
@@ -810,7 +839,7 @@ class CompositeSelector(BaseSelector):
         operator:
             ``"and"`` for intersection or ``"or"`` for union.
         selectors:
-            Two or more selectors to combine.
+            Selectors to combine.
         """
 
         object.__setattr__(self, "selector_kind", operator)
@@ -1429,7 +1458,7 @@ def _check_composition(a: SelectorLike, b: SelectorLike) -> None:
         Raises when composition is invalid.
     """
 
-    from ..ir.selector_eval import contains_followed_by
+    from ..ir.selector_eval import contains_followed_by, flatten_and_conjuncts
     from .errors import SelectorCompositionError
 
     a_dir = _classify_selector_direction(a)
@@ -1440,12 +1469,16 @@ def _check_composition(a: SelectorLike, b: SelectorLike) -> None:
             "selector cannot be combined. Use separate forward and backward hook sites."
         )
     if contains_followed_by(a) or contains_followed_by(b):
-        if not (
-            isinstance(a, FollowedBySelector)
-            and not contains_followed_by(b)
-            or isinstance(b, FollowedBySelector)
-            and not contains_followed_by(a)
-        ):
+        # `&` nests, so validate the FLAT conjunction: `a & fb & b` must pass
+        # exactly like `a & b & fb` and the flat three-child spec.
+        conjuncts = flatten_and_conjuncts((a, b))
+        direct = [c for c in conjuncts if isinstance(c, FollowedBySelector)]
+        buried = [
+            c
+            for c in conjuncts
+            if not isinstance(c, FollowedBySelector) and contains_followed_by(c)
+        ]
+        if len(direct) != 1 or buried:
             raise SelectorCompositionError(
                 "tl.followed_by(...) only supports candidate & tl.followed_by(successor); "
                 "nested or multi-followed_by compositions are unsupported."

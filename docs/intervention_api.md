@@ -33,7 +33,15 @@ Composites (`&`, `|`, `~`) SHORT-CIRCUIT per site in every lifecycle: a
 `tl.where` predicate is only invoked for sites its siblings have not already
 decided, so predicates must not rely on side effects from seeing every site.
 `&`/`|` build nested binary composites, and deserialized target specs may
-carry flat n-ary child tuples; both shapes evaluate identically.
+carry flat n-ary child tuples; both shapes evaluate identically. Conjunctions
+are association-insensitive for the temporal sugar — `a & tl.followed_by(x) & b`
+behaves exactly like `a & b & tl.followed_by(x)` and the flat three-child
+spec — and degenerate arities keep identity semantics in evaluation and spec
+round-trips alike: an empty `and` matches everything, an empty `or` matches
+nothing, and a unary composite matches like its child.
+`tl.followed_by`/`tl.preceded_by` target specs serialize a selector inner
+structurally at every save level; an opaque-callable inner remains audit-only
+and refuses typed at rebuild rather than being reconstructed lossily.
 
 Selectors compose with `&` and `|` for in-memory discovery:
 

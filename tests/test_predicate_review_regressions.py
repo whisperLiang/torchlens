@@ -495,3 +495,135 @@ def test_capture_module_fallback_for_nontorch_backend() -> None:
     )
     assert evaluate(tl.module("encoder.block"), subject, lifecycle="capture")
     assert not evaluate(tl.module("decoder"), subject, lifecycle="capture")
+
+
+# ---------------------------------------------------------------------------
+# sol closure round — final three temporal-edge residuals (FIX)
+# ---------------------------------------------------------------------------
+
+
+def test_followed_by_conjunction_is_association_insensitive() -> None:
+    """FIX: ``a & followed_by(x) & b`` raised while ``a & b & followed_by(x)`` worked.
+
+    ``&`` builds nested binary composites, so the one-followed_by check and the
+    retroactive split must normalize incrementally built conjunctions: every
+    association of the same conjuncts saves the same set as the flat spec.
+    """
+
+    def _mid() -> BaseSelector:
+        return tl.func("conv2d") & tl.followed_by(tl.func("relu")) & tl.contains("conv")
+
+    def _tail() -> BaseSelector:
+        return tl.func("conv2d") & tl.contains("conv") & tl.followed_by(tl.func("relu"))
+
+    def _flat() -> BaseSelector:
+        return CompositeSelector(
+            "and",
+            (tl.func("conv2d"), tl.contains("conv"), tl.followed_by(tl.func("relu"))),
+        )
+
+    def _saved(predicate: BaseSelector) -> list[str]:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            log = tl.trace(
+                TinyConvNet(),
+                _conv_input(),
+                save=predicate,
+                lookback=4,
+                lookback_payload_policy="detached_raw",
+            )
+        return sorted(
+            str(op.layer_label)
+            for op in log.layer_list
+            if getattr(op, "has_saved_activation", False)
+        )
+
+    mid_saved = _saved(_mid())
+    assert mid_saved == _saved(_tail()) == _saved(_flat())
+    assert mid_saved, "expected the conv-before-relu candidates to be saved"
+
+
+def test_composite_degenerate_arity_eval_and_roundtrip_agree(conv_trace: Any) -> None:
+    """FIX: empty/unary composites evaluated but refused their own spec round-trip.
+
+    The one truth is the standard identity semantics: empty ``and`` matches
+    everything, empty ``or`` matches nothing, a unary composite matches exactly
+    like its child — and the target-spec round-trip preserves that behavior.
+    """
+
+    empty_and = CompositeSelector("and", ())
+    empty_or = CompositeSelector("or", ())
+    unary_or = CompositeSelector("or", (tl.func("relu"),))
+
+    all_labels = conv_trace.find_sites(empty_and, max_fanout=10**6).labels()
+    assert all_labels, "empty and is the identity: it matches every site"
+    assert conv_trace.find_sites(empty_or, max_fanout=10**6).labels() == ()
+    unary_labels = conv_trace.find_sites(unary_or, max_fanout=10**6).labels()
+    assert unary_labels == conv_trace.find_sites(tl.func("relu"), max_fanout=10**6).labels()
+
+    for selector, expected in (
+        (empty_and, all_labels),
+        (empty_or, ()),
+        (unary_or, unary_labels),
+    ):
+        spec = selector.to_target_spec()
+        rebuilt = selector_from_spec(
+            spec.selector_kind, spec.selector_value, spec.metadata, lifecycle="site"
+        )
+        assert conv_trace.find_sites(rebuilt, max_fanout=10**6).labels() == expected
+
+
+def test_followed_by_target_spec_serializes_structurally() -> None:
+    """FIX: portable JSON refused ``followed_by(func(x))`` as an opaque callable
+    and audit JSON silently mangled it into ``followed_by(contains(repr))``.
+
+    A selector inner must round-trip structurally at every save level.
+    """
+
+    import json
+
+    from torchlens.intervention.save import (
+        SaveLevel,
+        _target_spec_from_json,
+        _target_spec_to_json,
+    )
+
+    for selector in (
+        tl.followed_by(tl.func("relu")),
+        tl.preceded_by(tl.func("conv2d")),
+    ):
+        spec = selector.to_target_spec()
+        for level in (SaveLevel.PORTABLE, SaveLevel.AUDIT):
+            payload = json.loads(json.dumps(_target_spec_to_json(spec, level)))
+            rebuilt_spec = _target_spec_from_json(payload)
+            rebuilt = selector_from_spec(
+                rebuilt_spec.selector_kind,
+                rebuilt_spec.selector_value,
+                rebuilt_spec.metadata,
+                lifecycle="capture",
+            )
+            assert repr(rebuilt) == repr(selector)
+
+
+def test_followed_by_opaque_inner_refuses_typed_never_mangles() -> None:
+    """FIX: an opaque-callable temporal inner must refuse typed, never rebuild
+    as a ``contains`` selector over its repr string."""
+
+    from torchlens.intervention.errors import OpaqueCallableInExecutableSaveError
+    from torchlens.intervention.save import (
+        SaveLevel,
+        _target_spec_from_json,
+        _target_spec_to_json,
+    )
+
+    spec = tl.followed_by(lambda ctx: True).to_target_spec()
+    with pytest.raises(OpaqueCallableInExecutableSaveError):
+        _target_spec_to_json(spec, SaveLevel.PORTABLE)
+    audit_spec = _target_spec_from_json(_target_spec_to_json(spec, SaveLevel.AUDIT))
+    with pytest.raises(SiteResolutionError, match="opaque audit payload"):
+        selector_from_spec(
+            audit_spec.selector_kind,
+            audit_spec.selector_value,
+            audit_spec.metadata,
+            lifecycle="capture",
+        )
