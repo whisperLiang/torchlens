@@ -4,17 +4,17 @@
       "input_1:1"
     ],
     [
-      "linear_1_4:1"
+      "linear_1_5:1"
     ],
     [
       "lstmcell_1_3:1",
-      "lstmcell_1_3:3",
-      "lstmcell_1_3:5"
+      "lstmcell_1_3:2",
+      "lstmcell_1_3:3"
     ],
     [
-      "lstmcell_1_3:2",
-      "lstmcell_1_3:4",
-      "lstmcell_1_3:6"
+      "lstmcell_2_4:1",
+      "lstmcell_2_4:2",
+      "lstmcell_2_4:3"
     ],
     [
       "newzeros_1_1:1",
@@ -88,18 +88,12 @@
       "in_submodule": true,
       "label": "lstmcell_1_3",
       "lookup_keys": [
-        "-3",
         "-4",
-        "-5",
         "-6",
-        "-7",
         "-8",
         "3",
-        "4",
         "5",
-        "6",
         "7",
-        "8",
         "cell:1",
         "cell:2",
         "cell:3",
@@ -107,28 +101,16 @@
         "lstmcell_1:1",
         "lstmcell_1:2",
         "lstmcell_1:3",
-        "lstmcell_1:4",
-        "lstmcell_1:5",
-        "lstmcell_1:6",
         "lstmcell_1_3",
         "lstmcell_1_3:1",
         "lstmcell_1_3:2",
         "lstmcell_1_3:3",
-        "lstmcell_1_3:4",
-        "lstmcell_1_3:5",
-        "lstmcell_1_3:6",
         "lstmcell_1_4",
         "lstmcell_1_4_raw",
-        "lstmcell_2_5",
-        "lstmcell_2_5_raw",
         "lstmcell_3_6",
         "lstmcell_3_6_raw",
-        "lstmcell_4_7",
-        "lstmcell_4_7_raw",
         "lstmcell_5_8",
-        "lstmcell_5_8_raw",
-        "lstmcell_6_9",
-        "lstmcell_6_9_raw"
+        "lstmcell_5_8_raw"
       ],
       "module": "cell:1",
       "module_call_depth": 1,
@@ -145,7 +127,48 @@
     },
     {
       "in_submodule": true,
-      "label": "linear_1_4",
+      "label": "lstmcell_2_4",
+      "lookup_keys": [
+        "-3",
+        "-5",
+        "-7",
+        "4",
+        "6",
+        "8",
+        "cell:1",
+        "cell:2",
+        "cell:3",
+        "lstmcell_2",
+        "lstmcell_2:1",
+        "lstmcell_2:2",
+        "lstmcell_2:3",
+        "lstmcell_2_4",
+        "lstmcell_2_4:1",
+        "lstmcell_2_4:2",
+        "lstmcell_2_4:3",
+        "lstmcell_2_5",
+        "lstmcell_2_5_raw",
+        "lstmcell_4_7",
+        "lstmcell_4_7_raw",
+        "lstmcell_6_9",
+        "lstmcell_6_9_raw"
+      ],
+      "module": "cell:1",
+      "module_call_depth": 1,
+      "modules": [
+        "cell:1"
+      ],
+      "output_of_module_calls": [
+        "cell:1"
+      ],
+      "output_of_modules": [
+        "cell"
+      ],
+      "step_index": 4
+    },
+    {
+      "in_submodule": true,
+      "label": "linear_1_5",
       "lookup_keys": [
         "-2",
         "9",
@@ -153,8 +176,8 @@
         "linear_1:1",
         "linear_1_10",
         "linear_1_10_raw",
-        "linear_1_4",
-        "linear_1_4:1",
+        "linear_1_5",
+        "linear_1_5:1",
         "readout",
         "readout:1"
       ],
@@ -210,7 +233,8 @@
         "newzeros_1_1",
         "newzeros_2_2",
         "lstmcell_1_3",
-        "linear_1_4",
+        "lstmcell_2_4",
+        "linear_1_5",
         "output_1"
       ],
       "output_layers": [
@@ -229,11 +253,11 @@
       ],
       "ops": [
         "lstmcell_1_3:1",
-        "lstmcell_1_3:2"
+        "lstmcell_2_4:1"
       ],
       "output_layers": [
         "lstmcell_1_3",
-        "lstmcell_1_3"
+        "lstmcell_2_4"
       ]
     },
     {
@@ -244,15 +268,15 @@
       "input_layers": [
         "input_1",
         "lstmcell_1_3",
-        "lstmcell_1_3"
+        "lstmcell_2_4"
       ],
       "ops": [
-        "lstmcell_1_3:3",
-        "lstmcell_1_3:4"
+        "lstmcell_1_3:2",
+        "lstmcell_2_4:2"
       ],
       "output_layers": [
         "lstmcell_1_3",
-        "lstmcell_1_3"
+        "lstmcell_2_4"
       ]
     },
     {
@@ -263,15 +287,15 @@
       "input_layers": [
         "input_1",
         "lstmcell_1_3",
-        "lstmcell_1_3"
+        "lstmcell_2_4"
       ],
       "ops": [
-        "lstmcell_1_3:5",
-        "lstmcell_1_3:6"
+        "lstmcell_1_3:3",
+        "lstmcell_2_4:3"
       ],
       "output_layers": [
         "lstmcell_1_3",
-        "lstmcell_1_3"
+        "lstmcell_2_4"
       ]
     },
     {
@@ -283,10 +307,10 @@
         "lstmcell_1_3"
       ],
       "ops": [
-        "linear_1_4:1"
+        "linear_1_5:1"
       ],
       "output_layers": [
-        "linear_1_4"
+        "linear_1_5"
       ]
     }
   ],
@@ -313,7 +337,8 @@
         "newzeros_1_1",
         "newzeros_2_2",
         "lstmcell_1_3",
-        "linear_1_4",
+        "lstmcell_2_4",
+        "linear_1_5",
         "output_1"
       ],
       "output_layers": [
@@ -335,19 +360,22 @@
       "input_layers": [
         "input_1",
         "lstmcell_1_3",
+        "lstmcell_2_4",
         "newzeros_1_1",
         "newzeros_2_2"
       ],
       "num_calls": 3,
       "num_param_tensors": 4,
-      "num_params": 1664,
+      "num_params": 3328,
       "num_params_frozen": 0,
-      "num_params_trainable": 1664,
+      "num_params_trainable": 3328,
       "ops": [
-        "lstmcell_1_3"
+        "lstmcell_1_3",
+        "lstmcell_2_4"
       ],
       "output_layers": [
-        "lstmcell_1_3"
+        "lstmcell_1_3",
+        "lstmcell_2_4"
       ],
       "training": true
     },
@@ -369,10 +397,10 @@
       "num_params_frozen": 0,
       "num_params_trainable": 68,
       "ops": [
-        "linear_1_4"
+        "linear_1_5"
       ],
       "output_layers": [
-        "linear_1_4"
+        "linear_1_5"
       ],
       "training": true
     }
@@ -540,15 +568,15 @@
       "is_internal_source": false,
       "is_module_output": true,
       "is_orphan": false,
-      "label": "lstmcell_1_3:2",
+      "label": "lstmcell_2_4:1",
       "lookup_keys": [
         "-7",
         "4",
         "cell:1",
-        "lstmcell_1",
-        "lstmcell_1:2",
-        "lstmcell_1_3",
-        "lstmcell_1_3:2",
+        "lstmcell_2",
+        "lstmcell_2:1",
+        "lstmcell_2_4",
+        "lstmcell_2_4:1",
         "lstmcell_2_5",
         "lstmcell_2_5_raw"
       ],
@@ -579,15 +607,15 @@
       "is_internal_source": false,
       "is_module_output": true,
       "is_orphan": false,
-      "label": "lstmcell_1_3:3",
+      "label": "lstmcell_1_3:2",
       "lookup_keys": [
         "-6",
         "5",
         "cell:2",
         "lstmcell_1",
-        "lstmcell_1:3",
+        "lstmcell_1:2",
         "lstmcell_1_3",
-        "lstmcell_1_3:3",
+        "lstmcell_1_3:2",
         "lstmcell_3_6",
         "lstmcell_3_6_raw"
       ],
@@ -618,15 +646,15 @@
       "is_internal_source": false,
       "is_module_output": true,
       "is_orphan": false,
-      "label": "lstmcell_1_3:4",
+      "label": "lstmcell_2_4:2",
       "lookup_keys": [
         "-5",
         "6",
         "cell:2",
-        "lstmcell_1",
-        "lstmcell_1:4",
-        "lstmcell_1_3",
-        "lstmcell_1_3:4",
+        "lstmcell_2",
+        "lstmcell_2:2",
+        "lstmcell_2_4",
+        "lstmcell_2_4:2",
         "lstmcell_4_7",
         "lstmcell_4_7_raw"
       ],
@@ -657,15 +685,15 @@
       "is_internal_source": false,
       "is_module_output": true,
       "is_orphan": false,
-      "label": "lstmcell_1_3:5",
+      "label": "lstmcell_1_3:3",
       "lookup_keys": [
         "-4",
         "7",
         "cell:3",
         "lstmcell_1",
-        "lstmcell_1:5",
+        "lstmcell_1:3",
         "lstmcell_1_3",
-        "lstmcell_1_3:5",
+        "lstmcell_1_3:3",
         "lstmcell_5_8",
         "lstmcell_5_8_raw"
       ],
@@ -698,15 +726,15 @@
       "is_internal_source": false,
       "is_module_output": true,
       "is_orphan": false,
-      "label": "lstmcell_1_3:6",
+      "label": "lstmcell_2_4:3",
       "lookup_keys": [
         "-3",
         "8",
         "cell:3",
-        "lstmcell_1",
-        "lstmcell_1:6",
-        "lstmcell_1_3",
-        "lstmcell_1_3:6",
+        "lstmcell_2",
+        "lstmcell_2:3",
+        "lstmcell_2_4",
+        "lstmcell_2_4:3",
         "lstmcell_6_9",
         "lstmcell_6_9_raw"
       ],
@@ -735,7 +763,7 @@
       "is_internal_source": false,
       "is_module_output": true,
       "is_orphan": false,
-      "label": "linear_1_4:1",
+      "label": "linear_1_5:1",
       "lookup_keys": [
         "-2",
         "9",
@@ -743,8 +771,8 @@
         "linear_1:1",
         "linear_1_10",
         "linear_1_10_raw",
-        "linear_1_4",
-        "linear_1_4:1",
+        "linear_1_5",
+        "linear_1_5:1",
         "readout",
         "readout:1"
       ],

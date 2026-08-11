@@ -7,6 +7,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
+from torchlens.data_classes.field_policy import portable_state_spec_from_policy
+from torchlens.data_classes.trace import Trace
 from torchlens.receptive_field._gradient import _probe_suppressed, gradient_for_unit
 
 
@@ -73,6 +75,29 @@ def test_probe_does_not_mutate_any_backward_or_gradient_state() -> None:
             assert parameter.grad is None
         else:
             assert parameter.grad is not None and torch.equal(parameter.grad, before_grad)
+
+
+def test_probe_does_not_mutate_the_class_level_field_policy_tables() -> None:
+    """A probe leaves ``Trace``'s class-level policy tables byte-identical.
+
+    The probe flag needs a portable scrub policy, but registering it from the
+    probe mutated ``Trace.PORTABLE_STATE_SPEC`` process-globally and left it
+    desynchronized from the ``FIELD_POLICY`` table it is generated from. That
+    made ``test_record_portable_spec_is_generated_from_policy[Trace]`` fail for
+    every test collected after the first receptive-field gradient probe in the
+    process, so the flag is declared statically on ``Trace`` instead.
+    """
+
+    before_spec = dict(Trace.PORTABLE_STATE_SPEC)
+    before_policy = dict(Trace.FIELD_POLICY)
+    assert "_tl_rf_probe_active" in before_spec
+
+    _, trace, target, input_op = _conv_trace()
+    gradient_for_unit(target, (0, 0, 2, 2), input=input_op)
+
+    assert dict(Trace.PORTABLE_STATE_SPEC) == before_spec
+    assert dict(Trace.FIELD_POLICY) == before_policy
+    assert Trace.PORTABLE_STATE_SPEC == portable_state_spec_from_policy(Trace.FIELD_POLICY)
 
 
 def test_suppression_restores_exact_flag_state_when_probe_raises() -> None:

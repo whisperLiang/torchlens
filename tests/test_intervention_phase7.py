@@ -336,6 +336,94 @@ def test_rerun_fast_refresh_repopulates_child_versions() -> None:
     )
 
 
+class MultiPassAddBlock(torch.nn.Module):
+    """Block whose two chained adds group into one two-pass layer."""
+
+    def __init__(self) -> None:
+        """Initialize three summed projections plus an output projection."""
+
+        super().__init__()
+        self.first = torch.nn.Linear(4, 4)
+        self.second = torch.nn.Linear(4, 4)
+        self.third = torch.nn.Linear(4, 4)
+        self.out_proj = torch.nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Sum three projections through two structurally corresponding adds.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Projected sum.
+        """
+
+        return self.out_proj(self.first(x) + self.second(x) + self.third(x))
+
+
+class MultiPassAdd(torch.nn.Module):
+    """Wrapper giving the two-pass block a stable module address."""
+
+    def __init__(self) -> None:
+        """Initialize the wrapped block."""
+
+        super().__init__()
+        self.block = MultiPassAddBlock()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the wrapped block.
+
+        Parameters
+        ----------
+        x:
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Block output.
+        """
+
+        return self.block(x)
+
+
+def test_rerun_fast_refresh_keeps_every_pass_of_a_multi_pass_layer_distinct() -> None:
+    """Fast refresh must pair passes positionally, not through a label map.
+
+    Neither the raw nor the final layer label is pass-qualified, so a label-keyed
+    refresh map collapses an N-pass layer to its last pass and overwrites every
+    earlier pass' activation with it -- silent corruption that only replay
+    validation catches.
+    """
+
+    torch.manual_seed(0)
+    model = MultiPassAdd()
+    x = torch.randn(2, 4)
+    new_x = torch.randn(2, 4)
+    log = tl.trace(model, x, layers_to_save="all", save_arg_values=True)
+    assert log.layer_logs["add_1_3"].num_passes == 2
+
+    log.run(model, new_x)
+
+    assert log.last_run["fast_refresh"] is True
+    first_pass, second_pass = (log["add_1_3:1"], log["add_1_3:2"])
+    assert first_pass.label == "add_1_3:1"
+    assert second_pass.label == "add_1_3:2"
+    first, second, third = (
+        log["linear_1_1"].out,
+        log["linear_2_2"].out,
+        log["linear_3_4"].out,
+    )
+    assert torch.equal(first_pass.out, first + second)
+    assert torch.equal(second_pass.out, first + second + third)
+    assert not torch.equal(first_pass.out, second_pass.out)
+    assert log.validate_forward_pass([log[log.output_layers[0]].out])
+
+
 def test_replace_run_state_preserves_relationship_and_spec_fields() -> None:
     """Atomic swap keeps recipe, warning flags, history, and evidence fields."""
 

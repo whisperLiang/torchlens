@@ -42,6 +42,7 @@ from torchlens.utils._callable_safety import (
     _unwrap_capture_wrapper,
     is_pure_forward_callable,
 )
+from torchlens.utils._torch_compat import HAS_NAMED_TENSOR_API
 
 _CAPTURE = CaptureOptions(
     intervention_ready=True,
@@ -55,9 +56,12 @@ _EXPECTED_ADMITTED = frozenset({"T", "mT", "H", "mH", "real", "imag"})
 # A representative slice of properties that MUST stay denied (metadata / layout / autograd
 # state / the autograd-detaching ``.data`` alias). Not exhaustive of the deny side -- the
 # structural oracle below covers the rest -- but pins the ones most likely to regress.
+# ``names`` is the named-tensor API property; torch removed the API upstream (torch 2.13
+# has no ``Tensor.names``), so it is required-denied only where torch ships it, keyed on
+# the same ``HAS_NAMED_TENSOR_API`` capability flag the sibling runnable suites use.
 _EXPECTED_DENIED_SAMPLE = frozenset(
-    {"data", "grad", "grad_fn", "requires_grad", "shape", "dtype", "device", "layout", "names"}
-)
+    {"data", "grad", "grad_fn", "requires_grad", "shape", "dtype", "device", "layout"}
+) | (frozenset({"names"}) if HAS_NAMED_TENSOR_API else frozenset())
 
 # Exhaustive reason vocabulary for the INDEPENDENT structural oracle. Every live descriptor
 # must resolve to exactly one of these -- an "unknown" reason can never arise, so a

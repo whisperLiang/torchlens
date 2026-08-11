@@ -355,7 +355,11 @@ def test_w34_census_unverified_outcome_is_recorded_not_discarded() -> None:
 
     from torchlens.validation.diagnostics import get_validation_diagnostics
 
-    trace, ground_truth = _capture(_Tiny(), torch.randn(3, 4))
+    # Bind the model: replay reads parameters through TorchLens' weak model
+    # reference, so a temporary model can be collected mid-test and turn the
+    # replay into PostTraceParamUnavailable.
+    model = _Tiny()
+    trace, ground_truth = _capture(model, torch.randn(3, 4))
     status = validate_saved_outs(trace, [ground_truth], validate_metadata=False)
     assert status.state == "passed"
     diagnostics = get_validation_diagnostics(trace)
@@ -369,7 +373,9 @@ def test_w34_census_unverified_outcome_is_recorded_not_discarded() -> None:
 def test_w34_census_validated_outcome_recorded_in_decisions() -> None:
     """A matched census is positive verdict evidence, not silence."""
 
-    trace, ground_truth = _capture(_Tiny(), torch.randn(3, 4))
+    # Bind the model for the duration of the replay (see the sibling test).
+    model = _Tiny()
+    trace, ground_truth = _capture(model, torch.randn(3, 4))
     # Simulate the public path's collected census: counts agree.
     trace._validation_dispatch_op_count = 3
     trace._validation_captured_dispatchable_op_count = 3

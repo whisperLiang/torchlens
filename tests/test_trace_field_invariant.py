@@ -94,12 +94,15 @@ def test_trace_field_set_subset_of_user_facing() -> None:
         "_session_param_inventory",
         "_session_buffer_inventory",
         "_session_buffer_identity",
-        # Pre-existing lockstep misses (RED at baseline 4c33555d before the
-        # backend branch): both are declared FieldPolicy.DROP in
-        # Trace.PORTABLE_STATE_SPEC but were never added here. The session-time
-        # tracemalloc knob and the cached module-call accessor.
-        "measure_python_peak_memory",
+        # Session-time knobs and lazily built accessor caches that Trace
+        # DECLARES with an explicit ``FieldPolicy.DROP`` (see
+        # ``data_classes/trace.py``): deliberately live on a finished Trace and
+        # deliberately absent from MODEL_LOG_FIELD_ORDER because they do not
+        # survive save/load. ``_module_call_accessor`` is the exact sibling of
+        # the allowlisted ``_buffer_accessor``; ``measure_python_peak_memory``
+        # is the documented tracemalloc opt-in read back by capture/trace.py.
         "_module_call_accessor",
+        "measure_python_peak_memory",
     }
 
     actual = set(trace.__dict__.keys())

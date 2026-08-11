@@ -2040,9 +2040,20 @@ def torch_func_decorator(
             ):
                 boundary_label = get_tensor_label(out_orig)
                 if boundary_label is not None:
+                    live_label_before_mint = get_tensor_label(args[0])
                     set_tensor_label(args[0], boundary_label)
                     _register_inplace_live_grad_hook(trace, args[0], boundary_label)
                     _record_label_version_snapshot(args[0])
+                    # The mint is value-preserving by construction (an internal
+                    # no-op identity): tell the container registry so snapshot
+                    # dedup of an unchanged threaded container survives the
+                    # label advance (a mutation's advance is never reported).
+                    if live_label_before_mint is not None and getattr(
+                        trace, "_capture_container_structure", False
+                    ):
+                        trace._ensure_build_state().container_registry.note_value_preserving_relabel(
+                            live_label_before_mint, boundary_label
+                        )
 
             # W3 F1 (out= family): an ``out=`` destination may itself be a view
             # of a larger live tensor (``torch.add(x, 1, out=y[0])``); the

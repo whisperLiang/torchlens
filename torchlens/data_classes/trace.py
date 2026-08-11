@@ -1095,6 +1095,7 @@ class Trace(
     _receptive_field_solution: Any
     _rf_source_solutions: Any
     _rf_target_solutions: Any
+    _tl_rf_probe_active: Any
 
     PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = {
         "trace_label": FieldPolicy.KEEP,
@@ -1117,6 +1118,7 @@ class Trace(
         "_receptive_field_solution": FieldPolicy.DROP,
         "_rf_source_solutions": FieldPolicy.DROP,
         "_rf_target_solutions": FieldPolicy.DROP,
+        "_tl_rf_probe_active": FieldPolicy.DROP,
         "module_identity_mode": FieldPolicy.KEEP,
         "param_source": FieldPolicy.KEEP,
         "derived_grads": FieldPolicy.KEEP,
@@ -1405,6 +1407,11 @@ class Trace(
         # Runtime-only: the set of dispatchable op func-call-ids the orphan-removal
         # pass pruned, read by the validation dispatch-count backstop. Never portable.
         "_orphan_pruned_func_call_ids": FieldPolicy.DROP,
+        # Runtime-only (r29 F3b): the capture-time (slot -> producer) parent-edge
+        # truth keyed by raw label, read by the capture_edge_survival metadata
+        # invariant. Registered in _io/scrub.py's runtime-only list; declared here
+        # so the portable-state cover stays exhaustive. Never portable.
+        "_capture_parent_edge_truth": FieldPolicy.DROP,
         "_capture_events": FieldPolicy.DROP,
         "_capture_session": FieldPolicy.DROP,
         "_tl_backward_hooked_tensor_keys": FieldPolicy.DROP,
@@ -2933,9 +2940,16 @@ class Trace(
         if old_raw_labels != new_raw_labels or old_final_labels != new_final_labels:
             return False
 
-        new_by_raw = {layer._layer_label_raw: layer for layer in new_log.layer_list}
-        for layer in self.layer_list:
-            self._refresh_rerun_op_from(layer, new_by_raw[layer._layer_label_raw])
+        # Pair the two op sequences POSITIONALLY, never through a label -> op map.
+        # Neither `_layer_label_raw` nor `layer_label` is pass-qualified, so every
+        # pass of a multi-pass (recurrent) layer shares both keys: a dict keyed by
+        # either collapses an N-pass layer to its last pass and then refreshes all
+        # N existing passes from that one op, silently overwriting the earlier
+        # passes' activations and pass labels. The label-sequence equality checked
+        # just above is exactly the precondition that makes index i of one list the
+        # same op as index i of the other.
+        for layer, new_layer in zip(self.layer_list, new_log.layer_list):
+            self._refresh_rerun_op_from(layer, new_layer)
         self._refresh_rerun_layer_logs_from(new_log)
         self._refresh_rerun_trace_fields_from(new_log)
         self.__dict__.pop("_validation_replay_status", None)

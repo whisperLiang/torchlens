@@ -898,6 +898,7 @@
       "_build_state",
       "_capture_config",
       "_capture_events",
+      "_capture_parent_edge_truth",
       "_code_context_cache",
       "_containers",
       "_current_func_barcode",
@@ -929,6 +930,7 @@
       "_mod_entered",
       "_mod_exited",
       "_module_build_data",
+      "_module_call_accessor",
       "_module_containment_engine",
       "_module_forward_args",
       "_module_logs",
@@ -1011,6 +1013,7 @@
       "_tf_validation_result",
       "_tl_backward_hooked_tensor_keys",
       "_tl_backward_triggers_disarmed",
+      "_tl_rf_probe_active",
       "_tl_save_selector_fire_count",
       "_tracing_finished",
       "_transform",
@@ -1129,6 +1132,7 @@
       "layers_with_params",
       "manual_tensor_connections",
       "mark_layer_depths",
+      "measure_python_peak_memory",
       "model_class_name",
       "model_class_qualname",
       "model_label",
@@ -1202,13 +1206,13 @@
     ]
   },
   "sha256_chunks": [
-    "03b1b25e",
-    "8a661b58",
-    "779d194e",
-    "6221a7e8",
-    "f181a59f",
-    "1be23a30",
-    "02ce3ec6",
-    "76a7400f"
+    "63e05648",
+    "e6b45f7b",
+    "39fc8677",
+    "b7e85b84",
+    "675c750c",
+    "8d482d05",
+    "4828b1db",
+    "5e428786"
   ]
 }

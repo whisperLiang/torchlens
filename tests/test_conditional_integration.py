@@ -26,6 +26,20 @@ from torchlens import trace as trace_fn  # noqa: E402
 from torchlens.data_classes.layer import Layer  # noqa: E402
 from torchlens.data_classes.op import Op  # noqa: E402
 from torchlens.data_classes.trace import ConditionalEvent, Trace  # noqa: E402
+from torchlens.utils._torch_compat import HAS_CODE_POSITIONS  # noqa: E402
+
+# Same-line ternary arm attribution needs PEP 657 per-instruction columns; the
+# degraded runtime deliberately fails closed instead (see the module docstring
+# of torchlens/postprocess/ast_branches.py and the gated fail-closed pin
+# test_ternary_py310_fail_closed_model_drops_same_line_arm_attribution). Mirrors
+# the marker in tests/test_conditional_branches.py.
+requires_code_positions = pytest.mark.skipif(
+    not HAS_CODE_POSITIONS,
+    reason=(
+        "PEP 657 bytecode column positions unavailable; same-line ternary arm "
+        "attribution deliberately fails closed on this runtime"
+    ),
+)
 
 
 class NestedIfThenIfModel(nn.Module):
@@ -1412,6 +1426,7 @@ def test_bool_cast_only_model_is_not_treated_as_branch() -> None:
     _assert_branchless_log(trace)
 
 
+@requires_code_positions
 def test_ternary_ifexp_model_attributes_then_arm_as_ifexp() -> None:
     """A minimal ternary materialises an ``ifexp`` event and branch stack."""
     trace = _log_model(TernaryIfExpModel(), torch.ones(1, 2))
@@ -1525,6 +1540,7 @@ def test_walrus_if_model_attributes_branch_normally() -> None:
     assert relu_layer.conditional_branch_stack == [(event.id, "then")]
 
 
+@requires_code_positions
 def test_nested_ternary_model_records_parent_child_ifexp_events() -> None:
     """Nested ternaries keep parent-child links between ``ifexp`` events."""
     trace = _log_model(NestedTernaryModel(), torch.ones(1, 2))
@@ -1547,6 +1563,7 @@ def test_nested_ternary_model_records_parent_child_ifexp_events() -> None:
     ]
 
 
+@requires_code_positions
 def test_ternary_inside_if_model_records_mixed_if_and_ifexp_stack() -> None:
     """An inner ternary keeps both the outer ``if_chain`` and inner ``ifexp`` stack."""
     trace = _log_model(TernaryInsideIfModel(), torch.ones(1, 2))
@@ -1567,6 +1584,7 @@ def test_ternary_inside_if_model_records_mixed_if_and_ifexp_stack() -> None:
     ]
 
 
+@requires_code_positions
 def test_ternary_with_bool_cast_model_marks_conditional_wrapper_kind() -> None:
     """``bool(...)`` wrappers inside ternaries keep ``ifexp`` attribution."""
     trace = _log_model(TernaryWithBoolCastModel(), torch.ones(1, 2))
@@ -1609,6 +1627,7 @@ def test_ternary_py311_records_non_none_column_offsets_for_ifexp_frames() -> Non
     assert trace.conditional_arm_entry_edges
 
 
+@requires_code_positions
 def test_ternary_multi_op_one_line_model_attributes_each_arm_by_column_offset() -> None:
     """Same-line multi-op ternary arms are separated by column offsets."""
     positive_log = _log_model(TernaryMultiOpOneLineModel(), torch.ones(2, 2))

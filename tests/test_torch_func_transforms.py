@@ -780,13 +780,33 @@ def test_provenance_warning_foreign_tensor_contract() -> None:
     assert module_add.unattributed_tensor_args == ()
 
 
-def test_known_provenance_parent_drop_warns_with_arg_position() -> None:
-    """A labeled tensor arg warns when a broken spec drops its parent edge."""
+def test_arg_spec_table_cannot_silently_cost_a_parent_edge() -> None:
+    """Narrowing an ArgSpec must not drop a traced operand's parent edge.
+
+    This replaces a test that tried to INDUCE a dropped edge by installing a
+    "broken" ``FUNC_ARG_SPECS["polygamma"]`` and asserting the provenance warning
+    named ``arg1``. That test could never pass, for two independent reasons:
+
+    1. Its "broken" spec was byte-identical to the shipped one
+       (``positions=(0,)``, same ``tensor_kwargs``), so the monkeypatch was a
+       no-op.
+    2. Parent-edge discovery does not consult this table at all. Since the r29/r31
+       work, ``_unattributed_tensor_arg_positions`` witnesses edges by tensor
+       IDENTITY against live producer labels, so even ``ArgSpec(positions=(),
+       tensor_kwargs=())`` still recovers the correct parent. Verified for both the
+       ``torch.polygamma(n, t)`` function form and the ``t.polygamma(n)`` method
+       form.
+
+    So assert the stronger property that actually holds and that we want to keep:
+    the spec table is not load-bearing for provenance, and narrowing it cannot
+    silently cost an edge. The ``arg1`` position marker the old test wanted is
+    pinned by the genuine route in the test below instead.
+    """
 
     from torchlens.capture.arg_positions import ArgSpec, FUNC_ARG_SPECS
 
-    class _BrokenSpecPolygammaModel(nn.Module):
-        """Exercise a schema-known tensor operand at argument position ``1``."""
+    class _PolygammaModel(nn.Module):
+        """Exercise a schema-known tensor operand at a non-zero argument position."""
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             """Return a scalar reduction through ``torch.polygamma``.
@@ -807,19 +827,51 @@ def test_known_provenance_parent_drop_warns_with_arg_position() -> None:
             return torch.polygamma(2, operand).sum()
 
     original_spec = FUNC_ARG_SPECS["polygamma"]
-    broken_spec = ArgSpec(positions=(0,), tensor_kwargs=("input", "self", "tensor"))
-    FUNC_ARG_SPECS["polygamma"] = broken_spec
+    FUNC_ARG_SPECS["polygamma"] = ArgSpec(positions=(), tensor_kwargs=())
     try:
-        with pytest.warns(UserWarning, match=r"no graph/source provenance.*arg1"):
-            trace = tl.trace(_BrokenSpecPolygammaModel().eval(), torch.ones(2, 2))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            trace = tl.trace(_PolygammaModel().eval(), torch.ones(2, 2) * 0.5)
     finally:
         FUNC_ARG_SPECS["polygamma"] = original_spec
 
+    assert [w for w in caught if "no graph/source provenance" in str(w.message)] == []
     op = next(op for op in trace.ops if op.type == "polygamma")
+    multiply = next(other for other in trace.ops if other.type == "mul")
+    assert op.parents == [multiply.layer_label]
+    assert op.unattributed_tensor_args == ()
+    assert op.dropped_edge_tensor_args == ()
 
-    assert op.parents == []
-    assert op.is_internal_source is True
-    assert op.unattributed_tensor_args == ("arg1",)
+
+def test_foreign_operand_warns_with_its_arg_position() -> None:
+    """A genuinely un-provenanced operand is flagged at its own arg position."""
+
+    foreign = torch.rand(4) + 0.5
+
+    class _ForeignOperandModel(nn.Module):
+        """Consume a tensor created outside the traced model at position ``1``."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Add a foreign operand as the second argument.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Scalar reduction of the polygamma output.
+            """
+
+            return torch.polygamma(2, (x * 3.0) + foreign).sum()
+
+    with pytest.warns(UserWarning, match=r"no graph/source provenance.*arg1"):
+        trace = tl.trace(_ForeignOperandModel().eval(), torch.rand(4) + 0.5)
+
+    add_op = next(op for op in trace.ops if op.type == "add")
+    assert add_op.unattributed_tensor_args == ("arg1",)
 
 
 @pytest.mark.skipif(not _HAS_TORCH_FUNC, reason="torch.func not available")
