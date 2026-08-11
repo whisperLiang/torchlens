@@ -68,8 +68,12 @@ that directly observed the edit (2026-06-02 lesson, kept armed by
 **S9 — MERGE LAW.** Every journal lane declares a merge policy
 (`torchlens.ir.capture_events.LANE_MERGE_POLICIES`, total over all lanes);
 `CaptureEvents.concat` is the ONLY way to combine streams (multi-pass recording,
-failed-partial recovery). Ad-hoc lane splicing is forbidden. Merged events are
-re-stamped into the target journal's sequence domain by the single writer.
+failed-partial recovery). Ad-hoc lane splicing is forbidden. Merging preserves the
+source stream's cross-lane chronological order, appends CLONES (the sealed source is
+never mutated), and re-stamps them into the target journal's sequence domain by the
+single writer. Every merging (non-`run_local`) lane MUST have a registered appender;
+a declared-but-unwired lane fails closed (`LaneMergePolicyError`) before any event
+moves, and the totality test asserts appender coverage.
 
 **S10 — SINGLE WRITER.** Only the `CaptureEvents` append methods allocate `seq` or
 append. Backends, projectors, postprocess, indexes, and public objects never mutate a
@@ -132,8 +136,8 @@ contract.
 | S6 | Torch op events trace-backref-free from birth; full native-handle sidecar (grad_fn handles, payload leases) remains with the producer rewrite. |
 | S7 | Followed by both producers (phase-1 straight-line commit path); conformance assertions ride the ports phase. |
 | S8 | Shipped (`InterventionAppliedEvent`, kind vocabulary cleaned, side ledger deleted, carve-out journal-backed). |
-| S9 | Shipped (`concat` + total `LANE_MERGE_POLICIES`; recorder splices routed). |
-| S10 | Shipped (writer methods; direct lane appends routed; invariant enforces counter consistency). |
+| S9 | Shipped (`concat` + total `LANE_MERGE_POLICIES` + total `_LANE_APPENDERS`, fail-closed on unwired lanes; chronological clone merge; recorder and failed-fastlog snapshot splices routed through `concat`). |
+| S10 | Shipped (writer methods; direct lane appends routed, including the failed-fastlog snapshot; invariant enforces counter consistency). |
 | S11 | Shipped (detached-stream baselines, phases 2-3 + fix rounds). |
 | S12 | Shipped (exact bracketing, nesting, typed coverage gaps, fail-closed validation). |
 | S13 | Standing (previews inert; `_check_non_torch_backward_inert`). |

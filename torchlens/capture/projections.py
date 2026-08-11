@@ -1167,7 +1167,11 @@ def activation_record_from_event(event: OpEvent) -> ActivationRecord | None:
 
     if not event.predicate_matched:
         return None
-    spec = getattr(event, "capture_spec", CaptureSpec(save_out=False, save_metadata=True))
+    # Events minted outside the predicate storage path (e.g. a replacement
+    # boundary op logged for a raw forward hook's injected tensor) carry the
+    # constructor default ``capture_spec=None``; they are structural facts
+    # with no retained payload, so they project as metadata-only records.
+    spec = getattr(event, "capture_spec", None) or CaptureSpec(save_out=False, save_metadata=True)
     ctx = _record_context_from_event(event)
     ram_payload = event.output.tensor.payload if spec.save_out else None
     transformed_ram_payload = (

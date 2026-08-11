@@ -1085,12 +1085,13 @@ class TorchBackend:
 
             events = getattr(session, "capture_events", None)
             if events is not None:
+                # Snapshot the failing pass through the sanctioned merge path:
+                # concat clones and re-stamps every mergeable lane under the
+                # declared merge law, keeping the snapshot's counter coherent
+                # with its seq values (a direct lane splice preserved source
+                # seqs that collided with the re-stamped op lane).
                 failed_fastlog_events = CaptureEvents()
-                failed_fastlog_events.extend(list(getattr(events, "op_events", ())))
-                failed_fastlog_events.module_prep_events.extend(events.module_prep_events)
-                failed_fastlog_events.module_enter_events.extend(events.module_enter_events)
-                failed_fastlog_events.module_exit_events.extend(events.module_exit_events)
-                failed_fastlog_events.pre_hook_events.extend(events.pre_hook_events)
+                failed_fastlog_events.concat(events)
                 setattr(session, "_failed_fastlog_capture_events", failed_fastlog_events)
         try:
             partial_log = PartialTrace.from_trace(cast("Trace", session), exc)

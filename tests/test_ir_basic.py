@@ -35,6 +35,7 @@ from torchlens.ir import (
     OutputRef,
     ParamRef,
     ParentEdge,
+    PreHookProvenanceEvent,
     RecordContext,
     ReservedLabel,
     TensorRef,
@@ -498,12 +499,12 @@ def test_mutable_slotted_state_dataclasses_reject_undeclared_fields() -> None:
 
     assert is_dataclass(intervention_state)
     assert is_dataclass(trace_build_state)
-    setattr(intervention_state, "has_direct_writes", True)
-    setattr(trace_build_state, "raw_layer_labels_list", [])
+    intervention_state.has_direct_writes = True
+    trace_build_state.raw_layer_labels_list = []
     with pytest.raises(AttributeError):
-        setattr(intervention_state, "undeclared_slot", True)
+        intervention_state.undeclared_slot = True
     with pytest.raises(AttributeError):
-        setattr(trace_build_state, "undeclared_slot", True)
+        trace_build_state.undeclared_slot = True
 
 
 def test_capture_events_mutation_and_label_reservation() -> None:
@@ -625,3 +626,172 @@ def test_capture_events_concat_follows_declared_merge_law() -> None:
     before = list(target.pre_hook_events)
     target.concat(target)
     assert target.pre_hook_events == before
+
+
+def _merge_prep_event(address: str) -> ModulePrepEvent:
+    """Build a minimal module-prep event for merge-law tests."""
+
+    return ModulePrepEvent(
+        address=address,
+        all_addresses=(address,),
+        module_type_str="Linear",
+        cls_qualname="torch.nn.Linear",
+        class_name="Linear",
+        address_children=(),
+        class_source_file=None,
+        class_source_line=None,
+        init_source_file=None,
+        init_source_line=None,
+        forward_source_file=None,
+        forward_source_line=None,
+        class_docstring=None,
+        init_signature=None,
+        init_docstring=None,
+        forward_signature=None,
+        forward_docstring=None,
+        forward_pre_hooks=None,
+        forward_hooks=None,
+        backward_pre_hooks=None,
+        backward_hooks=None,
+        full_backward_pre_hooks=None,
+        full_backward_hooks=None,
+        training_at_prep=False,
+        custom_attributes=(),
+        custom_methods=(),
+    )
+
+
+def _merge_pre_hook_event(address: str) -> PreHookProvenanceEvent:
+    """Build a minimal pre-hook provenance event for merge-law tests."""
+
+    return PreHookProvenanceEvent(
+        address=address,
+        call_index=1,
+        inputs_before_pre_hooks=None,
+        inputs_after_pre_hooks=None,
+        effects=(),
+        capture_complete=True,
+        incomplete_reasons=(),
+    )
+
+
+@pytest.mark.smoke
+def test_concat_merges_intervention_events_lane() -> None:
+    """A populated intervention-edit lane merges under append_restamp."""
+
+    from torchlens.ir.capture_events import CaptureEvents
+    from torchlens.ir.events import InterventionAppliedEvent
+
+    source = CaptureEvents()
+    source.append_intervention(
+        InterventionAppliedEvent(
+            label_raw="x_raw", kind="replaced", origin="raw_forward_hook", timestamp=1.0
+        )
+    )
+    target = CaptureEvents()
+    target.concat(source)
+    assert [event.label_raw for event in target.intervention_events] == ["x_raw"]
+    assert target.intervention_events[0].seq == 1
+    assert target.intervention_events[0].seq <= target.event_seq
+
+
+@pytest.mark.smoke
+def test_lane_appenders_cover_every_merging_policy() -> None:
+    """Every non-run_local lane policy has a registered single-writer appender.
+
+    A lane declared as merging but left unwired must be impossible to ship:
+    this assertion is the totality half, and ``concat`` itself fail-closes at
+    runtime (see ``test_concat_fails_closed_on_declared_unwired_lane``).
+    """
+
+    from torchlens.ir.capture_events import _LANE_APPENDERS, LANE_MERGE_POLICIES, CaptureEvents
+
+    merging_lanes = {
+        lane for lane, policy in LANE_MERGE_POLICIES.items() if policy != "run_local"
+    }
+    assert merging_lanes <= set(_LANE_APPENDERS)
+    for appender_name in _LANE_APPENDERS.values():
+        assert callable(getattr(CaptureEvents(), appender_name))
+
+
+@pytest.mark.smoke
+def test_concat_fails_closed_on_declared_unwired_lane(monkeypatch: pytest.MonkeyPatch) -> None:
+    """concat refuses (never silently skips) a merging lane with no appender."""
+
+    from torchlens.ir import capture_events as capture_events_module
+    from torchlens.ir.capture_events import CaptureEvents
+
+    monkeypatch.setitem(
+        capture_events_module.LANE_MERGE_POLICIES, "backward_events", "append_restamp"
+    )
+    target = CaptureEvents()
+    with pytest.raises(capture_events_module.LaneMergePolicyError, match="backward_events"):
+        target.concat(CaptureEvents())
+
+
+@pytest.mark.smoke
+def test_concat_preserves_source_chronology_across_lanes() -> None:
+    """Merged events keep the source stream's cross-lane chronological order."""
+
+    from torchlens.ir.capture_events import CaptureEvents
+    from torchlens.ir.events import InterventionAppliedEvent
+
+    source = CaptureEvents()
+    source.append_module_prep(_merge_prep_event("a"))
+    source.append_pre_hook(_merge_pre_hook_event("x"))
+    source.append_module_prep(_merge_prep_event("b"))
+    source.append_intervention(
+        InterventionAppliedEvent(
+            label_raw="edit_raw", kind="replaced", origin="raw_forward_hook", timestamp=1.0
+        )
+    )
+    source.append_pre_hook(_merge_pre_hook_event("y"))
+
+    def _flatten(events: CaptureEvents) -> list[tuple[int, str]]:
+        rows = [(event.seq, f"prep:{event.address}") for event in events.module_prep_events]
+        rows += [(event.seq, f"pre_hook:{event.address}") for event in events.pre_hook_events]
+        rows += [
+            (event.seq, f"edit:{event.label_raw}") for event in events.intervention_events
+        ]
+        return sorted(rows)
+
+    source_order = [identity for _seq, identity in _flatten(source)]
+    target = CaptureEvents()
+    target.concat(source)
+    target_order = [identity for _seq, identity in _flatten(target)]
+    assert target_order == source_order == [
+        "prep:a",
+        "pre_hook:x",
+        "prep:b",
+        "edit:edit_raw",
+        "pre_hook:y",
+    ]
+
+
+@pytest.mark.smoke
+def test_concat_clones_events_and_never_mutates_the_source_stream() -> None:
+    """Merging restamps clones; the sealed source stream's seqs stay intact."""
+
+    from torchlens.ir.capture_events import CaptureEvents
+
+    source = CaptureEvents()
+    source.append_module_prep(_merge_prep_event("a"))
+    source.append_pre_hook(_merge_pre_hook_event("x"))
+    source_events = [*source.module_prep_events, *source.pre_hook_events]
+    source_seqs_before = [event.seq for event in source_events]
+
+    target = CaptureEvents()
+    target.append_pre_hook(_merge_pre_hook_event("existing"))
+    target.concat(source)
+
+    assert [event.seq for event in source_events] == source_seqs_before
+    merged = [*target.module_prep_events, *target.pre_hook_events[1:]]
+    assert all(
+        merged_event is not source_event
+        for merged_event, source_event in zip(merged, source_events)
+    )
+    all_target_seqs = [
+        event.seq
+        for event in (*target.module_prep_events, *target.pre_hook_events)
+    ]
+    assert len(all_target_seqs) == len(set(all_target_seqs))

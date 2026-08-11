@@ -67,7 +67,17 @@ _LANE_APPENDERS: dict[str, str] = {
     "module_enter_events": "append_module_enter",
     "module_exit_events": "append_module_exit",
     "pre_hook_events": "append_pre_hook",
+    "intervention_events": "append_intervention",
 }
+
+
+class LaneMergePolicyError(RuntimeError):
+    """A lane declares a merging policy but has no registered appender.
+
+    Raised by :meth:`CaptureEvents.concat` BEFORE any event moves, so a
+    declared-but-unwired lane fails closed instead of silently skipping (or
+    crashing halfway through a merge and corrupting the target journal).
+    """
 
 
 def _clone_op_event_for_replay(event: OpEvent) -> OpEvent:
@@ -492,11 +502,22 @@ class CaptureEvents:
         """Merge another stream's lanes into this journal under the merge law.
 
         This is the ONLY sanctioned way to combine two capture streams. Each
-        lane follows its declared :data:`LANE_MERGE_POLICIES` entry; merged
-        events are re-stamped into THIS journal's sequence domain by the
-        single-writer append methods, so the combined journal keeps unique,
-        lane-monotonic seq values. Counters, param refs, and runtime sidecars
+        lane follows its declared :data:`LANE_MERGE_POLICIES` entry. Merging
+        events keep the SOURCE stream's cross-lane chronological order (its
+        ``seq`` domain is the sort key) and are re-stamped into THIS journal's
+        sequence domain by the single-writer append methods, so the combined
+        journal keeps unique seq values that preserve the source's recorded
+        chronology. Every merged event is a CLONE: re-stamping never mutates
+        the sealed source stream. Counters, param refs, and runtime sidecars
         stay the target's own (they are run state, not journal facts).
+
+        Raises
+        ------
+        LaneMergePolicyError
+            When a requested lane declares a merging (non-``run_local``)
+            policy but has no registered single-writer appender. The check
+            runs before any event moves, so a declared-but-unwired lane fails
+            closed even while empty.
 
         Parameters
         ----------
@@ -513,6 +534,14 @@ class CaptureEvents:
             return
         lane_names = tuple(lanes) if lanes is not None else tuple(LANE_MERGE_POLICIES)
         for lane_name in lane_names:
+            if LANE_MERGE_POLICIES[lane_name] != "run_local" and lane_name not in _LANE_APPENDERS:
+                raise LaneMergePolicyError(
+                    f"lane {lane_name!r} declares merge policy "
+                    f"{LANE_MERGE_POLICIES[lane_name]!r} but has no registered appender; "
+                    "wire it into _LANE_APPENDERS before it can merge"
+                )
+        merge_rows: list[tuple[int, str, Any]] = []
+        for lane_name in lane_names:
             policy = LANE_MERGE_POLICIES[lane_name]
             if policy == "run_local":
                 continue
@@ -521,9 +550,17 @@ class CaptureEvents:
                 continue
             if policy == "first_run_only" and getattr(self, lane_name):
                 continue
-            appender = getattr(self, _LANE_APPENDERS[lane_name])
-            for event in source_events:
-                appender(event)
+            merge_rows.extend((event.seq, lane_name, event) for event in source_events)
+        # Stable sort on the source seq domain: cross-lane chronology is
+        # preserved exactly; never-stamped events (seq 0, hand-built streams)
+        # keep their lane arrival order.
+        merge_rows.sort(key=lambda row: row[0])
+        for _source_seq, lane_name, event in merge_rows:
+            if lane_name == "op_events":
+                clone = _clone_op_event_for_replay(event)
+            else:
+                clone = replace(event)
+            getattr(self, _LANE_APPENDERS[lane_name])(clone)
 
     def append_backward(
         self,
