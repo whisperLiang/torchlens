@@ -541,3 +541,87 @@ def test_ir_imports_without_torch_module() -> None:
         module = importlib.import_module("torchlens.ir")
 
     assert module.TensorRef is TensorRef
+
+
+@pytest.mark.smoke
+def test_capture_events_concat_follows_declared_merge_law() -> None:
+    """journal.concat enforces the declared per-lane merge policies."""
+    from dataclasses import fields as dataclass_fields
+
+    from torchlens.ir.capture_events import LANE_MERGE_POLICIES, CaptureEvents
+    from torchlens.ir.events import ModulePrepEvent, PreHookProvenanceEvent
+
+    # The merge law is total: every event lane on CaptureEvents has a policy.
+    lane_fields = {
+        f.name
+        for f in dataclass_fields(CaptureEvents)
+        if f.name.endswith("_events") and f.name != "recent_events"
+    }
+    assert lane_fields == set(LANE_MERGE_POLICIES)
+
+    def _prep(address: str) -> ModulePrepEvent:
+        return ModulePrepEvent(
+            address=address,
+            all_addresses=(address,),
+            module_type_str="Linear",
+            cls_qualname="torch.nn.Linear",
+            class_name="Linear",
+            address_children=(),
+            class_source_file=None,
+            class_source_line=None,
+            init_source_file=None,
+            init_source_line=None,
+            forward_source_file=None,
+            forward_source_line=None,
+            class_docstring=None,
+            init_signature=None,
+            init_docstring=None,
+            forward_signature=None,
+            forward_docstring=None,
+            forward_pre_hooks=None,
+            forward_hooks=None,
+            backward_pre_hooks=None,
+            backward_hooks=None,
+            full_backward_pre_hooks=None,
+            full_backward_hooks=None,
+            training_at_prep=False,
+            custom_attributes=(),
+            custom_methods=(),
+        )
+
+    def _pre_hook(address: str) -> PreHookProvenanceEvent:
+        return PreHookProvenanceEvent(
+            address=address,
+            call_index=1,
+            inputs_before_pre_hooks=None,
+            inputs_after_pre_hooks=None,
+            effects=(),
+            capture_complete=True,
+            incomplete_reasons=(),
+        )
+
+    target = CaptureEvents()
+    run_one = CaptureEvents()
+    run_one.append_module_prep(_prep("linear"))
+    run_one.append_pre_hook(_pre_hook("linear"))
+    target.concat(run_one)
+    assert [event.address for event in target.module_prep_events] == ["linear"]
+    assert len(target.pre_hook_events) == 1
+
+    run_two = CaptureEvents()
+    run_two.append_module_prep(_prep("other"))
+    run_two.append_pre_hook(_pre_hook("other"))
+    target.concat(run_two)
+    # first_run_only: the second run's identical module structure is skipped.
+    assert [event.address for event in target.module_prep_events] == ["linear"]
+    # append_restamp: pre-hook facts accumulate with re-stamped unique seqs.
+    assert [event.address for event in target.pre_hook_events] == ["linear", "other"]
+    all_seqs = [event.seq for event in (*target.module_prep_events, *target.pre_hook_events)]
+    assert len(all_seqs) == len(set(all_seqs))
+    assert all(seq >= 1 for seq in all_seqs)
+    assert max(all_seqs) <= target.event_seq
+
+    # run_local lanes never merge, and self-concat is a no-op.
+    before = list(target.pre_hook_events)
+    target.concat(target)
+    assert target.pre_hook_events == before

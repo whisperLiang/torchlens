@@ -33,6 +33,40 @@ if TYPE_CHECKING:
     from .intervention import FireResult
 
 
+# Declared merge law: how each journal lane combines when one run's stream is
+# folded into an accumulating journal (multi-pass recording, failed-partial
+# recovery). ``CaptureEvents.concat`` is the ONLY sanctioned way to combine two
+# streams; ad-hoc lane splicing is forbidden.
+#
+# - ``append_restamp``: events join the target journal and are re-stamped into
+#   its sequence domain by the single writer.
+# - ``first_run_only``: merged only while the target lane is empty (module
+#   structure repeats identically per pass; one non-duplicated set is kept).
+# - ``run_local``: never merged — the lane's facts are scoped to their own run
+#   (per-pass replay snapshots, buffer writes predicate capture does not track,
+#   and backward events, which append to the ACCUMULATING stream directly).
+#
+# Dict order is the stamping order for one concat call.
+LANE_MERGE_POLICIES: dict[str, str] = {
+    "module_prep_events": "first_run_only",
+    "module_enter_events": "first_run_only",
+    "module_exit_events": "first_run_only",
+    "pre_hook_events": "append_restamp",
+    "op_events": "append_restamp",
+    "output_version_events": "run_local",
+    "buffer_write_events": "run_local",
+    "backward_events": "run_local",
+}
+
+_LANE_APPENDERS: dict[str, str] = {
+    "op_events": "append",
+    "module_prep_events": "append_module_prep",
+    "module_enter_events": "append_module_enter",
+    "module_exit_events": "append_module_exit",
+    "pre_hook_events": "append_pre_hook",
+}
+
+
 def _clone_op_event_for_replay(event: OpEvent) -> OpEvent:
     """Return a projection copy of ``event`` with independent mutable state.
 
@@ -441,6 +475,43 @@ class CaptureEvents:
         """Append a registered-buffer write event, stamping the global seq."""
         object.__setattr__(event, "seq", self.next_seq())
         self.buffer_write_events.append(event)
+
+    def concat(self, other: "CaptureEvents", *, lanes: Iterable[str] | None = None) -> None:
+        """Merge another stream's lanes into this journal under the merge law.
+
+        This is the ONLY sanctioned way to combine two capture streams. Each
+        lane follows its declared :data:`LANE_MERGE_POLICIES` entry; merged
+        events are re-stamped into THIS journal's sequence domain by the
+        single-writer append methods, so the combined journal keeps unique,
+        lane-monotonic seq values. Counters, param refs, and runtime sidecars
+        stay the target's own (they are run state, not journal facts).
+
+        Parameters
+        ----------
+        other
+            Source stream whose lanes should fold into this journal.
+        lanes
+            Optional restriction to a subset of lane names. ``None`` merges
+            every declared lane under its policy. A caller may restrict lanes
+            (failed-partial recovery keeps only op and pre-hook facts from the
+            failing pass) but never override a lane's declared policy.
+        """
+
+        if other is self:
+            return
+        lane_names = tuple(lanes) if lanes is not None else tuple(LANE_MERGE_POLICIES)
+        for lane_name in lane_names:
+            policy = LANE_MERGE_POLICIES[lane_name]
+            if policy == "run_local":
+                continue
+            source_events = list(getattr(other, lane_name))
+            if not source_events:
+                continue
+            if policy == "first_run_only" and getattr(self, lane_name):
+                continue
+            appender = getattr(self, _LANE_APPENDERS[lane_name])
+            for event in source_events:
+                appender(event)
 
     def append_backward(
         self,
