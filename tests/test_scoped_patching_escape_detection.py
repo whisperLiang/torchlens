@@ -889,3 +889,49 @@ def test_guard_pass_metadata_is_machine_readable() -> None:
         item["owner_thread_id"] == trace.capture_owner_thread_id
         for item in trace.capture_guard_passes
     )
+
+
+def test_witness_internal_storage_read_does_not_self_trip_detector() -> None:
+    """The armed completeness witness never reports its OWN raw storage reads.
+
+    Regression for the reds-lane finding: with scoped wrapping and the shadow
+    escape detector, an armed (runnable-capable) capture reported
+    ``TensorBase.untyped_storage`` from TorchLens's own
+    ``_raw_storage_ptr_no_observe`` frame, degrading otherwise-verified armed
+    captures with user-directed remediation no user action could clear. The
+    witness now authorizes its raw-original reads through the detector's
+    FRAME-BOUND ``expected_original_call`` accounting, so the exemption covers
+    exactly that call site: raw callable reaches anywhere else still trip the
+    detector (see the coarm test above for the positive detection control).
+    """
+
+    from torchlens.options import CaptureOptions
+
+    class Model(nn.Module):
+        """Two represented ops; nothing escapes."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Run a clean forward."""
+
+            return torch.sigmoid(torch.relu(x))
+
+    wrap_torch(patch_policy="scoped", escape_detector="shadow")
+    trace = tl.trace(
+        Model(),
+        torch.randn(3),
+        capture=CaptureOptions(
+            intervention_ready=True,
+            capture_container_structure=True,
+            cache=False,
+            random_seed=7,
+        ),
+    )
+    self_trips = [
+        diagnostic
+        for diagnostic in trace.escape_diagnostics
+        if any(
+            "untyped_storage" in str(candidate)
+            for candidate in diagnostic.get("callable_candidates", ())
+        )
+    ]
+    assert not self_trips, f"witness self-trip diagnostics: {self_trips}"

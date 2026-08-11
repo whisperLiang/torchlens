@@ -70,7 +70,12 @@ from ._tl import (
     session_meta_is_anchored,
 )
 from .buffer_writes import session_validated_buffer_address
-from .escape_detection import ExpectedOriginalToken, _active_token
+from .escape_detection import (
+    ExpectedOriginalToken,
+    _active_token,
+    expected_original_call,
+    mark_expected_original_accounted,
+)
 
 CompletenessWitnessMode = Literal["off", "shadow"]
 """Supported dispatcher-witness rollout modes."""
@@ -2367,8 +2372,32 @@ def _raw_storage_ptr_no_observe(tensor: Any) -> int | None:
     if not isinstance(tensor, torch.Tensor):
         return None
     try:
-        storage = _ORIG_TENSORBASE_UNTYPED_STORAGE(tensor)
-        ptr = _ORIG_UNTYPED_STORAGE_DATA_PTR(storage)
+        if _state._escape_detector_mode != "off":
+            # The witness's own raw-original reads are instrumentation, not an
+            # escaped user op: authorize each one through the detector's typed
+            # per-call accounting so the shadow detector never reports
+            # TorchLens's own frame (a false ceiling that degraded otherwise
+            # verified armed captures with user-directed remediation text no
+            # user action could clear). The token is FRAME-BOUND to this exact
+            # call, so a genuine raw untyped_storage reach anywhere else still
+            # trips the detector — the exemption cannot widen.
+            with expected_original_call(
+                _ORIG_TENSORBASE_UNTYPED_STORAGE,
+                "completeness_witness:internal_storage_ptr",
+                census_scope="expected_opaque",
+            ) as storage_token:
+                storage = _ORIG_TENSORBASE_UNTYPED_STORAGE(tensor)
+            mark_expected_original_accounted(storage_token, captured=False)
+            with expected_original_call(
+                _ORIG_UNTYPED_STORAGE_DATA_PTR,
+                "completeness_witness:internal_storage_ptr",
+                census_scope="expected_opaque",
+            ) as ptr_token:
+                ptr = _ORIG_UNTYPED_STORAGE_DATA_PTR(storage)
+            mark_expected_original_accounted(ptr_token, captured=False)
+        else:
+            storage = _ORIG_TENSORBASE_UNTYPED_STORAGE(tensor)
+            ptr = _ORIG_UNTYPED_STORAGE_DATA_PTR(storage)
     except (RuntimeError, TypeError, NotImplementedError, AttributeError):
         return None
     return int(ptr) if ptr else None
