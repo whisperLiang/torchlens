@@ -73,7 +73,7 @@ def test_parameterized_conditional_saves_and_verifies(tmp_path: Path) -> None:
 
     path = tmp_path / "param-conditional.tlspec"
     # Previously raised AssertionError: "Sparse core tensor payload at
-    # conditionals._list.0.arms.0._trace._runnable_capture_state.linear.weight".
+    # conditionals._list.0.arms.0._trace._runnable.capture_state.linear.weight".
     tl.save(trace, path, level="runnable", include_weights=True)
 
     # The save must not have mutated the live trace's conditional accessors.

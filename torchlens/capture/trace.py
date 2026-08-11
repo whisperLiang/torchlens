@@ -46,6 +46,7 @@ from ..ir.container_registry import ModelSite, Phase, Role, walk_container
 from ..quantities import Bytes, Duration
 from .. import _state
 from .._capture_state_helpers import prepare_compiled_capture
+from .._runnable_seam import runnable_trace_state
 from .config import InternalCaptureConfig
 from .session import (
     CaptureSession,
@@ -612,9 +613,7 @@ def save_new_outs(
     # original capture, so the live provider must gate its bare-tensor fast path on the fresh
     # proof (``bare_tensor_root``), not the stale capture-time one. Missing/malformed fresh
     # proof leaves the field absent -> the live reconstructor fails closed (not faithful).
-    self.__dict__["_runnable_output_losslessness"] = refreshed.__dict__.get(
-        "_runnable_output_losslessness"
-    )
+    self._runnable.output_losslessness = refreshed._runnable.output_losslessness
     if self.save_arg_values:
         self._replay_arg_version_data_complete = True
 
@@ -906,7 +905,7 @@ def _record_runnable_input_literal_leaves(
         _walk_site(("kwarg", key), value)
 
     if leaves:
-        trace.__dict__["_runnable_input_nontensor_leaves"] = tuple(leaves)
+        runnable_trace_state(trace).input_nontensor_leaves = tuple(leaves)
 
 
 def _record_runnable_input_structure(
@@ -940,7 +939,7 @@ def _record_runnable_input_structure(
         record = snapshot_input_boundary(value)
         record["position"] = ["kwarg", str(key)]
         snapshots.append(record)
-    trace.__dict__["_runnable_input_structure"] = tuple(snapshots)
+    runnable_trace_state(trace).input_structure = tuple(snapshots)
 
 
 def _record_runnable_input_tensor_sites(
@@ -1017,7 +1016,7 @@ def _record_runnable_input_tensor_sites(
         _walk_site(("kwarg", key), value)
 
     if sites:
-        trace.__dict__["_runnable_input_tensor_sites"] = sites
+        runnable_trace_state(trace).input_tensor_sites = sites
         from ..backends.torch.completeness_witness import record_runnable_input_storage_sites
 
         record_runnable_input_storage_sites(trace, tensor_leaves)
@@ -1056,7 +1055,7 @@ def _record_runnable_module_training_modes(trace: "Trace", model: Any) -> None:
     except (AttributeError, TypeError):
         return
     if modes:
-        trace.__dict__["_runnable_module_training_modes"] = modes
+        runnable_trace_state(trace).module_training_modes = modes
 
 
 def _extract_and_mark_outputs(
@@ -1364,25 +1363,25 @@ def run_and_log_inputs_through_model(
             # storage overlap) must be captured BEFORE ``snapshot_capture_state``'s
             # clones erase it; the runnable producer refuses unsupported topologies
             # at save and reproduces identity groups from this record.
-            self._runnable_state_alias_topology = snapshot_state_alias_topology(model)
+            self._runnable.state_alias_topology = snapshot_state_alias_topology(model)
             # r63 C1: per-slot metadata signatures are stamped from the LIVE tensors
             # PRE-clone -- the clone itself compacts ``storage_offset`` and
             # materializes conj/neg, so a post-clone signature is blind to two of
             # the four transport-lossy physical dims. Consumed by the escape-gated
             # ``producer_state_metadata`` preflight.
-            self._runnable_capture_state_signatures = snapshot_capture_state_signatures(model)
-            self._runnable_capture_state = snapshot_capture_state(model)
+            self._runnable.capture_state_signatures = snapshot_capture_state_signatures(model)
+            self._runnable.capture_state = snapshot_capture_state(model)
             # r77 F2: the persistent-buffer NAME universe survives non-tensor state
             # (``get_extra_state()`` / packed entries), so a dead-model
             # include_weights=False save declares the SAME slot universe as the
             # live lane instead of silently dropping never-forward-used buffers.
-            self._runnable_persistent_buffer_universe = snapshot_persistent_buffer_universe(model)
+            self._runnable.persistent_buffer_universe = snapshot_persistent_buffer_universe(model)
 
         if str(_backend_name_for_trace(self)) == "torch":
             # The provenance manifest needs the capture-time default, never the
             # potentially different save-time default. Runnable-ready captures
             # replace this minimal snapshot below with the complete ambient record.
-            self._runnable_capture_ambient = {"default_dtype": str(get_default_dtype())}
+            self._runnable.capture_ambient = {"default_dtype": str(get_default_dtype())}
 
         # Turn on the logging toggle and run the forward pass.
         # Inside this context, every decorated torch function will log its
@@ -1420,7 +1419,7 @@ def run_and_log_inputs_through_model(
                 # descriptor can restore it explicitly at replay.
                 from ..utils._torch_compat import snapshot_ambient_execution_context
 
-                self._runnable_capture_ambient = snapshot_ambient_execution_context()
+                self._runnable.capture_ambient = snapshot_ambient_execution_context()
 
             if self.capture_mode == "predicate":
                 outputs = _run_predicate_forward_with_root_frame(
@@ -1483,32 +1482,32 @@ def run_and_log_inputs_through_model(
                                 # a run at the capture seed stays verified while any
                                 # other/absent seed ceilings; ceiling ``channels``
                                 # alone decide UNREPLAYABLE.
-                                self._runnable_host_rng_consumed = (
+                                self._runnable.host_rng_consumed = (
                                     _global_advanced
                                     or bool(_rng_channels.channels)
                                     or bool(_rng_channels.replayable_reads)
                                 )
-                                self._runnable_host_rng_unreplayable = bool(_rng_channels.channels)
-                                self._runnable_host_rng_channels = tuple(
+                                self._runnable.host_rng_unreplayable = bool(_rng_channels.channels)
+                                self._runnable.host_rng_channels = tuple(
                                     sorted(_rng_channels.channels)
                                 )
-                                self._runnable_host_rng_replayable_reads = tuple(
+                                self._runnable.host_rng_replayable_reads = tuple(
                                     sorted(_rng_channels.replayable_reads)
                                 )
-                                self._runnable_rng_monitor_uncertain = bool(_rng_channels.uncertain)
+                                self._runnable.rng_monitor_uncertain = bool(_rng_channels.uncertain)
                                 # r39 CLASS A: name the offending threads / coverage
                                 # failure so the INCOMPLETE ceiling's readiness
                                 # diagnostic is actionable.
-                                self._runnable_rng_monitor_uncertain_detail = tuple(
+                                self._runnable.rng_monitor_uncertain_detail = tuple(
                                     _rng_channels.uncertain_detail
                                 )
                             else:
                                 # Global engines are still bracketed (cheap); the
                                 # channel verdict was never observed, so it must
                                 # read as UNKNOWABLE, never as no-consumption.
-                                self._runnable_host_rng_consumed = _global_advanced
-                                self._runnable_rng_monitor_uncertain = True
-                                self._runnable_rng_monitor_uncertain_detail = ("monitor_not_armed",)
+                                self._runnable.host_rng_consumed = _global_advanced
+                                self._runnable.rng_monitor_uncertain = True
+                                self._runnable.rng_monitor_uncertain_detail = ("monitor_not_armed",)
 
         backend.finalize_forward_session(self)
 

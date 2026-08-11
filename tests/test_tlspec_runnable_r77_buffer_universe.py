@@ -106,7 +106,7 @@ def _x() -> torch.Tensor:
 def _slot_universe(path: Path) -> list[str]:
     """Return the sorted declared state-slot name universe of a saved artifact."""
 
-    descriptor = tl.load(path).__dict__["_runnable_descriptor"]
+    descriptor = tl.load(path)._runnable.descriptor
     return sorted(
         slot.state_binding.state_dict_name
         for slot in descriptor.tensor_slots

@@ -205,7 +205,7 @@ def test_num_positional_args_bomb_refused_at_load(tmp_path: Path) -> None:
     _tamper(bundle, lambda m: m["run"]["calls"][0].__setitem__("num_positional_args", 10**10))
     with _rlimit_cap():
         loaded = tl.load(str(bundle))
-    readiness = loaded.__dict__["_runnable_readiness"]
+    readiness = loaded._runnable.readiness
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     diags = readiness.diagnostics
     assert RunnableErrorCode.CALL_ARITY_MISMATCH in {d.code for d in diags}
@@ -221,7 +221,7 @@ def test_num_keyword_args_bomb_refused_at_load(tmp_path: Path) -> None:
     _tamper(bundle, lambda m: m["run"]["calls"][0].__setitem__("num_keyword_args", 10**10))
     with _rlimit_cap():
         loaded = tl.load(str(bundle))
-    readiness = loaded.__dict__["_runnable_readiness"]
+    readiness = loaded._runnable.readiness
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     assert RunnableErrorCode.CALL_ARITY_MISMATCH in {d.code for d in readiness.diagnostics}
 
@@ -241,7 +241,7 @@ def test_sparse_positional_root_bomb_refused_at_load(tmp_path: Path) -> None:
     _tamper(bundle, _bomb)
     with _rlimit_cap():
         loaded = tl.load(str(bundle))
-    readiness = loaded.__dict__["_runnable_readiness"]
+    readiness = loaded._runnable.readiness
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     assert RunnableErrorCode.CALL_ARITY_MISMATCH in {d.code for d in readiness.diagnostics}
 
@@ -282,7 +282,7 @@ def test_int64_overflow_shape_refused_at_load(tmp_path: Path) -> None:
     _tamper(bundle, _bomb)
     with _rlimit_cap():
         loaded = tl.load(str(bundle))
-    readiness = loaded.__dict__["_runnable_readiness"]
+    readiness = loaded._runnable.readiness
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     assert RunnableErrorCode.STATE_SHAPE_MISMATCH in {d.code for d in readiness.diagnostics}
 
@@ -301,7 +301,7 @@ def test_rank_shape_mismatch_refused_at_load(tmp_path: Path) -> None:
     _tamper(bundle, _bomb)
     with _rlimit_cap():
         loaded = tl.load(str(bundle))
-    readiness = loaded.__dict__["_runnable_readiness"]
+    readiness = loaded._runnable.readiness
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     assert RunnableErrorCode.STATE_SHAPE_MISMATCH in {d.code for d in readiness.diagnostics}
 

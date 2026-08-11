@@ -106,7 +106,7 @@ def test_r75_inline_model_gc_full_save_load_run(tmp_path: Path) -> None:
     loaded = tl.load(path)
     slot_names = {
         slot.state_binding.state_dict_name
-        for slot in loaded.__dict__["_runnable_descriptor"].tensor_slots
+        for slot in loaded._runnable.descriptor.tensor_slots
         if slot.state_binding is not None
     }
     assert "bn.num_batches_tracked" in slot_names

@@ -109,7 +109,7 @@ def test_armed_baseline_coalesces_onto_capture_state_clone():
     model = _TrackerProbeModel()
     pre_forward_weight = model.lin.weight.detach().clone()
     trace = tl.trace(model, torch.randn(2, 4), capture=CaptureOptions(**_RUNNABLE_CAP))
-    capture_state = trace.__dict__.get("_runnable_capture_state")
+    capture_state = trace._runnable.capture_state
     assert capture_state is not None
     tracker = model.probe
     assert tracker is not None

@@ -258,7 +258,7 @@ def _ambient_execution_context(
     mark only widens ``not_applicable``, never a positive claim.
     """
 
-    snapshot = getattr(trace, "_runnable_capture_ambient", None)
+    snapshot = trace._runnable.capture_ambient
     if not isinstance(snapshot, Mapping) or "default_dtype" not in snapshot:
         return None
     # r53 hon_1: the global autograd/inference mode is REQUIRED. A capture
@@ -595,7 +595,7 @@ def build_sparse_run_descriptor(trace: Any) -> SparseRunDescriptor:
             _gap(WitnessGapKind.LIFECYCLE_LEDGER_MUTATION, "capture")
         else:
             _gap(WitnessGapKind.LIFECYCLE_LEDGER_DISPATCH, "capture")
-    if bool(getattr(trace, "_runnable_rng_monitor_uncertain", False)):
+    if trace._runnable.rng_monitor_uncertain:
         # r37 hon1_2 fail-closed rule: the host-nondeterminism monitor could not
         # prove its own installation/chain/restoration, so channel coverage for
         # this forward is unknowable -- INCOMPLETE, never "no consumption".
@@ -780,9 +780,9 @@ def _normalize_trace_numpy_scalar_metadata(trace: Any) -> None:
         ):
             if hasattr(op, field_name):
                 setattr(op, field_name, _normalize_numpy_scalars(getattr(op, field_name)))
-    leaves = getattr(trace, "_runnable_input_nontensor_leaves", None)
+    leaves = trace._runnable.input_nontensor_leaves
     if leaves is not None:
-        trace._runnable_input_nontensor_leaves = _normalize_numpy_scalars(leaves)
+        trace._runnable.input_nontensor_leaves = _normalize_numpy_scalars(leaves)
 
 
 def _normalize_numpy_scalars(value: Any) -> Any:
@@ -843,7 +843,7 @@ def _build_rng_profile(trace: Any) -> RunnableRngProfile:
     ``random_seed`` is the concrete effective seed every capture is seeded with.
     """
 
-    consumed = bool(getattr(trace, "_runnable_host_rng_consumed", False))
+    consumed = trace._runnable.host_rng_consumed
     seed = getattr(trace, "random_seed", None)
     capture_seed = int(seed) if isinstance(seed, int) and not isinstance(seed, bool) else None
     # r37 hon1_2: a touch on any NON-global monitored channel (RNG instances,
@@ -852,7 +852,7 @@ def _build_rng_profile(trace: Any) -> RunnableRngProfile:
     # host consumption with NO identifiable capture seed, landing every run in
     # the permanent-unreproduced ceiling (UNVERIFIABLE + NOT_APPLICABLE). The
     # replayable global engines keep their seeded-reproduction semantics.
-    if bool(getattr(trace, "_runnable_host_rng_unreplayable", False)):
+    if trace._runnable.host_rng_unreplayable:
         return RunnableRngProfile(host_rng_consumed=True, capture_seed=None)
     return RunnableRngProfile(host_rng_consumed=consumed, capture_seed=capture_seed)
 
@@ -1327,7 +1327,7 @@ def _add_persistent_buffer_slot_drafts(
         }
     else:
         # r75 F2 capture-time fallback: the model died before the save.
-        snapshot = getattr(trace, "_runnable_capture_state", None)
+        snapshot = trace._runnable.capture_state
         if isinstance(snapshot, Mapping):
             parameter_names = set()
             param_logs = getattr(trace, "param_logs", None)
@@ -1358,7 +1358,7 @@ def _add_persistent_buffer_slot_drafts(
             # extra state). A silent return here DROPPED never-forward-used
             # buffers (``num_batches_tracked``) and refused honest binds with
             # ``state_unexpected_key``.
-            universe = getattr(trace, "_runnable_persistent_buffer_universe", None)
+            universe = trace._runnable.persistent_buffer_universe
             if not isinstance(universe, Mapping):
                 # No capture-time record either (``state_dict()`` failed at the
                 # capture boundary): the universe is UNKNOWN. Refuse loudly and
@@ -1380,7 +1380,7 @@ def _add_persistent_buffer_slot_drafts(
                 )
                 for name, record in universe.items()
             }
-        topology = getattr(trace, "_runnable_state_alias_topology", None)
+        topology = trace._runnable.state_alias_topology
         topology_groups = (topology.get("groups") if isinstance(topology, Mapping) else None) or {}
         buffer_name_set = set(buffer_names)
         names_by_group: dict[str, list[str]] = defaultdict(list)
@@ -2649,13 +2649,13 @@ def _build_input_boundary(
     partial boundary record.
     """
 
-    snapshots = trace.__dict__.get("_runnable_input_structure")
+    snapshots = trace._runnable.input_structure
     if not isinstance(snapshots, tuple):
         # The positive-proof preflight (``_preflight_input_structure``) owns this
         # refusal; an empty boundary can never bless a run (parse requires the
         # boundary to cross-anchor every MODEL_INPUT binding).
         return ()
-    reads = trace.__dict__.get("_runnable_input_metadata_reads")
+    reads = trace._runnable.input_metadata_reads
     reads_map: Mapping[Any, Any] = reads if isinstance(reads, Mapping) else {}
     tensor_by_position: dict[tuple[Any, ...], list[InputBoundaryTensorSite]] = {}
     for draft in slot_drafts.values():
@@ -2759,7 +2759,7 @@ def _stamp_state_binding_facts(
 
     from ..backends.torch.completeness_witness import host_escape_state_metadata_facts
 
-    signatures = trace.__dict__.get("_runnable_capture_state_signatures")
+    signatures = trace._runnable.capture_state_signatures
     signature_map: Mapping[str, Any] = signatures if isinstance(signatures, Mapping) else {}
     read_facts = host_escape_state_metadata_facts(trace)
     for draft in slot_drafts.values():
@@ -3017,7 +3017,7 @@ def _escape_witnesses(
         binding = draft.state_binding
         if binding is not None and slot_id in bound_slot_ids:
             bound_state_names.add(binding.state_dict_name)
-    capture_state = trace.__dict__.get("_runnable_capture_state")
+    capture_state = trace._runnable.capture_state
 
     # ---- PASS A: state-slot escape/host-path witnesses (bound-or-unbound) ----
     for slot_id, draft in slot_drafts.items():
@@ -3326,7 +3326,7 @@ def _input_structure_witnesses(trace: Any, *, start_order: int) -> list[ControlW
     nested-kind/class-identity/empty-dataclass/hidden-state classes at every depth.
     """
 
-    snapshots = trace.__dict__.get("_runnable_input_structure")
+    snapshots = trace._runnable.input_structure
     if not isinstance(snapshots, tuple):
         return []
     witnesses: list[ControlWitness] = []
@@ -3512,7 +3512,7 @@ def _preflight_input_structure(trace: Any) -> list[RunnableDiagnostic]:
     intervention-ready capture refuses the same way: absence of proof is never proof.
     """
 
-    snapshots = trace.__dict__.get("_runnable_input_structure")
+    snapshots = trace._runnable.input_structure
     diagnostics: list[RunnableDiagnostic] = []
     if not isinstance(snapshots, tuple):
         diagnostics.append(
@@ -3571,7 +3571,7 @@ def _module_training_mode_witnesses(
     closed). No tensors are recorded.
     """
 
-    modes = getattr(trace, "__dict__", {}).get("_runnable_module_training_modes", None)
+    modes = trace._runnable.module_training_modes
     if not isinstance(modes, Mapping) or not modes:
         return []
     fact = {
@@ -3741,7 +3741,7 @@ def _input_metadata_witnesses(
     the read-site existence; the witness carries the observed values).
     """
 
-    reads = getattr(trace, "__dict__", {}).get("_runnable_input_metadata_reads", None)
+    reads = trace._runnable.input_metadata_reads
     reads_map: Mapping[Any, Any] = reads if isinstance(reads, Mapping) else {}
     witnesses: list[ControlWitness] = []
     for site in input_boundary:
@@ -3830,7 +3830,7 @@ def _input_literal_witnesses(
         ``encodable=False`` literal fact.
     """
 
-    leaves = getattr(trace, "__dict__", {}).get("_runnable_input_nontensor_leaves", ())
+    leaves = trace._runnable.input_nontensor_leaves or ()
     witnesses: list[ControlWitness] = []
     opaque_members: list[str] = []
     for position, path, value in leaves:
@@ -3900,7 +3900,7 @@ def _preflight_state_alias_topology(
     same-storage views serialize independently and stay admitted.
     """
 
-    topology = getattr(trace, "_runnable_state_alias_topology", None)
+    topology = trace._runnable.state_alias_topology
     if not isinstance(topology, Mapping):
         return []
     refusals = topology.get("refusals") or ()
@@ -3976,7 +3976,7 @@ def _preflight_state_metadata(trace: Any) -> list[RunnableDiagnostic]:
     # ``is_pinned``) -- the observed-value kinds validate the user's one real return
     # against the device-defined staged canonical, never a speculative signature stamp.
     observations = host_escape_state_metadata_observations(trace)
-    signatures = trace.__dict__.get("_runnable_capture_state_signatures")
+    signatures = trace._runnable.capture_state_signatures
     signature_map: Mapping[str, Any] = signatures if isinstance(signatures, Mapping) else {}
     for name in sorted(reads):
         violations = state_metadata_read_violations(
@@ -4009,7 +4009,7 @@ def _preflight_state_metadata(trace: Any) -> list[RunnableDiagnostic]:
     # The ordinary population (frozen OR trainable models reading ``requires_grad`` on
     # float state) records facts staging reproduces exactly -- no refusal, no ceiling.
     facts_by_state = host_escape_state_metadata_facts(trace)
-    capture_state = trace.__dict__.get("_runnable_capture_state")
+    capture_state = trace._runnable.capture_state
     capture_map: Mapping[str, Any] = capture_state if isinstance(capture_state, Mapping) else {}
     for name in sorted(facts_by_state):
         slot_facts = facts_by_state[name]
@@ -4057,7 +4057,7 @@ def _preflight_output_contracts(trace: Any, ops: Sequence[Any]) -> list[Runnable
     # the runnable save uniformly (bare/nested/one-tensor/empty sets, frozensets and
     # subclasses, opaque tensor holders, duplicate paths, BFS fallback), never a
     # save-then-UNVERIFIABLE landmine and never an advertise-then-crash artifact.
-    losslessness = getattr(trace, "__dict__", {}).get("_runnable_output_losslessness")
+    losslessness = trace._runnable.output_losslessness
     if not isinstance(losslessness, Mapping) or not losslessness.get("lossless", False):
         reason = (
             str(losslessness.get("reason", "unknown"))
@@ -4203,7 +4203,7 @@ def _buffer_binding(trace: Any, op: Any) -> StateSlotBinding | None:
     # r37 corr2-4: repeated live object identity (captured before state cloning)
     # becomes a shared alias group so the loader stages ONE allocation per group and
     # preserves ``a is b`` / in-place propagation semantics across the tied names.
-    topology = getattr(trace, "_runnable_state_alias_topology", None)
+    topology = trace._runnable.state_alias_topology
     groups = topology.get("groups") if isinstance(topology, Mapping) else None
     alias_group = groups.get(address) if isinstance(groups, Mapping) else None
     return StateSlotBinding(

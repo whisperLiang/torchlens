@@ -790,10 +790,8 @@ class TorchBackend:
         # cardinality/depth: bare one-tensor sets, nested sets, opaque tensor
         # holders, set subclasses, and multi-tensor collapses alike. Ordinary
         # analysis capture is unaffected by the stamp.
-        setattr(
-            self_trace,
-            "_runnable_output_losslessness",
-            runnable_output_losslessness(outputs, output_entries),
+        self_trace._runnable.output_losslessness = runnable_output_losslessness(
+            outputs, output_entries
         )
         # The container_spec is only user-facing metadata when explicitly opted
         # into via capture_container_structure (or implied by intervention_ready);

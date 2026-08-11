@@ -204,7 +204,7 @@ def test_container_held_generator_drawn_on_worker_ceilings(
     trace, result = _roundtrip(
         _ContainerGenModel(kind, preexisting_worker), torch.randn(2, 4), tmp_path
     )
-    assert "model_attribute_generator" in getattr(trace, "_runnable_host_rng_channels", ()), (
+    assert "model_attribute_generator" in trace._runnable.host_rng_channels, (
         f"{kind}: model-held generator draw was not inventoried"
     )
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
@@ -258,8 +258,8 @@ def test_empty_opaque_queue_stays_verified(queue_factory: Any, tmp_path: Path) -
             return self.lin(x).relu()
 
     trace, result = _roundtrip(_EmptyQueueModel(), torch.randn(2, 4), tmp_path)
-    assert "inventory_opaque_container" not in getattr(
-        trace, "_runnable_rng_monitor_uncertain_detail", ()
+    assert (
+        "inventory_opaque_container" not in trace._runnable.rng_monitor_uncertain_detail
     ), "an empty opaque queue must not fail closed to inventory_opaque_container"
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
     assert result.report.numeric_attestation is NumericAttestationStatus.ATTESTED
@@ -305,7 +305,7 @@ def test_undrawn_container_generator_stays_verified(kind: str, tmp_path: Path) -
             return self.lin(x).relu()
 
     trace, result = _roundtrip(_UndrawnModel(), torch.randn(2, 4), tmp_path)
-    assert "model_attribute_generator" not in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" not in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
 
 
@@ -328,7 +328,7 @@ def test_tensor_only_container_stays_verified(kind: str, tmp_path: Path) -> None
             return self.lin(x).relu()
 
     trace, result = _roundtrip(_TensorContainerModel(), torch.randn(2, 4), tmp_path)
-    assert "model_attribute_generator" not in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" not in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
 
 

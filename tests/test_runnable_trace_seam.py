@@ -7,48 +7,17 @@ from dataclasses import fields
 from pathlib import Path
 
 from torchlens._runnable_seam import (
+    LEGACY_RUNNABLE_TRACE_FIELD_MAP,
     RUNNABLE_TRACE_PUBLIC_MEMBERS,
     RunnableCoordinator,
     RunnableTraceState,
+    normalize_runnable_trace_state,
 )
 from torchlens.constants import MODEL_LOG_FIELD_ORDER
 from torchlens.data_classes.trace import Trace
 
 _PACKAGE_ROOT = Path(__file__).parents[1] / "torchlens"
-_LEGACY_RUNNABLE_TRACE_FIELDS = frozenset(
-    {
-        "_runnable_descriptor",
-        "_runnable_readiness",
-        "_runnable_staged_user_state",
-        "_runnable_embedded_state",
-        "_runnable_capture_state",
-        "_runnable_embedded_nonpersistent_buffers",
-        "_runnable_archived_activations",
-        "_runnable_path_faithfulness",
-        "_runnable_first_mismatch",
-        "_runnable_poisoned",
-    }
-)
-
-# Step 2 lands before the slot collapse. This exact allowlist is a ratchet: step
-# 3 deletes it once every direct reader uses ``trace._runnable``.
-_MIGRATION_DIRECT_READER_ALLOWLIST = frozenset(
-    {
-        "_io/bundle.py",
-        "_io/runnable.py",
-        "_io/runnable_load.py",
-        "_runnable_execution.py",
-        "_runnable_state.py",
-        "backends/torch/backend.py",
-        "backends/torch/buffer_writes.py",
-        "backends/torch/completeness_witness.py",
-        "capture/trace.py",
-        "data_classes/_trace_validation.py",
-        "data_classes/trace.py",
-        "postprocess/graph_traversal.py",
-        "runnable.py",
-    }
-)
+_MIGRATION_DIRECT_READER_ALLOWLIST = frozenset()
 
 
 def _module_ast(relative_path: str) -> ast.Module:
@@ -180,16 +149,32 @@ def test_runnable_coordinator_has_exactly_four_verbs() -> None:
     assert verbs == {"produce", "decode", "prepare", "execute"}
 
 
-def test_trace_legacy_runnable_fields_and_readers_are_frozen_for_migration() -> None:
-    """Prevent the pre-collapse field and reader sets from expanding."""
+def test_trace_runnable_fields_are_collapsed_behind_the_seam() -> None:
+    """Keep the collapsed state owner singular and legacy readers absent."""
 
     declared = frozenset(
-        name for name in Trace.__annotations__ if name.startswith("_runnable_")
+        name for name in Trace.__annotations__ if name.startswith("_runnable")
     )
-    ordered = frozenset(name for name in MODEL_LOG_FIELD_ORDER if name.startswith("_runnable_"))
-    assert declared == _LEGACY_RUNNABLE_TRACE_FIELDS
-    assert ordered == _LEGACY_RUNNABLE_TRACE_FIELDS - {"_runnable_embedded_nonpersistent_buffers"}
+    ordered = frozenset(name for name in MODEL_LOG_FIELD_ORDER if name.startswith("_runnable"))
+    assert declared == {"_runnable"}
+    assert ordered == {"_runnable"}
+    assert frozenset(LEGACY_RUNNABLE_TRACE_FIELD_MAP) == {
+        f"_runnable_{item.name}" for item in fields(RunnableTraceState)
+    }
     assert _direct_runnable_reader_modules() == _MIGRATION_DIRECT_READER_ALLOWLIST
+
+
+def test_legacy_plain_pickle_fields_normalize_into_collapsed_state() -> None:
+    """Keep plain-pickle compatibility while removing legacy live attributes."""
+
+    state: dict[str, object] = {
+        "_runnable_descriptor": "descriptor",
+        "_runnable_poisoned": True,
+    }
+    runnable_state = normalize_runnable_trace_state(state)
+    assert runnable_state.descriptor == "descriptor"
+    assert runnable_state.poisoned is True
+    assert state == {"_runnable": runnable_state}
 
 
 def test_public_runnable_schema_has_no_runtime_imports() -> None:

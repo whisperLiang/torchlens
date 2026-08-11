@@ -624,7 +624,7 @@ def _orphan_is_uninit_alloc_source(self: "Trace", op: Any) -> bool:
     is_resize = qualname_is_uninit_growth_resize(namespace, qualname)
     if not is_factory and not is_resize:
         return False
-    snapshot = getattr(self, "_runnable_capture_ambient", None)
+    snapshot = self._runnable.capture_ambient
     if isinstance(snapshot, dict) and deterministic_fill_governs(
         snapshot.get("deterministic_algorithms"),
         snapshot.get("fill_uninitialized_memory"),

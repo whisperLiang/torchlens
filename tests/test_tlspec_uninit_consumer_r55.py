@@ -58,7 +58,7 @@ def _realistic_nondeterministic_fill() -> Iterator[None]:
 
 def _output_taint_reaches(bundle: Path) -> bool:
     loaded = tl.load(str(bundle))
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     taint = _nondeterministic_value_sources(descriptor)
     output_slots = [
         slot.slot_id

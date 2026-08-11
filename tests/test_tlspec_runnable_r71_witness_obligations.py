@@ -75,7 +75,7 @@ def _verdict(path: Path, inputs: Any) -> tuple[str, Any]:
     from torchlens.runnable import DivergencePolicy
 
     loaded = tl.load(path)
-    readiness = loaded.__dict__.get("_runnable_readiness")
+    readiness = loaded._runnable.readiness
     if readiness is not None and readiness.status is ReadinessStatus.UNAVAILABLE:
         return ("refused", {d.code.value for d in readiness.diagnostics})
     try:
@@ -350,7 +350,7 @@ def test_r71_derivation_independence(tmp_path: Path) -> None:
     }, "ReplayWitnessStructure must stay witness-free by construction"
 
     path = _save(_trace(_Meta(), torch.randn(2, 4)), tmp_path / "indep.tlspec")
-    descriptor = tl.load(path).__dict__["_runnable_descriptor"]
+    descriptor = tl.load(path)._runnable.descriptor
     baseline = derive_required_witness_members(ReplayWitnessStructure.from_descriptor(descriptor))
     stripped = replace(
         descriptor,
@@ -503,7 +503,7 @@ def test_r71_claim_family_strip_matrix(tmp_path: Path) -> None:
     only where the disposition totality allows it."""
 
     source = _save(_trace(_DualUseSink(), torch.tensor([1.0, 2.0])), tmp_path / "sink.tlspec")
-    descriptor = tl.load(source).__dict__["_runnable_descriptor"]
+    descriptor = tl.load(source)._runnable.descriptor
     inert_slots = [slot.slot_id for slot in descriptor.tensor_slots if slot.inert_sink]
     assert inert_slots, "fixture must claim at least one inert_sink slot"
 
@@ -734,7 +734,7 @@ def test_r71_completeness_forgery_never_strengthens(tmp_path: Path) -> None:
     source = _save(
         _trace(_OpaqueLeaf(), [x.clone(), {"blob": (1 + 2j)}]), tmp_path / "forge.tlspec"
     )
-    descriptor = tl.load(source).__dict__["_runnable_descriptor"]
+    descriptor = tl.load(source)._runnable.descriptor
     assert any(gap.gap_kind is WitnessGapKind.OPAQUE_INPUT_LEAF for gap in descriptor.coverage_gaps)
     result = tl.load(source).run(inputs=[x.clone(), {"blob": (1 + 2j)}])
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
@@ -929,7 +929,7 @@ def test_r71_reauthor_pin_locks_the_threat_model_boundary(tmp_path: Path) -> Non
 
     # Semantic identity with the honest twin on the load-bearing surfaces.
     def _semantic_surface(path: Path) -> list[tuple[str, int, int]]:
-        descriptor = tl.load(path).__dict__["_runnable_descriptor"]
+        descriptor = tl.load(path)._runnable.descriptor
         registry = {entry.registry_id: entry.key.qualname for entry in descriptor.callable_registry}
         return sorted(
             (

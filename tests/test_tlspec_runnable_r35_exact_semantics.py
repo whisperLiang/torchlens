@@ -239,7 +239,7 @@ def test_r35_cpu_only_seeded_run_never_touches_cuda_lazy_seed(tmp_path: Path) ->
     loaded = tl.load(str(path))
     from torchlens._runnable_execution import _seeded_fork_devices
 
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     if torch.cuda.is_available() and torch.cuda.is_initialized():
         assert _seeded_fork_devices(descriptor, 5) == list(range(torch.cuda.device_count()))
     else:

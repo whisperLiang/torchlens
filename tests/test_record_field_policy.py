@@ -247,17 +247,14 @@ def test_trace_runnable_field_order_slots_are_live_and_loaded_values_override(
         ),
     )
     try:
-        expected_defaults = {
-            "_runnable_descriptor": None,
-            "_runnable_readiness": None,
-            "_runnable_staged_user_state": None,
-            "_runnable_embedded_state": None,
-            "_runnable_archived_activations": None,
-            "_runnable_path_faithfulness": None,
-            "_runnable_first_mismatch": None,
-            "_runnable_poisoned": False,
-        }
-        assert {field: getattr(trace, field) for field in expected_defaults} == expected_defaults
+        assert trace._runnable.descriptor is None
+        assert trace._runnable.readiness is None
+        assert trace._runnable.staged_user_state is None
+        assert trace._runnable.embedded_state is None
+        assert trace._runnable.archived_activations is None
+        assert trace._runnable.path_faithfulness is None
+        assert trace._runnable.first_mismatch is None
+        assert trace._runnable.poisoned is False
 
         path = tmp_path / "trace.tlspec"
         trace.save(path, level="runnable")
@@ -266,12 +263,12 @@ def test_trace_runnable_field_order_slots_are_live_and_loaded_values_override(
             assert loaded.runnable_descriptor is not None
             assert loaded.readiness is not None
             assert loaded.readiness.status is ReadinessStatus.READY
-            assert loaded._runnable_path_faithfulness is None
-            assert loaded._runnable_poisoned is False
+            assert loaded._runnable.path_faithfulness is None
+            assert loaded._runnable.poisoned is False
             result = loaded.run(inputs=torch.randn(2, 3), seed=11)
             try:
-                assert result.trace._runnable_path_faithfulness is PathFaithfulness.VERIFIED
-                assert result.trace._runnable_poisoned is False
+                assert result.trace._runnable.path_faithfulness is PathFaithfulness.VERIFIED
+                assert result.trace._runnable.poisoned is False
             finally:
                 result.trace.cleanup()
         finally:

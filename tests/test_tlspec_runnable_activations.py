@@ -477,7 +477,7 @@ def test_corrupt_archived_digest_fails_tripwire_and_rolls_back(tmp_path: Path) -
         layer,
         members=(dataclasses.replace(first_member, byte_digest="0" * 64),) + layer.members[1:],
     )
-    loaded.__dict__["_runnable_descriptor"] = dataclasses.replace(
+    loaded._runnable.descriptor = dataclasses.replace(
         descriptor,
         payload_layers=dataclasses.replace(descriptor.payload_layers, activations=corrupt_layer),
     )
@@ -498,7 +498,7 @@ def test_corrupt_archived_digest_fails_tripwire_and_rolls_back(tmp_path: Path) -
     assert details["expected_digest"] == "0" * 64
     assert details["archived_digest"] != details["expected_digest"]
     assert _physical_outs(loaded) == before
-    assert not bool(loaded.__dict__.get("_runnable_poisoned", False))
+    assert not bool(loaded._runnable.poisoned)
 
 
 def test_random_state_changed_input_and_non_equivalent_state_are_not_applicable(

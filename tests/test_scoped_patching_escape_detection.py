@@ -765,8 +765,8 @@ def test_rng_and_escape_profile_detectors_coarm_without_lost_detection() -> None
         for candidate in diagnostic["callable_candidates"]
     }
     assert any("relu" in candidate for candidate in escaped), escaped
-    assert trace._runnable_rng_monitor_uncertain is False
-    assert "c_rng_instance_draw" in trace._runnable_host_rng_channels
+    assert trace._runnable.rng_monitor_uncertain is False
+    assert "c_rng_instance_draw" in trace._runnable.host_rng_channels
     assert sys.getprofile() is None
 
 

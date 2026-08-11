@@ -1376,15 +1376,11 @@ class TraceInterventionMixin(_TraceMixinBase):
             Field value for the fork.
         """
 
-        if field_name in {
-            "_runnable_staged_user_state",
-            "_runnable_embedded_state",
-            "_runnable_capture_state",
-        }:
-            # These bindings are immutable mapping proxies. Run execution only
-            # reads them, and mappingproxy does not implement the pickle hooks
-            # used by copy/deepcopy.
-            return value
+        if field_name == "_runnable":
+            # The container's state bindings are immutable mapping proxies.
+            # Fork the small owner object so path status remains fork-local,
+            # while sharing the read-only tensor mappings by identity.
+            return copy.copy(value)
         if field_name in ("capture_events", "_capture_events"):
             # Event streams never fork by copy: deep-copying one raises on the
             # frozen ``GradFnDiscovered.source`` proxies, which used to degrade

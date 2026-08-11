@@ -352,7 +352,7 @@ def test_r67_runtime_added_instance_state_diverges(tmp_path: Path) -> None:
 
 def _structure_witnesses_of(path: Path):
     loaded = tl.load(path)
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     return [
         witness
         for witness in descriptor.control_witnesses
@@ -1073,7 +1073,7 @@ def _assert_context_field_invalid(path: Path, run_inputs) -> None:
     """Analysis load survives; readiness UNAVAILABLE with context_field_invalid; no run."""
 
     loaded = tl.load(path)
-    readiness = loaded.__dict__.get("_runnable_readiness")
+    readiness = loaded._runnable.readiness
     assert readiness is not None
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     codes = {diagnostic.code.value for diagnostic in readiness.diagnostics}
@@ -1118,7 +1118,7 @@ def test_r69_inventory_is_authored_for_every_registry_family(tmp_path: Path) -> 
 
     x = torch.randn(3)
     path = _save(_trace(_RichFamilies(), [x, 1]), tmp_path / "families.tlspec")
-    descriptor = tl.load(path).__dict__["_runnable_descriptor"]
+    descriptor = tl.load(path)._runnable.descriptor
     inventory = descriptor.required_witness_inventory
     assert inventory.registry_version == WITNESS_FAMILY_REGISTRY_VERSION
     rows = {row.family: row for row in inventory.families}
@@ -1384,7 +1384,7 @@ def test_r69_emission_meta_test_every_prefix_is_registered(tmp_path: Path) -> No
 
     x = torch.randn(3)
     path = _save(_trace(_RichFamilies(), [x, 1]), tmp_path / "emit.tlspec")
-    descriptor = tl.load(path).__dict__["_runnable_descriptor"]
+    descriptor = tl.load(path)._runnable.descriptor
     for witness in descriptor.control_witnesses:
         family = io_runnable.witness_family_of_witness(witness)
         assert family is not None, witness.site_label

@@ -440,7 +440,7 @@ class TraceValidationMixin(_TraceMixinBase):
             from .._runnable_state import validate_run_seed
 
             validate_run_seed(seed)
-        readiness = self.__dict__.get("_runnable_readiness")
+        readiness = self._runnable.readiness
         loaded_provider = getattr(readiness, "provider", None)
         use_unified_provider = inputs is not MISSING or (
             not isinstance(model, nn.Module)

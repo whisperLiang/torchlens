@@ -889,7 +889,7 @@ def record_runnable_input_storage_sites(
     if storage_sites:
         _RUNNABLE_INPUT_STORAGE_SITES[trace] = storage_sites
     if label_layouts:
-        trace.__dict__["_runnable_input_label_layouts"] = label_layouts
+        trace._runnable.input_label_layouts = label_layouts
 
 
 def _classify_input_storage_alias(
@@ -961,7 +961,7 @@ def _record_input_metadata_read_at_site(trace: Any, site: Any, name: str, value:
     layout change occurred, in which case the LAST observed value is the one nearest the branch.
     """
 
-    facts = trace.__dict__.setdefault("_runnable_input_metadata_reads", {})
+    facts = trace._runnable.input_metadata_reads
     site_facts = facts.setdefault(site, {})
     site_facts[name] = value
 
@@ -974,7 +974,7 @@ def _record_input_metadata_read(trace: Any, source: torch.Tensor, name: str, val
     (storage-alias attribution is handled by :func:`_observe_input_metadata_read`).
     """
 
-    sites = trace.__dict__.get("_runnable_input_tensor_sites")
+    sites = trace._runnable.input_tensor_sites
     if not sites:
         return
     site = sites.get(id(source))
@@ -1010,7 +1010,7 @@ def _observe_input_metadata_read(trace: Any, source: torch.Tensor, name: str, va
     * Anything else (a genuinely new activation not aliasing an input) -> ignore.
     """
 
-    sites = trace.__dict__.get("_runnable_input_tensor_sites")
+    sites = trace._runnable.input_tensor_sites
     if not sites:
         return
     if id(source) in sites:
@@ -1092,7 +1092,7 @@ def _observe_input_derived_layout_read(trace: Any, source: torch.Tensor) -> None
       unreachable here -- orphaned receivers are re-resolved or fail closed above.
     """
 
-    layouts = trace.__dict__.get("_runnable_input_label_layouts")
+    layouts = trace._runnable.input_label_layouts
     capture_events = getattr(trace, "capture_events", None)
     live_index = getattr(capture_events, "live_index", None)
     by_raw_label = getattr(live_index, "by_raw_label", None)
@@ -1361,7 +1361,7 @@ def _observe_state_metadata_read(trace: Any, source: torch.Tensor, read_kind: st
     receiver (an activation) records nothing here.
     """
 
-    sites = trace.__dict__.get("_runnable_input_tensor_sites")
+    sites = trace._runnable.input_tensor_sites
     if sites and id(source) in sites:
         return
     addresses = _state_derived_addresses(trace, source)
@@ -1560,7 +1560,7 @@ def _observe_state_metadata_read_direct(trace: Any, source: torch.Tensor, read_k
     documented residual); an input-leaf receiver is the input nets' domain and is skipped.
     """
 
-    sites = trace.__dict__.get("_runnable_input_tensor_sites")
+    sites = trace._runnable.input_tensor_sites
     if sites and id(source) in sites:
         return
     address = _state_direct_address(trace, source)
@@ -1581,7 +1581,7 @@ def _expand_state_alias_addresses(trace: Any, addresses: "set[str]") -> "set[str
 
     if not addresses:
         return addresses
-    topology = getattr(trace, "_runnable_state_alias_topology", None)
+    topology = trace._runnable.state_alias_topology
     groups = topology.get("groups") if isinstance(topology, Mapping) else None
     if not isinstance(groups, Mapping) or not groups:
         return addresses
@@ -1673,7 +1673,7 @@ def _observe_state_placement_read(
     unrelated receivers record nothing.
     """
 
-    sites = trace.__dict__.get("_runnable_input_tensor_sites")
+    sites = trace._runnable.input_tensor_sites
     if sites and id(source) in sites:
         return
     addresses = _state_derived_addresses(trace, source)
@@ -1691,7 +1691,7 @@ def _placement_read_witnessed(trace: Any, source: torch.Tensor) -> bool:
     the census ledger fact then stands and the capture stays fail-closed.
     """
 
-    sites = trace.__dict__.get("_runnable_input_tensor_sites") or {}
+    sites = trace._runnable.input_tensor_sites or {}
     if id(source) in sites:
         return True
     if _state_derived_addresses(trace, source):
@@ -1725,7 +1725,7 @@ def _observe_state_metadata_fact(
     records the true current bit, which staging reproduces -- harmless by construction.
     """
 
-    sites = trace.__dict__.get("_runnable_input_tensor_sites")
+    sites = trace._runnable.input_tensor_sites
     if sites and id(source) in sites:
         return
     address = _state_direct_address(trace, source)
@@ -1784,7 +1784,7 @@ def _tensor_receiver_origin(trace: Any, source: torch.Tensor) -> "tuple[str, Any
     re-derived by the replayed DAG, so reads on it record nothing.
     """
 
-    sites = trace.__dict__.get("_runnable_input_tensor_sites")
+    sites = trace._runnable.input_tensor_sites
     if sites:
         site = sites.get(id(source))
         if site is not None:

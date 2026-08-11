@@ -128,7 +128,7 @@ def test_mha_benign_fallback_still_checks_later_corrupted_slot(tmp_path: Path) -
     )
 
     loaded = tl.load(path)
-    archive = loaded.__dict__["_runnable_archived_activations"]
+    archive = loaded._runnable.archived_activations
     victim = "slot:softmax_1_20:1:out"
     assert victim in archive
     record = archive[victim]

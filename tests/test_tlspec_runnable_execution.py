@@ -701,7 +701,7 @@ def test_loaded_sparse_execution_pauses_recursive_capture(
     path, model, _ = runnable_execution_artifact
     loaded = tl.load(path)
     loaded.load_state_dict(model.state_dict())
-    attached = loaded.__dict__["_runnable_callables_by_call_id"]
+    attached = loaded._runnable.callables_by_call_id
     observed: list[bool] = []
     for call_id, original in tuple(attached.items()):
         attached[call_id] = _logging_probe(original, observed)
@@ -957,7 +957,7 @@ def test_loaded_sparse_preserves_torch_structseq_outputs(
     assert type(result.output) is type(expected)
     assert [
         slot.output_path
-        for slot in loaded._runnable_descriptor.tensor_slots
+        for slot in loaded._runnable.descriptor.tensor_slots
         if slot.role.value == "output"
     ] == [
         ("values",),
@@ -1034,7 +1034,7 @@ def test_loaded_sparse_still_diverges_for_a_genuinely_changed_output_structure(
     path = tmp_path / "changed-structseq-output.tlspec"
     trace.save(path, level="runnable")
     loaded = tl.load(path)
-    loaded.__dict__["_runnable_callables_by_call_id"]["call:1"] = _return_positional_pair
+    loaded._runnable.callables_by_call_id["call:1"] = _return_positional_pair
 
     with pytest.raises(PathDivergenceError):
         loaded.run(inputs=inputs.clone())
@@ -1127,7 +1127,7 @@ def test_witness_divergence_raises_and_rolls_back_by_default(honesty_artifact: P
     assert mismatch.code.value == "loop_predicate_divergence"
     assert mismatch.affected_op_labels
     _assert_outs_equal(loaded, source_outs)
-    assert not bool(loaded.__dict__.get("_runnable_poisoned", False))
+    assert not bool(loaded._runnable.poisoned)
 
 
 def test_shape_divergence_return_mode_finishes_and_poison_marks_result(
@@ -1148,8 +1148,8 @@ def test_shape_divergence_return_mode_finishes_and_poison_marks_result(
     assert result.report.poisoned
     assert result.report.first_mismatch is not None
     assert result.report.first_mismatch.code.value == "input_shape_mismatch"
-    assert result.trace.__dict__["_runnable_poisoned"] is True
-    assert result.trace.__dict__["_runnable_path_faithfulness"] is PathFaithfulness.DIVERGED
+    assert result.trace._runnable.poisoned is True
+    assert result.trace._runnable.path_faithfulness is PathFaithfulness.DIVERGED
     _assert_outs_equal(loaded, source_outs)
 
 
@@ -1229,7 +1229,7 @@ def test_incomplete_witness_coverage_is_unverifiable_and_poisoned(
     )
 
     loaded = tl.load(honesty_artifact)
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     gap_spec = WITNESS_GAP_REGISTRY[WitnessGapKind.RNG_MONITOR_UNCERTAIN]
     gap = WitnessCoverageGap(
         gap_kind=WitnessGapKind.RNG_MONITOR_UNCERTAIN,
@@ -1238,7 +1238,7 @@ def test_incomplete_witness_coverage_is_unverifiable_and_poisoned(
         order=0,
         resulting_completeness=gap_spec.resulting_completeness,
     )
-    loaded.__dict__["_runnable_descriptor"] = replace(
+    loaded._runnable.descriptor = replace(
         descriptor,
         coverage_gaps=(gap,),
         witness_completeness=gap_spec.resulting_completeness,
@@ -1250,13 +1250,13 @@ def test_incomplete_witness_coverage_is_unverifiable_and_poisoned(
     assert result.report.first_mismatch is None
     assert result.report.poisoned
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
-    assert result.trace.__dict__["_runnable_poisoned"] is True
+    assert result.trace._runnable.poisoned is True
 
     # Summary-only flip (no gap): internally contradictory -> typed refusal, never
     # a silently trusted summary in EITHER direction.
     contradictory = tl.load(honesty_artifact)
-    contradictory.__dict__["_runnable_descriptor"] = replace(
-        contradictory.__dict__["_runnable_descriptor"],
+    contradictory._runnable.descriptor = replace(
+        contradictory._runnable.descriptor,
         witness_completeness=WitnessCompleteness.INCOMPLETE_UNOBSERVED_PREDICATE,
     )
     with pytest.raises(RunPreconditionError):
@@ -1504,7 +1504,7 @@ def test_h5_batchnorm_records_mode_and_verifies(train: bool, tmp_path: Path) -> 
             intervention_ready=True, capture_container_structure=True, cache=False
         ),
     )
-    assert trace.__dict__.get("_runnable_module_training_modes") == {
+    assert trace._runnable.module_training_modes == {
         "self": train,
         "lin": train,
         "bn": train,
@@ -1535,7 +1535,7 @@ def test_h5_dropout_model_in_eval_records_mode_and_verifies(tmp_path: Path) -> N
             intervention_ready=True, capture_container_structure=True, cache=False
         ),
     )
-    assert trace.__dict__.get("_runnable_module_training_modes") == {
+    assert trace._runnable.module_training_modes == {
         "self": False,
         "lin": False,
         "drop": False,
@@ -1574,7 +1574,7 @@ def test_h5_mode_sensitive_op_without_declared_mode_is_unverifiable(
             intervention_ready=True, capture_container_structure=True, cache=False
         ),
     )
-    assert trace.__dict__.get("_runnable_module_training_modes") is None
+    assert trace._runnable.module_training_modes is None
     with pytest.raises(RunnablePreflightError) as excinfo:
         trace.save(tmp_path / "bn_nomode.tlspec", level="runnable", include_activations=True)
     assert "context_field_invalid" in str(excinfo.value.fields.get("diagnostics"))

@@ -697,7 +697,7 @@ def test_r69_multi_slot_escape_witnesses_stay_runnable(tmp_path: Path) -> None:
     x = torch.tensor([3.0, 5.0])
     path = _save(_trace(_BufferNumpyWriteback(), x.clone()), tmp_path / "wb.tlspec")
     loaded = tl.load(path)
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     assert descriptor is not None, "artifact must stay RUNNABLE, never analysis-only"
     members = required_witness_family_members(descriptor.control_witnesses)["unbound_state_escape"]
     assert len(members) == len(set(members)), members
@@ -728,7 +728,7 @@ def test_r69_multi_slot_escape_witnesses_stay_runnable(tmp_path: Path) -> None:
     from torchlens.runnable import ReadinessStatus
 
     reloaded = tl.load(path)
-    readiness = reloaded.__dict__.get("_runnable_readiness")
+    readiness = reloaded._runnable.readiness
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     assert "context_field_invalid" in {d.code.value for d in readiness.diagnostics}
 

@@ -1505,8 +1505,8 @@ def mark_trace_path_status(
         Effective monotonic status and retained first mismatch.
     """
 
-    previous = trace.__dict__.get("_runnable_path_faithfulness")
-    previous_mismatch = trace.__dict__.get("_runnable_first_mismatch")
+    previous = trace._runnable.path_faithfulness
+    previous_mismatch = trace._runnable.first_mismatch
     if previous is PathFaithfulness.DIVERGED:
         effective = PathFaithfulness.DIVERGED
     elif status is PathFaithfulness.DIVERGED:
@@ -1518,9 +1518,9 @@ def mark_trace_path_status(
     retained = (
         previous_mismatch if isinstance(previous_mismatch, RunnableDiagnostic) else first_mismatch
     )
-    trace.__dict__["_runnable_path_faithfulness"] = effective
-    trace.__dict__["_runnable_first_mismatch"] = retained
-    trace.__dict__["_runnable_poisoned"] = effective is not PathFaithfulness.VERIFIED
+    trace._runnable.path_faithfulness = effective
+    trace._runnable.first_mismatch = retained
+    trace._runnable.poisoned = effective is not PathFaithfulness.VERIFIED
     return effective, retained
 
 
@@ -1540,12 +1540,12 @@ def refuse_poisoned_trace(trace: Any, operation: str) -> None:
         If the Trace carries a monotonic non-faithful sparse-run mark.
     """
 
-    if not bool(trace.__dict__.get("_runnable_poisoned", False)):
+    if not trace._runnable.poisoned:
         return
     from .errors import PoisonedRunError
 
-    status = trace.__dict__.get("_runnable_path_faithfulness")
-    mismatch = trace.__dict__.get("_runnable_first_mismatch")
+    status = trace._runnable.path_faithfulness
+    mismatch = trace._runnable.first_mismatch
     raise PoisonedRunError(
         f"{operation} refused a poison-marked sparse run Trace.",
         code=RunnableErrorCode.POISONED_RUN_REFUSED.value,

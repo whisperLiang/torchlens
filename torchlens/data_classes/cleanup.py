@@ -85,10 +85,6 @@ def cleanup(self: "Trace") -> None:
         "_source_bundle_manifest_sha256",
         "_source_bundle_path",
         "_source_bundle_created_at",
-        "_runnable_descriptor",
-        "_runnable_readiness",
-        "_runnable_callables_by_call_id",
-        "_runnable_archived_activations",
         "_fast_run_session",
         "_validation_replay_status",
     ]:

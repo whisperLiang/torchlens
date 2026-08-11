@@ -1009,7 +1009,7 @@ def test_context_invalid_degrades_analysis_only(
     )
     _tamper_context_field(path)
     loaded = tl.load(path)  # must not hard-raise on the weights/buffers/activations binder
-    readiness = loaded._runnable_readiness
+    readiness = loaded._runnable.readiness
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     codes = {d.code for d in readiness.diagnostics}
     assert RunnableErrorCode.CONTEXT_FIELD_INVALID in codes
