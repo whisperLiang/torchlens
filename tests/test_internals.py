@@ -86,15 +86,31 @@ class TestFieldOrderSync:
             )
 
     def test_trace_field_order_covers_init(self):
-        """MODEL_LOG_FIELD_ORDER should cover all public self.X assignments in Trace.__init__."""
+        """Every public Trace init attr is declared, and user-facing ones are ordered.
+
+        A public NAME does not imply a user-facing FIELD. ``FIELD_POLICY`` is the
+        source of truth (``MODEL_LOG_FIELD_ORDER`` is generated from it -- see
+        ``test_record_field_policy.py::test_record_field_policy_is_field_order_source``),
+        and a session-time knob may be public-named yet deliberately non-user-facing:
+        ``measure_python_peak_memory`` is ``FieldPolicy.DROP`` and intentionally absent
+        from ``MODEL_LOG_FIELD_ORDER`` because it does not survive save/load.
+
+        So the check is split rather than relaxed. Requiring a DECLARATION for every
+        public init attr is strictly stronger than the previous name heuristic: a field
+        that is simply forgotten is undeclared and still fails here, while a field that
+        is declared non-user-facing on purpose is provably outside the ordering contract.
+        """
         from torchlens.data_classes.trace import Trace
 
         init_attrs = self._init_assigned_attrs(Trace)
-        order_set = set(MODEL_LOG_FIELD_ORDER)
-        # Every non-private init attr should be in FIELD_ORDER
         public_attrs = {a for a in init_attrs if not a.startswith("_")}
-        missing = public_attrs - order_set
-        assert not missing, f"Trace public fields missing from FIELD_ORDER: {missing}"
+
+        undeclared = public_attrs - set(Trace.FIELD_POLICY)
+        assert not undeclared, f"Trace public fields absent from FIELD_POLICY: {undeclared}"
+
+        user_facing = {a for a in public_attrs if Trace.FIELD_POLICY[a].user_facing}
+        missing = user_facing - set(MODEL_LOG_FIELD_ORDER)
+        assert not missing, f"Trace user-facing fields missing from FIELD_ORDER: {missing}"
 
     def test_module_call_log_field_order_covers_init(self):
         from torchlens.data_classes.module import ModuleCall
