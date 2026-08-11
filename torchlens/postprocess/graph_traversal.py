@@ -17,7 +17,12 @@ import torch
 from ..quantities import Bytes, Duration
 from ..utils.display import identity
 from ..utils.rng import log_current_rng_states
-from ..utils.tensor_utils import safe_copy, safe_to, tensor_nanequal
+from ..utils.tensor_utils import (
+    get_memory_amount_from_metadata,
+    safe_copy,
+    safe_to,
+    tensor_nanequal,
+)
 from ..utils.introspection import _get_code_context
 from ..data_classes.op import Op
 from ..ir import replace_op_event
@@ -235,6 +240,20 @@ def _add_output_layers(
         if container_path_meta is not None:
             new_output_node.container_path = container_path_meta[0]
             new_output_node.container_spec = container_path_meta[1]
+
+        # Tensor metadata must describe the tensor the model actually returned,
+        # not the parent op's recorded output: after an in-place mutation
+        # through a view (``y = x[...]; y.zero_(); return x``) the returned
+        # base tensor's label is advanced to the mutating op, whose recorded
+        # output is the VIEW — copying its shape would make the output node
+        # claim the view's shape for the full base tensor.
+        new_output_node.shape = tuple(output_tensor.shape)
+        new_output_node.dtype = output_tensor.dtype
+        new_output_node.activation_memory = Bytes(
+            get_memory_amount_from_metadata(
+                output_tensor, new_output_node.shape, new_output_node.dtype
+            )
+        )
 
         # Fix function information:
 
