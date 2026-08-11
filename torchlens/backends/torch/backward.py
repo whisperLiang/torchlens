@@ -1221,17 +1221,42 @@ def _materialize_backward_projections(trace: Any) -> None:
         ):
             _fold_backward_projection_tail(trace, state, events[watermark:])
         else:
-            _materialize_backward_projections_impl(trace, events)
+            _materialize_backward_projections_impl(trace, events, stream=stream)
         trace._backward_projection_event_count = len(events)
         trace._backward_projection_revision = revision
     finally:
         trace.__dict__.pop("_tl_materializing_backward_projection", None)
 
 
-def _materialize_backward_projections_impl(trace: Any, events: list[Any]) -> None:
-    """Rebuild backward projections from an already-snapshotted event list."""
+def _materialize_backward_projections_impl(
+    trace: Any, events: list[Any], stream: Any = None
+) -> None:
+    """Rebuild backward projections from an already-snapshotted event list.
 
+    A DETACHED stream (installed by pickle restore or ``Trace.fork()`` over an
+    already-materialized projection) carries ``pass_index_base`` plus the
+    cumulative baselines of the projection it extends. The rebuild is then
+    stream-authoritative only for passes strictly above the base: pass records,
+    per-op/per-param gradient records, and grad-fn records from at-or-below
+    the base are preserved facts whose source events were dropped with the old
+    stream by design (event streams never serialize). A live capture stream
+    has base 0 and this function behaves exactly as a full scratch rebuild.
+    """
+
+    pass_index_base = int(getattr(stream, "pass_index_base", 0) or 0)
     state = _BackwardFoldState()
+    if pass_index_base:
+        state.total_gradient_memory = int(
+            getattr(stream, "base_total_gradient_memory", 0) or 0
+        )
+        state.total_backward_memory = int(
+            getattr(stream, "base_total_backward_memory", 0) or 0
+        )
+        state.saved_grad_labels = set(getattr(stream, "base_saved_grad_labels", ()) or ())
+        # Pre-base passes are already materialized; marking them built keeps
+        # ``num_backward_passes`` honest and stops any later fold from ever
+        # re-building them.
+        state.built_pass_indices.update(range(1, pass_index_base + 1))
     starts = state.starts
     ends = state.ends
     discovered = state.discovered
@@ -1269,10 +1294,27 @@ def _materialize_backward_projections_impl(trace: Any, events: list[Any]) -> Non
             state.param_grad_passes.add(event.pass_index)
             param_grad_events.append(event)
 
+    # Preserved grad-fn records: on a detached stream, every existing record
+    # whose discovery is NOT in this stream predates the detach (its events
+    # were dropped with the old stream) and is kept verbatim. A record whose
+    # object id IS rediscovered here rebuilds fresh from the stream. Label and
+    # ordinal counters continue after the preserved records so merged labels
+    # stay unique.
+    preserved_grad_fn_logs: "OrderedDict[int, GradFn]" = OrderedDict()
+    if pass_index_base:
+        for object_id, grad_fn_record in getattr(trace, "grad_fn_logs", {}).items():
+            if object_id not in discovered:
+                preserved_grad_fn_logs[object_id] = grad_fn_record
+
     grad_fn_logs: OrderedDict[int, GradFn] = OrderedDict()
     type_counter: dict[str, int] = {}
+    for preserved_record in preserved_grad_fn_logs.values():
+        type_counter[preserved_record.type] = max(
+            type_counter.get(preserved_record.type, 0), preserved_record.type_index
+        )
+    ordinal_offset = len(preserved_grad_fn_logs)
     object_to_label: dict[int, str] = {}
-    for ordinal_index, (object_id, event) in enumerate(discovered.items()):
+    for ordinal_index, (object_id, event) in enumerate(discovered.items(), start=ordinal_offset):
         grad_fn_type = _grad_fn_type_from_class_name(event.class_name)
         step_index = ordinal_index + 1
         type_index, step_index, label = _grad_fn_label_parts(
@@ -1327,6 +1369,10 @@ def _materialize_backward_projections_impl(trace: Any, events: list[Any]) -> Non
         if grad_fn_record.creator_object_id is not None:
             grad_fn_record.differentiates = object_to_label.get(grad_fn_record.creator_object_id)
 
+    if preserved_grad_fn_logs:
+        merged_grad_fn_logs: "OrderedDict[int, GradFn]" = OrderedDict(preserved_grad_fn_logs)
+        merged_grad_fn_logs.update(grad_fn_logs)
+        grad_fn_logs = merged_grad_fn_logs
     trace.grad_fn_logs = grad_fn_logs
     trace.grad_fn_order = list(grad_fn_logs)
 
@@ -1337,15 +1383,41 @@ def _materialize_backward_projections_impl(trace: Any, events: list[Any]) -> Non
     _infer_grad_fn_module_membership(trace)
     _prefer_direct_pairing_source_for_paired_ops(trace)
 
+    # Gradient records at or below the pass-index base are preserved facts
+    # from before the stream detach; only the stream's own window rebuilds.
     for op in getattr(trace, "layer_list", []):
-        op._clear_gradient_records()
+        if pass_index_base:
+            op_records = op._slot("_grad_records") or []
+            op._internal_set(
+                "_grad_records",
+                [
+                    record
+                    for record in op_records
+                    if record.backward_pass_index <= pass_index_base
+                ],
+            )
+        else:
+            op._clear_gradient_records()
     _fold_op_grad_events(trace, state, op_grad_events)
 
     for param_log in getattr(trace, "param_logs", {}).values():
-        param_log._clear_gradient_records()
+        if pass_index_base:
+            param_log._grad_records = [
+                record
+                for record in param_log._grad_records
+                if record.backward_pass_index <= pass_index_base
+            ]
+        else:
+            param_log._clear_gradient_records()
     _fold_param_grad_events(trace, param_grad_events)
 
     backward_pass_logs: OrderedDict[int, BackwardPass] = OrderedDict()
+    if pass_index_base:
+        for preserved_pass_index, preserved_pass in getattr(
+            trace, "backward_pass_logs", {}
+        ).items():
+            if preserved_pass_index <= pass_index_base:
+                backward_pass_logs[preserved_pass_index] = preserved_pass
     pass_indices = sorted(
         set(starts) | set(ends) | set(pass_to_calls) | op_grad_passes | state.param_grad_passes
     )
@@ -1601,8 +1673,15 @@ def _refresh_backward_pass_counters(trace: Any, state: _BackwardFoldState) -> No
     """Refresh pass-derived Trace counters after a full or incremental fold."""
 
     roots_by_pass = getattr(trace, "_backward_roots_by_pass", {})
+    # ``_backward_roots_by_pass`` is session-only; a detached stream carries
+    # the pre-detach root ids so preserved passes keep their roots listed.
+    base_root_ids = tuple(
+        getattr(getattr(trace, "_capture_events", None), "base_root_grad_fn_object_ids", ())
+        or ()
+    )
     trace.backward_root_grad_fn_object_ids = [
-        root_id for roots in roots_by_pass.values() for root_id in roots
+        *base_root_ids,
+        *(root_id for roots in roots_by_pass.values() for root_id in roots),
     ]
     trace.num_backward_passes = max(state.built_pass_indices, default=0)
     trace.has_backward_pass = bool(state.built_pass_indices)
@@ -2781,10 +2860,27 @@ def _capture_autograd_engine_call(
         Return value from ``engine_callable``.
     """
 
+    from .tensor_tracking import _is_fork_relative
+
+    # A backward the user directed at one trace (open managed bracket) must
+    # not be re-captured by that trace's FORK RELATIVES just because they
+    # share the root tensors: a fork's ``log_backward`` would otherwise
+    # silently append a pass to its parent's projection (and vice versa).
+    # Unrelated root-owning traces keep the historical multi-trace capture.
+    directing_trace = _state._active_trace
+    if directing_trace is not None and not getattr(
+        directing_trace, "_tl_active_backward_bracket", False
+    ):
+        directing_trace = None
     matched_traces = tuple(
         trace
         for trace in _traces_for_roots(roots)
         if not getattr(trace, "_tl_active_backward_bracket", False)
+        and not (
+            directing_trace is not None
+            and trace is not directing_trace
+            and _is_fork_relative(trace, directing_trace)
+        )
     )
     loss = _first_root_tensor(roots)
     if loss is None or not matched_traces:

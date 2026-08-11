@@ -91,6 +91,54 @@ class CaptureEvents:
     grad_fn_handles_by_label_raw: dict[str, Any] = field(default_factory=dict)
     backward_event_seq: int = 0
     backward_revision: int = 0
+    # Detached-stream baseline: event streams never serialize and forks never
+    # share a stream, so a stream installed on a trace that ALREADY carries a
+    # materialized backward projection records the projection it extends.
+    # ``pass_index_base`` is the number of backward passes materialized before
+    # this stream existed; every event appended here carries a strictly
+    # greater pass index, and the projection/invariant layers treat passes at
+    # or below the base as preserved facts outside this stream's window. The
+    # ``base_*`` constants seed the cumulative counters a full scratch rebuild
+    # would otherwise recompute from the (dropped) pre-detach events. All five
+    # are written only by :meth:`detached_from` at the two detach sites
+    # (pickle restore and fork) and stay 0/empty for live capture streams.
+    pass_index_base: int = 0
+    base_total_gradient_memory: int = 0
+    base_total_backward_memory: int = 0
+    base_saved_grad_labels: frozenset[str] = frozenset()
+    base_root_grad_fn_object_ids: tuple[int, ...] = ()
+
+    @classmethod
+    def detached_from(cls, trace: Any) -> "CaptureEvents":
+        """Return a fresh stream extending ``trace``'s materialized projection.
+
+        Used when a trace keeps its portable backward projection but must
+        drop or replace its event stream (pickle restore, ``Trace.fork()``).
+        The new stream starts empty with the projection baseline recorded so
+        later full rebuilds preserve the pre-detach passes instead of
+        silently erasing them, and so backward pass numbering stays dense
+        from ``pass_index_base + 1`` within this stream.
+
+        Parameters
+        ----------
+        trace
+            Trace whose current backward projection this stream extends.
+
+        Returns
+        -------
+        CaptureEvents
+            Empty event buffer carrying the projection baseline.
+        """
+
+        return cls(
+            pass_index_base=int(getattr(trace, "num_backward_passes", 0) or 0),
+            base_total_gradient_memory=int(getattr(trace, "total_gradient_memory", 0) or 0),
+            base_total_backward_memory=int(getattr(trace, "total_backward_memory", 0) or 0),
+            base_saved_grad_labels=frozenset(getattr(trace, "_saved_grad_labels", ()) or ()),
+            base_root_grad_fn_object_ids=tuple(
+                getattr(trace, "backward_root_grad_fn_object_ids", ()) or ()
+            ),
+        )
 
     @property
     def op_event_by_label_raw(self) -> dict[str, OpEvent]:
@@ -229,6 +277,11 @@ class CaptureEvents:
             grad_fn_handles_by_label_raw=dict(self.grad_fn_handles_by_label_raw),
             backward_event_seq=self.backward_event_seq,
             backward_revision=self.backward_revision,
+            pass_index_base=self.pass_index_base,
+            base_total_gradient_memory=self.base_total_gradient_memory,
+            base_total_backward_memory=self.base_total_backward_memory,
+            base_saved_grad_labels=self.base_saved_grad_labels,
+            base_root_grad_fn_object_ids=self.base_root_grad_fn_object_ids,
         )
 
     def release_working_projection(self) -> None:
@@ -376,15 +429,17 @@ class CaptureEvents:
         projection copies BY VALUE at materialize time, so an in-place
         mutation of it would diverge a guarded (already-folded) projection
         from a scratch rebuild without moving ``backward_revision``. The
-        writer therefore snapshots it into a read-only mapping here; every
-        other nested reference (payload refs, ``engine_flags``, ``root_meta``
-        elements) is shared BY REFERENCE between the event and both projection
-        paths, so mutating it cannot make folded and scratch state diverge.
+        writer therefore snapshots it into a read-only mapping over a PRIVATE
+        dict copy here — unconditionally, because a caller-supplied
+        ``MappingProxyType`` still aliases the caller's mutable backing dict,
+        which would reintroduce the exact bypass the freeze exists to close.
+        Every other nested reference (payload refs, ``engine_flags``,
+        ``root_meta`` elements) is shared BY REFERENCE between the event and
+        both projection paths, so mutating it cannot make folded and scratch
+        state diverge.
         """
 
-        if isinstance(event, GradFnDiscovered) and not isinstance(
-            event.source, MappingProxyType
-        ):
+        if isinstance(event, GradFnDiscovered):
             object.__setattr__(event, "source", MappingProxyType(dict(event.source)))
         object.__setattr__(event, "seq", self.next_backward_seq())
         self.backward_events.append(event)

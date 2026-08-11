@@ -88,3 +88,13 @@ class CaptureKernel:
         """Raise: kernel observation accounting was removed."""
 
         self._removed("begin_observation")
+
+    def mark_metadata(self, *args: Any, **kwargs: Any) -> None:
+        """Raise: kernel metadata staging was removed."""
+
+        self._removed("mark_metadata")
+
+    def mark_payload(self, *args: Any, **kwargs: Any) -> None:
+        """Raise: kernel payload staging was removed."""
+
+        self._removed("mark_payload")

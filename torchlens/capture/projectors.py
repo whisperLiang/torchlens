@@ -62,16 +62,23 @@ def __getattr__(name: str) -> object:
     """
 
     if name == "TraceProjector":
-        warnings.warn(
-            "torchlens.capture.projectors.TraceProjector is deprecated: the "
-            "ledger-backed projector layer was removed. This delegating shim "
-            "reads the sealed CapturedRunCore event spine directly and will be "
-            "dropped in a future release.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        if name not in _WARNED_DEPRECATED_NAMES:
+            _WARNED_DEPRECATED_NAMES.add(name)
+            warnings.warn(
+                "torchlens.capture.projectors.TraceProjector is deprecated: the "
+                "ledger-backed projector layer was removed. This delegating shim "
+                "reads the sealed CapturedRunCore event spine directly and will be "
+                "dropped in a future release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         return _DeprecatedTraceProjector
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# Deprecated names warn ONCE per process; repeated attribute access stays
+# silent even under an ``always`` warning filter.
+_WARNED_DEPRECATED_NAMES: set[str] = set()
 
 
 def _distinct_label_index_keys(label: str, raw_label: str | None) -> tuple[str, ...]:

@@ -2799,9 +2799,13 @@ class Trace(
         # trace remains a supported backward-capture target within the live
         # process, so restore installs a fresh stream EXPLICITLY here rather
         # than letting backward capture fabricate one silently on demand.
+        # The stream is DETACHED, not blank: it records the restored
+        # projection's pass-index base and cumulative baselines so a new
+        # backward numbers itself after the preserved passes and a full
+        # rebuild keeps (never silently erases) the pre-pickle projection.
         from ..ir import CaptureEvents
 
-        self.__dict__["_capture_events"] = CaptureEvents()
+        self.__dict__["_capture_events"] = CaptureEvents.detached_from(self)
         # The projection guard is derived from the stream that just got
         # replaced; stale values from the source process (or a reused object)
         # would silently drop new passes or fold onto dead-process fold state.

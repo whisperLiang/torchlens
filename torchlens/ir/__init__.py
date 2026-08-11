@@ -159,13 +159,20 @@ def __getattr__(name: str) -> object:
 
         from . import _deprecated
 
-        warnings.warn(
-            f"torchlens.ir.{name} is deprecated: TorchLens no longer emits this "
-            "event kind (module containment uses ModuleEnterEvent/ModuleExitEvent; "
-            "buffer capture uses BufferWriteEvent). The class remains importable "
-            "as an inert compatibility shim.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        if name not in _WARNED_DEPRECATED_NAMES:
+            _WARNED_DEPRECATED_NAMES.add(name)
+            warnings.warn(
+                f"torchlens.ir.{name} is deprecated: TorchLens no longer emits this "
+                "event kind (module containment uses ModuleEnterEvent/ModuleExitEvent; "
+                "buffer capture uses BufferWriteEvent). The class remains importable "
+                "as an inert compatibility shim.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         return getattr(_deprecated, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# Deprecated names warn ONCE per process; repeated attribute access stays
+# silent even under an ``always`` warning filter.
+_WARNED_DEPRECATED_NAMES: set[str] = set()

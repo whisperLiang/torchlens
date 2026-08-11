@@ -361,9 +361,9 @@ def test_backward_reprojection_folds_incrementally() -> None:
     full_rebuild_sizes: list[int] = []
     real_impl = backward_mod._materialize_backward_projections_impl
 
-    def counting_impl(trace_arg: tl.Trace, events: list) -> None:
+    def counting_impl(trace_arg: tl.Trace, events: list, stream: object = None) -> None:
         full_rebuild_sizes.append(len(events))
-        real_impl(trace_arg, events)
+        real_impl(trace_arg, events, stream=stream)
 
     with mock.patch.object(
         backward_mod, "_materialize_backward_projections_impl", counting_impl
@@ -547,6 +547,41 @@ def test_replay_fork_does_not_inherit_gradient_state() -> None:
     assert trace.has_gradients
     assert trace._saved_grad_labels
     assert any(param_log._grad_records for param_log in trace.param_logs.values())
+
+
+@pytest.mark.smoke
+def test_replay_fork_cannot_resurrect_has_grad_from_derived_payload() -> None:
+    """A seeded ``_derived_grad_payload`` never survives onto a replay fork.
+
+    ``_check_param_grad`` treats a surviving derived payload as proof of a
+    gradient, so a fork that inherited it would report ``has_grad=True`` for a
+    fork that never ran a backward — the stale-True channel the replay-fork
+    reset exists to kill. No backward runs here, so the live-model
+    read-through cannot legitimately supply a gradient either.
+    """
+    model = _TinyBackwardModel()
+    x = torch.randn(2, 3, requires_grad=True)
+    trace = tl.trace(
+        model,
+        x,
+        capture=CaptureOptions(layers_to_save="all"),
+        intervention_ready=True,
+        backward_ready=True,
+    )
+    address, param_log = next(iter(trace.param_logs.items()))
+    param_log._derived_grad_payload = torch.ones(1)
+    assert param_log.has_grad is True  # positive control: the seed arms the channel
+
+    def _identity_hook(out: torch.Tensor, *, hook: object) -> torch.Tensor:
+        return out
+
+    fork = trace.replay(hooks={tl.func("relu"): _identity_hook}, differentiable=True)
+
+    fork_param = fork.param_logs[address]
+    assert fork_param._derived_grad_payload is None
+    assert fork_param.has_grad is False
+    # The source keeps its own (seeded) state untouched.
+    assert param_log._derived_grad_payload is not None
 
 
 @pytest.mark.smoke
@@ -1110,6 +1145,13 @@ def test_param_grad_incremental_fold_matches_scratch_rebuild() -> None:
 
     incremental_snapshot = _backward_projection_snapshot(trace)
     assert incremental_snapshot["param_grads"], "oracle must include parameter state"
+    # Armed by construction: erase every projected param record first, so the
+    # forced scratch rebuild can only match the incremental snapshot by
+    # re-deriving the records from the ParamGradObserved event spine. Under
+    # direct-write param capture (no event folding) the cleared records never
+    # come back and this comparison fails.
+    for param_log in trace.param_logs.values():
+        param_log._grad_records = []
     trace.__dict__.pop("_backward_projection_fold_state", None)
     trace.__dict__.pop("_backward_projection_revision", None)
     trace.__dict__.pop("_backward_projection_event_count", None)
@@ -1313,6 +1355,177 @@ def test_double_restore_replaces_stale_stream() -> None:
     assert "_capture_events" not in trace.__getstate__()
     assert "_backward_projection_revision" not in trace.__getstate__()
     assert "_backward_projection_fold_state" not in trace.__getstate__()
+
+
+@pytest.mark.smoke
+def test_restored_trace_with_prior_backward_extends_pass_numbering() -> None:
+    """A post-restore backward numbers itself after the preserved pass.
+
+    The restored stream is DETACHED (pass-index base = passes materialized
+    before pickling), so the new pass is pass 2, the invariants stay green,
+    and pass 1's projection (pass record, per-param records, grad-fn records)
+    survives the full rebuild instead of being silently erased.
+    """
+    import pickle
+
+    _model, _x, trace = _logged_model()
+    loss = _output_loss(trace)
+    trace.log_backward(loss, retain_graph=True)
+    assert trace.num_backward_passes == 1
+
+    restored = pickle.loads(pickle.dumps(trace))
+    assert restored._capture_events.pass_index_base == 1
+    pass_one_record = restored.backward_pass_logs[1]
+    preserved_grad_fn_ids = set(restored.grad_fn_logs)
+    assert preserved_grad_fn_ids
+    pass_one_param_counts = {
+        address: len(param_log._grad_records)
+        for address, param_log in restored.param_logs.items()
+    }
+    assert any(pass_one_param_counts.values())
+
+    restored.log_backward(loss)
+
+    assert restored.num_backward_passes == 2
+    assert set(restored.backward_pass_logs) == {1, 2}
+    # The earlier pass's projection is intact — the SAME preserved record,
+    # not a lookalike rebuilt from a stream that never saw pass 1.
+    assert restored.backward_pass_logs[1] is pass_one_record
+    assert preserved_grad_fn_ids <= set(restored.grad_fn_logs)
+    all_labels = [record.label for record in restored.grad_fn_logs.values()]
+    assert len(all_labels) == len(set(all_labels)), "merged grad-fn labels must stay unique"
+    for address, param_log in restored.param_logs.items():
+        pass_indices = sorted(
+            record.backward_pass_index for record in param_log._grad_records
+        )
+        preserved = [index for index in pass_indices if index == 1]
+        assert len(preserved) == pass_one_param_counts[address]
+        if pass_one_param_counts[address]:
+            assert 2 in pass_indices, f"{address} missing the new pass's record"
+    _invariant_check(restored)
+
+
+@pytest.mark.smoke
+def test_fork_after_backward_gets_detached_event_stream() -> None:
+    """``Trace.fork()`` never shares the parent's backward event stream.
+
+    The fork starts a detached stream (fresh lists, pass-index base = the
+    parent's materialized passes) with the stream-derived projection guards
+    dropped, and a managed backward on the fork leaves the parent's stream
+    and projection completely untouched.
+    """
+    _model, _x, trace = _logged_model()
+    loss = _output_loss(trace)
+    trace.log_backward(loss, retain_graph=True)
+
+    fork = trace.fork()
+    assert fork._capture_events is not trace._capture_events
+    assert fork._capture_events.backward_events is not trace._capture_events.backward_events
+    assert fork._capture_events.backward_events == []
+    assert fork._capture_events.pass_index_base == 1
+    assert "_backward_projection_revision" not in fork.__dict__
+    assert "_backward_projection_fold_state" not in fork.__dict__
+    assert "_backward_projection_event_count" not in fork.__dict__
+
+    parent_event_count = len(trace._capture_events.backward_events)
+    parent_revision = trace._capture_events.backward_revision
+    with warnings.catch_warnings():
+        # The parent's tensor hooks must stand down for the fork's managed
+        # pass — an implicit-pass warning here means the parent absorbed it.
+        warnings.simplefilter("error")
+        fork.log_backward(loss, retain_graph=True)
+
+    assert len(trace._capture_events.backward_events) == parent_event_count
+    assert trace._capture_events.backward_revision == parent_revision
+    assert trace.num_backward_passes == 1
+    assert set(trace.backward_pass_logs) == {1}
+    assert fork.num_backward_passes == 2
+    assert set(fork.backward_pass_logs) == {1, 2}
+    # The parent's persistent tensor hooks redirect their observations to the
+    # bracket-holding fork (shared label space), so the fork's pass records
+    # op gradients instead of silently losing them.
+    fork_op_grad_passes = {
+        event.pass_index
+        for event in fork._capture_events.backward_events
+        if isinstance(event, OpGradObserved)
+    }
+    assert fork_op_grad_passes == {2}
+    _invariant_check(trace)
+    _invariant_check(fork)
+
+
+@pytest.mark.smoke
+def test_grad_fn_discovered_source_snapshot_defeats_caller_proxy() -> None:
+    """The writer re-snapshots an already-proxied source's backing dict.
+
+    A caller-supplied ``MappingProxyType`` aliases the caller's mutable dict;
+    trusting it would let an in-place mutation of that backing dict change the
+    event without moving ``backward_revision``.
+    """
+    from types import MappingProxyType
+
+    from torchlens.ir.capture_events import CaptureEvents
+    from torchlens.ir.events import GradFnDiscovered
+
+    backing = {
+        "class_source_file": "/original/source.py",
+        "class_source_line": 1,
+    }
+    event = GradFnDiscovered(
+        object_id=1,
+        class_name="AddBackward0",
+        class_qualname="AddBackward0",
+        is_custom=False,
+        op_label=None,
+        param_ref=None,
+        created_in_pass=None,
+        creator_object_id=None,
+        source=MappingProxyType(backing),
+        topology=(),
+    )
+    stream = CaptureEvents()
+    stream.append_backward(event)
+    backing["class_source_file"] = "/tmp/planted-mutation.py"
+    assert event.source["class_source_file"] == "/original/source.py"
+
+
+@pytest.mark.smoke
+def test_fork_deep_copy_debug_mode_rethrows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TORCHLENS_DEBUG_FORK_COPY=1 surfaces silently-degraded fork copies.
+
+    The fork copier intentionally degrades opaque values to ``on_failure``
+    (several routine Trace fields rely on it), which is exactly how a genuine
+    copy bug — a field that MUST fork independently silently becoming shared —
+    stays invisible. The debug channel re-raises instead; this exercises the
+    single choke point every fork field copy routes through.
+    """
+    import copy
+
+    from torchlens.data_classes import _trace_intervention as trace_intervention
+
+    class _PoisonDeepCopy:
+        """Object whose deepcopy always fails (shallow copy still works)."""
+
+        def __deepcopy__(self, memo: dict) -> "_PoisonDeepCopy":
+            raise RuntimeError("planted deepcopy failure")
+
+    monkeypatch.delenv("TORCHLENS_DEBUG_FORK_COPY", raising=False)
+    degraded = trace_intervention._memoized_deep_copy(
+        _PoisonDeepCopy(), None, on_failure=copy.copy
+    )
+    assert isinstance(degraded, _PoisonDeepCopy)  # default: silent degradation
+
+    monkeypatch.setenv("TORCHLENS_DEBUG_FORK_COPY", "1")
+    with pytest.raises(RuntimeError, match="planted deepcopy failure"):
+        trace_intervention._memoized_deep_copy(_PoisonDeepCopy(), None, on_failure=copy.copy)
+
+    # And a whole-trace fork under a poisoned field degrades (not raises) by
+    # default — the historical behavior stays available.
+    monkeypatch.delenv("TORCHLENS_DEBUG_FORK_COPY", raising=False)
+    _model, _x, trace = _logged_model()
+    trace.__dict__["_tl_test_poison"] = _PoisonDeepCopy()
+    fork = trace.fork()
+    assert isinstance(fork.__dict__.get("_tl_test_poison"), _PoisonDeepCopy)
 
 
 @pytest.mark.smoke

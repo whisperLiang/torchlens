@@ -1394,11 +1394,27 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
         raise MetadataInvariantError(name, "backward events contain duplicate pass starts")
     if len(end_indices) != len(set(end_indices)):
         raise MetadataInvariantError(name, "backward events contain duplicate pass ends")
-    bracket_indices = sorted(set(start_indices) | set(end_indices))
-    if bracket_indices != list(range(1, len(bracket_indices) + 1)):
+    # A detached stream (pickle restore / fork over an existing projection)
+    # records ``pass_index_base``: the passes materialized before the stream
+    # existed. Within the stream, brackets must be dense from base + 1 — a
+    # live capture stream has base 0, so this is the historical dense-from-1
+    # check there. The base is written only by the two detach sites; events
+    # at or below it can never appear here (they would break density and the
+    # missing-pass checks below).
+    pass_index_base = int(getattr(capture_events, "pass_index_base", 0) or 0)
+    if pass_index_base < 0:
         raise MetadataInvariantError(
             name,
-            f"backward event pass indices {bracket_indices!r} are not dense from 1",
+            f"backward stream pass-index base {pass_index_base!r} is negative",
+        )
+    bracket_indices = sorted(set(start_indices) | set(end_indices))
+    if bracket_indices != list(
+        range(pass_index_base + 1, pass_index_base + 1 + len(bracket_indices))
+    ):
+        raise MetadataInvariantError(
+            name,
+            f"backward event pass indices {bracket_indices!r} are not dense "
+            f"from {pass_index_base + 1}",
         )
     if set(start_indices) != set(end_indices):
         raise MetadataInvariantError(
@@ -1520,11 +1536,18 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
 
     # Reconcile by MULTIPLICITY, not membership: a duplicated or dropped
     # record/event PAIR keeps set equality but changes the count, so only a
-    # multiset comparison catches it.
+    # multiset comparison catches it. Reconciliation is scoped to the
+    # stream's window: records for passes at or below ``pass_index_base`` are
+    # preserved projections whose source events were dropped with the
+    # pre-detach stream by design, so the stream is authoritative (and this
+    # comparison exact) only for passes strictly above the base. With base 0
+    # every record is in scope — the historical full comparison.
     layer_labels = set(getattr(trace, "layer_dict_all_keys", {}))
     projected_grad_records: Counter[tuple[str, int]] = Counter()
     for layer in getattr(trace, "layer_list", []):
         for record in getattr(layer, "_grad_records", ()):
+            if record.backward_pass_index <= pass_index_base:
+                continue
             projected_grad_records[(layer.layer_label, record.backward_pass_index)] += 1
 
     event_grad_records: Counter[tuple[str, int]] = Counter()
@@ -1547,6 +1570,8 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
     projected_param_records: Counter[tuple[str, int]] = Counter()
     for param_address, param_log in getattr(trace, "param_logs", {}).items():
         for record in getattr(param_log, "_grad_records", ()):
+            if record.backward_pass_index <= pass_index_base:
+                continue
             projected_param_records[(param_address, record.backward_pass_index)] += 1
     event_param_records: Counter[tuple[str, int]] = Counter()
     for param_grad_event in param_grad_events:
@@ -1567,6 +1592,8 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
     projected_calls: dict[tuple[int, int], int] = defaultdict(int)
     for grad_fn_handle in getattr(trace, "grad_fn_logs", {}).values():
         for call in grad_fn_handle.calls.values():
+            if call.backward_pass_index <= pass_index_base:
+                continue
             projected_calls[(grad_fn_handle.grad_fn_object_id, call.backward_pass_index)] += 1
     event_calls: dict[tuple[int, int], int] = defaultdict(int)
     grad_fn_ids = set(getattr(trace, "grad_fn_logs", {}))
