@@ -8,8 +8,8 @@ version = "2.34.1"
 description = "A package for extracting activations from PyTorch models and saving portable bundles"
 readme = "README.md"
 license = "Apache-2.0"
-# 3.10 is the real floor: the package uses @dataclass(slots=True) in 144 places
-# across 32 modules, and `slots=True` is Python 3.10+, so `import torchlens`
+# 3.10 is the real floor: the package uses @dataclass(slots=True) in 143 places
+# across 31 modules, and `slots=True` is Python 3.10+, so `import torchlens`
 # cannot succeed on 3.9. CI tests 3.10 and 3.11.
 requires-python = ">=3.10"
 authors = [
