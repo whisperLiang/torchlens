@@ -1443,6 +1443,7 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
     """
 
     from ..ir.events import (
+        BackwardCoverageGap,
         BackwardPassEnd,
         BackwardPassStart,
         GradFnDiscovered,
@@ -1525,10 +1526,20 @@ def _check_backward_event_flow_invariants(trace: "Trace", name: str) -> None:
     # inference from timestamps or list positions.
     start_seq_by_pass = {event.pass_index: event.seq for event in starts}
     end_seq_by_pass = {event.pass_index: event.seq for event in ends}
-    pass_scoped_events: list[OpGradObserved | GradFnFired | ParamGradObserved] = [
+    coverage_gap_events = [event for event in events if isinstance(event, BackwardCoverageGap)]
+    for gap_event in coverage_gap_events:
+        if gap_event.pass_index not in valid_pass_indices:
+            raise MetadataInvariantError(
+                name,
+                f"coverage gap references missing pass {gap_event.pass_index!r}",
+            )
+    pass_scoped_events: list[
+        OpGradObserved | GradFnFired | ParamGradObserved | BackwardCoverageGap
+    ] = [
         *op_grad_events,
         *fired_events,
         *param_grad_events,
+        *coverage_gap_events,
     ]
     for event in pass_scoped_events:
         start_seq = start_seq_by_pass.get(event.pass_index)

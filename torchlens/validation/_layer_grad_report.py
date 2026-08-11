@@ -14,26 +14,35 @@ if TYPE_CHECKING:
 else:
     ModuleOutputGradKey = tuple[str, int, int]
 
-MIN_MODULE_OUTPUT_COVERAGE: float = 0.80
-
-
 @dataclass
 class LayerGradReport:
     """PATH E module-output gradient comparison report.
 
     Coverage is keyed by module-call label for single-output calls and by
-    ``module:call[index]`` for multi-output calls. The classifier buckets are ``covered``,
-    ``mismatched``,
-    ``skipped_no_first_leaf``, ``skipped_module_less`` (counter only),
-    ``skipped_no_grad``, ``skipped_identity_output``, and
-    ``skipped_root_module``.
+    ``module:call[index]`` for multi-output calls. The classifier buckets are:
+
+    - ``covered`` / ``mismatched``: eligible outputs that were compared;
+    - classified LEGITIMATE exclusions (never block passing):
+      ``skipped_root_module``, ``skipped_identity_output``,
+      ``skipped_no_tensor_output`` (a module call that produced no captured
+      tensor output has no meaningful first tensor leaf to compare), and the
+      diagnostic-only ``skipped_module_less`` counter;
+    - fail-closed gaps (any occurrence sinks the verdict):
+      ``skipped_no_grad`` (an eligible output whose gradient was not captured)
+      and ``unresolved_output_label`` (a module call names an output layer the
+      trace cannot resolve — an internal inconsistency, not an exclusion).
+
+    The acceptance rule is EXACT: 100% of the classified-eligible denominator
+    must be ``covered``. There is no coverage-ratio tolerance; a tolerance
+    here could hide missing hooks, which is a disarmed tripwire.
     """
 
     mode: Literal["module_output"]
     overall_passed: bool
     coverage: dict[str, str]
     covered_count: int
-    skipped_no_first_leaf_count: int
+    skipped_no_tensor_output_count: int
+    unresolved_output_label_count: int
     skipped_module_less_count: int
     skipped_no_grad_count: int
     skipped_identity_output_count: int
@@ -66,7 +75,6 @@ def _compare_module_output_grads(
     *,
     atol: float = 1e-6,
     rtol: float = 1e-5,
-    min_coverage: float = MIN_MODULE_OUTPUT_COVERAGE,
 ) -> LayerGradReport:
     """Compare candidate module-call output grads to stock module-output grads.
 
@@ -82,8 +90,6 @@ def _compare_module_output_grads(
         Absolute allclose tolerance.
     rtol:
         Relative allclose tolerance.
-    min_coverage:
-        Minimum required covered ratio.
 
     Returns
     -------
@@ -113,7 +119,9 @@ def _compare_module_output_grads(
             getattr(call_log, "output_ops", None) or getattr(call_log, "output_layers", None) or []
         )
         if not output_ops:
-            coverage[call_label] = "skipped_no_first_leaf"
+            # Classified legitimate exclusion: no captured tensor output means
+            # there is no meaningful first tensor leaf to compare.
+            coverage[call_label] = "skipped_no_tensor_output"
             continue
         multi_output = len(output_ops) > 1
         for output_index, output_label in enumerate(output_ops):
@@ -121,7 +129,10 @@ def _compare_module_output_grads(
             try:
                 cand_layer = trace[output_label]
             except (KeyError, IndexError):
-                coverage[coverage_label] = "skipped_no_first_leaf"
+                # Fail-closed gap: a module call naming an output layer the
+                # trace cannot resolve is an internal inconsistency, never a
+                # legitimate exclusion.
+                coverage[coverage_label] = "unresolved_output_label"
                 continue
             key = (addr, call_index, output_index)
             if key in stock_identity_addresses:
@@ -159,8 +170,11 @@ def _compare_module_output_grads(
 
     covered_count = sum(value == "covered" for value in coverage.values())
     mismatched_count = sum(value == "mismatched" for value in coverage.values())
-    skipped_no_first_leaf_count = sum(
-        value == "skipped_no_first_leaf" for value in coverage.values()
+    skipped_no_tensor_output_count = sum(
+        value == "skipped_no_tensor_output" for value in coverage.values()
+    )
+    unresolved_output_label_count = sum(
+        value == "unresolved_output_label" for value in coverage.values()
     )
     skipped_no_grad_count = sum(value == "skipped_no_grad" for value in coverage.values())
     skipped_identity_output_count = sum(
@@ -169,16 +183,17 @@ def _compare_module_output_grads(
     skipped_root_module_count = sum(value == "skipped_root_module" for value in coverage.values())
     unexpected_count = sum(value == "unexpected" for value in coverage.values())
 
-    coverage_denom = (
-        covered_count + mismatched_count + skipped_no_first_leaf_count + skipped_no_grad_count
-    )
-    coverage_ratio = covered_count / coverage_denom if coverage_denom else 0.0
+    # Eligibility-classifier acceptance (replaces the former 0.80 coverage
+    # ratio): the classified-eligible denominator is {covered, mismatched,
+    # skipped_no_grad, unresolved_output_label} and 100% of it must be
+    # covered. Legitimate exclusions were classified out above; any
+    # unexplained gap fails closed rather than hiding inside a tolerance.
     overall_passed = (
         unexpected_count == 0
         and mismatched_count == 0
         and skipped_no_grad_count == 0
+        and unresolved_output_label_count == 0
         and covered_count > 0
-        and coverage_ratio >= min_coverage
     )
 
     return LayerGradReport(
@@ -186,7 +201,8 @@ def _compare_module_output_grads(
         overall_passed=overall_passed,
         coverage=coverage,
         covered_count=covered_count,
-        skipped_no_first_leaf_count=skipped_no_first_leaf_count,
+        skipped_no_tensor_output_count=skipped_no_tensor_output_count,
+        unresolved_output_label_count=unresolved_output_label_count,
         skipped_module_less_count=skipped_module_less_count,
         skipped_no_grad_count=skipped_no_grad_count,
         skipped_identity_output_count=skipped_identity_output_count,

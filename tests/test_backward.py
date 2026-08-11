@@ -1728,3 +1728,141 @@ def test_journal_seq_invariant_fires_on_planted_mutations() -> None:
         check()
     object.__setattr__(backward_event, "seq", original_backward_seq)
     check()
+
+
+@pytest.mark.smoke
+def test_aliased_label_registrations_emit_one_grad_event_per_pass() -> None:
+    """One logical op output emits exactly ONE OpGradObserved per pass.
+
+    An identity-output module relabels the SAME live tensor under a second
+    raw label and also hooks its own logged entry, so the same logical
+    gradient used to be emitted twice under one final label — caught by the
+    events<->projection multiplicity reconciliation. The label-owner rule
+    (one gradient owner per raw label; live registrations take ownership)
+    keeps exactly one emission.
+    """
+    import collections
+
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+    from torchlens.ir.events import OpGradObserved
+    from torchlens.validation.invariants import check_metadata_invariants
+
+    class IdentityWrapper(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = nn.Linear(3, 3)
+            self.identity = nn.Identity()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.identity(self.linear(x))
+
+    torch.manual_seed(42)
+    trace = tl.trace(
+        IdentityWrapper(),
+        torch.randn(2, 3),
+        capture=CaptureOptions(layers_to_save="all", save_grads="all", random_seed=42),
+    )
+    # Arming proof for the owner rule itself: the identity label is owned by
+    # exactly one hooked tensor even though two registrations happened.
+    owners = trace.__dict__.get("_tl_grad_hook_owner_by_label", {})
+    identity_labels = [label for label in owners if label.startswith("identity")]
+    assert identity_labels, "identity op label must be gradient-hooked"
+
+    trace.log_backward(trace[trace.output_layers[0]].out.sum())
+    events = _ensure_backward_event_stream(trace).backward_events
+    op_grad_counts = collections.Counter(
+        (event.op_label, event.pass_index)
+        for event in events
+        if isinstance(event, OpGradObserved)
+    )
+    assert op_grad_counts, "backward must observe op gradients"
+    duplicated = {key: count for key, count in op_grad_counts.items() if count > 1}
+    assert not duplicated, f"duplicate OpGradObserved emissions: {duplicated}"
+    # The reconciliation tripwire stays green on the fixed producer.
+    check_metadata_invariants(trace)
+
+
+@pytest.mark.smoke
+def test_failed_backward_walk_keeps_start_and_gains_failed_end() -> None:
+    """A failed graph walk is evidence: Start stays, a failed End closes it."""
+    from torchlens.backends.torch import backward as backward_mod
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+    from torchlens.ir.events import BackwardPassEnd as _End
+    from torchlens.validation.invariants import check_metadata_invariants
+
+    _model, _x, trace = _logged_model()
+    loss = _output_loss(trace)
+
+    with mock.patch.object(
+        backward_mod,
+        "_walk_and_hook_backward_graph",
+        side_effect=RuntimeError("planted walk failure"),
+    ):
+        with pytest.raises(RuntimeError, match="planted walk failure"):
+            trace.log_backward(loss)
+
+    events = _ensure_backward_event_stream(trace).backward_events
+    starts = [e for e in events if isinstance(e, BackwardPassStart)]
+    ends = [e for e in events if isinstance(e, _End)]
+    assert [s.pass_index for s in starts] == [1], "the attempted pass keeps its start"
+    assert [e.pass_index for e in ends] == [1], "the attempted pass gains a terminal end"
+    assert ends[0].status == "error"
+    assert trace.num_backward_passes == 1
+    check_metadata_invariants(trace)
+
+    # A later real backward numbers itself after the failed attempt and the
+    # whole stream still satisfies the exact bracketing invariants.
+    trace.log_backward(_output_loss(trace))
+    assert trace.num_backward_passes == 2
+    check_metadata_invariants(trace)
+
+
+@pytest.mark.smoke
+def test_hook_registration_failure_records_typed_coverage_gap() -> None:
+    """A registration skip is a typed BackwardCoverageGap, and validation fails closed."""
+    from torchlens.backends.torch import backward as backward_mod
+    from torchlens.backends.torch.backward import _ensure_backward_event_stream
+    from torchlens.ir.events import BackwardCoverageGap
+    from torchlens.validation.invariants import check_metadata_invariants
+
+    _model, _x, trace = _logged_model()
+    with mock.patch.object(
+        backward_mod,
+        "_make_grad_fn_hook",
+        side_effect=RuntimeError("planted registration failure"),
+    ):
+        trace.log_backward(_output_loss(trace))
+
+    events = _ensure_backward_event_stream(trace).backward_events
+    gaps = [e for e in events if isinstance(e, BackwardCoverageGap)]
+    assert gaps, "every skipped registration must record a typed gap"
+    assert {gap.reason for gap in gaps} == {"registration_error"}
+    assert {gap.pass_index for gap in gaps} == {1}
+    for gap in gaps:
+        assert gap.class_qualname
+        assert "planted registration failure" in (gap.detail or "")
+    # Gaps sit inside their pass bracket and the stream stays invariant-green.
+    check_metadata_invariants(trace)
+
+
+@pytest.mark.smoke
+def test_validate_backward_fails_closed_on_coverage_gaps() -> None:
+    """validate_backward_pass returns False when any unexplained gap exists."""
+    from torchlens.backends.torch import backward as backward_mod
+    from torchlens.validation import backward as backward_validation
+
+    model = _TinyBackwardModel()
+    x = torch.randn(2, 3)
+    with mock.patch.object(
+        backward_mod,
+        "_make_grad_fn_hook",
+        side_effect=RuntimeError("planted registration failure"),
+    ):
+        with pytest.warns(RuntimeWarning, match="coverage gap"):
+            passed = backward_validation.validate_backward_pass(
+                model,
+                x,
+                loss_fn=lambda output: output.sum(),
+                random_seed=11,
+            )
+    assert passed is False

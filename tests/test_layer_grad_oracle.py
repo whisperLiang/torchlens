@@ -191,25 +191,19 @@ def _loss(output: torch.Tensor) -> torch.Tensor:
     return output.sum()
 
 
-def _coverage_ratio(report: LayerGradReport) -> float:
-    """Return PATH E module-output coverage ratio."""
-
-    denom = (
-        report.covered_count
-        + report.mismatched_count
-        + report.skipped_no_first_leaf_count
-        + report.skipped_no_grad_count
-    )
-    return report.covered_count / denom if denom else 0.0
-
-
 def _assert_acceptance(report: LayerGradReport) -> None:
-    """Assert the P5 module-output acceptance criteria."""
+    """Assert the eligibility-classifier module-output acceptance criteria.
+
+    100% of the classified-eligible denominator must be covered: any
+    mismatch, uncaptured-eligible gradient, or unresolved output label sinks
+    the verdict (the former 0.80 ratio tolerance is gone).
+    """
 
     assert report.overall_passed
-    assert _coverage_ratio(report) >= 0.80
+    assert report.covered_count > 0
     assert report.mismatched_count == 0
     assert report.skipped_no_grad_count == 0
+    assert report.unresolved_output_label_count == 0
 
 
 def _run_public_layer_grad_validation(
@@ -461,16 +455,37 @@ def test_compare_excludes_root_and_identity_from_denominator() -> None:
     assert report.overall_passed
 
 
-def test_compare_counts_no_first_leaf() -> None:
-    """Module calls with no output layer receive the no-first-leaf bucket."""
+def test_compare_counts_no_tensor_output() -> None:
+    """Module calls with no captured tensor output are a classified exclusion."""
 
     report = _compare_module_output_grads(
         SyntheticTrace([_synthetic_call("empty", 1, [])], {}),
         {},
         set(),
     )
-    assert report.skipped_no_first_leaf_count == 1
-    assert report.coverage["empty:1"] == "skipped_no_first_leaf"
+    assert report.skipped_no_tensor_output_count == 1
+    assert report.coverage["empty:1"] == "skipped_no_tensor_output"
+
+
+def test_unresolved_output_label_fails_closed() -> None:
+    """A module call naming an unresolvable output layer sinks the verdict."""
+
+    grad = torch.ones(1)
+    trace = SyntheticTrace(
+        [
+            _synthetic_call("linear", 1, ["linear_out"]),
+            _synthetic_call("ghost", 1, ["missing_label"]),
+        ],
+        {"linear_out": _synthetic_layer("linear_out", grad)},
+    )
+    report = _compare_module_output_grads(trace, {("linear", 1, 0): grad}, set())
+    # Positive control: the resolvable output is covered...
+    assert report.coverage["linear:1"] == "covered"
+    # ...but the unresolvable label is an internal inconsistency, not an
+    # exclusion, and no ratio tolerance can absorb it.
+    assert report.coverage["ghost:1"] == "unresolved_output_label"
+    assert report.unresolved_output_label_count == 1
+    assert not report.overall_passed
 
 
 def test_compare_counts_module_less_layers_diagnostically() -> None:
@@ -832,7 +847,8 @@ def test_path_e_module_exports_expected_surface() -> None:
         overall_passed=True,
         coverage={},
         covered_count=1,
-        skipped_no_first_leaf_count=0,
+        skipped_no_tensor_output_count=0,
+        unresolved_output_label_count=0,
         skipped_module_less_count=0,
         skipped_no_grad_count=0,
         skipped_identity_output_count=0,

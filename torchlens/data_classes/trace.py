@@ -1418,6 +1418,11 @@ class Trace(
         "_capture_events": FieldPolicy.DROP,
         "_capture_session": FieldPolicy.DROP,
         "_tl_backward_hooked_tensor_keys": FieldPolicy.DROP,
+        "_tl_grad_hook_owner_by_label": FieldPolicy.DROP,
+        # RF probe suppression flag: declared statically so a Trace serialized
+        # BEFORE any receptive-field probe has the same class spec as one
+        # serialized after (the probe used to setdefault this at call time).
+        "_tl_rf_probe_active": FieldPolicy.DROP,
         "_active_backward_pass_index": FieldPolicy.DROP,
         "_backward_roots_by_pass": FieldPolicy.DROP,
         "_backward_projection_event_count": FieldPolicy.DROP,
@@ -2588,6 +2593,7 @@ class Trace(
         state.pop("_build_state", None)
         state["_backward_gradfn_refs"] = []
         state["_tl_backward_hooked_tensor_keys"] = set()
+        state.pop("_tl_grad_hook_owner_by_label", None)
         state["_pending_live_fire_records"] = []
         state["_last_hook_handle_ids"] = ()
         state["_activation_transform_repr"] = (

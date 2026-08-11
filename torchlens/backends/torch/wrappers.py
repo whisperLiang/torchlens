@@ -1208,7 +1208,9 @@ def _register_inplace_live_grad_hook(trace: Any, tensor: Any, raw_label: str) ->
         return
     from .tensor_tracking import _add_tensor_backward_hook
 
-    _add_tensor_backward_hook(trace, tensor, raw_label)
+    # The live tensor is what downstream ops consume, so it takes gradient
+    # ownership of the label; the logged copy's hook (if any) stops emitting.
+    _add_tensor_backward_hook(trace, tensor, raw_label, take_ownership=True)
 
 
 def _storage_overlap_byte_interval(t: torch.Tensor) -> tuple[int, int]:

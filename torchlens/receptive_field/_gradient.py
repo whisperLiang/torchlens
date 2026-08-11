@@ -12,7 +12,6 @@ import warnings
 
 import torch
 
-from .._io import FieldPolicy
 from ..backends import BackendUnsupportedError, get_backend_spec
 from . import _engine
 from . import _rules
@@ -243,7 +242,9 @@ def _probe_suppressed(trace: Trace) -> Iterator[None]:
         Control while both backward-capture gates are suppressed.
     """
 
-    type(trace).PORTABLE_STATE_SPEC.setdefault("_tl_rf_probe_active", FieldPolicy.DROP)
+    # "_tl_rf_probe_active" is declared statically in Trace.PORTABLE_STATE_SPEC
+    # (FieldPolicy.DROP): registering it here at call time gave a Trace
+    # serialized before any RF probe a different class spec than one after.
     trace_dict = trace.__dict__
     flag_was_present = "_tl_rf_probe_active" in trace_dict
     previous_flag = trace_dict.get("_tl_rf_probe_active")

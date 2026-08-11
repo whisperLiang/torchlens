@@ -132,6 +132,36 @@ class GradFnDiscovered:
     seq: int = 0
 
 
+BackwardCoverageGapReason = Literal[
+    "registration_error",
+    "framework_unhookable",
+    "dead_node",
+    "unsupported_kind",
+    "capture_exception",
+    "suppressed",
+    "unknown",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class BackwardCoverageGap:
+    """Core event recording one autograd node the walk could not observe.
+
+    A hook-registration or discovery skip is a typed journal fact, never a
+    silent ``continue``: only proven framework-contract exclusions preserve a
+    complete-coverage claim, and validation fails closed on every other
+    reason.
+    """
+
+    pass_index: int
+    object_id: int | None
+    class_qualname: str | None
+    reason: BackwardCoverageGapReason
+    detail: str | None
+    timestamp: float
+    seq: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class GradFnFired:
     """Torch enrichment event emitted from an autograd node hook."""

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Iterable, NoReturn
 import weakref
 
 from .events import (
+    BackwardCoverageGap,
     BackwardPassEnd,
     BackwardPassStart,
     BufferWriteEvent,
@@ -116,6 +117,7 @@ class CaptureEvents:
         | BackwardPassEnd
         | GradFnDiscovered
         | GradFnFired
+        | BackwardCoverageGap
     ] = field(default_factory=list)
     param_refs: dict[str, ParamRef] = field(default_factory=dict)
     raw_layer_counter: int = 0
@@ -520,7 +522,8 @@ class CaptureEvents:
         | ParamGradObserved
         | BackwardPassEnd
         | GradFnDiscovered
-        | GradFnFired,
+        | GradFnFired
+        | BackwardCoverageGap,
     ) -> None:
         """Append a backward sidecar event, stamping the global backward seq.
 
