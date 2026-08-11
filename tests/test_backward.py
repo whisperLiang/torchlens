@@ -1357,6 +1357,46 @@ def test_double_restore_replaces_stale_stream() -> None:
     assert "_backward_projection_fold_state" not in trace.__getstate__()
 
 
+def _assert_pass_one_calls_survive_rebase(trace, pass_one_call_snapshot) -> None:
+    """Assert every rediscovered grad-fn keeps its pass-1 calls VERBATIM.
+
+    The same GradFnCall objects, at the same call ordinals, with the pass-2
+    call appended after them — a rebase must never renumber the retained
+    pass's call tuples.
+    """
+    for object_id, snapshot in pass_one_call_snapshot.items():
+        record = trace.grad_fn_logs[object_id]
+        merged_calls = dict(record.calls._dict)
+        for call_ordinal, pass_one_call in snapshot.items():
+            assert merged_calls.get(call_ordinal) is pass_one_call
+            assert pass_one_call.backward_pass_index == 1
+        if snapshot:
+            call_passes = sorted(
+                call.backward_pass_index for call in merged_calls.values()
+            )
+            assert call_passes == [1, 2], (
+                f"grad-fn {record.label} call passes {call_passes}: the retained "
+                "pass-1 call must survive next to the new pass-2 call"
+            )
+
+
+def _assert_pass_record_calls_owned(trace, pass_record) -> None:
+    """Assert the pass record's calls agree with the grad-fn projections.
+
+    Every call the retained pass record lists must be a call some grad-fn
+    record still owns — the two projections must never diverge.
+    """
+    owned_call_ids = {
+        id(call)
+        for record in trace.grad_fn_logs.values()
+        for call in record.calls._dict.values()
+    }
+    assert pass_record.grad_fn_calls
+    for call in pass_record.grad_fn_calls:
+        assert id(call) in owned_call_ids
+        assert call.backward_pass_index == pass_record.pass_index
+
+
 @pytest.mark.smoke
 def test_restored_trace_with_prior_backward_extends_pass_numbering() -> None:
     """A post-restore backward numbers itself after the preserved pass.
@@ -1378,13 +1418,20 @@ def test_restored_trace_with_prior_backward_extends_pass_numbering() -> None:
     pass_one_record = restored.backward_pass_logs[1]
     preserved_grad_fn_ids = set(restored.grad_fn_logs)
     assert preserved_grad_fn_ids
+    # Full pass-1 projection content, not just ID presence: the exact
+    # GradFnCall objects each grad-fn record holds before the rebase.
+    pass_one_call_snapshot = {
+        object_id: dict(record.calls._dict)
+        for object_id, record in restored.grad_fn_logs.items()
+    }
+    assert any(pass_one_call_snapshot.values())
     pass_one_param_counts = {
         address: len(param_log._grad_records)
         for address, param_log in restored.param_logs.items()
     }
     assert any(pass_one_param_counts.values())
 
-    restored.log_backward(loss)
+    restored.log_backward(loss, retain_graph=True)
 
     assert restored.num_backward_passes == 2
     assert set(restored.backward_pass_logs) == {1, 2}
@@ -1392,6 +1439,10 @@ def test_restored_trace_with_prior_backward_extends_pass_numbering() -> None:
     # not a lookalike rebuilt from a stream that never saw pass 1.
     assert restored.backward_pass_logs[1] is pass_one_record
     assert preserved_grad_fn_ids <= set(restored.grad_fn_logs)
+    _assert_pass_one_calls_survive_rebase(restored, pass_one_call_snapshot)
+    # And the retained pass record agrees with the grad-fn records: every
+    # call it lists is one the merged grad-fn projection still owns.
+    _assert_pass_record_calls_owned(restored, pass_one_record)
     all_labels = [record.label for record in restored.grad_fn_logs.values()]
     assert len(all_labels) == len(set(all_labels)), "merged grad-fn labels must stay unique"
     for address, param_log in restored.param_logs.items():
@@ -1403,6 +1454,36 @@ def test_restored_trace_with_prior_backward_extends_pass_numbering() -> None:
         if pass_one_param_counts[address]:
             assert 2 in pass_indices, f"{address} missing the new pass's record"
     _invariant_check(restored)
+
+    # Re-restoring after the second pass and running a THIRD exercises a
+    # repeat rebuild of a detached stream (base = 2): both earlier passes'
+    # calls survive verbatim and the ordinals stay contiguous — the new
+    # fire must continue after the pre-base window, never gap past it.
+    restored_again = pickle.loads(pickle.dumps(restored))
+    assert restored_again._capture_events.pass_index_base == 2
+    two_pass_call_snapshot = {
+        object_id: dict(record.calls._dict)
+        for object_id, record in restored_again.grad_fn_logs.items()
+    }
+    assert any(two_pass_call_snapshot.values())
+    restored_again.log_backward(loss)
+    assert restored_again.num_backward_passes == 3
+    assert set(restored_again.backward_pass_logs) == {1, 2, 3}
+    for object_id, snapshot in two_pass_call_snapshot.items():
+        record = restored_again.grad_fn_logs[object_id]
+        merged_calls = dict(record.calls._dict)
+        for call_ordinal, prior_call in snapshot.items():
+            assert merged_calls.get(call_ordinal) is prior_call
+        if snapshot:
+            assert sorted(merged_calls) == [1, 2, 3], (
+                f"grad-fn {record.label} call ordinals {sorted(merged_calls)} "
+                "must stay contiguous across a repeat rebuild"
+            )
+            assert [
+                merged_calls[ordinal].backward_pass_index
+                for ordinal in sorted(merged_calls)
+            ] == [1, 2, 3]
+    _invariant_check(restored_again)
 
 
 @pytest.mark.smoke
@@ -1429,6 +1510,12 @@ def test_fork_after_backward_gets_detached_event_stream() -> None:
 
     parent_event_count = len(trace._capture_events.backward_events)
     parent_revision = trace._capture_events.backward_revision
+    fork_pass_one_record = fork.backward_pass_logs[1]
+    fork_pass_one_call_snapshot = {
+        object_id: dict(record.calls._dict)
+        for object_id, record in fork.grad_fn_logs.items()
+    }
+    assert any(fork_pass_one_call_snapshot.values())
     with warnings.catch_warnings():
         # The parent's tensor hooks must stand down for the fork's managed
         # pass — an implicit-pass warning here means the parent absorbed it.
@@ -1450,6 +1537,11 @@ def test_fork_after_backward_gets_detached_event_stream() -> None:
         if isinstance(event, OpGradObserved)
     }
     assert fork_op_grad_passes == {2}
+    # The detached-fork rebuild preserves the inherited pass's projection
+    # content the same way the pickle-restore path does.
+    assert fork.backward_pass_logs[1] is fork_pass_one_record
+    _assert_pass_one_calls_survive_rebase(fork, fork_pass_one_call_snapshot)
+    _assert_pass_record_calls_owned(fork, fork_pass_one_record)
     _invariant_check(trace)
     _invariant_check(fork)
 

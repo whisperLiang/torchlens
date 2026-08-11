@@ -1301,10 +1301,26 @@ def _materialize_backward_projections_impl(
     # ordinal counters continue after the preserved records so merged labels
     # stay unique.
     preserved_grad_fn_logs: "OrderedDict[int, GradFn]" = OrderedDict()
+    prior_grad_fn_logs: dict[int, GradFn] = {}
     if pass_index_base:
-        for object_id, grad_fn_record in getattr(trace, "grad_fn_logs", {}).items():
+        prior_grad_fn_logs = dict(getattr(trace, "grad_fn_logs", {}) or {})
+        for object_id, grad_fn_record in prior_grad_fn_logs.items():
             if object_id not in discovered:
                 preserved_grad_fn_logs[object_id] = grad_fn_record
+            # Ordinal counters continue after the PRE-BASE calls (preserved OR
+            # rediscovered) so a new fire never reuses a pre-base call index.
+            # Above-base calls are excluded: the stream still holds their fire
+            # events and a later re-rebuild replays them onto this same seed.
+            prior_calls = getattr(grad_fn_record.calls, "_dict", grad_fn_record.calls)
+            base_ordinals = [
+                call_ordinal
+                for call_ordinal, prior_call in prior_calls.items()
+                if prior_call.backward_pass_index <= pass_index_base
+            ]
+            if base_ordinals:
+                state.per_object_ordinals[object_id] = max(
+                    max(base_ordinals), state.per_object_ordinals.get(object_id, 0)
+                )
 
     grad_fn_logs: OrderedDict[int, GradFn] = OrderedDict()
     type_counter: dict[str, int] = {}
@@ -1360,6 +1376,19 @@ def _materialize_backward_projections_impl(
             **source_fields,
         )
         grad_fn_record.source_trace = trace
+        prior_record = prior_grad_fn_logs.get(object_id)
+        if prior_record is not None:
+            # A rediscovered node predating the detach keeps its at-or-below-
+            # base calls verbatim (the SAME GradFnCall objects the preserved
+            # pass records hold): the stream is authoritative only above the
+            # base, and dropping these calls would strand the retained pass's
+            # projection with calls its grad-fn record no longer knows.
+            prior_calls = getattr(prior_record.calls, "_dict", prior_record.calls)
+            for call_ordinal, prior_call in sorted(prior_calls.items()):
+                if prior_call.backward_pass_index <= pass_index_base:
+                    grad_fn_record.calls[call_ordinal] = prior_call
+            if grad_fn_record.origin_backward_pass is None:
+                grad_fn_record.origin_backward_pass = prior_record.origin_backward_pass
         grad_fn_logs[object_id] = grad_fn_record
         object_to_label[object_id] = label
 
