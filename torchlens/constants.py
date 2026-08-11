@@ -54,6 +54,7 @@ MODEL_LOG_FIELD_ORDER = [
     "_runnable_descriptor",
     "_runnable_readiness",
     "_runnable_staged_user_state",
+    "_fast_run_session",
     "_runnable_embedded_state",
     "_runnable_capture_state",
     "_runnable_archived_activations",

@@ -1402,6 +1402,7 @@ def run(
     inputs: Any,
     *,
     seed: int | None = None,
+    fast: bool = False,
     on_divergence: DivergencePolicy = DivergencePolicy.RAISE,
 ) -> RunResult: ...
 
@@ -1415,6 +1416,29 @@ sparse Trace binds new inputs/state and executes the taken-path DAG. Both return
 mutating the source. Analysis-only loaded Trace raises `RunCapabilityUnavailableError` with
 `run_capability_unavailable`. This is not module/model reconstruction, source emission, or execution
 of untaken branches.
+
+`fast=True` is the explicit stateful static feature-extraction loop. It never changes the
+default transaction or attestation contract. For a loaded sparse provider, the first call is an
+ordinary fully validated run and must settle `verified`; only then are staged state and compiled
+argument binders cached. Later calls skip repeated full validation and numeric attestation but
+still check the complete input contract, every produced tensor's structure/shape/dtype, and every
+recorded scalar/loop control witness before exposure. The verify-once seed is pinned. Explicit
+or implicit declared-state mutation is refused because cached state could not remain a stable
+oracle; this includes state-derived view mutation and training-mode normalization running-stat
+updates.
+
+For a live provider, `fast=True` is also the caller's explicit assertion that unsaved model internals
+remain static. It executes native `model.forward()` and saves known module-boundary sites with
+targeted forward hooks. Functional collection is scoped to function types explicitly requested by
+the original `save=` predicate. The guard checks the requested module/function-call sequences,
+input shape/dtype, and saved plus model-output structure/shape/dtype on every call. Therefore a
+change that alters the name sequence, count, shape, or dtype at a requested site cannot be silently
+relabelled as the captured activation: those mismatches raise `PathDivergenceError`. Subject to the
+caller's assertion that unsaved internals remain static, unchanged requested-site observables retain
+their captured labels. `return_diverged` is unavailable in fast mode. Fast iterations
+deliberately reuse one result Trace in place, so callers needing immutable per-example results must
+copy the selected tensors. Cleanup removes the cached hooks/session. An explicit `seed` reseeds the
+native call; omitting it leaves native ambient RNG behavior intact.
 
 For migration compatibility, the older intervention spelling `run(model, x, ...)` continues to
 return its in-place rerun Trace. New provider-neutral code uses the explicit `inputs=` keyword;

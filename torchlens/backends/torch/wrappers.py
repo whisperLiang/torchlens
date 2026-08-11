@@ -1560,6 +1560,9 @@ def torch_func_decorator(
             if needs_device_injection:
                 kwargs = _maybe_inject_device_kwarg(func_name, kwargs)
             out = func(*args, **kwargs)
+            fast_collector = _state._active_fast_run_collector
+            if fast_collector is not None and fast_collector.wants_function(func_name):
+                fast_collector.capture_function(func_name, out)
             if is_detached_propagation_func and has_detached_saved_activations():
                 propagate_detached_saved_activation(
                     func_name,

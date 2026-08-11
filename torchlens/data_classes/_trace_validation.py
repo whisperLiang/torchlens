@@ -70,7 +70,8 @@ def _warn_stateful_live_run_once(trace: Any, model: nn.Module) -> None:
     warnings.warn(
         "run() detected training-mode BatchNorm running-stat buffers "
         f"{', '.join(buffer_names)} on module {module_name!r}; re-executing the live model can "
-        "mutate them. Pass pristine=True to execute an isolated deep copy.",
+        "mutate them. Use eval() for immutable feature extraction or clone the model explicitly "
+        "when isolated training-mode state is required.",
         UserWarning,
         stacklevel=3,
     )
@@ -362,6 +363,7 @@ class TraceValidationMixin(_TraceMixinBase):
         *,
         inputs: Any | MissingType = MISSING,
         seed: int | None = None,
+        fast: bool = False,
         on_divergence: DivergencePolicy = DivergencePolicy.RAISE,
         append: bool | MissingType = MISSING,
         chunk_size: int | None | MissingType = MISSING,
@@ -386,6 +388,12 @@ class TraceValidationMixin(_TraceMixinBase):
             transactional :class:`RunResult` and leaves this Trace unchanged.
         seed:
             Optional deterministic live refresh, random-state, and runtime RNG seed.
+        fast:
+            Explicit stateful static-loop mode. The live provider runs native ``forward``
+            with targeted module/function collection and a per-call path/shape guard. The
+            loaded provider performs one ordinary verified run, then reuses staged state
+            and compiled argument binders. Unlike the default transactional provider, later
+            fast iterations reuse one result Trace in place.
         on_divergence:
             Strict divergence behavior or the sole poison-return opt-in.
         append:
@@ -416,8 +424,8 @@ class TraceValidationMixin(_TraceMixinBase):
         A live-provider run re-executes the retained model object. TorchLens warns
         once when it detects training-mode BatchNorm running-stat buffers, which the
         forward pass can mutate. Custom mutable attributes such as caches and user
-        counters cannot be detected generically; use ``pristine=True`` when the model
-        may contain them. Live-state mutation can also change the captured graph and
+        counters cannot be detected generically. Clone the model explicitly when isolated
+        state is required. Live-state mutation can also change the captured graph and
         trigger the normal graph-change tripwire.
         """
 
@@ -455,7 +463,15 @@ class TraceValidationMixin(_TraceMixinBase):
                 chunk_paths is not None or replay is not None
             ):
                 raise TypeError("Sparse/unified run does not accept legacy rerun options.")
+            if fast and DivergencePolicy(on_divergence) is not DivergencePolicy.RAISE:
+                raise ValueError(
+                    "fast=True always fails closed and requires on_divergence='raise'."
+                )
             if loaded_provider is RunProvider.LOADED_SPARSE:
+                if fast:
+                    from .._fast_run import run_fast_loaded_trace
+
+                    return run_fast_loaded_trace(self, run_inputs, seed=seed)
                 from .._runnable_execution import run_loaded_sparse_trace
 
                 return run_loaded_sparse_trace(
@@ -475,12 +491,20 @@ class TraceValidationMixin(_TraceMixinBase):
             if live_model is not None:
                 _warn_stateful_live_run_once(self, live_model)
 
+            if fast:
+                from .._fast_run import run_fast_live_trace
+
+                return run_fast_live_trace(self, run_inputs, seed=seed)
+
             return run_live_trace(
                 self,
                 run_inputs,
                 seed=seed,
                 on_divergence=on_divergence,
             )
+
+        if fast:
+            raise TypeError("fast=True is available only with the unified inputs= surface.")
 
         run_model: nn.Module | None
         if isinstance(model, nn.Module):

@@ -179,6 +179,7 @@ _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "_runnable_path_faithfulness": None,
     "_runnable_first_mismatch": None,
     "_runnable_poisoned": False,
+    "_fast_run_session": None,
     "_buffer_persistence": {},
     "intervention_ready": False,
     "save_arg_templates": False,
@@ -1075,6 +1076,7 @@ class Trace(
     _runnable_path_faithfulness: "PathFaithfulness | None"
     _runnable_first_mismatch: "RunnableDiagnostic | None"
     _runnable_poisoned: bool
+    _fast_run_session: Any | None
     backward_root_grad_fn_object_ids: list[int]
     backward_pass_logs: Dict[int, BackwardPass]
     code_context: list["FuncCallLocation"]
@@ -1135,6 +1137,7 @@ class Trace(
         "_runnable_path_faithfulness": FieldPolicy.DROP,
         "_runnable_first_mismatch": FieldPolicy.DROP,
         "_runnable_poisoned": FieldPolicy.DROP,
+        "_fast_run_session": FieldPolicy.DROP,
         "detached_patch_policy": FieldPolicy.DROP,
         "detached_patch_epoch": FieldPolicy.DROP,
         "escape_detector_mode": FieldPolicy.DROP,
@@ -1573,6 +1576,7 @@ class Trace(
         self._runnable_path_faithfulness: PathFaithfulness | None = None
         self._runnable_first_mismatch: RunnableDiagnostic | None = None
         self._runnable_poisoned = False
+        self._fast_run_session: Any | None = None
         self.halted = False
         self.halt_reason: str | None = None
         self.halt_frontier: str | None = None

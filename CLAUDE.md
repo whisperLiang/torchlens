@@ -300,6 +300,13 @@ and rolls back by default; `return_diverged` is the sole opt-in and returns a mo
 Trace refused by validation, export, faithful comparison, and path-assuming intervention chaining.
 Incomplete witness coverage is `unverifiable`, never `verified`; numeric attestation is
 `not_applicable` for sparse-only or ineligible activation-payload runs. Model outputs with ZERO
+tensor leaves remain subject to the output-container rules below. `trace.run(inputs=x, fast=True)`
+is the explicit guarded static-loop exception to source immutability: live traces execute native
+`forward()` with targeted module hooks (and scoped functional collection only for an explicit
+functional `save=` predicate); loaded traces perform one ordinary verified run, then reuse staged
+state, compiled binders, and one result Trace. Every fast iteration retains input, output-shape/
+dtype, call-path, and control-witness guards and always raises on divergence. Default `fast=False`
+keeps the full transactional validation/attestation path. Model outputs with ZERO
 tensor leaves (all-literal trees, literal roots, empty containers) and namedtuple/mapping/
 registered-container outputs carrying extra per-instance state refuse at save
 (`missing_output_container_contract`; one per-kind capability table governs capture proof, save

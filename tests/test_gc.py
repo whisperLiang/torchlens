@@ -15,9 +15,9 @@ import weakref
 
 import pytest
 import torch
-import torchlens as tl
 from torch import nn
 
+import torchlens as tl
 from torchlens import trace as trace_fn
 from torchlens._io import FieldPolicy
 from torchlens.data_classes._trace_accessors import _TRACE_MODULE_CALL_ACCESSOR_ATTR
@@ -82,6 +82,25 @@ class TestTraceGC:
         trace = tl.trace(model, torch.randn(1, 5))
         trace.cleanup()
         del trace
+        del model
+        gc.collect()
+        assert param_ref() is None
+
+    def test_fast_live_hooks_finalize_when_trace_is_deleted(self):
+        """Deleting a fast Trace removes its hooks and leaves parameters collectible."""
+
+        model = _TwoLayerNet().eval()
+        trace = tl.trace(model, torch.randn(1, 5), save=tl.module("fc1"))
+        trace.run(inputs=torch.randn(1, 5), fast=True)
+        trace_ref = weakref.ref(trace)
+        param_ref = weakref.ref(next(model.parameters()))
+        assert model.fc1._forward_hooks
+
+        del trace
+        gc.collect()
+
+        assert trace_ref() is None
+        assert not model.fc1._forward_hooks
         del model
         gc.collect()
         assert param_ref() is None
