@@ -343,6 +343,19 @@ class InterventionAppliedEvent:
     functionless-op validation carve-out requires. A placeholder minted
     during PLAIN capture can never mint one of these and must still fail
     validation (2026-06-02 lesson).
+
+    Causal binding: the observing site stamps ``run_token`` (the owning
+    stream's run nonce), ``target_seq`` (the journal seq of the edited op's
+    event at observation time), and ``target_func_call_id``. Validation
+    accepts an edit only when the token matches the validated stream's nonce
+    AND the journal really contains the bound target event, so a bare record
+    appended through the ordinary writer (a forged edit) and a genuine record
+    replayed into a DIFFERENT run's journal both stay refused. The sanctioned
+    merge path (``CaptureEvents.concat``) re-binds tokens and target seqs for
+    events that were genuinely bound to their source run. An in-process
+    forger who also copies a live stream's nonce and a real target binding is
+    outside this record's threat model (coherent reauthoring), the same
+    documented boundary the runnable contract draws.
     """
 
     label_raw: str
@@ -350,6 +363,9 @@ class InterventionAppliedEvent:
     origin: InterventionEditOrigin
     timestamp: float
     seq: int = 0
+    run_token: int | None = None
+    target_seq: int = 0
+    target_func_call_id: int | None = None
 
 
 BufferWriteKind = Literal["reassign", "inplace", "fused", "data_reassign"]

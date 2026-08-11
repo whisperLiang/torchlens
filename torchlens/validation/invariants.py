@@ -1736,8 +1736,10 @@ def op_has_genuine_replacement_evidence(layer: "Op", trace: "Trace | None" = Non
     forged during PLAIN capture passed validation -- defeating the 2026-06-02
     lesson that a placeholder op appearing during plain capture must STILL
     fail. This helper is the cross-check: the op must appear in the
-    journal's intervention-edit records (``InterventionAppliedEvent``),
-    appended ONLY by the capture sites that directly observed the replacement
+    journal's intervention-edit records (``InterventionAppliedEvent``) with a
+    live causal binding (run token matching the stream nonce plus the exact
+    target op-event instance), appended ONLY by the capture sites that
+    directly observed the replacement
     (``wrapped_hook`` seeing a raw forward hook return a new object; a
     live-fire hook reporting ``replaced=True`` while intervention machinery
     is armed), or the trace must carry no journal authority at all (loaded
@@ -1772,22 +1774,50 @@ def op_has_genuine_replacement_evidence(layer: "Op", trace: "Trace | None" = Non
         return True
     from ..ir.events import InterventionAppliedEvent
 
-    edited_labels = {
-        event.label_raw
-        for event in getattr(
-            getattr(trace, "_capture_events", None), "intervention_events", ()
-        )
-        or ()
-        if isinstance(event, InterventionAppliedEvent) and event.kind == "replaced"
+    stream = getattr(trace, "_capture_events", None)
+    # Causal binding: an edit counts only when it is bound to THIS stream's
+    # run (its run_token matches the stream nonce) AND the journal really
+    # contains the exact target op event it was stamped against at the
+    # observation site -- (label_raw, seq) identifies one event instance, so
+    # a bare record appended through the ordinary writer (forged) and a
+    # genuine record replayed from a DIFFERENT run's journal both stay
+    # refused, and a pass-1 edit can no longer bless a same-labelled pass-2
+    # op after a multi-pass merge (concat re-binds sanctioned merges).
+    run_nonce = getattr(stream, "run_nonce", None)
+    target_event_ids = {
+        (event.label_raw, event.seq)
+        for event in getattr(stream, "op_events", ()) or ()
     }
-    if edited_labels:
+    bound_edits = [
+        event
+        for event in getattr(stream, "intervention_events", ()) or ()
+        if isinstance(event, InterventionAppliedEvent)
+        and event.kind == "replaced"
+        and event.run_token is not None
+        and event.run_token == run_nonce
+        and event.target_seq
+        and (event.label_raw, event.target_seq) in target_event_ids
+    ]
+    if bound_edits:
         candidate_labels = {
             getattr(layer, "_label_raw", None),
             getattr(layer, "label", None),
             getattr(layer, "layer_label", None),
         }
         candidate_labels.discard(None)
-        if candidate_labels & edited_labels:
+        layer_func_call_id = getattr(layer, "func_call_id", None)
+        for event in bound_edits:
+            if event.label_raw not in candidate_labels:
+                continue
+            # Pin the op instance when both sides carry a func_call_id;
+            # synthesized boundary ops may legitimately carry None on the
+            # layer, which keeps the label+target binding as the authority.
+            if (
+                layer_func_call_id is not None
+                and event.target_func_call_id is not None
+                and event.target_func_call_id != layer_func_call_id
+            ):
+                continue
             return True
     # Push/rerun fallback: the journal is a run-scoped stream on the
     # capture-time trace object, and the intervention rerun engine rebuilds a

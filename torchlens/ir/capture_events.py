@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field, replace
+import itertools
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Iterable, NoReturn
 import weakref
@@ -80,6 +81,13 @@ class LaneMergePolicyError(RuntimeError):
     """
 
 
+# Process-monotonic run-nonce source: every CaptureEvents stream is one
+# capture run's journal, and intervention-edit records are causally bound to
+# their run through this token (streams never serialize, so an in-process
+# counter is collision-free for the token's whole lifetime).
+_RUN_NONCE_COUNTER = itertools.count(1)
+
+
 def _clone_op_event_for_replay(event: OpEvent) -> OpEvent:
     """Return a projection copy of ``event`` with independent mutable state.
 
@@ -147,6 +155,12 @@ class CaptureEvents:
     # cross-kind and forward/backward ordering is an exact recorded fact.
     event_seq: int = 0
     backward_revision: int = 0
+    # Run identity token for causal binding of intervention-edit records: the
+    # observing site stamps it onto each edit, and validation accepts an edit
+    # only when its token matches the validated stream's nonce. Working
+    # projections of the SAME run (``copy_for_replay``) preserve the nonce;
+    # detached streams and fresh captures get their own.
+    run_nonce: int = field(default_factory=lambda: next(_RUN_NONCE_COUNTER))
     # Detached-stream baseline: event streams never serialize and forks never
     # share a stream, so a stream installed on a trace that ALREADY carries a
     # materialized backward projection records the projection it extends.
@@ -335,6 +349,7 @@ class CaptureEvents:
             grad_fn_handles_by_label_raw=dict(self.grad_fn_handles_by_label_raw),
             event_seq=self.event_seq,
             backward_revision=self.backward_revision,
+            run_nonce=self.run_nonce,
             pass_index_base=self.pass_index_base,
             base_total_gradient_memory=self.base_total_gradient_memory,
             base_total_backward_memory=self.base_total_backward_memory,
@@ -555,12 +570,27 @@ class CaptureEvents:
         # preserved exactly; never-stamped events (seq 0, hand-built streams)
         # keep their lane arrival order.
         merge_rows.sort(key=lambda row: row[0])
-        for _source_seq, lane_name, event in merge_rows:
+        seq_map: dict[int, int] = {}
+        for source_seq, lane_name, event in merge_rows:
             if lane_name == "op_events":
                 clone = _clone_op_event_for_replay(event)
             else:
                 clone = replace(event)
+            if lane_name == "intervention_events":
+                # Sanctioned chain of custody: an edit genuinely bound to the
+                # SOURCE run re-binds to this journal (its run token and the
+                # re-stamped seq of its already-merged target op, which sorts
+                # earlier by chronology). A forged/unbound edit or one bound
+                # to a foreign run keeps its stale binding and stays refused
+                # by validation.
+                if getattr(event, "run_token", None) == other.run_nonce:
+                    object.__setattr__(clone, "run_token", self.run_nonce)
+                    object.__setattr__(
+                        clone, "target_seq", seq_map.get(getattr(event, "target_seq", 0), 0)
+                    )
             getattr(self, _LANE_APPENDERS[lane_name])(clone)
+            if source_seq:
+                seq_map[source_seq] = clone.seq
 
     def append_backward(
         self,

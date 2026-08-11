@@ -107,6 +107,13 @@ def test_record_with_raw_replacement_hook_merges_intervention_lane() -> None:
     assert events is not None
     edited = [event.label_raw for event in events.intervention_events]
     assert len(edited) >= 1
+    # Sanctioned-merge chain of custody: the per-pass genuine edit re-binds
+    # to the recorder journal (run token + re-stamped target seq), so the
+    # merged record still names a real op event in THIS journal.
+    target_ids = {(event.label_raw, event.seq) for event in events.op_events}
+    for edit in events.intervention_events:
+        assert edit.run_token == events.run_nonce
+        assert (edit.label_raw, edit.target_seq) in target_ids
     all_seqs = [
         event.seq
         for lane in (

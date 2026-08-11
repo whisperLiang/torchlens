@@ -1401,12 +1401,21 @@ def _note_replacement_event(
         return
     from ...ir.events import InterventionAppliedEvent
 
+    # Causal binding stamped at the observation site: the edited op's event
+    # already exists in this journal (the boundary/replacement op was logged
+    # before the edit is noted), so the edit records the run nonce and the
+    # exact target event instance. Validation refuses an edit without a live
+    # binding, so a record appended anywhere else stays inert.
+    target_event = events.op_event_by_label_raw.get(raw_label)
     events.append_intervention(
         InterventionAppliedEvent(
             label_raw=raw_label,
             kind="replaced",
             origin=origin,  # type: ignore[arg-type]
             timestamp=time.time(),
+            run_token=events.run_nonce,
+            target_seq=int(getattr(target_event, "seq", 0) or 0),
+            target_func_call_id=getattr(target_event, "func_call_id", None),
         )
     )
 
