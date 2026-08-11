@@ -89,7 +89,7 @@ it is in this pack:
 ### Critic passes
 
 - **Completeness critic:** independently enumerate every draw() kwarg x value
-  and every node/edge kind emitted by `torchlens/visualization/rendering.py`;
+  and every node/edge kind emitted by `torchlens/visualization/_render_nodes.py` and `_render_edges.py`;
   diff against `AXES` + `NA_AXES`. Anything unrepresented is a defect.
 - **Fresh-eyes clarity critic:** scroll the PDF as someone who has never seen
   TorchLens. Every page must be self-explanatory from its caption alone; flag
