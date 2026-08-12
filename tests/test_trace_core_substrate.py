@@ -572,22 +572,31 @@ def test_fork_shares_one_equivalent_ops_view_per_class() -> None:
     """
 
     import torchlens as tl
+    from benchmarks.godobject_m0_probes import _ScaleModel
 
-    model = torch.nn.Sequential(*[torch.nn.ReLU() for _ in range(6)])
-    trace = tl.trace(model, torch.randn(1, 4))
+    torch.manual_seed(0)
+    trace = tl.trace(_ScaleModel(5), torch.zeros(1, 8))
     fork = trace.fork()
+    multi_member = {
+        equivalence_class
+        for equivalence_class, members in fork.op_equivalence_classes.items()
+        if len(members) >= 2
+    }
+    assert multi_member, "test model must produce a shared equivalence class"
     views_by_class: dict = {}
-    shared = 0
+    members_checked: dict = {}
     for layer in fork.layer_logs.values():
         equivalence_class = getattr(layer, "equivalence_class", None)
         view = layer.__dict__.get("equivalent_ops")
-        if equivalence_class is None or view is None:
+        if equivalence_class not in multi_member or view is None:
             continue
         assert not isinstance(view, (list, set)), "finished layer view stays immutable"
         prior = views_by_class.setdefault(equivalence_class, view)
         assert prior is view, "same-class fork layers must share one view object"
-        shared += 1
-    assert shared >= 2, "test model must produce a shared equivalence class"
+        members_checked[equivalence_class] = members_checked.get(equivalence_class, 0) + 1
+    assert max(members_checked.values(), default=0) >= 2, (
+        "at least one shared class must be checked across two member layers"
+    )
 
 
 @pytest.mark.smoke
