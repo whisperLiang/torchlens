@@ -33,7 +33,7 @@ Accessors (`LayerAccessor`, `ModuleAccessor`, `ParamAccessor`, `BufferAccessor`,
 | `_trace_stats.py` | Trace aggregate stats and backward-pass projections |
 | `_trace_validation.py` | Trace validation and log-entry removal helpers |
 | `_trace_viz.py` | Trace visualization entrypoints |
-| `op.py` | `Op`, `TensorLog` alias, tensor save and per-pass fields |
+| `op.py` | `Op` two-word row facade (`_core`/`_row` over `_trace_core`), `TensorLog` alias, tensor save, per-pass fields |
 | `layer.py` | `Layer` aggregate, pass delegation, graph unions |
 | `buffer.py` | `Buffer` and `BufferAccessor` |
 | `module.py` | `ModuleCall`, `Module`, `ModuleAccessor` |

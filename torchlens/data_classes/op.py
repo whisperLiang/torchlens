@@ -88,6 +88,7 @@ from ..quantities import (
     as_macs,
 )
 from .._state import pause_logging
+from .._trace_core.op_store import _MISSING, DetachedOpStore, OpStoreLayout
 from ..backends.torch._tl import mark_detached_saved_activation
 from ._accessor_base import Accessor
 from .field_policy import (
@@ -292,6 +293,42 @@ _OP_SLOT_NAMES = tuple(
             ),
             *_OP_DYNAMIC_SLOT_NAMES,
         ]
+    )
+)
+# The M5 seam: ``_OP_SLOT_NAMES`` is no longer a ``__slots__`` tuple but the
+# declared stored-field universe of the Op row store. One shared layout maps
+# each stored field to its column id; ``Op`` itself carries only
+# ``(_core, _row)`` and one generated data descriptor per stored field (see
+# ``_OpField`` / ``_install_op_field_descriptors`` at the bottom of this
+# module). All storage magic (``_slot``, ``_internal_set``, the ancestor
+# bitset overlays in ``backends/torch/ops.py``, ``state_items`` /
+# ``state_restore``) already speaks the descriptor protocol, so behavior is
+# unchanged while the physical cells live in per-trace columns.
+_OP_STORE_LAYOUT = OpStoreLayout(_OP_SLOT_NAMES)
+# Bulk-ingress seed constants: the converted-at-construction fields and the
+# layout ids of the cells `__init__` overrides after the one-pass dict seed.
+_INIT_BYTES_FIELDS = (
+    "activation_memory",
+    "transformed_activation_memory",
+    "autograd_memory",
+    "bytes_delta_at_call",
+    "bytes_peak_at_call",
+    "gradient_memory",
+    "transformed_gradient_memory",
+)
+_FID_SOURCE_TRACE_REF = _OP_STORE_LAYOUT.fid_by_name["_source_trace_ref"]
+_FID_IS_IN_CONDITIONAL_BODY = _OP_STORE_LAYOUT.fid_by_name["_is_in_conditional_body"]
+_FID_GRAD_RECORDS = _OP_STORE_LAYOUT.fid_by_name["_grad_records"]
+_FID_CONSTRUCTION_DONE = _OP_STORE_LAYOUT.fid_by_name["_construction_done"]
+_FIDS_INIT_NONE = tuple(
+    _OP_STORE_LAYOUT.fid_by_name[field_name]
+    for field_name in (
+        "out_ref",
+        "grad_ref",
+        "_pending_blob_id",
+        "_pending_transformed_out_blob_id",
+        "_pending_grad_blob_id",
+        "_pending_transformed_grad_blob_id",
     )
 )
 
@@ -1201,7 +1238,200 @@ class Op:
       FX-style name form is needed.
     """
 
-    __slots__ = _OP_SLOT_NAMES
+    __slots__ = ("_core", "_row")
+
+    if TYPE_CHECKING:
+        # Static field declarations for type checkers ONLY (invisible at
+        # runtime, so the frozen debugger/DX surface is unchanged). The
+        # explicitly typed names carry the annotations the former inline
+        # `self.x: T = ...` assignments declared; every other stored field
+        # was already inferred as Any from the untyped fields_dict.
+        annotations: Dict[str, Any]
+        dtype_ref: DtypeRef | None
+        device_ref: DeviceRef | None
+        backend_address: str | None
+        resolver_status: str
+        activation_memory: Bytes | None
+        transformed_activation_memory: Bytes | None
+        visualizer_path: str | None
+        autograd_memory: Bytes | None
+        num_autograd_tensors: Optional[int]
+        bytes_delta_at_call: Bytes | None
+        bytes_peak_at_call: Bytes | None
+        gradient_memory: Bytes | None
+        transformed_gradient_memory: Bytes | None
+        func_id: FunctionRegistryKey | None
+        code_context: List["FuncCallLocation"]
+        var_names: list[str]
+        func_duration: Duration | None
+        flops_forward: Flops | None
+        flops_backward: Flops | None
+        _param_barcodes: list[Any]
+        _param_logs: List["Param"]
+        param_memory: Bytes
+        is_orphan: bool
+        fx_qualpath: Optional[str]
+        fx_call_index: int
+        out_ref: Optional["LazyActivationRef"]
+        grad_ref: Optional["LazyActivationRef"]
+        _pending_blob_id: Optional[str]
+        _pending_transformed_out_blob_id: Optional[str]
+        _pending_grad_blob_id: Optional[str]
+        _pending_transformed_grad_blob_id: Optional[str]
+        _grad_records: list[GradientRecord]
+
+        _label_raw: Any
+        _layer_label_raw: Any
+        step_index: Any
+        raw_index: Any
+        ordinal_index: Any
+        _tracing_finished: Any
+        _construction_done: Any
+        label: Any
+        label_short: Any
+        layer_label: Any
+        layer_label_short: Any
+        type: Any
+        type_index: Any
+        pass_index: Any
+        num_passes: Any
+        lookup_keys: Any
+        out: Any
+        has_saved_activation: Any
+        output_device: Any
+        activation_transform: Any
+        interventions: Any
+        intervention_replaced: Any
+        detach_saved_activations: Any
+        has_saved_args: Any
+        saved_args: Any
+        saved_kwargs: Any
+        args_template: Any
+        kwargs_template: Any
+        shape: Any
+        transformed_out_shape: Any
+        dtype: Any
+        transformed_out_dtype: Any
+        transformed_out: Any
+        has_out_variations: Any
+        out_versions_by_child: Any
+        grad: Any
+        transformed_grad: Any
+        save_grads: Any
+        has_grad: Any
+        grad_shape: Any
+        transformed_grad_shape: Any
+        grad_dtype: Any
+        transformed_grad_dtype: Any
+        func: Any
+        func_call_id: Any
+        func_name: Any
+        func_qualname: Any
+        func_rng_states: Any
+        func_autocast_state: Any
+        arg_names: Any
+        num_args_total: Any
+        num_pos_args: Any
+        num_kwargs: Any
+        non_tensor_pos_args: Any
+        non_tensor_kwargs: Any
+        func_non_tensor_args: Any
+        is_inplace: Any
+        grad_fn_class_name: Any
+        grad_fn_class_qualname: Any
+        grad_fn_object_id: Any
+        grad_fn_handle: Any
+        grad_fn: Any
+        in_multi_output: Any
+        multi_output_index: Any
+        multi_output_name: Any
+        container_path: Any
+        container_spec: Any
+        is_transform: Any
+        transform_kind: Any
+        transform_chain: Any
+        transform_config: Any
+        transform_fn_name: Any
+        transform_fn_qualname: Any
+        transform_fn_source: Any
+        unattributed_tensor_args: Any
+        dropped_edge_tensor_args: Any
+        parent_params: Any
+        parent_param_ops: Any
+        param_shapes: Any
+        num_params: Any
+        num_params_trainable: Any
+        num_params_frozen: Any
+        equivalence_class: Any
+        equivalent_ops: Any
+        recurrent_ops: Any
+        parents: Any
+        parent_arg_positions: Any
+        _edge_uses: Any
+        root_ancestors: Any
+        children: Any
+        has_children: Any
+        is_input: Any
+        input_was_parameter: Any
+        has_input_ancestor: Any
+        input_ancestors: Any
+        min_distance_from_input: Any
+        max_distance_from_input: Any
+        is_output: Any
+        is_output_parent: Any
+        is_final_output: Any
+        has_output_descendant: Any
+        output_descendants: Any
+        io_role: Any
+        min_distance_to_output: Any
+        max_distance_to_output: Any
+        is_buffer: Any
+        address: Any
+        buffer_pass: Any
+        buffer_source: Any
+        buffer_write_kind: Any
+        buffer_value_changed: Any
+        buffer_replay_validated: Any
+        buffer_source_func_name: Any
+        is_internal_source: Any
+        has_internal_source_ancestor: Any
+        internal_source_parents: Any
+        internal_source_ancestors: Any
+        is_internal_sink: Any
+        is_terminal_bool: Any
+        is_terminal_conditional_bool: Any
+        conditional_context_kind: Any
+        conditional_wrapper_kind: Any
+        terminal_conditional_id: Any
+        is_scalar_bool: Any
+        bool_value: Any
+        in_conditionals: Any
+        terminal_bool_for: Any
+        conditional_branch_stack: Any
+        conditional_branch_depth: Any
+        conditional_entry_children: Any
+        conditional_then_children: Any
+        conditional_elif_children: Any
+        conditional_else_children: Any
+        conditional_arm_children: Any
+        module: Any
+        _address_normalized: Any
+        modules: Any
+        module_call_stack: Any
+        input_to_module_calls: Any
+        module_entry_arg_keys: Any
+        output_of_modules: Any
+        output_of_module_calls: Any
+        is_module_output: Any
+        is_atomic_module: Any
+        atomic_module_call: Any
+        func_config: Any
+        _source_trace_ref: Any
+        _facets_cache: Any
+        _receptive_field_cache: Any
+        _projective_field_cache: Any
+        _arg_expressions_cache: Any
+        _is_in_conditional_body: Any
 
     PORTABLE_STATE_SPEC: dict[str, FieldPolicy] = {
         "_label_raw": FieldPolicy.KEEP,
@@ -1615,18 +1845,19 @@ class Op:
         if isinstance(current_value, torch.Tensor) and isinstance(other_value, torch.Tensor):
             self._internal_set(field_name, concatenate_batch_tensors(current_value, other_value))
 
-    def __init__(self, fields_dict: Dict[str, Any]) -> None:
+    def __init__(self, fields_dict: Dict[str, Any], *, _store: Any = None) -> None:
         """Initialise from a complete fields dictionary.
 
         Args:
             fields_dict: Dict with values for all fields defined in
                 ``LAYER_PASS_LOG_FIELD_ORDER``.  Missing or extra keys
                 raise ``ValueError``.
+            _store: Private ingress hook: the owning trace's ``OpRowStore``
+                when materialize step 0 constructs this op (a shared row is
+                appended). Every other construction path (``copy()``, direct
+                user construction, preview backends) gets a detached
+                single-row store.
         """
-        # Attributes are set explicitly (not via loop) for IDE autocompletion.
-        set_ = object.__setattr__
-        set_(self, "_construction_done", False)
-
         # Validate that fields_dict has exactly the expected keys:
         if "_address_normalized" not in fields_dict:
             fields_dict["_address_normalized"] = None
@@ -1674,225 +1905,44 @@ class Op:
                 error_str += f"\n\t- Extra fields {', '.join(extra_fields)}"
             raise ValueError(error_str)
 
-        # General info:
-        self._label_raw = fields_dict["_label_raw"]
-        self._layer_label_raw = fields_dict["_layer_label_raw"]
-        self.step_index = fields_dict["step_index"]
-        self.raw_index = fields_dict["raw_index"]
-        self.ordinal_index = fields_dict["ordinal_index"]
-        # Store as weakref to break circular reference (Trace -> layer_list -> entry -> Trace).
-        _sml = fields_dict["source_trace"]
-        self._source_trace_ref = weakref.ref(_sml) if _sml is not None else None
-        self._tracing_finished = fields_dict["_tracing_finished"]
-
-        # Label info:
-        self.layer_label = fields_dict["layer_label"]
-        self.layer_label_short = fields_dict["layer_label_short"]
-        self.label = fields_dict["label"]
-        self.label_short = fields_dict["label_short"]
-        self.type = fields_dict["type"]
-        self.type_index = fields_dict["type_index"]
-        self.pass_index = fields_dict["pass_index"]
-        self.num_passes = fields_dict["num_passes"]
-        self.lookup_keys = fields_dict["lookup_keys"]
-
-        # Saved tensor info:
-        self.out = fields_dict["out"]
-        self.transformed_out = fields_dict["transformed_out"]
-        self.has_saved_activation = fields_dict["has_saved_activation"]
-        self.output_device = fields_dict["output_device"]
-        self.activation_transform = fields_dict["activation_transform"]
-        self.annotations: Dict[str, Any] = fields_dict["annotations"]
-        self.interventions = fields_dict["interventions"]
-        self.intervention_replaced = fields_dict["intervention_replaced"]
-        self.detach_saved_activations = fields_dict["detach_saved_activations"]
-        self.has_saved_args = fields_dict["has_saved_args"]
-        self.saved_args = fields_dict["saved_args"]
-        self.saved_kwargs = fields_dict["saved_kwargs"]
-        self.args_template = fields_dict["args_template"]
-        self.kwargs_template = fields_dict["kwargs_template"]
-        self.shape = fields_dict["shape"]
-        self.transformed_out_shape = fields_dict["transformed_out_shape"]
-        self.dtype = fields_dict["dtype"]
-        self.dtype_ref: DtypeRef | None = fields_dict["dtype_ref"]
-        self.transformed_out_dtype = fields_dict["transformed_out_dtype"]
-        self.device_ref: DeviceRef | None = fields_dict["device_ref"]
-        self.backend_address: str | None = fields_dict["backend_address"]
-        self.resolver_status: str = fields_dict["resolver_status"]
-        self.activation_memory: Bytes | None = as_bytes(fields_dict["activation_memory"])
-        self.transformed_activation_memory: Bytes | None = as_bytes(
-            fields_dict["transformed_activation_memory"]
+        # One-pass layout-ordered row seed. The former 185 explicit
+        # descriptor assignments were pure stores during construction (the
+        # __setattr__ guard is inert until _construction_done flips), so
+        # normalizing the converted fields into the dict and building the
+        # row cells directly is value-identical at ~40% of the cost. Static
+        # field types live in the TYPE_CHECKING declaration block on the
+        # class; runtime attribute surface comes from the generated field
+        # descriptors.
+        fd = fields_dict
+        for field_name in _INIT_BYTES_FIELDS:
+            fd[field_name] = as_bytes(fd[field_name])
+        fd["param_memory"] = Bytes(fd["param_memory"] or 0)
+        fd["func_duration"] = as_duration(fd["func_duration"])
+        fd["flops_forward"] = as_flops(fd["flops_forward"])
+        fd["flops_backward"] = as_flops(fd["flops_backward"])
+        get = fd.get
+        cells = [get(field_name, _MISSING) for field_name in _OP_STORE_LAYOUT.names]
+        # Store as weakref to break the circular reference
+        # (Trace -> layer_list -> entry -> Trace).
+        source_trace = fd["source_trace"]
+        cells[_FID_SOURCE_TRACE_REF] = (
+            weakref.ref(source_trace) if source_trace is not None else None
         )
-        self.visualizer_path: str | None = fields_dict["visualizer_path"]
-        self.autograd_memory: Bytes | None = as_bytes(fields_dict["autograd_memory"])
-        self.num_autograd_tensors: Optional[int] = fields_dict["num_autograd_tensors"]
-        self.bytes_delta_at_call: Bytes | None = as_bytes(fields_dict["bytes_delta_at_call"])
-        self.bytes_peak_at_call: Bytes | None = as_bytes(fields_dict["bytes_peak_at_call"])
-
-        # Child tensor variation tracking - stores the raw tensor values that
-        # each child operation received as input.  Must store RAW values (not
-        # postprocessed) because validation compares these against saved_args.
-        self.has_out_variations = fields_dict["has_out_variations"]
-        self.out_versions_by_child = fields_dict["out_versions_by_child"]
-
-        # Saved grad info - grad is stored as a bare clone (not deep-copied)
-        # via log_tensor_grad().  grad is populated by a backward hook.
-        self.grad = fields_dict["grad"]
-        self.transformed_grad = fields_dict["transformed_grad"]
-        self.save_grads = fields_dict["save_grads"]
-        self.has_grad = fields_dict["has_grad"]
-        self.grad_shape = fields_dict["grad_shape"]
-        self.transformed_grad_shape = fields_dict["transformed_grad_shape"]
-        self.grad_dtype = fields_dict["grad_dtype"]
-        self.transformed_grad_dtype = fields_dict["transformed_grad_dtype"]
-        self.gradient_memory: Bytes | None = as_bytes(fields_dict["gradient_memory"])
-        self.transformed_gradient_memory: Bytes | None = as_bytes(
-            fields_dict["transformed_gradient_memory"]
-        )
-
-        # Function call info:
-        self.func = fields_dict["func"]
-        self.func_id: FunctionRegistryKey | None = fields_dict["func_id"]
-        self.func_call_id = fields_dict["func_call_id"]
-        self.func_name = fields_dict["func_name"]
-        self.func_qualname = fields_dict["func_qualname"]
-        self.code_context: List["FuncCallLocation"] = fields_dict["code_context"]
-        self.var_names: list[str] = fields_dict["var_names"]
-        self.func_duration = as_duration(fields_dict["func_duration"])
-        self.flops_forward = as_flops(fields_dict["flops_forward"])
-        self.flops_backward = as_flops(fields_dict["flops_backward"])
-        self.func_rng_states = fields_dict["func_rng_states"]
-        self.func_autocast_state = fields_dict["func_autocast_state"]
-        self.arg_names = fields_dict["arg_names"]
-        self.num_args_total = fields_dict["num_args_total"]
-        self.num_pos_args = fields_dict["num_pos_args"]
-        self.num_kwargs = fields_dict["num_kwargs"]
-        self.non_tensor_pos_args = fields_dict["non_tensor_pos_args"]
-        self.non_tensor_kwargs = fields_dict["non_tensor_kwargs"]
-        self.func_non_tensor_args = fields_dict["func_non_tensor_args"]
-        self.is_inplace = fields_dict["is_inplace"]
-        self.grad_fn_class_name = fields_dict["grad_fn_class_name"]
-        self.grad_fn_class_qualname = fields_dict["grad_fn_class_qualname"]
-        self.grad_fn_object_id = fields_dict["grad_fn_object_id"]
-        self.grad_fn_handle = fields_dict["grad_fn_handle"]
-        self.grad_fn = fields_dict["grad_fn"]
-        self.in_multi_output = fields_dict["in_multi_output"]
-        self.multi_output_index = fields_dict["multi_output_index"]
-        self.multi_output_name = fields_dict["multi_output_name"]
-        self.container_path = fields_dict["container_path"]
-        self.container_spec = fields_dict["container_spec"]
-        self.is_transform = fields_dict["is_transform"]
-        self.transform_kind = fields_dict["transform_kind"]
-        self.transform_chain = fields_dict["transform_chain"]
-        self.transform_config = fields_dict["transform_config"]
-        self.transform_fn_name = fields_dict["transform_fn_name"]
-        self.transform_fn_qualname = fields_dict["transform_fn_qualname"]
-        self.transform_fn_source = fields_dict["transform_fn_source"]
-        self.unattributed_tensor_args = fields_dict["unattributed_tensor_args"]
-        self.dropped_edge_tensor_args = fields_dict["dropped_edge_tensor_args"]
-
-        # Param info:
-        self.parent_params = fields_dict["parent_params"]
-        self._param_barcodes = fields_dict["_param_barcodes"]
-        self.parent_param_ops = fields_dict["parent_param_ops"]
-        self._param_logs: List["Param"] = fields_dict["_param_logs"]
-        self.param_shapes = fields_dict["param_shapes"]
-        self.num_params = fields_dict["num_params"]
-        self.num_params_trainable = fields_dict["num_params_trainable"]
-        self.num_params_frozen = fields_dict["num_params_frozen"]
-        self.param_memory: Bytes = Bytes(fields_dict["param_memory"] or 0)
-
-        # Loop-detection equivalence info:
-        # equivalence_class groups structurally identical operations
-        # (same func + same param barcodes).  equivalent_ops holds a
-        # DIRECT reference to the Trace-level set for this type.
-        # recurrent_ops is populated by loop_detection.py for layers
-        # that are different ops of the same recurrent layer.
-        self.equivalence_class = fields_dict["equivalence_class"]
-        self.equivalent_ops = fields_dict["equivalent_ops"]
-        self.recurrent_ops = fields_dict["recurrent_ops"]
-
-        # Graph info:
-        self.parents = fields_dict["parents"]
-        self.parent_arg_positions = fields_dict["parent_arg_positions"]
-        self._edge_uses = fields_dict["_edge_uses"]
-        self.root_ancestors = fields_dict["root_ancestors"]
-        self.children = fields_dict["children"]
-        self.has_children = fields_dict["has_children"]
-        self.is_input = fields_dict["is_input"]
-        self.input_was_parameter = fields_dict["input_was_parameter"]
-        self.has_input_ancestor = fields_dict["has_input_ancestor"]
-        self.input_ancestors = fields_dict["input_ancestors"]
-        self.min_distance_from_input = fields_dict["min_distance_from_input"]
-        self.max_distance_from_input = fields_dict["max_distance_from_input"]
-        self.is_output = fields_dict["is_output"]
-        self.is_output_parent = fields_dict["is_output_parent"]
-        self.is_final_output = fields_dict["is_final_output"]
-        self.has_output_descendant = fields_dict["has_output_descendant"]
-        self.output_descendants = fields_dict["output_descendants"]
-        self.is_orphan: bool = fields_dict["is_orphan"]
-        self.min_distance_to_output = fields_dict["min_distance_to_output"]
-        self.max_distance_to_output = fields_dict["max_distance_to_output"]
-        self.io_role = fields_dict["io_role"]
-        self.is_buffer = fields_dict["is_buffer"]
-        self.address = fields_dict["address"]
-        self.buffer_pass = fields_dict["buffer_pass"]
-        self.buffer_source = fields_dict["buffer_source"]
-        self.buffer_write_kind = fields_dict["buffer_write_kind"]
-        self.buffer_value_changed = fields_dict["buffer_value_changed"]
-        self.buffer_replay_validated = fields_dict["buffer_replay_validated"]
-        self.buffer_source_func_name = fields_dict["buffer_source_func_name"]
-        self.is_internal_source = fields_dict["is_internal_source"]
-        self.has_internal_source_ancestor = fields_dict["has_internal_source_ancestor"]
-        self.internal_source_parents = fields_dict["internal_source_parents"]
-        self.internal_source_ancestors = fields_dict["internal_source_ancestors"]
-        self.is_internal_sink = fields_dict["is_internal_sink"]
-
-        # Conditional info
-        self.is_terminal_bool = fields_dict["is_terminal_bool"]
-        self.is_terminal_conditional_bool = fields_dict["is_terminal_conditional_bool"]
-        self.conditional_context_kind = fields_dict["conditional_context_kind"]
-        self.conditional_wrapper_kind = fields_dict["conditional_wrapper_kind"]
-        self.terminal_conditional_id = fields_dict["terminal_conditional_id"]
-        self.is_scalar_bool = fields_dict["is_scalar_bool"]
-        self.bool_value = fields_dict["bool_value"]
-        self.in_conditionals = fields_dict["in_conditionals"]
-        self.terminal_bool_for = fields_dict["terminal_bool_for"]
-        self.is_in_conditional_body = fields_dict["is_in_conditional_body"]
-        self.conditional_branch_stack = fields_dict["conditional_branch_stack"]
-        self.conditional_branch_depth = fields_dict["conditional_branch_depth"]
-        self.conditional_entry_children = fields_dict["conditional_entry_children"]
-        self.conditional_then_children = fields_dict["conditional_then_children"]
-        self.conditional_elif_children = fields_dict["conditional_elif_children"]
-        self.conditional_else_children = fields_dict["conditional_else_children"]
-        self.conditional_arm_children = fields_dict["conditional_arm_children"]
-
-        # Module info
-        self.module = fields_dict["module"]
-        self._address_normalized = fields_dict["_address_normalized"]
-        self.modules = fields_dict["modules"]
-        self.fx_qualpath: Optional[str] = fields_dict["fx_qualpath"]
-        self.fx_call_index: int = fields_dict["fx_call_index"]
-        self.module_call_stack = fields_dict["module_call_stack"]
-        self.module_entry_arg_keys = fields_dict["module_entry_arg_keys"]
-        self.input_to_module_calls = fields_dict["input_to_module_calls"]
-        self.output_of_modules = fields_dict["output_of_modules"]
-        self.output_of_module_calls = fields_dict["output_of_module_calls"]
-        self.is_module_output = fields_dict["is_module_output"]
-        self.is_atomic_module = fields_dict["is_atomic_module"]
-        self.atomic_module_call = fields_dict["atomic_module_call"]
-
-        # Function config - lightweight hyperparameters always captured.
-        self.func_config = fields_dict["func_config"]
-
-        self.out_ref: Optional["LazyActivationRef"] = None
-        self.grad_ref: Optional["LazyActivationRef"] = None
-        self._pending_blob_id: Optional[str] = None
-        self._pending_transformed_out_blob_id: Optional[str] = None
-        self._pending_grad_blob_id: Optional[str] = None
-        self._pending_transformed_grad_blob_id: Optional[str] = None
-        self._grad_records: list[GradientRecord] = []
-        set_(self, "_construction_done", True)
+        # The public alias value backs the `_is_in_conditional_body` cell
+        # (exactly what the compatibility property setter does).
+        cells[_FID_IS_IN_CONDITIONAL_BODY] = fd["is_in_conditional_body"]
+        for none_fid in _FIDS_INIT_NONE:
+            cells[none_fid] = None
+        cells[_FID_GRAD_RECORDS] = []
+        cells[_FID_CONSTRUCTION_DONE] = True
+        set_ = object.__setattr__
+        if _store is None:
+            store: Any = DetachedOpStore(_OP_STORE_LAYOUT)
+        else:
+            store = _store
+        row = store.adopt_row(cells)
+        set_(self, "_core", store)
+        set_(self, "_row", row)
 
     @property
     def layer_type(self) -> str:
@@ -3075,6 +3125,40 @@ class Op:
         )
         return self.grad
 
+    def __tl_state_items__(self):
+        """Yield live state ``(field_name, value)`` pairs in declared order.
+
+        The M2 state-protocol hook. Enumeration follows the declared
+        ``_OP_SLOT_NAMES`` order and reads through
+        ``object.__getattribute__`` -- exactly what the former per-slot walk
+        did -- so class-level compatibility overlays (the ancestor-bitset
+        properties installed by ``backends/torch/ops.py``) keep
+        materializing their public values into pickle/fork state instead of
+        leaking compact internal encodings. Unset cells are skipped; a bare
+        ``object.__new__`` shell with no bound store yields nothing.
+        """
+
+        getattribute = _object_getattribute
+        for name in _OP_SLOT_NAMES:
+            try:
+                yield name, getattribute(self, name)
+            except AttributeError:
+                continue
+
+    def __tl_state_restore__(self, mapping: Dict[str, Any]) -> None:
+        """Install ``mapping`` onto this op through the descriptor protocol.
+
+        Binds a detached single-row store when this op is a bare shell
+        (``state_new`` fork/scrub shells), then assigns exactly like the
+        generic fallback did: one ``object.__setattr__`` per field, which
+        resolves the generated field descriptors and the compatibility
+        properties identically to the former slot layout.
+        """
+
+        _ensure_detached_store(self)
+        for field_name, field_value in mapping.items():
+            _object_setattr(self, field_name, field_value)
+
     def __getstate__(self) -> Dict[str, Any]:
         """Return pickle state with weakrefs stripped."""
         state = dict(state_items(self))
@@ -3089,6 +3173,7 @@ class Op:
 
     def __setstate__(self, state: Dict[str, Any]) -> None:
         """Restore pickle state produced by ``__getstate__``."""
+        _ensure_detached_store(self)
         version = read_tlspec_version(state, cls_name=type(self).__name__)
         legacy_thread_keys = (
             "_module_boundary_thread_output",
@@ -3356,8 +3441,13 @@ class Op:
     # ************* Logging Functions ************
     # ********************************************
 
-    def copy(self) -> "Op":
+    def copy(self, *, _store: Any = None) -> "Op":
         """Return a selective-depth copy of this entry.
+
+        ``_store`` is the private internal-synthesis hook: postprocess output
+        node synthesis passes the owning trace's row store so the clone is
+        appended as a shared columnar row. Public callers omit it and receive
+        a detached single-row copy.
 
         Most fields are ``copy.deepcopy``'d so the clone is fully independent.
         However, certain fields are shallow-copied (shared by reference) because:
@@ -3401,7 +3491,7 @@ class Op:
                 fields_dict[field] = copy.deepcopy(getattr(self, field, None))
             else:
                 fields_dict[field] = getattr(self, field, None)
-        copied_entry = type(self)(fields_dict)
+        copied_entry = type(self)(fields_dict, _store=_store)
         return copied_entry
 
     def save_activation(
@@ -4030,6 +4120,154 @@ class Op:
         """Return the developer representation for this operation."""
 
         return self.__str__()
+
+
+# ---------------------------------------------------------------------------
+# The M5 facade: generated per-field data descriptors over (_core, _row)
+#
+# ``Op`` stores nothing per instance beyond the store handle and its row id.
+# Each declared stored field is a real data descriptor (visible to dir(),
+# debugger enumeration, and ``vars(Op)`` -- the ancestor-bitset overlay in
+# ``backends/torch/ops.py`` captures these exactly as it captured the former
+# slot member descriptors). ``_MISSING`` cells reproduce the exact unset-slot
+# ``AttributeError`` shapes (message + ``name``/``obj`` on reads; bare-name
+# args on deletes), so ``_slot()``, ``getattr`` defaults, and cleanup paths
+# behave byte-identically.
+# ---------------------------------------------------------------------------
+
+# Bound member-descriptor accessors: C-speed reads of the two real slots that
+# do NOT re-enter ``Op.__getattribute__`` (descriptor bodies run on every
+# field touch, so each avoided Python-level re-entry is measurable).
+_CORE_GET = Op.__dict__["_core"].__get__
+_ROW_GET = Op.__dict__["_row"].__get__
+
+
+def _ensure_detached_store(op: "Op") -> None:
+    """Bind a fresh detached single-row store when ``op`` is a bare shell."""
+
+    try:
+        _CORE_GET(op)
+    except AttributeError:
+        _object_setattr(op, "_core", DetachedOpStore(_OP_STORE_LAYOUT))
+        _object_setattr(op, "_row", 0)
+
+
+def _detach_op_husk(op: "Op") -> None:
+    """Rebind a cleared op to an empty detached row.
+
+    Cleanup / removal paths clear every field and historically left an empty
+    slotted husk; the facade equivalent also drops the reference to the
+    shared row store so a user-held husk cannot pin the whole trace core.
+    """
+
+    _object_setattr(op, "_core", DetachedOpStore(_OP_STORE_LAYOUT))
+    _object_setattr(op, "_row", 0)
+
+
+class _OpField:
+    """Data descriptor for one stored ``Op`` field backed by the row store."""
+
+    __slots__ = ("_name", "_fid")
+
+    def __init__(self, name: str, fid: int) -> None:
+        """Bind the descriptor to its declared field name and column id."""
+
+        self._name = name
+        self._fid = fid
+
+    def __repr__(self) -> str:
+        """Return a diagnostic representation naming the backed field."""
+
+        return f"<Op field descriptor {self._name!r}>"
+
+    def __get__(self, op: Any, owner: Any = None) -> Any:
+        """Read the backing cell; unset cells raise like an unset slot."""
+
+        if op is None:
+            return self
+        value = _CORE_GET(op).cell_get(_ROW_GET(op), self._fid)
+        if value is _MISSING:
+            name = self._name
+            raise AttributeError(
+                f"{type(op).__name__!r} object has no attribute {name!r}",
+                name=name,
+                obj=op,
+            )
+        return value
+
+    def __set__(self, op: Any, value: Any) -> None:
+        """Write the backing cell (base while building, overlay after freeze)."""
+
+        _CORE_GET(op).cell_set(_ROW_GET(op), self._fid, value)
+
+    def __delete__(self, op: Any) -> None:
+        """Delete the backing cell; unset cells raise like an unset slot."""
+
+        if not _CORE_GET(op).cell_del(_ROW_GET(op), self._fid):
+            raise AttributeError(self._name)
+
+
+def _install_op_field_descriptors() -> None:
+    """Install one ``_OpField`` per stored field on the ``Op`` class."""
+
+    existing = vars(Op)
+    for fid, name in enumerate(_OP_SLOT_NAMES):
+        if name in existing:
+            raise RuntimeError(
+                f"Op facade collision: {name!r} is already defined on Op"
+            )
+        setattr(Op, name, _OpField(name, fid))
+
+
+_install_op_field_descriptors()
+
+
+def _compact_store_rows(store: Any, pool: Dict[Any, Any]) -> None:
+    """Pool repeated immutable metadata across a whole building-phase store.
+
+    Column-major equivalent of ``Op._compact_metadata`` (same class ladder,
+    same ``_UNPOOLED_SLOTS`` skips, same container-member handling) operating
+    directly on the row cells, so a core-backed trace pools without paying
+    the per-attribute descriptor protocol.
+
+    Parameters
+    ----------
+    store:
+        Building-phase ``OpRowStore`` (frozen stores are left untouched --
+        pooling always precedes the physical freeze).
+    pool:
+        Pass-local ``pool key -> canonical instance`` table shared with any
+        remaining per-op walks of the same trace.
+    """
+
+    rows = store.rows_building()
+    if rows is None:
+        return
+    pooled_classes = _POOLED_CLASSES
+    pool_get = pool.get
+    for fid, name in enumerate(store.layout.names):
+        if name in _UNPOOLED_SLOTS:
+            continue
+        for row_cells in rows:
+            value = row_cells[fid]
+            if value is None or value is _MISSING:
+                continue
+            cls = value.__class__
+            if cls in pooled_classes:
+                key = (cls, value.hex()) if cls is Duration else (cls, value)
+                pooled = pool_get(key)
+                if pooled is None:
+                    pool[key] = value
+                elif pooled is not value:
+                    row_cells[fid] = pooled
+            elif cls is list or cls is set or cls is dict:
+                _pool_container_members(value, pool, 0)
+            elif cls is tuple or cls is frozenset:
+                pooled = _pool_value(value, pool)
+                if pooled is not value:
+                    row_cells[fid] = pooled
+            elif isinstance(value, dict):
+                _pool_container_members(value, pool, 0)
 
 
 # Backward-compatible alias: TensorLog was the original name for

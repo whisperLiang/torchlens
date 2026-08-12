@@ -37,6 +37,11 @@ layer.ops             # dict[int, Op]
 - `graph_shape_hash` is computed before `_set_tracing_finished`.
 
 ## Op Gotchas
+- `Op.__slots__` is `("_core", "_row")` (M5 seam): fields are generated data
+  descriptors over the per-trace `_trace_core` row store (detached single-row store
+  for copy/pickle/fork/preview ops). `_OP_SLOT_NAMES` remains the declared stored-field
+  universe; `_slot()`, `_internal_set`, and `object.__setattr__` compose over the
+  descriptors exactly as they did over slots. Never assume per-instance storage.
 - `copy()` shallow-copies selected graph/conditional fields and deep-copies the rest.
 - `out` for some output/getitem cases may reference parent saved data directly.
 - `grad` is a bare reference; do not mutate it in-place.

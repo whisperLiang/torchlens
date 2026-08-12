@@ -1056,12 +1056,23 @@ class Trace(
             return
         _COMPACTED_TRACES.add(self)
         pool: Dict[Any, Any] = {}
+        core = self.__dict__.get("_trace_core")
+        store = core.ops if core is not None else None
+        if store is not None:
+            # Core-backed ops pool in ONE column-major sweep over the row
+            # cells (same ladder, same skips as the per-op walk) without
+            # paying the attribute protocol per field.
+            from .op import _compact_store_rows
+
+            _compact_store_rows(store, pool)
         seen_ops: set[int] = set()
         for op in ops:
             op_id = id(op)
             if op_id in seen_ops:
                 continue
             seen_ops.add(op_id)
+            if store is not None and getattr(op, "_core", None) is store:
+                continue
             op._compact_metadata(pool)
 
     backend: BackendName
@@ -1383,6 +1394,11 @@ class Trace(
         "_module_logs": FieldPolicy.DROP,
         "_param_logs_by_module": FieldPolicy.DROP,
         "_build_state": FieldPolicy.DROP,
+        # The per-trace columnar Op row store (torchlens._trace_core). Never
+        # portable: plain pickle re-materializes each Op as a detached row
+        # from its own state, and .tlspec artifacts stay object-shaped until
+        # the M11 direct semantic serialization.
+        "_trace_core": FieldPolicy.DROP,
         "_pre_forward_rng_states": FieldPolicy.DROP,
         # r63 C1: pre-clone per-slot state metadata signatures (producer-side only,
         # never portable) and the buffer storage-pointer attribution index.
@@ -2590,6 +2606,7 @@ class Trace(
         state.pop("_container_ordinals_by_output_op_label", None)
         state.pop("_container_ordinals_by_input_func_call_id", None)
         state.pop("_build_state", None)
+        state.pop("_trace_core", None)
         state["_backward_gradfn_refs"] = []
         state["_tl_backward_hooked_tensor_keys"] = set()
         state.pop("_tl_grad_hook_owner_by_label", None)
@@ -2607,7 +2624,7 @@ class Trace(
 
     def __setstate__(self, state: Dict[str, Any]) -> None:
         """Restore pickle state and rebuild weakref-backed links."""
-        for field_name in (*LEGACY_TRACE_BUILD_STATE_KEYS, "_build_state"):
+        for field_name in (*LEGACY_TRACE_BUILD_STATE_KEYS, "_build_state", "_trace_core"):
             state.pop(field_name, None)
         read_tlspec_version(state, cls_name=type(self).__name__)
         containers_were_serialized = "_containers" in state and state["_containers"] is not None

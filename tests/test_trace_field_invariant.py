@@ -106,6 +106,11 @@ def test_trace_field_set_subset_of_user_facing() -> None:
         "measure_python_peak_memory",
         "save_budget",
         "_save_budget_accountant",
+        # M5 Op seam: the per-trace columnar row store backing every Op
+        # facade. Declared ``FieldPolicy.DROP`` with a component owner
+        # (``_trace_components.py`` -> "graph"); plain pickle re-materializes
+        # each Op as a detached row, so the store never persists.
+        "_trace_core",
     }
 
     actual = set(trace.__dict__.keys())

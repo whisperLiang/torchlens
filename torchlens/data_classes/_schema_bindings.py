@@ -277,6 +277,7 @@ STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {
         "_module_logs": StorageBinding(StorageKind.RUNTIME),
         "_param_logs_by_module": StorageBinding(StorageKind.RUNTIME),
         "_build_state": StorageBinding(StorageKind.RUNTIME, annotation="<class 'torchlens.ir.trace_build_state.TraceBuildState'>"),
+        "_trace_core": StorageBinding(StorageKind.RUNTIME),
         "_pre_forward_rng_states": StorageBinding(StorageKind.RUNTIME),
         "_buffer_storage_addresses": StorageBinding(StorageKind.RUNTIME),
         "_mlx_saved_payloads": StorageBinding(StorageKind.RUNTIME),

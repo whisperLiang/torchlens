@@ -37,13 +37,19 @@ if TYPE_CHECKING:
     from torchlens.data_classes.op import Op
 
 
-def materialize_log_from_fields(fields_dict: dict[str, object]) -> "Op":
+def materialize_log_from_fields(
+    fields_dict: dict[str, object], store: object | None = None
+) -> "Op":
     """Construct the live log object for one captured operation.
 
     Parameters
     ----------
     fields_dict
         Raw field mapping populated by the backend hot path.
+    store
+        The owning trace's ``OpRowStore`` (the M5 builder ingress): the op is
+        appended as a shared columnar row. ``None`` constructs a detached
+        single-row op (legacy/preview callers).
 
     Returns
     -------
@@ -67,7 +73,7 @@ def materialize_log_from_fields(fields_dict: dict[str, object]) -> "Op":
     # (forcing op nodes to None) was FALSE and is corrected there.
     has_backend_override = "_materialized_backend_address" in fields_dict
     backend_address_override = fields_dict.pop("_materialized_backend_address", None)
-    op_log = Op(fields_dict)  # type: ignore[arg-type]
+    op_log = Op(fields_dict, _store=store)  # type: ignore[arg-type]
     for field_name, blob_id in pending_blob_ids.items():
         setattr(op_log, field_name, blob_id)
     if has_backend_override:
@@ -139,6 +145,15 @@ def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
         Populates raw trace lookup structures without consuming the sealed source lanes.
     """
 
+    core = trace.__dict__.get("_trace_core")
+    if core is None:
+        from torchlens._trace_core import OpRowStore, TraceCore
+        from torchlens.data_classes.op import _OP_STORE_LAYOUT
+
+        core = TraceCore()
+        core.ops = OpRowStore(_OP_STORE_LAYOUT)
+        trace._trace_core = core
+    op_store = core.ops
     live_module_forward_args = dict(trace._build_state.module_forward_args)
     _rebuild_module_side_channels(trace, events)
     module_enter_addresses = _module_enter_addresses(
@@ -201,7 +216,7 @@ def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
             op_events_by_label,
         )
         with _timed_phase(trace, "object_construction:op"):
-            op_log = materialize_log_from_fields(fields_dict)
+            op_log = materialize_log_from_fields(fields_dict, op_store)
         _register_raw_log(trace, event, op_log)
     _drop_missing_buffer_sources(trace)
 

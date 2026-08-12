@@ -69,6 +69,7 @@ def cleanup(self: "Trace") -> None:
     for attr in [
         "_capture_events",
         "_build_state",
+        "_trace_core",
         "_saved_grad_labels",
         "_module_logs",
         "_buffer_accessor",
@@ -100,8 +101,13 @@ def cleanup(self: "Trace") -> None:
 
 def _clear_entry_attributes(log_entry: Op) -> None:
     """Clear all instance attributes from a Op entry."""
+    from .op import _detach_op_husk
+
     for attr, _ in list(state_items(log_entry)):
         delattr(log_entry, attr)
+    # Rebind the emptied facade to a detached row so a user-held husk cannot
+    # pin the trace's shared columnar store (slot-era husks pinned nothing).
+    _detach_op_husk(log_entry)
 
 
 def _strip_pass_suffix(layer_label: str) -> str:

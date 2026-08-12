@@ -133,8 +133,13 @@ exclusive with backward-related capture because it discards the autograd graph.
   regenerate with `tools/generate_record_schema.py`); Trace fields have a declared
   component ownership map (`_trace_components.py`).
 - `_trace_core/` - private columnar store substrate (columns, pools, edge-occurrence
-  table, payload arena, overlays, `TraceCore`); zero production consumers until the Op
-  seam lands. Architecture of record: `docs/reference/trace_core_design.md`.
+  table, payload arena, overlays, `TraceCore`). The M5 Op seam is LIVE: every captured
+  `Op` is a two-word `(_core, _row)` facade over the per-trace `OpRowStore`
+  (`op_store.py`) held at `trace._trace_core` (declared `FieldPolicy.DROP`); rows are
+  row-major lists while building and seal after step 20 (columnar transpose with
+  numeric packing at >=512 rows). `Op.copy()`, pickle restore, fork shells, and
+  preview backends use detached single-row stores. Architecture of record:
+  `docs/reference/trace_core_design.md`.
 - `backends/torch/` - torch function wrapping, explicit wrap/unwrap, module prep.
 - `fastlog/` - sparse predicate recording with RAM/disk storage and recovery.
 - `postprocess/` - graph cleanup, conditionals, loop detection, labeling, finalization.

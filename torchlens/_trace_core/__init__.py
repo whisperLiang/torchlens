@@ -13,6 +13,7 @@ prototypes of every hard seam (copy, fork, payload identity, hydration).
 
 from .columns import ColumnBuilder, FrozenColumn
 from .core import TraceCore
+from .op_store import DetachedOpStore, OpRowStore, OpStoreLayout
 from .overlays import RowOverlay, Transaction
 from .payloads import PayloadArena
 from .pools import InternPool
@@ -20,9 +21,12 @@ from .relations import EdgeTable
 
 __all__ = [
     "ColumnBuilder",
+    "DetachedOpStore",
     "EdgeTable",
     "FrozenColumn",
     "InternPool",
+    "OpRowStore",
+    "OpStoreLayout",
     "PayloadArena",
     "RowOverlay",
     "TraceCore",

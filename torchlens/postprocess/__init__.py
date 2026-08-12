@@ -647,6 +647,15 @@ def postprocess(
 
     _compact_ancestor_sets(self)
 
+    # The core freeze point (trace_core_design.md section 3.3): forward
+    # topology froze logically at step 17, the payload plane settled through
+    # step 20, and the ancestor closures were just interned -- transpose the
+    # Op row store into its frozen columnar form. Later public writes land in
+    # the store's sparse overlay; facade behavior is unchanged.
+    _core = self.__dict__.get("_trace_core")
+    if _core is not None and _core.ops is not None:
+        _core.ops.freeze()
+
     if getattr(self, "verbose", False):
         print(f"[torchlens] Postprocessing complete ({time.time() - _post_t0:.2f}s)")
     _drop_transient_capture_state(self)

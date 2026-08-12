@@ -99,6 +99,7 @@ class TraceCore:
 
     __slots__ = (
         "tables",
+        "ops",
         "pool",
         "closures",
         "edges",
@@ -114,6 +115,9 @@ class TraceCore:
         """Create an empty core."""
 
         self.tables: dict[str, KindTable] = {}
+        # The Op row store (op_store.OpRowStore) once the M5 ingress binds it;
+        # None until materialize step 0 creates it for a captured run.
+        self.ops: Any = None
         self.pool = InternPool()
         self.closures = ClosurePool()
         self.edges: dict[str, EdgeTable] = {}
@@ -195,6 +199,7 @@ class TraceCore:
 
         child = TraceCore.__new__(TraceCore)
         child.tables = self.tables
+        child.ops = self.ops
         child.pool = self.pool
         child.closures = self.closures
         child.edges = self.edges

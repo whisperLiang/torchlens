@@ -292,6 +292,7 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "_module_logs": "graph",
     "_param_logs_by_module": "graph",
     "_build_state": "session",
+    "_trace_core": "graph",
     "_pre_forward_rng_states": "session",
     "_buffer_storage_addresses": "graph",
     "_mlx_saved_payloads": "session",

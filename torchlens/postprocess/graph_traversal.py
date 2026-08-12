@@ -216,9 +216,15 @@ def _add_output_layers(
         if parent_label is not None
     ]
     new_output_layers = []
+    _core = self.__dict__.get("_trace_core")
+    _op_store = _core.ops if _core is not None else None
+    if _op_store is not None and _op_store.frozen:
+        _op_store = None
     for i, (output_layer_label, output_tensor, output_address_suffix) in enumerate(paired_outputs):
         output_node = self[output_layer_label]
-        new_output_node = cast(Op, output_node.copy())
+        # Internal output-node synthesis is a builder row append on the
+        # trace's own store (detached only for legacy/preview traces).
+        new_output_node = cast(Op, output_node.copy(_store=_op_store))
         new_output_node.layer_type = "output"
         new_output_node.is_output = True
         new_output_node.is_input = False
