@@ -627,3 +627,58 @@ def test_rehydrate_mixed_ownership_aborts_with_zero_mutations() -> None:
         assert isinstance(bound, DetachedOpStore), (
             "earlier op re-bound to an orphaned store after abort"
         )
+@pytest.mark.smoke
+def test_loaded_partial_capture_stays_staging() -> None:
+    """A loaded partial/failed capture is never rehydrated or frozen.
+
+    Partials are documented as keeping their staging surface; running the
+    F9 relation freeze + seal on them at load re-bound their ops to a
+    frozen shared store and converted relation cells to interned views and
+    ``GroupRef`` group tables (closure review, blocking item 5 / fix item
+    4). A loaded partial must match the pre-F9 coreless behavior exactly:
+    no core, detached-backed unfrozen op rows, no relation-freeze
+    artifacts. (The list->tuple container coercion of legacy load states
+    in ``Op.__setstate__`` predates F9 and is out of this guard's scope.)
+    """
+
+    import pickle
+    from unittest import mock
+
+    import torchlens as tl
+    import torchlens.postprocess as postprocess
+    from torchlens._trace_core.op_store import DetachedOpStore
+
+    model = torch.nn.Sequential(torch.nn.Linear(3, 4), torch.nn.ReLU())
+
+    # Fail LATE in postprocess (after layer logs exist) so the partial has
+    # reachable ops — the case where an unguarded rehydrate would freeze.
+    with mock.patch.object(
+        postprocess, "_build_module_logs", side_effect=RuntimeError("boom")
+    ):
+        with pytest.raises(Exception) as exc_info:
+            tl.trace(model, torch.randn(1, 3))
+    partial = tl.partial.from_failed_capture(exc_info.value)
+    assert partial is not None
+    source = partial.trace
+    assert source.__dict__.get("_tracing_finished") is False
+    assert len(source.layer_list) > 0, "late failure must leave reachable ops"
+
+    clone = pickle.loads(pickle.dumps(source))
+    assert clone.__dict__.get("_tracing_finished") is False
+    assert clone.__dict__.get("_trace_core") is None, (
+        "partial captures must stay coreless on load"
+    )
+    for staged in clone.layer_list:
+        bound = object.__getattribute__(staged, "_core")
+        assert isinstance(bound, DetachedOpStore), (
+            f"partial op re-bound to {type(bound).__name__} on load"
+        )
+        assert not bound.frozen
+        assert bound.dataflow_edges is None, "no relation-freeze artifacts"
+    op = clone.layer_list[0]
+    # Group cells stay raw (no GroupRef conversion) on a loaded partial.
+    store = object.__getattribute__(op, "_core")
+    fid = store.layout.fid_by_name.get("equivalent_ops")
+    if fid is not None:
+        cell = store.cell_get(0, fid)
+        assert type(cell).__name__ != "GroupRef"

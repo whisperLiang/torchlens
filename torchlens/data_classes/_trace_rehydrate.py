@@ -17,6 +17,10 @@ pooling) and seals the store exactly like the capture-time freeze seam
 
 Boundaries (documented, tested):
 
+* PARTIAL / FAILED captures are exempt: their staging surface is
+  documented as staying raw, so a load must not run the relation freeze
+  on them. The ``_tracing_finished`` master switch (``FieldPolicy.KEEP``)
+  gates rehydration.
 * Backward records (``GradFn``/``GradFnCall``/``BackwardPass``) stay
   detached-backed — loaded traces have no event stream, so there is no
   epoch to rebuild; a NEW backward on the restored trace binds fresh
@@ -52,12 +56,16 @@ def rehydrate_trace_core(trace: "Trace") -> bool:
     """Adopt a coreless trace's detached records into a fresh sealed core.
 
     Returns ``True`` when a core was built and sealed, ``False`` when the
-    trace already has a core, has no ops, or rehydration aborted (the
-    coreless-island behavior is preserved on abort, with every op still
-    bound to its own detached store).
+    trace already has a core, is a partial/failed capture, has no ops, or
+    rehydration aborted (the coreless-island behavior is preserved on
+    abort, with every op still bound to its own detached store).
     """
 
     if trace.__dict__.get("_trace_core") is not None:
+        return False
+    if not trace.__dict__.get("_tracing_finished", False):
+        # Partial/failed captures keep their documented staging surface:
+        # no relation freeze, no seal, no core.
         return False
     from .._trace_core.core import TraceCore
     from .._trace_core.op_store import DetachedOpStore, OpRowStore
