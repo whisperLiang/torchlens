@@ -627,44 +627,6 @@ def set_capture_producer_policy(trace: "Trace", mode: CaptureProducerMode) -> No
     trace._capture_producer_policy = get_capture_producer_policy(mode)
 
 
-_SHARED_FIELDS_TO_SHALLOW_COPY_PER_OUTPUT = (
-    "interventions",
-    "non_tensor_pos_args",
-    "non_tensor_kwargs",
-    "func_non_tensor_args",
-    "transform_config",
-    "parent_params",
-    "_param_barcodes",
-    "parent_param_ops",
-    "_param_logs",
-    "param_shapes",
-    "parents",
-    "_edge_uses",
-    "root_ancestors",
-    "children",
-    "input_ancestors",
-    "output_descendants",
-    "internal_source_parents",
-    "internal_source_ancestors",
-    "in_conditionals",
-    "terminal_bool_for",
-    "conditional_branch_stack",
-    "conditional_entry_children",
-    "conditional_then_children",
-    "conditional_elif_children",
-    "conditional_else_children",
-    "conditional_arm_children",
-    "modules",
-    "module_call_stack",
-    "module_entry_arg_keys",
-    "input_to_module_calls",
-    "output_of_modules",
-    "output_of_module_calls",
-    "func_config",
-)
-_SHARED_FIELDS_TO_DEEP_COPY_PER_OUTPUT = ("parent_arg_positions",)
-
-
 def _should_keep_alias_mutation_contract(trace: "Trace") -> bool:
     """Return whether mutation-position alias contracts can be consumed.
 
@@ -902,12 +864,76 @@ def _parent_edges_from_fields(fields_dict: dict[str, Any]) -> tuple[ParentEdge, 
     )
 
 
+#: FunctionCallRef fields the per-output logging path genuinely rewrites
+#: (``_log_output_tensor_info``): FLOPs derive from the output shape and
+#: ``is_inplace`` from the output tensor's version. Everything else on the
+#: ref is a call-level fact, so sibling outputs of one wrapped call share
+#: ONE frozen ref (M7); a sibling whose per-output facts differ gets a
+#: ``dataclasses.replace`` derivative that still shares every container
+#: field by reference.
+_FUNCTION_REF_PER_OUTPUT_FIELDS = ("flops_forward", "flops_backward", "is_inplace")
+
+
+def _function_call_ref_from_fields(fields_dict: dict[str, Any]) -> FunctionCallRef:
+    """Build the frozen function-call summary for one operation event."""
+
+    return FunctionCallRef(
+        func=fields_dict["func"],
+        func_name=fields_dict["func_name"],
+        func_qualname=fields_dict["func_qualname"],
+        func_call_id=fields_dict["func_call_id"],
+        code_context=tuple(fields_dict["code_context"]),
+        func_duration=fields_dict["func_duration"],
+        flops_forward=fields_dict["flops_forward"],
+        flops_backward=fields_dict["flops_backward"],
+        func_rng_states=fields_dict["func_rng_states"],
+        func_autocast_state=fields_dict["func_autocast_state"],
+        arg_names=tuple(fields_dict["arg_names"]),
+        num_args_total=fields_dict["num_args_total"],
+        num_pos_args=fields_dict["num_pos_args"],
+        num_kwargs=fields_dict["num_kwargs"],
+        non_tensor_pos_args=tuple(fields_dict["non_tensor_pos_args"]),
+        non_tensor_kwargs=tuple(fields_dict["non_tensor_kwargs"].items()),
+        func_non_tensor_args=tuple(fields_dict["func_non_tensor_args"]),
+        is_inplace=fields_dict["is_inplace"],
+        func_config=tuple(fields_dict["func_config"].items()),
+        func_id=fields_dict.get("func_id"),
+    )
+
+
+def _resolve_call_function_ref(
+    fields_dict: dict[str, Any],
+    call_ref_box: list[FunctionCallRef] | None,
+) -> FunctionCallRef:
+    """Return the (shared) function-call ref for one output event.
+
+    The first output of a wrapped call builds the ref and parks it in
+    ``call_ref_box``; sibling outputs reuse it verbatim when their per-output
+    facts match, otherwise derive via ``dataclasses.replace`` (container
+    fields stay shared by reference either way).
+    """
+
+    if call_ref_box:
+        shared = call_ref_box[0]
+        overrides = {
+            name: fields_dict[name]
+            for name in _FUNCTION_REF_PER_OUTPUT_FIELDS
+            if getattr(shared, name) != fields_dict[name]
+        }
+        return dataclasses.replace(shared, **overrides) if overrides else shared
+    ref = _function_call_ref_from_fields(fields_dict)
+    if call_ref_box is not None:
+        call_ref_box.append(ref)
+    return ref
+
+
 def _op_event_from_log(
     trace: "Trace",
     fields_dict: dict[str, Any],
     tensor: torch.Tensor,
     fire_results: tuple[FireResult, ...] = (),
     module_stack: tuple[ModuleFrame, ...] | None = None,
+    call_ref_box: list[FunctionCallRef] | None = None,
 ) -> OpEvent:
     """Build an ``OpEvent`` that mirrors a just-constructed ``Op``.
 
@@ -921,6 +947,9 @@ def _op_event_from_log(
         Live intervention fire results associated with this output.
     module_stack
         Precomputed immutable module frames shared by outputs from the call.
+    call_ref_box
+        Per-call one-element box sharing ONE ``FunctionCallRef`` across the
+        sibling outputs of a multi-output call (M7).
 
     Returns
     -------
@@ -984,28 +1013,7 @@ def _op_event_from_log(
         source_trace_id=None,
         tracing_finished=fields_dict["_tracing_finished"],
         construction_done=fields_dict["_construction_done"],
-        function=FunctionCallRef(
-            func=fields_dict["func"],
-            func_name=fields_dict["func_name"],
-            func_qualname=fields_dict["func_qualname"],
-            func_call_id=fields_dict["func_call_id"],
-            code_context=tuple(fields_dict["code_context"]),
-            func_duration=fields_dict["func_duration"],
-            flops_forward=fields_dict["flops_forward"],
-            flops_backward=fields_dict["flops_backward"],
-            func_rng_states=fields_dict["func_rng_states"],
-            func_autocast_state=fields_dict["func_autocast_state"],
-            arg_names=tuple(fields_dict["arg_names"]),
-            num_args_total=fields_dict["num_args_total"],
-            num_pos_args=fields_dict["num_pos_args"],
-            num_kwargs=fields_dict["num_kwargs"],
-            non_tensor_pos_args=tuple(fields_dict["non_tensor_pos_args"]),
-            non_tensor_kwargs=tuple(fields_dict["non_tensor_kwargs"].items()),
-            func_non_tensor_args=tuple(fields_dict["func_non_tensor_args"]),
-            is_inplace=fields_dict["is_inplace"],
-            func_config=tuple(fields_dict["func_config"].items()),
-            func_id=fields_dict.get("func_id"),
-        ),
+        function=_resolve_call_function_ref(fields_dict, call_ref_box),
         output=OutputRef(
             tensor=tensor_ref,
             transformed_tensor=transformed_ref,
@@ -4054,29 +4062,6 @@ def _build_shared_fields_dict(
     return fields_dict, parent_layer_entries, arg_tensors, parent_param_ops
 
 
-def _copy_shared_fields_for_output(fields_dict: dict[str, Any]) -> dict[str, Any]:
-    """Return an isolated per-output copy of shared exhaustive fields.
-
-    Parameters
-    ----------
-    fields_dict
-        Shared field mapping for all tensor outputs of one wrapped function call.
-
-    Returns
-    -------
-    dict[str, Any]
-        Field mapping that can be mutated for one output tensor without changing
-        sibling output entries.
-    """
-
-    fields_dict_onetensor = fields_dict.copy()
-    for field in _SHARED_FIELDS_TO_SHALLOW_COPY_PER_OUTPUT:
-        fields_dict_onetensor[field] = copy.copy(fields_dict[field])
-    for field in _SHARED_FIELDS_TO_DEEP_COPY_PER_OUTPUT:
-        fields_dict_onetensor[field] = copy.deepcopy(fields_dict[field])
-    return fields_dict_onetensor
-
-
 def _classify_new_tensor_in_trace(
     self: "Trace",
     fields_dict: dict[str, Any],
@@ -4349,6 +4334,10 @@ def _emit_exhaustive_operation_events(
         else frozenset()
     )
 
+    # One shared FunctionCallRef per wrapped call (M7): the first logged
+    # output parks the frozen ref here and every sibling reuses it.
+    call_ref_box: list[FunctionCallRef] = []
+
     for i, output_entry in enumerate(output_entries):
         out = output_entry.value
         if not _output_should_be_logged(out, is_bottom_level_func):
@@ -4369,8 +4358,16 @@ def _emit_exhaustive_operation_events(
                 except AttributeError:
                     pass
 
+        # M7: per-output isolation is a plain dict copy. Every per-output
+        # writer REASSIGNS its fields (``_log_output_tensor_info``,
+        # ``_build_graph_relationship_fields``, the foreach projection, and
+        # this loop all bind fresh containers; the single-output path has
+        # always shared ``fields_dict`` itself, so in-place mutation of a
+        # call-shared container would already be a bug there). The frozen
+        # ``OpEvent`` isolates at construction (tuple/deepcopy), so sibling
+        # dicts sharing the call-level container objects is unobservable.
         fields_dict_onetensor = (
-            fields_dict if use_single_output_fields else _copy_shared_fields_for_output(fields_dict)
+            fields_dict if use_single_output_fields else dict(fields_dict)
         )
         fields_dict_onetensor["container_path"] = output_entry.container_path
         fields_dict_onetensor["container_spec"] = output_entry.container_spec
@@ -4440,6 +4437,7 @@ def _emit_exhaustive_operation_events(
                 t_kwargs=kwarg_copies,
                 activation_transform=self.activation_transform,
                 event_module_stack=event_module_stack,
+                call_ref_box=call_ref_box,
             ),
         )
         new_tensor_label = new_layer_entry._label_raw
@@ -6124,6 +6122,7 @@ def _make_layer_log_entry(
     t_kwargs: dict[str, Any] | None = None,
     activation_transform: Callable[..., Any] | None = None,
     event_module_stack: tuple[ModuleFrame, ...] | None = None,
+    call_ref_box: list[FunctionCallRef] | None = None,
 ) -> Any:
     """Create a Op (or Buffer) entry and register it in Trace.
 
@@ -6220,6 +6219,7 @@ def _make_layer_log_entry(
         t,
         fire_results,
         module_stack=event_module_stack,
+        call_ref_box=call_ref_box,
     )
     self.capture_events.append(op_event)
     if op_event.grad_fn_handle is not None:

@@ -654,8 +654,10 @@ def postprocess(
     # conversion runs here — parents/children project into the core's
     # canonical dataflow edge table (differentially verified before the
     # staging cells die) and the remaining relation families become interned
-    # immutable views — then the Op row store seals (columnar transpose on
-    # large traces). Later public writes land in the store's sparse overlay;
+    # immutable views — the M7 group and shared-fact conversions follow
+    # (equivalence/recurrence GroupRefs, FunctionCall/ParamAlias fact
+    # blocks) — then the Op row store seals (columnar transpose on large
+    # traces). Later public writes land in the store's sparse overlay;
     # facade behavior is otherwise unchanged.
     _core = self.__dict__.get("_trace_core")
     if _core is not None and _core.ops is not None:

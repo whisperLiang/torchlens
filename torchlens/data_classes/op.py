@@ -89,7 +89,8 @@ from ..quantities import (
 )
 from .._state import pause_logging
 from .._trace_core.groups import GroupRef
-from .._trace_core.op_store import _CSR, _MISSING, DetachedOpStore, OpStoreLayout
+from .._trace_core.fact_blocks import OP_FACT_FIELDS
+from .._trace_core.op_store import _CSR, _FACT, _MISSING, DetachedOpStore, OpStoreLayout
 from .._trace_core.relation_views import (
     OP_BITSET_VIEW_FIELDS,
     OP_DATAFLOW_FIELDS,
@@ -4304,13 +4305,50 @@ class _DataflowField(_RelationViewField):
         return value
 
 
+class _FactField(_OpField):
+    """Descriptor for one shared-fact field (M7 FunctionCall/ParamAlias blocks).
+
+    A ``_FACT`` cell means the value lives in the store's shared fact block:
+    the first read hydrates the field's exact public container type for THIS
+    row and caches it back, so identity is stable across reads, per-row
+    in-place mutation stays isolated (a fresh container per row, exactly the
+    pre-M7 semantics), and uninspected rows retain no per-row container. A
+    direct write replaces the sentinel with a per-row cell value and never
+    mutates the shared block.
+    """
+
+    __slots__ = ()
+
+    def __get__(self, op: Any, owner: Any = None) -> Any:
+        """Read the cell, hydrating shared-fact sentinels on demand."""
+
+        if op is None:
+            return self
+        store = _CORE_GET(op)
+        row = _ROW_GET(op)
+        value = store.cell_get(row, self._fid)
+        if value is _FACT:
+            value = store.fact_blocks.hydrate(row, self._name)
+            store.cell_set(row, self._fid, value)
+            return value
+        if value is _MISSING:
+            name = self._name
+            raise AttributeError(
+                f"{type(op).__name__!r} object has no attribute {name!r}",
+                name=name,
+                obj=op,
+            )
+        return value
+
+
 def _install_op_field_descriptors() -> None:
     """Install the per-field data descriptors on the ``Op`` class.
 
     Most stored fields get a plain ``_OpField``; the declared relation
-    families get view-normalizing descriptors (``_RelationViewField``) and
-    the dataflow pair additionally rematerializes from the CSR
-    (``_DataflowField``).
+    families get view-normalizing descriptors (``_RelationViewField``), the
+    dataflow pair additionally rematerializes from the CSR
+    (``_DataflowField``), and the shared-fact fields hydrate from the M7
+    fact blocks (``_FactField``).
     """
 
     tuple_view_names = frozenset(OP_TUPLE_VIEW_FIELDS)
@@ -4332,6 +4370,8 @@ def _install_op_field_descriptors() -> None:
             descriptor = _RelationViewField(name, fid, tuple)
         elif name in frozenset_view_names:
             descriptor = _RelationViewField(name, fid, frozenset)
+        elif name in OP_FACT_FIELDS:
+            descriptor = _FactField(name, fid)
         else:
             descriptor = _OpField(name, fid)
         setattr(Op, name, descriptor)

@@ -40,6 +40,12 @@ _MISSING = object()
 #: ``cell_del`` on a ``_CSR`` cell clears to genuinely absent.
 _CSR = object()
 
+#: Shared-fact cell sentinel (M7): the value lives in the store's fact
+#: blocks (the FunctionCall / ParamAlias group tables); the facade
+#: descriptor hydrates the exact public container type for the row on first
+#: access and caches it back. Same present/absent semantics as ``_CSR``.
+_FACT = object()
+
 #: Overlay-miss sentinel local to cell reads.
 _NO_OVERLAY = object()
 
@@ -132,6 +138,7 @@ class OpRowStore:
         "_sealed",
         "dataflow_edges",
         "ref_labels",
+        "fact_blocks",
     )
 
     def __init__(self, layout: OpStoreLayout) -> None:
@@ -149,6 +156,9 @@ class OpRowStore:
         # table the facade descriptors use to rematerialize views.
         self.dataflow_edges: Any = None
         self.ref_labels: dict[int, str] | None = None
+        # The M7 shared-fact blocks (FunctionCall / ParamAlias group
+        # tables), bound by the same freeze-time conversion.
+        self.fact_blocks: Any = None
 
     def __len__(self) -> int:
         """Return the number of rows ever appended (removed rows included)."""
@@ -373,10 +383,12 @@ class DetachedOpStore:
 
     __slots__ = ("layout", "_cells")
 
-    #: Detached rows never carry CSR-backed relations (class-level constants
-    #: so the facade descriptors can probe both store kinds uniformly).
+    #: Detached rows never carry CSR-backed relations or shared-fact cells
+    #: (class-level constants so the facade descriptors can probe both store
+    #: kinds uniformly).
     dataflow_edges = None
     ref_labels = None
+    fact_blocks = None
 
     def __init__(self, layout: OpStoreLayout) -> None:
         """Create an empty single-row store."""

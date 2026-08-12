@@ -151,6 +151,13 @@ exclusive with backward-related capture because it discards the autograd graph.
   M7a group views are LIVE: `equivalent_ops`/`recurrent_ops` cells hold ONE shared
   `GroupRef` per membership group (`groups.py`); reads resolve to the group's cached
   immutable view (`frozenset`/`tuple`) and removal scrub rebinds the group row once.
+  M7b shared-fact blocks (`fact_blocks.py`): the call-level container facts
+  (`code_context`, `non_tensor_pos_args`, `non_tensor_kwargs`, `func_non_tensor_args`,
+  `func_config`, `arg_names`) live ONCE per FunctionCall group and `param_shapes` once
+  per distinct value (the ParamAlias block); member cells hold the `_FACT` sentinel and
+  the facade hydrates the exact public container type per row on first read (fresh
+  mutable copy, cached back — per-row isolation is unchanged). Sibling outputs of one
+  wrapped call also share ONE journal-side `FunctionCallRef`.
   During postprocess the staging containers remain real mutable builtins; legacy
   list/set state normalizes on load. Architecture of record:
   `docs/reference/trace_core_design.md`.

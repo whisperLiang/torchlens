@@ -309,3 +309,150 @@ class TestFinishedTraceSurface:
         staging = ["raw"]
         store.cell_set(0, layout.fid_by_name["parents"], staging)
         assert store.cell_get(0, layout.fid_by_name["parents"]) is staging
+
+
+class TestFactBlocks:
+    """The M7 shared-fact blocks (FunctionCall / ParamAlias group tables)."""
+
+    @staticmethod
+    def _fact_store(rows: list[dict[str, object]]) -> OpRowStore:
+        """Build a building-phase store carrying the fact fields."""
+
+        layout = OpStoreLayout(
+            (
+                "func_call_id",
+                "code_context",
+                "non_tensor_kwargs",
+                "func_config",
+                "arg_names",
+                "param_shapes",
+            )
+        )
+        store = OpRowStore(layout)
+        for fields in rows:
+            cells: list[object] = [_MISSING] * layout.n_fields
+            for name, value in fields.items():
+                cells[layout.fid_by_name[name]] = value
+            store.adopt_row(cells)
+        return store
+
+    def test_call_siblings_share_one_canonical(self) -> None:
+        from torchlens._trace_core.fact_blocks import convert_fact_cells
+        from torchlens._trace_core.op_store import _FACT
+
+        store = self._fact_store(
+            [
+                {"func_call_id": 7, "func_config": {"dim": 0}, "arg_names": ("x",)},
+                {"func_call_id": 7, "func_config": {"dim": 0}, "arg_names": ("x",)},
+                {"func_call_id": 8, "func_config": {"dim": 1}, "arg_names": ("x",)},
+            ]
+        )
+        convert_fact_cells(store, {})
+        rows = store.rows_building()
+        assert rows is not None
+        config_fid = store.layout.fid_by_name["func_config"]
+        assert all(cells[config_fid] is _FACT for cells in rows)
+        family = store.fact_blocks.families["call"]
+        assert len(family) == 2
+        # Equal arg_names canonicals intern to ONE tuple across call groups.
+        names = family.columns["arg_names"]
+        assert names[0] is names[1]
+
+    def test_hydration_isolates_mutable_types_per_row(self) -> None:
+        from torchlens._trace_core.fact_blocks import convert_fact_cells
+
+        store = self._fact_store(
+            [
+                {"func_call_id": 1, "func_config": {"dim": 0}, "code_context": ["frame"]},
+                {"func_call_id": 1, "func_config": {"dim": 0}, "code_context": ["frame"]},
+            ]
+        )
+        convert_fact_cells(store, {})
+        first = store.fact_blocks.hydrate(0, "func_config")
+        second = store.fact_blocks.hydrate(1, "func_config")
+        assert first == {"dim": 0} and second == {"dim": 0}
+        assert first is not second
+        assert isinstance(store.fact_blocks.hydrate(0, "code_context"), list)
+
+    def test_unequal_sibling_keeps_explicit_cell(self) -> None:
+        from torchlens._trace_core.fact_blocks import convert_fact_cells
+        from torchlens._trace_core.op_store import _FACT
+
+        divergent = {"dim": 999}
+        store = self._fact_store(
+            [
+                {"func_call_id": 3, "func_config": {"dim": 0}},
+                {"func_call_id": 3, "func_config": divergent},
+            ]
+        )
+        convert_fact_cells(store, {})
+        rows = store.rows_building()
+        assert rows is not None
+        config_fid = store.layout.fid_by_name["func_config"]
+        assert rows[0][config_fid] is _FACT
+        assert rows[1][config_fid] is divergent
+
+    def test_param_family_groups_by_value(self) -> None:
+        from torchlens._trace_core.fact_blocks import convert_fact_cells
+        from torchlens._trace_core.op_store import _FACT
+
+        store = self._fact_store(
+            [
+                {"func_call_id": 1, "param_shapes": [(4, 3), (4,)]},
+                {"func_call_id": 2, "param_shapes": [(4, 3), (4,)]},
+                {"func_call_id": 3, "param_shapes": [(2, 2)]},
+            ]
+        )
+        convert_fact_cells(store, {})
+        rows = store.rows_building()
+        assert rows is not None
+        fid = store.layout.fid_by_name["param_shapes"]
+        assert all(cells[fid] is _FACT for cells in rows)
+        family = store.fact_blocks.families["param"]
+        assert len(family.columns["param_shapes"]) == 2
+        assert store.fact_blocks.hydrate(0, "param_shapes") == [(4, 3), (4,)]
+
+    def test_finished_trace_fact_surface(self) -> None:
+        from torchlens._trace_core.op_store import _FACT
+
+        trace = _capture()
+        store = trace.__dict__["_trace_core"].ops
+        assert store.fact_blocks is not None
+        op = trace.ops["relu_1_2"]
+        fid = store.layout.fid_by_name["func_config"]
+        assert store.cell_get(op._row, fid) is _FACT
+        config = op.func_config
+        assert isinstance(config, dict)
+        # Identity-stable after the first read; per-row mutation isolated.
+        assert op.func_config is config
+        config["__probe__"] = 1
+        sibling = trace.ops["conv2d_1_1"]
+        assert "__probe__" not in sibling.func_config
+        assert isinstance(op.code_context, list)
+        assert isinstance(op.arg_names, tuple)
+
+    def test_direct_write_overrides_shared_fact(self) -> None:
+        trace = _capture()
+        op = trace.ops["relu_1_2"]
+        op.func_config = {"replaced": True}
+        assert op.func_config == {"replaced": True}
+        assert trace.ops["conv2d_1_1"].func_config != {"replaced": True}
+
+    def test_fact_cell_delete_is_genuinely_absent(self) -> None:
+        from torchlens._trace_core.fact_blocks import convert_fact_cells
+
+        store = self._fact_store(
+            [{"func_call_id": 1, "func_config": {"dim": 0}}]
+        )
+        convert_fact_cells(store, {})
+        fid = store.layout.fid_by_name["func_config"]
+        assert store.cell_del(0, fid) is True
+        assert store.cell_get(0, fid) is _MISSING
+
+    def test_pickle_round_trip_materializes_facts(self) -> None:
+        trace = _capture()
+        clone = pickle.loads(pickle.dumps(trace))
+        op = clone.ops["relu_1_2"]
+        assert isinstance(op.func_config, dict)
+        assert isinstance(op.code_context, list)
+        assert op.func_name == "relu"

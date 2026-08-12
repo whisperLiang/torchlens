@@ -477,6 +477,12 @@ def freeze_trace_relation_views(trace: Any) -> RelationFreezeStats | None:
     group_keepalive: list[Any] = []
     convert_group_cells(core, store, pool, group_refs, group_keepalive)
 
+    # M7 shared-fact blocks: call-level facts once per FunctionCall group,
+    # param facts once per distinct value (the ParamAlias block).
+    from .fact_blocks import convert_fact_cells
+
+    convert_fact_cells(store, pool)
+
     for layer_log in (getattr(trace, "layer_logs", None) or {}).values():
         record_dict = getattr(layer_log, "__dict__", None)
         if record_dict is None:

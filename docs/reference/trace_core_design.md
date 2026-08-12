@@ -120,6 +120,14 @@ coordination only, so it never becomes a generic dict-driven GodStore. Component
   record per group. Op rows keep only output-specific facts. A direct write to one Op of
   a shared call group creates a PER-OP overlay, never mutates the shared group row.
   `_copy_shared_fields_for_output` dies here.
+  M7 as-landed disposition: Equivalence/Recurrence ship as `MembershipGroups`/`GroupRef`
+  live views (`groups.py`); FunctionCall call-facts and the ParamAlias value block ship
+  as shared-fact column families (`fact_blocks.py`, `_FACT` member cells, per-row
+  hydration on the facade); conditional source/span groups need NO separate group table
+  — every per-op conditional relation container is already an interned immutable view
+  (M6, equal views share ONE object through the intern pool) and the dense-id primary
+  conditional records live on the Trace side (M10 decomposition territory), so a
+  conditional group block would duplicate existing sharing without deleting any copy.
 - **Payload arena**: preserves IDENTITY, not equality. Same tensor object = same handle;
   equal-but-distinct stays distinct; no value dedup; lazy blob refs stay lazy; in-place
   mutation stays visible through every aliasing handle; replacement writes allocate
