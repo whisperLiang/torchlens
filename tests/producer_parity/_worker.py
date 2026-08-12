@@ -33,7 +33,7 @@ def snapshot_payload(run: object) -> dict:
     }
 
 
-def load_snapshot(payload: dict) -> object:
+def load_snapshot(payload: dict):  # -> Snapshot (imported lazily)
     """Rebuild a Snapshot from a worker payload."""
 
     from ._snapshot import Snapshot, TokenSite
