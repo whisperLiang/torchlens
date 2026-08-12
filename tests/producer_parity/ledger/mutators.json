@@ -6,14 +6,14 @@
   "torchlens/backends/tf/backend.py:997",
   "torchlens/backends/tf/backend.py:1028",
   "torchlens/backends/tinygrad/backend.py:1159",
-  "torchlens/ir/capture_events.py:820"
+  "torchlens/ir/capture_events.py:873"
  ],
  "replace_op_event_callers": [
-  "torchlens/backends/torch/backend.py:877",
+  "torchlens/backends/torch/backend.py:878",
   "torchlens/backends/torch/model_prep.py:2135",
   "torchlens/backends/torch/model_prep.py:1832",
   "torchlens/backends/torch/model_prep.py:1964",
-  "torchlens/backends/torch/ops.py:5932",
+  "torchlens/backends/torch/ops.py:6216",
   "torchlens/postprocess/graph_traversal.py:149",
   "torchlens/user_funcs.py:759"
  ]

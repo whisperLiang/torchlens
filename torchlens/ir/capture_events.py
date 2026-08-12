@@ -30,6 +30,11 @@ from .op_record import OpRecord, record_with_flat_updates
 from .predicate import RecordContext
 from .refs import ParamRef, ReservedLabel
 
+# The journal op lane's record union: compat flat events (legacy producer,
+# preview backends) and decomposed records (torch decomposed producer). The
+# compat member dies in S15.
+JournalOp = OpEvent | OpRecord
+
 
 # Declared merge law: how each journal lane combines when one run's stream is
 # folded into an accumulating journal (multi-pass recording, failed-partial
@@ -160,7 +165,7 @@ def _clone_op_event_for_replay(event: Any) -> Any:
 class CaptureEvents:
     """Mutable event buffer allocated once per capture."""
 
-    op_events: list[OpEvent] = field(default_factory=list)
+    op_events: list[JournalOp] = field(default_factory=list)
     module_prep_events: list[ModulePrepEvent] = field(default_factory=list)
     module_enter_events: list[ModuleEnterEvent] = field(default_factory=list)
     module_exit_events: list[ModuleExitEvent] = field(default_factory=list)
@@ -433,7 +438,7 @@ class CaptureEvents:
             detaches all runtime-handle sidecars.
         """
 
-        structural_events: list[OpEvent] = []
+        structural_events: list[JournalOp] = []
         for event in self.op_events:
             tensor = replace(event.output.tensor, payload=None)
             transformed = event.output.transformed_tensor
@@ -459,14 +464,23 @@ class CaptureEvents:
                     args_template=None,
                     kwargs_template=None,
                 )
-            structural_events.append(
-                replace(
-                    event,
-                    output=output,
-                    templates=templates,
-                    source_trace=None,
+            if isinstance(event, OpRecord):
+                structural_events.append(
+                    replace(
+                        event,
+                        core=replace(event.core, output=output),
+                        templates=templates,
+                    )
                 )
-            )
+            else:
+                structural_events.append(
+                    replace(
+                        event,
+                        output=output,
+                        templates=templates,
+                        source_trace=None,
+                    )
+                )
         self.op_events = structural_events
         self.module_prep_events = [
             replace(
@@ -508,7 +522,7 @@ class CaptureEvents:
         self.grad_fn_handles_by_label_raw.clear()
         self.recent_events.clear()
 
-    def amended_op_records(self) -> list[OpEvent]:
+    def amended_op_records(self) -> list[JournalOp]:
         """Return the canonical folded view of the op lane.
 
         The ONE reducer every amended-state consumer reads (producer
@@ -521,7 +535,7 @@ class CaptureEvents:
 
         return self.op_events
 
-    def amended_op_record(self, label_raw: str) -> OpEvent | None:
+    def amended_op_record(self, label_raw: str) -> JournalOp | None:
         """Return one op record through the folded view."""
 
         return self.op_event_by_label_raw.get(label_raw)
@@ -532,7 +546,7 @@ class CaptureEvents:
         self.event_seq += 1
         return self.event_seq
 
-    def append(self, event: OpEvent | OpRecord) -> None:
+    def append(self, event: JournalOp) -> None:
         """Append a single operation event/record, stamping the global seq.
 
         The seq slot lives on the flat event for compat ``OpEvent``s and on
@@ -827,7 +841,7 @@ def register_live_event(trace: Any, event: OpEvent) -> None:
         events.grad_fn_handles_by_label_raw[event.label_raw] = event.grad_fn_handle
 
 
-def replace_op_event(trace: Any, label_raw: str, **updates: Any) -> OpEvent | None:
+def replace_op_event(trace: Any, label_raw: str, **updates: Any) -> JournalOp | None:
     """Replace one emitted operation event with updated field values.
 
     Parameters
@@ -841,8 +855,8 @@ def replace_op_event(trace: Any, label_raw: str, **updates: Any) -> OpEvent | No
 
     Returns
     -------
-    OpEvent | None
-        Updated event when found, otherwise ``None``.
+    OpEvent | OpRecord | None
+        Updated record when found, otherwise ``None``.
     """
 
     events = getattr(trace, "capture_events", None)

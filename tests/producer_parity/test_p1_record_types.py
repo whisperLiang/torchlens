@@ -39,7 +39,6 @@ from torchlens.ir.op_record import (
 from torchlens.ir.op_record_scatter import (
     CELL_SOURCES,
     EXTRA_KEY_CHANNELS,
-    scatter_record_to_cells,
 )
 
 pytestmark = pytest.mark.smoke
@@ -161,66 +160,66 @@ def _journal_events(model, inputs) -> list:
 
 
 @pytest.mark.heavy
-def test_scatter_parity_cell_for_cell(tmp_path: Path) -> None:
-    """Adapter + scatter reproduce _fields_from_event on record-sourced cells."""
+def test_scatter_is_the_single_ingest_truth(tmp_path: Path) -> None:
+    """Every journal record ingests through the generated scatter (P3).
 
-    from torchlens.postprocess._materialize import _fields_from_event
+    ``_fields_from_event`` is deleted; the record-sourced cells of every
+    materialized op flow through ``scatter_record_to_cells`` exactly once per
+    record, and the scatter output lands verbatim in the Op fields ingest
+    hands to construction (spot-checked on identity cells). Byte-identity of
+    the full store/journal/artifact layers vs pre-migration main is carried
+    by the temporal-baseline comparator (P0 archive, 6.2b).
+    """
+
+    import torchlens.ir.op_record_scatter as scatter_module
 
     from ._models import SCENARIOS
     from ._snapshot import run_scenario
 
-    gated_classes = ("CORE", "FACET:", "EXTRAS:", "DEFAULT")
-    checked_cells = 0
     for scenario in SCENARIOS:
         if scenario.name == "cnn_backward":
             continue  # backward mutates grads post-capture; journal identical anyway
-        events: list = []
+        journal_labels: list[str] = []
 
-        def collect(journal_events, _sink=events) -> None:
-            _sink.extend(journal_events.op_events)
+        def collect(journal_events, _sink=journal_labels) -> None:
+            _sink.extend(e.label_raw for e in journal_events.op_events)
 
-        with tempfile.TemporaryDirectory() as tmp:
-            run = run_scenario(
-                scenario,
-                Path(tmp),
-                with_artifact=False,
-                arm_shims=False,
-                journal_mutator=collect,
-            )
-        trace = run.trace
-        for event in events:
-            expected = _fields_from_event(
-                trace,
-                event,
-                op_event_labels={e.label_raw for e in events},
-                children=[],
-                equivalent_ops=set(),
-                buffer_address=None,
-                buffer_alias_snapshots={},
-                module_input_fields={},
-                module_output_fields={},
-                buffer_write_fields={},
-                grad_fn_handle=None,
-                input_io_role=None,
-                output_versions_by_child={},
-                op_events_by_label={e.label_raw: e for e in events},
-            )
-            record, extras = op_record_from_event(event)
-            cells = scatter_record_to_cells(record, extras, trace)
-            for name, value in cells.items():
-                source = CELL_SOURCES.get(name, "")
-                if not source.startswith(gated_classes):
-                    continue
-                if name == "source_trace":
-                    assert value is expected[name]
-                    continue
-                assert name in expected, f"scatter produced unknown cell {name!r}"
-                assert value == expected[name], (
-                    f"{scenario.name}:{event.label_raw}:{name}: "
-                    f"scatter {value!r} != legacy {expected[name]!r}"
+        scattered: list[tuple[str, dict]] = []
+        original_scatter = scatter_module.scatter_record_to_cells
+
+        def observing_scatter(record, extras, owning_trace):
+            cells = original_scatter(record, extras, owning_trace)
+            scattered.append((record.core.label_raw, cells))
+            return cells
+
+        scatter_module.scatter_record_to_cells = observing_scatter
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                run = run_scenario(
+                    scenario,
+                    Path(tmp),
+                    with_artifact=False,
+                    arm_shims=False,
+                    journal_mutator=collect,
                 )
-                checked_cells += 1
-    assert checked_cells > 1000, f"vacuity guard: only {checked_cells} cells compared"
+        finally:
+            scatter_module.scatter_record_to_cells = original_scatter
+        assert journal_labels, f"{scenario.name}: no journal rows (vacuous)"
+        scattered_labels = [label for label, _ in scattered]
+        assert sorted(scattered_labels) == sorted(journal_labels), (
+            f"{scenario.name}: scatter coverage mismatch — records not routed "
+            "through the single ingest truth"
+        )
+        # scatter output lands verbatim in the materialized rows (identity cells)
+        trace = run.trace
+        raw_labels = {
+            getattr(op, "raw_label", None) or getattr(op, "_label_raw", None)
+            for op in trace.ops
+        }
+        for label, cells in scattered:
+            assert cells["_label_raw"] == label
+            if label in raw_labels:
+                assert cells["type_index"] is not None
 
 
 def test_ingest_inputs_v1_reserves_aten_lane_and_covers_step0_reads() -> None:

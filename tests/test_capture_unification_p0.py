@@ -10,8 +10,8 @@ import torch
 from torch import nn
 
 import torchlens as tl
-import torchlens.postprocess as postprocess_mod
-from torchlens.ir import CaptureEvents, DeviceRef, DtypeRef
+import torchlens.postprocess._materialize as materialize_mod
+from torchlens.ir import DeviceRef, DtypeRef
 
 
 @dataclass(slots=True)
@@ -22,7 +22,6 @@ class CapturedEventSnapshot:
     module_prep_events: tuple[Any, ...]
     module_enter_events: tuple[Any, ...]
     module_exit_events: tuple[Any, ...]
-    events: CaptureEvents
 
 
 def _trace_and_capture_events(
@@ -48,23 +47,26 @@ def _trace_and_capture_events(
     """
 
     snapshots: list[CapturedEventSnapshot] = []
-    real_materialize = postprocess_mod.materialize_from_events
+    real_ingest = materialize_mod.ingest_op_records
 
-    def spy_materialize(trace: Any, events: CaptureEvents) -> None:
-        """Snapshot events, then delegate to the real materializer."""
+    def spy_ingest(inputs: Any, manifest: Any) -> Any:
+        """Snapshot the folded journal view, then delegate to the real ingest.
+
+        The step-0 interception seam is ``ingest_op_records(inputs, manifest)``
+        (producer unification P3); the journal lanes ride ``inputs.journal``.
+        """
 
         snapshots.append(
             CapturedEventSnapshot(
-                op_events=tuple(events.op_events),
-                module_prep_events=tuple(events.module_prep_events),
-                module_enter_events=tuple(events.module_enter_events),
-                module_exit_events=tuple(events.module_exit_events),
-                events=events,
+                op_events=tuple(inputs.journal.op_events),
+                module_prep_events=tuple(inputs.journal.module_prep_events),
+                module_enter_events=tuple(inputs.journal.module_enter_events),
+                module_exit_events=tuple(inputs.journal.module_exit_events),
             )
         )
-        real_materialize(trace, events)
+        return real_ingest(inputs, manifest)
 
-    monkeypatch.setattr(postprocess_mod, "materialize_from_events", spy_materialize)
+    monkeypatch.setattr(materialize_mod, "ingest_op_records", spy_ingest)
     trace = tl.trace(model, x)
     assert snapshots
     return trace, snapshots[0]

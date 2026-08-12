@@ -191,6 +191,7 @@ from ...capture.salient_args import extract_salient_args
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace
+    from ...ir.op_record import OpRecord
 
 
 class _AncestorBitset:

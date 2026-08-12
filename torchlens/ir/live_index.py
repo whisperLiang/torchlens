@@ -6,7 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
-from .events import ModuleFrame, OpEvent
+from .events import ModuleFrame
 
 
 class LiveIndexWindowError(KeyError):
@@ -17,17 +17,19 @@ class LiveIndexWindowError(KeyError):
 class LiveIndex:
     """Shared-engine-owned index over emitted operation events.
 
-    The index is populated only from ``OpEvent`` objects and small sibling-event
-    counters. It intentionally does not expose mutable ``Op`` field dictionaries.
+    The index is populated only from journal op records (compat ``OpEvent``
+    or decomposed ``OpRecord``, read through the shared flat-name protocol)
+    and small sibling-event counters. It intentionally does not expose
+    mutable ``Op`` field dictionaries.
     """
 
-    by_raw_label: dict[str, OpEvent] = field(default_factory=dict)
+    by_raw_label: dict[str, Any] = field(default_factory=dict)
     labels: list[str] = field(default_factory=list)
     children_by_parent: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
     module_entry_counts: dict[int, int] = field(default_factory=lambda: defaultdict(int))
     module_entries_by_label: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
 
-    def append(self, event: OpEvent) -> None:
+    def append(self, event: Any) -> None:
         """Index one emitted operation event.
 
         A raw label re-seen at this boundary (for example when a failed-partial
@@ -62,7 +64,7 @@ class LiveIndex:
             if event.label_raw not in children:
                 children.append(event.label_raw)
 
-    def replace(self, event: OpEvent) -> None:
+    def replace(self, event: Any) -> None:
         """Replace a previously indexed event.
 
         Parameters
@@ -96,7 +98,7 @@ class LiveIndex:
                 if event.label_raw not in children:
                     children.append(event.label_raw)
 
-    def require_event(self, label_raw: str) -> OpEvent:
+    def require_event(self, label_raw: str) -> Any:
         """Return an event or raise an explicit out-of-window error.
 
         Parameters

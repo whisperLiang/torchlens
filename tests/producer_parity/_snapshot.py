@@ -298,10 +298,19 @@ def _tensor_fingerprint(tensor: torch.Tensor) -> dict[str, Any]:
 
 
 def journal_snapshot(snapshot: Snapshot, events: Any) -> None:
-    """Canonicalize the op lane as consumed by step 0."""
+    """Canonicalize the op lane as consumed by step 0.
 
+    Decomposed ``OpRecord`` journals project through the inverse oracle
+    adapter (with the side-index grad-fn handle rebound), so both legs
+    snapshot in the SAME flat shape and stay cross-comparable.
+    """
+
+    from ._oracle_adapter import op_event_from_record
+
+    handles = getattr(events, "grad_fn_handles_by_label_raw", {}) or {}
     canonizer = _Canonicalizer(snapshot, "journal")
-    for event in events.op_events:
+    for entry in events.op_events:
+        event = op_event_from_record(entry, grad_fn_handle=handles.get(entry.label_raw))
         canonizer.anchor = event.label_raw
         row: dict[str, Any] = {}
         for f in dataclass_fields(event):

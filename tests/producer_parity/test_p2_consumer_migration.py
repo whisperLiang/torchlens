@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-import torch
 
 import torchlens as tl
 from torchlens.ir.capture_events import CaptureEvents
