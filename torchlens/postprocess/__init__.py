@@ -16,16 +16,26 @@ stable contract steps 0-20, split into thematic submodules:
   finalize any streamed bundle, optionally evict in-memory outs, and release
   live parameter references.
 
-Step ordering invariants:
-- Steps 1-3 MUST precede Step 5 (conditional branch detection needs orphan-free graph).
-- Module suffixes must be present on equivalence_class before Step 7 loop detection.
-- Step 7 MUST precede Step 8 (label generation needs recurrent_ops).
-- Step 8 MUST precede Step 9 (final info logging uses finalized labels).
-- Step 9 MUST precede Step 11 (lookup key generation needs module hierarchy data
-  populated in Step 9).
-- Step 10 (rename) MUST precede Step 11 (lookup keys use renamed labels).
-- Step 15.5 (_build_layer_logs) MUST precede Step 16 (_build_module_logs) because
-  Module.layers references Layer keys.
+Step ordering is DERIVED, not hand-maintained (design-ppdag-v3): each step's
+``PostprocessStepContract`` (``_contracts.py``) declares op-column
+writes/reads, placeholder probes, row effects, and trace-state tokens; the
+derivation (``_executor.py``) orients every conflict by the frozen
+``LEGACY_STEP_RANK`` and reproduces the registry order exactly (import
+checks R1/R2). The semantic direction authority is the reason-bearing
+``PINNED_ORDER_PAIRS`` corpus (import check K1; test-side K2 in
+``tests/test_postprocess_dag.py``) — the historical prose invariants
+("1-3 precede 5", "7 precedes 8", "15.5 precedes 16", ...) live there as
+machine-checked entries. Reordering steps requires editing the named corpus
+entry, re-recording the axes matrix, and the byte-identity oracles;
+warnings and first-exception order are pinned solely by day-1 order
+identity (a reorder adds a review gate for them).
+
+The read-triggers-write class: exactly one member is live inside steps
+1-20 — reading ``op.arg_expressions`` writes ``_arg_expressions_cache``.
+A write-audit trip on a ``*_cache`` column from a read site is
+ROOT-CAUSED, never widened away. Out-of-model, disclosed: deferred
+gradient streaming re-runs step-18/19-equivalent code after backward,
+outside the pipeline and its windows.
 
 """
 

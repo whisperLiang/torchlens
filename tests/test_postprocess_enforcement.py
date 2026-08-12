@@ -1,0 +1,148 @@
+"""Read/write enforcement over the postprocess axes matrix (design §8.2).
+
+Enforcement ships THIS phase: every axis of the recording matrix runs with
+the combined audit in ENFORCE mode — observed writes must be a subset of
+declared writes, observed reads a subset of declared reads + probes, and
+row-clone reads only on row-creating steps. An undeclared read or write on
+a covered axis fails CI the day it is introduced. The honest residual is a
+new configuration-gated path on an axis NOT in the matrix
+(``tests/support/postprocess_axes.py``); adding the config to the matrix is
+part of adding the config.
+
+The union-level reports (phantom declarations and permanent no-op writers)
+run the whole matrix in one process and are ``heavy``-marked; the per-axis
+enforcement runs are sub-second and live in the fast tier.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Callable
+
+import pytest
+
+from support.postprocess_axes import iter_axes
+
+_AXES = iter_axes()
+_AXIS_IDS = [name for name, _ in _AXES]
+
+#: Declared-but-never-observed writes with named config-gated exemptions —
+#: mirror of PHANTOM_WRITE_EXEMPTIONS in test_postprocess_dag.py, asserted
+#: here against the LIVE matrix union (the Opus-4 anti-laundering guard: a
+#: fabricated declaration is red the day it lands).
+EXPECTED_PHANTOM_WRITES = {
+    ("5", "is_terminal_bool"),
+    ("9", "args_template"),
+    ("9", "kwargs_template"),
+    ("18", "grad_ref"),
+    ("6", "internal_source_parents"),
+}
+
+#: Writers whose intercepted writes are never content-effective on ANY
+#: matrix axis (design §2.4 guard 2, pinned-findings discipline): these are
+#: placeholder-equal rewrites (output-row init, equal-content scrub
+#: rebinds, absent-feature configs). A permanent no-op writer cannot
+#: discharge a read-before-write finding; a NEW entry here is reviewed,
+#: never silently accepted. Matrix-relative: var_names IS effective on an
+#: assignment-bearing model (test_record_field_policy proves it) — the
+#: oracle models' forwards simply resolve to the empty default.
+PINNED_NOOP_WRITERS = {
+    "1": frozenset((
+        "container_path", "container_spec", "dropped_edge_tensor_args",
+        "dtype", "has_out_variations", "input_to_module_calls", "is_buffer",
+        "is_input", "is_internal_source", "is_transform", "non_tensor_kwargs",
+        "num_kwargs", "num_params_frozen", "num_passes",
+        "out_versions_by_child", "pass_index", "recurrent_ops", "shape",
+        "transform_chain", "transform_fn_name", "transform_fn_qualname",
+        "transform_fn_source", "transform_kind", "transformed_out_dtype",
+        "transformed_out_shape", "unattributed_tensor_args", "var_names",
+    )),
+    "3": frozenset((
+        "_edge_uses", "args_template", "conditional_arm_children",
+        "conditional_elif_children", "conditional_else_children",
+        "conditional_entry_children", "conditional_then_children",
+        "interventions", "kwargs_template",
+    )),
+    "4": frozenset(("has_output_descendant",)),
+    "5": frozenset(("conditional_elif_children", "conditional_else_children")),
+    "6": frozenset(("has_children", "has_input_ancestor")),
+    "7": frozenset(("equivalence_class",)),
+    "9": frozenset((
+        "conditional_elif_children", "conditional_else_children",
+        "is_buffer", "is_input", "is_output",
+    )),
+    "11.5": frozenset(("var_names",)),
+    "11.75": frozenset((
+        "dtype", "shape", "transformed_activation_memory", "transformed_out",
+        "transformed_out_dtype", "transformed_out_shape",
+    )),
+}
+
+
+@pytest.mark.parametrize(("axis_name", "axis_fn"), _AXES, ids=_AXIS_IDS)
+def test_axis_passes_read_and_write_enforcement(
+    axis_name: str,
+    axis_fn: Callable[[], Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One matrix axis captures green under full contract enforcement."""
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_READ_AUDIT", "enforce")
+    trace = axis_fn()
+    if trace is not None:
+        trace.cleanup()
+
+
+@pytest.mark.heavy
+def test_matrix_union_reports(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phantom-declaration and no-op-writer reports over the full matrix."""
+
+    import torchlens.postprocess as pp
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_WRITE_AUDIT", "record")
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_READ_AUDIT", "record")
+    for sink in (
+        pp.RECORDED_STEP_WRITES,
+        pp.RECORDED_STEP_READS,
+        pp.RECORDED_STEP_CLONE_READS,
+        pp.RECORDED_STEP_EFFECTIVE_WRITES,
+    ):
+        sink.clear()
+    try:
+        for _, axis_fn in iter_axes():
+            trace = axis_fn()
+            if trace is not None:
+                trace.cleanup()
+
+        phantom: set[tuple[str, str]] = set()
+        noop: dict[str, frozenset[str]] = {}
+        for step, contract in pp.POSTPROCESS_STEP_CONTRACTS.items():
+            if step == "0":
+                continue
+            observed = pp.RECORDED_STEP_WRITES.get(step, set())
+            effective = pp.RECORDED_STEP_EFFECTIVE_WRITES.get(step, set())
+            for column in contract.writes - observed:
+                phantom.add((step, column))
+            never_effective = frozenset((observed & contract.writes) - effective)
+            if never_effective:
+                noop[step] = never_effective
+
+        assert phantom == EXPECTED_PHANTOM_WRITES, (
+            "declared-never-observed writes drifted; a NEW phantom "
+            "declaration is the cheapest laundering path — root-cause it, "
+            f"never exempt it silently. Diff: {phantom ^ EXPECTED_PHANTOM_WRITES}"
+        )
+        assert noop == PINNED_NOOP_WRITERS, (
+            "the permanent no-op writer report drifted; a new no-op writer "
+            "cannot discharge read-before-write findings and is reviewed, "
+            "never silently accepted."
+        )
+    finally:
+        for sink in (
+            pp.RECORDED_STEP_WRITES,
+            pp.RECORDED_STEP_READS,
+            pp.RECORDED_STEP_CLONE_READS,
+            pp.RECORDED_STEP_EFFECTIVE_WRITES,
+        ):
+            sink.clear()
