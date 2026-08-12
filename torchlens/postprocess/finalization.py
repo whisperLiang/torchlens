@@ -145,6 +145,15 @@ def _finalize_param_logs(self: "Trace") -> None:
         pl.num_calls = max(1, len(pl.used_by_ops))
         pl.source_trace = self
 
+    # Adopt the finished Param rows into the per-trace kind table (M8): each
+    # record's detached single row moves into ONE shared store owned by the
+    # trace core; facade behavior is unchanged.
+    _core = self.__dict__.get("_trace_core")
+    if _core is not None:
+        from .._trace_core.record_rows import adopt_records
+
+        adopt_records(_core, "param", self.param_logs)
+
     # Param grad metadata is populated lazily via backward hooks in _log_tensor_grad.
     # Param._param_ref is intentionally released later, after module finalization has
     # consumed param metadata; Param re-fetches from Trace._source_model_ref on demand.

@@ -101,6 +101,7 @@ class TraceCore:
     __slots__ = (
         "tables",
         "ops",
+        "kind_rows",
         "pool",
         "closures",
         "edges",
@@ -120,6 +121,9 @@ class TraceCore:
         # The Op row store (op_store.OpRowStore) once the M5 ingress binds it;
         # None until materialize step 0 creates it for a captured run.
         self.ops: Any = None
+        # The M8 non-Op kind tables (param/buffer/module/module_call/
+        # func_call_location), populated by the build passes' adopt_records.
+        self.kind_rows: dict[str, Any] = {}
         self.pool = InternPool()
         self.closures = ClosurePool()
         self.edges: dict[str, EdgeTable] = {}
@@ -191,6 +195,8 @@ class TraceCore:
 
         for table in self.tables.values():
             table.freeze()
+        for row_store in self.kind_rows.values():
+            row_store.freeze()
         for family, edges in self.edges.items():
             del family
             if len(edges):
@@ -203,6 +209,7 @@ class TraceCore:
         child = TraceCore.__new__(TraceCore)
         child.tables = self.tables
         child.ops = self.ops
+        child.kind_rows = self.kind_rows
         child.pool = self.pool
         child.closures = self.closures
         child.edges = self.edges

@@ -663,6 +663,11 @@ def postprocess(
     if _core is not None and _core.ops is not None:
         _freeze_relation_views(self)
         _core.ops.freeze()
+        # The M8 non-Op kind tables (param/module/module_call/buffer/
+        # func_call_location) seal with the same lifecycle: appends stop,
+        # later writes keep landing in row cells via the sealed-store path.
+        for _kind_store in _core.kind_rows.values():
+            _kind_store.freeze()
 
     if getattr(self, "verbose", False):
         print(f"[torchlens] Postprocessing complete ({time.time() - _post_t0:.2f}s)")
