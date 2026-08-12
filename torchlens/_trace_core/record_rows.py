@@ -119,15 +119,23 @@ def record_state_items(record: Any) -> Iterator[tuple[str, Any]]:
     Declared stored fields come first in layout order (unset cells skipped),
     followed by undeclared instance attributes in insertion order — the same
     complete state the dict-era ``__dict__`` enumeration yielded.
+
+    Instance-dict entries that SHADOW a declared stored field are skipped:
+    the cell descriptor is a data descriptor, so such a shadow is unreachable
+    through attribute access, and streaming it would let a dead ``__dict__``
+    write silently replace the live cell value on restore (the store cell is
+    the single truth for declared fields).
     """
 
     instance_dict = record.__dict__
     store = instance_dict.get(CORE_KEY)
+    declared = type(record)._TL_LAYOUT.fid_by_name
     if store is not None:
         yield from store.items(instance_dict[ROW_KEY])
     for name, value in instance_dict.items():
-        if name is not CORE_KEY and name is not ROW_KEY:
-            yield name, value
+        if name is CORE_KEY or name is ROW_KEY or name in declared:
+            continue
+        yield name, value
 
 
 def record_state_restore(record: Any, mapping: Any) -> None:

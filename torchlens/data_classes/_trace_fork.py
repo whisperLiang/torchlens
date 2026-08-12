@@ -373,10 +373,19 @@ _RECORD_TRACE_REF_FIELDS = ("_source_trace_ref", "_source_ref")
 def _copy_record_extras(
     parent_record: Any, shell: Any, translator: _RecordTranslator, fork_ref: Any
 ) -> None:
-    """Copy a record facade's instance extras onto its fork shell."""
+    """Copy a record facade's instance extras onto its fork shell.
 
+    Declared stored names are excluded: a ``__dict__`` entry shadowing a
+    declared field is unreachable dead weight (the cell descriptor wins),
+    and copying it would propagate the inert shadow into every fork.
+    """
+
+    declared = getattr(type(parent_record), "_TL_LAYOUT", None)
+    declared_names = declared.fid_by_name if declared is not None else ()
     for key, value in parent_record.__dict__.items():
         if key == CORE_KEY or key == ROW_KEY or key == "_facets_cache":
+            continue
+        if key in declared_names:
             continue
         if key == "_source_trace_ref":
             shell.__dict__[key] = fork_ref

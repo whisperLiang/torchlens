@@ -338,3 +338,36 @@ def test_facade_cache_weak_valued_with_strong_fallback() -> None:
     del held
     gc.collect()
     assert strong_core.facade("op", strong_row) == {"row": strong_row}
+
+
+@pytest.mark.smoke
+def test_record_dict_shadow_never_streams() -> None:
+    """A ``__dict__`` shadow of a declared record field never reaches state.
+
+    The cell descriptor is a data descriptor, so a raw ``__dict__`` write on
+    a declared field name is unreachable through attribute access; streaming
+    it into pickle/fork state let the dead entry silently replace the live
+    cell value on restore (sol review finding 3).
+    """
+
+    import pickle
+
+    import torchlens as tl
+    from torchlens._trace_core.record_rows import record_state_items
+
+    model = torch.nn.Sequential(torch.nn.Linear(3, 4), torch.nn.ReLU())
+    trace = tl.trace(model, torch.randn(1, 3))
+    param = next(iter(trace.params.values()))
+    live_value = param.module_address
+
+    param.__dict__["module_address"] = "__dict_shadow__"
+    param.__dict__["user_note"] = "keep_me"
+
+    assert param.module_address == live_value, "shadow must not affect the facade"
+    occurrences = [v for k, v in record_state_items(param) if k == "module_address"]
+    assert occurrences == [live_value], f"shadow leaked into state: {occurrences}"
+    assert dict(record_state_items(param)).get("user_note") == "keep_me"
+
+    restored = pickle.loads(pickle.dumps(param))
+    assert restored.module_address == live_value
+    assert restored.user_note == "keep_me"
