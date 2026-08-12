@@ -149,3 +149,144 @@ def test_scrub_completeness_tripwire_uses_adapter_enumeration() -> None:
             blob_specs=[],
             blob_counter=[0],
         )
+
+
+class _ColumnarBackedState:
+    """Facade-shaped object whose state lives in an external column store."""
+
+    __slots__ = ("_core", "_row_id")
+
+    def __init__(self, core: dict[str, list[object]], row_id: int) -> None:
+        """Bind one row of a struct-of-arrays core.
+
+        Parameters
+        ----------
+        core:
+            Column-name-to-column mapping.
+        row_id:
+            Row index of this facade.
+        """
+
+        self._core = core
+        self._row_id = row_id
+
+    def __tl_state_items__(self) -> "list[tuple[str, object]]":
+        """Materialize the full row as adapter state."""
+
+        return [
+            (column_name, column[self._row_id])
+            for column_name, column in sorted(self._core.items())
+        ]
+
+    def __tl_state_restore__(self, mapping: "dict[str, object]") -> None:
+        """Install restored state into a fresh single-row core."""
+
+        self._core = {name: [value] for name, value in mapping.items()}
+        self._row_id = 0
+
+
+def test_state_items_prefers_columnar_opt_in_hook_over_slots() -> None:
+    """``__tl_state_items__`` wins over dict/slot introspection."""
+
+    core = {"alpha": [10, 11], "beta": ["x", "y"]}
+    obj = _ColumnarBackedState(core, row_id=1)
+
+    assert list(state_items(obj)) == [("alpha", 11), ("beta", "y")]
+
+
+def test_state_restore_prefers_columnar_opt_in_hook() -> None:
+    """``__tl_state_restore__`` receives the mapping instead of slot writes."""
+
+    core = {"alpha": [10, 11], "beta": ["x", "y"]}
+    obj = _ColumnarBackedState(core, row_id=1)
+    restored = state_restore(state_new(_ColumnarBackedState), dict(state_items(obj)))
+
+    assert list(state_items(restored)) == [("alpha", 11), ("beta", "y")]
+    assert restored is not obj
+
+
+def test_field_order_state_coverage_on_live_records() -> None:
+    """Coupling-A tripwire: declared fields must flow through ``state_items``.
+
+    Save/load, pickle, scrub, and fork all enumerate object state through
+    ``state_items``. A storage re-plumbing that turns a declared field into a
+    computed property without opting into ``__tl_state_items__`` would
+    silently drop it from every persistence path; this test fails first.
+    """
+
+    from torch import nn
+
+    import torchlens as tl
+    from torchlens import constants as tl_constants
+    from torchlens.data_classes.layer import Layer
+    from torchlens.data_classes.module import Module, ModuleCall
+    from torchlens.data_classes.op import Op
+    from torchlens.data_classes.param import Param
+    from torchlens.data_classes.trace import Trace
+
+    class _CouplingModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.conv = nn.Conv2d(1, 2, kernel_size=3, padding=1)
+            self.head = nn.Linear(2, 3)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            y = torch.relu(self.conv(x))
+            return self.head(y.mean(dim=(2, 3)))
+
+    torch.manual_seed(0)
+    trace = tl.trace(_CouplingModel(), torch.linspace(-1.0, 1.0, 16).reshape(1, 1, 4, 4))
+    cases: list[tuple[object, tuple[str, ...]]] = [
+        (trace, tuple(tl_constants.MODEL_LOG_FIELD_ORDER)),
+        (
+            next(iter(trace.ops.values())),
+            tuple(tl_constants.LAYER_PASS_LOG_FIELD_ORDER),
+        ),
+        (
+            next(iter(trace.layers.values())),
+            tuple(tl_constants.LAYER_LOG_FIELD_ORDER),
+        ),
+        (
+            next(iter(trace.modules.values())),
+            tuple(tl_constants.MODULE_LOG_FIELD_ORDER),
+        ),
+        (
+            next(iter(trace.module_calls.values())),
+            tuple(tl_constants.MODULE_PASS_LOG_FIELD_ORDER),
+        ),
+        (
+            next(iter(trace.params.values())),
+            tuple(tl_constants.PARAM_LOG_FIELD_ORDER),
+        ),
+    ]
+    assert isinstance(cases[0][0], Trace)
+    assert isinstance(cases[1][0], Op)
+    assert isinstance(cases[2][0], Layer)
+    assert isinstance(cases[3][0], Module)
+    assert isinstance(cases[4][0], ModuleCall)
+    assert isinstance(cases[5][0], Param)
+    for record, field_order in cases:
+        state_keys = {name for name, _ in state_items(record)}
+        dropped: list[str] = []
+        for field_name in field_order:
+            descriptor = next(
+                (
+                    mro_cls.__dict__[field_name]
+                    for mro_cls in type(record).__mro__
+                    if field_name in mro_cls.__dict__
+                ),
+                None,
+            )
+            if isinstance(descriptor, property):
+                continue
+            try:
+                getattr(record, field_name)
+            except AttributeError:
+                continue
+            if field_name not in state_keys:
+                dropped.append(field_name)
+        assert not dropped, (
+            f"{type(record).__name__} declared fields invisible to "
+            f"state_items (would silently drop from save/pickle/scrub): "
+            f"{dropped}"
+        )
