@@ -33,6 +33,13 @@ import numpy as np
 #: Unset-cell sentinel; distinct from None (a real storable value).
 _MISSING = object()
 
+#: CSR-backed relation cell sentinel (M6): the value lives in the store's
+#: dataflow edge table; the facade descriptor rematerializes an immutable
+#: tuple view on first access and caches it back through ``cell_set``.
+#: Distinct from ``_MISSING`` so present/absent semantics stay exact —
+#: ``cell_del`` on a ``_CSR`` cell clears to genuinely absent.
+_CSR = object()
+
 #: Overlay-miss sentinel local to cell reads.
 _NO_OVERLAY = object()
 
@@ -116,7 +123,16 @@ class OpRowStore:
         Shared field layout (one module-level instance per process).
     """
 
-    __slots__ = ("layout", "_rows", "_columns", "_overlay", "_n_rows", "_sealed")
+    __slots__ = (
+        "layout",
+        "_rows",
+        "_columns",
+        "_overlay",
+        "_n_rows",
+        "_sealed",
+        "dataflow_edges",
+        "ref_labels",
+    )
 
     def __init__(self, layout: OpStoreLayout) -> None:
         """Create an empty building-phase store."""
@@ -127,6 +143,12 @@ class OpRowStore:
         self._overlay: dict[int, Any] = {}
         self._n_rows = 0
         self._sealed = False
+        # The M6 dataflow family: bound at the freeze-time relation
+        # conversion (same EdgeTable object registered in the owning
+        # TraceCore's edge registry) together with the row -> reference-label
+        # table the facade descriptors use to rematerialize views.
+        self.dataflow_edges: Any = None
+        self.ref_labels: dict[int, str] | None = None
 
     def __len__(self) -> int:
         """Return the number of rows ever appended (removed rows included)."""
@@ -350,6 +372,11 @@ class DetachedOpStore:
     """
 
     __slots__ = ("layout", "_cells")
+
+    #: Detached rows never carry CSR-backed relations (class-level constants
+    #: so the facade descriptors can probe both store kinds uniformly).
+    dataflow_edges = None
+    ref_labels = None
 
     def __init__(self, layout: OpStoreLayout) -> None:
         """Create an empty single-row store."""

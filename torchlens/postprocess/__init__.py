@@ -649,11 +649,16 @@ def postprocess(
 
     # The core freeze point (trace_core_design.md section 3.3): forward
     # topology froze logically at step 17, the payload plane settled through
-    # step 20, and the ancestor closures were just interned -- transpose the
-    # Op row store into its frozen columnar form. Later public writes land in
-    # the store's sparse overlay; facade behavior is unchanged.
+    # step 20, and the ancestor closures were just interned. The M6 relation
+    # conversion runs here — parents/children project into the core's
+    # canonical dataflow edge table (differentially verified before the
+    # staging cells die) and the remaining relation families become interned
+    # immutable views — then the Op row store seals (columnar transpose on
+    # large traces). Later public writes land in the store's sparse overlay;
+    # facade behavior is otherwise unchanged.
     _core = self.__dict__.get("_trace_core")
     if _core is not None and _core.ops is not None:
+        _freeze_relation_views(self, _core)
         _core.ops.freeze()
 
     if getattr(self, "verbose", False):

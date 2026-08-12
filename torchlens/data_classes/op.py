@@ -88,7 +88,14 @@ from ..quantities import (
     as_macs,
 )
 from .._state import pause_logging
-from .._trace_core.op_store import _MISSING, DetachedOpStore, OpStoreLayout
+from .._trace_core.op_store import _CSR, _MISSING, DetachedOpStore, OpStoreLayout
+from .._trace_core.relation_views import (
+    OP_BITSET_VIEW_FIELDS,
+    OP_DATAFLOW_FIELDS,
+    OP_FROZENSET_VIEW_FIELDS,
+    OP_TUPLE_VIEW_FIELDS,
+    materialize_dataflow_view,
+)
 from ..backends.torch._tl import mark_detached_saved_activation
 from ._accessor_base import Accessor
 from .field_policy import (
@@ -217,34 +224,38 @@ _LAYER_PASS_LOG_CONTAINER_DEFAULTS: dict[str, Any] = {
     "transform_config": {},
     "unattributed_tensor_args": (),
     "dropped_edge_tensor_args": (),
-    "parent_params": [],
-    "_param_barcodes": [],
+    # Relation view fields (M6, JMT-FORK-1): the declared restore type is the
+    # IMMUTABLE view — ``coerce_container_typed_state`` normalizes legacy
+    # list/set state to tuple/frozenset on load, so loaded traces present the
+    # same immutable relation surface as live finished captures.
+    "parent_params": (),
+    "_param_barcodes": (),
     "parent_param_ops": {},
-    "_param_logs": [],
+    "_param_logs": (),
     "param_shapes": [],
     "equivalent_ops": set(),
     "recurrent_ops": [],
-    "parents": [],
+    "parents": (),
     "parent_arg_positions": {},
-    "root_ancestors": set(),
-    "children": [],
-    "input_ancestors": set(),
-    "output_descendants": set(),
-    "internal_source_parents": [],
-    "internal_source_ancestors": set(),
-    "in_conditionals": [],
-    "conditional_branch_stack": [],
-    "conditional_entry_children": [],
-    "conditional_then_children": [],
+    "root_ancestors": frozenset(),
+    "children": (),
+    "input_ancestors": frozenset(),
+    "output_descendants": frozenset(),
+    "internal_source_parents": (),
+    "internal_source_ancestors": frozenset(),
+    "in_conditionals": (),
+    "conditional_branch_stack": (),
+    "conditional_entry_children": (),
+    "conditional_then_children": (),
     "conditional_elif_children": {},
-    "conditional_else_children": [],
+    "conditional_else_children": (),
     "conditional_arm_children": {},
-    "modules": [],
-    "module_call_stack": [],
-    "input_to_module_calls": [],
+    "modules": (),
+    "module_call_stack": (),
+    "input_to_module_calls": (),
     "module_entry_arg_keys": {},
-    "output_of_modules": [],
-    "output_of_module_calls": [],
+    "output_of_modules": (),
+    "output_of_module_calls": (),
     "func_config": {},
 }
 _LAYER_PASS_LOG_DEFAULT_FILL = {
@@ -4207,16 +4218,100 @@ class _OpField:
             raise AttributeError(self._name)
 
 
-def _install_op_field_descriptors() -> None:
-    """Install one ``_OpField`` per stored field on the ``Op`` class."""
+class _RelationViewField(_OpField):
+    """Descriptor for one immutable-view relation field (M6, JMT-FORK-1).
 
+    While a shared ``OpRowStore`` is BUILDING, writes stage raw mutable
+    containers (postprocess mutates them in place). Once the store is sealed
+    — and always on detached single-row stores (copy/pickle/fork/loaded) —
+    writes normalize ``list``/``set`` values to the field's immutable view
+    type, so a finished record can never re-expose a mutable relation
+    container regardless of which write path assigned it.
+    """
+
+    __slots__ = ("_view_type",)
+
+    def __init__(self, name: str, fid: int, view_type: type) -> None:
+        """Bind the descriptor with its immutable view type."""
+
+        super().__init__(name, fid)
+        self._view_type = view_type
+
+    def __set__(self, op: Any, value: Any) -> None:
+        """Write the cell, normalizing to the view type once finished."""
+
+        store = _CORE_GET(op)
+        cls = value.__class__
+        if (cls is list or cls is set) and (
+            store.frozen or store.__class__ is DetachedOpStore
+        ):
+            value = self._view_type(value)
+        store.cell_set(_ROW_GET(op), self._fid, value)
+
+
+class _DataflowField(_RelationViewField):
+    """Descriptor for the two CSR-backed dataflow fields.
+
+    A ``_CSR`` cell means the value lives in the store's edge-occurrence
+    table: the first read rematerializes the interned tuple view and caches
+    it back into the row (row cell on small sealed stores, sparse overlay on
+    transposed ones), so identity is stable across reads and uninspected
+    rows retain no per-row container.
+    """
+
+    __slots__ = ()
+
+    def __get__(self, op: Any, owner: Any = None) -> Any:
+        """Read the cell, rematerializing CSR-backed views on demand."""
+
+        if op is None:
+            return self
+        store = _CORE_GET(op)
+        row = _ROW_GET(op)
+        value = store.cell_get(row, self._fid)
+        if value is _CSR:
+            value = materialize_dataflow_view(store, row, self._name)
+            store.cell_set(row, self._fid, value)
+            return value
+        if value is _MISSING:
+            name = self._name
+            raise AttributeError(
+                f"{type(op).__name__!r} object has no attribute {name!r}",
+                name=name,
+                obj=op,
+            )
+        return value
+
+
+def _install_op_field_descriptors() -> None:
+    """Install the per-field data descriptors on the ``Op`` class.
+
+    Most stored fields get a plain ``_OpField``; the declared relation
+    families get view-normalizing descriptors (``_RelationViewField``) and
+    the dataflow pair additionally rematerializes from the CSR
+    (``_DataflowField``).
+    """
+
+    tuple_view_names = frozenset(OP_TUPLE_VIEW_FIELDS)
+    frozenset_view_names = frozenset(
+        OP_FROZENSET_VIEW_FIELDS + OP_BITSET_VIEW_FIELDS
+    )
+    dataflow_names = frozenset(OP_DATAFLOW_FIELDS)
     existing = vars(Op)
     for fid, name in enumerate(_OP_SLOT_NAMES):
         if name in existing:
             raise RuntimeError(
                 f"Op facade collision: {name!r} is already defined on Op"
             )
-        setattr(Op, name, _OpField(name, fid))
+        if name in dataflow_names:
+            descriptor: _OpField = _DataflowField(name, fid, tuple)
+        elif name in tuple_view_names:
+            descriptor = _RelationViewField(name, fid, tuple)
+        elif name in frozenset_view_names:
+            descriptor = _RelationViewField(name, fid, frozenset)
+        else:
+            descriptor = _OpField(name, fid)
+        setattr(Op, name, descriptor)
 
 
 _install_op_field_descriptors()

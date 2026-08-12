@@ -227,17 +227,30 @@ private; computed collapse metadata stays out of serialization.
   state byte-identically; `_internal_set` remains the unstamped path. Sanctioned
   writers: backward epoch append; sparse `annotations` sidecar; intervention/
   direct-write overlay; the step 18-20 payload plane.
-- **Public mutable containers — lazy hydration.** Internal consumers read compact
-  relations; the first PUBLIC access materializes the exact builtin (list/set/dict) into
-  that row's overlay, which becomes authoritative for that row; uninspected rows stay
-  compact. Byte-identical public types and mutation observability, near-zero cost for
-  untouched rows.
-- **The two copy-on-read fields** (`equivalent_ops`, `recurrent_ops`) are the exception:
-  today every read returns a FRESH copy and caller mutation is DISCARDED (the alias-
-  safety barrier). Durable hydration would make mutation stick; a shared cached copy
-  breaks the alias barrier (caller A's mutation visible to caller B). Default = byte-
-  identical fresh copies per read, materialized cheaply from the shared group row.
-  Immutable views = JMT-FORK-1.
+- **Relation accessors — immutable views (JMT-DECIDED 2026-08-12, supersedes the
+  lazy-hydration default for relation fields).** The label-sequence and label-set
+  relation accessors (`parents`, `children`, `modules`, `module_call_stack`,
+  `input_to_module_calls`, `output_of_modules`, `output_of_module_calls`,
+  `internal_source_parents`, `parent_params`, the conditional child/stack lists,
+  `input_ancestors`, `output_descendants`, `root_ancestors`,
+  `internal_source_ancestors`) return IMMUTABLE views — `tuple` for sequences,
+  `frozenset` for sets — once a trace is finished. This is an authorized public-type
+  break: in-place mutation (`op.children.append(...)`) raises instead of sticking, and
+  equal immutable views may be shared across records. During postprocess the staging
+  containers remain real mutable builtins; the conversion happens at the per-family
+  freeze. Dict-shaped relation metadata (`parent_arg_positions`,
+  `out_versions_by_child`, `module_entry_arg_keys`, `conditional_elif_children`,
+  `conditional_arm_children`, `parent_param_ops`) keeps its mutable dict type (a
+  mappingproxy would break `isinstance(..., dict)` consumers and pickling; revisit
+  only with a separate authorization).
+- **Non-relation public mutable containers — lazy hydration.** Internal consumers read
+  compact storage; the first PUBLIC access materializes the exact builtin into that
+  row's overlay, which becomes authoritative for that row; uninspected rows stay
+  compact.
+- **The two group-membership fields** (`equivalent_ops`, `recurrent_ops`): JMT-DECIDED
+  2026-08-12 — LIVE group-membership views (immutable, backed by the shared group row;
+  reads reflect group state, caller mutation impossible), replacing the historical
+  fresh-mutable-copy-per-read barrier. Lands in M7 with the group tables.
 - **`Op.copy()`**: internal output-node synthesis is a builder row append seeded from
   the source row; public `.copy()` is a detached one-row core honoring today's EXACT
   selective share/deep policy (deep metadata; share func/handles/source_trace/RNG
@@ -325,12 +338,12 @@ never a half-migrated family (where a false-VERIFIED hole would hide).
 
 ## 5. JMT forks (reserved decisions; the plan assumes every default)
 
-1. **JMT-FORK-1 — immutable views on the two copy-on-read fields.**
-   `equivalent_ops` -> `frozenset`, `recurrent_ops` -> `tuple`: O(1) reads vs today's
-   O(N)-per-read (O(N^2) over loops). PUBLIC TYPE CHANGE on exactly two fields.
-   Default: byte-identical fresh mutable copies. The only sound options are these two —
-   cached-copy hybrids break the alias barrier. Related sub-fork: durable hydration
-   (caller mutation would stick instead of being discarded); default preserves discard.
+1. **JMT-FORK-1 — DECIDED 2026-08-12: immutable views.** Relation accessors
+   (`child_ops` family: the label-sequence/label-set relation fields) return immutable
+   views (`tuple`/`frozenset`), and `equivalent_ops`/`recurrent_ops` become LIVE
+   group-membership views (`frozenset`/`tuple` backed by the shared group row): O(1)
+   reads vs the old O(N)-per-read copies (O(N^2) over loops). PUBLIC TYPE CHANGE,
+   authorized; aliases-v1 rows updated in the same waves (M6 relations / M7 groups).
 2. **JMT-FORK-2 — external UI regrouping** (`op.timing.*` etc.): already decided
    PLAN-ONLY by JMT; the plan document ships in M13 (everyday fields top-level;
    specialist facts under timing/autograd/geometry/provenance/storage/control_flow/
@@ -395,8 +408,8 @@ final acceptance.
 | **M3** (parallel lanes) | (a) slot dict-backed classes from the table with `__slots__`+`"__dict__"` (laziness measured); (b) `FunctionCallRef`/`ArgTemplateRef` identity-assumption grep (precondition for M7) | byte-identical |
 | **M4** | `_trace_core/` substrate, zero consumers: ids, columns, pools, edge-occurrence + CSR, ancestor-closure pool, groups, overlays, payload arena, facade cache. Executable prototypes immediately: `Op.copy` policy, COW fork + rollback, payload identity, parallel-edge order, partial capture, mutable-container hydration, GC lifetime | standalone unit suite |
 | **M5** | **The seam**: `_materialize.py` switches to builder ingress; Op facades authoritative (strong cache); scalars columnar, relations staged mutable; per-plane freeze lands; pools absorb `_compact_op_metadata`, bitsets absorb `_compact_ancestor_sets`; kills the `fields_dict` + 39-container transient; partial/no-op/error paths facade-backed. Shadow dual-write parity oracle runs one full CI cycle INSIDE this wave, then is deleted | dual-path parity, deletion proof, scale benchmark, classics spot-check |
-| **M6** | Relations family-by-family: parents/children + arg positions -> module membership/stacks -> conditionals -> param uses/aliases; each family compared old-vs-new before its legacy container dies; ancestor closures wired; lazy-hydration overlays for public mutable containers; copy-on-read fields keep fresh-copy (JMT-FORK-1 default) | aliases-v1 green per family |
-| **M7** | Groups: FunctionCall/Equivalence/Recurrence/ParamAlias/conditional group blocks + group_id columns; delete `_copy_shared_fields_for_output`; journal-side shared `FunctionCallRef` per call | byte-identical |
+| **M6** | Relations family-by-family: parents/children + arg positions -> module membership/stacks -> conditionals -> param uses/aliases; each family compared old-vs-new before its legacy container dies; ancestor closures wired; relation accessors become IMMUTABLE views (JMT-FORK-1 decided) | aliases-v1 green per family |
+| **M7** | Groups: FunctionCall/Equivalence/Recurrence/ParamAlias/conditional group blocks + group_id columns; delete `_copy_shared_fields_for_output`; journal-side shared `FunctionCallRef` per call; `equivalent_ops`/`recurrent_ops` become LIVE group-membership views (JMT-FORK-1 decided) | byte-identical |
 | **M8** | Layer as aggregate facade over layer->op relations (kills the ~78-field per-pass copy); Module/ModuleCall/Param/Buffer/FuncCallLocation tables + facades; live-handle/lazy-grad/version/release semantics preserved; Module responsibility decomposition; Trace label maps -> core indexes | per-class oracle |
 | **M9** | **Backward, last**: GradFn/GradFnCall/BackwardPass tables; atomic backward EPOCHS preserving the exact watermark/revision invalidation; projection + validation consumers migrate in ONE commit; no mixed object/core backward state survives | repeated-backward oracle cases |
 | **M10** (parallel from M2) | **Trace decomposition — the deliverable**: 220 fields -> header + owned components; `TraceBuildState` -> named per-phase workspaces; POSTPROCESS_STEP_CONTRACTS become enforced declared read/write sets; C2-style private-family collapses only as lockstep table diffs if needed | <=~60 fields per component |

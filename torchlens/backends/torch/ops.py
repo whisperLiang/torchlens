@@ -190,9 +190,14 @@ if TYPE_CHECKING:
     from ...data_classes.trace import Trace
 
 
-@dataclass(frozen=True, slots=True)
 class _AncestorBitset:
-    """Compact immutable storage for one finished Op ancestor set.
+    """Compact storage for one finished Op ancestor closure.
+
+    One instance per distinct closure per trace (interned by
+    ``_compact_ancestor_sets``), so the lazily cached frozen view is also
+    one-per-closure: the first public read of any member materializes the
+    ``frozenset`` once and every sibling read shares it (M6 immutable-view
+    contract, JMT-FORK-1).
 
     Parameters
     ----------
@@ -202,11 +207,17 @@ class _AncestorBitset:
         Integer bitmap whose set bits select entries from ``labels``.
     """
 
-    labels: tuple[str, ...]
-    bits: int
+    __slots__ = ("labels", "bits", "_frozen_view")
+
+    def __init__(self, labels: tuple[str, ...], bits: int) -> None:
+        """Bind the shared label table and this closure's bitmap."""
+
+        self.labels = labels
+        self.bits = bits
+        self._frozen_view: frozenset[str] | None = None
 
     def materialize(self) -> set[str]:
-        """Return the exact public set represented by this bitmap.
+        """Return the closure as a fresh mutable set (internal use).
 
         Returns
         -------
@@ -223,6 +234,15 @@ class _AncestorBitset:
             bits ^= lowest_bit
         return result
 
+    def frozen_view(self) -> frozenset[str]:
+        """Return the public immutable view, cached per closure."""
+
+        view = self._frozen_view
+        if view is None:
+            view = frozenset(self.materialize())
+            self._frozen_view = view
+        return view
+
 
 _ANCESTOR_FIELD_NAMES = ("root_ancestors", "internal_source_ancestors")
 _ANCESTOR_SLOT_DESCRIPTORS = {
@@ -230,8 +250,14 @@ _ANCESTOR_SLOT_DESCRIPTORS = {
 }
 
 
-def _get_ancestor_field(op: Op, field_name: str) -> set[str]:
-    """Return one public ancestor set, materializing compact storage lazily.
+def _get_ancestor_field(op: Op, field_name: str) -> "set[str] | frozenset[str]":
+    """Return one public ancestor closure view.
+
+    During postprocess the cell holds the mutable staging set and is returned
+    as-is. Once ``_compact_ancestor_sets`` has interned the closure, reads
+    return the bitset's cached ``frozenset`` view (one per distinct closure,
+    shared by every member op — safe because it is immutable) WITHOUT writing
+    it back, so the compact encoding stays the storage authority.
 
     Parameters
     ----------
@@ -242,15 +268,14 @@ def _get_ancestor_field(op: Op, field_name: str) -> set[str]:
 
     Returns
     -------
-    set[str]
-        The mutable, exact-type public field value.
+    set[str] | frozenset[str]
+        Staging set during postprocess; immutable view once finished.
     """
 
     descriptor = _ANCESTOR_SLOT_DESCRIPTORS[field_name]
     value = descriptor.__get__(op, type(op))
     if isinstance(value, _AncestorBitset):
-        value = value.materialize()
-        descriptor.__set__(op, value)
+        return value.frozen_view()
     return cast(set[str], value)
 
 
