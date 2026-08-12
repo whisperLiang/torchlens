@@ -477,6 +477,18 @@ class OpRecord:
         # compat-only field, verified dead in P2; always None on OpRecord
         return None
 
+    # Trace-identity joins travel via IngestExtras, never the record. The
+    # torch producer has stamped ``source_trace=None`` on every event since
+    # the backref removal, so the compat read is a constant; live consumers
+    # (`LiveOpView`) resolve ``event.source_trace or trace`` unchanged.
+    @property
+    def source_trace(self) -> None:
+        return None
+
+    @property
+    def source_trace_id(self) -> None:
+        return None
+
 
 _FACET_ATTRIBUTES: dict[str, str] = {
     "function": "function",
@@ -575,6 +587,46 @@ PATH_TO_FLAT: dict[str, str] = {
     "intervention.intervention_replaced": "intervention_replaced",
     "intervention.fire_results": "fire_results",
 }
+
+# Inverse fold table: flat OpEvent field name -> registry facet path. The
+# record-aware `replace_op_event` (P3, until the P4 amendment migration
+# deletes it) maps the seven legacy mutators' flat kwargs onto facet paths.
+FLAT_TO_PATH: dict[str, str] = {flat: path for path, flat in PATH_TO_FLAT.items()}
+
+
+def record_with_flat_updates(record: "OpRecord", **updates: Any) -> "OpRecord":
+    """Return a new record with legacy flat-field updates applied.
+
+    Each flat name resolves through ``FLAT_TO_PATH`` onto its owning core
+    field or facet; an absent facet materializes from ``FACET_DEFAULTS``
+    before the patch (the same fold semantics the P4 reducer uses). Unknown
+    flat names refuse — the mutator set is closed by the registry.
+    """
+
+    from dataclasses import replace as dataclass_replace
+
+    core_updates: dict[str, Any] = {}
+    facet_updates: dict[str, dict[str, Any]] = {}
+    for flat_name, value in updates.items():
+        path = FLAT_TO_PATH.get(flat_name)
+        if path is None:
+            raise OpRecordAttributeError(
+                f"no registered facet path for flat update {flat_name!r} "
+                "(the post-commit mutator set is closed by PATH_TO_FLAT)"
+            )
+        owner, _, field_name = path.partition(".")
+        if owner == "core":
+            core_updates[field_name] = value
+        else:
+            facet_updates.setdefault(owner, {})[field_name] = value
+    record_changes: dict[str, Any] = {}
+    if core_updates:
+        record_changes["core"] = dataclass_replace(record.core, **core_updates)
+    for facet_name, kwargs in facet_updates.items():
+        current = record._facet_or_default(facet_name)
+        record_changes[_FACET_ATTRIBUTES[facet_name]] = dataclass_replace(current, **kwargs)
+    return dataclass_replace(record, **record_changes)
+
 
 # Identity fields are structurally unpatchable: outside every schema AND
 # refused by validation even on a forged raw OpAmendment.

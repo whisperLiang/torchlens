@@ -26,6 +26,7 @@ from .events import (
     PreHookProvenanceEvent,
 )
 from .live_index import LiveIndex
+from .op_record import OpRecord, record_with_flat_updates
 from .predicate import RecordContext
 from .refs import ParamRef, ReservedLabel
 
@@ -96,7 +97,7 @@ class SourceSequencingError(RuntimeError):
 _RUN_NONCE_COUNTER = itertools.count(1)
 
 
-def _clone_op_event_for_replay(event: OpEvent) -> OpEvent:
+def _clone_op_event_for_replay(event: Any) -> Any:
     """Return a projection copy of ``event`` with independent mutable state.
 
     ``OpEvent`` is a frozen dataclass, but two of its fields are live dicts:
@@ -106,18 +107,46 @@ def _clone_op_event_for_replay(event: OpEvent) -> OpEvent:
     intentionally shared tensor payload / opaque handle), so the clone stays
     cheap and never copies activations.
 
+    Polymorphic from P3 (reviewer note O-N5): a decomposed ``OpRecord`` clones
+    only the facets that carry live dicts (``graph.parent_arg_positions``,
+    ``transform.transform_config``, ``annotations.annotations``) — the same
+    shared-mutable-state guarantee, NOT a blanket identity return, because the
+    record's facets are frozen but those three payloads are not. A record with
+    no such facet present returns itself (genuinely immutable).
+
     Parameters
     ----------
     event
-        Sealed source operation event.
+        Sealed source operation event or decomposed op record.
 
     Returns
     -------
-    OpEvent
-        Event with fresh, independent ``transform_config`` and
-        ``parent_arg_positions`` containers.
+    OpEvent | OpRecord
+        Event/record whose reachable mutable dicts are independent copies.
     """
 
+    if isinstance(event, OpRecord):
+        record_changes: dict[str, Any] = {}
+        graph = event.graph
+        if graph is not None:
+            record_changes["graph"] = replace(
+                graph,
+                parent_arg_positions={
+                    domain: dict(positions)
+                    for domain, positions in graph.parent_arg_positions.items()
+                },
+            )
+        transform = event.transform
+        if transform is not None:
+            record_changes["transform"] = replace(
+                transform, transform_config=dict(transform.transform_config)
+            )
+        annotations_facet = event.annotations_facet
+        if annotations_facet is not None:
+            record_changes["annotations_facet"] = replace(
+                annotations_facet, annotations=dict(annotations_facet.annotations)
+            )
+        return replace(event, **record_changes) if record_changes else event
     return replace(
         event,
         parent_arg_positions={
@@ -503,9 +532,18 @@ class CaptureEvents:
         self.event_seq += 1
         return self.event_seq
 
-    def append(self, event: OpEvent) -> None:
-        """Append a single operation event, stamping the global seq."""
-        object.__setattr__(event, "seq", self.next_seq())
+    def append(self, event: OpEvent | OpRecord) -> None:
+        """Append a single operation event/record, stamping the global seq.
+
+        The seq slot lives on the flat event for compat ``OpEvent``s and on
+        ``core`` for decomposed ``OpRecord``s; both are frozen dataclasses and
+        this append path is their single sequencing authority.
+        """
+        seq = self.next_seq()
+        if isinstance(event, OpRecord):
+            object.__setattr__(event.core, "seq", seq)
+        else:
+            object.__setattr__(event, "seq", seq)
         self.op_events.append(event)
         self.live_index.append(event)
 
@@ -813,7 +851,13 @@ def replace_op_event(trace: Any, label_raw: str, **updates: Any) -> OpEvent | No
     event = events.op_event_by_label_raw.get(label_raw)
     if event is None:
         return None
-    updated_event = replace(event, **updates)
+    if isinstance(event, OpRecord):
+        # Decomposed journal: the seven legacy mutators' flat kwargs fold onto
+        # facet paths (P3 bridge; the P4 amendment lane replaces this caller
+        # surface entirely).
+        updated_event = record_with_flat_updates(event, **updates)
+    else:
+        updated_event = replace(event, **updates)
     index = events._event_position(event)
     if index is None:
         return updated_event

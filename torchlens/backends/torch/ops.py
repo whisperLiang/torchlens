@@ -6,6 +6,7 @@ interventions, and saves or streams activation payloads for torch captures.
 
 import copy
 import dataclasses
+import os
 import time
 import warnings
 from collections import OrderedDict, defaultdict, deque
@@ -553,6 +554,25 @@ def _label_version_baseline(t: Any) -> int | None:
 
 
 CaptureProducerMode = Literal["exhaustive", "predicate"]
+RecordProducer = Literal["legacy", "decomposed"]
+
+# Internal dual-path switch (producer unification 6.1). Read ONCE per capture
+# at session setup (`set_capture_producer_policy`); never consulted on the
+# hot path — the resolved value rides the policy object.
+_RECORD_PRODUCER_ENV = "TORCHLENS_CAPTURE_PRODUCER"
+_RECORD_PRODUCERS: tuple[str, ...] = ("legacy", "decomposed")
+
+
+def _resolve_record_producer() -> RecordProducer:
+    """Resolve the journal record producer from the internal environment switch."""
+
+    value = os.environ.get(_RECORD_PRODUCER_ENV, "legacy")
+    if value not in _RECORD_PRODUCERS:
+        raise ValueError(
+            f"{_RECORD_PRODUCER_ENV}={value!r} is not a known capture producer; "
+            f"expected one of {_RECORD_PRODUCERS}"
+        )
+    return cast(RecordProducer, value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -563,11 +583,15 @@ class CaptureProducerPolicy:
     ----------
     mode
         Capture mode represented by this policy.
+    record_producer
+        Journal record shape the freeze stage constructs (``legacy`` compat
+        ``OpEvent`` vs ``decomposed`` ``OpRecord``).
     emit
         Callable that emits operation events for the mode.
     """
 
     mode: CaptureProducerMode
+    record_producer: RecordProducer
     emit: Callable[
         [
             "Trace",
@@ -586,16 +610,27 @@ class CaptureProducerPolicy:
     ]
 
 
-_CAPTURE_PRODUCER_POLICIES: dict[CaptureProducerMode, CaptureProducerPolicy] = {}
+_CAPTURE_PRODUCER_POLICIES: dict[
+    tuple[CaptureProducerMode, RecordProducer], CaptureProducerPolicy
+] = {}
+
+_EMIT_BY_MODE: dict[CaptureProducerMode, str] = {
+    "exhaustive": "_emit_exhaustive_operation_events",
+    "predicate": "_emit_predicate_operation_events",
+}
 
 
-def get_capture_producer_policy(mode: CaptureProducerMode) -> CaptureProducerPolicy:
-    """Return the precomputed producer policy for ``mode``.
+def get_capture_producer_policy(
+    mode: CaptureProducerMode, record_producer: RecordProducer | None = None
+) -> CaptureProducerPolicy:
+    """Return the precomputed producer policy for ``(mode, record_producer)``.
 
     Parameters
     ----------
     mode
         Capture mode to route.
+    record_producer
+        Journal record shape; ``None`` resolves the environment switch.
 
     Returns
     -------
@@ -603,20 +638,23 @@ def get_capture_producer_policy(mode: CaptureProducerMode) -> CaptureProducerPol
         Cached policy object used on the decorated-operation hot path.
     """
 
-    if not _CAPTURE_PRODUCER_POLICIES:
-        _CAPTURE_PRODUCER_POLICIES.update(
-            {
-                "exhaustive": CaptureProducerPolicy(
-                    "exhaustive", _emit_exhaustive_operation_events
-                ),
-                "predicate": CaptureProducerPolicy("predicate", _emit_predicate_operation_events),
-            }
-        )
-    return _CAPTURE_PRODUCER_POLICIES[mode]
+    if record_producer is None:
+        record_producer = _resolve_record_producer()
+    key = (mode, record_producer)
+    policy = _CAPTURE_PRODUCER_POLICIES.get(key)
+    if policy is None:
+        emit = globals()[_EMIT_BY_MODE[mode]]
+        policy = CaptureProducerPolicy(mode, record_producer, emit)
+        _CAPTURE_PRODUCER_POLICIES[key] = policy
+    return policy
 
 
 def set_capture_producer_policy(trace: "Trace", mode: CaptureProducerMode) -> None:
     """Attach a precomputed producer policy to ``trace``.
+
+    The ONE per-capture read of the internal ``TORCHLENS_CAPTURE_PRODUCER``
+    switch happens here (session setup); the hot path only ever touches the
+    precompiled policy object.
 
     Parameters
     ----------
@@ -632,6 +670,19 @@ def set_capture_producer_policy(trace: "Trace", mode: CaptureProducerMode) -> No
     """
 
     trace._capture_producer_policy = get_capture_producer_policy(mode)
+
+
+def record_producer_for(trace: Any) -> RecordProducer:
+    """Return the journal record producer active for ``trace``.
+
+    Freeze stages branch on this. A trace with no compiled policy (preview
+    projections, detached partial recovery) stays on the legacy shape.
+    """
+
+    policy = getattr(trace, "_capture_producer_policy", None)
+    if policy is None:
+        return "legacy"
+    return policy.record_producer
 
 
 def _should_keep_alias_mutation_contract(trace: "Trace") -> bool:
