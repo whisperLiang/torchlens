@@ -574,6 +574,32 @@ _AUDIT_COLLECTORS: dict[int, set[int]] = {}
 #: a step's produces contract, not a column write.
 _AUDIT_FINGERPRINTS: dict[int, tuple[int, dict[int, int]]] = {}
 
+#: Rows RELEASED whole (op removal husking) during the live audit window,
+#: keyed by audited store id. Whole-row release is the row-lifecycle twin of
+#: row creation: its per-cell deletes are not column writes, so the audited
+#: ``cell_del`` skips recording them and the fingerprint diff skips the row.
+#: The release itself is still audited — ``end_cell_write_audit`` reports
+#: the released-row count and the step contract must sanction removal
+#: explicitly (``removes_rows``), so an unsanctioned whole-row removal
+#: trips with a precise message instead of a wall of column names.
+_AUDIT_ROW_RELEASES: dict[int, set[int]] = {}
+
+#: Immutable empty fallback for the audited ``cell_del`` released-row probe.
+_NO_RELEASES: frozenset[int] = frozenset()
+
+
+def mark_op_row_released(store: Any, row: int) -> None:
+    """Mark one row as released whole for the active audit window (if any).
+
+    Called by the op-removal husking path BEFORE it deletes the row's
+    cells. A no-op when the store is not under audit (including detached
+    stores and fork views, which are never audited).
+    """
+
+    releases = _AUDIT_ROW_RELEASES.get(id(store))
+    if releases is not None:
+        releases.add(row)
+
 
 def _cell_content_fingerprint(value: Any) -> int | None:
     """Content fingerprint for one exact builtin mutable-container cell.
@@ -614,10 +640,17 @@ class _AuditedOpRowStore(OpRowStore):
         OpRowStore.cell_set(self, row, fid, value)
 
     def cell_del(self, row: int, fid: int) -> bool:
-        """Record the deleted column id, then perform the delete."""
+        """Record the deleted column id, then perform the delete.
+
+        Deletes belonging to a whole-row release (op removal husking) are
+        row-lifecycle events, not column writes: they are excluded here and
+        accounted through the released-row count instead.
+        """
 
         collector = _AUDIT_COLLECTORS.get(id(self))
-        if collector is not None:
+        if collector is not None and row not in _AUDIT_ROW_RELEASES.get(
+            id(self), _NO_RELEASES
+        ):
             collector.add(fid)
         return OpRowStore.cell_del(self, row, fid)
 
@@ -635,6 +668,7 @@ def begin_cell_write_audit(store: OpRowStore) -> None:
     if store.__class__ is OpRowStore:
         store.__class__ = _AuditedOpRowStore
     _AUDIT_COLLECTORS.setdefault(id(store), set())
+    _AUDIT_ROW_RELEASES.setdefault(id(store), set())
     fingerprints: dict[int, int] = {}
     rows = store._rows
     baseline_rows = 0
@@ -650,15 +684,18 @@ def begin_cell_write_audit(store: OpRowStore) -> None:
     _AUDIT_FINGERPRINTS[id(store)] = (baseline_rows, fingerprints)
 
 
-def end_cell_write_audit(store: OpRowStore) -> set[str]:
-    """Stop recording and return the written column NAMES.
+def end_cell_write_audit(store: OpRowStore) -> tuple[set[str], int]:
+    """Stop recording; return the written column NAMES and released-row count.
 
     Columns whose mutable-container cells changed CONTENT since the audit
     began count as written even without an intercepted ``cell_set`` — the
-    in-place mutation path.
+    in-place mutation path. Rows released whole (op removal husking) are
+    excluded from both channels and reported as the second element, checked
+    against the step contract's explicit ``removes_rows`` sanction.
     """
 
     observed = _AUDIT_COLLECTORS.pop(id(store), set())
+    released = _AUDIT_ROW_RELEASES.pop(id(store), set())
     snapshot = _AUDIT_FINGERPRINTS.pop(id(store), None)
     if store.__class__ is _AuditedOpRowStore:
         store.__class__ = OpRowStore  # type: ignore[assignment]
@@ -667,18 +704,21 @@ def end_cell_write_audit(store: OpRowStore) -> set[str]:
     # The fingerprint diff only applies to stores this audit window ARMED
     # (a store born mid-window — the step-0 materialize ingress — has no
     # baseline and its whole-row bulk writes are its declared contract) and
-    # to rows that existed at begin (row creation is not a column write).
+    # to rows that existed at begin (row creation is not a column write;
+    # released rows' emptied cells are not container mutations either).
     if rows is not None and snapshot is not None:
         baseline_rows, baseline = snapshot
         n_fields = store.layout.n_fields
         for row_index in range(min(baseline_rows, len(rows))):
+            if row_index in released:
+                continue
             base = row_index * n_fields
             for fid, value in enumerate(rows[row_index]):
                 if fid in observed:
                     continue
                 if _cell_content_fingerprint(value) != baseline.get(base + fid):
                     observed.add(fid)
-    return {layout_names[fid] for fid in observed}
+    return {layout_names[fid] for fid in observed}, len(released)
 
 
 class DetachedOpStore:

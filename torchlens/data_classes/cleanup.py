@@ -112,8 +112,19 @@ def cleanup(self: "Trace") -> None:
 
 def _clear_entry_attributes(log_entry: Op) -> None:
     """Clear all instance attributes from a Op entry."""
+    from .._trace_core.op_store import mark_op_row_released
     from .op import _detach_op_husk
 
+    # Whole-row release: tell any active step write audit these per-cell
+    # deletes are the op's removal husking (a row-lifecycle event checked
+    # against the step's removes_rows sanction), not column writes.
+    try:
+        row_store = object.__getattribute__(log_entry, "_core")
+        row = object.__getattribute__(log_entry, "_row")
+    except AttributeError:
+        row_store = None
+    if row_store is not None:
+        mark_op_row_released(row_store, row)
     for attr, _ in list(state_items(log_entry)):
         delattr(log_entry, attr)
     # Rebind the emptied facade to a detached row so a user-held husk cannot

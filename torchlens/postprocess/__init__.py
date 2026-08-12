@@ -126,12 +126,21 @@ class PostprocessStepContract:
         row (materialize, undecorate) or run before the store exists.
         A step writing an undeclared column fails the tripwire; widening
         a set is a REVIEWED schema-contract diff, never a silent drift.
+    removes_rows:
+        Whether the step is sanctioned to remove whole op rows (removal
+        husking releases every cell of the row). Whole-row release is the
+        row-lifecycle twin of row creation — audited separately from
+        column writes, so an unsanctioned removal fails with a precise
+        message instead of a wall of column names, and a sanctioned one
+        (orphan removal) stops false-positively tripping the column
+        tripwire on removal-heavy paths such as the fastlog cook.
     """
 
     step: str
     name: str
     contract: str
     writes: frozenset[str] | None = None
+    removes_rows: bool = False
 
 
 POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
@@ -267,6 +276,7 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "kwargs_template",
             )
         ),
+        removes_rows=True,
     ),
     "4": PostprocessStepContract(
         "4",
@@ -543,8 +553,11 @@ def _open_step_write_audit(self: "Trace") -> None:
     begin_cell_write_audit(core.ops)
 
 
-def _close_step_write_audit(self: "Trace") -> set[str] | None:
-    """Stop the audit and return written column names (None when unarmed)."""
+def _close_step_write_audit(self: "Trace") -> tuple[set[str], int] | None:
+    """Stop the audit; return (written column names, released-row count).
+
+    ``None`` when unarmed (no core-backed store yet).
+    """
 
     core = self.__dict__.get("_trace_core")
     if core is None or core.ops is None:
@@ -569,8 +582,15 @@ def _assert_postprocess_contract(self: "Trace", step: str) -> None:
         return
     contract = POSTPROCESS_STEP_CONTRACTS.get(step)
     assert contract is not None, f"Unknown postprocess step contract: {step!r}"
-    observed_writes = _close_step_write_audit(self)
-    if observed_writes is not None:
+    audit_result = _close_step_write_audit(self)
+    if audit_result is not None:
+        observed_writes, released_rows = audit_result
+        assert not released_rows or contract.removes_rows, (
+            f"Step {step} ({contract.name}) released {released_rows} whole op "
+            "row(s) without a removes_rows sanction in "
+            "POSTPROCESS_STEP_CONTRACTS; declaring row removal is a reviewed "
+            "contract diff, never a silent drift."
+        )
         if _write_audit_record_mode():
             RECORDED_STEP_WRITES.setdefault(step, set()).update(observed_writes)
         elif contract.writes is not None:

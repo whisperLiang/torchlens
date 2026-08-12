@@ -358,3 +358,48 @@ def test_postprocess_write_audit_catches_in_place_container_mutation(
         AssertionError, match=r"Step 10 .* undeclared op-store columns.*annotations"
     ):
         tl.trace(_PolicyModel().eval(), torch.randn(2, 3), save_grads=False)
+
+
+def test_postprocess_write_audit_allows_sanctioned_row_removal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fastlog cook passes enforcement despite step-3 orphan removal.
+
+    Pre-existing false positive (reproduced at 684f8860): removing an
+    orphan op husks the row cell-by-cell, and the audit recorded every
+    per-cell delete as a column write — step 3 tripped with essentially
+    the whole layout on removal-heavy paths such as ``Recording.to_trace``.
+    Whole-row release is now a row-lifecycle event accounted against the
+    step contract's explicit ``removes_rows`` sanction instead.
+    """
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    model = _PolicyModel().eval()
+    recording = tl.record(model, torch.randn(2, 3), save=tl.func("linear"))
+    trace = recording.to_trace()
+    assert trace.layer_logs
+    trace.cleanup()
+
+
+def test_postprocess_write_audit_trips_on_unsanctioned_row_removal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removing rows in a step without a removes_rows sanction still trips."""
+
+    from torchlens.postprocess import POSTPROCESS_STEP_CONTRACTS, PostprocessStepContract
+
+    original = POSTPROCESS_STEP_CONTRACTS["3"]
+    assert original.removes_rows, "step 3 must sanction orphan-row removal"
+    unsanctioned = PostprocessStepContract(
+        original.step,
+        original.name,
+        original.contract,
+        writes=original.writes,
+        removes_rows=False,
+    )
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    monkeypatch.setitem(POSTPROCESS_STEP_CONTRACTS, "3", unsanctioned)
+    model = _PolicyModel().eval()
+    recording = tl.record(model, torch.randn(2, 3), save=tl.func("linear"))
+    with pytest.raises(AssertionError, match="without a removes_rows sanction"):
+        recording.to_trace()
