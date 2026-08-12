@@ -536,15 +536,36 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
             )
         ),
     ),
+    # Steps 18/19 previously declared writes=None (wildcard), which the audit
+    # skipped entirely — the streaming axis ran unaudited (design-ppdag-v3
+    # defect 1). The sets below are HAND-DERIVED from finalization.py and
+    # verified by a streaming recording run: step 18's only live-op writes are
+    # the LazyActivationRef attachments in _attach_streamed_tensor_refs
+    # (out_ref always; grad_ref only when grads streamed), and step 19's are
+    # the _internal_set evictions (out always; transformed_out only when a
+    # transformed payload was streamed). The grad/transform halves are
+    # config-gated, not phantom.
     "18": PostprocessStepContract(
         "18",
         "Finalize streamed bundle",
         "Consumes stream writer state; finalizes bundle metadata in place.",
+        writes=frozenset(
+            (
+                "grad_ref",
+                "out_ref",
+            )
+        ),
     ),
     "19": PostprocessStepContract(
         "19",
         "Evict streamed outs",
         "Consumes finalized stream state; drops in-memory output payloads.",
+        writes=frozenset(
+            (
+                "out",
+                "transformed_out",
+            )
+        ),
     ),
     "20": PostprocessStepContract(
         "20",
