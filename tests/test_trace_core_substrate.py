@@ -583,3 +583,47 @@ def test_fork_shares_one_equivalent_ops_view_per_class() -> None:
         assert prior is view, "same-class fork layers must share one view object"
         shared += 1
     assert shared >= 2, "test model must produce a shared equivalence class"
+
+
+@pytest.mark.smoke
+def test_rehydrate_mixed_ownership_aborts_with_zero_mutations() -> None:
+    """An unadoptable op set aborts rehydration BEFORE any op is re-bound.
+
+    The former in-loop guards returned early after earlier ops were
+    already adopted, bypassing the rollback and stranding them on an
+    orphaned unfrozen store with ``_trace_core`` never set (closure
+    review, blocking item 2).
+    """
+
+    import pickle
+    from unittest import mock
+
+    import torchlens as tl
+    from torchlens._trace_core.op_store import DetachedOpStore, OpRowStore
+    from torchlens.data_classes import _trace_rehydrate
+    from torchlens.data_classes.op import _OP_STORE_LAYOUT
+
+    model = torch.nn.Sequential(torch.nn.Linear(3, 4), torch.nn.ReLU())
+    trace = tl.trace(model, torch.randn(1, 3))
+    payload = pickle.dumps(trace)
+    with mock.patch.object(
+        _trace_rehydrate, "rehydrate_trace_core", return_value=False
+    ):
+        clone = pickle.loads(payload)  # genuine coreless island
+    assert clone.__dict__.get("_trace_core") is None
+
+    ops = list(clone.layer_list)
+    assert len(ops) >= 2
+    # Tamper: bind ONE later op to a foreign shared store (mixed ownership).
+    foreign = OpRowStore(_OP_STORE_LAYOUT)
+    foreign.adopt_row(list(object.__getattribute__(ops[-1], "_core")._cells))
+    object.__setattr__(ops[-1], "_core", foreign)
+    object.__setattr__(ops[-1], "_row", 0)
+
+    assert _trace_rehydrate.rehydrate_trace_core(clone) is False
+    assert clone.__dict__.get("_trace_core") is None, "no core may be installed"
+    for op in ops[:-1]:
+        bound = object.__getattribute__(op, "_core")
+        assert isinstance(bound, DetachedOpStore), (
+            "earlier op re-bound to an orphaned store after abort"
+        )

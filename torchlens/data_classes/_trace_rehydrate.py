@@ -21,9 +21,12 @@ Boundaries (documented, tested):
   detached-backed — loaded traces have no event stream, so there is no
   epoch to rebuild; a NEW backward on the restored trace binds fresh
   epochs through the normal projection path.
-* Rehydration is strictly best-effort: any inconsistency (mixed store
-  ownership, layout drift) aborts and leaves the load exactly as the
-  coreless island behaved — a load never fails because of it.
+* Rehydration is strictly best-effort AND all-or-nothing: the op set is
+  validated BEFORE anything is re-bound (a mixed-ownership or
+  layout-drifted op set aborts with zero mutations), and any unexpected
+  failure later rolls every adopted binding back to its detached store —
+  a load never fails because of it, and no partial-adoption island can
+  survive.
 * Compaction passes are not re-run: pickle already preserves shared
   identity within one artifact, so pooled metadata stays pooled.
 """
@@ -50,7 +53,8 @@ def rehydrate_trace_core(trace: "Trace") -> bool:
 
     Returns ``True`` when a core was built and sealed, ``False`` when the
     trace already has a core, has no ops, or rehydration aborted (the
-    coreless-island behavior is preserved on abort).
+    coreless-island behavior is preserved on abort, with every op still
+    bound to its own detached store).
     """
 
     if trace.__dict__.get("_trace_core") is not None:
@@ -66,22 +70,28 @@ def rehydrate_trace_core(trace: "Trace") -> bool:
     if not ops:
         return False
 
+    # Validation pre-scan: every op must be a plain detached-backed restore
+    # BEFORE anything is re-bound. The former in-loop guards returned early
+    # AFTER earlier ops were already adopted, bypassing the rollback and
+    # leaving a mixed-ownership island (closure review, blocking item 2).
+    adoptable: list[tuple[Any, Any]] = []
+    for op in ops:
+        try:
+            bound = object.__getattribute__(op, "_core")
+        except AttributeError:
+            return False
+        if not isinstance(bound, DetachedOpStore):
+            # Mixed/foreign ownership: not a plain coreless load.
+            return False
+        if bound.layout is not _OP_STORE_LAYOUT:
+            return False
+        adoptable.append((op, bound))
+
     store = OpRowStore(_OP_STORE_LAYOUT)
     adopted: list[tuple[Any, Any, int]] = []
     records_by_kind: dict[str, dict[int, Any]] = {}
     try:
-        for op in ops:
-            try:
-                bound = object.__getattribute__(op, "_core")
-            except AttributeError:
-                return False
-            if bound is store:
-                continue
-            if not isinstance(bound, DetachedOpStore):
-                # Mixed/foreign ownership: not a plain coreless load.
-                return False
-            if bound.layout is not _OP_STORE_LAYOUT:
-                return False
+        for op, bound in adoptable:
             row = store.adopt_row(bound._cells)
             adopted.append((op, bound, row))
             _object_setattr(op, "_core", store)
