@@ -21,7 +21,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens._io import TorchLensIOError
-from torchlens._io.manifest import Manifest, enforce_version_policy
+from torchlens._io.manifest import Manifest
 from torchlens._io.payload_codec import get_payload_codec
 from torchlens.options import CaptureOptions
 from torchlens.runnable import NumericAttestationStatus
@@ -378,21 +378,24 @@ def test_bfloat16_payload_round_trips_through_the_real_routing(tmp_path: Path) -
 
 
 @pytest.mark.smoke
-def test_older_version_warning_does_not_promise_default_filling(tmp_path: Path) -> None:
-    """The warning must not claim missing portable fields "default-fill" -- they never do."""
+def test_older_version_refuses_at_rehydration_floor(tmp_path: Path) -> None:
+    """A sub-current tlspec_version refuses typed instead of warning.
+
+    The 2.33 rehydration floor equals the current ``TLSPEC_VERSION``, so the
+    former older-but-parsed ``DeprecationWarning`` branch is gone: nothing can
+    be both accepted and older. ``Manifest.from_dict`` refuses first with the
+    floor named.
+    """
+
+    from torchlens.errors import ArtifactVersionBelowFloorError
 
     path = tmp_path / "versioned.tlspec"
     tl.trace(ParamsOnlyModel().eval(), torch.ones(2, 3), capture=_CAP).save(path)
     manifest_dict = _manifest(path)
     manifest_dict["tlspec_version"] = int(manifest_dict["tlspec_version"]) - 1
-    manifest = Manifest.from_dict(manifest_dict)
 
-    with pytest.warns(DeprecationWarning) as caught:
-        enforce_version_policy(manifest)
-    message = str(caught[0].message)
-    assert "may default-fill during load" not in message
-    assert "fails closed" in message
-    assert "never default-fills" in message
+    with pytest.raises(ArtifactVersionBelowFloorError, match="torchlens 2.33"):
+        Manifest.from_dict(manifest_dict)
 
 
 @pytest.mark.smoke

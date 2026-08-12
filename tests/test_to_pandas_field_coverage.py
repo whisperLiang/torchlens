@@ -42,8 +42,8 @@ docstring here previously claiming it already had "equivalent coverage".
 guard) by ``backends/torch/backward.py`` -- was silently absent from both
 ``MODEL_LOG_FIELD_ORDER`` and (as a direct consequence) ``_MODEL_LOG_DEFAULT_FILL``,
 so any ``Trace`` reconstructed from a state dict that predates the field (a
-supported backward-compat path per ``read_tlspec_version``'s pre-versioning
-mode) crashed with ``AttributeError`` mid-way through ``log_backward()``.
+supported path for same-``tlspec_version`` states saved before the field
+existed) crashed with ``AttributeError`` mid-way through ``log_backward()``.
 ``Trace`` was never added to ``test_field_order_has_no_keep_field_desync``'s
 parametrize list either, even though ``Trace.to_pandas()`` genuinely has no
 per-record projection built from ``MODEL_LOG_FIELD_ORDER`` (so the to_pandas()

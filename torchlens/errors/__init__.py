@@ -149,6 +149,7 @@ _LAZY_EXCEPTION_PATHS = {
     # Resolved lazily like the legacy names, but for the opposite reason: the
     # defining modules import ``errors._base``, so eagerly importing them here
     # would create a cycle.
+    "ArtifactVersionBelowFloorError": ("torchlens._io", "ArtifactVersionBelowFloorError"),
     "DistributedCaptureUnsupportedError": (
         "torchlens._distributed",
         "DistributedCaptureUnsupportedError",

@@ -1256,11 +1256,7 @@ class Layer:
 
     def __setstate__(self, state: Dict[str, Any]) -> None:
         """Restore pickle state produced by ``__getstate__``."""
-        version = read_tlspec_version(state, cls_name=type(self).__name__)
-        if "ops" not in state and "passes" in state:
-            state["ops"] = state.pop("passes")
-        if "call_labels" not in state and "pass_labels" in state:
-            state["call_labels"] = state.pop("pass_labels")
+        read_tlspec_version(state, cls_name=type(self).__name__)
         layer_setstate_defaults: dict[str, Any] = {
             **_LAYER_LOG_CONTAINER_DEFAULTS,
             "_source_trace_ref": None,
@@ -1273,7 +1269,7 @@ class Layer:
             "transformed_out_dtype": None,
             "dtype_ref": DtypeRef.from_value(state.get("dtype")),
             "device_ref": None,
-            "backend_address": state.get("address") if version < 5 else None,
+            "backend_address": None,
             "resolver_status": "resolved",
             "transformed_activation_memory": None,
             "transformed_grad": None,
@@ -1289,12 +1285,8 @@ class Layer:
         coerce_container_typed_state(state, layer_setstate_defaults)
         if state.get("dtype_ref") is None:
             state["dtype_ref"] = DtypeRef.from_value(state.get("dtype"))
-        if version < 5 and state.get("backend_address") is None:
-            state["backend_address"] = state.get("address")
         if state.get("resolver_status") is None:
             state["resolver_status"] = "resolved"
-        if "activation_memory" not in state and "memory" in state:
-            state["activation_memory"] = state.pop("memory")
         for field_name in (
             "activation_memory",
             "transformed_activation_memory",

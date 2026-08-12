@@ -450,14 +450,23 @@ def test_validate_tlspec_rejects_unparseable_manifest(tmp_path: Path) -> None:
 
 
 @pytest.mark.smoke
-def test_validate_tlspec_still_accepts_genuine_legacy_bundle() -> None:
-    """A checked-in v2.16 model-log fixture remains accepted for backcompat."""
+def test_validate_tlspec_refuses_pre_floor_legacy_modellog_bundle() -> None:
+    """A checked-in v2.16 model-log fixture refuses at the 2.33 floor.
+
+    Both validation and loading refuse the same real pre-floor artifact with
+    the typed floor error; legacy 2.16 intervention specs remain accepted.
+    """
+
+    from torchlens.errors import ArtifactVersionBelowFloorError
 
     fixture_path = (
         Path(__file__).parent / "fixtures" / "tlspec_v2_16" / "F2_modellog_tiny_cnn.tlspec"
     )
 
-    validate_tlspec(fixture_path)
+    with pytest.raises(ArtifactVersionBelowFloorError, match="torchlens 2.33"):
+        validate_tlspec(fixture_path)
+    with pytest.raises(ArtifactVersionBelowFloorError, match="torchlens 2.33"):
+        tl.load(fixture_path)
 
 
 @pytest.mark.smoke

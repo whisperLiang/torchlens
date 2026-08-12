@@ -21,7 +21,13 @@ from typing import Any
 import torch
 from packaging.version import InvalidVersion, Version
 
-from . import TLSPEC_VERSION, TorchLensIOError
+from . import (
+    MIN_TLSPEC_VERSION,
+    MIN_TORCHLENS_VERSION_TEXT,
+    TLSPEC_VERSION,
+    ArtifactVersionBelowFloorError,
+    TorchLensIOError,
+)
 from . import _json
 from .. import __version__ as TORCHLENS_VERSION
 
@@ -376,9 +382,24 @@ class Manifest:
 
         Raises
         ------
+        ArtifactVersionBelowFloorError
+            If the manifest predates the ``tlspec_version >= 6`` rehydration
+            floor. Checked before the remaining required fields so a
+            genuinely old manifest (which also lacks newer required fields)
+            refuses with the floor named instead of a missing-field error.
         TorchLensIOError
             If required fields are missing or have invalid types.
         """
+
+        raw_version = data.get("tlspec_version")
+        if isinstance(raw_version, int) and raw_version < MIN_TLSPEC_VERSION:
+            raise ArtifactVersionBelowFloorError(
+                f"Bundle manifest has tlspec_version={raw_version}, below the "
+                f"supported rehydration floor tlspec_version={MIN_TLSPEC_VERSION} "
+                f"(torchlens {MIN_TORCHLENS_VERSION_TEXT}). Load and re-save the "
+                f"artifact with a torchlens release >= {MIN_TORCHLENS_VERSION_TEXT} "
+                "that still reads it."
+            )
 
         required_int_fields = (
             "tlspec_version",
@@ -609,6 +630,9 @@ def enforce_version_policy(manifest: Manifest) -> None:
 
     Raises
     ------
+    ArtifactVersionBelowFloorError
+        If the bundle predates the ``tlspec_version >= 6`` / torchlens 2.33
+        rehydration floor.
     TorchLensIOError
         If the bundle targets a newer I/O format or an incompatible torch
         major version.
@@ -620,23 +644,20 @@ def enforce_version_policy(manifest: Manifest) -> None:
             f"{manifest.tlspec_version}, but this runtime only supports "
             f"{TLSPEC_VERSION}."
         )
-    if manifest.tlspec_version < TLSPEC_VERSION:
-        warnings.warn(
-            # r6 L7: the old text promised "missing portable fields may default-fill
-            # during load", which is the opposite of what happens -- ``Manifest.from_dict``
-            # REQUIRES every non-provenance field and raises ``TorchLensIOError`` on a
-            # missing one. The warning is advisory only; the load either parses in full or
-            # fails closed.
-            "Bundle tlspec_version="
-            f"{manifest.tlspec_version} is older than runtime "
-            f"tlspec_version={TLSPEC_VERSION}; it parsed against the current schema, but "
-            "portable fields added after that version are absent. Loading never "
-            "default-fills a missing required field -- an older bundle that lacks one "
-            "fails closed with a TorchLensIOError. Re-save it with this runtime to get "
-            "the current schema.",
-            DeprecationWarning,
-            stacklevel=2,
+    if manifest.tlspec_version < MIN_TLSPEC_VERSION:
+        raise ArtifactVersionBelowFloorError(
+            "Bundle uses tlspec_version="
+            f"{manifest.tlspec_version}, below the supported rehydration floor "
+            f"tlspec_version={MIN_TLSPEC_VERSION} (torchlens "
+            f"{MIN_TORCHLENS_VERSION_TEXT}). Load and re-save the artifact with "
+            f"a torchlens release >= {MIN_TORCHLENS_VERSION_TEXT} that still "
+            "reads it."
         )
+    # No older-version warning branch: the rehydration floor equals the current
+    # TLSPEC_VERSION, so every accepted bundle is exactly current. When a future
+    # schema bump raises TLSPEC_VERSION above MIN_TLSPEC_VERSION, reintroduce an
+    # honest between-floor-and-current advisory here (see r6 L7: it must not
+    # promise default-filling -- ``Manifest.from_dict`` fails closed).
 
     runtime_torch = _parse_version(torch.__version__, label="runtime torch")
     manifest_torch = _parse_version(manifest.torch_version, label="manifest torch")
@@ -664,6 +685,20 @@ def enforce_version_policy(manifest: Manifest) -> None:
 
     runtime_torchlens = _parse_version(TORCHLENS_VERSION, label="runtime torchlens")
     manifest_torchlens = _parse_version(manifest.torchlens_version, label="manifest torchlens")
+    # A parseable torchlens_version below the floor refuses even when the
+    # manifest claims a current tlspec_version: a real 2.33+ save can never
+    # carry a pre-2.33 torchlens_version, so the pair is inconsistent.
+    if manifest_torchlens is not None and manifest_torchlens < Version(
+        MIN_TORCHLENS_VERSION_TEXT
+    ):
+        raise ArtifactVersionBelowFloorError(
+            "Bundle torchlens_version="
+            f"{manifest.torchlens_version} is below the supported rehydration "
+            f"floor torchlens {MIN_TORCHLENS_VERSION_TEXT} (tlspec_version="
+            f"{MIN_TLSPEC_VERSION}). Load and re-save the artifact with a "
+            f"torchlens release >= {MIN_TORCHLENS_VERSION_TEXT} that still "
+            "reads it."
+        )
     if runtime_torchlens is not None and manifest_torchlens is not None:
         if manifest_torchlens > runtime_torchlens:
             warnings.warn(

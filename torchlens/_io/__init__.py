@@ -13,7 +13,6 @@ verify, and close blob files per materialization instead of sharing handles.
 from __future__ import annotations
 
 import copy
-import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -25,39 +24,47 @@ from ..errors._base import CompatibilityError
 
 # v6 adds persisted ModuleCall forward-pre-hook provenance value objects.
 TLSPEC_VERSION = 6
-_LEGACY_THREAD_WARNING_EMITTED: dict[str, bool] = {"flag": False}
 
-
-def _warn_legacy_thread_fields_dropped() -> None:
-    """Emit one deprecation warning for legacy thread-replay fields.
-
-    Older TorchLens portable bundles with ``tlspec_version <= 2`` carried
-    private fields removed by the module-containment-refactor sprint. Current
-    load code drops those fields and uses the stored ``modules`` field
-    directly.
-    """
-
-    if not _LEGACY_THREAD_WARNING_EMITTED["flag"]:
-        warnings.warn(
-            "Loaded a TorchLens bundle from tlspec_version<=2; "
-            "legacy thread-replay fields were dropped. "
-            "Module containment is reconstructed from hook-stack "
-            "snapshots in current capture; this load uses the stored "
-            "modules field directly.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-        _LEGACY_THREAD_WARNING_EMITTED["flag"] = True
-
-
-def reset_legacy_thread_warning() -> None:
-    """Reset the once-per-process legacy-thread warning flag for tests."""
-
-    _LEGACY_THREAD_WARNING_EMITTED["flag"] = False
+# Rehydration floor: artifacts older than tlspec_version 6 (first shipped in
+# torchlens 2.33) refuse to load instead of being resurrected through legacy
+# field-alias ladders. ``MIN_TORCHLENS_VERSION_TEXT`` is the release named in
+# refusal messages and matched against parsed manifest ``torchlens_version``.
+MIN_TLSPEC_VERSION = 6
+MIN_TORCHLENS_VERSION_TEXT = "2.33"
 
 
 class TorchLensIOError(CompatibilityError, RuntimeError):
     """Raised when TorchLens portable bundle state is invalid or unsupported."""
+
+
+class ArtifactVersionBelowFloorError(TorchLensIOError):
+    """Raised when an artifact predates the supported rehydration floor.
+
+    TorchLens loads artifacts written by torchlens ``2.33`` or newer
+    (``tlspec_version >= 6``). Older artifacts refuse with this error rather
+    than being partially reconstructed; re-save them with a torchlens release
+    in the ``2.33``-to-``2.34`` range that can still read them.
+    """
+
+
+def _raise_below_floor(cls_name: str, version_text: str) -> None:
+    """Raise the typed rehydration-floor refusal for one object state.
+
+    Parameters
+    ----------
+    cls_name:
+        Human-readable class name used in the error message.
+    version_text:
+        Rendered source version (``"tlspec_version=N"`` or a description of
+        an unversioned state).
+    """
+
+    raise ArtifactVersionBelowFloorError(
+        f"{cls_name} state has {version_text}, below the supported rehydration "
+        f"floor tlspec_version={MIN_TLSPEC_VERSION} (torchlens "
+        f"{MIN_TORCHLENS_VERSION_TEXT}). Load and re-save the artifact with a "
+        f"torchlens release >= {MIN_TORCHLENS_VERSION_TEXT} that still reads it."
+    )
 
 
 @dataclass(frozen=True)
@@ -129,15 +136,18 @@ def read_tlspec_version(state: dict[str, Any], *, cls_name: str) -> int:
     state:
         Serialized state dict for the object being restored.
     cls_name:
-        Human-readable class name used in warnings and errors.
+        Human-readable class name used in errors.
 
     Returns
     -------
     int
-        The decoded version. Pre-sprint states return ``0``.
+        The decoded version, always ``MIN_TLSPEC_VERSION`` or newer.
 
     Raises
     ------
+    ArtifactVersionBelowFloorError
+        If the state predates the ``tlspec_version >= MIN_TLSPEC_VERSION``
+        rehydration floor (including unversioned pre-sprint states).
     TorchLensIOError
         If the serialized version is newer than this runtime understands or
         is not an integer.
@@ -145,13 +155,7 @@ def read_tlspec_version(state: dict[str, Any], *, cls_name: str) -> int:
 
     version = state.pop("tlspec_version", None)
     if version is None:
-        warnings.warn(
-            f"{cls_name} pickle state predates TorchLens portable I/O versioning; "
-            "compat mode is deprecated.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-        return 0
+        _raise_below_floor(cls_name, "no tlspec_version (predates portable I/O versioning)")
     if not isinstance(version, int):
         raise TorchLensIOError(f"{cls_name} pickle state has invalid tlspec_version={version!r}.")
     if version > TLSPEC_VERSION:
@@ -159,6 +163,8 @@ def read_tlspec_version(state: dict[str, Any], *, cls_name: str) -> int:
             f"{cls_name} pickle state uses tlspec_version={version}, "
             f"but this runtime only supports up to {TLSPEC_VERSION}."
         )
+    if version < MIN_TLSPEC_VERSION:
+        _raise_below_floor(cls_name, f"tlspec_version={version}")
     return version
 
 

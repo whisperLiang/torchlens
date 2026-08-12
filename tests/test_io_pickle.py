@@ -119,20 +119,18 @@ def test_scrubbed_pickle_roundtrip_rehydrates_accessors(tmp_path) -> None:
     assert isinstance(first_arg_layer.saved_args[0], torch.Tensor)
 
 
-def test_trace_setstate_default_fills_pre_sprint_state() -> None:
-    """Missing version tags should warn and default-fill new S1 fields."""
+def test_trace_setstate_refuses_pre_versioning_state() -> None:
+    """Missing version tags refuse at the 2.33 rehydration floor."""
+
+    from torchlens._io import ArtifactVersionBelowFloorError
 
     live_log = _build_live_log()
     old_state = live_log.__getstate__()
     old_state.pop("tlspec_version", None)
-    old_state.pop("_activation_transform_repr", None)
 
     restored = Trace.__new__(Trace)
-    with pytest.warns(DeprecationWarning):
+    with pytest.raises(ArtifactVersionBelowFloorError, match="torchlens 2.33"):
         restored.__setstate__(old_state)
-
-    assert restored.tlspec_version == TLSPEC_VERSION
-    assert restored._activation_transform_repr is None
 
 
 def test_trace_setstate_default_fills_grad_fn_param_refs() -> None:
@@ -144,9 +142,8 @@ def test_trace_setstate_default_fills_grad_fn_param_refs() -> None:
     ``backends/torch/backward.py::_walk_and_hook_backward_graph``, but it was
     absent from ``MODEL_LOG_FIELD_ORDER`` and therefore from
     ``_MODEL_LOG_DEFAULT_FILL``. Loading a state dict that predates the field
-    (an explicitly supported path -- ``read_tlspec_version`` only rejects
-    *newer* versions, so pre-versioning/legacy states are accepted with a
-    ``DeprecationWarning``) left the restored ``Trace`` without the attribute
+    (a supported path for same-``tlspec_version`` states saved before the
+    field existed) left the restored ``Trace`` without the attribute
     at all, so the first backward pass crashed with
     ``AttributeError: 'Trace' object has no attribute '_grad_fn_param_refs'``
     mid-way through backward-graph hook installation.
