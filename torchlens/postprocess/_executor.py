@@ -24,8 +24,9 @@ import gate — import must not depend on recordings.
 from __future__ import annotations
 
 import heapq
+import sys
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Any, Callable, Iterator, TYPE_CHECKING
 
 from ._contracts import (
     CAPTURE_BASELINE_TOKENS,
@@ -33,38 +34,325 @@ from ._contracts import (
     POSTPROCESS_STEP_CONTRACTS,
     PostprocessStepContract,
 )
+from ..utils.display import _vtimed
 
-#: The registry order: the canonical hand-established step sequence the
-#: executor runs. R1 pins it strictly rank-ascending; R2 pins the derived
-#: order equal to it. Step "0" is the fenced prologue (producer lane) and
-#: deliberately absent.
-REGISTRY_ORDER: tuple[str, ...] = (
-    "1",
-    "2",
-    "3",
-    "4",
-    "5",
-    "6",
-    "7",
-    "8",
-    "9",
-    "10",
-    "11",
-    "11.5",
-    "11.75",
-    "12",
-    "13",
-    "14",
-    "15",
-    "15.5",
-    "16",
-    "16.5",
-    "17",
-    "17.5",
-    "18",
-    "19",
-    "20",
+if TYPE_CHECKING:
+    from ..data_classes.trace import Trace
+
+
+def _pp() -> Any:
+    """Return the live ``torchlens.postprocess`` module namespace.
+
+    Every step body resolves its callable through this namespace AT CALL
+    TIME (design-ppdag-v3 §5.2, tripwire integrity): tests monkeypatch step
+    functions on the module — a registry holding imported references would
+    break the in-place-mutation tripwire test and the streaming/step-0
+    seams silently.
+    """
+
+    return sys.modules["torchlens.postprocess"]
+
+
+@dataclass
+class StepContext:
+    """Mutable per-run context threaded through the step registry."""
+
+    trace: "Trace"
+    output_tensors: list[Any]
+    output_tensor_addresses: list[str]
+    output_parent_labels: list[Any]
+    capture_session: Any | None
+    #: Step-18-position snapshot (design §5.4): 18's should_run IS the
+    #: snapshot point — 18 clears _out_writer, so a re-evaluated 19
+    #: predicate would always be false and streamed outs would never be
+    #: evicted. Context-writing, never trace-writing.
+    finalize_streaming: bool | None = None
+
+
+def _always(ctx: StepContext) -> bool:
+    """Default should_run: the step always executes."""
+
+    return True
+
+
+@dataclass(frozen=True)
+class StepSpec:
+    """One executable pipeline step.
+
+    ``should_run`` is evaluated EXACTLY ONCE per step per run, in registry
+    order (executor invariant, counting-tested). ``assert_when_skipped``
+    mirrors the historical per-step assert placement: steps 11.75 and 13
+    assert unconditionally (their gates are inside), steps 4/18/19 assert
+    only when their body ran.
+    """
+
+    step: str
+    run: Callable[[StepContext], None]
+    should_run: Callable[[StepContext], bool] = _always
+    assert_when_skipped: bool = False
+
+
+def _run_step_1(ctx: StepContext) -> None:
+    with _vtimed(ctx.trace, "  Step 1: Add output layers"):
+        _pp()._add_output_layers(
+            ctx.trace,
+            ctx.output_tensors,
+            ctx.output_tensor_addresses,
+            ctx.output_parent_labels,
+        )
+
+
+def _run_step_2(ctx: StepContext) -> None:
+    with _vtimed(ctx.trace, "  Step 2: Trace output ancestors"):
+        _pp()._find_output_ancestors(ctx.trace)
+
+
+def _run_step_3(ctx: StepContext) -> None:
+    with _vtimed(ctx.trace, "  Step 3: Remove orphan nodes"):
+        _pp()._remove_orphan_nodes(ctx.trace)
+
+
+def _run_step_4(ctx: StepContext) -> None:
+    with _vtimed(ctx.trace, "  Step 4: Input/output distances"):
+        _pp()._mark_layer_depths(ctx.trace)
+
+
+def _should_run_step_4(ctx: StepContext) -> bool:
+    return bool(ctx.trace.mark_layer_depths)
+
+
+def _run_step_5(ctx: StepContext) -> None:
+    with _vtimed(ctx.trace, "  Step 5: Mark conditional branches"):
+        _pp()._mark_conditional_branches(ctx.trace)
+
+
+def _run_step_6(ctx: StepContext) -> None:
+    with _vtimed(ctx.trace, "  Step 6: Fix buffer layers"):
+        _pp()._fix_buffer_layers(ctx.trace)
+
+
+def _run_step_7(ctx: StepContext) -> None:
+    trace = ctx.trace
+    loop_desc = (
+        "  Step 7: Loop detection (full)"
+        if trace.recurrence_detection
+        else "  Step 7: Loop detection (params only)"
+    )
+    with _vtimed(trace, loop_desc):
+        if trace.recurrence_detection:
+            _pp()._detect_and_label_loops(trace)
+        else:
+            _pp()._group_by_shared_params(trace)
+
+
+def _run_step_8(ctx: StepContext) -> None:
+    with _vtimed(ctx.trace, "  Step 8: Map labels"):
+        _pp()._map_raw_labels_to_final_labels(ctx.trace)
+
+
+def _run_step_9(ctx: StepContext) -> None:
+    with _vtimed(ctx.trace, "  Step 9: Log final info"):
+        _pp()._log_final_info_for_layers(ctx.trace)
+
+
+def _run_step_10(ctx: StepContext) -> None:
+    with _vtimed(ctx.trace, "  Step 10: Rename labels"):
+        _pp()._rename_model_history_layer_names(ctx.trace)
+
+
+def _run_step_11(ctx: StepContext) -> None:
+    module = _pp()
+    with _vtimed(ctx.trace, "  Step 11: Build lookup keys"):
+        module._build_lookup_keys_and_finalize_retained_layers(ctx.trace)
+        module._refresh_fast_saved_summary(ctx.trace)
+        module._warn_unattributed_tensor_args(ctx.trace)
+
+
+def _run_step_11_5(ctx: StepContext) -> None:
+    with _vtimed(ctx.trace, "  Step 11.5: Populate source var names"):
+        _pp()._populate_var_names(ctx.trace)
+
+
+def _run_step_11_75(ctx: StepContext) -> None:
+    capture_session = ctx.capture_session
+    assert capture_session is not None  # should_run gates on this
+    with _vtimed(ctx.trace, "  Step 11.75: Resolve deferred retention"):
+        capture_session.resolve_deferred_retention(ctx.trace, list(ctx.output_tensors))
+
+
+def _run_step_12(ctx: StepContext) -> None:
+    with _vtimed(ctx.trace, "  Step 12: Undecorate tensors"):
+        _pp()._undecorate_all_saved_tensors(ctx.trace)
+
+
+def _run_step_13(ctx: StepContext) -> None:
+    # Unwrapped by _vtimed (historical); the CUDA availability test lives
+    # in the body so the contract assert fires unconditionally (§5.4).
+    module = _pp()
+    if module._is_cuda_available():
+        module.torch.cuda.empty_cache()
+
+
+def _run_step_14(ctx: StepContext) -> None:
+    with _vtimed(ctx.trace, "  Step 14: Log timing"):
+        _pp()._log_time_elapsed(ctx.trace)
+
+
+def _run_step_15(ctx: StepContext) -> None:
+    with _vtimed(ctx.trace, "  Step 15: Finalize params"):
+        _pp()._finalize_param_logs(ctx.trace)
+
+
+def _run_step_15_5(ctx: StepContext) -> None:
+    trace = ctx.trace
+    with _vtimed(trace, "  Step 15.5: Build layer logs"):
+        _pp()._build_layer_logs(trace)
+        trace.by_pass = {}
+        for index, op in enumerate(trace.layer_list):
+            pass_index = getattr(op, "pass_index", None)
+            if pass_index is not None:
+                trace.by_pass.setdefault(pass_index, []).append(index)
+
+
+def _run_step_16(ctx: StepContext) -> None:
+    module = _pp()
+    with _vtimed(ctx.trace, "  Step 16: Build module logs"):
+        module._build_module_logs(ctx.trace)
+        module.refresh_saved_module_call_count(ctx.trace)
+
+
+def _run_step_16_5(ctx: StepContext) -> None:
+    module = _pp()
+    trace = ctx.trace
+    with _vtimed(trace, "  Step 16.5: Graph shape hash"):
+        module.populate_normalized_layer_addresses(trace)
+        trace.graph_shape_hash = module.compute_graph_shape_hash(trace)
+
+
+def _run_step_17(ctx: StepContext) -> None:
+    with _vtimed(ctx.trace, "  Step 17: Mark pass finished"):
+        _pp()._set_tracing_finished(ctx.trace)
+
+
+def _run_step_17_5(ctx: StepContext) -> None:
+    # Unwrapped by _vtimed (historical). Adopt container records, then drop
+    # the per-phase workspaces (terminal consumes).
+    trace = ctx.trace
+    wrapper_ws = trace.__dict__.get("_wrapper_runtime_ws")
+    if wrapper_ws is not None:
+        registry = getattr(wrapper_ws, "container_registry", None)
+        if registry is not None:
+            if registry.records:
+                trace.__dict__["_containers"] = dict(registry.records)
+            registry.clear_live_state()
+    for field_name in (
+        "_raw_graph_ws",
+        "_module_capture_ws",
+        "_wrapper_runtime_ws",
+        "capture_events",
+        "_output_container_specs_by_raw_label",
+    ):
+        trace.__dict__.pop(field_name, None)
+
+
+def _should_run_step_18(ctx: StepContext) -> bool:
+    """THE streaming snapshot point (design §5.4, deliberately context-writing)."""
+
+    trace = ctx.trace
+    ctx.finalize_streaming = getattr(trace, "_out_writer", None) is not None and not getattr(
+        trace, "_defer_streaming_bundle_finalization", False
+    )
+    return ctx.finalize_streaming
+
+
+def _run_step_18(ctx: StepContext) -> None:
+    with _vtimed(ctx.trace, "  Step 18: Finalize streamed bundle"):
+        _pp()._finalize_streamed_bundle(ctx.trace)
+
+
+def _should_run_step_19(ctx: StepContext) -> bool:
+    return bool(ctx.finalize_streaming) and not ctx.trace._keep_outs_in_memory
+
+
+def _run_step_19(ctx: StepContext) -> None:
+    with _vtimed(ctx.trace, "  Step 19: Evict streamed outs"):
+        _pp()._evict_streamed_outs(ctx.trace)
+
+
+def _run_step_20(ctx: StepContext) -> None:
+    with _vtimed(ctx.trace, "  Step 20: Release param refs"):
+        ctx.trace.release_param_refs(allow_iter_rehydrate=True)
+
+
+#: The executable registry, in the canonical hand-established order. R1
+#: pins it strictly rank-ascending; R2 pins the derived order equal to it.
+#: Step "0" is the fenced prologue (producer lane) and deliberately absent.
+STEP_REGISTRY: tuple[StepSpec, ...] = (
+    StepSpec("1", _run_step_1),
+    StepSpec("2", _run_step_2),
+    StepSpec("3", _run_step_3),
+    StepSpec("4", _run_step_4, should_run=_should_run_step_4),
+    StepSpec("5", _run_step_5),
+    StepSpec("6", _run_step_6),
+    StepSpec("7", _run_step_7),
+    StepSpec("8", _run_step_8),
+    StepSpec("9", _run_step_9),
+    StepSpec("10", _run_step_10),
+    StepSpec("11", _run_step_11),
+    StepSpec("11.5", _run_step_11_5),
+    StepSpec(
+        "11.75",
+        _run_step_11_75,
+        should_run=lambda ctx: ctx.capture_session is not None,
+        assert_when_skipped=True,
+    ),
+    StepSpec("12", _run_step_12),
+    StepSpec("13", _run_step_13, assert_when_skipped=True),
+    StepSpec("14", _run_step_14),
+    StepSpec("15", _run_step_15),
+    StepSpec("15.5", _run_step_15_5),
+    StepSpec("16", _run_step_16),
+    StepSpec("16.5", _run_step_16_5),
+    StepSpec("17", _run_step_17),
+    StepSpec("17.5", _run_step_17_5),
+    StepSpec("18", _run_step_18, should_run=_should_run_step_18),
+    StepSpec("19", _run_step_19, should_run=_should_run_step_19),
+    StepSpec("20", _run_step_20),
 )
+
+REGISTRY_ORDER: tuple[str, ...] = tuple(spec.step for spec in STEP_REGISTRY)
+
+
+def run_pipeline(ctx: StepContext) -> None:
+    """Execute steps 1-20 with explicit per-step audit windows.
+
+    Window protocol (design §2.5): begin -> run -> end (in ``finally``, so
+    a raising step can no longer leave the store class-swapped with a live
+    collector) -> contract check -> postconditions OUTSIDE any window. No
+    window is open while harness code runs, and none survives the loop —
+    the freeze seam after step 20 runs unaudited by construction (review
+    note N11 replaces the historical trailing-window discard).
+    """
+
+    module = _pp()
+    audits_enabled = module._postprocess_assertions_enabled()
+    for spec in STEP_REGISTRY:
+        should = spec.should_run(ctx)
+        if not should and not spec.assert_when_skipped:
+            continue
+        if not audits_enabled:
+            if should:
+                spec.run(ctx)
+            continue
+        module._open_step_write_audit(ctx.trace)
+        try:
+            if should:
+                spec.run(ctx)
+        finally:
+            audit_result = module._close_step_write_audit(ctx.trace)
+        module._check_postprocess_contract(ctx.trace, spec.step, audit_result)
+    if audits_enabled:
+        module._assert_no_open_window(ctx.trace)
 
 
 @dataclass(frozen=True)

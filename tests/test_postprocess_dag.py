@@ -559,6 +559,116 @@ def test_row_clone_scope_free_when_unarmed() -> None:
         trace.cleanup()
 
 
+def test_executor_seam_patched_step_executes_and_audits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A monkeypatched step function still executes AND still trips the audit.
+
+    Design §5.2 tripwire integrity: the executor resolves step callables
+    through the module namespace at CALL time; a registry of imported
+    references would silently break every monkeypatch seam.
+    """
+
+    import torchlens.postprocess as pp
+
+    calls: list[str] = []
+    real_step2 = pp._find_output_ancestors
+
+    def patched_step2(trace: object) -> None:
+        calls.append("ran")
+        real_step2(trace)
+        first_op = next(iter(trace._raw_graph_ws.raw_layer_dict.values()))
+        first_op.annotations["seam_smuggle"] = 1  # undeclared in-place write
+
+    monkeypatch.setattr(pp, "_find_output_ancestors", patched_step2)
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    with pytest.raises(AssertionError, match=r"Step 2 .*annotations"):
+        tl.trace(_TinyModel().eval(), torch.randn(2, 3))
+    assert calls == ["ran"], "the patched step body must have executed"
+
+
+def test_executor_should_run_called_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Executor invariant: should_run evaluates once per step, in order.
+
+    Step 18's predicate is deliberately context-writing (THE streaming
+    snapshot point); a re-evaluated step-19 predicate after 18 cleared
+    _out_writer would always be false and streamed outs would never be
+    evicted (design §5.4).
+    """
+
+    from torchlens.postprocess import _executor as ex
+
+    counts: dict[str, int] = {}
+    seen_order: list[str] = []
+    original_registry = ex.STEP_REGISTRY
+
+    def counting(spec: ex.StepSpec) -> ex.StepSpec:
+        inner = spec.should_run
+
+        def counted(ctx: ex.StepContext) -> bool:
+            counts[spec.step] = counts.get(spec.step, 0) + 1
+            seen_order.append(spec.step)
+            return inner(ctx)
+
+        return ex.StepSpec(spec.step, spec.run, counted, spec.assert_when_skipped)
+
+    monkeypatch.setattr(
+        ex, "STEP_REGISTRY", tuple(counting(spec) for spec in original_registry)
+    )
+    trace = tl.trace(_TinyModel().eval(), torch.randn(2, 3))
+    try:
+        assert counts == {spec.step: 1 for spec in original_registry}
+        assert seen_order == list(REGISTRY_ORDER)
+    finally:
+        trace.cleanup()
+
+
+def test_executor_failing_step_propagates_and_cleans_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising step propagates its exception and leaves no armed window.
+
+    The finally-cleanup half of the window protocol: historically a raising
+    step left the store class-swapped with a live collector.
+    """
+
+    import torchlens.postprocess as pp
+    from torchlens._trace_core.op_store import (
+        _AUDIT_COLLECTORS,
+        _AUDIT_FINGERPRINTS,
+        _AUDIT_READS,
+    )
+
+    class _StepBoom(RuntimeError):
+        pass
+
+    def exploding_step9(trace: object) -> None:
+        raise _StepBoom("step 9 exploded")
+
+    monkeypatch.setattr(pp, "_log_final_info_for_layers", exploding_step9)
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    with pytest.raises(_StepBoom):
+        tl.trace(_TinyModel().eval(), torch.randn(2, 3))
+    assert not _AUDIT_COLLECTORS, "no collector may survive a raising step"
+    assert not _AUDIT_FINGERPRINTS
+    assert not _AUDIT_READS
+
+
+def test_no_window_open_past_step_20(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review note N11: the freeze seam runs unaudited by construction."""
+
+    from torchlens._trace_core.op_store import _AUDIT_COLLECTORS
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    trace = tl.trace(_TinyModel().eval(), torch.randn(2, 3))
+    try:
+        assert not _AUDIT_COLLECTORS
+    finally:
+        trace.cleanup()
+
+
 def test_phase_timing_bucket_names_default_capture() -> None:
     """The _vtimed bucket-name set for a default capture is frozen (§5.5).
 
