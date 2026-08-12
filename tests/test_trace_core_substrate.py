@@ -419,7 +419,12 @@ def test_op_store_view_parent_mutation_never_leaks_after_isolation() -> None:
         big.cell_set(r, 0, f"op_{i}")
         big.cell_set(r, 1, {"i": i})
     big.freeze()
-    assert big.rows_building() is None or big._rows is None or True
+    # 600 rows is past the transpose threshold: the seal must actually have
+    # transposed to columns (the former `... or True` here asserted nothing).
+    assert big.rows_building() is None and big._columns is not None
+    # Mutation check that the assertion can fail: a small sealed store stays
+    # row-major, so the same predicate distinguishes the two seal shapes.
+    assert store.rows_building() is not None and store._columns is None
     big_view = OpStoreView(big)
     big_view.isolate_mutable_cells()
     big.cell_get(5, 1)["late"] = True
