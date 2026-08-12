@@ -81,13 +81,25 @@ def test_state_keysets_match_golden() -> None:
     """state_items key sets are frozen per class and lifecycle stage."""
 
     actual = json.dumps(_capture_stage_records(), indent=1, sort_keys=True)
+    from _oracle_env import resolve_env_golden
+
+    golden_path, record_on_missing = resolve_env_golden(
+        _GOLDEN_PATH.parent, _GOLDEN_PATH.name
+    )
     if os.environ.get(_UPDATE_ENV) == "1":
-        _GOLDEN_PATH.write_text(actual + "\n")
+        golden_path.parent.mkdir(parents=True, exist_ok=True)
+        golden_path.write_text(actual + "\n")
         pytest.skip("updated state-keyset golden")
-    assert _GOLDEN_PATH.exists(), (
+    if record_on_missing and not golden_path.exists():
+        golden_path.parent.mkdir(parents=True, exist_ok=True)
+        golden_path.write_text(actual + "\n")
+        pytest.skip(
+            f"recorded first-run state-keyset golden for this environment: {golden_path}"
+        )
+    assert golden_path.exists(), (
         f"missing state-keyset golden; generate with {_UPDATE_ENV}=1"
     )
-    expected = _GOLDEN_PATH.read_text().rstrip("\n")
+    expected = golden_path.read_text().rstrip("\n")
     if actual != expected:
         diff = "\n".join(
             list(

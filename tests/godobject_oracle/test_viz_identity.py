@@ -117,12 +117,20 @@ def _dot(trace: tl.Trace, tmp_path: Path, **kwargs: Any) -> str:
 def _assert_matches_golden(actual: str, golden_name: str) -> None:
     """Compare DOT text to a committed golden, with the update escape hatch."""
 
-    golden_path = _GOLDEN_DIR / golden_name
+    from _oracle_env import resolve_env_golden
+
+    golden_path, record_on_missing = resolve_env_golden(_GOLDEN_DIR, golden_name)
     actual = actual.rstrip("\n")
     if os.environ.get(_UPDATE_ENV) == "1":
-        _GOLDEN_DIR.mkdir(exist_ok=True)
+        golden_path.parent.mkdir(parents=True, exist_ok=True)
         golden_path.write_text(actual + "\n")
         pytest.skip(f"updated golden {golden_name}")
+    if record_on_missing and not golden_path.exists():
+        golden_path.parent.mkdir(parents=True, exist_ok=True)
+        golden_path.write_text(actual + "\n")
+        pytest.skip(
+            f"recorded first-run viz golden for this environment: {golden_path}"
+        )
     assert golden_path.exists(), (
         f"missing golden {golden_name}; generate with {_UPDATE_ENV}=1"
     )

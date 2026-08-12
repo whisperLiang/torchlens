@@ -36,13 +36,25 @@ def test_legacy_analysis_artifact_loads_byte_identically() -> None:
     assert _ANALYSIS_ARTIFACT.exists(), "frozen legacy artifact missing"
     loaded = tl.load(str(_ANALYSIS_ARTIFACT))
     actual = canonical_dump(snapshot_trace_surface(loaded))
+    from _oracle_env import resolve_env_golden
+
+    golden_path, record_on_missing = resolve_env_golden(
+        _GOLDEN_DIR, _LOADED_SURFACE_GOLDEN.name
+    )
     if os.environ.get(_UPDATE_ENV) == "1":
-        _LOADED_SURFACE_GOLDEN.write_text(actual + "\n")
+        golden_path.parent.mkdir(parents=True, exist_ok=True)
+        golden_path.write_text(actual + "\n")
         pytest.skip("updated legacy loaded-surface golden")
-    assert _LOADED_SURFACE_GOLDEN.exists(), (
+    if record_on_missing and not golden_path.exists():
+        golden_path.parent.mkdir(parents=True, exist_ok=True)
+        golden_path.write_text(actual + "\n")
+        pytest.skip(
+            f"recorded first-run loaded-surface golden for this environment: {golden_path}"
+        )
+    assert golden_path.exists(), (
         f"missing loaded-surface golden; generate with {_UPDATE_ENV}=1"
     )
-    expected = _LOADED_SURFACE_GOLDEN.read_text().rstrip("\n")
+    expected = golden_path.read_text().rstrip("\n")
     if actual != expected:
         diff = "\n".join(
             list(

@@ -362,6 +362,24 @@ OUT (documented handoffs, never silent):
 Any capacity cut happens at a completed wave boundary, named plainly — never mid-fan-out,
 never a half-migrated family (where a false-VERIFIED hole would hide).
 
+M11 dependency analysis (2026-08-12, named cut): the COW `Trace.fork()` +
+forkcopier deletion + strong->weak facade flip are BLOCKED on the Trace
+label-map relocation (the M10 physical-decomposition slice). Concretely:
+(a) a COW fork's writes must land in a FORK-LOCAL overlay, but the M5 facade
+binds `op._core` to the shared `OpRowStore` whose overlay is store-owned —
+COW needs a per-trace store VIEW layering a fork overlay over the shared
+base; (b) the fork's records must be FRESH facades over that view, but every
+trace-side lookup container (`layer_dict_all_keys`, `layer_logs`, accessor
+dicts) holds OBJECT references, so fork facades require the lookup maps to
+resolve through `TraceCore.label_rows`-style indexes first; (c) the
+`TraceCore._facades` identity cache has zero production consumers today —
+identity is carried by those same object-holding maps — so the strong->weak
+flip is vacuous until the maps relocate. Order of the mechanical-later
+handoff: label maps -> core indexes (accessors become facade factories),
+then per-trace store views + COW fork + transactions, then forkcopier
+deletion with the fork/rollback/payload-alias/parent-run/GC parity proof,
+then the weak-valued flip against the aliases-v1 lifetime rows.
+
 ## 5. JMT forks (reserved decisions; the plan assumes every default)
 
 1. **JMT-FORK-1 — DECIDED 2026-08-12: immutable views.** Relation accessors
