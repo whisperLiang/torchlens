@@ -400,6 +400,89 @@ def test_phantom_write_exemptions_are_exact() -> None:
         assert reason
 
 
+def test_guard2_ledger_static_mirror() -> None:
+    """Smoke-tier half of the guard-2 mirror (closure-review nit).
+
+    The full runtime no-op/phantom reports run only in the heavy-marked
+    matrix union test, so between heavy runs the static tables could drift
+    against the contracts without anything going red in the smoke tier.
+    This pins the static consistency: every guard-2 ledger row names a real
+    declared write of an existing step, the phantom tables in the two test
+    files mirror exactly, and a column cannot be both declared-never-
+    observed (phantom) and observed-never-effective (no-op ledger).
+    """
+
+    from test_postprocess_enforcement import (
+        EXPECTED_PHANTOM_READS,
+        EXPECTED_PHANTOM_WRITES,
+        PINNED_NOOP_WRITERS,
+    )
+
+    for step, columns in PINNED_NOOP_WRITERS.items():
+        assert step in POSTPROCESS_STEP_CONTRACTS, step
+        undeclared = columns - POSTPROCESS_STEP_CONTRACTS[step].writes
+        assert not undeclared, (
+            f"guard-2 ledger names step-{step} writes no longer declared: "
+            f"{sorted(undeclared)}"
+        )
+    assert EXPECTED_PHANTOM_WRITES == set(PHANTOM_WRITE_EXEMPTIONS)
+    assert EXPECTED_PHANTOM_READS == set(PHANTOM_READ_EXEMPTIONS)
+    for step, column in EXPECTED_PHANTOM_WRITES:
+        assert column not in PINNED_NOOP_WRITERS.get(step, frozenset()), (
+            step,
+            column,
+        )
+
+
+def test_guard2_ledger_holds_on_default_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Smoke-tier runtime tether for the guard-2 ledger (closure-review nit).
+
+    PINNED_NOOP_WRITERS claims its writers are never content-effective on
+    ANY matrix axis, which makes every single capture a valid probe of the
+    claim's dangerous drift direction: a pinned entry that has become
+    effective would let the heavy union test alone catch a now-stale ledger
+    still discharging... nothing — but the smoke tier would keep passing the
+    stale ledger to the pinned-findings classifier. One default capture in
+    record mode asserts no pinned row is content-effective, so that drift
+    goes red per-step without paying the full matrix.
+    """
+
+    import torchlens.postprocess as pp
+    from test_postprocess_enforcement import PINNED_NOOP_WRITERS
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_WRITE_AUDIT", "record")
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_READ_AUDIT", "record")
+    for sink in (
+        pp.RECORDED_STEP_WRITES,
+        pp.RECORDED_STEP_READS,
+        pp.RECORDED_STEP_CLONE_READS,
+        pp.RECORDED_STEP_EFFECTIVE_WRITES,
+    ):
+        sink.clear()
+    try:
+        trace = tl.trace(_TinyModel().eval(), torch.randn(2, 3))
+        trace.cleanup()
+        for step, pinned in PINNED_NOOP_WRITERS.items():
+            effective = pp.RECORDED_STEP_EFFECTIVE_WRITES.get(step, set())
+            leaked = pinned & effective
+            assert not leaked, (
+                f"pinned step-{step} no-op writers were content-effective "
+                f"on a default capture — the guard-2 ledger is stale: "
+                f"{sorted(leaked)}"
+            )
+    finally:
+        for sink in (
+            pp.RECORDED_STEP_WRITES,
+            pp.RECORDED_STEP_READS,
+            pp.RECORDED_STEP_CLONE_READS,
+            pp.RECORDED_STEP_EFFECTIVE_WRITES,
+        ):
+            sink.clear()
+
+
 # ---------------------------------------------------------------------------
 # The two-key direction authority (Sol 1's counterexample, both halves)
 # ---------------------------------------------------------------------------
