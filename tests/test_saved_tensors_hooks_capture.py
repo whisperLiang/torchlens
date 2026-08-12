@@ -66,9 +66,9 @@ class SaveOnCpuModel(nn.Module):
 def _assert_clean_offload_graph(trace: tl.Trace) -> None:
     """The forward graph must be exactly input -> linear -> relu -> mul -> output."""
     assert trace.layer_labels == EXPECTED_LABELS
-    assert trace["relu_1_2"].parents == ["linear_1_1"]
-    assert trace["relu_1_2"].children == ["mul_1_3"]
-    assert trace["linear_1_1"].parents == ["input_1"]
+    assert trace["relu_1_2"].parents == ("linear_1_1",)
+    assert trace["relu_1_2"].children == ("mul_1_3",)
+    assert trace["linear_1_1"].parents == ("input_1",)
     for label in trace.layer_labels:
         op = trace[label]
         if label != "input_1":

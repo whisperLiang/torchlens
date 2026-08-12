@@ -618,7 +618,7 @@ def test_torch_tensor_scalar_factory_stays_clean() -> None:
         trace = tl.trace(_TensorScalarFactory().eval(), torch.randn(3))
     op = next(o for o in trace.ops if o.type == "tensor")
 
-    assert op.parents == []
+    assert op.parents == ()
     assert op.unattributed_tensor_args == ()
     assert not [w for w in caught if _PROVENANCE_MATCH in str(w.message)]
 

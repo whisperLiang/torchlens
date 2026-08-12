@@ -71,7 +71,7 @@ class Buffer:
         "_initial_value": FieldPolicy.KEEP,
         "_source_ref": FieldPolicy.WEAKREF_STRIP,
     }
-    FIELD_POLICY = build_record_field_policy_table(BUFFER_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC)
+    FIELD_POLICY = build_record_field_policy_table(BUFFER_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="buffer")
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     def __init__(
@@ -99,6 +99,20 @@ class Buffer:
         self._initial_value = initial_value
         self._source_ref = weakref.ref(source_trace) if source_trace is not None else None
 
+    def __tl_state_items__(self) -> Any:
+        """Yield live state pairs from the backing row (M8 facade hook)."""
+
+        from .._trace_core.record_rows import record_state_items
+
+        return record_state_items(self)
+
+    def __tl_state_restore__(self, mapping: Dict[str, Any]) -> None:
+        """Install a state mapping through the cell descriptors (M8 hook)."""
+
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, mapping)
+
     def __getstate__(self) -> Dict[str, Any]:
         """Return pickle state with the non-picklable weakref stripped.
 
@@ -109,7 +123,9 @@ class Buffer:
         ``pickle.dumps(buffer)`` does not crash.
         """
 
-        state = self.__dict__.copy()
+        from ._state_adapter import state_items
+
+        state = dict(state_items(self))
         state["_source_ref"] = None
         state["tlspec_version"] = TLSPEC_VERSION
         return state
@@ -129,7 +145,9 @@ class Buffer:
         from .._io.state_keys import refuse_callable_shadowing_state_keys
 
         refuse_callable_shadowing_state_keys(type(self), state)
-        self.__dict__.update(state)
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, state)
 
     @property
     def source_trace(self) -> "Trace | None":
@@ -347,6 +365,28 @@ class Buffer:
         lines.append(f"  versions: {len(self.versions)}")
         lines.append(f"  num_overwrites: {self.num_overwrites}")
         return format_summary_lines(f"Buffer: {self.address}", lines)
+
+
+# The M8 facade: the five declared stored fields become row-cell
+# descriptors; the instance dict keeps only the store binding + user extras.
+_BUFFER_STORED_FIELDS: tuple[str, ...] = (
+    "address",
+    "module_address",
+    "versions",
+    "_initial_value",
+    "_source_ref",
+)
+
+
+def _install_buffer_facade() -> None:
+    """Install the Buffer row-cell descriptors (import-time, collision-safe)."""
+
+    from .._trace_core.record_rows import install_record_facade
+
+    install_record_facade(Buffer, _BUFFER_STORED_FIELDS)
+
+
+_install_buffer_facade()
 
 
 class BufferAccessor(Accessor["Buffer"]):

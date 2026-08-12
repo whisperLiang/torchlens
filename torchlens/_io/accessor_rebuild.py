@@ -52,6 +52,29 @@ def rebuild_trace_accessors(
     _invalidate_trace_module_call_accessor_cache(trace)
     trace._module_logs = ModuleAccessor(module_dict, module_order, pass_dict)
 
+    # Adopt Module/ModuleCall rows into the per-trace kind tables (M8). A
+    # ``.tlspec`` load rebuilds the module accessor only HERE — after
+    # ``__setstate__`` already rehydrated and sealed the core (F9) — which
+    # used to leave every public Module/ModuleCall facade detached-backed
+    # with empty kind tables (closure review F9 gap). Live captures arrive
+    # already table-bound (postprocess/finalization adopts them just before
+    # calling this), so adoption is an idempotent no-op there. Tables born
+    # after a sealed core are sealed too, exactly like buffers below.
+    _core = trace.__dict__.get("_trace_core")
+    if _core is not None and _core.ops is not None:
+        from torchlens._trace_core.record_rows import adopt_records
+
+        for kind, records in (
+            ("module", list(module_dict.values())),
+            ("module_call", list(pass_dict.values())),
+        ):
+            if not records:
+                continue
+            adopt_records(_core, kind, records)
+            kind_store = _core.kind_rows.get(kind)
+            if kind_store is not None and not kind_store.frozen and _core.ops.frozen:
+                kind_store.freeze()
+
     buffer_versions: dict[str, list["Op"]] = {}
     for entry in trace.layer_list:
         for grad_record in getattr(entry, "_grad_records", ()):
@@ -67,4 +90,22 @@ def rebuild_trace_accessors(
         )
         for address, versions in buffer_versions.items()
     }
+    # Adopt Buffer rows into the per-trace kind table (M8) when this trace is
+    # core-backed (live captures AND rehydrated loads, F9).
+    _core = trace.__dict__.get("_trace_core")
+    if _core is not None and buffer_dict:
+        from torchlens._trace_core.record_rows import adopt_records
+
+        adopt_records(_core, "buffer", buffer_dict.values())
+        # A rehydrated load's core is already sealed; seal a kind table born
+        # after that seal too, so a later fork can view it (OpStoreView
+        # requires sealed bases).
+        buffer_store = _core.kind_rows.get("buffer")
+        if (
+            buffer_store is not None
+            and not buffer_store.frozen
+            and _core.ops is not None
+            and _core.ops.frozen
+        ):
+            buffer_store.freeze()
     trace._buffer_accessor = BufferAccessor(buffer_dict, source_trace=trace)  # type: ignore[assignment]

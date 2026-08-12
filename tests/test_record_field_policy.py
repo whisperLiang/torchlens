@@ -290,3 +290,159 @@ def test_postprocess_contract_assertions_run_over_standard_model(
         assert trace.modules
     finally:
         trace.cleanup()
+
+
+def test_postprocess_write_audit_enforces_declared_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each postprocess step writes only its declared op-store columns (M10).
+
+    The declared ``PostprocessStepContract.writes`` sets were recorded over
+    the six surface-oracle model axes; the audit re-runs one representative
+    conditional+recurrent-free capture here so a step growing an undeclared
+    column write fails CI, not just the opt-in debug env.
+    """
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    trace = tl.trace(_PolicyModel().eval(), torch.randn(2, 3), save_grads=False)
+    trace.cleanup()
+
+
+def test_postprocess_write_audit_trips_on_undeclared_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An undeclared op-store column write fails the step-contract tripwire."""
+
+    from torchlens.postprocess import POSTPROCESS_STEP_CONTRACTS, PostprocessStepContract
+
+    original = POSTPROCESS_STEP_CONTRACTS["4"]
+    assert original.writes, "step 4 must declare a non-empty write set"
+    narrowed = PostprocessStepContract(
+        original.step,
+        original.name,
+        original.contract,
+        writes=frozenset(),
+    )
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    monkeypatch.setitem(POSTPROCESS_STEP_CONTRACTS, "4", narrowed)
+    with pytest.raises(AssertionError, match="undeclared op-store columns"):
+        tl.trace(_PolicyModel().eval(), torch.randn(2, 3), save_grads=False)
+
+
+def test_postprocess_write_audit_catches_in_place_container_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An in-place container mutation inside a step trips the write audit.
+
+    Sol review finding 6: the audit intercepted only cell assignment and
+    deletion, so an in-place ``annotations[...] = ...`` mutation smuggled an
+    undeclared write through a step with an EMPTY declared write set
+    (step 10). The content-fingerprint diff now surfaces it.
+    """
+
+    import torchlens.postprocess as postprocess_mod
+
+    real_rename = postprocess_mod._rename_model_history_layer_names
+
+    def smuggling_rename(trace: object) -> None:
+        real_rename(trace)
+        raw_layer_dict = trace._raw_graph_ws.raw_layer_dict
+        first_op = next(iter(raw_layer_dict.values()))
+        first_op.annotations["smuggled_in_place"] = 1
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    monkeypatch.setattr(
+        postprocess_mod, "_rename_model_history_layer_names", smuggling_rename
+    )
+    with pytest.raises(
+        AssertionError, match=r"Step 10 .* undeclared op-store columns.*annotations"
+    ):
+        tl.trace(_PolicyModel().eval(), torch.randn(2, 3), save_grads=False)
+
+
+def test_postprocess_write_audit_allows_sanctioned_row_removal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fastlog cook passes enforcement despite step-3 orphan removal.
+
+    Pre-existing false positive (reproduced at 684f8860): removing an
+    orphan op husks the row cell-by-cell, and the audit recorded every
+    per-cell delete as a column write — step 3 tripped with essentially
+    the whole layout on removal-heavy paths such as ``Recording.to_trace``.
+    Whole-row release is now a row-lifecycle event accounted against the
+    step contract's explicit ``removes_rows`` sanction instead.
+    """
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    model = _PolicyModel().eval()
+    recording = tl.record(model, torch.randn(2, 3), save=tl.func("linear"))
+    trace = recording.to_trace()
+    assert trace.layer_logs
+    trace.cleanup()
+
+
+def test_postprocess_write_audit_trips_on_unsanctioned_row_removal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removing rows in a step without a removes_rows sanction still trips."""
+
+    from torchlens.postprocess import POSTPROCESS_STEP_CONTRACTS, PostprocessStepContract
+
+    original = POSTPROCESS_STEP_CONTRACTS["3"]
+    assert original.removes_rows, "step 3 must sanction orphan-row removal"
+    unsanctioned = PostprocessStepContract(
+        original.step,
+        original.name,
+        original.contract,
+        writes=original.writes,
+        removes_rows=False,
+    )
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    monkeypatch.setitem(POSTPROCESS_STEP_CONTRACTS, "3", unsanctioned)
+    model = _PolicyModel().eval()
+    recording = tl.record(model, torch.randn(2, 3), save=tl.func("linear"))
+    with pytest.raises(AssertionError, match="without a removes_rows sanction"):
+        recording.to_trace()
+
+
+def test_write_audit_fingerprint_is_order_canonical() -> None:
+    """Equal container content fingerprints equal; real mutation differs.
+
+    ``hash(repr(value))`` on set cells was iteration-order sensitive: 8 and
+    16 collide in a small set table, so equal sets built in different
+    insertion orders repr differently, and a mutate-and-revert inside one
+    step could register as a write of an undeclared column (closure
+    review, F6 fragility). The fingerprint now sorts element fingerprints
+    for unordered containers.
+    """
+
+    from torchlens._trace_core.op_store import _cell_content_fingerprint
+
+    a = {8, 16}
+    b = {16, 8}
+    assert list(a) != list(b) or repr(a) != repr(b) or a == b  # equal content
+    assert _cell_content_fingerprint(a) == _cell_content_fingerprint(b)
+
+    # Mutate-and-revert keeps the fingerprint stable even when the revert
+    # changes iteration order (table resize).
+    grown = {8, 16}
+    before = _cell_content_fingerprint(grown)
+    for value in range(100, 200):
+        grown.add(value)
+    for value in range(100, 200):
+        grown.remove(value)
+    assert _cell_content_fingerprint(grown) == before
+
+    # Equal dicts with reordered keys fingerprint equal; nested unordered
+    # containers canonicalize recursively.
+    assert _cell_content_fingerprint({"a": {8, 16}, "b": 1}) == (
+        _cell_content_fingerprint({"b": 1, "a": {16, 8}})
+    )
+
+    # Real content changes are still caught, including nested ones.
+    assert _cell_content_fingerprint({8, 16}) != _cell_content_fingerprint({8, 17})
+    assert _cell_content_fingerprint([1, [2, 3]]) != _cell_content_fingerprint(
+        [1, [2, 4]]
+    )
+    # Lists stay ORDER-SENSITIVE (list equality is positional).
+    assert _cell_content_fingerprint([1, 2]) != _cell_content_fingerprint([2, 1])

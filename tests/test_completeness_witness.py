@@ -1150,7 +1150,7 @@ def test_tensor_data_getter_dispatch_is_captured() -> None:
 
     detach_ops = [op for op in trace.ops if op.func_name == "detach"]
     assert len(detach_ops) == 1
-    assert detach_ops[0].parents == ["input_1"]
+    assert detach_ops[0].parents == ("input_1",)
     assert trace.completeness_diagnostics == []
     assert trace.capture_verified is True
 

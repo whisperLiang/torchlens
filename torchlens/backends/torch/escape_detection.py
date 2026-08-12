@@ -566,7 +566,7 @@ def _report_escape(
         "owner_thread_id": guard.owner_thread_id,
         "guard_pass_index": guard.guard_pass_index,
         "capture_mode": getattr(guard.trace, "capture_mode", None),
-        "exhaustive_pass": guard.trace._build_state.in_exhaustive_pass,
+        "exhaustive_pass": guard.trace._wrapper_runtime_ws.in_exhaustive_pass,
         "stack": tuple(traceback.format_stack(callsite, limit=5)),
         "witness_corroborated": False,
         "enforced": False,

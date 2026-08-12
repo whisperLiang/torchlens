@@ -35,11 +35,14 @@ from .scrub import (
 from ..backends import BackendRuntimeCompatibilityError
 from ..data_classes._state_adapter import state_items
 from ..data_classes.trace import Trace
-from ..ir.trace_build_state import LEGACY_TRACE_BUILD_STATE_KEYS
+from ..ir.workspaces import LEGACY_TRACE_BUILD_STATE_KEYS
 
 _LEGACY_CAPTURE_TRACE_KEYS = {
     *LEGACY_TRACE_BUILD_STATE_KEYS,
     "_build_state",
+    "_raw_graph_ws",
+    "_module_capture_ws",
+    "_wrapper_runtime_ws",
     "_pending_live_fire_records",
 }
 _TORCH_BACKEND_NAME = "torch"

@@ -249,7 +249,7 @@ class GradFn:
         "backward_signature": FieldPolicy.KEEP,
         "backward_docstring": FieldPolicy.KEEP,
     }
-    FIELD_POLICY = build_record_field_policy_table(GRAD_FN_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC)
+    FIELD_POLICY = build_record_field_policy_table(GRAD_FN_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="grad_fn")
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     grad_fn_object_id: int
@@ -316,10 +316,26 @@ class GradFn:
         backward pass.
         """
 
-        state = self.__dict__.copy()
+        from ._state_adapter import state_items
+
+        state = dict(state_items(self))
         state["_source_trace_ref"] = None
         state["tlspec_version"] = TLSPEC_VERSION
         return state
+
+    def __tl_state_items__(self) -> Any:
+        """Yield live state pairs from the backing row (M9 facade hook)."""
+
+        from .._trace_core.record_rows import record_state_items
+
+        return record_state_items(self)
+
+    def __tl_state_restore__(self, mapping: dict[str, Any]) -> None:
+        """Install a state mapping through the cell descriptors (M9 hook)."""
+
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, mapping)
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore pickle state and fill fields added in newer versions."""
@@ -376,7 +392,9 @@ class GradFn:
         from .._io.state_keys import refuse_callable_shadowing_state_keys
 
         refuse_callable_shadowing_state_keys(type(self), state)
-        self.__dict__.update(state)
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, state)
         self.__post_init__()
 
     @property
@@ -620,6 +638,65 @@ class GradFn:
 
         row = {field_name: getattr(self, field_name) for field_name in GRAD_FN_LOG_FIELD_ORDER}
         return pd.DataFrame([row], columns=GRAD_FN_LOG_FIELD_ORDER)
+
+
+# The M9 facade: the declared stored fields (the literal PORTABLE_STATE_SPEC
+# keys) become row-cell descriptors; dataclass defaults are baked into the
+# generated __init__, so replacing the class-attribute defaults is
+# behavior-preserving. Rows adopt into the owning backward epoch's stores.
+_GRAD_FN_STORED_FIELDS: tuple[str, ...] = (
+    "grad_fn_object_id",
+    "class_name",
+    "class_qualname",
+    "is_custom",
+    "order",
+    "origin_backward_pass",
+    "creator_object_id",
+    "differentiates",
+    "modules",
+    "module_address",
+    "module_membership_source",
+    "label",
+    "type",
+    "type_index",
+    "ordinal_index",
+    "step_index",
+    "has_op",
+    "op_label",
+    "next_grad_fn_ids",
+    "parents",
+    "children",
+    "siblings",
+    "co_parents",
+    "calls",
+    "_source_trace_ref",
+    "class_source_file",
+    "class_source_line",
+    "class_docstring",
+    "init_source_file",
+    "init_source_line",
+    "init_signature",
+    "init_docstring",
+    "forward_source_file",
+    "forward_source_line",
+    "forward_signature",
+    "forward_docstring",
+    "backward_source_file",
+    "backward_source_line",
+    "backward_signature",
+    "backward_docstring",
+)
+
+
+def _install_grad_fn_facade() -> None:
+    """Install the GradFn row-cell descriptors (import-time)."""
+
+    from .._trace_core.record_rows import install_record_facade
+
+    install_record_facade(GradFn, _GRAD_FN_STORED_FIELDS)
+
+
+_install_grad_fn_facade()
 
 
 class GradFnAccessor(Accessor[GradFn]):

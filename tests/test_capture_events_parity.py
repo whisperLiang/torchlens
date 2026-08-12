@@ -323,7 +323,9 @@ def _drop_capture_scratch(trace: Any) -> None:
     """
 
     for field_name in (
-        "_build_state",
+        "_raw_graph_ws",
+        "_module_capture_ws",
+        "_wrapper_runtime_ws",
         "_raw_layer_dict",
         "_raw_layer_labels_list",
         "_layer_counter",

@@ -84,8 +84,8 @@ def test_orphan_island_ops_have_safe_repr_and_list_printing(
     trace = _orphan_trace()
     parent, child = tuple(trace.orphans)
 
-    assert parent.children == [child.layer_label]
-    assert child.parents == [parent.layer_label]
+    assert parent.children == (child.layer_label,)
+    assert child.parents == (parent.layer_label,)
     assert "PASS NOT FINISHED" not in repr(parent)
     assert "PASS NOT FINISHED" not in repr(child)
     print(list(trace.orphans))

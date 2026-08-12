@@ -156,7 +156,7 @@ def test_direct_inplace_control_unchanged():
     log = tl.trace(Direct(), torch.zeros(2, 3))
     mutation = _single_op(log, "add_")
     consumer = _single_op(log, "__mul__")
-    assert log[consumer].parents == [mutation]
+    assert log[consumer].parents == (mutation,)
     assert validate_forward_pass(Direct(), torch.zeros(2, 3))
 
 
@@ -274,11 +274,11 @@ def test_tuple_passthrough_no_label_steal_or_false_dep():
     # Both executed pass-through entries are still recorded (honest accounting)...
     assert len(bt_ops) == 2
     for bt_op in bt_ops:
-        assert log[bt_op].parents == ["input_1"]
+        assert log[bt_op].parents == ("input_1",)
     # ...but the downstream direct consumer of x keeps its true parent: no
     # false dependency through an op whose result the user never used.
     consumer = _single_op(log, "__mul__")
-    assert log[consumer].parents == ["input_1"]
+    assert log[consumer].parents == ("input_1",)
     assert validate_forward_pass(BroadcastUnused(), torch.randn(2, 3))
 
 
@@ -314,7 +314,7 @@ def test_subclass_output_capture():
     # __torch_function__ machinery may interpose as_subclass re-wrap hops,
     # so assert path connectivity, not direct parenthood).
     first_cast = _ops_by_func(log, "as_subclass")[0]
-    assert log[first_cast].parents == ["input_1"]
+    assert log[first_cast].parents == ("input_1",)
     assert _has_path(log, first_cast, add_op)
     assert _has_path(log, add_op, mul_op)
     # Nothing in the trace is provenance-broken.
@@ -373,9 +373,9 @@ def test_identity_module_boundary_connectivity():
     consumer = _single_op(log, "__mul__")
     dropout = _single_op(log, "dropout")
     # The boundary op is on the path, not a dead end.
-    assert log[boundary].parents == [dropout]
+    assert log[boundary].parents == (dropout,)
     assert consumer in log[boundary].children
-    assert log[consumer].parents == [boundary]
+    assert log[consumer].parents == (boundary,)
     assert validate_forward_pass(IdentityModule().eval(), torch.randn(2, 3))
 
 
@@ -384,7 +384,7 @@ def test_custom_passthrough_module_boundary_connectivity():
     boundary = _single_op(log, "identity")
     consumer = _single_op(log, "__add__")
     assert consumer in log[boundary].children
-    assert log[consumer].parents == [boundary]
+    assert log[consumer].parents == (boundary,)
     assert validate_forward_pass(CustomPassThroughHost(), torch.randn(2))
 
 

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Set, Tuple, cast
 
 import torch
 
+from .._trace_core.groups import GroupRef
 from ..constants import MODEL_LOG_FIELD_ORDER
 from ..intervention.types import ParentRef, Unsupported
 from ..utils.collections import remove_entry_from_list
@@ -54,6 +55,14 @@ def cleanup(self: "Trace") -> None:
     if hasattr(self, "param_logs"):
         for pl in self.param_logs:
             pl.release_param_ref()
+    # Materialize the M8 Layer mirror fields BEFORE husking the ops that back
+    # them: a user-held Layer keeps exactly the readable metadata the dict-era
+    # per-layer copies kept after cleanup (the copies existed at this point in
+    # the dict era, so post-cleanup memory is unchanged).
+    from .layer import materialize_layer_mirrors
+
+    for layer_log in (self.__dict__.get("layer_logs") or {}).values():
+        materialize_layer_mirrors(layer_log)
     # First, clear all attributes from each Op entry.
     # This breaks the Op -> Trace circular reference
     # (via source_trace) without needing per-entry reference removal.
@@ -68,7 +77,10 @@ def cleanup(self: "Trace") -> None:
     # and large data structures (layer_logs, layer_dict_all_keys).
     for attr in [
         "_capture_events",
-        "_build_state",
+        "_raw_graph_ws",
+        "_module_capture_ws",
+        "_wrapper_runtime_ws",
+        "_trace_core",
         "_saved_grad_labels",
         "_module_logs",
         "_buffer_accessor",
@@ -100,8 +112,24 @@ def cleanup(self: "Trace") -> None:
 
 def _clear_entry_attributes(log_entry: Op) -> None:
     """Clear all instance attributes from a Op entry."""
+    from .._trace_core.op_store import mark_op_row_released
+    from .op import _detach_op_husk
+
+    # Whole-row release: tell any active step write audit these per-cell
+    # deletes are the op's removal husking (a row-lifecycle event checked
+    # against the step's removes_rows sanction), not column writes.
+    try:
+        row_store = object.__getattribute__(log_entry, "_core")
+        row = object.__getattribute__(log_entry, "_row")
+    except AttributeError:
+        row_store = None
+    if row_store is not None:
+        mark_op_row_released(row_store, row)
     for attr, _ in list(state_items(log_entry)):
         delattr(log_entry, attr)
+    # Rebind the emptied facade to a detached row so a user-held husk cannot
+    # pin the trace's shared columnar store (slot-era husks pinned nothing).
+    _detach_op_husk(log_entry)
 
 
 def _strip_pass_suffix(layer_label: str) -> str:
@@ -367,20 +395,26 @@ def _scrub_layer_log_conditional_fields(self: "Trace", labels_to_remove_no_pass:
     for layer_log in getattr(self, "layer_logs", {}).values():
         if "conditional_entry_children" not in getattr(layer_log, "__dict__", {}):
             continue
-        layer_log.conditional_entry_children = [
+        # Layer is dict-backed (no normalizing descriptors until M8), so the
+        # scrub itself preserves the finished-trace immutable relation
+        # surface: tuple views in, tuple views out.
+        layer_log.conditional_entry_children = tuple(
             child_label
             for child_label in layer_log.conditional_entry_children
             if child_label not in labels_to_remove_no_pass
-        ]
+        )
         layer_log.conditional_arm_children = _filter_conditional_arm_children(
             layer_log.conditional_arm_children,
             labels_to_remove_no_pass,
         )
         (
-            layer_log.conditional_then_children,
-            layer_log.conditional_elif_children,
-            layer_log.conditional_else_children,
+            then_children,
+            elif_children,
+            else_children,
         ) = _project_aggregate_conditional_child_views(layer_log.conditional_arm_children)
+        layer_log.conditional_then_children = tuple(then_children)
+        layer_log.conditional_elif_children = elif_children
+        layer_log.conditional_else_children = tuple(else_children)
 
 
 def _scrub_conditional_fields_after_removal(
@@ -596,6 +630,9 @@ _OP_LABEL_FIELDS_TO_CLEAN = (
     "recurrent_ops",
 )
 
+#: The M7 group-membership fields: scrubbed via their shared group row.
+_OP_GROUP_FIELDS = frozenset({"equivalent_ops", "recurrent_ops"})
+
 
 def _remove_log_entry_references(self: "Trace", layer_to_remove: str) -> None:
     """Removes all references to a single Op from the Trace's list/dict fields.
@@ -670,19 +707,39 @@ def _scrub_op_label_collections(op: "Op", labels_to_remove: Set[str]) -> None:
         Raw labels that no longer have a materialized operation record.
     """
 
+    core = getattr(op, "_core", None)
     for field_name in _OP_LABEL_FIELDS_TO_CLEAN:
+        # M7 group fields: the raw cell holds ONE GroupRef shared by every
+        # member. Scrub the GROUP ROW once — every member's next read
+        # reflects the filtered membership (live views), sharing intact.
+        # Idempotent: the second member sees a disjoint view and skips.
+        if field_name in _OP_GROUP_FIELDS and core is not None:
+            fid = core.layout.fid_by_name.get(field_name)
+            raw = core.cell_get(op._row, fid) if fid is not None else None
+            if raw.__class__ is GroupRef:
+                view = raw.view()
+                if not labels_to_remove.isdisjoint(view):
+                    raw.groups.replace(
+                        raw.group_id,
+                        [label for label in view if label not in labels_to_remove],
+                    )
+                continue
         value = getattr(op, field_name, None)
         if not value:
             continue
-        if isinstance(value, list):
+        if isinstance(value, (list, tuple)):
             # Only rebind when a dead label is actually present, for the same
             # reason as the set branch below: ``recurrent_ops`` shares ONE
             # canonical list across every Op of a recurrence group, and an
             # unconditional rebind would hand every Op its own equal-but-
-            # distinct copy for nothing.
+            # distinct copy for nothing. Finished traces store immutable
+            # tuple views here; reading one materializes any CSR-backed cell
+            # into an explicit view, and the rebind below writes the filtered
+            # view back, so removal can never resurrect through the edge
+            # table.
             if not labels_to_remove.isdisjoint(value):
                 setattr(op, field_name, [label for label in value if label not in labels_to_remove])
-        elif isinstance(value, set):
+        elif isinstance(value, (set, frozenset)):
             # Only rebind when a dead label is actually present. ``equivalent_ops``
             # shares ONE set object across every Op of an equivalence class, and
             # the Trace-level group behind it is scrubbed in place by the caller,

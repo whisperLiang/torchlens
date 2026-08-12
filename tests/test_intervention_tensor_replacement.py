@@ -126,7 +126,7 @@ def test_intervention_api_replaces_op_output_preserves_graph() -> None:
     fc1_layer = next(layer for layer in log.layer_list if layer.layer_label.startswith("linear_1"))
 
     assert relu_layer.intervention_replaced is True
-    assert relu_layer.parents == [fc1_layer.layer_label]
+    assert relu_layer.parents == (fc1_layer.layer_label,)
     assert len(relu_layer.interventions) == 1
     assert torch.count_nonzero(relu_layer.out) == 0
 
@@ -173,7 +173,7 @@ def test_raw_forward_hook_replaces_module_output_does_not_crash() -> None:
     relu_layer = next(layer for layer in log.layer_list if layer.func_name == "relu")
 
     assert mul_layer.intervention_replaced is True
-    assert mul_layer.parents == [relu_layer.layer_label]
+    assert mul_layer.parents == (relu_layer.layer_label,)
     assert log.layer_dict_main_keys[mul_layer.label] is mul_layer
 
 
@@ -197,7 +197,7 @@ def test_chain_of_interventions_preserves_graph() -> None:
 
     assert relu_layer.intervention_replaced is True
     assert sigmoid_layer.intervention_replaced is True
-    assert sigmoid_layer.parents == [fc2_layer.layer_label]
+    assert sigmoid_layer.parents == (fc2_layer.layer_label,)
     assert len(_replacement_layers(log)) >= 2
 
 

@@ -1229,12 +1229,78 @@ def _materialize_backward_projections(trace: Any) -> None:
             and _backward_tail_is_foldable(state, events[watermark:])
         ):
             _fold_backward_projection_tail(trace, state, events[watermark:])
+            full_rebuild = False
         else:
             _materialize_backward_projections_impl(trace, events, stream=stream)
+            full_rebuild = True
+        _bind_backward_epoch(
+            trace,
+            full_rebuild=full_rebuild,
+            revision=revision,
+            watermark=len(events),
+        )
+        # Publication is the LAST step: the lazy-invalidation stamps only
+        # advance once the facade projection AND the core epoch both hold
+        # the complete result, so a failure anywhere above cannot suppress
+        # the retry (sol review finding 2).
         trace._backward_projection_event_count = len(events)
         trace._backward_projection_revision = revision
+    except BaseException:
+        # Poison every lazy-invalidation surface: the projection or epoch
+        # may be partially mutated, so the next access must take the full
+        # scratch rebuild (events are all retained by the stream), never a
+        # fold over inconsistent state.
+        trace._backward_projection_revision = None
+        trace._backward_projection_event_count = None
+        trace._backward_projection_fold_state = None
+        core = trace.__dict__.get("_trace_core")
+        if core is not None:
+            core.backward_epochs = []
+        raise
     finally:
         trace.__dict__.pop("_tl_materializing_backward_projection", None)
+
+
+def _bind_backward_epoch(
+    trace: Any, *, full_rebuild: bool, revision: Any, watermark: Any
+) -> None:
+    """Bind the projected backward records to the core's backward epoch (M9).
+
+    Runs AFTER a successful projection and BEFORE the trace-side stamp
+    publication. The swap is genuinely atomic: a full rebuild adopts every
+    row into a STAGED fresh epoch and only then replaces the epoch list, so
+    a failed adoption leaves ``core.backward_epochs`` untouched (the caller
+    poisons the lazy-invalidation stamps and the next access rebuilds from
+    scratch). A clean tail fold extends the live epoch; ``adopt_rows``
+    skips already-adopted records, so folds only add the new tail rows and
+    a failed fold is healed by the caller-forced full rebuild. The epoch
+    stamps ``revision``/``watermark`` (its generation) last, after every
+    adoption succeeded. Non-core-backed traces (loaded artifacts, previews)
+    keep detached-backed records.
+    """
+
+    core = trace.__dict__.get("_trace_core")
+    if core is None:
+        return
+    from torchlens._trace_core.record_rows import BackwardEpoch, adopt_rows
+
+    epochs = core.backward_epochs
+    staged = full_rebuild or not epochs
+    epoch = BackwardEpoch() if staged else epochs[-1]
+    grad_fn_logs = getattr(trace, "grad_fn_logs", None) or {}
+    grad_fns = list(grad_fn_logs.values())
+    calls: list[Any] = []
+    for grad_fn_record in grad_fns:
+        call_map = getattr(grad_fn_record.calls, "_dict", grad_fn_record.calls)
+        calls.extend(call_map.values())
+    passes = list((getattr(trace, "backward_pass_logs", None) or {}).values())
+    adopt_rows(epoch.stores, "grad_fn", grad_fns)
+    adopt_rows(epoch.stores, "grad_fn_call", calls)
+    adopt_rows(epoch.stores, "backward_pass", passes)
+    epoch.revision = revision
+    epoch.watermark = watermark
+    if staged:
+        core.backward_epochs = [epoch]
 
 
 def _materialize_backward_projections_impl(

@@ -192,6 +192,9 @@ def test_trace_pickled_at_pre_seam_commit_loads_with_collapsed_state() -> None:
         legacy_name in trace.__dict__ for legacy_name in LEGACY_RUNNABLE_TRACE_FIELD_MAP
     )
     assert "_build_state" not in trace.__dict__
+    assert "_raw_graph_ws" not in trace.__dict__
+    assert "_module_capture_ws" not in trace.__dict__
+    assert "_wrapper_runtime_ws" not in trace.__dict__
 
 
 def test_runnable_fork_keeps_mutable_witness_ledgers_independent() -> None:
@@ -206,7 +209,9 @@ def test_runnable_fork_keeps_mutable_witness_ledgers_independent() -> None:
         input_metadata_reads={("args", 0): {"shape": (2, 3)}},
     )
 
-    forked_state = parent._fork_model_field("_runnable", parent_state, {})
+    from torchlens.data_classes._trace_fork import _fork_model_field
+
+    forked_state = _fork_model_field(parent, "_runnable", parent_state, {})
 
     assert forked_state is not parent_state
     assert forked_state.staged_user_state is immutable_state

@@ -216,9 +216,15 @@ def _add_output_layers(
         if parent_label is not None
     ]
     new_output_layers = []
+    _core = self.__dict__.get("_trace_core")
+    _op_store = _core.ops if _core is not None else None
+    if _op_store is not None and _op_store.frozen:
+        _op_store = None
     for i, (output_layer_label, output_tensor, output_address_suffix) in enumerate(paired_outputs):
         output_node = self[output_layer_label]
-        new_output_node = cast(Op, output_node.copy())
+        # Internal output-node synthesis is a builder row append on the
+        # trace's own store (detached only for legacy/preview traces).
+        new_output_node = cast(Op, output_node.copy(_store=_op_store))
         new_output_node.layer_type = "output"
         new_output_node.is_output = True
         new_output_node.is_input = False
@@ -227,10 +233,10 @@ def _add_output_layers(
         new_output_node._internal_set("intervention_replaced", False)
         if i == len(paired_outputs) - 1:
             new_output_node.is_final_output = True
-        self._build_state.layer_counter += 1
+        self._raw_graph_ws.layer_counter += 1
         new_output_node._label_raw = f"output_{i + 1}_raw"
         new_output_node._layer_label_raw = new_output_node._label_raw
-        new_output_node.raw_index = self._build_state.layer_counter
+        new_output_node.raw_index = self._raw_graph_ws.layer_counter
         output_address = "output"
         if output_address_suffix != "":
             output_address += f".{output_address_suffix}"
@@ -410,8 +416,8 @@ def _add_output_layers(
 
         output_node.children.append(new_output_node._label_raw)
 
-        self._build_state.raw_layer_dict[new_output_node._label_raw] = new_output_node
-        self._build_state.raw_layer_labels_list.append(new_output_node._label_raw)
+        self._raw_graph_ws.raw_layer_dict[new_output_node._label_raw] = new_output_node
+        self._raw_graph_ws.raw_layer_labels_list.append(new_output_node._label_raw)
 
         new_output_layers.append(new_output_node._label_raw)
 
@@ -427,7 +433,7 @@ def _find_output_ancestors(self: "Trace") -> None:
     disabled.
     """
 
-    for node_label in reversed(self._build_state.raw_layer_labels_list):
+    for node_label in reversed(self._raw_graph_ws.raw_layer_labels_list):
         node = self[node_label]
         for child_node_label in node.children:
             child = self[child_node_label]
@@ -449,7 +455,7 @@ def _remove_orphan_nodes(self: "Trace") -> None:
     Any non-output node with no children is logged as an internally-terminated tensor
     (it produced a value that was never used by downstream computation reaching an output).
     """
-    orig_nodes = set(self._build_state.raw_layer_labels_list)
+    orig_nodes = set(self._raw_graph_ws.raw_layer_labels_list)
     nodes_seen = set()
     # Seed with inputs, outputs, and written buffer-version nodes. Written
     # buffers such as BatchNorm.num_batches_tracked are state transitions even
@@ -457,13 +463,13 @@ def _remove_orphan_nodes(self: "Trace") -> None:
     written_buffer_layers = [
         label
         for label in self.buffer_layers
-        if getattr(self._build_state.raw_layer_dict[label], "buffer_write_kind", None) is not None
+        if getattr(self._raw_graph_ws.raw_layer_dict[label], "buffer_write_kind", None) is not None
     ]
     node_stack = self.input_layers + self.output_layers + written_buffer_layers
     while len(node_stack) > 0:
         tensor_label = node_stack.pop()
         nodes_seen.add(tensor_label)
-        layer_entry = self._build_state.raw_layer_dict[tensor_label]
+        layer_entry = self._raw_graph_ws.raw_layer_dict[tensor_label]
         if (len(layer_entry.children) == 0) and (not layer_entry.is_output):
             _log_internally_terminated_tensor(self, tensor_label)
         # Follow BOTH directions to ensure full bidirectional reachability.
@@ -473,8 +479,8 @@ def _remove_orphan_nodes(self: "Trace") -> None:
 
     nodes_seen = _expand_seen_nodes_to_complete_func_call_groups(self, nodes_seen)
     orphan_nodes = orig_nodes - nodes_seen
-    self._orphan_labels = [label for label in self._build_state.raw_layer_labels_list if label in orphan_nodes]
-    self._orphan_logs = tuple(self._build_state.raw_layer_dict[label] for label in self._orphan_labels)
+    self._orphan_labels = [label for label in self._raw_graph_ws.raw_layer_labels_list if label in orphan_nodes]
+    self._orphan_logs = tuple(self._raw_graph_ws.raw_layer_dict[label] for label in self._orphan_labels)
     self.orphan_records = [
         {
             "raw_label": orphan._label_raw,
@@ -498,7 +504,7 @@ def _remove_orphan_nodes(self: "Trace") -> None:
     _record_pruned_alias_mutation(self, orphan_nodes)
     if getattr(self, "keep_orphans", False):
         for orphan_label in orphan_nodes:
-            self._build_state.raw_layer_dict[orphan_label].is_orphan = True
+            self._raw_graph_ws.raw_layer_dict[orphan_label].is_orphan = True
         return
 
     # Record the ``func_call_id``s of the ops being INTENTIONALLY orphan-pruned
@@ -512,22 +518,22 @@ def _remove_orphan_nodes(self: "Trace") -> None:
     self._orphan_pruned_func_call_ids = {
         func_call_id
         for label in orphan_nodes
-        for func_call_id in (getattr(self._build_state.raw_layer_dict[label], "func_call_id", None),)
+        for func_call_id in (getattr(self._raw_graph_ws.raw_layer_dict[label], "func_call_id", None),)
         if isinstance(func_call_id, int)
     }
 
     # Batch-remove orphaned nodes and rebuild the ordered layer dict/list.
-    orphan_entries = [self._build_state.raw_layer_dict[label] for label in orphan_nodes]
+    orphan_entries = [self._raw_graph_ws.raw_layer_dict[label] for label in orphan_nodes]
     self._batch_remove_log_entries(orphan_entries, remove_references=True)
 
     new_layer_dict = OrderedDict()
     new_layer_list = []
-    for tensor_label in self._build_state.raw_layer_labels_list:
+    for tensor_label in self._raw_graph_ws.raw_layer_labels_list:
         if tensor_label not in orphan_nodes:
-            new_layer_dict[tensor_label] = self._build_state.raw_layer_dict[tensor_label]
+            new_layer_dict[tensor_label] = self._raw_graph_ws.raw_layer_dict[tensor_label]
             new_layer_list.append(tensor_label)
-    self._build_state.raw_layer_labels_list = new_layer_list
-    self._build_state.raw_layer_dict = new_layer_dict
+    self._raw_graph_ws.raw_layer_labels_list = new_layer_list
+    self._raw_graph_ws.raw_layer_dict = new_layer_dict
 
 
 def _child_edge_totally_overwrites(self: "Trace", walked_label: str, child_label: str) -> bool:
@@ -545,7 +551,7 @@ def _child_edge_totally_overwrites(self: "Trace", walked_label: str, child_label
 
     from ..utils.rng import qualname_is_uninit_total_writer
 
-    op = self._build_state.raw_layer_dict.get(child_label)
+    op = self._raw_graph_ws.raw_layer_dict.get(child_label)
     if op is None:
         return False
     func_id = getattr(op, "func_id", None)
@@ -587,7 +593,7 @@ def _rng_orphan_drove_control_or_output(
         if label in seen:
             continue
         seen.add(label)
-        op = self._build_state.raw_layer_dict.get(label)
+        op = self._raw_graph_ws.raw_layer_dict.get(label)
         if op is None:
             continue
         if label in escape_sources or getattr(op, "is_output", False):
@@ -647,7 +653,7 @@ def _orphan_is_uninit_alloc_source(self: "Trace", op: Any) -> bool:
         return out_numel is None or out_numel > 0
     arg_locs = getattr(op, "parent_arg_positions", None)
     args_locs = arg_locs.get("args", {}) if isinstance(arg_locs, dict) else {}
-    receiver = self._build_state.raw_layer_dict.get(args_locs.get(0, ""))
+    receiver = self._raw_graph_ws.raw_layer_dict.get(args_locs.get(0, ""))
     pre_numel = _numel(getattr(receiver, "shape", None)) if receiver is not None else None
     return pre_numel is None or out_numel is None or out_numel > pre_numel
 
@@ -675,7 +681,7 @@ def _record_pruned_rng_control_flow(self: "Trace", orphan_nodes: set[str]) -> No
 
     escape_sources = host_escape_source_labels(self)
     for label in orphan_nodes:
-        op = self._build_state.raw_layer_dict.get(label)
+        op = self._raw_graph_ws.raw_layer_dict.get(label)
         if op is None:
             continue
         func_id = getattr(op, "func_id", None)
@@ -733,8 +739,8 @@ def _expand_seen_nodes_to_complete_func_call_groups(
     """
 
     func_groups: dict[int, set[str]] = {}
-    for raw_label in self._build_state.raw_layer_labels_list:
-        func_call_id = getattr(self._build_state.raw_layer_dict[raw_label], "func_call_id", None)
+    for raw_label in self._raw_graph_ws.raw_layer_labels_list:
+        func_call_id = getattr(self._raw_graph_ws.raw_layer_dict[raw_label], "func_call_id", None)
         if func_call_id is not None:
             func_groups.setdefault(func_call_id, set()).add(raw_label)
 
@@ -791,7 +797,7 @@ def _flood_graph_from_input_or_output_nodes(self: "Trace", mode: str) -> None:
         marker_field = "has_input_ancestor"
         layer_logging_field = "input_ancestors"
         forward_field = "children"
-        traversal_order = self._build_state.raw_layer_labels_list
+        traversal_order = self._raw_graph_ws.raw_layer_labels_list
     elif mode == "output":
         starting_nodes = self.output_layers[:]
         min_field = "min_distance_to_output"
@@ -799,7 +805,7 @@ def _flood_graph_from_input_or_output_nodes(self: "Trace", mode: str) -> None:
         marker_field = "has_output_descendant"
         layer_logging_field = "output_descendants"
         forward_field = "parents"
-        traversal_order = reversed(self._build_state.raw_layer_labels_list)
+        traversal_order = reversed(self._raw_graph_ws.raw_layer_labels_list)
     else:
         raise ValueError("Mode but be either 'input' or 'output'")
 

@@ -1512,7 +1512,7 @@ def torch_func_decorator(
     6. Logs all output tensors into the active ``Trace``.
 
     **Barcode nesting detection**: Before calling the original function, a random
-    barcode is written to ``trace._build_state.current_func_barcode``.  If the
+    barcode is written to ``trace._wrapper_runtime_ws.current_func_barcode``.  If the
     original function internally calls *other* wrapped torch functions, those
     inner calls will overwrite the barcode.  After the call returns, if the
     barcode still matches, this is a "bottom-level" function (leaf in the call
@@ -1715,7 +1715,7 @@ def torch_func_decorator(
             )
 
         # Reset barcode; skip metadata-only functions that would cause recursion.
-        trace._build_state.current_func_barcode = 0
+        trace._wrapper_runtime_ws.current_func_barcode = 0
         if is_unlogged_func:
             if _diagnostic_edge_armed():
                 wrapper_name = f"torch_func:{func_name}:not_logged"
@@ -1839,7 +1839,7 @@ def torch_func_decorator(
         # execute during this call, they will overwrite it. After the call,
         # matching barcode => this is the bottom-level (leaf) function.
         func_call_barcode = make_random_barcode()
-        trace._build_state.current_func_barcode = func_call_barcode
+        trace._wrapper_runtime_ws.current_func_barcode = func_call_barcode
         _save_rng = getattr(trace, "save_rng_states", False)
         rng_states = log_current_rng_states(torch_only=True) if _save_rng else {}
         autocast_state = log_current_autocast_state()
@@ -1895,7 +1895,7 @@ def torch_func_decorator(
             rng_states=rng_states,
             autocast_state=autocast_state,
         )
-        is_bottom_level_func = trace._build_state.current_func_barcode == func_call_barcode
+        is_bottom_level_func = trace._wrapper_runtime_ws.current_func_barcode == func_call_barcode
 
         # __setitem__, zero_, __delitem__ modify in-place and return None;
         # treat the first arg (the modified tensor) as the output. Mutating
@@ -2122,7 +2122,7 @@ def torch_func_decorator(
                     if live_label_before_mint is not None and getattr(
                         trace, "_capture_container_structure", False
                     ):
-                        trace._build_state.container_registry.note_value_preserving_relabel(
+                        trace._wrapper_runtime_ws.container_registry.note_value_preserving_relabel(
                             live_label_before_mint, boundary_label
                         )
 

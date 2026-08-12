@@ -44,7 +44,7 @@ from .._io import (
     read_tlspec_version,
 )
 from ..constants import LAYER_LOG_FIELD_ORDER, LAYER_PASS_LOG_FIELD_ORDER
-from ..ir.refs import DeviceRef, DtypeRef
+from ..ir.refs import DtypeRef
 from ..quantities import Bytes, Duration, Flops, Macs, as_bytes, as_flops, as_macs
 from ._accessor_base import Accessor
 from .field_policy import build_record_field_policy_table, portable_state_spec_from_policy
@@ -56,7 +56,6 @@ if TYPE_CHECKING:
     from .op import Op
     from .trace import Trace
     from ..receptive_field._view import ReceptiveFieldView
-    from .param import Param
 
 
 _LAYER_DELEGATED_PASS_FIELDS = frozenset((*LAYER_PASS_LOG_FIELD_ORDER, "out_ref", "grad_ref"))
@@ -87,23 +86,455 @@ _MULTI_PASS_PER_CALL_LAYER_FIELDS: frozenset[str] = frozenset(
 _LAYER_LOG_CONTAINER_DEFAULTS: dict[str, Any] = {
     "arg_names": (),
     "param_shapes": [],
-    "_param_barcodes": [],
-    "_param_logs": [],
-    "equivalent_ops": set(),
-    "in_conditionals": [],
-    "conditional_role_stacks": [],
+    # Relation view fields (M6, JMT-FORK-1): declared restore type is the
+    # IMMUTABLE view; ``coerce_container_typed_state`` normalizes legacy
+    # list/set state on load so loaded Layers present the same immutable
+    # relation surface as live finished captures.
+    "_param_barcodes": (),
+    "_param_logs": (),
+    "equivalent_ops": frozenset(),
+    "in_conditionals": (),
+    "conditional_role_stacks": (),
     "conditional_branch_stack_ops": {},
     "conditional_arm_children": {},
-    "modules": [],
-    "output_of_modules": [],
-    "output_of_module_calls": [],
-    "conditional_entry_children": [],
-    "conditional_then_children": [],
+    "modules": (),
+    "output_of_modules": (),
+    "output_of_module_calls": (),
+    "conditional_entry_children": (),
+    "conditional_then_children": (),
     "conditional_elif_children": {},
-    "conditional_else_children": [],
+    "conditional_else_children": (),
     "annotations": {},
     "call_labels": [],
 }
+
+
+# ---------------------------------------------------------------------------
+# The M8 aggregate facade.
+#
+# ``Layer`` no longer copies ~86 representative fields from its first pass at
+# build time (the "~78-field per-pass copy" of the pre-columnar era). Each
+# mirror field is a class-level data descriptor that reads through to the
+# representative op — the FIRST pass in ``self.ops`` — on demand, applying the
+# exact normalization ``__init__`` used to apply at copy time (``as_bytes``,
+# ``as_flops``, the ``Bytes(... or 0)`` total). Writes land in the instance
+# ``__dict__`` as per-layer shadows, so the multi-pass merge passes
+# (``_build_layer_logs``, ``_reconcile_multipass_layer_fields``), direct user
+# writes, and loaded pickle/.tlspec state behave exactly as the former copies
+# did — a shadowed field permanently stops mirroring. Deletes leave the
+# ``_LAYER_DELETED`` tombstone so a deleted field stays deleted (state
+# enumeration skips it) while plain attribute reads fall through to the
+# historical ``__getattr__`` delegation, byte-identical to the dict-era
+# post-delete behavior.
+# ---------------------------------------------------------------------------
+
+#: Shadow-miss sentinel local to mirror reads.
+_LAYER_UNSET = object()
+
+#: Tombstone marking an explicitly deleted mirror field.
+_LAYER_DELETED = object()
+
+
+def _as_total_param_memory(value: Any) -> Bytes:
+    """Normalize ``Op.param_memory`` into the Layer total (``Bytes``)."""
+
+    return Bytes(value or 0)
+
+
+#: Mirror field table: public Layer field -> (source Op field, normalizer).
+#: Entries with a ``None`` normalizer return the op's value unchanged (the
+#: former ``__init__`` copies were plain reference copies for these).
+_LAYER_MIRROR_SPEC: dict[str, tuple[str, Any]] = {
+    **{
+        name: (name, None)
+        for name in (
+            "layer_label",
+            "layer_label_short",
+            "layer_type",
+            "type_index",
+            "step_index",
+            "ordinal_index",
+            "raw_index",
+            "num_passes",
+            "func",
+            "func_name",
+            "func_qualname",
+            "is_inplace",
+            "grad_fn_class_name",
+            "grad_fn_class_qualname",
+            "grad_fn_object_id",
+            "grad_fn_handle",
+            "grad_fn",
+            "arg_names",
+            "num_args_total",
+            "num_pos_args",
+            "num_kwargs",
+            "in_multi_output",
+            "multi_output_index",
+            "multi_output_name",
+            "shape",
+            "transformed_out_shape",
+            "dtype",
+            "dtype_ref",
+            "transformed_out_dtype",
+            "device_ref",
+            "backend_address",
+            "resolver_status",
+            "num_autograd_tensors",
+            "output_device",
+            "visualizer_path",
+            "activation_transform",
+            "intervention_replaced",
+            "detach_saved_activations",
+            "save_grads",
+            "transformed_grad_shape",
+            "transformed_grad_dtype",
+            "_param_barcodes",
+            "_param_logs",
+            "param_shapes",
+            "num_params",
+            "num_params_trainable",
+            "num_params_frozen",
+            "func_config",
+            "equivalence_class",
+            "is_input",
+            "input_was_parameter",
+            "is_output",
+            "is_final_output",
+            "is_buffer",
+            "address",
+            "buffer_source",
+            "buffer_write_kind",
+            "buffer_value_changed",
+            "buffer_replay_validated",
+            "buffer_source_func_name",
+            "is_internal_source",
+            "is_internal_sink",
+            "is_terminal_bool",
+            "is_scalar_bool",
+            "bool_value",
+            "in_conditionals",
+            "terminal_bool_for",
+            "module",
+            "modules",
+            "output_of_modules",
+            "output_of_module_calls",
+            "conditional_entry_children",
+            "conditional_then_children",
+            "conditional_elif_children",
+            "conditional_else_children",
+            "has_input_ancestor",
+            "io_role",
+            "buffer_pass",
+            "is_atomic_module",
+        )
+    },
+    "activation_memory": ("activation_memory", as_bytes),
+    "transformed_activation_memory": ("transformed_activation_memory", as_bytes),
+    "autograd_memory": ("autograd_memory", as_bytes),
+    "total_autograd_memory": ("autograd_memory", as_bytes),
+    "transformed_gradient_memory": ("transformed_gradient_memory", as_bytes),
+    "flops_forward": ("flops_forward", as_flops),
+    "flops_backward": ("flops_backward", as_flops),
+    "total_param_memory": ("param_memory", _as_total_param_memory),
+}
+
+#: Complete stored-state name order: the exact ``__dict__`` insertion order of
+#: the former copy-everything ``__init__`` (the pickle/state key order every
+#: golden was frozen against). Mirror fields resolve through the descriptors;
+#: the handful of genuinely stored fields read from ``__dict__``.
+_LAYER_STATE_ORDER: tuple[str, ...] = (
+    "layer_label",
+    "layer_label_short",
+    "layer_type",
+    "type_index",
+    "step_index",
+    "ordinal_index",
+    "raw_index",
+    "num_passes",
+    "_source_trace_ref",
+    "func",
+    "func_name",
+    "func_qualname",
+    "is_inplace",
+    "grad_fn_class_name",
+    "grad_fn_class_qualname",
+    "grad_fn_object_id",
+    "grad_fn_handle",
+    "grad_fn",
+    "arg_names",
+    "num_args_total",
+    "num_pos_args",
+    "num_kwargs",
+    "in_multi_output",
+    "multi_output_index",
+    "multi_output_name",
+    "shape",
+    "transformed_out_shape",
+    "dtype",
+    "dtype_ref",
+    "transformed_out_dtype",
+    "device_ref",
+    "backend_address",
+    "resolver_status",
+    "activation_memory",
+    "transformed_activation_memory",
+    "autograd_memory",
+    "total_autograd_memory",
+    "num_autograd_tensors",
+    "output_device",
+    "visualizer_path",
+    "activation_transform",
+    "annotations",
+    "intervention_replaced",
+    "detach_saved_activations",
+    "save_grads",
+    "transformed_grad_shape",
+    "transformed_grad_dtype",
+    "transformed_gradient_memory",
+    "flops_forward",
+    "flops_backward",
+    "_param_barcodes",
+    "_param_logs",
+    "param_shapes",
+    "num_params",
+    "num_params_trainable",
+    "num_params_frozen",
+    "total_param_memory",
+    "func_config",
+    "equivalence_class",
+    "equivalent_ops",
+    "is_input",
+    "input_was_parameter",
+    "is_output",
+    "is_final_output",
+    "is_buffer",
+    "address",
+    "buffer_source",
+    "buffer_write_kind",
+    "buffer_value_changed",
+    "buffer_replay_validated",
+    "buffer_source_func_name",
+    "is_internal_source",
+    "is_internal_sink",
+    "is_terminal_bool",
+    "is_scalar_bool",
+    "bool_value",
+    "in_conditionals",
+    "terminal_bool_for",
+    "_is_in_conditional_body",
+    "conditional_role_stacks",
+    "conditional_branch_stack_ops",
+    "conditional_arm_children",
+    "module",
+    "modules",
+    "output_of_modules",
+    "output_of_module_calls",
+    "conditional_entry_children",
+    "conditional_then_children",
+    "conditional_elif_children",
+    "conditional_else_children",
+    "has_input_ancestor",
+    "io_role",
+    "buffer_pass",
+    "is_atomic_module",
+    "ops",
+    "call_labels",
+)
+
+_LAYER_STATE_ORDER_SET = frozenset(_LAYER_STATE_ORDER)
+
+
+#: Layer stored relation fields and their immutable view types (the same
+#: universe the relation freeze converts; ``equivalent_ops`` is handled by
+#: its dedicated property but shares the normalization).
+def _build_layer_view_types() -> dict[str, type]:
+    """Map each Layer stored relation field to its immutable view type."""
+
+    from .._trace_core.relation_views import (
+        LAYER_FROZENSET_VIEW_FIELDS,
+        LAYER_TUPLE_VIEW_FIELDS,
+    )
+
+    view_types: dict[str, type] = {name: tuple for name in LAYER_TUPLE_VIEW_FIELDS}
+    view_types.update({name: frozenset for name in LAYER_FROZENSET_VIEW_FIELDS})
+    view_types["equivalent_ops"] = frozenset
+    return view_types
+
+
+_LAYER_RELATION_VIEW_TYPES: dict[str, type] = _build_layer_view_types()
+
+
+def _layer_relations_finished(layer: "Layer") -> bool:
+    """Return whether this Layer's backing capture is finished.
+
+    Mirrors the Op descriptor's finished predicate through the
+    representative op's store — sealed, relation-frozen (preview backends
+    convert without sealing), or detached (copy/pickle/fork/loaded) — and
+    falls back to the owning trace's core op store while the pass accessor
+    is not yet populated. Layers with neither (husked after cleanup, bare
+    restore shells) are finished by definition.
+    """
+
+    store = None
+    rep = _layer_rep_op(layer)
+    if rep is not None:
+        try:
+            store = object.__getattribute__(rep, "_core")
+        except AttributeError:
+            store = None
+    if store is None:
+        ref = layer.__dict__.get("_source_trace_ref")
+        trace = ref() if ref is not None else None
+        core = trace.__dict__.get("_trace_core") if trace is not None else None
+        store = core.ops if core is not None else None
+    if store is None:
+        return True
+    from .._trace_core.op_store import DetachedOpStore
+
+    return bool(
+        getattr(store, "frozen", False)
+        or getattr(store, "dataflow_edges", None) is not None
+        or store.__class__ is DetachedOpStore
+    )
+
+
+def _layer_normalize_relation_write(layer: "Layer", name: str, value: Any) -> Any:
+    """Normalize a relation container assigned to a finished Layer.
+
+    Applies exactly the relation freeze's conversion rules (subclass-
+    inclusive, unlike the freeze's staging-exact checks): sequences
+    normalize to ``tuple`` on tuple-view fields, sets to ``frozenset`` on
+    frozenset-view fields. Other value shapes (the dict form of
+    ``conditional_branch_stack_ops``, scalars, ``None``) pass through
+    unchanged, and building-phase writes stay raw so postprocess aliasing
+    is preserved.
+    """
+
+    view_type = _LAYER_RELATION_VIEW_TYPES.get(name)
+    if view_type is None or value.__class__ is view_type:
+        return value
+    if view_type is tuple:
+        if not isinstance(value, (list, tuple)):
+            return value
+    elif not isinstance(value, (set, frozenset, list, tuple)):
+        return value
+    if not _layer_relations_finished(layer):
+        return value
+    return view_type(value)
+
+
+def _layer_rep_op(layer: "Layer") -> "Op | None":
+    """Return the representative (first-pass) op backing one Layer's mirrors.
+
+    Reads raw ``__dict__`` storage so descriptor bodies never re-enter the
+    attribute protocol. ``OpAccessor._list`` is pass-index sorted, so index 0
+    is the first pass — the op the former ``__init__`` copied from.
+    """
+
+    ops = layer.__dict__.get("ops")
+    if ops is None:
+        return None
+    item_list = ops.__dict__.get("_list")
+    return item_list[0] if item_list else None
+
+
+def _layer_mirror_read(layer: "Layer", name: str) -> Any:
+    """Return the mirror value for ``name`` (no shadow consulted).
+
+    Raises ``AttributeError`` when the layer has no representative op yet or
+    the op's source cell is unset — the caller (descriptor or state
+    enumeration) translates that into the historical missing-field behavior.
+    """
+
+    rep = _layer_rep_op(layer)
+    if rep is None:
+        raise AttributeError(name)
+    source, normalize = _LAYER_MIRROR_SPEC[name]
+    value = getattr(rep, source)
+    return normalize(value) if normalize is not None else value
+
+
+class _LayerMirrorField:
+    """Data descriptor for one Layer field mirrored from the first-pass op."""
+
+    __slots__ = ("_name", "_source", "_normalize")
+
+    def __init__(self, name: str, source: str, normalize: Any) -> None:
+        """Bind the descriptor to its field name, op source, and normalizer."""
+
+        self._name = name
+        self._source = source
+        self._normalize = normalize
+
+    def __repr__(self) -> str:
+        """Return a debugging repr naming the mirrored field."""
+
+        return f"<Layer mirror descriptor {self._name!r}>"
+
+    def __get__(self, layer: Any, objtype: Any = None) -> Any:
+        """Return the per-layer shadow when present, else the op mirror."""
+
+        if layer is None:
+            return self
+        value = layer.__dict__.get(self._name, _LAYER_UNSET)
+        if value is not _LAYER_UNSET:
+            if value is _LAYER_DELETED:
+                raise AttributeError(self._name)
+            return value
+        rep = _layer_rep_op(layer)
+        if rep is None:
+            raise AttributeError(self._name)
+        value = getattr(rep, self._source)
+        normalize = self._normalize
+        return normalize(value) if normalize is not None else value
+
+    def __set__(self, layer: Any, value: Any) -> None:
+        """Write a per-layer shadow (mirroring permanently stops).
+
+        Relation-view fields normalize to their immutable view on finished
+        layers, so a direct assignment can never re-expose a mutable
+        relation container (the invariant the op-cell descriptors enforce).
+        """
+
+        layer.__dict__[self._name] = _layer_normalize_relation_write(
+            layer, self._name, value
+        )
+
+    def __delete__(self, layer: Any) -> None:
+        """Tombstone the field so it stays deleted instead of re-mirroring."""
+
+        instance_dict = layer.__dict__
+        if instance_dict.get(self._name, _LAYER_UNSET) is _LAYER_DELETED:
+            raise AttributeError(self._name)
+        instance_dict[self._name] = _LAYER_DELETED
+
+
+def materialize_layer_mirrors(layer_log: "Layer") -> None:
+    """Materialize every unmaterialized mirror field into ``__dict__``.
+
+    Called before the backing ops are husked (``Trace.cleanup()``, log-entry
+    removal): a user-held Layer keeps exactly the readable state the dict-era
+    copies would have kept. Tombstoned and already-shadowed fields are left
+    untouched; unreadable mirrors (an already-scrubbed op cell) stay absent,
+    matching a field the dict era had already deleted.
+    """
+
+    instance_dict = layer_log.__dict__
+    for field_name in _LAYER_MIRROR_SPEC:
+        if field_name in instance_dict:
+            continue
+        try:
+            instance_dict[field_name] = _layer_mirror_read(layer_log, field_name)
+        except AttributeError:
+            continue
+    if "equivalent_ops" not in instance_dict:
+        rep = _layer_rep_op(layer_log)
+        if rep is not None:
+            try:
+                instance_dict["equivalent_ops"] = rep.equivalent_ops
+            except AttributeError:
+                pass
 
 
 def _layer_log_to_row(layer_log: "Layer") -> Dict[str, Any]:
@@ -246,6 +677,96 @@ class Layer:
     reads from ``ops[0].out``).
     """
 
+    if TYPE_CHECKING:
+        # The M8 mirror fields are runtime-installed data descriptors
+        # (``_install_layer_mirror_descriptors``); declared here so static
+        # analysis sees the public surface.
+        layer_label: Any
+        layer_label_short: Any
+        layer_type: Any
+        type_index: Any
+        step_index: Any
+        ordinal_index: Any
+        raw_index: Any
+        num_passes: Any
+        func: Any
+        func_name: Any
+        func_qualname: Any
+        is_inplace: Any
+        grad_fn_class_name: Any
+        grad_fn_class_qualname: Any
+        grad_fn_object_id: Any
+        grad_fn_handle: Any
+        grad_fn: Any
+        arg_names: Any
+        num_args_total: Any
+        num_pos_args: Any
+        num_kwargs: Any
+        in_multi_output: Any
+        multi_output_index: Any
+        multi_output_name: Any
+        shape: Any
+        transformed_out_shape: Any
+        dtype: Any
+        dtype_ref: Any
+        transformed_out_dtype: Any
+        device_ref: Any
+        backend_address: Any
+        resolver_status: Any
+        activation_memory: Any
+        transformed_activation_memory: Any
+        autograd_memory: Any
+        total_autograd_memory: Any
+        num_autograd_tensors: Any
+        output_device: Any
+        visualizer_path: Any
+        activation_transform: Any
+        intervention_replaced: Any
+        detach_saved_activations: Any
+        save_grads: Any
+        transformed_grad_shape: Any
+        transformed_grad_dtype: Any
+        transformed_gradient_memory: Any
+        flops_forward: Any
+        flops_backward: Any
+        _param_barcodes: Any
+        _param_logs: Any
+        param_shapes: Any
+        num_params: Any
+        num_params_trainable: Any
+        num_params_frozen: Any
+        total_param_memory: Any
+        func_config: Any
+        equivalence_class: Any
+        is_input: Any
+        input_was_parameter: Any
+        is_output: Any
+        is_final_output: Any
+        is_buffer: Any
+        address: Any
+        buffer_source: Any
+        buffer_write_kind: Any
+        buffer_value_changed: Any
+        buffer_replay_validated: Any
+        buffer_source_func_name: Any
+        is_internal_source: Any
+        is_internal_sink: Any
+        is_terminal_bool: Any
+        is_scalar_bool: Any
+        bool_value: Any
+        module: Any
+        modules: Any
+        output_of_modules: Any
+        output_of_module_calls: Any
+        conditional_entry_children: Any
+        conditional_then_children: Any
+        conditional_elif_children: Any
+        conditional_else_children: Any
+        has_input_ancestor: Any
+        io_role: Any
+        buffer_pass: Any
+        is_atomic_module: Any
+
     PORTABLE_STATE_SPEC: dict[str, FieldPolicy] = {
         "_is_in_conditional_body": FieldPolicy.KEEP,
         "layer_label": FieldPolicy.KEEP,
@@ -347,147 +868,48 @@ class Layer:
         "ops": FieldPolicy.KEEP,
         "call_labels": FieldPolicy.KEEP,
     }
-    FIELD_POLICY = build_record_field_policy_table(LAYER_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC)
+    FIELD_POLICY = build_record_field_policy_table(LAYER_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="layer")
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     def __init__(self, first_pass: "Op") -> None:
-        """Initialize from the first pass of this layer.
+        """Initialize the aggregate facade for one layer.
+
+        The M8 facade stores ONLY the genuinely per-layer state (the trace
+        back-reference, the aggregate merge containers, and the pass
+        accessor); the ~86 representative fields the dict era copied from
+        ``first_pass`` are class-level mirror descriptors that read through
+        to the first pass in ``self.ops`` on demand (``_LAYER_MIRROR_SPEC``).
+        Callers populate ``self.ops`` immediately after construction, exactly
+        as before — no mirror field is read until they do.
 
         Args:
             first_pass: The Op for pass 1 of this layer.
         """
-        # Identity & labeling
-        self.layer_label = first_pass.layer_label
-        self.layer_label_short = first_pass.layer_label_short
-        self.layer_type = first_pass.layer_type
-        self.type_index = first_pass.type_index
-        self.step_index = first_pass.step_index
-        self.ordinal_index = first_pass.ordinal_index
-        self.raw_index = first_pass.raw_index
-        self.num_passes = first_pass.num_passes
         # Store as weakref to break circular reference (Trace -> layer_logs -> Layer -> Trace).
         _sml = first_pass.source_trace
         self._source_trace_ref: weakref.ReferenceType["Trace"] | None = (
             weakref.ref(_sml) if _sml is not None else None
         )
-
-        # Function identity
-        self.func = first_pass.func
-        self.func_name = first_pass.func_name
-        self.func_qualname = first_pass.func_qualname
-        self.is_inplace = first_pass.is_inplace
-        self.grad_fn_class_name = first_pass.grad_fn_class_name
-        self.grad_fn_class_qualname = first_pass.grad_fn_class_qualname
-        self.grad_fn_object_id = first_pass.grad_fn_object_id
-        self.grad_fn_handle = first_pass.grad_fn_handle
-        self.grad_fn = first_pass.grad_fn
-        self.arg_names = first_pass.arg_names
-        self.num_args_total = first_pass.num_args_total
-        self.num_pos_args = first_pass.num_pos_args
-        self.num_kwargs = first_pass.num_kwargs
-        self.in_multi_output = first_pass.in_multi_output
-        self.multi_output_index = first_pass.multi_output_index
-        self.multi_output_name = first_pass.multi_output_name
-
-        # Tensor type (representative from first pass)
-        self.shape = first_pass.shape
-        self.transformed_out_shape = first_pass.transformed_out_shape
-        self.dtype = first_pass.dtype
-        self.dtype_ref: DtypeRef | None = first_pass.dtype_ref
-        self.transformed_out_dtype = first_pass.transformed_out_dtype
-        self.device_ref: DeviceRef | None = first_pass.device_ref
-        self.backend_address: str | None = first_pass.backend_address
-        self.resolver_status: str = first_pass.resolver_status
-        self.activation_memory: Bytes | None = as_bytes(first_pass.activation_memory)
-        self.transformed_activation_memory: Bytes | None = as_bytes(
-            first_pass.transformed_activation_memory
-        )
-        self.autograd_memory: Bytes | None = as_bytes(first_pass.autograd_memory)
-        self.total_autograd_memory: Bytes | None = as_bytes(first_pass.autograd_memory)
-        self.num_autograd_tensors: Optional[int] = first_pass.num_autograd_tensors
-
-        # Config
-        self.output_device = first_pass.output_device
-        self.visualizer_path = first_pass.visualizer_path
-        self.activation_transform = first_pass.activation_transform
         self.annotations: Dict[str, Any] = {}
-        self.intervention_replaced = first_pass.intervention_replaced
-        self.detach_saved_activations = first_pass.detach_saved_activations
-        self.save_grads = first_pass.save_grads
-        self.transformed_grad_shape = first_pass.transformed_grad_shape
-        self.transformed_grad_dtype = first_pass.transformed_grad_dtype
-        self.transformed_gradient_memory: Bytes | None = as_bytes(
-            first_pass.transformed_gradient_memory
-        )
-
-        # FLOPs
-        self.flops_forward = as_flops(first_pass.flops_forward)
-        self.flops_backward = as_flops(first_pass.flops_backward)
-
-        # Param identity
-        self._param_barcodes = first_pass._param_barcodes
-        self._param_logs: List["Param"] = first_pass._param_logs
-        self.param_shapes = first_pass.param_shapes
-        self.num_params = first_pass.num_params
-        self.num_params_trainable = first_pass.num_params_trainable
-        self.num_params_frozen = first_pass.num_params_frozen
-        self.total_param_memory: Bytes = Bytes(first_pass.param_memory or 0)
-
-        # Function config
-        self.func_config = first_pass.func_config
-
-        # Equivalence
-        self.equivalence_class = first_pass.equivalence_class
-        # Read the RAW slot: the public Op read is copy-on-read, and retaining
-        # one private copy per Layer re-created the O(N^2) duplication the
-        # canonical sharing exists to prevent (a 512-member equivalence class
-        # retained 17 MB across its 512 Layers). The Layer-side
-        # ``equivalent_ops`` property hands out a private copy on read, so the
-        # shared canonical set stays alias-safe.
-        self.equivalent_ops = first_pass._slot("equivalent_ops", set())
-
-        # Special flags
-        self.is_input = first_pass.is_input
-        self.input_was_parameter = first_pass.input_was_parameter
-        self.is_output = first_pass.is_output
-        self.is_final_output = first_pass.is_final_output
-        self.is_buffer = first_pass.is_buffer
-        self.address = first_pass.address
-        self.buffer_source = first_pass.buffer_source
-        self.buffer_write_kind = first_pass.buffer_write_kind
-        self.buffer_value_changed = first_pass.buffer_value_changed
-        self.buffer_replay_validated = first_pass.buffer_replay_validated
-        self.buffer_source_func_name = first_pass.buffer_source_func_name
-        self.is_internal_source = first_pass.is_internal_source
-        self.is_internal_sink = first_pass.is_internal_sink
-        self.is_terminal_bool = first_pass.is_terminal_bool
-        self.is_scalar_bool = first_pass.is_scalar_bool
-        self.bool_value = first_pass.bool_value
+        # Build-time SNAPSHOTS, not mirrors: ``_build_conditional_records``
+        # (end of step 15.5) rebinds these two fields on the OPS after the
+        # aggregate Layers are built, and the public Layer contract keeps the
+        # pre-rebind values (the dict-era copies never saw the update).
         self.in_conditionals = first_pass.in_conditionals
         self.terminal_bool_for = first_pass.terminal_bool_for
+        # Cached conditional-body predicate (the ``is_in_conditional_body``
+        # property's storage slot; multi-pass merge ORs into it).
         self.is_in_conditional_body = first_pass.is_in_conditional_body
-        self.conditional_role_stacks: List[List[Tuple[int, str]]] = []
-        self.conditional_branch_stack_ops: Dict[Tuple[Tuple[int, str], ...], List[int]] = {}
+        # Raw ``__dict__`` writes by contract: these are BUILD-PHASE staging
+        # containers the multi-pass merge mutates in place, so they must
+        # never pass through the finished-layer view normalization (a
+        # refresh-built Layer over detached-backed ops would otherwise
+        # freeze them at construction).
+        self.__dict__["conditional_role_stacks"] = cast("List[List[Tuple[int, str]]]", [])
+        self.__dict__["conditional_branch_stack_ops"] = cast(
+            "Dict[Tuple[Tuple[int, str], ...], List[int]]", {}
+        )
         self.conditional_arm_children: Dict[int, Dict[str, List[str]]] = {}
-
-        # Module (static containment)
-        self.module = first_pass.module
-        self.modules = first_pass.modules
-
-        # Fields stored as aggregate for vis compatibility.
-        # Initialized from first pass.  For multi-pass layers, _build_layer_logs
-        # merges only has_input_ancestor (OR), io_role (char-merge),
-        # and is_atomic_module (OR).  All others keep first-pass values.
-        self.output_of_modules = first_pass.output_of_modules
-        self.output_of_module_calls = first_pass.output_of_module_calls
-        self.conditional_entry_children = first_pass.conditional_entry_children
-        self.conditional_then_children = first_pass.conditional_then_children
-        self.conditional_elif_children = first_pass.conditional_elif_children
-        self.conditional_else_children = first_pass.conditional_else_children
-        self.has_input_ancestor = first_pass.has_input_ancestor
-        self.io_role = first_pass.io_role
-        self.buffer_pass = first_pass.buffer_pass
-        self.is_atomic_module = first_pass.is_atomic_module
 
         # Pass management
         self.ops = OpAccessor()
@@ -720,41 +1142,107 @@ class Layer:
 
     @property
     def equivalent_ops(self) -> Any:
-        """Labels of ops equivalent to this layer, as a private copy per read.
+        """Labels of ops equivalent to this layer.
 
-        One canonical set object backs every Op AND Layer of an equivalence
-        class (see ``_COPY_ON_READ_SET_FIELDS`` in ``op.py``); handing out a
-        fresh copy means no holder can alias-corrupt the group. Storage stays
-        in ``__dict__`` under the public field name, so pickle state,
-        ``state_items``, and legacy ``__setstate__`` loads are unchanged.
-        Non-set legacy/loaded values (e.g. a list) pass through untouched.
+        On finished traces the value is the group's ONE cached immutable
+        ``frozenset`` view (M7 live group views), read through the M8 mirror
+        from the representative op and passed through unchanged — alias-safe
+        because it cannot be mutated. A raw staging ``set`` (mid-postprocess
+        reads, legacy loads before coercion) still hands back a private copy
+        so no holder can alias-corrupt the shared group container. A per-layer
+        shadow (direct write, loaded state) takes precedence over the mirror,
+        exactly like every other mirror field.
         """
 
-        try:
-            value = self.__dict__["equivalent_ops"]
-        except KeyError:
+        value = self.__dict__.get("equivalent_ops", _LAYER_UNSET)
+        if value is _LAYER_DELETED:
             # Fall back to ``__getattr__`` delegation, matching a plain
             # missing attribute.
-            raise AttributeError("equivalent_ops") from None
+            raise AttributeError("equivalent_ops")
+        if value is _LAYER_UNSET:
+            rep = _layer_rep_op(self)
+            if rep is None:
+                raise AttributeError("equivalent_ops")
+            value = rep.equivalent_ops
         return set(value) if value.__class__ is set else value
 
     @equivalent_ops.setter
     def equivalent_ops(self, value: Any) -> None:
-        self.__dict__["equivalent_ops"] = value
+        self.__dict__["equivalent_ops"] = _layer_normalize_relation_write(
+            self, "equivalent_ops", value
+        )
 
     @equivalent_ops.deleter
     def equivalent_ops(self) -> None:
-        # ``state_items`` enumerates the ``__dict__`` storage slot, so cleanup
-        # ``delattr``s this name; without a deleter the property raises
-        # "can't delete attribute", breaking batch removal of finished layers.
-        try:
-            del self.__dict__["equivalent_ops"]
-        except KeyError:
-            raise AttributeError("equivalent_ops") from None
+        # ``state_items`` skips the tombstone, so cleanup ``delattr``s this
+        # name; without a deleter the property raises "can't delete
+        # attribute", breaking batch removal of finished layers.
+        if self.__dict__.get("equivalent_ops", _LAYER_UNSET) is _LAYER_DELETED:
+            raise AttributeError("equivalent_ops")
+        self.__dict__["equivalent_ops"] = _LAYER_DELETED
+
+    def _layer_state_value(self, name: str) -> Any:
+        """Return one declared field's live state value (shadow, then mirror).
+
+        Raises ``AttributeError`` for absent state: a tombstoned field, an
+        unreadable mirror, or a stored-only field missing from ``__dict__`` —
+        exactly the keys the dict-era ``__dict__`` snapshot omitted.
+        """
+
+        value = self.__dict__.get(name, _LAYER_UNSET)
+        if value is _LAYER_DELETED:
+            raise AttributeError(name)
+        if value is not _LAYER_UNSET:
+            return value
+        if name in _LAYER_MIRROR_SPEC:
+            return _layer_mirror_read(self, name)
+        if name == "equivalent_ops":
+            rep = _layer_rep_op(self)
+            if rep is None:
+                raise AttributeError(name)
+            # The RAW canonical container (finished: the ONE frozen group
+            # view; staging: the shared staging set), matching the value the
+            # dict era stored — never the property's per-read staging copy.
+            return rep.equivalent_ops
+        raise AttributeError(name)
+
+    def __tl_state_items__(self) -> Iterator[tuple[str, Any]]:
+        """Yield live state ``(field_name, value)`` pairs in declared order.
+
+        Declared fields come first in the exact ``__dict__`` insertion order
+        of the dict-era ``__init__`` (the order every pickle golden was frozen
+        against); mirror fields resolve through the representative op. Extra
+        instance attributes (user-set names, JMT-FORK-7) follow in insertion
+        order. Tombstoned fields are omitted, matching dict-era deletion.
+        """
+
+        instance_dict = self.__dict__
+        for name in _LAYER_STATE_ORDER:
+            try:
+                yield name, self._layer_state_value(name)
+            except AttributeError:
+                continue
+        for name, value in instance_dict.items():
+            if name not in _LAYER_STATE_ORDER_SET and value is not _LAYER_DELETED:
+                yield name, value
+
+    def __tl_state_restore__(self, mapping: Dict[str, Any]) -> None:
+        """Install a state mapping as per-layer ``__dict__`` shadows.
+
+        The explicit counterpart of ``__tl_state_items__`` (M11: no record
+        class relies on the generic introspection fallback). ``Layer`` is
+        dict-backed by design — restored fields become per-layer shadows over
+        the M8 mirror descriptors, byte-identical to the dict-era
+        ``__dict__.update``.
+        """
+
+        self.__dict__.update(mapping)
 
     def __getstate__(self) -> Dict[str, Any]:
         """Return pickle state with weakrefs and raw autograd handles stripped."""
-        state = self.__dict__.copy()
+        from ._state_adapter import state_items
+
+        state = dict(state_items(self))
         state["_source_trace_ref"] = None
         # `grad_fn_handle` holds the live torch autograd `Node` (e.g.
         # `AddmmBackward0`), which is not picklable. `Layer.FIELD_POLICY`
@@ -1031,8 +1519,13 @@ class Layer:
     # iterations.  Order is preserved (first-seen insertion order).
 
     @property
-    def children(self) -> list[str]:
-        """Union of child layers (no-pass labels) across all ops."""
+    def children(self) -> tuple[str, ...]:
+        """Union of child layers (no-pass labels) across all ops.
+
+        Immutable view (M6, JMT-FORK-1): computed per read, so mutating the
+        returned container could never reach stored state anyway; the tuple
+        makes that contract explicit and matches the Op relation surface.
+        """
         result = []
         seen = set()
         for pass_log in self.ops.values():
@@ -1041,11 +1534,14 @@ class Layer:
                 if no_pass not in seen:
                     seen.add(no_pass)
                     result.append(no_pass)
-        return result
+        return tuple(result)
 
     @property
-    def parents(self) -> list[str]:
-        """Union of parent layers (no-pass labels) across all ops."""
+    def parents(self) -> tuple[str, ...]:
+        """Union of parent layers (no-pass labels) across all ops.
+
+        Immutable view (M6, JMT-FORK-1); see ``children``.
+        """
         result = []
         seen = set()
         for pass_log in self.ops.values():
@@ -1054,7 +1550,7 @@ class Layer:
                 if no_pass not in seen:
                     seen.add(no_pass)
                     result.append(no_pass)
-        return result
+        return tuple(result)
 
     @property
     def has_children(self) -> bool:
@@ -1592,6 +2088,87 @@ class Layer:
         """Return the number of operation passes aggregated into this layer."""
 
         return cast(int, self.num_passes)
+
+
+def _install_layer_mirror_descriptors() -> None:
+    """Install the per-field mirror descriptors on the ``Layer`` class.
+
+    Refuses to overwrite an existing class attribute: a mirror name colliding
+    with a hand-written ``@property`` (or method) would silently change public
+    behavior, so the collision fails at import time instead.
+    """
+
+    for name, (source, normalize) in _LAYER_MIRROR_SPEC.items():
+        if name in vars(Layer):
+            raise RuntimeError(
+                f"Layer mirror field {name!r} collides with an existing class attribute"
+            )
+        setattr(Layer, name, _LayerMirrorField(name, source, normalize))
+
+
+class _LayerViewField:
+    """Data descriptor for one plain-stored Layer relation-view field.
+
+    The relation-view fields NOT in the mirror spec are ordinary instance
+    attributes; this descriptor preserves their plain ``__dict__`` storage
+    and read/delete semantics while routing writes through the finished-
+    layer view normalization, so no assignment path can re-expose a mutable
+    relation container on a finished Layer.
+    """
+
+    __slots__ = ("_name",)
+
+    def __init__(self, name: str) -> None:
+        """Bind the descriptor to its field name."""
+
+        self._name = name
+
+    def __repr__(self) -> str:
+        """Return a debugging repr naming the stored field."""
+
+        return f"<Layer view descriptor {self._name!r}>"
+
+    def __get__(self, layer: Any, objtype: Any = None) -> Any:
+        """Return the stored value; missing fields raise ``AttributeError``."""
+
+        if layer is None:
+            return self
+        value = layer.__dict__.get(self._name, _LAYER_UNSET)
+        if value is _LAYER_UNSET:
+            raise AttributeError(self._name)
+        return value
+
+    def __set__(self, layer: Any, value: Any) -> None:
+        """Store the value, view-normalized on finished layers."""
+
+        layer.__dict__[self._name] = _layer_normalize_relation_write(
+            layer, self._name, value
+        )
+
+    def __delete__(self, layer: Any) -> None:
+        """Delete the stored value; a missing field raises ``AttributeError``."""
+
+        try:
+            del layer.__dict__[self._name]
+        except KeyError:
+            raise AttributeError(self._name) from None
+
+
+def _install_layer_view_descriptors() -> None:
+    """Install plain view descriptors for the non-mirror relation fields."""
+
+    for name in _LAYER_RELATION_VIEW_TYPES:
+        if name == "equivalent_ops" or name in _LAYER_MIRROR_SPEC:
+            continue
+        if name in vars(Layer):
+            raise RuntimeError(
+                f"Layer view field {name!r} collides with an existing class attribute"
+            )
+        setattr(Layer, name, _LayerViewField(name))
+
+
+_install_layer_mirror_descriptors()
+_install_layer_view_descriptors()
 
 
 class LayerAccessor(Accessor["Layer"]):

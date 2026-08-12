@@ -79,7 +79,12 @@ from .._runnable_seam import (
 )
 from ..constants import LAYER_PASS_LOG_FIELD_ORDER, MODEL_LOG_FIELD_ORDER
 from ..captured_run import CapturedRun
-from ..ir.trace_build_state import LEGACY_TRACE_BUILD_STATE_KEYS, TraceBuildState
+from ..ir.workspaces import (
+    LEGACY_TRACE_BUILD_STATE_KEYS,
+    ModuleCaptureWorkspace,
+    RawGraphWorkspace,
+    WrapperRuntimeWorkspace,
+)
 from ..intervention.types import (
     MODEL_LOG_FIELD_FORK_POLICY,
     InterventionSpec,
@@ -368,10 +373,6 @@ _MISSING_ATTR_HINTS: dict[str, str] = {
         "or forward_peak_memory for the measured runtime peak."
     ),
 }
-# Traces whose Op metadata has already been pooled by ``_compact_op_metadata``.
-# Held weakly and OFF the Trace itself so no new field enters ``__dict__``,
-# pickle state, or a portable artifact.
-_COMPACTED_TRACES: "weakref.WeakSet[Trace]" = weakref.WeakSet()
 
 
 def _raise_missing_trace_attribute(trace: "Trace", name: str) -> Any:
@@ -1035,35 +1036,6 @@ class Trace(
         stream = self.__dict__.get("capture_events") or self.__dict__.get("_capture_events")
         return list(getattr(stream, "buffer_write_events", ()) or ())
 
-    def _compact_op_metadata(self) -> None:
-        """Collapse repeated immutable Op metadata onto shared instances.
-
-        A finished graph stores the same dtype name, module address, ancestor
-        label, and zero-valued quantity once per op, so Python metadata grows
-        with ``#ops x #repeated facts`` rather than with the number of distinct
-        facts. One pass at the end of postprocessing pools those values; the
-        pool is dropped on return, so nothing is retained process-wide.
-
-        Field values are unchanged -- see :func:`~torchlens.data_classes.op._pool_key`
-        for why pooling is injective, and ``Op._compact_metadata`` for the
-        per-field walk. Running it more than once is a no-op beyond the first.
-        """
-
-        if self in _COMPACTED_TRACES:
-            return
-        ops = self.__dict__.get("layer_list")
-        if not ops:
-            return
-        _COMPACTED_TRACES.add(self)
-        pool: Dict[Any, Any] = {}
-        seen_ops: set[int] = set()
-        for op in ops:
-            op_id = id(op)
-            if op_id in seen_ops:
-                continue
-            seen_ops.add(op_id)
-            op._compact_metadata(pool)
-
     backend: BackendName
     backend_runtime_config: dict[str, Any] | None
     backend_runtime_device_summary: dict[str, Any] | None
@@ -1092,7 +1064,9 @@ class Trace(
     capture_start_time: float
     capture_end_time: float
     _runnable: RunnableTraceState
-    _build_state: TraceBuildState
+    _raw_graph_ws: RawGraphWorkspace
+    _module_capture_ws: ModuleCaptureWorkspace
+    _wrapper_runtime_ws: WrapperRuntimeWorkspace
     _fast_run_session: Any | None
     backward_root_grad_fn_object_ids: list[int]
     backward_pass_logs: Dict[int, BackwardPass]
@@ -1382,7 +1356,14 @@ class Trace(
         "_pending_live_fire_records": FieldPolicy.DROP,
         "_module_logs": FieldPolicy.DROP,
         "_param_logs_by_module": FieldPolicy.DROP,
-        "_build_state": FieldPolicy.DROP,
+        "_raw_graph_ws": FieldPolicy.DROP,
+        "_module_capture_ws": FieldPolicy.DROP,
+        "_wrapper_runtime_ws": FieldPolicy.DROP,
+        # The per-trace columnar Op row store (torchlens._trace_core). Never
+        # portable: plain pickle re-materializes each Op as a detached row
+        # from its own state, and .tlspec artifacts stay object-shaped until
+        # the M11 direct semantic serialization.
+        "_trace_core": FieldPolicy.DROP,
         "_pre_forward_rng_states": FieldPolicy.DROP,
         # r63 C1: pre-clone per-slot state metadata signatures (producer-side only,
         # never portable) and the buffer storage-pointer attribution index.
@@ -1454,6 +1435,7 @@ class Trace(
         PORTABLE_STATE_SPEC,
         fork_policy=MODEL_LOG_FIELD_FORK_POLICY,
         default_fill_state=_MODEL_LOG_DEFAULT_FILL,
+        schema_key="trace",
     )
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
@@ -1577,8 +1559,10 @@ class Trace(
         # True after postprocessing.  Many custom_methods (len, getitem, str, iter)
         # branch on this flag to choose raw-barcode vs final-label access.
         self._tracing_finished = False
-        self._build_state = TraceBuildState()
-        self._build_state.module_build_data = _init_module_hierarchy_data()
+        self._raw_graph_ws = RawGraphWorkspace()
+        self._module_capture_ws = ModuleCaptureWorkspace()
+        self._wrapper_runtime_ws = WrapperRuntimeWorkspace()
+        self._module_capture_ws.module_build_data = _init_module_hierarchy_data()
         self.capture_mode: Literal["exhaustive", "predicate"] = "exhaustive"
         self._runnable = RunnableTraceState()
         self._fast_run_session: Any | None = None
@@ -1827,7 +1811,7 @@ class Trace(
         if self._tracing_finished:
             return len(self.layer_list)
         else:
-            return len(self._build_state.raw_layer_dict)
+            return len(self._raw_graph_ws.raw_layer_dict)
 
     def __getitem__(self, ix: Any) -> Any:
         """Returns an object logging a model layer given an index. If the pass is finished,
@@ -2486,7 +2470,7 @@ class Trace(
         if self._tracing_finished:
             return iter(self.layer_list)
         else:
-            return iter(list(self._build_state.raw_layer_dict.values()))
+            return iter(list(self._raw_graph_ws.raw_layer_dict.values()))
 
     def save(self, path: str | Path, **kwargs: Any) -> None:
         """Call :func:`torchlens.save` for this model log.
@@ -2588,7 +2572,10 @@ class Trace(
         state["_code_context_cache"] = {}
         state.pop("_container_ordinals_by_output_op_label", None)
         state.pop("_container_ordinals_by_input_func_call_id", None)
-        state.pop("_build_state", None)
+        state.pop("_raw_graph_ws", None)
+        state.pop("_module_capture_ws", None)
+        state.pop("_wrapper_runtime_ws", None)
+        state.pop("_trace_core", None)
         state["_backward_gradfn_refs"] = []
         state["_tl_backward_hooked_tensor_keys"] = set()
         state.pop("_tl_grad_hook_owner_by_label", None)
@@ -2606,7 +2593,17 @@ class Trace(
 
     def __setstate__(self, state: Dict[str, Any]) -> None:
         """Restore pickle state and rebuild weakref-backed links."""
-        for field_name in (*LEGACY_TRACE_BUILD_STATE_KEYS, "_build_state"):
+        for field_name in (
+            *LEGACY_TRACE_BUILD_STATE_KEYS,
+            # "_build_state" is the pre-M10 flat scratchpad key; the three
+            # workspace keys are its dissolved successors. All transient,
+            # all dropped on restore.
+            "_build_state",
+            "_raw_graph_ws",
+            "_module_capture_ws",
+            "_wrapper_runtime_ws",
+            "_trace_core",
+        ):
             state.pop(field_name, None)
         read_tlspec_version(state, cls_name=type(self).__name__)
         containers_were_serialized = "_containers" in state and state["_containers"] is not None
@@ -2836,6 +2833,13 @@ class Trace(
                 if op_passes is not None and hasattr(op_passes, "values"):
                     for layer_pass in op_passes.values():
                         layer_pass.grad_fn_handle = grad_fn_handle
+        # F9: adopt the restored detached records into a fresh sealed core so
+        # loaded traces rejoin the single-truth store (best-effort — an abort
+        # preserves the coreless-island behavior; backward records stay
+        # detached by design). See data_classes/_trace_rehydrate.py.
+        from ._trace_rehydrate import rehydrate_trace_core
+
+        rehydrate_trace_core(self)
         _state._register_log(self)
 
     def replace_state_from(self, new_log: "Trace") -> None:

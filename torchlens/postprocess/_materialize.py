@@ -37,13 +37,19 @@ if TYPE_CHECKING:
     from torchlens.data_classes.op import Op
 
 
-def materialize_log_from_fields(fields_dict: dict[str, object]) -> "Op":
+def materialize_log_from_fields(
+    fields_dict: dict[str, object], store: object | None = None
+) -> "Op":
     """Construct the live log object for one captured operation.
 
     Parameters
     ----------
     fields_dict
         Raw field mapping populated by the backend hot path.
+    store
+        The owning trace's ``OpRowStore`` (the M5 builder ingress): the op is
+        appended as a shared columnar row. ``None`` constructs a detached
+        single-row op (legacy/preview callers).
 
     Returns
     -------
@@ -67,7 +73,7 @@ def materialize_log_from_fields(fields_dict: dict[str, object]) -> "Op":
     # (forcing op nodes to None) was FALSE and is corrected there.
     has_backend_override = "_materialized_backend_address" in fields_dict
     backend_address_override = fields_dict.pop("_materialized_backend_address", None)
-    op_log = Op(fields_dict)  # type: ignore[arg-type]
+    op_log = Op(fields_dict, _store=store)  # type: ignore[arg-type]
     for field_name, blob_id in pending_blob_ids.items():
         setattr(op_log, field_name, blob_id)
     if has_backend_override:
@@ -139,7 +145,16 @@ def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
         Populates raw trace lookup structures without consuming the sealed source lanes.
     """
 
-    live_module_forward_args = dict(trace._build_state.module_forward_args)
+    core = trace.__dict__.get("_trace_core")
+    if core is None:
+        from torchlens._trace_core import OpRowStore, TraceCore
+        from torchlens.data_classes.op import _OP_STORE_LAYOUT
+
+        core = TraceCore()
+        core.ops = OpRowStore(_OP_STORE_LAYOUT)
+        trace._trace_core = core
+    op_store = core.ops
+    live_module_forward_args = dict(trace._module_capture_ws.module_forward_args)
     _rebuild_module_side_channels(trace, events)
     module_enter_addresses = _module_enter_addresses(
         events.module_prep_events,
@@ -201,7 +216,7 @@ def materialize_from_events(trace: "Trace", events: CaptureEvents) -> None:
             op_events_by_label,
         )
         with _timed_phase(trace, "object_construction:op"):
-            op_log = materialize_log_from_fields(fields_dict)
+            op_log = materialize_log_from_fields(fields_dict, op_store)
         _register_raw_log(trace, event, op_log)
     _drop_missing_buffer_sources(trace)
 
@@ -237,8 +252,8 @@ def _drop_missing_buffer_sources(trace: "Trace") -> None:
         Mutates buffer logs in place.
     """
 
-    raw_labels = set(trace._build_state.raw_layer_dict)
-    for op_log in trace._build_state.raw_layer_dict.values():
+    raw_labels = set(trace._raw_graph_ws.raw_layer_dict)
+    for op_log in trace._raw_graph_ws.raw_layer_dict.values():
         buffer_source = getattr(op_log, "buffer_source", None)
         if buffer_source is not None and buffer_source not in raw_labels:
             op_log.buffer_source = None
@@ -1218,13 +1233,13 @@ def _rebuild_module_side_channels(trace: "Trace", events: CaptureEvents) -> None
     Returns
     -------
     None
-        Mutates ``trace._build_state.module_build_data``, ``trace._build_state.module_metadata``, and
-        ``trace._build_state.module_forward_args``.
+        Mutates ``trace._module_capture_ws.module_build_data``, ``trace._module_capture_ws.module_metadata``, and
+        ``trace._module_capture_ws.module_forward_args``.
     """
 
-    trace._build_state.module_build_data = _init_module_hierarchy_data()
-    trace._build_state.module_metadata = {}
-    trace._build_state.module_forward_args = {}
+    trace._module_capture_ws.module_build_data = _init_module_hierarchy_data()
+    trace._module_capture_ws.module_metadata = {}
+    trace._module_capture_ws.module_forward_args = {}
     for prep_event in events.module_prep_events:
         _apply_module_prep_event(trace, prep_event)
     module_enter_addresses = _module_enter_addresses(
@@ -1236,7 +1251,7 @@ def _rebuild_module_side_channels(trace: "Trace", events: CaptureEvents) -> None
         _apply_module_enter_event(trace, enter_event, module_enter_addresses[id(enter_event)])
     for exit_event in events.module_exit_events:
         _apply_module_exit_event(trace, exit_event)
-    provenance = trace._build_state.module_build_data.setdefault("module_pre_hook_provenance", {})
+    provenance = trace._module_capture_ws.module_build_data.setdefault("module_pre_hook_provenance", {})
     for pre_hook_event in events.pre_hook_events:
         if pre_hook_event.call_index is None:
             continue
@@ -1272,7 +1287,7 @@ def _fill_module_call_stacks_from_op_events(trace: "Trace", op_events: list[OpEv
     reconstruction, never an override of any authoritative enter-event value.
     """
 
-    stacks = trace._build_state.module_build_data["module_call_stacks"]
+    stacks = trace._module_capture_ws.module_build_data["module_call_stacks"]
     for event in op_events:
         module_stack = event.module_stack
         for index, frame in enumerate(module_stack):
@@ -1304,7 +1319,7 @@ def _apply_module_prep_event(trace: "Trace", event: ModulePrepEvent) -> None:
         Mutates module metadata and module type maps.
     """
 
-    trace._build_state.module_metadata[event.address] = {
+    trace._module_capture_ws.module_metadata[event.address] = {
         "cls": None,
         "class_name": event.class_name,
         "class_qualname": event.cls_qualname,
@@ -1332,7 +1347,7 @@ def _apply_module_prep_event(trace: "Trace", event: ModulePrepEvent) -> None:
         "custom_methods": list(event.custom_methods),
     }
     if event.address != "self":
-        trace._build_state.module_build_data["module_types"][event.address] = event.module_type_str
+        trace._module_capture_ws.module_build_data["module_types"][event.address] = event.module_type_str
 
 
 def _list_or_empty(value: object | None) -> list[Any]:
@@ -1376,7 +1391,7 @@ def _apply_module_enter_event(trace: "Trace", event: ModuleEnterEvent, address: 
         Mutates module build data and forward-argument maps.
     """
 
-    mbd = trace._build_state.module_build_data
+    mbd = trace._module_capture_ws.module_build_data
     call_label = f"{address}:{event.call_index}"
     mbd["module_training_modes"][address] = event.training
     mbd["module_forward_start_times"][call_label] = event.forward_start_time
@@ -1387,7 +1402,7 @@ def _apply_module_enter_event(trace: "Trace", event: ModuleEnterEvent, address: 
         event.forward_kwargs_template,
     )
     mbd["module_layer_argnames"][call_label].extend(list(event.layer_argnames))
-    trace._build_state.module_forward_args[(address, event.call_index)] = (
+    trace._module_capture_ws.module_forward_args[(address, event.call_index)] = (
         event.forward_args,
         event.forward_kwargs,
     )
@@ -1409,7 +1424,7 @@ def _apply_module_exit_event(trace: "Trace", event: ModuleExitEvent) -> None:
         Mutates module build data.
     """
 
-    mbd = trace._build_state.module_build_data
+    mbd = trace._module_capture_ws.module_build_data
     mbd["module_forward_durations"][event.call_label] = event.forward_duration
     if event.output_structure is not None:
         mbd["module_output_structures"][event.call_label] = event.output_structure
@@ -1820,7 +1835,7 @@ def _input_io_roles(trace: "Trace", op_events: list[OpEvent]) -> dict[str, str]:
     """
 
     input_events = [event for event in op_events if event.layer_type == "input"]
-    input_addresses = trace._build_state.input_tensor_addresses
+    input_addresses = trace._raw_graph_ws.input_tensor_addresses
     if isinstance(input_addresses, list) and len(input_addresses) == len(input_events):
         return {
             event.label_raw: address
@@ -1964,8 +1979,8 @@ def _register_raw_log(trace: "Trace", event: OpEvent, op_log: "Op") -> None:
     Returns
     -------
     None
-        Mutates ``trace._build_state.raw_layer_dict`` and ``trace._build_state.raw_layer_labels_list``.
+        Mutates ``trace._raw_graph_ws.raw_layer_dict`` and ``trace._raw_graph_ws.raw_layer_labels_list``.
     """
 
-    trace._build_state.raw_layer_dict[event.label_raw] = op_log
-    trace._build_state.raw_layer_labels_list.append(event.label_raw)
+    trace._raw_graph_ws.raw_layer_dict[event.label_raw] = op_log
+    trace._raw_graph_ws.raw_layer_labels_list.append(event.label_raw)

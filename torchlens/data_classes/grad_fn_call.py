@@ -52,6 +52,7 @@ class GradFnCall:
             **PORTABLE_STATE_SPEC,
             "call_label": PORTABLE_STATE_SPEC["label"],
         },
+        schema_key="grad_fn_call",
     )
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
@@ -75,10 +76,26 @@ class GradFnCall:
         if self.timestamp is None:
             self.timestamp = self._time_finished
 
+    def __tl_state_items__(self) -> Any:
+        """Yield live state pairs from the backing row (M9 facade hook)."""
+
+        from .._trace_core.record_rows import record_state_items
+
+        return record_state_items(self)
+
+    def __tl_state_restore__(self, mapping: dict[str, Any]) -> None:
+        """Install a state mapping through the cell descriptors (M9 hook)."""
+
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, mapping)
+
     def __getstate__(self) -> dict[str, Any]:
         """Return pickle state with an IO format marker."""
 
-        state = self.__dict__.copy()
+        from ._state_adapter import state_items
+
+        state = dict(state_items(self))
         state["_source_trace_ref"] = None
         state["tlspec_version"] = TLSPEC_VERSION
         return state
@@ -111,7 +128,9 @@ class GradFnCall:
         from .._io.state_keys import refuse_callable_shadowing_state_keys
 
         refuse_callable_shadowing_state_keys(type(self), state)
-        self.__dict__.update(state)
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, state)
         if self.ordinal is None:
             self.ordinal = self.call_index
 
@@ -199,3 +218,34 @@ class GradFnCall:
 
         row = {field_name: getattr(self, field_name) for field_name in GRAD_FN_PASS_LOG_FIELD_ORDER}
         return pd.DataFrame([row], columns=GRAD_FN_PASS_LOG_FIELD_ORDER)
+
+
+# The M9 facade: the declared stored fields become row-cell descriptors
+# (dataclass defaults are baked into the generated __init__, so replacing
+# the class-attribute defaults is behavior-preserving); the instance dict
+# keeps only the store binding + user extras. Rows adopt into the owning
+# backward epoch's stores.
+_GRAD_FN_CALL_STORED_FIELDS: tuple[str, ...] = (
+    "call_index",
+    "ordinal",
+    "backward_pass_index",
+    "label",
+    "grad_inputs",
+    "grad_outputs",
+    "intervention_fire_ref",
+    "timestamp",
+    "_time_started",
+    "_time_finished",
+    "_source_trace_ref",
+)
+
+
+def _install_grad_fn_call_facade() -> None:
+    """Install the GradFnCall row-cell descriptors (import-time)."""
+
+    from .._trace_core.record_rows import install_record_facade
+
+    install_record_facade(GradFnCall, _GRAD_FN_CALL_STORED_FIELDS)
+
+
+_install_grad_fn_call_facade()

@@ -142,6 +142,20 @@ print(tl.compat.report(model, x).to_markdown())
 
 - Top-level `torchlens.__all__` has 94 names: capture, save/load, intervention,
   selectors, helper transforms, observers, validation, and the three main log classes.
+- Relation accessors on FINISHED traces return IMMUTABLE views (authorized public type
+  break, JMT 2026-08-12): label sequences (`op.parents`, `op.children`, `op.modules`,
+  `op.module_call_stack`, conditional child lists, `Layer.parents`/`Layer.children`, ...)
+  are `tuple`; label sets (`input_ancestors`, `output_descendants`, `root_ancestors`,
+  `internal_source_ancestors`) are `frozenset`. Reads are identity-stable, in-place
+  mutation (`op.children.append(...)`) raises, direct assignment still works (a raw
+  `list`/`set` normalizes to the view type), and equal views may be shared across
+  records. Dict-shaped relation metadata (`parent_arg_positions`,
+  `conditional_elif_children`, `module_entry_arg_keys`, ...) keeps its mutable dict
+  type. Legacy saves load with the same immutable surface. `equivalent_ops`/
+  `recurrent_ops` are LIVE group-membership views (`frozenset`/`tuple`): every member
+  of a group reads THE one cached immutable view (O(1), identity-stable), removal
+  scrub rebinds the group row once for all members, and caller mutation is
+  impossible — this supersedes the historical fresh-mutable-copy-per-read barrier.
 - `tl.record(..., save=...)` is the sparse predicate recorder; it returns `Recording`.
   `Recording.to_trace()` cooks the event stream into a full-structure `Trace`, with unsaved
   payload reads rejected explicitly. `tl.record()`/fastlog is torch-only in the backend-v1

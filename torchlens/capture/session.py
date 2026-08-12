@@ -497,7 +497,7 @@ class CaptureSession:
                 "random_seed": getattr(trace, "random_seed", None),
                 "source_model_ref": getattr(trace, "_source_model_ref", None),
                 "layer_counter": getattr(
-                    getattr(trace, "_build_state", None), "layer_counter", 0
+                    getattr(trace, "_raw_graph_ws", None), "layer_counter", 0
                 ),
             }
         )

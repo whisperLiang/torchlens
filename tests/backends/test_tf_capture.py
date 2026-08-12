@@ -91,7 +91,7 @@ def test_tf_capture_hand_built_op_chain_edges_and_saved_values() -> None:
 
     assert trace.backend == "tf"
     assert {"AddV2", "Mul"} <= {op.func_name for op in trace.layer_list}
-    assert by_func["Mul"].parents == [by_func["AddV2"]._label_raw]
+    assert by_func["Mul"].parents == (by_func["AddV2"]._label_raw,)
     assert np.allclose(trace[by_func["Mul"].label].out, np.array([9.0, 20.0], dtype=np.float32))
     assert np.isfinite(trace[by_func["AddV2"].label].out).all()
 
@@ -151,7 +151,7 @@ def test_tf_capture_raw_tf_module_class_level_stack() -> None:
 
     assert {"ReadVariableOp", "MatMul", "AddV2", "Relu"} <= op_types
     assert trace.module_identity_mode == "object_module"
-    assert matmul.modules == ["self:1"]
+    assert matmul.modules == ("self:1",)
     assert getattr(trace, "_tf_init_op_labels", ()) == ()
     assert np.allclose(trace[matmul.label].out, np.array([[5.0]], dtype=np.float32))
 

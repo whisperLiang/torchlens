@@ -583,8 +583,4 @@ def __getattr__(name: str) -> object:
         If ``name`` is not a compatibility export.
     """
 
-    if name == "TraceBuildState":
-        from .trace_build_state import TraceBuildState
-
-        return TraceBuildState
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

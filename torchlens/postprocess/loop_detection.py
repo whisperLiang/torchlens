@@ -166,7 +166,7 @@ def _differentiated_param_equivalence_classes(self: "Trace") -> dict[str, str]:
     """
 
     cohorts: dict[str, list[tuple[str, str]]] = defaultdict(list)
-    for label in self._build_state.raw_layer_labels_list:
+    for label in self._raw_graph_ws.raw_layer_labels_list:
         node = self[label]
         if getattr(node, "is_orphan", False):
             continue
@@ -204,7 +204,7 @@ def _group_by_shared_params(self: "Trace") -> None:
     param_barcode_groups: dict[
         tuple[str, tuple[str, ...], int | None, tuple[str, ...], str], list[str]
     ] = defaultdict(list)
-    for label in self._build_state.raw_layer_labels_list:
+    for label in self._raw_graph_ws.raw_layer_labels_list:
         node = self[label]
         if getattr(node, "is_orphan", False):
             continue
@@ -266,7 +266,7 @@ def _build_recurrence_grouping_graph(self: "Trace") -> RecurrenceGroupingGraph:
 
     nodes: dict[str, RecurrenceNode] = {}
     eligible_labels: list[str] = []
-    raw_labels = tuple(self._build_state.raw_layer_labels_list)
+    raw_labels = tuple(self._raw_graph_ws.raw_layer_labels_list)
     raw_label_set = set(raw_labels)
     effective_equivalence = _differentiated_param_equivalence_classes(self)
     equivalent_labels_memo: dict[int, tuple[Any, tuple[str, ...]]] = {}

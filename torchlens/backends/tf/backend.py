@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
+from ..._trace_core.relation_views import freeze_trace_relation_views
 from ... import _state
 from ...backends import BackendName
 from ...data_classes.param import ParamAccessor
@@ -237,6 +238,7 @@ class TFBackend:
             delattr(trace, "capture_events")
             self._attach_param_logs(trace, None)
             self._finish_trace(trace, None)
+            freeze_trace_relation_views(trace)
             return trace
         module_tree = discover_tf_module_tree(model, tf)
         use_object_module = _resolve_tf_module_identity_mode(module_identity_mode, module_tree)
@@ -302,6 +304,7 @@ class TFBackend:
         delattr(trace, "capture_events")
         self._attach_param_logs(trace, module_tree)
         self._finish_trace(trace, module_tree)
+        freeze_trace_relation_views(trace)
         return trace
 
     def validate_entry(self, *args: Any, **kwargs: Any) -> Any:

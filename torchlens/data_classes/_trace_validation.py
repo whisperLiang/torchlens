@@ -28,6 +28,31 @@ from .cleanup import (
 from .op import Op
 
 
+def _materialize_layer_mirrors_for_removed(
+    trace: "Trace",
+    removed_entries: Iterable[Op],
+) -> None:
+    """Materialize Layer mirror fields whose representative op is being removed.
+
+    A Layer's M8 mirror descriptors read through to its first-pass op; husking
+    that op would otherwise change what a still-held Layer reads. Materializing
+    first preserves the dict-era post-removal surface (the copies existed at
+    this point in the dict era). Layers whose representative op survives keep
+    mirroring — their reads are unaffected by the removal.
+    """
+
+    layer_logs = trace.__dict__.get("layer_logs")
+    if not layer_logs:
+        return
+    from .layer import _layer_rep_op, materialize_layer_mirrors
+
+    removed_ids = {id(entry) for entry in removed_entries}
+    for layer_log in layer_logs.values():
+        rep = _layer_rep_op(layer_log)
+        if rep is not None and id(rep) in removed_ids:
+            materialize_layer_mirrors(layer_log)
+
+
 _USE_STORED_TRANSFORM = object()
 _JAX_VALIDATION_REPLAY_BACKEND = "jax"
 _MLX_VALIDATION_REPLAY_BACKEND = "mlx"
@@ -844,6 +869,7 @@ class TraceValidationMixin(_TraceMixinBase):
             Whether to scrub all graph references to the removed entry.
         """
         tensor_label = _label_for_reference_removal(log_entry, self._tracing_finished)
+        _materialize_layer_mirrors_for_removed(self, (log_entry,))
         if remove_references:
             _remove_log_entry_references(self, tensor_label)
         _clear_entry_attributes(log_entry)
@@ -864,6 +890,7 @@ class TraceValidationMixin(_TraceMixinBase):
         """
         entries_to_remove = list(entries_to_remove)
         surviving_entries = [entry for entry in self if entry not in entries_to_remove]
+        _materialize_layer_mirrors_for_removed(self, entries_to_remove)
 
         labels_to_remove = set()
         for entry in entries_to_remove:

@@ -28,12 +28,14 @@ Accessors (`LayerAccessor`, `ModuleAccessor`, `ParamAccessor`, `BufferAccessor`,
 | `trace.py` | `Trace`, conditional event records, save/load/intervention/summary helpers |
 | `_trace_accessors.py` | Trace-level typed accessor construction |
 | `_trace_export.py` | Trace tabular export and decoded-output helpers |
-| `_trace_intervention.py` | Trace intervention, fork, replay, and rerun helpers |
+| `_trace_intervention.py` | Trace intervention surface; fork dispatch, replay, and rerun helpers |
+| `_trace_fork.py` | M11 copy-on-write fork builder (COW shells over `OpStoreView`s) |
+| `_compaction.py` | Freeze-seam Op metadata pooling (M11 fold of the standalone pass) |
 | `_trace_profile.py` | Trace profiling and timing helpers |
 | `_trace_stats.py` | Trace aggregate stats and backward-pass projections |
 | `_trace_validation.py` | Trace validation and log-entry removal helpers |
 | `_trace_viz.py` | Trace visualization entrypoints |
-| `op.py` | `Op`, `TensorLog` alias, tensor save and per-pass fields |
+| `op.py` | `Op` two-word row facade (`_core`/`_row` over `_trace_core`), `TensorLog` alias, tensor save, per-pass fields |
 | `layer.py` | `Layer` aggregate, pass delegation, graph unions |
 | `buffer.py` | `Buffer` and `BufferAccessor` |
 | `module.py` | `ModuleCall`, `Module`, `ModuleAccessor` |
@@ -80,6 +82,38 @@ conditional consistency when removing entries.
 ### Layer Building
 `_build_layer_logs()` merges multiple `Op` entries into one aggregate. Most fields
 use first-pass values; only selected graph/role fields are merged across ops.
+Since M8, `Layer` no longer COPIES the first-pass fields: they are mirror
+descriptors reading through to `ops[0]` on demand, with per-layer `__dict__`
+shadows for merged/overwritten values (`_LAYER_MIRROR_SPEC` in `layer.py`).
+`in_conditionals`/`terminal_bool_for` remain build-time snapshots because
+`_build_conditional_records` rebinds them on the OPS after layers are built.
+
+### M8 record facades (Param/Buffer/FuncCallLocation/ModuleCall/Module)
+These classes are row facades over per-trace kind tables
+(`_trace_core/record_rows.py`): declared stored fields are row-cell
+descriptors; the instance `__dict__` keeps only the store binding, user
+extras (JMT-FORK-7), and the few names whose properties hardcode `__dict__`
+access (template/source-trace/facets slots). Torch build passes adopt records
+into `TraceCore.kind_rows`; direct construction, preview backends, pickle
+restore, and fork shells stay detached single-row stores.
+
+### M11 COW fork
+`Trace.fork()` builds copy-on-write forks (`_trace_fork.build_fork`): fork
+`Op`s and record facades are fresh two-word shells bound to per-fork
+`OpStoreView`s at the SAME rows; only `Layer` shadow dicts, record instance
+extras, and the policy-driven trace-side field remainder are copied (one
+shared-memo deepcopy over small trace-side data). Views isolate every
+mutation surface: fork writes/deletes land in the view overlay, mutable
+builtin containers are eagerly copied into the fork overlay at fork time
+(`OpStoreView.isolate_mutable_cells`, a sparse sweep over the base store's
+cached mutable-cell index; tensors/callables inside stay shared
+by identity), `GroupRef` cells translate to per-fork cloned group tables,
+and cell-held records/accessors translate to fork facades. Traces without
+a sealed core-backed op store (loaded analysis traces, failed partials)
+take the detached fallback (per-record single-row duplication). Mutation
+isolation holds in BOTH directions at fork time (deepcopy snapshot
+semantics); the one shared residual is mutables nested inside non-builtin
+custom objects.
 
 ### Module / ModuleCall Fields
 `Module.training` mirrors `nn.Module.training`; `Module.layer_labels` stores Layer

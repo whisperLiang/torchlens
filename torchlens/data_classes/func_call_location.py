@@ -30,6 +30,8 @@ from typing import Any, Dict, List, Optional, Union
 
 from .._io import FieldPolicy, TLSPEC_VERSION, default_fill_state, read_tlspec_version
 from .._source_links import vscode_file_line_link
+from ..constants import FUNC_CALL_LOCATION_FIELD_ORDER
+from .field_policy import build_record_field_policy_table
 
 # Sentinel object to distinguish "not yet loaded" from an actual None value.
 # Used as the default for lazy-loading placeholders so we can tell the
@@ -97,6 +99,12 @@ class FuncCallLocation:
         "_func_docstring": FieldPolicy.KEEP,
         "_linecache_entry": FieldPolicy.DROP,
     }
+
+    FIELD_POLICY = build_record_field_policy_table(
+        FUNC_CALL_LOCATION_FIELD_ORDER,
+        PORTABLE_STATE_SPEC,
+        schema_key="func_call_location",
+    )
 
     def __init__(
         self,
@@ -473,9 +481,25 @@ class FuncCallLocation:
             return 0
         return len(self.code_context)
 
+    def __tl_state_items__(self) -> Any:
+        """Yield live state pairs from the backing row (M8 facade hook)."""
+
+        from .._trace_core.record_rows import record_state_items
+
+        return record_state_items(self)
+
+    def __tl_state_restore__(self, mapping: Dict[str, Any]) -> None:
+        """Install a state mapping through the cell descriptors (M8 hook)."""
+
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, mapping)
+
     def __getstate__(self) -> Dict[str, Any]:
         """Return pickle state with live frame references stripped."""
-        state = self.__dict__.copy()
+        from ._state_adapter import state_items
+
+        state = dict(state_items(self))
         state["_frame_func_obj"] = None
         state["tlspec_version"] = TLSPEC_VERSION
         return state
@@ -487,4 +511,44 @@ class FuncCallLocation:
         from .._io.state_keys import refuse_callable_shadowing_state_keys
 
         refuse_callable_shadowing_state_keys(type(self), state)
-        self.__dict__.update(state)
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, state)
+
+
+# The M8 facade: the declared stored fields (the literal PORTABLE_STATE_SPEC
+# keys) become row-cell descriptors; the instance dict keeps only the store
+# binding + user extras. FuncCallLocation records are per-trace (cached in
+# ``Trace._code_context_cache``), so cell storage is trace-scoped like every
+# other record kind.
+_FUNC_CALL_LOCATION_STORED_FIELDS: tuple[str, ...] = (
+    "file",
+    "line_number",
+    "func_name",
+    "code_firstlineno",
+    "func_qualname",
+    "col_offset",
+    "source_loading_enabled",
+    "_num_context_lines_requested",
+    "_frame_func_obj",
+    "_source_loaded",
+    "_code_context",
+    "_source_context",
+    "_code_context_labeled",
+    "_call_line",
+    "_num_context_lines",
+    "_func_signature",
+    "_func_docstring",
+    "_linecache_entry",
+)
+
+
+def _install_func_call_location_facade() -> None:
+    """Install the row-cell descriptors (import-time, collision-safe)."""
+
+    from .._trace_core.record_rows import install_record_facade
+
+    install_record_facade(FuncCallLocation, _FUNC_CALL_LOCATION_STORED_FIELDS)
+
+
+_install_func_call_location_facade()

@@ -71,6 +71,7 @@ from ...capture.flops import compute_backward_flops, compute_forward_flops
 from ...capture.projections import LiveOpView
 from ...data_classes.op import (
     Op,
+    register_relation_cell_encoding,
     _dtype_or_none,
     _dedup_saved_activation_out,
     _effective_activation_save_mode,
@@ -190,9 +191,14 @@ if TYPE_CHECKING:
     from ...data_classes.trace import Trace
 
 
-@dataclass(frozen=True, slots=True)
 class _AncestorBitset:
-    """Compact immutable storage for one finished Op ancestor set.
+    """Compact storage for one finished Op ancestor closure.
+
+    One instance per distinct closure per trace (interned by
+    ``_compact_ancestor_sets``), so the lazily cached frozen view is also
+    one-per-closure: the first public read of any member materializes the
+    ``frozenset`` once and every sibling read shares it (M6 immutable-view
+    contract, JMT-FORK-1).
 
     Parameters
     ----------
@@ -202,11 +208,17 @@ class _AncestorBitset:
         Integer bitmap whose set bits select entries from ``labels``.
     """
 
-    labels: tuple[str, ...]
-    bits: int
+    __slots__ = ("labels", "bits", "_frozen_view")
+
+    def __init__(self, labels: tuple[str, ...], bits: int) -> None:
+        """Bind the shared label table and this closure's bitmap."""
+
+        self.labels = labels
+        self.bits = bits
+        self._frozen_view: frozenset[str] | None = None
 
     def materialize(self) -> set[str]:
-        """Return the exact public set represented by this bitmap.
+        """Return the closure as a fresh mutable set (internal use).
 
         Returns
         -------
@@ -223,15 +235,36 @@ class _AncestorBitset:
             bits ^= lowest_bit
         return result
 
+    def frozen_view(self) -> frozenset[str]:
+        """Return the public immutable view, cached per closure."""
+
+        view = self._frozen_view
+        if view is None:
+            view = frozenset(self.materialize())
+            self._frozen_view = view
+        return view
+
 
 _ANCESTOR_FIELD_NAMES = ("root_ancestors", "internal_source_ancestors")
 _ANCESTOR_SLOT_DESCRIPTORS = {
     field_name: vars(Op)[field_name] for field_name in _ANCESTOR_FIELD_NAMES
 }
 
+# The bitset is a sanctioned finished-cell encoding: reads through the
+# overlay materialize its cached frozenset view, and a refresh re-run may
+# assign it onto a detached-backed op (which the closed finished-store
+# assignment check would otherwise refuse).
+register_relation_cell_encoding(_AncestorBitset)
 
-def _get_ancestor_field(op: Op, field_name: str) -> set[str]:
-    """Return one public ancestor set, materializing compact storage lazily.
+
+def _get_ancestor_field(op: Op, field_name: str) -> "set[str] | frozenset[str]":
+    """Return one public ancestor closure view.
+
+    During postprocess the cell holds the mutable staging set and is returned
+    as-is. Once ``_compact_ancestor_sets`` has interned the closure, reads
+    return the bitset's cached ``frozenset`` view (one per distinct closure,
+    shared by every member op — safe because it is immutable) WITHOUT writing
+    it back, so the compact encoding stays the storage authority.
 
     Parameters
     ----------
@@ -242,15 +275,14 @@ def _get_ancestor_field(op: Op, field_name: str) -> set[str]:
 
     Returns
     -------
-    set[str]
-        The mutable, exact-type public field value.
+    set[str] | frozenset[str]
+        Staging set during postprocess; immutable view once finished.
     """
 
     descriptor = _ANCESTOR_SLOT_DESCRIPTORS[field_name]
     value = descriptor.__get__(op, type(op))
     if isinstance(value, _AncestorBitset):
-        value = value.materialize()
-        descriptor.__set__(op, value)
+        return value.frozen_view()
     return cast(set[str], value)
 
 
@@ -284,8 +316,8 @@ def _delete_ancestor_field(op: Op, field_name: str) -> None:
     _ANCESTOR_SLOT_DESCRIPTORS[field_name].__delete__(op)
 
 
-def _get_root_ancestors(op: Op) -> set[str]:
-    """Return ``op.root_ancestors`` as its public mutable set type."""
+def _get_root_ancestors(op: Op) -> "set[str] | frozenset[str]":
+    """Return ``op.root_ancestors``: staging set or frozen closure view."""
 
     return _get_ancestor_field(op, "root_ancestors")
 
@@ -302,8 +334,8 @@ def _delete_root_ancestors(op: Op) -> None:
     _delete_ancestor_field(op, "root_ancestors")
 
 
-def _get_internal_source_ancestors(op: Op) -> set[str]:
-    """Return ``op.internal_source_ancestors`` as its public mutable set type."""
+def _get_internal_source_ancestors(op: Op) -> "set[str] | frozenset[str]":
+    """Return ``op.internal_source_ancestors``: staging set or frozen closure view."""
 
     return _get_ancestor_field(op, "internal_source_ancestors")
 
@@ -602,44 +634,6 @@ def set_capture_producer_policy(trace: "Trace", mode: CaptureProducerMode) -> No
     trace._capture_producer_policy = get_capture_producer_policy(mode)
 
 
-_SHARED_FIELDS_TO_SHALLOW_COPY_PER_OUTPUT = (
-    "interventions",
-    "non_tensor_pos_args",
-    "non_tensor_kwargs",
-    "func_non_tensor_args",
-    "transform_config",
-    "parent_params",
-    "_param_barcodes",
-    "parent_param_ops",
-    "_param_logs",
-    "param_shapes",
-    "parents",
-    "_edge_uses",
-    "root_ancestors",
-    "children",
-    "input_ancestors",
-    "output_descendants",
-    "internal_source_parents",
-    "internal_source_ancestors",
-    "in_conditionals",
-    "terminal_bool_for",
-    "conditional_branch_stack",
-    "conditional_entry_children",
-    "conditional_then_children",
-    "conditional_elif_children",
-    "conditional_else_children",
-    "conditional_arm_children",
-    "modules",
-    "module_call_stack",
-    "module_entry_arg_keys",
-    "input_to_module_calls",
-    "output_of_modules",
-    "output_of_module_calls",
-    "func_config",
-)
-_SHARED_FIELDS_TO_DEEP_COPY_PER_OUTPUT = ("parent_arg_positions",)
-
-
 def _should_keep_alias_mutation_contract(trace: "Trace") -> bool:
     """Return whether mutation-position alias contracts can be consumed.
 
@@ -736,7 +730,7 @@ def _snapshot_exhaustive_module_stack(self: "Trace") -> list[tuple[str, int]]:
 
     return [
         (frame.address, frame.pass_index)
-        for frame in _mstack.snapshot(self._build_state.exhaustive_module_stack)
+        for frame in _mstack.snapshot(self._module_capture_ws.exhaustive_module_stack)
     ]
 
 
@@ -877,12 +871,76 @@ def _parent_edges_from_fields(fields_dict: dict[str, Any]) -> tuple[ParentEdge, 
     )
 
 
+#: FunctionCallRef fields the per-output logging path genuinely rewrites
+#: (``_log_output_tensor_info``): FLOPs derive from the output shape and
+#: ``is_inplace`` from the output tensor's version. Everything else on the
+#: ref is a call-level fact, so sibling outputs of one wrapped call share
+#: ONE frozen ref (M7); a sibling whose per-output facts differ gets a
+#: ``dataclasses.replace`` derivative that still shares every container
+#: field by reference.
+_FUNCTION_REF_PER_OUTPUT_FIELDS = ("flops_forward", "flops_backward", "is_inplace")
+
+
+def _function_call_ref_from_fields(fields_dict: dict[str, Any]) -> FunctionCallRef:
+    """Build the frozen function-call summary for one operation event."""
+
+    return FunctionCallRef(
+        func=fields_dict["func"],
+        func_name=fields_dict["func_name"],
+        func_qualname=fields_dict["func_qualname"],
+        func_call_id=fields_dict["func_call_id"],
+        code_context=tuple(fields_dict["code_context"]),
+        func_duration=fields_dict["func_duration"],
+        flops_forward=fields_dict["flops_forward"],
+        flops_backward=fields_dict["flops_backward"],
+        func_rng_states=fields_dict["func_rng_states"],
+        func_autocast_state=fields_dict["func_autocast_state"],
+        arg_names=tuple(fields_dict["arg_names"]),
+        num_args_total=fields_dict["num_args_total"],
+        num_pos_args=fields_dict["num_pos_args"],
+        num_kwargs=fields_dict["num_kwargs"],
+        non_tensor_pos_args=tuple(fields_dict["non_tensor_pos_args"]),
+        non_tensor_kwargs=tuple(fields_dict["non_tensor_kwargs"].items()),
+        func_non_tensor_args=tuple(fields_dict["func_non_tensor_args"]),
+        is_inplace=fields_dict["is_inplace"],
+        func_config=tuple(fields_dict["func_config"].items()),
+        func_id=fields_dict.get("func_id"),
+    )
+
+
+def _resolve_call_function_ref(
+    fields_dict: dict[str, Any],
+    call_ref_box: list[FunctionCallRef] | None,
+) -> FunctionCallRef:
+    """Return the (shared) function-call ref for one output event.
+
+    The first output of a wrapped call builds the ref and parks it in
+    ``call_ref_box``; sibling outputs reuse it verbatim when their per-output
+    facts match, otherwise derive via ``dataclasses.replace`` (container
+    fields stay shared by reference either way).
+    """
+
+    if call_ref_box:
+        shared = call_ref_box[0]
+        overrides = {
+            name: fields_dict[name]
+            for name in _FUNCTION_REF_PER_OUTPUT_FIELDS
+            if getattr(shared, name) != fields_dict[name]
+        }
+        return dataclasses.replace(shared, **overrides) if overrides else shared
+    ref = _function_call_ref_from_fields(fields_dict)
+    if call_ref_box is not None:
+        call_ref_box.append(ref)
+    return ref
+
+
 def _op_event_from_log(
     trace: "Trace",
     fields_dict: dict[str, Any],
     tensor: torch.Tensor,
     fire_results: tuple[FireResult, ...] = (),
     module_stack: tuple[ModuleFrame, ...] | None = None,
+    call_ref_box: list[FunctionCallRef] | None = None,
 ) -> OpEvent:
     """Build an ``OpEvent`` that mirrors a just-constructed ``Op``.
 
@@ -896,6 +954,9 @@ def _op_event_from_log(
         Live intervention fire results associated with this output.
     module_stack
         Precomputed immutable module frames shared by outputs from the call.
+    call_ref_box
+        Per-call one-element box sharing ONE ``FunctionCallRef`` across the
+        sibling outputs of a multi-output call (M7).
 
     Returns
     -------
@@ -959,28 +1020,7 @@ def _op_event_from_log(
         source_trace_id=None,
         tracing_finished=fields_dict["_tracing_finished"],
         construction_done=fields_dict["_construction_done"],
-        function=FunctionCallRef(
-            func=fields_dict["func"],
-            func_name=fields_dict["func_name"],
-            func_qualname=fields_dict["func_qualname"],
-            func_call_id=fields_dict["func_call_id"],
-            code_context=tuple(fields_dict["code_context"]),
-            func_duration=fields_dict["func_duration"],
-            flops_forward=fields_dict["flops_forward"],
-            flops_backward=fields_dict["flops_backward"],
-            func_rng_states=fields_dict["func_rng_states"],
-            func_autocast_state=fields_dict["func_autocast_state"],
-            arg_names=tuple(fields_dict["arg_names"]),
-            num_args_total=fields_dict["num_args_total"],
-            num_pos_args=fields_dict["num_pos_args"],
-            num_kwargs=fields_dict["num_kwargs"],
-            non_tensor_pos_args=tuple(fields_dict["non_tensor_pos_args"]),
-            non_tensor_kwargs=tuple(fields_dict["non_tensor_kwargs"].items()),
-            func_non_tensor_args=tuple(fields_dict["func_non_tensor_args"]),
-            is_inplace=fields_dict["is_inplace"],
-            func_config=tuple(fields_dict["func_config"].items()),
-            func_id=fields_dict.get("func_id"),
-        ),
+        function=_resolve_call_function_ref(fields_dict, call_ref_box),
         output=OutputRef(
             tensor=tensor_ref,
             transformed_tensor=transformed_ref,
@@ -2440,7 +2480,7 @@ def log_function_output_tensors(
     if policy is None:
         policy = get_capture_producer_policy(cast(CaptureProducerMode, self.capture_mode))
         self._capture_producer_policy = policy
-    layer_counter_before = self._build_state.layer_counter
+    layer_counter_before = self._raw_graph_ws.layer_counter
     _emit_operation_events(
         policy,
         self,
@@ -2455,7 +2495,7 @@ def log_function_output_tensors(
         is_bottom_level_func,
         func_call_id,
     )
-    return self._build_state.layer_counter > layer_counter_before
+    return self._raw_graph_ws.layer_counter > layer_counter_before
 
 
 def _emit_operation_events(
@@ -2642,8 +2682,8 @@ def _apply_live_hooks_to_outputs_legacy(
     replacements: dict[tuple[OutputPathComponent, ...], torch.Tensor] = {}
     loggable_outputs = list(_iter_loggable_live_outputs(out_orig, is_bottom_level_func))
     events = self.capture_events
-    events.raw_layer_counter = self._build_state.layer_counter
-    events.raw_layer_type_counter = dict(self._build_state.raw_layer_type_counter)
+    events.raw_layer_counter = self._raw_graph_ws.layer_counter
+    events.raw_layer_type_counter = dict(self._raw_graph_ws.raw_layer_type_counter)
     reserved_labels = events.reserve_label_block(layer_type, len(loggable_outputs))
 
     for reserved, (out, container_path, _container_spec) in zip(reserved_labels, loggable_outputs):
@@ -2734,8 +2774,8 @@ def _apply_predicate_mode_interventions_to_outputs(
     output_ordinal = 0
     for out, container_path, _container_spec in loggable_outputs:
         output_ordinal += 1
-        raw_index = trace._build_state.layer_counter + output_ordinal
-        type_index = trace._build_state.raw_layer_type_counter[layer_type] + output_ordinal
+        raw_index = trace._raw_graph_ws.layer_counter + output_ordinal
+        type_index = trace._raw_graph_ws.raw_layer_type_counter[layer_type] + output_ordinal
         raw_label = f"{layer_type}_{type_index}_{raw_index}_raw"
         module_frame = state.module_stack[-1] if state.module_stack else None
         ctx = build_op_record_context(
@@ -3498,13 +3538,13 @@ def _emit_predicate_operation_events(
     function_ref: FunctionCallRef | None = None
 
     for output_index, (out, container_path, _container_spec) in enumerate(out_iter):
-        self._build_state.layer_counter += 1
-        self._build_state.raw_layer_type_counter[layer_type] += 1
+        self._raw_graph_ws.layer_counter += 1
+        self._raw_graph_ws.raw_layer_type_counter[layer_type] += 1
         state.op_counts[layer_type] = state.op_counts.get(layer_type, 0) + 1
         state.step_index += 1
         state.event_index += 1
-        raw_index = self._build_state.layer_counter
-        type_index = self._build_state.raw_layer_type_counter[layer_type]
+        raw_index = self._raw_graph_ws.layer_counter
+        type_index = self._raw_graph_ws.raw_layer_type_counter[layer_type]
         _label_raw = f"{layer_type}_{type_index}_{raw_index}_raw"
         set_tensor_label(out, _label_raw)
         module_frame = state.module_stack[-1] if state.module_stack else None
@@ -4029,29 +4069,6 @@ def _build_shared_fields_dict(
     return fields_dict, parent_layer_entries, arg_tensors, parent_param_ops
 
 
-def _copy_shared_fields_for_output(fields_dict: dict[str, Any]) -> dict[str, Any]:
-    """Return an isolated per-output copy of shared exhaustive fields.
-
-    Parameters
-    ----------
-    fields_dict
-        Shared field mapping for all tensor outputs of one wrapped function call.
-
-    Returns
-    -------
-    dict[str, Any]
-        Field mapping that can be mutated for one output tensor without changing
-        sibling output entries.
-    """
-
-    fields_dict_onetensor = fields_dict.copy()
-    for field in _SHARED_FIELDS_TO_SHALLOW_COPY_PER_OUTPUT:
-        fields_dict_onetensor[field] = copy.copy(fields_dict[field])
-    for field in _SHARED_FIELDS_TO_DEEP_COPY_PER_OUTPUT:
-        fields_dict_onetensor[field] = copy.deepcopy(fields_dict[field])
-    return fields_dict_onetensor
-
-
 def _classify_new_tensor_in_trace(
     self: "Trace",
     fields_dict: dict[str, Any],
@@ -4324,6 +4341,10 @@ def _emit_exhaustive_operation_events(
         else frozenset()
     )
 
+    # One shared FunctionCallRef per wrapped call (M7): the first logged
+    # output parks the frozen ref here and every sibling reuses it.
+    call_ref_box: list[FunctionCallRef] = []
+
     for i, output_entry in enumerate(output_entries):
         out = output_entry.value
         if not _output_should_be_logged(out, is_bottom_level_func):
@@ -4344,8 +4365,16 @@ def _emit_exhaustive_operation_events(
                 except AttributeError:
                     pass
 
+        # M7: per-output isolation is a plain dict copy. Every per-output
+        # writer REASSIGNS its fields (``_log_output_tensor_info``,
+        # ``_build_graph_relationship_fields``, the foreach projection, and
+        # this loop all bind fresh containers; the single-output path has
+        # always shared ``fields_dict`` itself, so in-place mutation of a
+        # call-shared container would already be a bug there). The frozen
+        # ``OpEvent`` isolates at construction (tuple/deepcopy), so sibling
+        # dicts sharing the call-level container objects is unobservable.
         fields_dict_onetensor = (
-            fields_dict if use_single_output_fields else _copy_shared_fields_for_output(fields_dict)
+            fields_dict if use_single_output_fields else dict(fields_dict)
         )
         fields_dict_onetensor["container_path"] = output_entry.container_path
         fields_dict_onetensor["container_spec"] = output_entry.container_spec
@@ -4415,6 +4444,7 @@ def _emit_exhaustive_operation_events(
                 t_kwargs=kwarg_copies,
                 activation_transform=self.activation_transform,
                 event_module_stack=event_module_stack,
+                call_ref_box=call_ref_box,
             ),
         )
         new_tensor_label = new_layer_entry._label_raw
@@ -4871,7 +4901,7 @@ def _register_call_output_container_snapshot(
     spec = next((entry.container_spec for entry in output_entries if entry.container_spec), None)
     if spec is None:
         return
-    registry = trace._build_state.container_registry
+    registry = trace._wrapper_runtime_ws.container_registry
     registry.register_snapshot(
         output,
         site=FuncSite(func_call_id=func_call_id, position="return"),
@@ -4910,7 +4940,7 @@ def register_call_input_container_snapshots(
 
     if not getattr(trace, "_capture_container_structure", False):
         return
-    registry = trace._build_state.container_registry
+    registry = trace._wrapper_runtime_ws.container_registry
     for index, arg in enumerate(args):
         result = walk_container(arg, role=Role.CALL_INPUT, capability="full_spec")
         if result is None:
@@ -5029,10 +5059,10 @@ def _log_output_tensor_info(
     """
     layer_type = fields_dict["type"]
     indiv_param_barcodes = list(parent_param_ops.keys())
-    self._build_state.layer_counter += 1
-    self._build_state.raw_layer_type_counter[layer_type] += 1
-    raw_index = self._build_state.layer_counter
-    type_index = self._build_state.raw_layer_type_counter[layer_type]
+    self._raw_graph_ws.layer_counter += 1
+    self._raw_graph_ws.raw_layer_type_counter[layer_type] += 1
+    raw_index = self._raw_graph_ws.layer_counter
+    type_index = self._raw_graph_ws.raw_layer_type_counter[layer_type]
     _label_raw = f"{layer_type}_{type_index}_{raw_index}_raw"
 
     # Determine operation equivalence type — the fingerprint used by loop detection
@@ -5430,7 +5460,7 @@ def _stream_activation_fields(trace: "Trace", fields_dict: dict[str, Any]) -> No
     """
 
     writer = getattr(trace, "_out_writer", None)
-    if writer is None or not trace._build_state.in_exhaustive_pass:
+    if writer is None or not trace._wrapper_runtime_ws.in_exhaustive_pass:
         return
 
     label = fields_dict["_label_raw"]
@@ -5969,7 +5999,7 @@ def _build_trace_predicate_context(
         is_bottom_level_func=is_bottom_level_func,
         module_stack=_module_stack_frames_from_fields(fields_dict),
         history=history,
-        op_counts=dict(trace._build_state.raw_layer_type_counter),
+        op_counts=dict(trace._raw_graph_ws.raw_layer_type_counter),
         pass_index=int(fields_dict.get("pass_index", 0)),
         event_index=int(fields_dict["raw_index"]),
         step_index=fields_dict.get("step_index"),
@@ -6099,6 +6129,7 @@ def _make_layer_log_entry(
     t_kwargs: dict[str, Any] | None = None,
     activation_transform: Callable[..., Any] | None = None,
     event_module_stack: tuple[ModuleFrame, ...] | None = None,
+    call_ref_box: list[FunctionCallRef] | None = None,
 ) -> Any:
     """Create a Op (or Buffer) entry and register it in Trace.
 
@@ -6195,6 +6226,7 @@ def _make_layer_log_entry(
         t,
         fire_results,
         module_stack=event_module_stack,
+        call_ref_box=call_ref_box,
     )
     self.capture_events.append(op_event)
     if op_event.grad_fn_handle is not None:

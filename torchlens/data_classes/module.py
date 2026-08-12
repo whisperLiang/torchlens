@@ -534,7 +534,7 @@ class ModuleCall:
         "_source_trace_strong": FieldPolicy.DROP,
         "_source_trace_ref": FieldPolicy.WEAKREF_STRIP,
     }
-    FIELD_POLICY = build_record_field_policy_table(MODULE_PASS_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC)
+    FIELD_POLICY = build_record_field_policy_table(MODULE_PASS_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="module_call")
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     address: str
@@ -1236,9 +1236,25 @@ class ModuleCall:
         row = _module_call_log_to_row(self)
         return pd.DataFrame([row], columns=MODULE_PASS_LOG_FIELD_ORDER)
 
+    def __tl_state_items__(self) -> Any:
+        """Yield live state pairs from the backing row (M8 facade hook)."""
+
+        from .._trace_core.record_rows import record_state_items
+
+        return record_state_items(self)
+
+    def __tl_state_restore__(self, mapping: Dict[str, Any]) -> None:
+        """Install a state mapping through the cell descriptors (M8 hook)."""
+
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, mapping)
+
     def __getstate__(self) -> Dict[str, Any]:
         """Return pickle state annotated with the current I/O format version."""
-        state = self.__dict__.copy()
+        from ._state_adapter import state_items
+
+        state = dict(state_items(self))
         state.pop("_source_trace_strong", None)
         state.pop("_source_trace_ref", None)
         state["tlspec_version"] = TLSPEC_VERSION
@@ -1302,7 +1318,9 @@ class ModuleCall:
         from .._io.state_keys import refuse_callable_shadowing_state_keys
 
         refuse_callable_shadowing_state_keys(type(self), state)
-        self.__dict__.update(state)
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, state)
 
 
 # Typed container defaults for every non-Optional container field Module
@@ -1402,7 +1420,7 @@ class Module:
         "custom_methods": FieldPolicy.KEEP,
         "_source_trace_ref": FieldPolicy.WEAKREF_STRIP,
     }
-    FIELD_POLICY = build_record_field_policy_table(MODULE_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC)
+    FIELD_POLICY = build_record_field_policy_table(MODULE_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="module")
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     address: str
@@ -1993,9 +2011,25 @@ class Module:
 
         return runtime_handle_from_trace(self._source_trace, resolve_module)
 
+    def __tl_state_items__(self) -> Any:
+        """Yield live state pairs from the backing row (M8 facade hook)."""
+
+        from .._trace_core.record_rows import record_state_items
+
+        return record_state_items(self)
+
+    def __tl_state_restore__(self, mapping: Dict[str, Any]) -> None:
+        """Install a state mapping through the cell descriptors (M8 hook)."""
+
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, mapping)
+
     def __getstate__(self) -> Dict[str, Any]:
         """Return pickle state with weakrefs stripped."""
-        state = self.__dict__.copy()
+        from ._state_adapter import state_items
+
+        state = dict(state_items(self))
         state["_source_trace_ref"] = None
         state["_buffer_accessor"] = None
         state.pop("_facets_cache", None)
@@ -2028,7 +2062,9 @@ class Module:
         from .._io.state_keys import refuse_callable_shadowing_state_keys
 
         refuse_callable_shadowing_state_keys(type(self), state)
-        self.__dict__.update(state)
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, state)
         if not isinstance(self.ops, ModuleCallAccessor):
             self.ops = ModuleCallAccessor(self.ops)
         if not self.input_ops and not self.input_layers and not self.output_ops:
@@ -2751,3 +2787,105 @@ class ModuleAccessor(Accessor["Module"]):
                 f"{ml.num_layers:>7} {ml.num_calls:>7}"
             )
         return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# The M8 facades: declared stored fields become row-cell descriptors; the
+# instance dict keeps the store binding, user extras, and the handful of
+# names whose access paths hardcode ``__dict__`` (the template/source-trace/
+# facets slots poked directly by their properties).
+# ---------------------------------------------------------------------------
+
+_MODULE_CALL_STORED_FIELDS: tuple[str, ...] = (
+    "address",
+    "all_addresses",
+    "cls",
+    "class_name",
+    "class_qualname",
+    "call_index",
+    "call_label",
+    "ordinal_index",
+    "ops",
+    "input_layers",
+    "output_layers",
+    "input_ops",
+    "output_ops",
+    "output_structure",
+    "output_paths",
+    "forward_args",
+    "forward_kwargs",
+    "inputs_before_pre_hooks",
+    "inputs_after_pre_hooks",
+    "forward_pre_hook_effects",
+    "forward_arg_names",
+    "num_forward_pos_args",
+    "num_forward_kwargs",
+    "num_forward_args_total",
+    "forward_args_summary",
+    "forward_kwargs_summary",
+    "forward_duration",
+    "code_context",
+    "module_call_stack",
+    "call_parent",
+    "call_children",
+)
+
+_MODULE_STORED_FIELDS: tuple[str, ...] = (
+    "address",
+    "all_addresses",
+    "cls",
+    "class_name",
+    "class_qualname",
+    "class_source_file",
+    "class_source_line",
+    "init_source_file",
+    "init_source_line",
+    "forward_source_file",
+    "forward_source_line",
+    "class_docstring",
+    "init_signature",
+    "init_docstring",
+    "forward_signature",
+    "forward_docstring",
+    "address_parent",
+    "address_children",
+    "address_depth",
+    "call_parent",
+    "call_children",
+    "call_depth",
+    "num_calls",
+    "ops",
+    "call_labels",
+    "layer_labels",
+    "input_ops",
+    "input_layers",
+    "output_ops",
+    "output_layers",
+    "params",
+    "num_params",
+    "num_params_trainable",
+    "num_params_frozen",
+    "buffer_layers",
+    "_buffer_accessor",
+    "training",
+    "forward_pre_hooks",
+    "forward_hooks",
+    "backward_pre_hooks",
+    "backward_hooks",
+    "full_backward_pre_hooks",
+    "full_backward_hooks",
+    "custom_attributes",
+    "custom_methods",
+)
+
+
+def _install_module_facades() -> None:
+    """Install the ModuleCall/Module row-cell descriptors (import-time)."""
+
+    from .._trace_core.record_rows import install_record_facade
+
+    install_record_facade(ModuleCall, _MODULE_CALL_STORED_FIELDS)
+    install_record_facade(Module, _MODULE_STORED_FIELDS)
+
+
+_install_module_facades()

@@ -64,11 +64,17 @@ class _StubTrace:
         self._raw_to_final_layer_labels: Dict[str, str] = {}
         self._raw_to_final_parent_layer_labels: Dict[str, str] = {}
         self._raw_to_final_op_labels: Dict[str, str] = {}
-        from torchlens.ir.trace_build_state import TraceBuildState
+        from torchlens.ir.workspaces import (
+            ModuleCaptureWorkspace,
+            RawGraphWorkspace,
+            WrapperRuntimeWorkspace,
+        )
 
-        self._build_state = TraceBuildState(
+        self._raw_graph_ws = RawGraphWorkspace()
+        self._module_capture_ws = ModuleCaptureWorkspace(
             module_build_data={"module_layer_argnames": {}}
         )
+        self._wrapper_runtime_ws = WrapperRuntimeWorkspace()
 
     def __iter__(self) -> Iterator[SimpleNamespace]:
         """Iterate over surviving pass-level entries."""
@@ -318,10 +324,10 @@ def test_conditional_cleanup_scrubs_removed_labels() -> None:
     assert parent_pass.conditional_else_children == []
     assert parent_pass.conditional_arm_children == {0: {"then": ["kept_child:1"]}}
 
-    assert parent_layer.conditional_entry_children == ["kept_start"]
-    assert parent_layer.conditional_then_children == ["kept_child"]
+    assert parent_layer.conditional_entry_children == ("kept_start",)
+    assert parent_layer.conditional_then_children == ("kept_child",)
     assert parent_layer.conditional_elif_children == {}
-    assert parent_layer.conditional_else_children == []
+    assert parent_layer.conditional_else_children == ()
     assert parent_layer.conditional_arm_children == {0: {"then": ["kept_child"]}}
     assert parent_layer.conditional_branch_stack_ops == {((0, "then"),): [1, 2]}
 
@@ -378,9 +384,9 @@ def test_to_pandas_exports_conditional_columns() -> None:
     assert int(target_row["terminal_conditional_id"]) == 7
     assert int(target_row["conditional_branch_depth"]) == 2
     assert target_row["conditional_branch_stack"] == "cond_0:then,cond_1:elif_1"
-    assert target_row["conditional_then_children"] == ["then_child"]
+    assert target_row["conditional_then_children"] == ("then_child",)
     assert target_row["conditional_elif_children"] == {1: ["elif_child"]}
-    assert target_row["conditional_else_children"] == ["else_child"]
+    assert target_row["conditional_else_children"] == ("else_child",)
     assert target_row["func_config"] == {"alpha": 1}
 
 

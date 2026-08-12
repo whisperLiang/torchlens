@@ -296,7 +296,7 @@ def _first_input_shape(layer_log: "Layer") -> tuple[int, ...] | None:
 
     trace = _get_optional_attr(layer_log, "source_trace")
     parents = _get_optional_attr(layer_log, "parents")
-    if trace is not None and isinstance(parents, list):
+    if trace is not None and isinstance(parents, (list, tuple)):
         for parent_label in parents:
             parent = trace[parent_label]
             shape = _get_optional_attr(parent, "shape")
@@ -316,7 +316,7 @@ def _is_inside_multihead_attention(layer_log: "Layer") -> bool:
 
     trace = _get_optional_attr(layer_log, "source_trace")
     modules = _get_optional_attr(layer_log, "modules")
-    if trace is None or not isinstance(modules, list):
+    if trace is None or not isinstance(modules, (list, tuple)):
         return False
     for module_pass in modules:
         address = str(module_pass).rsplit(":", 1)[0]
@@ -368,7 +368,7 @@ def _attention_projection_role(layer_log: "Layer", containing_mha: bool) -> str 
         return None
 
     modules = _get_optional_attr(layer_log, "modules")
-    if isinstance(modules, list):
+    if isinstance(modules, (list, tuple)):
         for module_pass in modules:
             segment = str(module_pass).rsplit(":", 1)[0].split(".")[-1]
             if segment in ATTENTION_PROJECTION_ROLES:

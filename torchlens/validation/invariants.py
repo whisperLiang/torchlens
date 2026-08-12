@@ -3340,7 +3340,7 @@ def _check_conditional_derived_child_views(
         expected_then_children, expected_elif_children, expected_else_children = (
             _expected_layer_pass_child_views(layer.conditional_arm_children)
         )
-        if layer.conditional_then_children != expected_then_children:
+        if list(layer.conditional_then_children) != expected_then_children:
             _fail_conditional_invariant(
                 name,
                 2,
@@ -3354,7 +3354,7 @@ def _check_conditional_derived_child_views(
                 f"{layer.layer_label}.conditional_elif_children={layer.conditional_elif_children} != "
                 f"expected projection {expected_elif_children}",
             )
-        if layer.conditional_else_children != expected_else_children:
+        if list(layer.conditional_else_children) != expected_else_children:
             _fail_conditional_invariant(
                 name,
                 2,
@@ -3366,7 +3366,7 @@ def _check_conditional_derived_child_views(
         expected_then_children, expected_elif_children, expected_else_children = (
             _expected_layer_log_child_views(layer_log.conditional_arm_children)
         )
-        if layer_log.conditional_then_children != expected_then_children:
+        if list(layer_log.conditional_then_children) != expected_then_children:
             _fail_conditional_invariant(
                 name,
                 2,
@@ -3382,7 +3382,7 @@ def _check_conditional_derived_child_views(
                 f"{layer_log.conditional_elif_children} != expected projection "
                 f"{expected_elif_children}",
             )
-        if layer_log.conditional_else_children != expected_else_children:
+        if list(layer_log.conditional_else_children) != expected_else_children:
             _fail_conditional_invariant(
                 name,
                 2,
@@ -3717,7 +3717,7 @@ def _check_conditional_layer_aggregate_views(
                 expected_stack_ops[stack_signature] = []
             expected_stack_ops[stack_signature].append(call_index)
 
-        if layer_log.conditional_role_stacks != expected_stack_order:
+        if [list(stack) for stack in layer_log.conditional_role_stacks] != expected_stack_order:
             _fail_conditional_invariant(
                 name,
                 9,
@@ -5528,7 +5528,7 @@ def _check_equivalence_symmetry(ml: "Trace") -> None:
             if op_pair_key in verified_op_pairs:
                 continue
         equivalent_ops = getattr(op, "equivalent_ops", None)
-        if not isinstance(equivalent_ops, set):
+        if not isinstance(equivalent_ops, (set, frozenset)):
             raise MetadataInvariantError(
                 name,
                 f"{op.label}.equivalent_ops is not a set",
@@ -5566,7 +5566,7 @@ def _check_equivalence_symmetry(ml: "Trace") -> None:
             if layer_key in verified_layer_keys:
                 continue
         equivalent_ops = getattr(layer, "equivalent_ops", None)
-        if not isinstance(equivalent_ops, set):
+        if not isinstance(equivalent_ops, (set, frozenset)):
             raise MetadataInvariantError(
                 name,
                 f"Layer {layer.layer_label}.equivalent_ops is not a set",

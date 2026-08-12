@@ -73,24 +73,24 @@ def test_trace_submodule_as_root_after_container() -> None:
         "output_1",
     ]
     # inner.lin under outer is addressed relative to the outer root.
-    assert log_outer[_linear_layer(log_outer)].modules == ["inner:1", "inner.lin:1"]
+    assert log_outer[_linear_layer(log_outer)].modules == ("inner:1", "inner.lin:1")
     _assert_root_call_mirrors_layers(log_outer)
 
     # The submodule as its OWN root: previously a KeyError in push_frame.
     log_inner = tl.trace(outer.inner, x)
     assert log_inner.layer_labels == ["input_1", "linear_1_1", "relu_1_2", "output_1"]
     # Now root-relative: the linear op's module is "lin", not "inner.lin".
-    assert log_inner[_linear_layer(log_inner)].modules == ["lin:1"]
+    assert log_inner[_linear_layer(log_inner)].modules == ("lin:1",)
     _assert_root_call_mirrors_layers(log_inner)
 
     # Re-tracing the original container must still work AND restore the
     # descendant's root-relative-to-outer address (no leaked "" / "lin" state).
     log_outer_again = tl.trace(outer, x)
     assert log_outer_again.layer_labels == log_outer.layer_labels
-    assert log_outer_again[_linear_layer(log_outer_again)].modules == [
+    assert log_outer_again[_linear_layer(log_outer_again)].modules == (
         "inner:1",
         "inner.lin:1",
-    ]
+    )
     _assert_root_call_mirrors_layers(log_outer_again)
 
 
@@ -102,7 +102,7 @@ def test_trace_submodule_as_root_before_container() -> None:
 
     log_inner = tl.trace(outer.inner, x)
     assert log_inner.layer_labels == ["input_1", "linear_1_1", "relu_1_2", "output_1"]
-    assert log_inner[_linear_layer(log_inner)].modules == ["lin:1"]
+    assert log_inner[_linear_layer(log_inner)].modules == ("lin:1",)
     _assert_root_call_mirrors_layers(log_inner)
 
     log_outer = tl.trace(outer, x)
@@ -115,7 +115,7 @@ def test_trace_submodule_as_root_before_container() -> None:
     ]
     # The submodule's forward must now be (re)decorated so its module boundary is
     # captured -- addresses prefixed by the "inner" container.
-    assert log_outer[_linear_layer(log_outer)].modules == ["inner:1", "inner.lin:1"]
+    assert log_outer[_linear_layer(log_outer)].modules == ("inner:1", "inner.lin:1")
     _assert_root_call_mirrors_layers(log_outer)
 
 
@@ -133,10 +133,10 @@ def test_role_swap_repeated_alternation() -> None:
             "add_1_3",
             "output_1",
         ]
-        assert log_outer[_linear_layer(log_outer)].modules == [
+        assert log_outer[_linear_layer(log_outer)].modules == (
             "inner:1",
             "inner.lin:1",
-        ]
+        )
         _assert_root_call_mirrors_layers(log_outer)
 
         log_inner = tl.trace(outer.inner, x)
@@ -146,7 +146,7 @@ def test_role_swap_repeated_alternation() -> None:
             "relu_1_2",
             "output_1",
         ]
-        assert log_inner[_linear_layer(log_inner)].modules == ["lin:1"]
+        assert log_inner[_linear_layer(log_inner)].modules == ("lin:1",)
         _assert_root_call_mirrors_layers(log_inner)
 
 
@@ -164,7 +164,7 @@ def test_independent_models_no_spurious_reprep() -> None:
         log_a = tl.trace(a, x)
         log_b = tl.trace(b, x)
         assert log_a.layer_labels == log_b.layer_labels
-        assert log_a[_linear_layer(log_a)].modules == ["inner:1", "inner.lin:1"]
-        assert log_b[_linear_layer(log_b)].modules == ["inner:1", "inner.lin:1"]
+        assert log_a[_linear_layer(log_a)].modules == ("inner:1", "inner.lin:1")
+        assert log_b[_linear_layer(log_b)].modules == ("inner:1", "inner.lin:1")
         _assert_root_call_mirrors_layers(log_a)
         _assert_root_call_mirrors_layers(log_b)

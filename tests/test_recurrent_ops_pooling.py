@@ -79,7 +79,7 @@ def test_recurrent_ops_values_and_order_are_correct(loop_trace) -> None:
 
     for op in loop_trace:
         value = op.recurrent_ops
-        assert type(value) is list
+        assert type(value) is tuple
         assert op.label in value
         assert len(value) == op.num_passes
         members = [loop_trace[label] for label in value]
@@ -90,17 +90,23 @@ def test_recurrent_ops_values_and_order_are_correct(loop_trace) -> None:
 
 @pytest.mark.smoke
 def test_recurrent_ops_reads_are_alias_safe(loop_trace) -> None:
-    """Reads hand back a private copy; mutating it can never reach a sibling."""
+    """Reads share ONE immutable group view; mutation is impossible (M7).
+
+    The live group views (JMT-FORK-1, decided 2026-08-12) supersede the
+    fresh-copy-per-read barrier: sharing an immutable tuple across members
+    and readers is alias-safe by construction.
+    """
 
     groups = _multi_pass_groups(loop_trace)
     members = next(iter(groups.values()))
     first, second = members[0], members[1]
-    assert first.recurrent_ops is not first.recurrent_ops, "each read must be a fresh copy"
+    assert first.recurrent_ops is first.recurrent_ops, "group view reads are identity-stable"
+    assert first.recurrent_ops is second.recurrent_ops, "members share ONE view"
 
     stolen = first.recurrent_ops
-    expected = list(stolen)
-    stolen.clear()
-    stolen.append("corrupted")
+    expected = tuple(stolen)
+    with pytest.raises(AttributeError):
+        stolen.append("corrupted")
     assert first.recurrent_ops == expected
     assert second.recurrent_ops == expected
 
@@ -136,27 +142,35 @@ def test_assignment_apply_pools_lists_without_pooling_member_keys() -> None:
 
 @pytest.mark.smoke
 def test_layer_equivalent_ops_shares_canonical_set(loop_trace) -> None:
-    """Layers store the canonical class set, not a private per-Layer copy."""
+    """Layers back onto the ops' canonical equivalence container (M8 mirror).
+
+    The dict era stored the shared canonical set per Layer; the M8 aggregate
+    facade stores NOTHING — the mirror read resolves to the group's ONE
+    cached immutable view, the same object the op read returns.
+    """
 
     for layer in loop_trace.layers:
         first_pass = layer.ops[0]
-        raw_layer_value = layer.__dict__["equivalent_ops"]
-        assert raw_layer_value is first_pass._slot("equivalent_ops"), (
-            "Layer must back onto the ops' canonical equivalent_ops object"
+        assert "equivalent_ops" not in layer.__dict__, (
+            "Layer must not retain a private equivalent_ops copy (M8 mirror)"
+        )
+        assert layer.equivalent_ops is first_pass.equivalent_ops, (
+            "Layer reads must resolve to the ops' one shared group view"
         )
 
 
 @pytest.mark.smoke
 def test_layer_equivalent_ops_reads_are_alias_safe(loop_trace) -> None:
-    """Layer reads hand back a private copy of the shared canonical set."""
+    """Layer reads share the group's ONE immutable view (M7 live views)."""
 
     layer = loop_trace.layers[0]
     value = layer.equivalent_ops
-    assert type(value) is set
-    assert layer.equivalent_ops is not value, "each read must be a fresh copy"
+    assert type(value) is frozenset
+    assert layer.equivalent_ops is value, "group view reads are identity-stable"
 
-    expected = set(value)
-    value.add("corrupted")
+    expected = frozenset(value)
+    with pytest.raises(AttributeError):
+        value.add("corrupted")
     assert layer.equivalent_ops == expected
     assert layer.ops[0].equivalent_ops == expected
 

@@ -120,7 +120,7 @@ class Param:
         "_derived_grad_payload": FieldPolicy.KEEP,
         "_derived_grad_record_path": FieldPolicy.KEEP,
     }
-    FIELD_POLICY = build_record_field_policy_table(PARAM_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC)
+    FIELD_POLICY = build_record_field_policy_table(PARAM_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="param")
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     def __init__(
@@ -673,9 +673,25 @@ class Param:
         """Return the number of scalar elements in this parameter."""
         return self.num_params
 
+    def __tl_state_items__(self) -> Any:
+        """Yield live state pairs from the backing row (M8 facade hook)."""
+
+        from .._trace_core.record_rows import record_state_items
+
+        return record_state_items(self)
+
+    def __tl_state_restore__(self, mapping: Dict[str, Any]) -> None:
+        """Install a state mapping through the cell descriptors (M8 hook)."""
+
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, mapping)
+
     def __getstate__(self) -> Dict[str, Any]:
         """Return pickle state with live parameter references stripped."""
-        state = self.__dict__.copy()
+        from ._state_adapter import state_items
+
+        state = dict(state_items(self))
         state["_param_ref"] = None
         state["_param_ref_released"] = False
         state["_source_trace_ref"] = None
@@ -720,7 +736,57 @@ class Param:
         from .._io.state_keys import refuse_callable_shadowing_state_keys
 
         refuse_callable_shadowing_state_keys(type(self), state)
-        self.__dict__.update(state)
+        from .._trace_core.record_rows import record_state_restore
+
+        record_state_restore(self, state)
+
+
+# The M8 facade: every declared stored field becomes a row-cell descriptor
+# (the literal ``PORTABLE_STATE_SPEC`` keys above, in declared order); the
+# instance ``__dict__`` keeps only the store binding and user extras.
+_PARAM_STORED_FIELDS: tuple[str, ...] = (
+    "module_address",
+    "name",
+    "shape",
+    "dtype",
+    "dtype_ref",
+    "device_ref",
+    "backend_address",
+    "resolver_status",
+    "num_params",
+    "param_memory",
+    "is_trainable",
+    "address",
+    "all_addresses",
+    "all_module_addresses",
+    "barcode",
+    "has_optimizer",
+    "_param_ref",
+    "_param_ref_released",
+    "_source_trace_ref",
+    "num_calls",
+    "used_by_ops",
+    "used_by_layers",
+    "co_parent_params",
+    "_has_grad",
+    "_grad_shape",
+    "_grad_dtype",
+    "_grad_memory",
+    "_grad_records",
+    "_derived_grad_payload",
+    "_derived_grad_record_path",
+)
+
+
+def _install_param_facade() -> None:
+    """Install the Param row-cell descriptors (import-time, collision-safe)."""
+
+    from .._trace_core.record_rows import install_record_facade
+
+    install_record_facade(Param, _PARAM_STORED_FIELDS)
+
+
+_install_param_facade()
 
 
 class ParamAccessor(Accessor["Param"]):

@@ -7,6 +7,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from typing import Any, TypeAlias, cast
 
+from ..data_classes._compaction import compact_op_metadata
 from ..data_classes.layer import Layer
 from ..data_classes.module import ModuleAccessor
 from ..data_classes.trace import Trace, _init_module_hierarchy_data
@@ -83,7 +84,7 @@ def finalize_single_pass_trace(
 
     seen_param_barcodes: set[str] = set()
     layers_with_params_seen: set[str] = set()
-    for raw_index, (label, op_log) in enumerate(trace._build_state.raw_layer_dict.items()):
+    for raw_index, (label, op_log) in enumerate(trace._raw_graph_ws.raw_layer_dict.items()):
         _finalize_single_op(trace, op_log, label, raw_index)
         if enrich_op is not None:
             enrich_op(op_log)
@@ -137,7 +138,7 @@ def finalize_single_pass_trace(
     if not finish_before_module_logs:
         trace._tracing_finished = True
         _set_per_op_tracing_finished(trace)
-    trace._compact_op_metadata()
+    compact_op_metadata(trace)
 
 
 def _set_per_op_tracing_finished(trace: Trace) -> None:
@@ -181,10 +182,10 @@ def attach_function_root_module(trace: Trace) -> None:
         ``trace._module_logs`` is populated with a single ``self`` module.
     """
 
-    mbd = trace._build_state.module_build_data
+    mbd = trace._module_capture_ws.module_build_data
     mbd["top_level_modules"] = ["self"]
     mbd["top_level_module_ops"] = ["self:1"]
-    trace._build_state.module_metadata = {
+    trace._module_capture_ws.module_metadata = {
         "self": {
             "cls": None,
             "class_name": trace.model_class_name,
@@ -230,10 +231,10 @@ def attach_object_module_logs(
         ``trace.modules`` and transient module build-data are populated.
     """
 
-    trace._build_state.module_build_data = _init_module_hierarchy_data()
-    trace._build_state.module_forward_args = dict(tree.forward_args_by_call)
-    trace._build_state.module_metadata = tree.metadata
-    mbd = trace._build_state.module_build_data
+    trace._module_capture_ws.module_build_data = _init_module_hierarchy_data()
+    trace._module_capture_ws.module_forward_args = dict(tree.forward_args_by_call)
+    trace._module_capture_ws.module_metadata = tree.metadata
+    mbd = trace._module_capture_ws.module_build_data
     metadata_by_address = cast(dict[str, dict[str, Any]], tree.metadata)
     call_counts = cast(dict[str, int], tree.call_counts)
     for address, metadata in metadata_by_address.items():
@@ -284,10 +285,10 @@ def populate_object_module_build_data(
     Returns
     -------
     None
-        ``trace._build_state.module_build_data`` is updated in place.
+        ``trace._module_capture_ws.module_build_data`` is updated in place.
     """
 
-    mbd = trace._build_state.module_build_data
+    mbd = trace._module_capture_ws.module_build_data
     seen_layers: dict[str, set[str]] = defaultdict(set)
     seen_pass_layers: dict[str, set[str]] = defaultdict(set)
     seen_module_ops: set[str] = set()
@@ -378,7 +379,7 @@ def compute_preview_input_output_distances(trace: Trace) -> None:
                 ops_by_label.setdefault(key, op_log)
 
     ordered_ops = [
-        ops_by_label[label] for label in trace._build_state.raw_layer_labels_list if label in ops_by_label
+        ops_by_label[label] for label in trace._raw_graph_ws.raw_layer_labels_list if label in ops_by_label
     ]
     for mode, starting_labels, min_field, max_field, marker_field, lineage_field, edge_field in (
         (

@@ -730,7 +730,7 @@ def _build_trace_fork_policy() -> dict[str, ForkFieldPolicy]:
 
     from ..constants import MODEL_LOG_FIELD_ORDER
 
-    return _fork_policy_table(
+    table = _fork_policy_table(
         MODEL_LOG_FIELD_ORDER,
         share={
             "activation_transform",
@@ -742,6 +742,13 @@ def _build_trace_fork_policy() -> dict[str, ForkFieldPolicy]:
         },
         reconstruct={"parent_run"},
     )
+    # `_trace_core` (the columnar op row store) is not in MODEL_LOG_FIELD_ORDER
+    # (private runtime storage, FieldPolicy.DROP). The generic field pass
+    # reconstructs (drops) it; the M11 COW fork builder installs the forked
+    # core (per-fork store views over the shared sealed base) explicitly
+    # after the field pass.
+    table["_trace_core"] = ForkFieldPolicy.FORK_RECONSTRUCT
+    return table
 
 
 def _build_op_log_fork_policy() -> dict[str, ForkFieldPolicy]:

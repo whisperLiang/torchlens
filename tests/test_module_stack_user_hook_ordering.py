@@ -51,7 +51,7 @@ def test_user_pre_hook_does_not_see_module_frame() -> None:
 
         del module, args
         trace = _state._active_trace
-        stack = trace._build_state.exhaustive_module_stack if trace is not None else ()
+        stack = trace._module_capture_ws.exhaustive_module_stack if trace is not None else ()
         snapshots.append([frame.address for frame in stack])
 
     handle = model.child.linear.register_forward_pre_hook(pre_hook)
@@ -90,6 +90,6 @@ def test_user_forward_hook_replacement_logged() -> None:
 
     replacement_ops = [op for op in trace.layer_list if getattr(op, "intervention_replaced", False)]
     assert replacement_ops, "expected at least one intervention_replaced op"
-    assert any(op.func_name == "__mul__" and op.modules == [] for op in replacement_ops)
+    assert any(op.func_name == "__mul__" and op.modules == () for op in replacement_ops)
     linear_ops = [op for op in trace.layer_list if op.func_name == "linear"]
     assert any("mul" in parent for op in linear_ops for parent in op.parents)

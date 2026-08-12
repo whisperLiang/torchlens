@@ -216,7 +216,7 @@ def test_assert_then_if_still_materializes_branch() -> None:
 
     guarded_relu = _find_only_layer(guarded, "relu")
     control_relu = _find_only_layer(control, "relu")
-    assert guarded_relu.conditional_branch_stack == [(0, "then")]
+    assert guarded_relu.conditional_branch_stack == ((0, "then"),)
     assert guarded_relu.conditional_branch_stack == control_relu.conditional_branch_stack
 
     (conditional,) = list(guarded.conditionals)
@@ -237,7 +237,7 @@ def test_while_then_if_still_materializes_branch() -> None:
 
     assert len(trace.conditional_records) == 1
     sigmoid_layer = _find_only_layer(trace, "sigmoid")
-    assert sigmoid_layer.conditional_branch_stack == [(0, "else")]
+    assert sigmoid_layer.conditional_branch_stack == ((0, "else"),)
     (conditional,) = list(trace.conditionals)
     assert conditional.fired_arm_kind == "else"
 
@@ -277,8 +277,8 @@ def test_predicate_reuse_materializes_every_branch_consumer() -> None:
 
     relu_layer = _find_only_layer(trace, "relu")
     sigmoid_layer = _find_only_layer(trace, "sigmoid")
-    assert relu_layer.conditional_branch_stack == [(events[0].id, "then")]
-    assert sigmoid_layer.conditional_branch_stack == [(events[1].id, "then")]
+    assert list(relu_layer.conditional_branch_stack) == [(events[0].id, "then")]
+    assert list(sigmoid_layer.conditional_branch_stack) == [(events[1].id, "then")]
     assert {conditional.fired_arm_kind for conditional in trace.conditionals} == {"then"}
 
     # The shared bool keeps a deterministic primary conditional id.
@@ -335,7 +335,7 @@ def test_same_line_nested_ternary_does_not_cross_wire_bools() -> None:
         assert bool_lists[0] != bool_lists[1]
     else:
         for layer in trace.layer_list:
-            assert layer.conditional_branch_stack == []
+            assert layer.conditional_branch_stack == ()
             assert getattr(layer, "is_terminal_conditional_bool", False) is False
 
     # relu executed; tanh/sigmoid did not — no arm may claim they fired.
@@ -457,7 +457,7 @@ def test_multi_decorator_forward_attributes_taken_branch(
 
     assert len(trace.conditional_records) == 1
     relu_layer = _find_only_layer(trace, "relu")
-    assert relu_layer.conditional_branch_stack == [(0, "then")]
+    assert relu_layer.conditional_branch_stack == ((0, "then"),)
     (conditional,) = list(trace.conditionals)
     assert conditional.fired_arm_kind == "then"
     then_arm = conditional.arms[0]
@@ -641,7 +641,7 @@ def test_float_truthiness_stays_documented_false_negative(
     sum_layer = _find_only_layer(trace, "sum")
     assert sum_layer.is_terminal_conditional_bool is not True
     for layer in trace.layer_list:
-        assert layer.conditional_branch_stack == []
+        assert layer.conditional_branch_stack == ()
 
     _assert_no_false_fired(trace, executed, not_executed)
     _assert_bool_value_never_contradicts_fired(trace)
@@ -867,7 +867,7 @@ def test_single_line_item_scalar_if_never_false_fires() -> None:
 
     assert list(trace.conditionals) == []
     for layer in trace.layer_list:
-        assert layer.conditional_branch_stack == []
+        assert layer.conditional_branch_stack == ()
 
     _assert_no_false_fired(trace, {"sum", "item", "mul"}, {"relu"})
     _assert_bool_value_never_contradicts_fired(trace)

@@ -194,11 +194,19 @@ def _op_object_bytes(trace: Any) -> int:
     """
 
     total = 0
+    seen_stores: set[int] = set()
     for op in trace.layer_list:
         instance_dict = getattr(op, "__dict__", None)
         total += sys.getsizeof(op)
         if instance_dict is not None:
             total += sys.getsizeof(instance_dict)
+        # M5 facade: per-op cells live in the shared row store (or a detached
+        # single-row store); count each store's structural bytes exactly once
+        # so bytes/op stays an honest apples-to-apples number vs the slot era.
+        store = getattr(op, "_core", None)
+        if store is not None and id(store) not in seen_stores:
+            seen_stores.add(id(store))
+            total += store.retained_bytes()
     return total
 
 
@@ -266,7 +274,9 @@ def _seed_fields_for_synthetic_ops() -> dict[str, Any]:
     with torch.no_grad():
         trace = tl.trace(model, x, profile=True, save=lambda _ctx: False)
     seed_op = next(op for op in trace.layer_list if op.func_name not in {None, "none"})
-    physical_fields = set(getattr(type(seed_op), "__slots__", ()))
+    from torchlens.data_classes.op import _OP_SLOT_NAMES
+
+    physical_fields = set(_OP_SLOT_NAMES)
     return {
         field_name: seed_op._slot(field_name)
         if field_name in physical_fields

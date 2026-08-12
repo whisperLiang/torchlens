@@ -211,6 +211,9 @@ class TestTraceGC:
         model = _TwoLayerNet()
         trace = tl.trace(model, torch.randn(1, 5))
         assert "_build_state" not in trace.__dict__
+        assert "_raw_graph_ws" not in trace.__dict__
+        assert "_module_capture_ws" not in trace.__dict__
+        assert "_wrapper_runtime_ws" not in trace.__dict__
         assert not hasattr(trace, "_module_build_data")
         assert not hasattr(trace, "_module_metadata")
         assert not hasattr(trace, "_module_forward_args")
@@ -221,6 +224,9 @@ class TestTraceGC:
         model = _TwoLayerNet()
         trace = tl.trace(model, torch.randn(1, 5))
         assert "_build_state" not in trace.__dict__
+        assert "_raw_graph_ws" not in trace.__dict__
+        assert "_module_capture_ws" not in trace.__dict__
+        assert "_wrapper_runtime_ws" not in trace.__dict__
         assert not hasattr(trace, "_raw_layer_dict")
         trace.cleanup()
         assert not hasattr(trace, "_raw_layer_dict")
@@ -284,9 +290,12 @@ class TestTraceGC:
         trace = tl.trace(model, torch.randn(1, 5))
 
         with pytest.raises(AttributeError):
-            trace._build_state.mod_call_index = {"x": 1}
+            trace._module_capture_ws.mod_call_index = {"x": 1}
 
         assert "_build_state" not in trace.__dict__
+        assert "_raw_graph_ws" not in trace.__dict__
+        assert "_module_capture_ws" not in trace.__dict__
+        assert "_wrapper_runtime_ws" not in trace.__dict__
 
 
 def test_delattr_capture_events_releases_the_working_projection():

@@ -52,7 +52,7 @@ def _snapshot_exhaustive_module_stack(self: "Trace") -> list[tuple[str, int]]:
 
     return [
         (frame.address, frame.pass_index)
-        for frame in _mstack.snapshot(self._build_state.exhaustive_module_stack)
+        for frame in _mstack.snapshot(self._module_capture_ws.exhaustive_module_stack)
     ]
 
 
@@ -110,11 +110,11 @@ def log_source_tensor_predicate(
     if source not in {"input", "buffer"}:
         raise ValueError("source must be either 'input' or 'buffer'")
     state = get_active_recording_state()
-    self._build_state.layer_counter += 1
-    self._build_state.raw_layer_type_counter[source] += 1
+    self._raw_graph_ws.layer_counter += 1
+    self._raw_graph_ws.raw_layer_type_counter[source] += 1
     state.event_index += 1
-    raw_index = self._build_state.layer_counter
-    type_index = self._build_state.raw_layer_type_counter[source]
+    raw_index = self._raw_graph_ws.layer_counter
+    type_index = self._raw_graph_ws.raw_layer_type_counter[source]
     tensor_label = f"{source}_{type_index}_raw"
     set_tensor_label(t, tensor_label)
     if source == "input":
@@ -248,10 +248,10 @@ def log_source_tensor_exhaustive(
     with internal_scalar_read():
         _grad_fn_handle = t.grad_fn
     # Fetch counters and increment to be ready for next tensor to be logged
-    self._build_state.layer_counter += 1
-    self._build_state.raw_layer_type_counter[layer_type] += 1
-    raw_index = self._build_state.layer_counter
-    type_index = self._build_state.raw_layer_type_counter[layer_type]
+    self._raw_graph_ws.layer_counter += 1
+    self._raw_graph_ws.raw_layer_type_counter[layer_type] += 1
+    raw_index = self._raw_graph_ws.layer_counter
+    type_index = self._raw_graph_ws.raw_layer_type_counter[layer_type]
 
     tensor_label = f"{layer_type}_{type_index}_raw"
 
@@ -514,7 +514,7 @@ def log_source_tensor_exhaustive(
             },
             module_stack=[],
             history=(),
-            op_counts=self._build_state.raw_layer_type_counter,
+            op_counts=self._raw_graph_ws.raw_layer_type_counter,
             pass_index=1,
             event_index=raw_index,
             step_index=None,
