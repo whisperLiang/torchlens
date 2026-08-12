@@ -128,7 +128,13 @@ exclusive with backward-related capture because it discards the autograd graph.
 
 ## Subpackages
 - `capture/` - real-time forward and backward operation logging.
-- `data_classes/` - `Trace`, `Layer`, `Op`, module/param/buffer/grad logs.
+- `data_classes/` - `Trace`, `Layer`, `Op`, module/param/buffer/grad logs. The declared
+  record schema carries per-field `StorageBinding` axes (generated `_schema_bindings.py`,
+  regenerate with `tools/generate_record_schema.py`); Trace fields have a declared
+  component ownership map (`_trace_components.py`).
+- `_trace_core/` - private columnar store substrate (columns, pools, edge-occurrence
+  table, payload arena, overlays, `TraceCore`); zero production consumers until the Op
+  seam lands. Architecture of record: `docs/reference/trace_core_design.md`.
 - `backends/torch/` - torch function wrapping, explicit wrap/unwrap, module prep.
 - `fastlog/` - sparse predicate recording with RAM/disk storage and recovery.
 - `postprocess/` - graph cleanup, conditionals, loop detection, labeling, finalization.
