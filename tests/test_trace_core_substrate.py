@@ -488,3 +488,98 @@ def test_pickle_load_rehydrates_into_the_store() -> None:
     assert fork.ops["relu_1_2"].parents == ("linear_1_1",)
     fork.ops["relu_1_2"].annotations["fork_only"] = 1
     assert "fork_only" not in clone.ops["relu_1_2"].annotations
+
+
+@pytest.mark.smoke
+def test_sparse_isolation_index_tracks_post_seal_writes() -> None:
+    """The fork-isolation index never goes stale (F4 sparse sweep).
+
+    The eager sweep visits only the base store's cached mutable-cell index,
+    so a container written AFTER the index was built (post-seal, post-fork
+    parent write) must still isolate in the NEXT fork — sealed row-major
+    stores register such writes via ``_SealedRowMajorOpRowStore.cell_set``,
+    columnar stores route them through the overlay the sweep also visits.
+    """
+
+    from torchlens._trace_core.op_store import OpRowStore, OpStoreLayout, OpStoreView
+
+    # Sealed row-major base (under the transpose threshold).
+    layout = OpStoreLayout(("a", "b"))
+    store = OpRowStore(layout)
+    row = store.new_row()
+    store.cell_set(row, 0, "atomic")
+    store.cell_set(row, 1, {"x": 0})
+    store.freeze()
+    first = OpStoreView(store)
+    first.isolate_mutable_cells()  # builds and caches the index
+    store.cell_set(row, 0, ["post-index"])  # container into an atomic cell
+    second = OpStoreView(store)
+    second.isolate_mutable_cells()
+    store.cell_get(row, 0).append("parent-mutation")
+    assert second.cell_get(row, 0) == ["post-index"]
+
+    # Columnar base: the post-seal write lands in the overlay, which every
+    # fork snapshots and the sweep visits.
+    big = OpRowStore(OpStoreLayout(("a", "b")))
+    for i in range(600):
+        r = big.new_row()
+        big.cell_set(r, 0, i)
+        big.cell_set(r, 1, {"i": i})
+    big.freeze()
+    warm = OpStoreView(big)
+    warm.isolate_mutable_cells()
+    big.cell_set(5, 0, {"late": 0})  # packed-column cell -> overlay write
+    view = OpStoreView(big)
+    view.isolate_mutable_cells()
+    big.cell_get(5, 0)["mut"] = 1
+    assert view.cell_get(5, 0) == {"late": 0}
+
+
+@pytest.mark.smoke
+def test_sparse_isolation_fork_of_fork() -> None:
+    """A fork-of-fork snapshots the parent view's container writes."""
+
+    from torchlens._trace_core.op_store import OpRowStore, OpStoreLayout, OpStoreView
+
+    store = OpRowStore(OpStoreLayout(("a", "b")))
+    row = store.new_row()
+    store.cell_set(row, 0, {"base": 0})
+    store.cell_set(row, 1, "atomic")
+    store.freeze()
+    parent_view = OpStoreView(store)
+    parent_view.isolate_mutable_cells()
+    parent_view.cell_get(row, 0)["parent_write"] = 1
+    child_view = OpStoreView(parent_view)
+    child_view.isolate_mutable_cells()
+    parent_view.cell_get(row, 0)["after_child"] = 2
+    assert child_view.cell_get(row, 0) == {"base": 0, "parent_write": 1}
+
+
+@pytest.mark.smoke
+def test_fork_shares_one_equivalent_ops_view_per_class() -> None:
+    """Fork layers of one equivalence class share ONE normalized view.
+
+    The finished-Layer write normalization (F5) converts each assigned
+    staging set to an immutable view; materializing a fresh one per member
+    layer was quadratic on single-class traces (32 MB per fork measured on
+    a 2002-op stack). Equal views are documented as shareable across
+    records, so the fork builder memoizes one view per class.
+    """
+
+    import torchlens as tl
+
+    model = torch.nn.Sequential(*[torch.nn.ReLU() for _ in range(6)])
+    trace = tl.trace(model, torch.randn(1, 4))
+    fork = trace.fork()
+    views_by_class: dict = {}
+    shared = 0
+    for layer in fork.layer_logs.values():
+        equivalence_class = getattr(layer, "equivalence_class", None)
+        view = layer.__dict__.get("equivalent_ops")
+        if equivalence_class is None or view is None:
+            continue
+        assert not isinstance(view, (list, set)), "finished layer view stays immutable"
+        prior = views_by_class.setdefault(equivalence_class, view)
+        assert prior is view, "same-class fork layers must share one view object"
+        shared += 1
+    assert shared >= 2, "test model must produce a shared equivalence class"

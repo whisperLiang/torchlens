@@ -135,6 +135,7 @@ class OpRowStore:
     __slots__ = (
         "_columns",
         "_cow_shared",
+        "_mutable_keys",
         "_n_rows",
         "_overlay",
         "_rows",
@@ -161,6 +162,17 @@ class OpRowStore:
         # a removed op's payloads on a forked-from trace are released with
         # the store rather than at removal time.
         self._cow_shared = False
+        # Fork-isolation index (M11/F4): ``fid -> rows`` (tuple once
+        # columnar, set while sealed row-major) of cells whose values may
+        # need eager fork-time isolation (exact builtin mutable containers,
+        # and immutable containers transitively nesting one).
+        # Built lazily by the first ``OpStoreView.isolate_mutable_cells``
+        # sweep and kept valid thereafter: frozen columnar cells never
+        # mutate once ``_cow_shared`` (writes go to the overlay, deletes
+        # tombstone), and sealed row-major stores swap to
+        # ``_SealedRowMajorOpRowStore`` at freeze so post-seal container
+        # writes register here.
+        self._mutable_keys: dict[int, Any] | None = None
         # The M6 dataflow family: bound at the freeze-time relation
         # conversion (same EdgeTable object registered in the owning
         # TraceCore's edge registry) together with the row -> reference-label
@@ -322,6 +334,13 @@ class OpRowStore:
             return
         self._sealed = True
         if self._n_rows < _TRANSPOSE_MIN_ROWS:
+            # Sealed row-major cells keep mutating IN PLACE on later writes,
+            # so the sealed twin tracks post-seal container writes for the
+            # fork-isolation index (columnar stores need no tracking: their
+            # post-seal writes land in the overlay, which every fork
+            # snapshots). Audits never see a sealed store (the trailing
+            # postprocess audit window closes before the freeze seam).
+            self.__class__ = _SealedRowMajorOpRowStore  # type: ignore[assignment]
             return
         n_fields = self.layout.n_fields
         columns: list[_FrozenColumn] = []
@@ -381,6 +400,167 @@ def _freeze_column(column_values: list[Any]) -> _FrozenColumn:
             return _FrozenColumn(packed_values, present, True)
     object_values = [None if value is _MISSING else value for value in column_values]
     return _FrozenColumn(object_values, present, False)
+
+
+def _contains_mutable_container(value: Any) -> bool:
+    """Return whether a tuple/frozenset transitively nests a dict/list/set."""
+
+    for item in value:
+        cls = item.__class__
+        if cls is dict or cls is list or cls is set:
+            return True
+        if (cls is tuple or cls is frozenset) and _contains_mutable_container(item):
+            return True
+    return False
+
+
+def _needs_eager_isolation(value: Any) -> bool:
+    """Return whether a cell value must be copied at fork time.
+
+    This is the minimal leak-closure set for the parent->fork direction:
+    exact builtin mutable containers (a parent in-place mutation after the
+    fork would otherwise be visible through the fork's copy-on-first-read
+    window) and exact immutable containers transitively nesting one. Every
+    other translation concern (record facades, ``GroupRef`` cells, interned
+    immutable views of atomics) stays lazy on first read — translation is
+    not mutation, so deferring it cannot leak parent state.
+    """
+
+    cls = value.__class__
+    if cls is dict or cls is list or cls is set:
+        return True
+    if cls is tuple or cls is frozenset:
+        return _contains_mutable_container(value)
+    return False
+
+
+def _build_mutable_key_index(store: "OpRowStore") -> dict[int, Any]:
+    """Scan a sealed base store once for its fork-isolation candidate cells.
+
+    Returns ``fid -> rows`` (field-grouped so the per-fork sweep reads
+    column backings by direct index, no per-cell method dispatch). Runs at
+    the FIRST fork of a store (never at capture/freeze time, so unforked
+    traces pay nothing) and is cached on the store: frozen columnar cells
+    are immutable once ``_cow_shared`` (post-seal writes overlay, deletes
+    tombstone) and sealed row-major stores register post-seal container
+    writes through ``_SealedRowMajorOpRowStore.cell_set``, so the index
+    never goes stale. Packed numeric columns are skipped wholesale.
+    """
+
+    index: dict[int, Any] = {}
+    rows = store._rows
+    if rows is not None:
+        # Row-major indices stay sets: ``_SealedRowMajorOpRowStore.cell_set``
+        # keeps extending them on post-seal container writes.
+        for row_index, row_cells in enumerate(rows):
+            for fid, value in enumerate(row_cells):
+                if _needs_eager_isolation(value):
+                    fid_rows = index.get(fid)
+                    if fid_rows is None:
+                        fid_rows = index[fid] = set()
+                    fid_rows.add(row_index)
+        return index
+    columns = store._columns
+    assert columns is not None
+    # Columnar cells are immutable once ``_cow_shared``, so the per-field row
+    # lists freeze as ascending tuples (faster iteration, better locality).
+    for fid, column in enumerate(columns):
+        if column.packed:
+            continue
+        present = column.present
+        candidate_rows: list[int] = []
+        if present is None:
+            for row, value in enumerate(column.values):
+                if _needs_eager_isolation(value):
+                    candidate_rows.append(row)
+        else:
+            for row, value in enumerate(column.values):
+                if present[row] and _needs_eager_isolation(value):
+                    candidate_rows.append(row)
+        if candidate_rows:
+            index[fid] = tuple(candidate_rows)
+    return index
+
+
+def _eager_copy(value: Any, translate: Callable[[Any], Any] | None) -> Any:
+    """Copy one mutable container for the eager fork sweep.
+
+    Same result as ``cow_copy_value``, restructured for the sweep's value
+    population: empty containers and containers of exact atomics copy at C
+    speed (the overwhelmingly common case — the F8 census counts ~11 empty
+    plus ~16 small flat containers per op), atomic members skip the
+    per-item call entirely, and nested mutable containers recurse through
+    the same fast paths. Only tuples/frozensets and non-container members
+    fall through to the generic translating copier (which owns the
+    identity-sharing rules).
+    """
+
+    atomic = _COW_ATOMIC
+    cls = value.__class__
+    if cls is dict:
+        for key, item in value.items():
+            if key.__class__ not in atomic or item.__class__ not in atomic:
+                return {
+                    (key if key.__class__ in atomic else _eager_item(key, translate)): (
+                        item if item.__class__ in atomic else _eager_item(item, translate)
+                    )
+                    for key, item in value.items()
+                }
+        return value.copy()
+    if cls is list:
+        for item in value:
+            if item.__class__ not in atomic:
+                return [
+                    item if item.__class__ in atomic else _eager_item(item, translate)
+                    for item in value
+                ]
+        return value.copy()
+    if cls is set:
+        for item in value:
+            if item.__class__ not in atomic:
+                return {
+                    item if item.__class__ in atomic else _eager_item(item, translate)
+                    for item in value
+                }
+        return value.copy()
+    return cow_copy_value(value, translate)
+
+
+def _eager_item(item: Any, translate: Callable[[Any], Any] | None) -> Any:
+    """Copy one non-atomic container member for ``_eager_copy``."""
+
+    cls = item.__class__
+    if cls is dict or cls is list or cls is set:
+        return _eager_copy(item, translate)
+    return cow_copy_value(item, translate)
+
+
+class _SealedRowMajorOpRowStore(OpRowStore):
+    """Sealed row-major store (under the transpose threshold).
+
+    Installed by ``freeze()`` via class swap so the BUILDING hot path keeps
+    zero per-write overhead. Post-seal writes still mutate rows in place
+    (existing fork views hold row snapshots, so isolation is unaffected),
+    but container writes must register in the fork-isolation index — a
+    later fork's eager sweep would otherwise miss a container written after
+    the index was built (parent ``op.field = [..]`` then in-place mutation
+    after the next fork).
+    """
+
+    __slots__ = ()
+
+    def cell_set(self, row: int, fid: int, value: Any) -> None:
+        """Write one cell in place, indexing post-seal container writes."""
+
+        rows = self._rows
+        assert rows is not None
+        rows[row][fid] = value
+        index = self._mutable_keys
+        if index is not None and _needs_eager_isolation(value):
+            fid_rows = index.get(fid)
+            if fid_rows is None:
+                fid_rows = index[fid] = set()
+            fid_rows.add(row)
 
 
 #: Live write-audit collectors keyed by audited store id (M10 step
@@ -658,6 +838,8 @@ class OpStoreView:
       in BOTH directions from fork time — the copy-on-first-read in
       ``_isolate`` remains as the read-cache backstop (tensors/callables
       inside stay shared by identity — the payload-sharing fork contract).
+      The sweep is sparse: it visits only the base's cached mutable-cell
+      index plus the base-overlay snapshot, never the whole store.
     * ``GroupRef`` cells translate to the fork core's cloned group tables, so
       removal scrub on either trace never reaches the other.
     * Record facades inside containers and hydrated fact blocks translate
@@ -860,64 +1042,78 @@ class OpStoreView:
         in-place container mutation between fork time and the fork's first
         read of that cell leaked into the fork; pre-isolating restores the
         deepcopy fork's snapshot semantics in both directions (fork writes
-        were already overlay-isolated). Cells already written or isolated
-        stay untouched; atomic values, sentinels, and shared-by-identity
-        payloads (tensors, callables) never enter the overlay.
+        were already overlay-isolated).
+
+        The sweep is SPARSE (sol closure review, F4 perf): it visits only
+        the base store's cached mutable-cell index (built at the store's
+        first fork, valid thereafter — see ``_build_mutable_key_index``)
+        plus this view's base-overlay snapshot, and copies only the minimal
+        leak-closure set (``_needs_eager_isolation``). Record facades,
+        ``GroupRef`` cells, and interned immutable views stay lazy on first
+        read through ``_isolate`` — translation is not mutation, so
+        deferring it cannot leak parent state. Tensors/callables inside
+        copied containers stay shared by identity (the payload-sharing
+        fork contract).
         """
 
-        n_fields = self.base.layout.n_fields
+        base = self.base
+        index = base._mutable_keys
+        if index is None:
+            index = _build_mutable_key_index(base)
+            base._mutable_keys = index
+        n_fields = base.layout.n_fields
         overlay = self._overlay
         base_overlay = self._base_overlay
         base_rows = self._base_rows
-        atomic = _COW_ATOMIC
         translate = self.record_translator
-
-        def _isolate_eager(key: int, value: Any) -> None:
-            # ``_isolate`` minus the unconditional read-cache: identity
-            # results (interned tuples/frozensets of atomics, untranslated
-            # records) stay OUT of the overlay so the eager sweep does not
-            # materialize a per-fork copy of every immutable view.
-            cls = value.__class__
-            if cls is GroupRef:
-                fork_ref = self._translate_group_ref(value)
-                if fork_ref is not value:
-                    overlay[key] = fork_ref
-                return
-            if cls is dict or cls is list or cls is set or cls is tuple or cls is frozenset:
-                copied = cow_copy_value(value, translate)
-                if copied is not value:
-                    overlay[key] = copied
-                return
-            if translate is not None:
-                mapped = translate(value)
-                if mapped is not None:
-                    overlay[key] = mapped
-
-        if base_rows is not None:
-            for row, row_cells in enumerate(base_rows):
-                row_key = row * n_fields
-                for fid, value in enumerate(row_cells):
-                    if value.__class__ in atomic:
-                        continue
-                    key = row_key + fid
-                    if key not in overlay:
-                        _isolate_eager(key, value)
-        else:
-            columns = self.base._columns
+        # Post-freeze writes visible at fork time (the base-overlay snapshot;
+        # for a fork-of-fork this includes the parent view's own writes).
+        for key, value in base_overlay.items():
+            if key not in overlay and _needs_eager_isolation(value):
+                overlay[key] = _eager_copy(value, translate)
+        # Frozen cells named by the index (values re-checked: the index may
+        # conservatively retain cells since deleted or overwritten with
+        # atomics). Values read by direct backing index: an index cell was
+        # present at index build, and any later delete/replacement is a
+        # tombstone/write in an overlay checked first. The loop is
+        # duplicated per store shape on purpose — this is the fork hot
+        # path, and empty containers dominate the census (~11 of ~27
+        # candidate cells per op), hence the direct-allocation branch.
+        if base_rows is None:
+            columns = base._columns
             assert columns is not None
-            n_rows = len(self.base)
-            for fid in range(n_fields):
-                column = columns[fid]
-                for row in range(n_rows):
+            for fid, fid_rows in index.items():
+                values = columns[fid].values
+                for row in fid_rows:
                     key = row * n_fields + fid
-                    if key in overlay:
+                    if key in overlay or key in base_overlay:
                         continue
-                    value = base_overlay.get(key, _NO_OVERLAY)
-                    if value is _NO_OVERLAY:
-                        value = column.get(row)
-                    if value.__class__ in atomic:
+                    value = values[row]
+                    cls = value.__class__
+                    if cls is dict or cls is list or cls is set:
+                        overlay[key] = (
+                            cls() if not value else _eager_copy(value, translate)
+                        )
+                    elif (
+                        cls is tuple or cls is frozenset
+                    ) and _contains_mutable_container(value):
+                        overlay[key] = cow_copy_value(value, translate)
+        else:
+            for fid, fid_rows in index.items():
+                for row in fid_rows:
+                    key = row * n_fields + fid
+                    if key in overlay or key in base_overlay:
                         continue
-                    _isolate_eager(key, value)
+                    value = base_rows[row][fid]
+                    cls = value.__class__
+                    if cls is dict or cls is list or cls is set:
+                        overlay[key] = (
+                            cls() if not value else _eager_copy(value, translate)
+                        )
+                    elif (
+                        cls is tuple or cls is frozenset
+                    ) and _contains_mutable_container(value):
+                        overlay[key] = cow_copy_value(value, translate)
 
     def retained_bytes(self) -> int:
         """Return shallow structural bytes retained by this view alone."""

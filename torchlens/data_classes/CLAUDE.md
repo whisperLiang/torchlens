@@ -105,7 +105,8 @@ extras, and the policy-driven trace-side field remainder are copied (one
 shared-memo deepcopy over small trace-side data). Views isolate every
 mutation surface: fork writes/deletes land in the view overlay, mutable
 builtin containers are eagerly copied into the fork overlay at fork time
-(`OpStoreView.isolate_mutable_cells`; tensors/callables inside stay shared
+(`OpStoreView.isolate_mutable_cells`, a sparse sweep over the base store's
+cached mutable-cell index; tensors/callables inside stay shared
 by identity), `GroupRef` cells translate to per-fork cloned group tables,
 and cell-held records/accessors translate to fork facades. Traces without
 a sealed core-backed op store (loaded analysis traces, failed partials)

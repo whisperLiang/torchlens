@@ -461,10 +461,16 @@ now provably defines both explicit protocol hooks (tripwire in
 `test_state_adapter.py`), so the generic branch never fires for records.
 COW isolation holds in BOTH directions at fork time: the fork builder runs
 `OpStoreView.isolate_mutable_cells()` after the record translator installs,
-eagerly copying every mutable-container cell into the fork overlay
-(identity results — interned immutable views, untranslated records — stay
-out of it), so a parent's in-place container mutation after the fork is
-never visible to the fork, matching the deepcopy fork's snapshot semantics.
+eagerly copying the minimal leak-closure set — exact builtin mutable
+containers plus tuples/frozensets transitively nesting one — into the fork
+overlay, so a parent's in-place container mutation after the fork is never
+visible to the fork, matching the deepcopy fork's snapshot semantics. The
+sweep is SPARSE (F4 closure review): it visits only the base store's cached
+mutable-cell index (`_build_mutable_key_index`, built at the store's first
+fork, kept valid by overlay-routing on columnar stores and by the sealed
+row-major class swap `_SealedRowMajorOpRowStore`) plus the view's
+base-overlay snapshot; record facades, `GroupRef` cells, and interned
+immutable views stay lazy on first read (translation is not mutation).
 The fork->parent isolation direction was already pinned and holds
 unconditionally. The one shared residual is unchanged: mutables nested in
 NON-builtin custom objects are shared by identity, as the shallow fork path

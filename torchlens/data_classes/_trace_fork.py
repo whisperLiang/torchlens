@@ -24,6 +24,7 @@ restore.
 from __future__ import annotations
 
 import copy
+import gc
 import os
 import weakref
 from collections import OrderedDict
@@ -158,12 +159,27 @@ class _RecordTranslator:
     keyed parent object so a recycled ``id`` can never mistranslate.
     """
 
-    __slots__ = ("_fork_ref", "_guards", "_keepalive", "_parent_ref", "map")
+    __slots__ = (
+        "_fork_ref",
+        "_guards",
+        "_keepalive",
+        "_miss_classes",
+        "_parent_cls",
+        "_parent_ref",
+        "map",
+    )
 
     def __init__(self, fork_ref: Any = None) -> None:
         """Create an empty translator owned by the fork behind ``fork_ref``."""
 
         self.map: dict[int, Any] = {}
+        # Classes whose instances can never translate (tensors, dtypes,
+        # plain metadata): one set lookup short-circuits the miss path. Safe
+        # because the id-map lookup runs FIRST (record facades hit there even
+        # if their class is cached) and the parent Trace's class is excluded
+        # (parent translation is identity-based, not class-based).
+        self._miss_classes: set[type] = set()
+        self._parent_cls: type | None = None
         # id-recycling protection WITHOUT pinning the parent graph (records
         # like ModuleCall hold a STRONG trace reference, so a blanket
         # keepalive would keep the parent Trace alive for the fork's whole
@@ -218,11 +234,19 @@ class _RecordTranslator:
             # ``value``: drop the stale entry and fall through.
             del self.map[key]
             del self._guards[key]
+        cls = value.__class__
+        if cls in self._miss_classes:
+            return None
         parent_ref = self._parent_ref
         if parent_ref is not None and value is parent_ref():
             return self._fork_ref() if self._fork_ref is not None else None
         if isinstance(value, Accessor):
             return self._rebuild_accessor(value)
+        if cls is not self._parent_cls:
+            # ``isinstance`` returned False, so no instance of ``cls`` can
+            # ever rebuild as an accessor; only the parent's own class must
+            # keep taking the identity check above.
+            self._miss_classes.add(cls)
         return None
 
 
@@ -433,6 +457,12 @@ def _fill_layer_shells(
     fork_layer_logs: OrderedDict[str, Any] = OrderedDict()
     consumed_shells: set[int] = set()
     fork_equivalent_ops = fork.op_equivalence_classes
+    # One normalized relation view per equivalence class: the finished-Layer
+    # write normalization (F5) converts each assigned staging set to an
+    # immutable view, and materializing a fresh one PER MEMBER layer is
+    # quadratic on single-class traces (32 MB/fork measured on a 2002-op
+    # stack). Equal views are documented as shareable across records.
+    equivalent_view_memo: dict[Any, Any] = {}
     remap = translator.map
     for label, parent_layer in (parent.__dict__.get("layer_logs") or {}).items():
         parent_layer_id = id(parent_layer)
@@ -457,8 +487,17 @@ def _fill_layer_shells(
                     for call_index, layer_pass in parent_ops.items()
                 )
             )
-        if getattr(shell, "equivalence_class", None) in fork_equivalent_ops:
-            shell.equivalent_ops = fork_equivalent_ops[shell.equivalence_class]
+        equivalence_class = getattr(shell, "equivalence_class", None)
+        if equivalence_class in fork_equivalent_ops:
+            view = equivalent_view_memo.get(equivalence_class)
+            if view is None:
+                shell.equivalent_ops = fork_equivalent_ops[equivalence_class]
+                view = shell.__dict__.get(
+                    "equivalent_ops", fork_equivalent_ops[equivalence_class]
+                )
+                equivalent_view_memo[equivalence_class] = view
+            else:
+                shell.equivalent_ops = view
         fork_layer_logs[label] = shell
     fork.layer_logs = fork_layer_logs
 
@@ -502,6 +541,7 @@ def build_fork(parent: Trace, *, name: str | None) -> Trace:
     dict.update(memo, {id(parent): fork})
     translator = _RecordTranslator(fork_ref)
     translator._parent_ref = weakref.ref(parent)
+    translator._parent_cls = type(parent)
 
     ops_view = fork_core.ops if fork_core is not None else None
     base_store = core.ops if core is not None else None
@@ -610,9 +650,20 @@ def build_fork(parent: Trace, *, name: str | None) -> Trace:
     # PARENT's in-place mutation after the fork can never leak into the fork
     # through the copy-on-first-read window (both isolation directions now
     # hold at fork time, matching the deepcopy fork's snapshot semantics).
+    # The sweep is sparse (the base's cached mutable-cell index plus the
+    # overlay snapshot) but still allocates tens of thousands of small
+    # containers on large traces; pausing collection for the burst avoids
+    # redundant young-gen scans (fork build allocates, never frees).
     if fork_core is not None:
-        for view in fork_core.store_views():
-            view.isolate_mutable_cells()
+        gc_was_enabled = gc.isenabled()
+        if gc_was_enabled:
+            gc.disable()
+        try:
+            for view in fork_core.store_views():
+                view.isolate_mutable_cells()
+        finally:
+            if gc_was_enabled:
+                gc.enable()
     fork._rebind_fork_owner_refs()
     _state._register_log(fork)
     return fork
