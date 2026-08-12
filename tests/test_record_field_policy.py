@@ -438,6 +438,8 @@ def test_postprocess_write_audit_trips_on_undeclared_column(
         original.name,
         original.contract,
         writes=frozenset(),
+        reads=original.reads,
+        trace_state=original.trace_state,
     )
     monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
     monkeypatch.setitem(POSTPROCESS_STEP_CONTRACTS, "4", narrowed)
@@ -505,19 +507,21 @@ def test_postprocess_write_audit_trips_on_unsanctioned_row_removal(
     from torchlens.postprocess import POSTPROCESS_STEP_CONTRACTS, PostprocessStepContract
 
     original = POSTPROCESS_STEP_CONTRACTS["3"]
-    assert original.removes_rows, "step 3 must sanction orphan-row removal"
+    assert "deletes" in original.row_effects, "step 3 must sanction orphan-row removal"
     unsanctioned = PostprocessStepContract(
         original.step,
         original.name,
         original.contract,
         writes=original.writes,
-        removes_rows=False,
+        reads=original.reads,
+        row_effects=original.row_effects - {"deletes"},
+        trace_state=original.trace_state,
     )
     monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
     monkeypatch.setitem(POSTPROCESS_STEP_CONTRACTS, "3", unsanctioned)
     model = _PolicyModel().eval()
     recording = tl.record(model, torch.randn(2, 3), save=tl.func("linear"))
-    with pytest.raises(AssertionError, match="without a removes_rows sanction"):
+    with pytest.raises(AssertionError, match="without a 'deletes' row_effects sanction"):
         recording.to_trace()
 
 

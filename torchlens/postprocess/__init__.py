@@ -31,7 +31,8 @@ Step ordering invariants:
 
 from dataclasses import dataclass
 import os
-from typing import TYPE_CHECKING, List
+from types import MappingProxyType
+from typing import TYPE_CHECKING, List, Mapping  # noqa: F401  (Mapping: rank annotation)
 
 import time
 import torch
@@ -105,6 +106,73 @@ from ..utils.display import _vprint, _vtimed
 _POSTPROCESS_ASSERT_ENV = "TORCHLENS_POSTPROCESS_ASSERTIONS"
 
 
+#: Closed trace-state token vocabulary (design-ppdag-v3 §2.2). Each token
+#: names one non-column state surface a step may consume or produce; the
+#: derivation orients token conflicts exactly like column conflicts. The
+#: three workspace tokens are capture-produced (legal to read with no
+#: earlier pipeline writer — the token analogue of the capture baseline).
+_TRACE_STATE_TOKENS: frozenset[str] = frozenset(
+    (
+        "raw_graph_ws",
+        "module_capture_ws",
+        "wrapper_runtime_ws",
+        "label_maps",
+        "lookup_containers",
+        "conditional_records",
+        "layer_logs",
+        "module_logs",
+        "module_build",
+        "param_logs_kind",
+        "stream_writer",
+        "payload_tensors",
+        "timing",
+        "warnings",
+        "cuda_cache",
+        "finished_flag",
+        "saved_summary",
+        "graph_hash",
+        "containers",
+        "stream_lifecycle",
+    )
+)
+
+#: Tokens produced by capture/step 0 itself: a declared read with no earlier
+#: pipeline writer is legal for exactly these (import check 7.1-5).
+CAPTURE_BASELINE_TOKENS: frozenset[str] = frozenset(
+    ("raw_graph_ws", "module_capture_ws", "wrapper_runtime_ws")
+)
+
+
+def tokens(*declarations: str) -> frozenset[str]:
+    """Normalize trace-state token declarations to the stored vocabulary.
+
+    The stored vocabulary is ``r:<token>`` / ``w:<token>`` ONLY. ``rw:<token>``
+    is construction-time shorthand expanded to both entries; any other prefix
+    or unknown token raises at import time (design-ppdag-v3 §2.2).
+    """
+
+    normalized: set[str] = set()
+    for declaration in declarations:
+        prefix, _, token = declaration.partition(":")
+        if token not in _TRACE_STATE_TOKENS:
+            raise ValueError(
+                f"Unknown trace-state token {token!r} in {declaration!r}; the "
+                "closed vocabulary lives in _TRACE_STATE_TOKENS and growing it "
+                "is a reviewed contract diff."
+            )
+        if prefix == "rw":
+            normalized.add(f"r:{token}")
+            normalized.add(f"w:{token}")
+        elif prefix in ("r", "w"):
+            normalized.add(declaration)
+        else:
+            raise ValueError(
+                f"Invalid trace-state prefix {prefix!r} in {declaration!r}; "
+                "only r:/w: are stored (rw: is construction-time shorthand)."
+            )
+    return frozenset(normalized)
+
+
 @dataclass(frozen=True)
 class PostprocessStepContract:
     """Declared contract for one postprocess pipeline step.
@@ -121,34 +189,124 @@ class PostprocessStepContract:
         Declared op-store COLUMN write set for this step (M10): the exact
         cell columns the step may write or delete, enforced under
         ``TORCHLENS_POSTPROCESS_ASSERTIONS`` by the zero-cost-when-off
-        write audit (``op_store.begin_cell_write_audit``). ``None`` means
-        undeclared (wildcard) — steps that legitimately touch the whole
-        row (materialize, undecorate) or run before the store exists.
-        A step writing an undeclared column fails the tripwire; widening
-        a set is a REVIEWED schema-contract diff, never a silent drift.
-    removes_rows:
-        Whether the step is sanctioned to remove whole op rows (removal
-        husking releases every cell of the row). Whole-row release is the
-        row-lifecycle twin of row creation — audited separately from
-        column writes, so an unsanctioned removal fails with a precise
-        message instead of a wall of column names, and a sanctioned one
-        (orphan removal) stops false-positively tripping the column
-        tripwire on removal-heavy paths such as the fastlog cook.
+        write audit (``op_store.begin_cell_write_audit``). The former
+        ``None`` wildcard is DELETED (design-ppdag-v3): every step declares
+        an exact set. A step writing an undeclared column fails the
+        tripwire; widening a set is a REVIEWED schema-contract diff, never
+        a silent drift.
+    reads:
+        Declared op-store COLUMN read set. Authority for the dependency
+        derivation: seeded from the recording matrix, hand-reviewed against
+        the step source, shipped as a reviewed diff (recordings are
+        evidence, never auto-regenerated declarations).
+    placeholder_probes:
+        Reviewed reads that legally observe the step-0 schema placeholder
+        ("has this been set yet"). Exempt from read-before-write findings,
+        NEVER from WAR edges — a probe's correctness depends on staying
+        pinned before the column's writer.
+    row_effects:
+        Whole-row lifecycle sanctions: ``"creates"`` (the step may build op
+        rows — also the legality condition for row-clone reads) and/or
+        ``"deletes"`` (removal husking releases every cell of the row).
+        Row lifecycle is audited separately from column writes, so an
+        unsanctioned removal fails with a precise message instead of a
+        wall of column names. A step with either effect is a two-sided
+        barrier against every op-column-touching step (edge rule 4).
+    trace_state:
+        Non-column state tokens, ``r:<token>``/``w:<token>`` over the
+        closed ``_TRACE_STATE_TOKENS`` vocabulary. Construct with
+        ``tokens()`` so ``rw:`` shorthand normalizes and typos refuse at
+        import.
+    barrier:
+        Full ordering barrier (step 17 only: ``_tracing_finished`` flips
+        global facade behavior).
     """
 
     step: str
     name: str
     contract: str
-    writes: frozenset[str] | None = None
-    removes_rows: bool = False
+    writes: frozenset[str]
+    reads: frozenset[str]
+    placeholder_probes: frozenset[str] = frozenset()
+    row_effects: frozenset[str] = frozenset()
+    trace_state: frozenset[str] = frozenset()
+    barrier: bool = False
+
+    def __post_init__(self) -> None:
+        """Refuse malformed contracts at construction (plain raise, not assert)."""
+
+        if self.writes is None or self.reads is None:  # type: ignore[unreachable]
+            raise ValueError(
+                f"Step {self.step}: writes/reads must be exact frozensets; the "
+                "None wildcard is deleted (design-ppdag-v3 defect 1)."
+            )
+        unknown_effects = self.row_effects - {"creates", "deletes"}
+        if unknown_effects:
+            raise ValueError(
+                f"Step {self.step}: unknown row_effects {sorted(unknown_effects)}; "
+                "the vocabulary is {'creates', 'deletes'}."
+            )
+        for entry in self.trace_state:
+            prefix, _, token = entry.partition(":")
+            if prefix not in ("r", "w") or token not in _TRACE_STATE_TOKENS:
+                raise ValueError(
+                    f"Step {self.step}: invalid trace_state entry {entry!r}; "
+                    "construct with tokens() (stored vocabulary is r:/w: over "
+                    "_TRACE_STATE_TOKENS)."
+                )
+
+
+#: FROZEN semantic constant (design-ppdag-v3 §2.1, key 1 of the two-key
+#: direction authority): the historically-established producer/consumer
+#: order as ground truth. Every RAW/WW/WAR/row/token edge orients by this
+#: rank; registry position is NOT an input to derivation. Editing it is a
+#: reviewed semantic diff under the same governance as widening a write
+#: set. It is NOT derived from the step registry and is NOT regenerated by
+#: any tool. Step "0" is deliberately absent (fenced prologue, producer
+#: lane); step "17.5" is the contracted container-adoption seam.
+LEGACY_STEP_RANK: "Mapping[str, int]" = MappingProxyType(
+    {
+        "1": 10,
+        "2": 20,
+        "3": 30,
+        "4": 40,
+        "5": 50,
+        "6": 60,
+        "7": 70,
+        "8": 80,
+        "9": 90,
+        "10": 100,
+        "11": 110,
+        "11.5": 115,
+        "11.75": 118,
+        "12": 120,
+        "13": 130,
+        "14": 140,
+        "15": 150,
+        "15.5": 155,
+        "16": 160,
+        "16.5": 165,
+        "17": 170,
+        "17.5": 175,
+        "18": 180,
+        "19": 190,
+        "20": 200,
+    }
+)
 
 
 POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
+    # Step 0 runs before any audit window can arm (the store is born inside
+    # it), so its writes line is vacuously green; it exists for the
+    # producer-lane fence and is JOINT-SIGNOFF with that lane.
     "0": PostprocessStepContract(
         "0",
         "Materialize capture events",
         "Consumes capture events; rebuilds raw Op state; mutates Trace in place.",
         writes=frozenset(),
+        reads=frozenset(),
+        row_effects=frozenset(("creates",)),
+        trace_state=tokens("w:raw_graph_ws"),
     ),
     "1": PostprocessStepContract(
         "1",
@@ -243,6 +401,13 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "var_names",
             )
         ),
+        reads=frozenset(),
+        # Row creation carries the row-clone read legality (design-ppdag-v3
+        # §2.4d): step 1 clones the output node via Op.copy(), whose
+        # whole-schema getattr loop is a mechanical row_clone access kind,
+        # not a per-column dependency.
+        row_effects=frozenset(("creates",)),
+        trace_state=tokens("rw:raw_graph_ws", "w:lookup_containers"),
     ),
     "2": PostprocessStepContract(
         "2",
@@ -256,6 +421,8 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "output_descendants",
             )
         ),
+        reads=frozenset(),
+        trace_state=tokens("r:raw_graph_ws"),
     ),
     "3": PostprocessStepContract(
         "3",
@@ -291,7 +458,9 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "kwargs_template",
             )
         ),
-        removes_rows=True,
+        reads=frozenset(),
+        row_effects=frozenset(("deletes",)),
+        trace_state=tokens("rw:raw_graph_ws"),
     ),
     "4": PostprocessStepContract(
         "4",
@@ -310,6 +479,8 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "min_distance_to_output",
             )
         ),
+        reads=frozenset(),
+        trace_state=tokens("r:raw_graph_ws"),
     ),
     "5": PostprocessStepContract(
         "5",
@@ -334,6 +505,8 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "terminal_conditional_id",
             )
         ),
+        reads=frozenset(),
+        trace_state=tokens("r:raw_graph_ws", "w:conditional_records"),
     ),
     "6": PostprocessStepContract(
         "6",
@@ -352,6 +525,13 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "root_ancestors",
             )
         ),
+        reads=frozenset(),
+        # Buffer dedup removes merged duplicate rows through the same husking
+        # path as orphan removal (_remove_log_entry at control_flow.py:951);
+        # previously unsanctioned — a latent released-row trip on any
+        # buffer-merging axis (design-ppdag-v3 inventory row 6).
+        row_effects=frozenset(("deletes",)),
+        trace_state=tokens("rw:raw_graph_ws"),
     ),
     "7": PostprocessStepContract(
         "7",
@@ -366,6 +546,8 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "recurrent_ops",
             )
         ),
+        reads=frozenset(),
+        trace_state=tokens("r:raw_graph_ws"),
     ),
     "8": PostprocessStepContract(
         "8",
@@ -381,6 +563,8 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "type_index",
             )
         ),
+        reads=frozenset(),
+        trace_state=tokens("r:raw_graph_ws", "w:label_maps"),
     ),
     "9": PostprocessStepContract(
         "9",
@@ -425,12 +609,16 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "step_index",
             )
         ),
+        reads=frozenset(),
+        trace_state=tokens("r:label_maps", "rw:raw_graph_ws", "w:module_build"),
     ),
     "10": PostprocessStepContract(
         "10",
         "Rename labels",
         "Consumes raw-to-final maps; mutates graph references to final labels.",
         writes=frozenset(),
+        reads=frozenset(),
+        trace_state=tokens("r:label_maps", "r:raw_graph_ws", "w:lookup_containers"),
     ),
     "11": PostprocessStepContract(
         "11",
@@ -446,6 +634,16 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "output_of_module_calls",
             )
         ),
+        reads=frozenset(),
+        # r:module_build makes the 9 -> 11 edge derivable: step 11 reads
+        # module_build_data["module_num_calls"] (labeling.py:847).
+        trace_state=tokens(
+            "r:label_maps",
+            "r:module_build",
+            "rw:lookup_containers",
+            "w:saved_summary",
+            "w:warnings",
+        ),
     ),
     # Step 11.5 previously declared an EMPTY write set, silently wrong under
     # save_code_context=True where it assigns op.var_names on every op
@@ -459,6 +657,8 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         "Populate source var names",
         "Consumes code context; mutates Op var_names in place.",
         writes=frozenset(("var_names",)),
+        reads=frozenset(),
+        trace_state=tokens("r:raw_graph_ws"),
     ),
     # Step 11.75 previously had NO contract boundary, so its writes were
     # misattributed to step 12's window and only surfaced on the selective/
@@ -487,24 +687,32 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "transformed_out_shape",
             )
         ),
+        reads=frozenset(),
+        trace_state=tokens("w:payload_tensors"),
     ),
     "12": PostprocessStepContract(
         "12",
         "Undecorate tensors",
         "Consumes saved tensors; mutates payload wrappers in place.",
         writes=frozenset(),
+        reads=frozenset(),
+        trace_state=tokens("w:payload_tensors"),
     ),
     "13": PostprocessStepContract(
         "13",
         "Clear CUDA cache",
         "Runs optional CUDA allocator cleanup; leaves Trace metadata unchanged.",
         writes=frozenset(),
+        reads=frozenset(),
+        trace_state=tokens("r:payload_tensors", "w:cuda_cache"),
     ),
     "14": PostprocessStepContract(
         "14",
         "Log timing",
         "Consumes capture timestamps; mutates duration fields in place.",
         writes=frozenset(),
+        reads=frozenset(),
+        trace_state=tokens("w:timing"),
     ),
     "15": PostprocessStepContract(
         "15",
@@ -518,6 +726,8 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "parent_params",
             )
         ),
+        reads=frozenset(),
+        trace_state=tokens("rw:param_logs_kind"),
     ),
     "15.5": PostprocessStepContract(
         "15.5",
@@ -529,6 +739,8 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "terminal_bool_for",
             )
         ),
+        reads=frozenset(),
+        trace_state=tokens("r:conditional_records", "w:layer_logs"),
     ),
     "16": PostprocessStepContract(
         "16",
@@ -537,6 +749,15 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         # Reviewed widening (sol finding 6 in-place audit): module-log
         # building mutates the _param_logs containers in place.
         writes=frozenset(("_param_logs",)),
+        reads=frozenset(),
+        trace_state=tokens(
+            "r:layer_logs",
+            "r:module_build",
+            "r:module_capture_ws",
+            "rw:param_logs_kind",
+            "rw:saved_summary",
+            "w:module_logs",
+        ),
     ),
     "16.5": PostprocessStepContract(
         "16.5",
@@ -547,6 +768,8 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "_address_normalized",
             )
         ),
+        reads=frozenset(),
+        trace_state=tokens("r:lookup_containers", "w:graph_hash"),
     ),
     "17": PostprocessStepContract(
         "17",
@@ -556,6 +779,30 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
             (
                 "_tracing_finished",
             )
+        ),
+        reads=frozenset(),
+        trace_state=tokens("w:finished_flag"),
+        barrier=True,
+    ),
+    # Step 17.5: the container-adoption + workspace-drop seam, contracted at
+    # its exact historical position between 17 and the streaming snapshot
+    # (design-ppdag-v3 §5.3). Trace-side only: adopts the wrapper runtime
+    # registry's container records into trace._containers and drops all
+    # three per-phase workspaces (terminal consumes). Step 18 declares
+    # r:containers, which is the edge that makes this seam's position
+    # derivable. Unwrapped by _vtimed today — stays unwrapped.
+    "17.5": PostprocessStepContract(
+        "17.5",
+        "Adopt containers, drop workspaces",
+        "Consumes wrapper runtime registry; adopts container records; drops workspaces.",
+        writes=frozenset(),
+        reads=frozenset(),
+        trace_state=tokens(
+            "r:wrapper_runtime_ws",
+            "w:containers",
+            "w:raw_graph_ws",
+            "w:module_capture_ws",
+            "w:wrapper_runtime_ws",
         ),
     ),
     # Steps 18/19 previously declared writes=None (wildcard), which the audit
@@ -577,6 +824,13 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "out_ref",
             )
         ),
+        reads=frozenset(),
+        trace_state=tokens(
+            "r:containers",
+            "r:payload_tensors",
+            "rw:stream_writer",
+            "w:stream_lifecycle",
+        ),
     ),
     "19": PostprocessStepContract(
         "19",
@@ -588,14 +842,50 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "transformed_out",
             )
         ),
+        reads=frozenset(),
+        trace_state=tokens("r:stream_writer", "rw:stream_lifecycle"),
     ),
     "20": PostprocessStepContract(
         "20",
         "Release param refs",
         "Consumes finalized Param logs; drops live parameter references in place.",
         writes=frozenset(),
+        reads=frozenset(),
+        # r:stream_lifecycle is the explicit hand-declared token that makes
+        # the 18/19 -> 20 ordering derivable (release after optional stream
+        # finalization, AGENTS.md).
+        trace_state=tokens("rw:param_logs_kind", "r:stream_lifecycle"),
     ),
 }
+
+
+def _validate_contract_artifacts() -> None:
+    """Import-time structural binding of contracts and the frozen rank.
+
+    Check 7.1-0 (design-ppdag-v3): the rank's key set equals the contract
+    key set minus the fenced step "0", refused by name — a step
+    insertion/removal diff hits this first, never a bare ``KeyError``
+    inside derivation. Plain ``raise`` (``python -O`` strips asserts).
+    """
+
+    contract_steps = set(POSTPROCESS_STEP_CONTRACTS) - {"0"}
+    rank_steps = set(LEGACY_STEP_RANK)
+    if contract_steps != rank_steps:
+        missing_rank = sorted(contract_steps - rank_steps)
+        missing_contract = sorted(rank_steps - contract_steps)
+        raise ValueError(
+            "POSTPROCESS_STEP_CONTRACTS and LEGACY_STEP_RANK disagree: "
+            f"steps missing a rank: {missing_rank}; ranks missing a "
+            f"contract: {missing_contract}. Adding or removing a pipeline "
+            "step edits both artifacts (and the pinned-pair corpus) in one "
+            "reviewed diff."
+        )
+    ranks = [LEGACY_STEP_RANK[step] for step in LEGACY_STEP_RANK]
+    if len(set(ranks)) != len(ranks):
+        raise ValueError("LEGACY_STEP_RANK ranks must be unique integers.")
+
+
+_validate_contract_artifacts()
 
 
 def _postprocess_assertions_enabled() -> bool:
@@ -667,15 +957,15 @@ def _assert_postprocess_contract(self: "Trace", step: str) -> None:
     audit_result = _close_step_write_audit(self)
     if audit_result is not None:
         observed_writes, released_rows = audit_result
-        assert not released_rows or contract.removes_rows, (
+        assert not released_rows or "deletes" in contract.row_effects, (
             f"Step {step} ({contract.name}) released {released_rows} whole op "
-            "row(s) without a removes_rows sanction in "
+            "row(s) without a 'deletes' row_effects sanction in "
             "POSTPROCESS_STEP_CONTRACTS; declaring row removal is a reviewed "
             "contract diff, never a silent drift."
         )
         if _write_audit_record_mode():
             RECORDED_STEP_WRITES.setdefault(step, set()).update(observed_writes)
-        elif contract.writes is not None:
+        else:
             undeclared_writes = observed_writes - contract.writes
             assert not undeclared_writes, (
                 f"Step {step} ({contract.name}) wrote undeclared op-store "
@@ -1040,6 +1330,7 @@ def postprocess(
         _set_tracing_finished(self)
     _assert_postprocess_contract(self, "17")
 
+    # Step 17.5: Adopt container records and drop the per-phase workspaces.
     wrapper_ws = self.__dict__.get("_wrapper_runtime_ws")
     if wrapper_ws is not None:
         registry = getattr(wrapper_ws, "container_registry", None)
@@ -1056,6 +1347,7 @@ def postprocess(
         "_output_container_specs_by_raw_label",
     ):
         self.__dict__.pop(field_name, None)
+    _assert_postprocess_contract(self, "17.5")
 
     should_finalize_streaming = getattr(self, "_out_writer", None) is not None and not getattr(
         self, "_defer_streaming_bundle_finalization", False
