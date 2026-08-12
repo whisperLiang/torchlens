@@ -5,7 +5,6 @@ from __future__ import annotations
 from .capture_events import (
     CaptureEvents,
     register_live_event,
-    replace_op_event,
 )
 from .container import ContainerSpec
 from .container_registry import (
@@ -136,7 +135,6 @@ __all__ = [
     "coerce_deferred_value",
     "is_deferred_value",
     "register_live_event",
-    "replace_op_event",
     # Deprecated inert shims (warn on access; see __getattr__ below).
     "BufferEvent",
     "ModuleEvent",

@@ -589,10 +589,6 @@ PATH_TO_FLAT: dict[str, str] = {
     "intervention.fire_results": "fire_results",
 }
 
-# Inverse fold table: flat OpEvent field name -> registry facet path. The
-# record-aware `replace_op_event` (P3, until the P4 amendment migration
-# deletes it) maps the seven legacy mutators' flat kwargs onto facet paths.
-FLAT_TO_PATH: dict[str, str] = {flat: path for path, flat in PATH_TO_FLAT.items()}
 
 
 def record_with_path_updates(
@@ -625,26 +621,6 @@ def record_with_path_updates(
     return dataclass_replace(record, **record_changes)
 
 
-def record_with_flat_updates(record: "OpRecord", **updates: Any) -> "OpRecord":
-    """Return a new record with legacy flat-field updates applied.
-
-    Each flat name resolves through ``FLAT_TO_PATH`` onto its owning core
-    field or facet path, then folds through :func:`record_with_path_updates`.
-    Unknown flat names refuse — the mutator set is closed by the registry.
-    """
-
-    items: list[tuple[str, Any]] = []
-    for flat_name, value in updates.items():
-        path = FLAT_TO_PATH.get(flat_name)
-        if path is None:
-            raise OpRecordAttributeError(
-                f"no registered facet path for flat update {flat_name!r} "
-                "(the post-commit mutator set is closed by PATH_TO_FLAT)"
-            )
-        items.append((path, value))
-    return record_with_path_updates(record, items)
-
-
 def apply_patch_items(event: Any, items: Iterable[tuple[str, Any]]) -> Any:
     """Apply ordered ``(facet path, value)`` pairs to either journal shape.
 
@@ -659,21 +635,6 @@ def apply_patch_items(event: Any, items: Iterable[tuple[str, Any]]) -> Any:
     if isinstance(event, OpRecord):
         return record_with_path_updates(event, items)
     return dataclass_replace(event, **{PATH_TO_FLAT[path]: value for path, value in items})
-
-
-def replace_op_fields(event: Any, **updates: Any) -> Any:
-    """Polymorphic flat-field replace over either journal record shape.
-
-    Compat ``OpEvent``s take a plain ``dataclasses.replace``; decomposed
-    ``OpRecord``s fold the same flat names onto facet paths. The P3 bridge
-    for the in-function update sites the P4 amendment migration will absorb.
-    """
-
-    from dataclasses import replace as dataclass_replace
-
-    if isinstance(event, OpRecord):
-        return record_with_flat_updates(event, **updates)
-    return dataclass_replace(event, **updates)
 
 
 # Identity fields are structurally unpatchable: outside every schema AND

@@ -30,7 +30,6 @@ from .op_record import (
     OpAmendment,
     OpRecord,
     apply_patch_items,
-    record_with_flat_updates,
     validate_amendment,
 )
 from .predicate import RecordContext
@@ -342,38 +341,6 @@ class CaptureEvents:
         self.live_index.by_raw_label = events_by_label
         self.live_index.labels = list(events_by_label)
         self.live_index.rebuild_edges()
-
-    def _event_position(self, event: OpEvent) -> int | None:
-        """Return one event's canonical list position without a retained index.
-
-        Parameters
-        ----------
-        event
-            Existing operation event to locate.
-
-        Returns
-        -------
-        int | None
-            Producer-order position, or ``None`` when absent.
-        """
-
-        if self.op_events:
-            position = event.raw_index - self.op_events[0].raw_index
-            if 0 <= position < len(self.op_events):
-                candidate = self.op_events[position]
-                if (
-                    candidate.raw_index == event.raw_index
-                    and candidate.label_raw == event.label_raw
-                ):
-                    return position
-        return next(
-            (
-                index
-                for index, candidate in enumerate(self.op_events)
-                if candidate.raw_index == event.raw_index and candidate.label_raw == event.label_raw
-            ),
-            None,
-        )
 
     def copy_for_replay(
         self,
@@ -1080,40 +1047,7 @@ def register_live_event(trace: Any, event: OpEvent) -> None:
         events.grad_fn_handles_by_label_raw[event.label_raw] = event.grad_fn_handle
 
 
-def replace_op_event(trace: Any, label_raw: str, **updates: Any) -> JournalOp | None:
-    """Replace one emitted operation event with updated field values.
-
-    Parameters
-    ----------
-    trace
-        Active trace carrying the capture event buffer.
-    label_raw
-        Raw label identifying the operation event.
-    **updates
-        Dataclass field updates to apply to the frozen event.
-
-    Returns
-    -------
-    OpEvent | OpRecord | None
-        Updated record when found, otherwise ``None``.
-    """
-
-    events = getattr(trace, "capture_events", None)
-    if events is None:
-        return None
-    event = events.op_event_by_label_raw.get(label_raw)
-    if event is None:
-        return None
-    if isinstance(event, OpRecord):
-        # Decomposed journal: the seven legacy mutators' flat kwargs fold onto
-        # facet paths (P3 bridge; the P4 amendment lane replaces this caller
-        # surface entirely).
-        updated_event = record_with_flat_updates(event, **updates)
-    else:
-        updated_event = replace(event, **updates)
-    index = events._event_position(event)
-    if index is None:
-        return updated_event
-    events.op_events[index] = updated_event
-    events.live_index.replace(updated_event)
-    return updated_event
+# ``replace_op_event`` is DELETED (producer unification P4): the op lane is
+# genuinely append-only and every post-commit mutation routes through the
+# typed amendment lane (``CaptureEvents.append_amendment`` + the nine-family
+# registry in ``op_record.py``).

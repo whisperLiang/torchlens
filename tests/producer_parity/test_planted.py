@@ -33,6 +33,23 @@ def clean_run(tmp_path_factory: pytest.TempPathFactory) -> Any:
     )
 
 
+def _event_position(events: Any, event: Any) -> int:
+    """Adversarial-plant position finder over the raw op lane.
+
+    The production ``CaptureEvents._event_position`` died with
+    ``replace_op_event`` (P4); the plants keep mutating the raw list
+    directly BY DESIGN — they model exactly the bypass the two-check
+    comparator must convict.
+    """
+
+    return next(
+        index
+        for index, candidate in enumerate(events.op_events)
+        if candidate.raw_index == event.raw_index
+        and candidate.label_raw == event.label_raw
+    )
+
+
 def _clone_run(run: Any) -> Any:
     snapshot = Snapshot(scenario=run.snapshot.scenario)
     snapshot.journal = copy.deepcopy(run.snapshot.journal)
@@ -77,7 +94,7 @@ def test_a1_within_leg_sibling_swap_red_via_check_b(tmp_path: Path) -> None:
         for event, handle in ((first, handle_second), (second, handle_first)):
             updated = dataclasses.replace(event, grad_fn_handle=handle)
             object.__setattr__(updated, "seq", event.seq)
-            position = events._event_position(event)
+            position = _event_position(events, event)
             events.op_events[position] = updated
             events.live_index.replace(updated)
             events.grad_fn_handles_by_label_raw[event.label_raw] = handle
@@ -214,7 +231,7 @@ def test_barcode_binding_red_capable(tmp_path: Path) -> None:
             swapped = dataclasses.replace(own, barcode=donor.barcode)
             updated = dataclasses.replace(event, params=(swapped, *event.params[1:]))
             object.__setattr__(updated, "seq", event.seq)
-            events.op_events[events._event_position(event)] = updated
+            events.op_events[_event_position(events, event)] = updated
             events.live_index.replace(updated)
         planted_rows.extend([first.label_raw, second.label_raw])
 
@@ -248,7 +265,7 @@ def test_handle_binding_red_capable(tmp_path: Path) -> None:
             event, output=dataclasses.replace(event.output, tensor=tensor_ref)
         )
         object.__setattr__(updated, "seq", event.seq)
-        events.op_events[events._event_position(event)] = updated
+        events.op_events[_event_position(events, event)] = updated
         events.live_index.replace(updated)
         planted_labels.append(event.label_raw)
 

@@ -11,12 +11,10 @@
   "torchlens/backends/torch/model_prep.py:1840",
   "torchlens/backends/torch/model_prep.py:1980",
   "torchlens/backends/torch/ops.py:6216",
-  "torchlens/ir/capture_events.py:956",
+  "torchlens/ir/capture_events.py:923",
   "torchlens/postprocess/graph_traversal.py:149",
   "torchlens/user_funcs.py:760"
  ],
- "op_events_inplace_writes": [
-  "torchlens/ir/capture_events.py:1117"
- ],
+ "op_events_inplace_writes": [],
  "replace_op_event_callers": []
 }

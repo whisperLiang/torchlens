@@ -9732,7 +9732,7 @@
 "field": "grad_fn_handle",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 1079,
+"line": 1046,
 "via_getattr": false
 },
 {
@@ -9740,7 +9740,7 @@
 "field": "grad_fn_handle",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 1080,
+"line": 1047,
 "via_getattr": false
 },
 {
@@ -9748,7 +9748,7 @@
 "field": "label_raw",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 449,
+"line": 416,
 "via_getattr": false
 },
 {
@@ -9756,7 +9756,7 @@
 "field": "templates",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 560,
+"line": 527,
 "via_getattr": false
 },
 {
@@ -9764,7 +9764,7 @@
 "field": "label_raw",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 624,
+"line": 591,
 "via_getattr": false
 },
 {
@@ -9772,7 +9772,7 @@
 "field": "label_raw",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 674,
+"line": 641,
 "via_getattr": false
 },
 {
@@ -9780,7 +9780,7 @@
 "field": "label_raw",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 688,
+"line": 655,
 "via_getattr": false
 },
 {
@@ -9788,7 +9788,7 @@
 "field": "label_raw",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 1080,
+"line": 1047,
 "via_getattr": false
 },
 {
@@ -9796,23 +9796,7 @@
 "field": "transform_config",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 199,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 361,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 361,
+"line": 198,
 "via_getattr": false
 },
 {
@@ -9820,7 +9804,7 @@
 "field": "output",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 546,
+"line": 513,
 "via_getattr": false
 },
 {
@@ -9828,7 +9812,7 @@
 "field": "output",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 554,
+"line": 521,
 "via_getattr": false
 },
 {
@@ -9836,7 +9820,7 @@
 "field": "seq",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 722,
+"line": 689,
 "via_getattr": false
 },
 {
@@ -9844,7 +9828,7 @@
 "field": "seq",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 938,
+"line": 905,
 "via_getattr": false
 },
 {
@@ -9852,7 +9836,7 @@
 "field": "output",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 545,
+"line": 512,
 "via_getattr": false
 },
 {
@@ -9860,7 +9844,7 @@
 "field": "seq",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 866,
+"line": 833,
 "via_getattr": false
 },
 {
@@ -9868,39 +9852,7 @@
 "field": "transform_config",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 186,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 365,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 365,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 366,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 366,
+"line": 185,
 "via_getattr": false
 },
 {
@@ -9908,7 +9860,7 @@
 "field": "seq",
 "file": "torchlens/ir/capture_events.py",
 "has_default": true,
-"line": 445,
+"line": 412,
 "via_getattr": true
 },
 {
@@ -9916,7 +9868,7 @@
 "field": "seq",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 726,
+"line": 693,
 "via_getattr": false
 },
 {
@@ -9924,7 +9876,7 @@
 "field": "seq",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 855,
+"line": 822,
 "via_getattr": false
 },
 {
@@ -9932,7 +9884,7 @@
 "field": "seq",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 860,
+"line": 827,
 "via_getattr": false
 },
 {
@@ -9940,7 +9892,7 @@
 "field": "seq",
 "file": "torchlens/ir/capture_events.py",
 "has_default": true,
-"line": 875,
+"line": 842,
 "via_getattr": true
 },
 {
@@ -9948,7 +9900,7 @@
 "field": "seq",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 910,
+"line": 877,
 "via_getattr": false
 },
 {
@@ -9956,39 +9908,7 @@
 "field": "parent_arg_positions",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 197,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 373,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 373,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 373,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 373,
+"line": 196,
 "via_getattr": false
 },
 {
@@ -9996,7 +9916,7 @@
 "field": "seq",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 443,
+"line": 410,
 "via_getattr": false
 },
 {
@@ -10004,7 +9924,7 @@
 "field": "output",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 551,
+"line": 518,
 "via_getattr": false
 },
 {
@@ -10012,7 +9932,7 @@
 "field": "parent_arg_positions",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 180,
+"line": 179,
 "via_getattr": false
 },
 {
@@ -10020,7 +9940,7 @@
 "field": "seq",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 858,
+"line": 825,
 "via_getattr": false
 },
 {
@@ -10028,7 +9948,7 @@
 "field": "seq",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 863,
+"line": 830,
 "via_getattr": false
 },
 {
@@ -10692,7 +10612,7 @@
 "field": "transform_config",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 909,
+"line": 870,
 "via_getattr": false
 },
 {
@@ -10700,7 +10620,7 @@
 "field": "seq",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 914,
+"line": 875,
 "via_getattr": false
 },
 {
@@ -10708,7 +10628,7 @@
 "field": "kind",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 915,
+"line": 876,
 "via_getattr": false
 },
 {
@@ -10716,7 +10636,7 @@
 "field": "label_raw",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 916,
+"line": 877,
 "via_getattr": false
 },
 {
@@ -10724,7 +10644,7 @@
 "field": "layer_label_raw",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 917,
+"line": 878,
 "via_getattr": false
 },
 {
@@ -10732,7 +10652,7 @@
 "field": "layer_type",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 918,
+"line": 879,
 "via_getattr": false
 },
 {
@@ -10740,7 +10660,7 @@
 "field": "raw_index",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 919,
+"line": 880,
 "via_getattr": false
 },
 {
@@ -10748,7 +10668,7 @@
 "field": "type_index",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 920,
+"line": 881,
 "via_getattr": false
 },
 {
@@ -10756,7 +10676,7 @@
 "field": "step_index",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 921,
+"line": 882,
 "via_getattr": false
 },
 {
@@ -10764,7 +10684,7 @@
 "field": "pass_index",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 922,
+"line": 883,
 "via_getattr": false
 },
 {
@@ -10772,7 +10692,7 @@
 "field": "output",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 924,
+"line": 885,
 "via_getattr": false
 },
 {
@@ -10780,7 +10700,7 @@
 "field": "is_bottom_level",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 925,
+"line": 886,
 "via_getattr": false
 },
 {
@@ -10788,7 +10708,7 @@
 "field": "func_call_id",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 926,
+"line": 887,
 "via_getattr": false
 },
 {
@@ -10796,7 +10716,7 @@
 "field": "parent_arg_positions",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 930,
+"line": 891,
 "via_getattr": false
 },
 {
@@ -10804,7 +10724,7 @@
 "field": "is_output_parent",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 934,
+"line": 895,
 "via_getattr": false
 },
 {
@@ -10812,7 +10732,7 @@
 "field": "input_was_parameter",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 935,
+"line": 896,
 "via_getattr": false
 },
 {
@@ -10820,7 +10740,7 @@
 "field": "equivalence_class",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 936,
+"line": 897,
 "via_getattr": false
 },
 {
@@ -10828,7 +10748,7 @@
 "field": "module_stack",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 940,
+"line": 901,
 "via_getattr": false
 },
 {
@@ -10836,7 +10756,7 @@
 "field": "modules",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 940,
+"line": 901,
 "via_getattr": false
 },
 {
@@ -10844,7 +10764,7 @@
 "field": "input_ancestors",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 951,
+"line": 912,
 "via_getattr": false
 },
 {
@@ -10852,7 +10772,7 @@
 "field": "internal_source_ancestors",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 952,
+"line": 913,
 "via_getattr": false
 },
 {
@@ -10860,12 +10780,44 @@
 "field": "root_ancestors",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 953,
+"line": 914,
 "via_getattr": false
 },
 {
 "ambiguous": false,
 "field": "has_internal_source_ancestor",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 915,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "grad_fn_class_qualname",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 921,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "is_transform",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 936,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_chain",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 938,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "params",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
 "line": 954,
@@ -10873,42 +10825,10 @@
 },
 {
 "ambiguous": false,
-"field": "grad_fn_class_qualname",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 960,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "is_transform",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 975,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_chain",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 977,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "params",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 993,
-"via_getattr": false
-},
-{
-"ambiguous": false,
 "field": "parent_params",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 993,
+"line": 954,
 "via_getattr": false
 },
 {
@@ -10916,7 +10836,7 @@
 "field": "backend_semantics",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 1002,
+"line": 963,
 "via_getattr": false
 },
 {
@@ -10924,7 +10844,7 @@
 "field": "policy",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 1003,
+"line": 964,
 "via_getattr": false
 },
 {
@@ -10932,7 +10852,7 @@
 "field": "predicate_matched",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 1004,
+"line": 965,
 "via_getattr": false
 },
 {
@@ -10940,7 +10860,7 @@
 "field": "tracing_finished",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 1005,
+"line": 966,
 "via_getattr": false
 },
 {
@@ -10948,140 +10868,12 @@
 "field": "construction_done",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 1006,
+"line": 967,
 "via_getattr": false
 },
 {
 "ambiguous": false,
 "field": "intervention_fired",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 1019,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "intervention_replaced",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 1019,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "fire_results",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 1019,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "function",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 1025,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "templates",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 1026,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "source_trace",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 1040,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "source_trace_id",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 1041,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "grad_fn_handle",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 1042,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "parents",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 923,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "_edge_uses",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 931,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "unattributed_tensor_args",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 932,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "dropped_edge_tensor_args",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 933,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "has_internal_source_ancestor",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 948,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "grad_fn_class_qualname",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 959,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_kind",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 976,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_fn_name",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 979,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_fn_qualname",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
 "line": 980,
@@ -11089,194 +10881,10 @@
 },
 {
 "ambiguous": false,
-"field": "transform_fn_source",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 981,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "is_transform",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 965,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_kind",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 966,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_fn_name",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 969,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_fn_qualname",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 970,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_fn_source",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 971,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "is_scalar_bool",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 988,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "bool_value",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 988,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "is_scalar_bool",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 987,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "bool_value",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 987,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "record_context",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 1010,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "capture_spec",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 1010,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "record_context",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 1009,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "capture_spec",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 1009,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "intervention_fired",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 1015,
-"via_getattr": false
-},
-{
-"ambiguous": false,
 "field": "intervention_replaced",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 1016,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "module_stack",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 939,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "modules",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 939,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "input_ancestors",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 945,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "internal_source_ancestors",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 946,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "root_ancestors",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 947,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_chain",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 967,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "params",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 992,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "parent_params",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 992,
+"line": 980,
 "via_getattr": false
 },
 {
@@ -11284,7 +10892,319 @@
 "field": "fire_results",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 1017,
+"line": 980,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "function",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 986,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "templates",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 987,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "source_trace",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 1001,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "source_trace_id",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 1002,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "grad_fn_handle",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 1003,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "parents",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 884,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "_edge_uses",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 892,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "unattributed_tensor_args",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 893,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "dropped_edge_tensor_args",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 894,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "has_internal_source_ancestor",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 909,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "grad_fn_class_qualname",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 920,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_kind",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 937,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_fn_name",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 940,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_fn_qualname",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 941,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_fn_source",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 942,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "is_transform",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 926,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_kind",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 927,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_fn_name",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 930,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_fn_qualname",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 931,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_fn_source",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 932,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "is_scalar_bool",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 949,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "bool_value",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 949,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "is_scalar_bool",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 948,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "bool_value",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 948,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "record_context",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 971,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "capture_spec",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 971,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "record_context",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 970,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "capture_spec",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 970,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "intervention_fired",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 976,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "intervention_replaced",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 977,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "module_stack",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 900,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "modules",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 900,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "input_ancestors",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 906,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "internal_source_ancestors",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 907,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "root_ancestors",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 908,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_chain",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 928,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "params",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 953,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "parent_params",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 953,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "fire_results",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 978,
 "via_getattr": false
 },
 {
