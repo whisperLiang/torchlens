@@ -93,7 +93,7 @@ _LAYER_LOG_CONTAINER_DEFAULTS: dict[str, Any] = {
     # relation surface as live finished captures.
     "_param_barcodes": (),
     "_param_logs": (),
-    "equivalent_ops": set(),
+    "equivalent_ops": frozenset(),
     "in_conditionals": (),
     "conditional_role_stacks": (),
     "conditional_branch_stack_ops": {},
@@ -724,14 +724,16 @@ class Layer:
 
     @property
     def equivalent_ops(self) -> Any:
-        """Labels of ops equivalent to this layer, as a private copy per read.
+        """Labels of ops equivalent to this layer.
 
-        One canonical set object backs every Op AND Layer of an equivalence
-        class (see ``_COPY_ON_READ_SET_FIELDS`` in ``op.py``); handing out a
-        fresh copy means no holder can alias-corrupt the group. Storage stays
-        in ``__dict__`` under the public field name, so pickle state,
-        ``state_items``, and legacy ``__setstate__`` loads are unchanged.
-        Non-set legacy/loaded values (e.g. a list) pass through untouched.
+        On finished traces the stored value is the group's ONE cached
+        immutable ``frozenset`` view (M7 live group views) and passes through
+        unchanged — alias-safe because it cannot be mutated. A raw staging
+        ``set`` (mid-postprocess reads, legacy loads before coercion) still
+        hands back a private copy so no holder can alias-corrupt the shared
+        group container. Storage stays in ``__dict__`` under the public field
+        name, so pickle state, ``state_items``, and legacy ``__setstate__``
+        loads are unchanged.
         """
 
         try:

@@ -18,6 +18,7 @@ from typing import Any, Callable, Iterator
 from .columns import ColumnBuilder
 from .overlays import MISSING, RowOverlay
 from .payloads import PayloadArena
+from .groups import MembershipGroups
 from .pools import ClosurePool, InternPool
 from .relations import EdgeTable
 
@@ -103,6 +104,7 @@ class TraceCore:
         "pool",
         "closures",
         "edges",
+        "groups",
         "payloads",
         "overlay",
         "_facades",
@@ -121,6 +123,7 @@ class TraceCore:
         self.pool = InternPool()
         self.closures = ClosurePool()
         self.edges: dict[str, EdgeTable] = {}
+        self.groups: dict[str, MembershipGroups] = {}
         self.payloads = PayloadArena()
         self.overlay = RowOverlay()
         # Strong facade cache first (byte-identical lifetime parity with the

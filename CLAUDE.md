@@ -152,7 +152,10 @@ print(tl.compat.report(model, x).to_markdown())
   records. Dict-shaped relation metadata (`parent_arg_positions`,
   `conditional_elif_children`, `module_entry_arg_keys`, ...) keeps its mutable dict
   type. Legacy saves load with the same immutable surface. `equivalent_ops`/
-  `recurrent_ops` still return fresh mutable copies until the M7 live group views land.
+  `recurrent_ops` are LIVE group-membership views (`frozenset`/`tuple`): every member
+  of a group reads THE one cached immutable view (O(1), identity-stable), removal
+  scrub rebinds the group row once for all members, and caller mutation is
+  impossible — this supersedes the historical fresh-mutable-copy-per-read barrier.
 - `tl.record(..., save=...)` is the sparse predicate recorder; it returns `Recording`.
   `Recording.to_trace()` cooks the event stream into a full-structure `Trace`, with unsaved
   payload reads rejected explicitly. `tl.record()`/fastlog is torch-only in the backend-v1

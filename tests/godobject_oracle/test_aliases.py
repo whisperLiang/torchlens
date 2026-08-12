@@ -130,12 +130,13 @@ def test_record_lifetime_pinned_by_trace() -> None:
 
 
 @pytest.mark.smoke
-def test_copy_on_read_fields_return_fresh_containers() -> None:
-    """Row 2: equivalent_ops/recurrent_ops reads are FRESH; mutation discards.
+def test_group_fields_return_live_immutable_views() -> None:
+    """Row 2 (JMT-FORK-1, decided 2026-08-12): live immutable group views.
 
-    This is the alias-safety barrier (JMT-FORK-1 default: byte-identical
-    fresh copies). A durable-hydration or shared-cache implementation would
-    make caller mutation stick and MUST fail here.
+    ``equivalent_ops``/``recurrent_ops`` reads resolve to their group's ONE
+    cached immutable view — identity-stable, O(1), and alias-safe because
+    the view cannot be mutated. This natively replaces the historical
+    fresh-mutable-copy-per-read barrier.
     """
 
     trace = _capture_recurrent()
@@ -145,23 +146,19 @@ def test_copy_on_read_fields_return_fresh_containers() -> None:
 
     first_read = op.equivalent_ops
     second_read = op.equivalent_ops
-    assert first_read is not second_read
-    assert first_read == second_read
-    assert isinstance(first_read, set)
-
-    first_read.add("__aliases_v1_sentinel__")
-    assert "__aliases_v1_sentinel__" not in op.equivalent_ops
+    assert first_read is second_read, "group view reads must be identity-stable"
+    assert isinstance(first_read, frozenset)
+    with pytest.raises(AttributeError):
+        first_read.add("__aliases_v1_sentinel__")
 
     recurrent = [op for op in trace.ops.values() if op.recurrent_ops]
     assert recurrent, "recurrent capture produced no recurrence groups"
     rec_op = recurrent[0]
     rec_first = rec_op.recurrent_ops
-    rec_second = rec_op.recurrent_ops
-    assert rec_first is not rec_second
-    assert rec_first == rec_second
-    assert isinstance(rec_first, list)
-    rec_first.append("__aliases_v1_sentinel__")
-    assert "__aliases_v1_sentinel__" not in rec_op.recurrent_ops
+    assert rec_first is rec_op.recurrent_ops
+    assert isinstance(rec_first, tuple)
+    with pytest.raises(AttributeError):
+        rec_first.append("__aliases_v1_sentinel__")
 
 
 @pytest.mark.smoke
@@ -370,8 +367,14 @@ def test_source_trace_weakref_lifetime() -> None:
 
 
 @pytest.mark.smoke
-def test_equivalence_group_read_isolation() -> None:
-    """Row 10: group members agree on content; reads never alias each other."""
+def test_equivalence_group_shared_live_view() -> None:
+    """Row 10 (JMT-FORK-1): one shared LIVE view per group, mutation impossible.
+
+    Every member of an equivalence group reads THE same immutable view
+    object (O(1), no per-read copies), and the one sanctioned group
+    mutation — removal scrub — rebinds the group row once so every member
+    reflects it. Caller mutation is impossible by construction.
+    """
 
     trace = _capture_recurrent()
     grouped = [op for op in trace.ops.values() if op.equivalent_ops]
@@ -382,7 +385,19 @@ def test_equivalence_group_read_isolation() -> None:
     assert multi, "no multi-member equivalence group captured"
     first, second = multi[0][0], multi[0][1]
     assert first.equivalent_ops == second.equivalent_ops
-    assert first.equivalent_ops is not second.equivalent_ops
-    mutated = first.equivalent_ops
-    mutated.add("__aliases_v1_group__")
-    assert "__aliases_v1_group__" not in second.equivalent_ops
+    assert first.equivalent_ops is second.equivalent_ops, (
+        "group members must share ONE cached view"
+    )
+    with pytest.raises(AttributeError):
+        first.equivalent_ops.add("__aliases_v1_group__")
+
+    # LIVE through the sanctioned scrub path: filtering the group once is
+    # observed by every member on its next read, sharing intact.
+    from torchlens.data_classes.cleanup import _scrub_per_op_equivalence_lists
+
+    group_labels = sorted(first.equivalent_ops)
+    removed = group_labels[-1]
+    _scrub_per_op_equivalence_lists(multi[0], {removed})
+    assert removed not in first.equivalent_ops
+    assert removed not in second.equivalent_ops
+    assert first.equivalent_ops is second.equivalent_ops

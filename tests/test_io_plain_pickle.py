@@ -364,7 +364,7 @@ def test_op_setstate_absent_container_fields_restore_typed() -> None:
     assert isinstance(restored.input_to_module_calls, tuple)
     assert isinstance(restored.parents, tuple)
     assert isinstance(restored.children, tuple)
-    assert isinstance(restored.equivalent_ops, set)
+    assert isinstance(restored.equivalent_ops, frozenset)
     assert isinstance(restored.root_ancestors, frozenset)
     assert isinstance(restored._param_barcodes, tuple)
     assert isinstance(restored.param_shapes, list)

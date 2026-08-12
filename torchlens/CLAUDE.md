@@ -148,6 +148,9 @@ exclusive with backward-related capture because it discards the autograd graph.
   and equal views may be shared across records. `parents`/`children` live in the
   core's canonical dataflow edge-occurrence table (CSR by edge id) and rematerialize
   lazily; dict-shaped relation metadata (`parent_arg_positions` etc.) stays mutable.
+  M7a group views are LIVE: `equivalent_ops`/`recurrent_ops` cells hold ONE shared
+  `GroupRef` per membership group (`groups.py`); reads resolve to the group's cached
+  immutable view (`frozenset`/`tuple`) and removal scrub rebinds the group row once.
   During postprocess the staging containers remain real mutable builtins; legacy
   list/set state normalizes on load. Architecture of record:
   `docs/reference/trace_core_design.md`.

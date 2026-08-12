@@ -34,6 +34,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
+from .groups import GroupRef, MembershipGroups
 from .op_store import _CSR, _MISSING
 
 if TYPE_CHECKING:
@@ -79,6 +80,14 @@ OP_BITSET_VIEW_FIELDS: tuple[str, ...] = (
 
 #: Edge family name in ``TraceCore.edges`` for forward dataflow.
 DATAFLOW_FAMILY = "dataflow"
+
+#: Group-membership relation fields (M7): each cell becomes THE one shared
+#: ``GroupRef`` of its group; reads resolve to the group's cached immutable
+#: view (LIVE through removal scrub, which rebinds the group row once).
+OP_GROUP_VIEW_FIELDS: dict[str, type] = {
+    "equivalent_ops": frozenset,
+    "recurrent_ops": tuple,
+}
 
 #: Layer-side stored relation fields converted to the same view types (the
 #: aggregate builds at step 15.5 alias or copy the op staging containers, so
@@ -369,6 +378,58 @@ def convert_record_dict_views(
             record_dict[name] = frozenset_view(value, pool)
 
 
+def convert_group_cells(
+    core: "TraceCore",
+    store: "OpRowStore",
+    pool: dict[Any, Any],
+    refs_by_identity: dict[int, GroupRef],
+    keepalive: list[Any],
+) -> None:
+    """Convert equivalence/recurrence staging cells to shared ``GroupRef``s.
+
+    One group row per distinct membership; every member cell holds THE one
+    shared ref. Empty staging containers collapse to the interned empty view
+    directly (no group row). ``refs_by_identity`` maps ``id(raw container)``
+    to its ref for the caller's Layer pass; ``keepalive`` pins every keyed raw
+    container so an id can never be reused while the map is consulted.
+    """
+
+    rows = store.rows_building()
+    if rows is None:
+        return
+    fid_by_name = store.layout.fid_by_name
+    for name, view_type in OP_GROUP_VIEW_FIELDS.items():
+        fid = fid_by_name.get(name)
+        if fid is None:
+            continue
+        family = core.groups.get(name)
+        if family is None:
+            family = core.groups[name] = MembershipGroups(view_type)
+        make_view = tuple_view if view_type is tuple else frozenset_view
+        refs_by_value: dict[Any, GroupRef] = {}
+        for row_cells in rows:
+            value = row_cells[fid]
+            cls = value.__class__
+            if cls is not set and cls is not list and cls is not tuple and cls is not frozenset:
+                continue
+            if not value:
+                row_cells[fid] = make_view(value, pool)
+                continue
+            ref = refs_by_identity.get(id(value))
+            if ref is None:
+                # The rename memo shares ONE canonical container per group by
+                # identity; the value key coalesces legacy equal-but-distinct
+                # members (pre-memo loads, hand-built records).
+                value_key = (name, view_type(value))
+                ref = refs_by_value.get(value_key)
+                if ref is None:
+                    ref = GroupRef(family, family.add(value))
+                    refs_by_value[value_key] = ref
+                refs_by_identity[id(value)] = ref
+                keepalive.append(value)
+            row_cells[fid] = ref
+
+
 def freeze_trace_relation_views(trace: Any) -> RelationFreezeStats | None:
     """Run the whole relation freeze for one finished trace.
 
@@ -409,13 +470,31 @@ def freeze_trace_relation_views(trace: Any) -> RelationFreezeStats | None:
     pool: dict[Any, Any] = {}
     stats = freeze_op_relation_views(core, store, label_rows.get, pool)
 
+    # M7 group families: one shared GroupRef per membership group. The
+    # keepalive list pins the raw containers so the id-keyed map stays sound
+    # through the Layer pass below.
+    group_refs: dict[int, GroupRef] = {}
+    group_keepalive: list[Any] = []
+    convert_group_cells(core, store, pool, group_refs, group_keepalive)
+
     for layer_log in (getattr(trace, "layer_logs", None) or {}).values():
         record_dict = getattr(layer_log, "__dict__", None)
-        if record_dict is not None:
-            convert_record_dict_views(
-                record_dict,
-                pool,
-                tuple_fields=LAYER_TUPLE_VIEW_FIELDS,
-                frozenset_fields=LAYER_FROZENSET_VIEW_FIELDS,
+        if record_dict is None:
+            continue
+        convert_record_dict_views(
+            record_dict,
+            pool,
+            tuple_fields=LAYER_TUPLE_VIEW_FIELDS,
+            frozenset_fields=LAYER_FROZENSET_VIEW_FIELDS,
+        )
+        # Layer aggregates share the ops' canonical equivalence containers;
+        # store the group's ONE cached view (Layer is dict-backed until M8,
+        # so the value itself is the public read).
+        group_value = record_dict.get("equivalent_ops")
+        if group_value.__class__ is set:
+            ref = group_refs.get(id(group_value))
+            record_dict["equivalent_ops"] = (
+                ref.view() if ref is not None else frozenset_view(group_value, pool)
             )
+    del group_keepalive
     return stats

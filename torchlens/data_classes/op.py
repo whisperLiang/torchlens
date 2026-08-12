@@ -88,11 +88,13 @@ from ..quantities import (
     as_macs,
 )
 from .._state import pause_logging
+from .._trace_core.groups import GroupRef
 from .._trace_core.op_store import _CSR, _MISSING, DetachedOpStore, OpStoreLayout
 from .._trace_core.relation_views import (
     OP_BITSET_VIEW_FIELDS,
     OP_DATAFLOW_FIELDS,
     OP_FROZENSET_VIEW_FIELDS,
+    OP_GROUP_VIEW_FIELDS,
     OP_TUPLE_VIEW_FIELDS,
     materialize_dataflow_view,
 )
@@ -139,22 +141,13 @@ _object_setattr = object.__setattr__
 # Fields whose reads go through the lazy-materialization path in
 # ``Op.__getattribute__``; every other name short-circuits straight to the slot.
 _LAZY_READ_FIELDS = frozenset({"grad", "out"})
-# Set-valued fields whose slot holds ONE canonical object shared by every Op of
-# an equivalence class (see ``_LIST_FIELDS_TO_RENAME`` handling in
-# ``postprocess/labeling.py``).  Sharing is what keeps a many-pass graph from
-# storing the same N-label group N times -- a 512-step loop retained 33.8 MB of
-# per-op duplicates -- but a shared MUTABLE set could be alias-corrupted by any
-# holder.  Reads therefore hand back a fresh copy, so the object a caller sees is
-# private to that read and mutating it can never reach a sibling Op.  Writes are
-# unaffected: assigning rebinds the slot exactly as before.
-_COPY_ON_READ_SET_FIELDS = frozenset({"equivalent_ops"})
-# List-valued analogue of the set barrier above: ``recurrent_ops`` shares ONE
-# canonical list per recurrence group (order-bearing, so a list, not a set --
-# see the memoized rename in ``postprocess/labeling.py``).  Reads hand back a
-# fresh copy for exactly the same reason: a shared MUTABLE container must never
-# be alias-corruptible through any single holder.
-_COPY_ON_READ_LIST_FIELDS = frozenset({"recurrent_ops"})
-_INTERCEPTED_READ_FIELDS = _LAZY_READ_FIELDS | _COPY_ON_READ_SET_FIELDS | _COPY_ON_READ_LIST_FIELDS
+# ``equivalent_ops``/``recurrent_ops`` historically lived here too as
+# copy-on-read fields (a fresh mutable copy per read, protecting the ONE
+# canonical container shared by every group member from alias corruption).
+# The M7 live group views replace that barrier natively: cells hold a shared
+# ``GroupRef`` and reads resolve to the group's cached IMMUTABLE view
+# (``_GroupViewField``), so sharing is alias-safe without per-read copies.
+_INTERCEPTED_READ_FIELDS = _LAZY_READ_FIELDS
 _WARNED_REFERENCE_SAVE_MODE = False
 _LAYER_PASS_LOG_DEFAULT_FILL: dict[str, Any] = {
     "_source_trace_ref": None,
@@ -233,8 +226,8 @@ _LAYER_PASS_LOG_CONTAINER_DEFAULTS: dict[str, Any] = {
     "parent_param_ops": {},
     "_param_logs": (),
     "param_shapes": [],
-    "equivalent_ops": set(),
-    "recurrent_ops": [],
+    "equivalent_ops": frozenset(),
+    "recurrent_ops": (),
     "parents": (),
     "parent_arg_positions": {},
     "root_ancestors": frozenset(),
@@ -1677,18 +1670,6 @@ class Op:
 
         if name not in _lazy_fields:
             return _getattribute(self, name)
-        if name == "equivalent_ops":
-            # One canonical set object backs every Op of an equivalence class;
-            # hand out a private copy so no holder can alias-corrupt the group.
-            # Non-set legacy/loaded values (e.g. a list) pass through untouched.
-            value = _getattribute(self, name)
-            return set(value) if value.__class__ is set else value
-        if name == "recurrent_ops":
-            # Same barrier for the recurrence group: one canonical list per
-            # group, private copy per read.  Non-list legacy values pass
-            # through untouched.
-            value = _getattribute(self, name)
-            return list(value) if value.__class__ is list else value
         if name == "grad":
             slot = _object_getattribute(self, "_slot")
             records = slot("_grad_records")
@@ -4257,6 +4238,38 @@ class _RelationViewField(_OpField):
         store.cell_set(_ROW_GET(op), self._fid, value)
 
 
+class _GroupViewField(_RelationViewField):
+    """Descriptor for the two group-membership fields (M7, JMT-FORK-1).
+
+    A finished cell holds THE one shared ``GroupRef`` of its membership
+    group; reads resolve to the group's cached immutable view (``frozenset``
+    for ``equivalent_ops``, ``tuple`` for ``recurrent_ops``) — O(1) and LIVE
+    through removal scrub, which rebinds the group row once for every
+    member. This natively replaces the historical copy-on-read barrier
+    (a fresh mutable copy per read, O(group) each): immutable views cannot
+    alias-corrupt the group, so sharing is safe by construction.
+    """
+
+    __slots__ = ()
+
+    def __get__(self, op: Any, owner: Any = None) -> Any:
+        """Read the cell, resolving group refs to their live view."""
+
+        if op is None:
+            return self
+        value = _CORE_GET(op).cell_get(_ROW_GET(op), self._fid)
+        if value.__class__ is GroupRef:
+            return value.view()
+        if value is _MISSING:
+            name = self._name
+            raise AttributeError(
+                f"{type(op).__name__!r} object has no attribute {name!r}",
+                name=name,
+                obj=op,
+            )
+        return value
+
+
 class _DataflowField(_RelationViewField):
     """Descriptor for the two CSR-backed dataflow fields.
 
@@ -4313,6 +4326,8 @@ def _install_op_field_descriptors() -> None:
             )
         if name in dataflow_names:
             descriptor: _OpField = _DataflowField(name, fid, tuple)
+        elif name in OP_GROUP_VIEW_FIELDS:
+            descriptor = _GroupViewField(name, fid, OP_GROUP_VIEW_FIELDS[name])
         elif name in tuple_view_names:
             descriptor = _RelationViewField(name, fid, tuple)
         elif name in frozenset_view_names:

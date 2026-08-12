@@ -5528,7 +5528,7 @@ def _check_equivalence_symmetry(ml: "Trace") -> None:
             if op_pair_key in verified_op_pairs:
                 continue
         equivalent_ops = getattr(op, "equivalent_ops", None)
-        if not isinstance(equivalent_ops, set):
+        if not isinstance(equivalent_ops, (set, frozenset)):
             raise MetadataInvariantError(
                 name,
                 f"{op.label}.equivalent_ops is not a set",
@@ -5566,7 +5566,7 @@ def _check_equivalence_symmetry(ml: "Trace") -> None:
             if layer_key in verified_layer_keys:
                 continue
         equivalent_ops = getattr(layer, "equivalent_ops", None)
-        if not isinstance(equivalent_ops, set):
+        if not isinstance(equivalent_ops, (set, frozenset)):
             raise MetadataInvariantError(
                 name,
                 f"Layer {layer.layer_label}.equivalent_ops is not a set",

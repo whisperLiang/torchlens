@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Set, Tuple, cast
 
 import torch
 
+from .._trace_core.groups import GroupRef
 from ..constants import MODEL_LOG_FIELD_ORDER
 from ..intervention.types import ParentRef, Unsupported
 from ..utils.collections import remove_entry_from_list
@@ -608,6 +609,9 @@ _OP_LABEL_FIELDS_TO_CLEAN = (
     "recurrent_ops",
 )
 
+#: The M7 group-membership fields: scrubbed via their shared group row.
+_OP_GROUP_FIELDS = frozenset({"equivalent_ops", "recurrent_ops"})
+
 
 def _remove_log_entry_references(self: "Trace", layer_to_remove: str) -> None:
     """Removes all references to a single Op from the Trace's list/dict fields.
@@ -682,7 +686,23 @@ def _scrub_op_label_collections(op: "Op", labels_to_remove: Set[str]) -> None:
         Raw labels that no longer have a materialized operation record.
     """
 
+    core = getattr(op, "_core", None)
     for field_name in _OP_LABEL_FIELDS_TO_CLEAN:
+        # M7 group fields: the raw cell holds ONE GroupRef shared by every
+        # member. Scrub the GROUP ROW once — every member's next read
+        # reflects the filtered membership (live views), sharing intact.
+        # Idempotent: the second member sees a disjoint view and skips.
+        if field_name in _OP_GROUP_FIELDS and core is not None:
+            fid = core.layout.fid_by_name.get(field_name)
+            raw = core.cell_get(op._row, fid) if fid is not None else None
+            if raw.__class__ is GroupRef:
+                view = raw.view()
+                if not labels_to_remove.isdisjoint(view):
+                    raw.groups.replace(
+                        raw.group_id,
+                        [label for label in view if label not in labels_to_remove],
+                    )
+                continue
         value = getattr(op, field_name, None)
         if not value:
             continue
