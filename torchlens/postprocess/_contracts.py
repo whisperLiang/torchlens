@@ -414,12 +414,22 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         # runs the removal scrub (_batch_remove_log_entries with
         # remove_references=True), which rebinds SURVIVING rows'
         # equivalent_ops when an orphan shared an equivalence class
-        # (verified live on the OrphanTensors fixture). The design's wider
-        # parents/children/recurrent_ops scrub columns CANNOT fire at step 3:
-        # the orphan flood is undirected, so orphans are whole disconnected
-        # components — no survivor holds a dataflow edge to one — and
-        # recurrence groups are not built until step 7. Declaring them here
-        # would be phantom declarations (the Opus-4 anti-laundering guard).
+        # (verified live on the OrphanTensors fixture). Why the design's
+        # wider parents/children scrub columns are NOT declared (opus
+        # impl-review F3 corrected the original disconnected-components
+        # claim): the undirected flood alone IS closed (every popped node
+        # pushes children+parents), but
+        # _expand_seen_nodes_to_complete_func_call_groups
+        # (graph_traversal.py) then adds func-call-group siblings WITHOUT
+        # flooding from them, so an expansion-added survivor can hold edges
+        # to orphans and the scrub would rebind its parents/children. The
+        # trigger needs a multi-output call sharing NO parent with any
+        # flooded member — standard torch ops cannot produce it (siblings
+        # share the call's inputs) — and if it ever fires, the write audit
+        # fails LOUD on the undeclared column; declaring parents/children
+        # today would be phantom declarations (the Opus-4 anti-laundering
+        # guard). recurrent_ops additionally cannot fire: recurrence groups
+        # are not built until step 7.
         writes=frozenset(
             (
                 "_edge_uses",

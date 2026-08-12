@@ -58,11 +58,15 @@ RANK_GOLDEN = {
 #: golden (design-ppdag-v3 §4). Independently re-derived by both design
 #: reviewers for the pre-repair rows; the repairs added: the step-11.75
 #: save_activation family, steps 18/19 streaming columns, var_names (11.5),
-#: and equivalent_ops gaining step 3 (orphan-removal scrub, conditional —
-#: the design's wider parents/children/recurrent_ops scrub columns cannot
-#: fire at step 3: the orphan flood is undirected, so no survivor holds a
-#: dataflow edge to an orphan, and recurrence groups do not exist before
-#: step 7).
+#: equivalent_ops gaining step 3 (orphan-removal scrub, conditional), and
+#: step 6's buffer-merge write family (B2). Step 3 deliberately does NOT
+#: declare parents/children scrub writes: the flood-closure argument alone
+#: is insufficient (the func-call-group expansion at graph_traversal.py
+#: adds siblings without flooding, so a survivor CAN hold edges to
+#: orphans — opus impl-review F3), but the trigger needs a multi-output
+#: call sharing no parent with any flooded member, which standard torch
+#: ops cannot produce, and the write audit fails loud if one ever does.
+#: recurrent_ops cannot fire at 3: groups are not built until step 7.
 MULTI_WRITER_GOLDEN = {
     "_edge_uses": ("1", "3", "6", "9"),
     "_layer_label_raw": ("1", "7"),
