@@ -412,10 +412,16 @@ own byte-identity experiment) and the generic state-walker fallback, which
 stays for arbitrary nested scrub/rehydrate values — every core record class
 now provably defines both explicit protocol hooks (tripwire in
 `test_state_adapter.py`), so the generic branch never fires for records.
-Known COW semantics change (documented, unpinned): a parent's in-place
-mutation of a stored mutable container between fork time and the fork's
-first read of that cell is visible to the fork (read-time snapshot); the
-pinned fork->parent isolation direction holds unconditionally.
+COW isolation holds in BOTH directions at fork time: the fork builder runs
+`OpStoreView.isolate_mutable_cells()` after the record translator installs,
+eagerly copying every mutable-container cell into the fork overlay
+(identity results — interned immutable views, untranslated records — stay
+out of it), so a parent's in-place container mutation after the fork is
+never visible to the fork, matching the deepcopy fork's snapshot semantics.
+The fork->parent isolation direction was already pinned and holds
+unconditionally. The one shared residual is unchanged: mutables nested in
+NON-builtin custom objects are shared by identity, as the shallow fork path
+always accepted.
 GC parity is preserved exactly (parent Trace collectable while a fork
 lives): the MODULE kind table is deliberately NOT viewed — its cells embed
 accessor objects whose ``ModuleCall`` members hold a strong trace

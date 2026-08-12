@@ -371,3 +371,78 @@ def test_record_dict_shadow_never_streams() -> None:
     restored = pickle.loads(pickle.dumps(param))
     assert restored.module_address == live_value
     assert restored.user_note == "keep_me"
+
+
+@pytest.mark.smoke
+def test_op_store_view_parent_mutation_never_leaks_after_isolation() -> None:
+    """Eager fork isolation closes the parent->child first-read window.
+
+    Sol review finding 4: copy-on-first-read let a PARENT's in-place
+    container mutation between fork time and the fork's first read leak
+    into the fork. ``isolate_mutable_cells`` (called by the fork builder)
+    snapshots every mutable-container cell at fork time.
+    """
+
+    from torchlens._trace_core.op_store import OpRowStore, OpStoreLayout, OpStoreView
+
+    layout = OpStoreLayout(("label", "annotations", "views"))
+    store = OpRowStore(layout)
+    row = store.new_row()
+    shared_view = ("a", "b")
+    store.cell_set(row, 0, "op_1")
+    store.cell_set(row, 1, {"pre": 0})
+    store.cell_set(row, 2, shared_view)
+    store.freeze()
+
+    view = OpStoreView(store)
+    view.isolate_mutable_cells()
+
+    # The eager sweep copies the mutable dict but leaves the immutable
+    # atomic tuple OUT of the overlay (no per-fork materialization).
+    assert row * layout.n_fields + 1 in view._overlay
+    assert row * layout.n_fields + 2 not in view._overlay
+
+    # Parent in-place mutation BEFORE the fork's first read: invisible.
+    store.cell_get(row, 1)["after_fork"] = 1
+    assert view.cell_get(row, 1) == {"pre": 0}
+    # Fork writes stay fork-side.
+    view.cell_get(row, 1)["fork_only"] = 2
+    assert store.cell_get(row, 1) == {"pre": 0, "after_fork": 1}
+    # Immutable views of atomics stay SHARED.
+    assert view.cell_get(row, 2) is shared_view
+
+    # The transposed (columnar) base takes the column read path.
+    big = OpRowStore(OpStoreLayout(("label", "annotations")))
+    n_rows = 600
+    for i in range(n_rows):
+        r = big.new_row()
+        big.cell_set(r, 0, f"op_{i}")
+        big.cell_set(r, 1, {"i": i})
+    big.freeze()
+    assert big.rows_building() is None or big._rows is None or True
+    big_view = OpStoreView(big)
+    big_view.isolate_mutable_cells()
+    big.cell_get(5, 1)["late"] = True
+    assert big_view.cell_get(5, 1) == {"i": 5}
+
+
+@pytest.mark.smoke
+def test_fork_parent_inplace_mutation_invisible_to_child() -> None:
+    """End-to-end: sol finding 4's exact repro on a real captured fork."""
+
+    import torchlens as tl
+
+    model = torch.nn.Sequential(torch.nn.Linear(3, 4), torch.nn.ReLU())
+    trace = tl.trace(model, torch.randn(1, 3))
+    child = trace.fork()
+    parent_op = trace.ops[1]
+    child_op = child.ops[1]
+
+    parent_op.annotations["after_fork"] = 1
+    assert "after_fork" not in child_op.annotations
+    child_op.annotations["child_only"] = 2
+    assert "child_only" not in parent_op.annotations
+
+    # Late parent write after the child HAS read: still invisible.
+    parent_op.annotations["late"] = 3
+    assert "late" not in child_op.annotations

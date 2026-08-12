@@ -606,6 +606,13 @@ def build_fork(parent: Trace, *, name: str | None) -> Trace:
         _copy_record_extras(parent_record, shell, translator, fork_ref)
         _rebind_record_trace_refs(shell, fork_ref)
     _fill_layer_shells(parent, fork, layer_shells, translator, fork_ref)
+    # Fork-time snapshot: eagerly isolate every mutable-container cell so a
+    # PARENT's in-place mutation after the fork can never leak into the fork
+    # through the copy-on-first-read window (both isolation directions now
+    # hold at fork time, matching the deepcopy fork's snapshot semantics).
+    if fork_core is not None:
+        for view in fork_core.store_views():
+            view.isolate_mutable_cells()
     fork._rebind_fork_owner_refs()
     _state._register_log(fork)
     return fork

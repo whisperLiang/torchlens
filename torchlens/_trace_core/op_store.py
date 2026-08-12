@@ -584,10 +584,12 @@ class OpStoreView:
     * The base's post-freeze overlay is SNAPSHOT at construction (row-major
       sealed bases snapshot their row lists instead), so parent writes after
       the fork stay invisible in both directions.
-    * Reads of exact builtin mutable containers are isolated copy-on-first-
-      read into the view overlay, preserving the fork-mutation isolation the
-      object-graph forkcopier provided (tensors/callables inside stay shared
-      by identity — the payload-sharing fork contract).
+    * Exact builtin mutable containers are eagerly copied into the view
+      overlay at fork time (``isolate_mutable_cells``, run by the fork
+      builder once the record translator is installed), so isolation holds
+      in BOTH directions from fork time — the copy-on-first-read in
+      ``_isolate`` remains as the read-cache backstop (tensors/callables
+      inside stay shared by identity — the payload-sharing fork contract).
     * ``GroupRef`` cells translate to the fork core's cloned group tables, so
       removal scrub on either trace never reaches the other.
     * Record facades inside containers and hydrated fact blocks translate
@@ -781,6 +783,73 @@ class OpStoreView:
             value = self.cell_get(row, fid)
             if value is not _MISSING:
                 yield name, value
+
+    def isolate_mutable_cells(self) -> None:
+        """Eagerly isolate every mutable-container cell into the fork overlay.
+
+        Called once by the fork builder AFTER the record translator is
+        installed. Copy-on-first-read alone left a window where a PARENT's
+        in-place container mutation between fork time and the fork's first
+        read of that cell leaked into the fork; pre-isolating restores the
+        deepcopy fork's snapshot semantics in both directions (fork writes
+        were already overlay-isolated). Cells already written or isolated
+        stay untouched; atomic values, sentinels, and shared-by-identity
+        payloads (tensors, callables) never enter the overlay.
+        """
+
+        n_fields = self.base.layout.n_fields
+        overlay = self._overlay
+        base_overlay = self._base_overlay
+        base_rows = self._base_rows
+        atomic = _COW_ATOMIC
+        translate = self.record_translator
+
+        def _isolate_eager(key: int, value: Any) -> None:
+            # ``_isolate`` minus the unconditional read-cache: identity
+            # results (interned tuples/frozensets of atomics, untranslated
+            # records) stay OUT of the overlay so the eager sweep does not
+            # materialize a per-fork copy of every immutable view.
+            cls = value.__class__
+            if cls is GroupRef:
+                fork_ref = self._translate_group_ref(value)
+                if fork_ref is not value:
+                    overlay[key] = fork_ref
+                return
+            if cls is dict or cls is list or cls is set or cls is tuple or cls is frozenset:
+                copied = cow_copy_value(value, translate)
+                if copied is not value:
+                    overlay[key] = copied
+                return
+            if translate is not None:
+                mapped = translate(value)
+                if mapped is not None:
+                    overlay[key] = mapped
+
+        if base_rows is not None:
+            for row, row_cells in enumerate(base_rows):
+                row_key = row * n_fields
+                for fid, value in enumerate(row_cells):
+                    if value.__class__ in atomic:
+                        continue
+                    key = row_key + fid
+                    if key not in overlay:
+                        _isolate_eager(key, value)
+        else:
+            columns = self.base._columns
+            assert columns is not None
+            n_rows = len(self.base)
+            for fid in range(n_fields):
+                column = columns[fid]
+                for row in range(n_rows):
+                    key = row * n_fields + fid
+                    if key in overlay:
+                        continue
+                    value = base_overlay.get(key, _NO_OVERLAY)
+                    if value is _NO_OVERLAY:
+                        value = column.get(row)
+                    if value.__class__ in atomic:
+                        continue
+                    _isolate_eager(key, value)
 
     def retained_bytes(self) -> int:
         """Return shallow structural bytes retained by this view alone."""

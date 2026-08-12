@@ -191,7 +191,7 @@ exclusive with backward-related capture because it discards the autograd graph.
   M11: `Trace.fork()` is COPY-ON-WRITE (`data_classes/_trace_fork.py`): the
   fork core wraps the sealed op store and every kind table in per-fork
   `OpStoreView`s (own overlay; base overlay/rows snapshot at fork;
-  copy-on-first-read isolation for exact builtin containers with
+  eager fork-time isolation of exact builtin mutable containers with
   tensor/callable identity preserved; GroupRef translation to cloned group
   tables; record/accessor translation for cell-held references), fork
   records are fresh two-word shells at the SAME rows, and only Layer shadow
