@@ -209,7 +209,9 @@ def test_runnable_fork_keeps_mutable_witness_ledgers_independent() -> None:
         input_metadata_reads={("args", 0): {"shape": (2, 3)}},
     )
 
-    forked_state = parent._fork_model_field("_runnable", parent_state, {})
+    from torchlens.data_classes._trace_fork import _fork_model_field
+
+    forked_state = _fork_model_field(parent, "_runnable", parent_state, {})
 
     assert forked_state is not parent_state
     assert forked_state.staged_user_state is immutable_state

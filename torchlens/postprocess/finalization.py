@@ -1559,7 +1559,6 @@ def _set_tracing_finished(self: "Trace") -> None:
         tensor = self.layer_dict_main_keys[layer_label]
         tensor._tracing_finished = True
     self._tracing_finished = True
-    self._compact_op_metadata()
 
 
 def _finalize_streamed_bundle(self: "Trace") -> None:

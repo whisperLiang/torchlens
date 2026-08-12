@@ -7,6 +7,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from typing import Any, TypeAlias, cast
 
+from ..data_classes._compaction import compact_op_metadata
 from ..data_classes.layer import Layer
 from ..data_classes.module import ModuleAccessor
 from ..data_classes.trace import Trace, _init_module_hierarchy_data
@@ -137,7 +138,7 @@ def finalize_single_pass_trace(
     if not finish_before_module_logs:
         trace._tracing_finished = True
         _set_per_op_tracing_finished(trace)
-    trace._compact_op_metadata()
+    compact_op_metadata(trace)
 
 
 def _set_per_op_tracing_finished(trace: Trace) -> None:

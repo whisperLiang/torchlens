@@ -28,7 +28,9 @@ Accessors (`LayerAccessor`, `ModuleAccessor`, `ParamAccessor`, `BufferAccessor`,
 | `trace.py` | `Trace`, conditional event records, save/load/intervention/summary helpers |
 | `_trace_accessors.py` | Trace-level typed accessor construction |
 | `_trace_export.py` | Trace tabular export and decoded-output helpers |
-| `_trace_intervention.py` | Trace intervention, fork, replay, and rerun helpers |
+| `_trace_intervention.py` | Trace intervention surface; fork dispatch, replay, and rerun helpers |
+| `_trace_fork.py` | M11 copy-on-write fork builder (COW shells over `OpStoreView`s) |
+| `_compaction.py` | Freeze-seam Op metadata pooling (M11 fold of the standalone pass) |
 | `_trace_profile.py` | Trace profiling and timing helpers |
 | `_trace_stats.py` | Trace aggregate stats and backward-pass projections |
 | `_trace_validation.py` | Trace validation and log-entry removal helpers |
@@ -94,6 +96,22 @@ extras (JMT-FORK-7), and the few names whose properties hardcode `__dict__`
 access (template/source-trace/facets slots). Torch build passes adopt records
 into `TraceCore.kind_rows`; direct construction, preview backends, pickle
 restore, and fork shells stay detached single-row stores.
+
+### M11 COW fork
+`Trace.fork()` builds copy-on-write forks (`_trace_fork.build_fork`): fork
+`Op`s and record facades are fresh two-word shells bound to per-fork
+`OpStoreView`s at the SAME rows; only `Layer` shadow dicts, record instance
+extras, and the policy-driven trace-side field remainder are copied (one
+shared-memo deepcopy over small trace-side data). Views isolate every
+mutation surface: fork writes/deletes land in the view overlay, mutable
+builtin containers are copied on first read (tensors/callables inside stay
+shared by identity), `GroupRef` cells translate to per-fork cloned group
+tables, and cell-held records/accessors translate to fork facades. Traces
+without a sealed core-backed op store (loaded analysis traces, failed
+partials) take the detached fallback (per-record single-row duplication).
+Fork->parent mutation isolation is pinned; a parent's in-place container
+mutation between fork time and the fork's first read of that cell is
+visible to the fork (documented read-time snapshot semantic).
 
 ### Module / ModuleCall Fields
 `Module.training` mirrors `nn.Module.training`; `Module.layer_labels` stores Layer

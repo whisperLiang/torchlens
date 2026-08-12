@@ -30151,37 +30151,67 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "df9ae1a23d13bcf5b8318183575914939e4a57414959eae5578f9545f6c8f46e",
+     "shape": [
+      8
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.linear1"
+    },
     "module_address": "encoder.linear1",
     "module_cls": null,
     "module_name": "linear1",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.linear1"
+     }
+    ],
     "name": "bias",
     "num_calls": 1,
     "num_params": 8,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 5,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      8
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "linear_3_29"
     ],
     "used_by_ops": [
      "linear_3_29:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "df9ae1a23d13bcf5b8318183575914939e4a57414959eae5578f9545f6c8f46e",
+     "shape": [
+      8
+     ]
+    }
    },
    "encoder.linear1.weight": {
     "_derived_grad_record_path": null,
@@ -30205,38 +30235,70 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "240b56ae0407833f60805bcf39ce418e577179337f644ebc7181d826bcbc8d7f",
+     "shape": [
+      8,
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.linear1"
+    },
     "module_address": "encoder.linear1",
     "module_cls": null,
     "module_name": "linear1",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.linear1"
+     }
+    ],
     "name": "weight",
     "num_calls": 1,
     "num_params": 32,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 4,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      8,
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "linear_3_29"
     ],
     "used_by_ops": [
      "linear_3_29:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "240b56ae0407833f60805bcf39ce418e577179337f644ebc7181d826bcbc8d7f",
+     "shape": [
+      8,
+      4
+     ]
+    }
    },
    "encoder.linear2.bias": {
     "_derived_grad_record_path": null,
@@ -30260,37 +30322,67 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "4438fcbf72f38693e18fed0b7ef6e1064b822460f7a510fff7a833eeb4598204",
+     "shape": [
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.linear2"
+    },
     "module_address": "encoder.linear2",
     "module_cls": null,
     "module_name": "linear2",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.linear2"
+     }
+    ],
     "name": "bias",
     "num_calls": 1,
     "num_params": 4,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 7,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "linear_4_32"
     ],
     "used_by_ops": [
      "linear_4_32:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "4438fcbf72f38693e18fed0b7ef6e1064b822460f7a510fff7a833eeb4598204",
+     "shape": [
+      4
+     ]
+    }
    },
    "encoder.linear2.weight": {
     "_derived_grad_record_path": null,
@@ -30314,38 +30406,70 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "7f07b4fb4d692bfe3b93c39064fb00a748d9ad63ddd0b351c9986e6a189f61b3",
+     "shape": [
+      4,
+      8
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.linear2"
+    },
     "module_address": "encoder.linear2",
     "module_cls": null,
     "module_name": "linear2",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.linear2"
+     }
+    ],
     "name": "weight",
     "num_calls": 1,
     "num_params": 32,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 6,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      4,
      8
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "linear_4_32"
     ],
     "used_by_ops": [
      "linear_4_32:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "7f07b4fb4d692bfe3b93c39064fb00a748d9ad63ddd0b351c9986e6a189f61b3",
+     "shape": [
+      4,
+      8
+     ]
+    }
    },
    "encoder.norm1.bias": {
     "_derived_grad_record_path": null,
@@ -30369,37 +30493,67 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb",
+     "shape": [
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.norm1"
+    },
     "module_address": "encoder.norm1",
     "module_cls": null,
     "module_name": "norm1",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.norm1"
+     }
+    ],
     "name": "bias",
     "num_calls": 1,
     "num_params": 4,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 9,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "layernorm_1_28"
     ],
     "used_by_ops": [
      "layernorm_1_28:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb",
+     "shape": [
+      4
+     ]
+    }
    },
    "encoder.norm1.weight": {
     "_derived_grad_record_path": null,
@@ -30423,37 +30577,67 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "f6bb1294da2f78cd935b01c7656280df5eaa0439e9d97bc03775825a41a508e4",
+     "shape": [
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.norm1"
+    },
     "module_address": "encoder.norm1",
     "module_cls": null,
     "module_name": "norm1",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.norm1"
+     }
+    ],
     "name": "weight",
     "num_calls": 1,
     "num_params": 4,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 8,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "layernorm_1_28"
     ],
     "used_by_ops": [
      "layernorm_1_28:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "f6bb1294da2f78cd935b01c7656280df5eaa0439e9d97bc03775825a41a508e4",
+     "shape": [
+      4
+     ]
+    }
    },
    "encoder.norm2.bias": {
     "_derived_grad_record_path": null,
@@ -30477,37 +30661,67 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb",
+     "shape": [
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.norm2"
+    },
     "module_address": "encoder.norm2",
     "module_cls": null,
     "module_name": "norm2",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.norm2"
+     }
+    ],
     "name": "bias",
     "num_calls": 1,
     "num_params": 4,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 11,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "layernorm_2_35"
     ],
     "used_by_ops": [
      "layernorm_2_35:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb",
+     "shape": [
+      4
+     ]
+    }
    },
    "encoder.norm2.weight": {
     "_derived_grad_record_path": null,
@@ -30531,37 +30745,67 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "f6bb1294da2f78cd935b01c7656280df5eaa0439e9d97bc03775825a41a508e4",
+     "shape": [
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.norm2"
+    },
     "module_address": "encoder.norm2",
     "module_cls": null,
     "module_name": "norm2",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.norm2"
+     }
+    ],
     "name": "weight",
     "num_calls": 1,
     "num_params": 4,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 10,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "layernorm_2_35"
     ],
     "used_by_ops": [
      "layernorm_2_35:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "f6bb1294da2f78cd935b01c7656280df5eaa0439e9d97bc03775825a41a508e4",
+     "shape": [
+      4
+     ]
+    }
    },
    "encoder.self_attn.in_proj_bias": {
     "_derived_grad_record_path": null,
@@ -30585,37 +30829,67 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "17b0761f87b081d5cf10757ccc89f12be355c70e2e29df288b65b30710dcbcd1",
+     "shape": [
+      12
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.self_attn"
+    },
     "module_address": "encoder.self_attn",
     "module_cls": null,
     "module_name": "self_attn",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.self_attn"
+     }
+    ],
     "name": "in_proj_bias",
     "num_calls": 1,
     "num_params": 12,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 1,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      12
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "linear_1_2"
     ],
     "used_by_ops": [
      "linear_1_2:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "17b0761f87b081d5cf10757ccc89f12be355c70e2e29df288b65b30710dcbcd1",
+     "shape": [
+      12
+     ]
+    }
    },
    "encoder.self_attn.in_proj_weight": {
     "_derived_grad_record_path": null,
@@ -30639,38 +30913,70 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "9c44e55fa865ea17d06542d6269a5f64350b75372dea7c3a41ce755ba9533e07",
+     "shape": [
+      12,
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.self_attn"
+    },
     "module_address": "encoder.self_attn",
     "module_cls": null,
     "module_name": "self_attn",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.self_attn"
+     }
+    ],
     "name": "in_proj_weight",
     "num_calls": 1,
     "num_params": 48,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 0,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      12,
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "linear_1_2"
     ],
     "used_by_ops": [
      "linear_1_2:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "9c44e55fa865ea17d06542d6269a5f64350b75372dea7c3a41ce755ba9533e07",
+     "shape": [
+      12,
+      4
+     ]
+    }
    },
    "encoder.self_attn.out_proj.bias": {
     "_derived_grad_record_path": null,
@@ -30694,37 +31000,59 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb",
+     "shape": [
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": "<raises KeyError>",
     "module_address": "encoder.self_attn.out_proj",
-    "module_cls": null,
+    "module_cls": "<raises KeyError>",
     "module_name": "out_proj",
-    "modules": [],
+    "modules": "<raises KeyError>",
     "name": "bias",
     "num_calls": 1,
     "num_params": 4,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 3,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "linear_2_23"
     ],
     "used_by_ops": [
      "linear_2_23:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb",
+     "shape": [
+      4
+     ]
+    }
    },
    "encoder.self_attn.out_proj.weight": {
     "_derived_grad_record_path": null,
@@ -30748,38 +31076,62 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "d1267c88428e01b0dbe2b53d70b6eac8ae1f6d83dc1da2bcd3122def0299d994",
+     "shape": [
+      4,
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": "<raises KeyError>",
     "module_address": "encoder.self_attn.out_proj",
-    "module_cls": null,
+    "module_cls": "<raises KeyError>",
     "module_name": "out_proj",
-    "modules": [],
+    "modules": "<raises KeyError>",
     "name": "weight",
     "num_calls": 1,
     "num_params": 16,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 2,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      4,
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "linear_2_23"
     ],
     "used_by_ops": [
      "linear_2_23:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "d1267c88428e01b0dbe2b53d70b6eac8ae1f6d83dc1da2bcd3122def0299d994",
+     "shape": [
+      4,
+      4
+     ]
+    }
    }
   },
   "trace": {
@@ -100351,37 +100703,67 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "df9ae1a23d13bcf5b8318183575914939e4a57414959eae5578f9545f6c8f46e",
+     "shape": [
+      8
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.linear1"
+    },
     "module_address": "encoder.linear1",
     "module_cls": null,
     "module_name": "linear1",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.linear1"
+     }
+    ],
     "name": "bias",
     "num_calls": 1,
     "num_params": 8,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 5,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      8
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "linear_3_29"
     ],
     "used_by_ops": [
      "linear_3_29:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "df9ae1a23d13bcf5b8318183575914939e4a57414959eae5578f9545f6c8f46e",
+     "shape": [
+      8
+     ]
+    }
    },
    "encoder.linear1.weight": {
     "_derived_grad_record_path": null,
@@ -100405,38 +100787,70 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "240b56ae0407833f60805bcf39ce418e577179337f644ebc7181d826bcbc8d7f",
+     "shape": [
+      8,
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.linear1"
+    },
     "module_address": "encoder.linear1",
     "module_cls": null,
     "module_name": "linear1",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.linear1"
+     }
+    ],
     "name": "weight",
     "num_calls": 1,
     "num_params": 32,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 4,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      8,
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "linear_3_29"
     ],
     "used_by_ops": [
      "linear_3_29:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "240b56ae0407833f60805bcf39ce418e577179337f644ebc7181d826bcbc8d7f",
+     "shape": [
+      8,
+      4
+     ]
+    }
    },
    "encoder.linear2.bias": {
     "_derived_grad_record_path": null,
@@ -100460,37 +100874,67 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "4438fcbf72f38693e18fed0b7ef6e1064b822460f7a510fff7a833eeb4598204",
+     "shape": [
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.linear2"
+    },
     "module_address": "encoder.linear2",
     "module_cls": null,
     "module_name": "linear2",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.linear2"
+     }
+    ],
     "name": "bias",
     "num_calls": 1,
     "num_params": 4,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 7,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "linear_4_32"
     ],
     "used_by_ops": [
      "linear_4_32:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "4438fcbf72f38693e18fed0b7ef6e1064b822460f7a510fff7a833eeb4598204",
+     "shape": [
+      4
+     ]
+    }
    },
    "encoder.linear2.weight": {
     "_derived_grad_record_path": null,
@@ -100514,38 +100958,70 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "7f07b4fb4d692bfe3b93c39064fb00a748d9ad63ddd0b351c9986e6a189f61b3",
+     "shape": [
+      4,
+      8
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.linear2"
+    },
     "module_address": "encoder.linear2",
     "module_cls": null,
     "module_name": "linear2",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.linear2"
+     }
+    ],
     "name": "weight",
     "num_calls": 1,
     "num_params": 32,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 6,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      4,
      8
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "linear_4_32"
     ],
     "used_by_ops": [
      "linear_4_32:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "7f07b4fb4d692bfe3b93c39064fb00a748d9ad63ddd0b351c9986e6a189f61b3",
+     "shape": [
+      4,
+      8
+     ]
+    }
    },
    "encoder.norm1.bias": {
     "_derived_grad_record_path": null,
@@ -100569,37 +101045,67 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb",
+     "shape": [
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.norm1"
+    },
     "module_address": "encoder.norm1",
     "module_cls": null,
     "module_name": "norm1",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.norm1"
+     }
+    ],
     "name": "bias",
     "num_calls": 1,
     "num_params": 4,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 9,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "layernorm_1_28"
     ],
     "used_by_ops": [
      "layernorm_1_28:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb",
+     "shape": [
+      4
+     ]
+    }
    },
    "encoder.norm1.weight": {
     "_derived_grad_record_path": null,
@@ -100623,37 +101129,67 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "f6bb1294da2f78cd935b01c7656280df5eaa0439e9d97bc03775825a41a508e4",
+     "shape": [
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.norm1"
+    },
     "module_address": "encoder.norm1",
     "module_cls": null,
     "module_name": "norm1",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.norm1"
+     }
+    ],
     "name": "weight",
     "num_calls": 1,
     "num_params": 4,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 8,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "layernorm_1_28"
     ],
     "used_by_ops": [
      "layernorm_1_28:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "f6bb1294da2f78cd935b01c7656280df5eaa0439e9d97bc03775825a41a508e4",
+     "shape": [
+      4
+     ]
+    }
    },
    "encoder.norm2.bias": {
     "_derived_grad_record_path": null,
@@ -100677,37 +101213,67 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb",
+     "shape": [
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.norm2"
+    },
     "module_address": "encoder.norm2",
     "module_cls": null,
     "module_name": "norm2",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.norm2"
+     }
+    ],
     "name": "bias",
     "num_calls": 1,
     "num_params": 4,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 11,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "layernorm_2_35"
     ],
     "used_by_ops": [
      "layernorm_2_35:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb",
+     "shape": [
+      4
+     ]
+    }
    },
    "encoder.norm2.weight": {
     "_derived_grad_record_path": null,
@@ -100731,37 +101297,67 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "f6bb1294da2f78cd935b01c7656280df5eaa0439e9d97bc03775825a41a508e4",
+     "shape": [
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.norm2"
+    },
     "module_address": "encoder.norm2",
     "module_cls": null,
     "module_name": "norm2",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.norm2"
+     }
+    ],
     "name": "weight",
     "num_calls": 1,
     "num_params": 4,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 10,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "layernorm_2_35"
     ],
     "used_by_ops": [
      "layernorm_2_35:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "f6bb1294da2f78cd935b01c7656280df5eaa0439e9d97bc03775825a41a508e4",
+     "shape": [
+      4
+     ]
+    }
    },
    "encoder.self_attn.in_proj_bias": {
     "_derived_grad_record_path": null,
@@ -100785,37 +101381,67 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "17b0761f87b081d5cf10757ccc89f12be355c70e2e29df288b65b30710dcbcd1",
+     "shape": [
+      12
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.self_attn"
+    },
     "module_address": "encoder.self_attn",
     "module_cls": null,
     "module_name": "self_attn",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.self_attn"
+     }
+    ],
     "name": "in_proj_bias",
     "num_calls": 1,
     "num_params": 12,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 1,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      12
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "linear_1_2"
     ],
     "used_by_ops": [
      "linear_1_2:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "17b0761f87b081d5cf10757ccc89f12be355c70e2e29df288b65b30710dcbcd1",
+     "shape": [
+      12
+     ]
+    }
    },
    "encoder.self_attn.in_proj_weight": {
     "_derived_grad_record_path": null,
@@ -100839,38 +101465,70 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "9c44e55fa865ea17d06542d6269a5f64350b75372dea7c3a41ce755ba9533e07",
+     "shape": [
+      12,
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": {
+     "__ref__": "Module",
+     "label": "encoder.self_attn"
+    },
     "module_address": "encoder.self_attn",
     "module_cls": null,
     "module_name": "self_attn",
-    "modules": [],
+    "modules": [
+     {
+      "__ref__": "Module",
+      "label": "encoder.self_attn"
+     }
+    ],
     "name": "in_proj_weight",
     "num_calls": 1,
     "num_params": 48,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 0,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      12,
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "linear_1_2"
     ],
     "used_by_ops": [
      "linear_1_2:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "9c44e55fa865ea17d06542d6269a5f64350b75372dea7c3a41ce755ba9533e07",
+     "shape": [
+      12,
+      4
+     ]
+    }
    },
    "encoder.self_attn.out_proj.bias": {
     "_derived_grad_record_path": null,
@@ -100894,37 +101552,59 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb",
+     "shape": [
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": "<raises KeyError>",
     "module_address": "encoder.self_attn.out_proj",
-    "module_cls": null,
+    "module_cls": "<raises KeyError>",
     "module_name": "out_proj",
-    "modules": [],
+    "modules": "<raises KeyError>",
     "name": "bias",
     "num_calls": 1,
     "num_params": 4,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 3,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "linear_2_23"
     ],
     "used_by_ops": [
      "linear_2_23:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb",
+     "shape": [
+      4
+     ]
+    }
    },
    "encoder.self_attn.out_proj.weight": {
     "_derived_grad_record_path": null,
@@ -100948,38 +101628,62 @@
     "grad_shape": null,
     "gradient_memory": "<measured>",
     "grads": "<torchlens.data_classes.op.GradientRecordAccessor>",
-    "handle": null,
+    "handle": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "d1267c88428e01b0dbe2b53d70b6eac8ae1f6d83dc1da2bcd3122def0299d994",
+     "shape": [
+      4,
+      4
+     ]
+    },
     "has_grad": false,
     "has_multiple_addresses": false,
     "has_optimizer": null,
     "is_quantized": false,
     "is_trainable": true,
-    "module": null,
+    "module": "<raises KeyError>",
     "module_address": "encoder.self_attn.out_proj",
-    "module_cls": null,
+    "module_cls": "<raises KeyError>",
     "module_name": "out_proj",
-    "modules": [],
+    "modules": "<raises KeyError>",
     "name": "weight",
     "num_calls": 1,
     "num_params": 16,
     "num_uses_by_layers": 1,
     "num_uses_by_ops": 1,
-    "ordinal_index": -1,
+    "ordinal_index": 2,
     "param_memory": "<measured>",
     "resolver_status": "resolved",
     "shape": [
      4,
      4
     ],
-    "source_trace": null,
-    "trace": null,
+    "source_trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
+    "trace": {
+     "__ref__": "Trace",
+     "label": null
+    },
     "used_by_layers": [
      "linear_2_23"
     ],
     "used_by_ops": [
      "linear_2_23:1"
     ],
-    "value": null
+    "value": {
+     "__tensor__": true,
+     "dtype": "torch.float32",
+     "requires_grad": true,
+     "sha256": "d1267c88428e01b0dbe2b53d70b6eac8ae1f6d83dc1da2bcd3122def0299d994",
+     "shape": [
+      4,
+      4
+     ]
+    }
    }
   },
   "trace": {

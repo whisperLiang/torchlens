@@ -26,9 +26,12 @@ value); facade descriptors translate ``_MISSING`` into the exact
 
 from __future__ import annotations
 
-from typing import Any, Iterator
+from collections.abc import Callable, Iterator
+from typing import Any
 
 import numpy as np
+
+from .groups import GroupRef, MembershipGroups
 
 #: Unset-cell sentinel; distinct from None (a real storable value).
 _MISSING = object()
@@ -67,7 +70,7 @@ class OpStoreLayout:
         dynamic runtime slots).
     """
 
-    __slots__ = ("names", "fid_by_name", "n_fields")
+    __slots__ = ("fid_by_name", "n_fields", "names")
 
     def __init__(self, names: tuple[str, ...]) -> None:
         """Freeze the layout for ``names``."""
@@ -90,7 +93,7 @@ class _FrozenColumn:
         Whether ``values`` is a numpy array requiring ``.item()`` on read.
     """
 
-    __slots__ = ("values", "present", "packed")
+    __slots__ = ("packed", "present", "values")
 
     def __init__(self, values: Any, present: bytearray | None, packed: bool) -> None:
         """Bind backing storage produced by ``OpRowStore.freeze``."""
@@ -130,15 +133,16 @@ class OpRowStore:
     """
 
     __slots__ = (
-        "layout",
-        "_rows",
         "_columns",
-        "_overlay",
+        "_cow_shared",
         "_n_rows",
+        "_overlay",
+        "_rows",
         "_sealed",
         "dataflow_edges",
-        "ref_labels",
         "fact_blocks",
+        "layout",
+        "ref_labels",
     )
 
     def __init__(self, layout: OpStoreLayout) -> None:
@@ -150,6 +154,13 @@ class OpRowStore:
         self._overlay: dict[int, Any] = {}
         self._n_rows = 0
         self._sealed = False
+        # Sticky flag set by the first OpStoreView taken over this store
+        # (M11 COW fork). Once shared, deletes must stop releasing object
+        # column cells IN PLACE — a fork reads the same column backing —
+        # and tombstone through the overlay instead. Memory-only effect:
+        # a removed op's payloads on a forked-from trace are released with
+        # the store rather than at removal time.
+        self._cow_shared = False
         # The M6 dataflow family: bound at the freeze-time relation
         # conversion (same EdgeTable object registered in the owning
         # TraceCore's edge registry) together with the row -> reference-label
@@ -243,7 +254,7 @@ class OpRowStore:
         columns = self._columns
         assert columns is not None
         column = columns[fid]
-        if column.packed:
+        if column.packed or self._cow_shared:
             self._overlay[key] = _MISSING
         else:
             self._overlay.pop(key, None)
@@ -431,7 +442,7 @@ class DetachedOpStore:
         Shared field layout.
     """
 
-    __slots__ = ("layout", "_cells")
+    __slots__ = ("_cells", "layout")
 
     #: Detached rows never carry CSR-backed relations or shared-fact cells
     #: (class-level constants so the facade descriptors can probe both store
@@ -500,3 +511,286 @@ class DetachedOpStore:
         import sys
 
         return sys.getsizeof(self) + sys.getsizeof(self._cells)
+
+
+#: Exact types returned uncopied (and untranslated) by the COW copier.
+_COW_ATOMIC = frozenset(
+    {str, int, float, bool, bytes, complex, type(None)}
+)
+
+
+def cow_copy_value(value: Any, translate: Callable[[Any], Any] | None) -> Any:
+    """Structurally copy one COW-read value for fork-side isolation.
+
+    Exact builtin containers are rebuilt (so fork-side in-place mutation can
+    never reach the shared base); ``translate`` maps parent record facades to
+    their fork facades (returning ``None`` for non-records); every other
+    object — tensors, callables, interned immutables, quantity subclasses —
+    is returned by identity, preserving the fork's payload-sharing contract.
+    All-identity tuples/frozensets return the original object so interned
+    immutable views stay shared.
+    """
+
+    cls = value.__class__
+    if cls in _COW_ATOMIC:
+        return value
+    if cls is dict:
+        return {
+            cow_copy_value(key, translate): cow_copy_value(item, translate)
+            for key, item in value.items()
+        }
+    if cls is list:
+        return [cow_copy_value(item, translate) for item in value]
+    if cls is set:
+        return {cow_copy_value(item, translate) for item in value}
+    if cls is tuple or cls is frozenset:
+        copied = [cow_copy_value(item, translate) for item in value]
+        for original, item_copy in zip(value, copied):
+            if original is not item_copy:
+                return cls(copied)
+        return value
+    if translate is not None:
+        mapped = translate(value)
+        if mapped is not None:
+            return mapped
+    return value
+
+
+class _ViewFactBlocks:
+    """Fact-block adapter isolating hydrated containers for one fork view."""
+
+    __slots__ = ("_base", "_view")
+
+    def __init__(self, base: Any, view: OpStoreView) -> None:
+        """Bind the base fact blocks and the owning view."""
+
+        self._base = base
+        self._view = view
+
+    def hydrate(self, row: int, name: str) -> Any:
+        """Hydrate one shared fact, translating record members for the fork."""
+
+        return cow_copy_value(
+            self._base.hydrate(row, name), self._view.record_translator
+        )
+
+
+class OpStoreView:
+    """Per-fork COW view over one sealed base store (the M11 fork substrate).
+
+    The view shares the base's frozen storage and isolates everything mutable:
+
+    * Fork writes and deletes land in the view's own overlay, never the base.
+    * The base's post-freeze overlay is SNAPSHOT at construction (row-major
+      sealed bases snapshot their row lists instead), so parent writes after
+      the fork stay invisible in both directions.
+    * Reads of exact builtin mutable containers are isolated copy-on-first-
+      read into the view overlay, preserving the fork-mutation isolation the
+      object-graph forkcopier provided (tensors/callables inside stay shared
+      by identity — the payload-sharing fork contract).
+    * ``GroupRef`` cells translate to the fork core's cloned group tables, so
+      removal scrub on either trace never reaches the other.
+    * Record facades inside containers and hydrated fact blocks translate
+      through ``record_translator`` (installed by the fork builder) to the
+      fork's own facades.
+
+    Non-builtin mutable cell values (custom objects) are shared by identity —
+    the same residual the shallow fork path already accepted for
+    replay-unaffected fields.
+    """
+
+    __slots__ = (
+        "_base_overlay",
+        "_base_rows",
+        "_group_refs",
+        "_group_tables",
+        "_overlay",
+        "base",
+        "fact_blocks",
+        "record_translator",
+    )
+
+    def __init__(
+        self,
+        base: "OpRowStore | OpStoreView",
+        group_tables: dict[int, MembershipGroups] | None = None,
+    ) -> None:
+        """Snapshot ``base`` (which must be sealed) into a COW view.
+
+        ``base`` may itself be an ``OpStoreView`` (fork of a fork): the new
+        view flattens onto the ROOT store, snapshotting the parent view's
+        effective overlay (its private base snapshot plus its own writes) —
+        the parent view never mutates its base snapshot, so sharing the
+        row snapshot list is safe.
+        """
+
+        if not base.frozen:
+            raise RuntimeError("OpStoreView requires a sealed base store")
+        self.base: OpRowStore
+        self._base_rows: list[list[Any]] | None
+        self._base_overlay: dict[int, Any]
+        if isinstance(base, OpStoreView):
+            self.base = base.base
+            self._base_rows = base._base_rows
+            self._base_overlay = {**base._base_overlay, **base._overlay}
+        else:
+            self.base = base
+            base._cow_shared = True
+            base_rows = base._rows
+            if base_rows is not None:
+                # Sealed row-major base: writes/deletes mutate rows in
+                # place, so the view snapshots the row lists (cheap under
+                # the transpose threshold) and ignores the live cells
+                # thereafter.
+                self._base_rows = [list(row_cells) for row_cells in base_rows]
+                self._base_overlay = {}
+            else:
+                self._base_rows = None
+                self._base_overlay = dict(base._overlay)
+        self._overlay: dict[int, Any] = {}
+        self._group_tables = group_tables
+        self._group_refs: dict[tuple[int, int], GroupRef] = {}
+        self.record_translator: Callable[[Any], Any] | None = None
+        self.fact_blocks = (
+            _ViewFactBlocks(self.base.fact_blocks, self)
+            if self.base.fact_blocks is not None
+            else None
+        )
+
+    def __len__(self) -> int:
+        """Return the base row count."""
+
+        return len(self.base)
+
+    @property
+    def layout(self) -> OpStoreLayout:
+        """Return the shared field layout."""
+
+        return self.base.layout
+
+    @property
+    def dataflow_edges(self) -> Any:
+        """Return the shared (frozen) dataflow edge table."""
+
+        return self.base.dataflow_edges
+
+    @property
+    def ref_labels(self) -> Any:
+        """Return the shared row -> reference-label table."""
+
+        return self.base.ref_labels
+
+    @property
+    def frozen(self) -> bool:
+        """Return ``True``: views only exist over sealed bases."""
+
+        return True
+
+    def new_row(self) -> int:
+        """Refuse: fork views never append rows."""
+
+        raise RuntimeError("op store view is frozen; no new rows may be appended")
+
+    def adopt_row(self, cells: list[Any]) -> int:
+        """Refuse: fork views never adopt rows."""
+
+        raise RuntimeError("op store view is frozen; no new rows may be appended")
+
+    def rows_building(self) -> None:
+        """Return ``None``: a view is never in the building phase."""
+
+        return
+
+    def _translate_group_ref(self, ref: GroupRef) -> GroupRef:
+        """Return the fork-side ref for one shared group cell."""
+
+        tables = self._group_tables
+        if tables is None:
+            return ref
+        clone = tables.get(id(ref.groups))
+        if clone is None:
+            return ref
+        key = (id(ref.groups), ref.group_id)
+        fork_ref = self._group_refs.get(key)
+        if fork_ref is None:
+            fork_ref = GroupRef(clone, ref.group_id)
+            self._group_refs[key] = fork_ref
+        return fork_ref
+
+    def _isolate(self, key: int, value: Any) -> Any:
+        """Isolate one base-read value, caching fork copies in the overlay."""
+
+        if value is _MISSING or value is _CSR or value is _FACT:
+            return value
+        cls = value.__class__
+        if cls in _COW_ATOMIC:
+            return value
+        if cls is GroupRef:
+            fork_ref = self._translate_group_ref(value)
+            if fork_ref is not value:
+                self._overlay[key] = fork_ref
+            return fork_ref
+        if cls is dict or cls is list or cls is set or cls is tuple or cls is frozenset:
+            copied = cow_copy_value(value, self.record_translator)
+            self._overlay[key] = copied
+            return copied
+        translate = self.record_translator
+        if translate is not None:
+            mapped = translate(value)
+            if mapped is not None:
+                self._overlay[key] = mapped
+                return mapped
+        return value
+
+    def cell_get(self, row: int, fid: int) -> Any:
+        """Return one cell value with fork-side isolation applied."""
+
+        key = row * self.base.layout.n_fields + fid
+        value = self._overlay.get(key, _NO_OVERLAY)
+        if value is not _NO_OVERLAY:
+            return value
+        value = self._base_overlay.get(key, _NO_OVERLAY)
+        if value is _NO_OVERLAY:
+            base_rows = self._base_rows
+            if base_rows is not None:
+                value = base_rows[row][fid]
+            else:
+                columns = self.base._columns
+                assert columns is not None
+                value = columns[fid].get(row)
+        return self._isolate(key, value)
+
+    def cell_set(self, row: int, fid: int, value: Any) -> None:
+        """Write one cell into the fork overlay."""
+
+        self._overlay[row * self.base.layout.n_fields + fid] = value
+
+    def cell_del(self, row: int, fid: int) -> bool:
+        """Tombstone one cell in the fork overlay; report prior presence."""
+
+        if self.cell_get(row, fid) is _MISSING:
+            return False
+        self._overlay[row * self.base.layout.n_fields + fid] = _MISSING
+        return True
+
+    def items(self, row: int) -> Iterator[tuple[str, Any]]:
+        """Yield ``(field_name, value)`` for every set cell in layout order."""
+
+        names = self.base.layout.names
+        for fid, name in enumerate(names):
+            value = self.cell_get(row, fid)
+            if value is not _MISSING:
+                yield name, value
+
+    def retained_bytes(self) -> int:
+        """Return shallow structural bytes retained by this view alone."""
+
+        import sys
+
+        total = sys.getsizeof(self) + sys.getsizeof(self._overlay)
+        total += sys.getsizeof(self._base_overlay)
+        if self._base_rows is not None:
+            total += sys.getsizeof(self._base_rows)
+            for row_cells in self._base_rows:
+                total += sys.getsizeof(row_cells)
+        return total

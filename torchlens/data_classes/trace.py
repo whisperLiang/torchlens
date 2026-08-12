@@ -373,10 +373,6 @@ _MISSING_ATTR_HINTS: dict[str, str] = {
         "or forward_peak_memory for the measured runtime peak."
     ),
 }
-# Traces whose Op metadata has already been pooled by ``_compact_op_metadata``.
-# Held weakly and OFF the Trace itself so no new field enters ``__dict__``,
-# pickle state, or a portable artifact.
-_COMPACTED_TRACES: "weakref.WeakSet[Trace]" = weakref.WeakSet()
 
 
 def _raise_missing_trace_attribute(trace: "Trace", name: str) -> Any:
@@ -1039,46 +1035,6 @@ class Trace(
 
         stream = self.__dict__.get("capture_events") or self.__dict__.get("_capture_events")
         return list(getattr(stream, "buffer_write_events", ()) or ())
-
-    def _compact_op_metadata(self) -> None:
-        """Collapse repeated immutable Op metadata onto shared instances.
-
-        A finished graph stores the same dtype name, module address, ancestor
-        label, and zero-valued quantity once per op, so Python metadata grows
-        with ``#ops x #repeated facts`` rather than with the number of distinct
-        facts. One pass at the end of postprocessing pools those values; the
-        pool is dropped on return, so nothing is retained process-wide.
-
-        Field values are unchanged -- see :func:`~torchlens.data_classes.op._pool_key`
-        for why pooling is injective, and ``Op._compact_metadata`` for the
-        per-field walk. Running it more than once is a no-op beyond the first.
-        """
-
-        if self in _COMPACTED_TRACES:
-            return
-        ops = self.__dict__.get("layer_list")
-        if not ops:
-            return
-        _COMPACTED_TRACES.add(self)
-        pool: Dict[Any, Any] = {}
-        core = self.__dict__.get("_trace_core")
-        store = core.ops if core is not None else None
-        if store is not None:
-            # Core-backed ops pool in ONE column-major sweep over the row
-            # cells (same ladder, same skips as the per-op walk) without
-            # paying the attribute protocol per field.
-            from .op import _compact_store_rows
-
-            _compact_store_rows(store, pool)
-        seen_ops: set[int] = set()
-        for op in ops:
-            op_id = id(op)
-            if op_id in seen_ops:
-                continue
-            seen_ops.add(op_id)
-            if store is not None and getattr(op, "_core", None) is store:
-                continue
-            op._compact_metadata(pool)
 
     backend: BackendName
     backend_runtime_config: dict[str, Any] | None

@@ -380,6 +380,51 @@ then per-trace store views + COW fork + transactions, then forkcopier
 deletion with the fork/rollback/payload-alias/parent-run/GC parity proof,
 then the weak-valued flip against the aliases-v1 lifetime rows.
 
+M11 as-landed disposition (2026-08-12): dependency (b) resolved WITHOUT the
+full trace-side map relocation — the maps' object entries already carry
+their row ids, so the fork MATERIALIZES fresh facades by row (two-word
+shells over `OpStoreView`s; a record-identity translator remaps every
+record reference reached through cells, hydrated fact blocks, and the
+policy-driven trace-field pass), which is exactly "resolving through the
+core index" with the parent object as carrier. Public map types are
+unchanged (`FieldPolicy.KEEP`, surface-v1-pinned); the maps->indexes
+relocation proper stays with the named M10 physical-decomposition slice
+(the 220-property component move) and no longer blocks anything.
+`OpStoreView` supplies dependency (a): sealed-base sharing, per-fork
+overlay, base-overlay/row snapshot at fork, copy-on-first-read isolation
+for exact builtin containers (tensor/callable identity preserved — the
+payload-sharing contract), GroupRef translation to per-fork cloned group
+tables, and cell-stored accessor rebuilds. The fork core is the facade
+cache's first production consumer, discharging (c): the cache flipped
+weak-valued with ONE documented carve-out — `Op` deliberately refuses
+weak references (aliases-v1 row 1b pins the refusal), so non-weakref-able
+facades fall to a strong side table; op lifetime stays carried by the
+trace-side lookup containers either way. The forkcopier (typed deepcopy
+engine + per-field object-graph copier) is DELETED; the standalone
+compaction passes folded into the freeze seam
+(`data_classes/_compaction.py`, invoked next to `_compact_ancestor_sets`
+at the core freeze); `TraceCore.transaction()` checkpoints core overlay +
+store overlays/sealed rows + backward epochs atomically. Named remainders,
+honestly out of the wave: the direct cell-streaming serialization writer
+(save/pickle already flow through the explicit per-class semantic state
+protocol; bypassing the descriptor layer is a perf increment gated on its
+own byte-identity experiment) and the generic state-walker fallback, which
+stays for arbitrary nested scrub/rehydrate values — every core record class
+now provably defines both explicit protocol hooks (tripwire in
+`test_state_adapter.py`), so the generic branch never fires for records.
+Known COW semantics change (documented, unpinned): a parent's in-place
+mutation of a stored mutable container between fork time and the fork's
+first read of that cell is visible to the fork (read-time snapshot); the
+pinned fork->parent isolation direction holds unconditionally.
+GC parity is preserved exactly (parent Trace collectable while a fork
+lives): the MODULE kind table is deliberately NOT viewed — its cells embed
+accessor objects whose ``ModuleCall`` members hold a strong trace
+reference, so a view would keep the parent reachable — fork modules
+duplicate as detached rows with translated cells (they are few); and the
+record translator uses weakref guards for id-recycling protection instead
+of pinning parent records (only non-weakref-able ``Op`` facades, which
+hold no strong trace reference, are pinned).
+
 ## 5. JMT forks (reserved decisions; the plan assumes every default)
 
 1. **JMT-FORK-1 — DECIDED 2026-08-12: immutable views.** Relation accessors

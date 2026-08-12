@@ -290,3 +290,50 @@ def test_field_order_state_coverage_on_live_records() -> None:
             f"state_items (would silently drop from save/pickle/scrub): "
             f"{dropped}"
         )
+
+
+@pytest.mark.smoke
+def test_every_record_class_owns_its_explicit_state_protocol() -> None:
+    """Core record classes never take the generic introspection fallback.
+
+    M11 disposition of the "generic core-record state walker": the generic
+    ``__dict__``/slots branch of ``state_items``/``state_restore`` stays for
+    arbitrary nested values (scrub/rehydrate walk user objects), but every
+    core record class must define BOTH explicit protocol hooks so the
+    generic branch provably never fires for a record. A record class losing
+    its hook would silently fall back to storage introspection — exactly
+    the state-adapter blindness the M2 protocol closed.
+    """
+
+    from torchlens.data_classes.backward_pass import BackwardPass
+    from torchlens.data_classes.buffer import Buffer
+    from torchlens.data_classes.func_call_location import FuncCallLocation
+    from torchlens.data_classes.grad_fn import GradFn
+    from torchlens.data_classes.grad_fn_call import GradFnCall
+    from torchlens.data_classes.layer import Layer
+    from torchlens.data_classes.module import Module, ModuleCall
+    from torchlens.data_classes.op import Op
+    from torchlens.data_classes.param import Param
+
+    record_classes = (
+        Op,
+        Layer,
+        Module,
+        ModuleCall,
+        Param,
+        Buffer,
+        FuncCallLocation,
+        GradFn,
+        GradFnCall,
+        BackwardPass,
+    )
+    missing = [
+        cls.__name__
+        for cls in record_classes
+        if getattr(cls, "__tl_state_items__", None) is None
+        or getattr(cls, "__tl_state_restore__", None) is None
+    ]
+    assert not missing, (
+        f"record classes without an explicit state protocol (would take the "
+        f"generic walker): {missing}"
+    )

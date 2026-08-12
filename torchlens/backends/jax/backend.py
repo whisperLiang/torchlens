@@ -16,6 +16,7 @@ from typing import Any, Final, cast
 
 from ..._deprecations import MISSING, MissingType
 from ...backends import BackendName, BackendUnsupportedError, get_backend_spec
+from ...data_classes._compaction import compact_op_metadata
 from ...data_classes.layer import Layer
 from ...data_classes.derived_grad import (
     DerivedGradAccessor,
@@ -2116,7 +2117,7 @@ class JAXBackend:
             trace.module_identity_mode = "pytree_module"
             self._attach_pytree_module_logs(trace, module_tree)
         trace._tracing_finished = True
-        trace._compact_op_metadata()
+        compact_op_metadata(trace)
         # The depth flood deliberately resolves ops through its own explicit
         # label index, NOT Trace.__getitem__ (finished-mode lookup returns
         # Layer objects, not the ops the flood must mutate); running it after

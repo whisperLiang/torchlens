@@ -40,6 +40,7 @@ import warnings
 from ..capture.session import capture_session_for_events
 from ..ir.capture_events import _clone_op_event_for_replay
 from ..backends.torch.ops import _compact_ancestor_sets
+from ..data_classes._compaction import compact_op_metadata as _compact_op_metadata
 from .._trace_core.relation_views import freeze_trace_relation_views as _freeze_relation_views
 from ..utils.tensor_utils import _is_cuda_available
 from ..utils.hashing import (
@@ -953,7 +954,11 @@ def postprocess(
     # freeze conversion below legitimately rewrites relation cells wholesale.
     _close_step_write_audit(self)
 
+    # The compaction passes belong to the freeze (M11 fold): ancestor
+    # closures intern into shared bitmaps and repeated immutable Op metadata
+    # pools onto shared instances, right before the physical seal.
     _compact_ancestor_sets(self)
+    _compact_op_metadata(self)
 
     # The core freeze point (trace_core_design.md section 3.3): forward
     # topology froze logically at step 17, the payload plane settled through

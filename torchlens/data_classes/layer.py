@@ -1131,6 +1131,18 @@ class Layer:
             if name not in _LAYER_STATE_ORDER_SET and value is not _LAYER_DELETED:
                 yield name, value
 
+    def __tl_state_restore__(self, mapping: Dict[str, Any]) -> None:
+        """Install a state mapping as per-layer ``__dict__`` shadows.
+
+        The explicit counterpart of ``__tl_state_items__`` (M11: no record
+        class relies on the generic introspection fallback). ``Layer`` is
+        dict-backed by design — restored fields become per-layer shadows over
+        the M8 mirror descriptors, byte-identical to the dict-era
+        ``__dict__.update``.
+        """
+
+        self.__dict__.update(mapping)
+
     def __getstate__(self) -> Dict[str, Any]:
         """Return pickle state with weakrefs and raw autograd handles stripped."""
         from ._state_adapter import state_items

@@ -281,8 +281,14 @@ def test_differentiable_replay_patching_captures_backward_grads() -> None:
     assert last_run["differentiable"] is True
 
 
-def test_differentiable_replay_deep_copies_only_replay_cone_ops() -> None:
-    """Differentiable replay uses a shallow untouched-op fork."""
+def test_differentiable_replay_forks_isolated_records() -> None:
+    """Differentiable replay forks COW records isolated from the source.
+
+    The M11 COW fork replaced the deep-cone/shallow-rest forkcopier split:
+    every fork Op is a fresh facade over shared frozen storage, so the
+    history record now carries the replay cone for provenance only, and the
+    isolation contract holds uniformly inside and outside the cone.
+    """
 
     x = torch.tensor([-1.0, 0.5, 2.0], requires_grad=True)
     log = tl.trace(
@@ -303,13 +309,13 @@ def test_differentiable_replay_deep_copies_only_replay_cone_ops() -> None:
     )
     fork_payload = cast(dict[str, Any], fork_record)
     last_run = cast(dict[str, Any], replayed.last_run)
-    deep_copy_labels = set(fork_payload["deep_copy_layer_labels"])
+    source_cone_labels = set(fork_payload["source_cone_labels"])
     replay_cone_labels = set(last_run["cone"])
     all_labels = {site.layer_label for site in log.layer_list}
     outside_cone_label = next(iter(all_labels - replay_cone_labels))
 
-    assert deep_copy_labels == replay_cone_labels
-    assert deep_copy_labels < all_labels
+    assert source_cone_labels == replay_cone_labels
+    assert source_cone_labels < all_labels
     assert replayed[outside_cone_label] is not log[outside_cone_label]
     assert replayed[outside_cone_label].source_trace is replayed
     assert replayed[outside_cone_label].interventions is not log[outside_cone_label].interventions

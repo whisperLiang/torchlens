@@ -347,7 +347,7 @@ _FIDS_INIT_NONE = tuple(
 # object, so per-node footprint grows with (#ops x #repeated facts) instead of
 # with the number of DISTINCT facts.
 #
-# ``Trace._compact_op_metadata`` runs one pass at the end of postprocessing and
+# ``_compaction.compact_op_metadata`` runs one pass at the freeze seam and
 # replaces each such value with a single pooled instance.  The pool is local to
 # that pass and dropped afterwards, so nothing leaks process-wide the way
 # ``sys.intern`` would.
@@ -1781,8 +1781,8 @@ class Op:
     def _compact_metadata(self, pool: Dict[Any, Any]) -> None:
         """Replace repeated immutable metadata with pooled shared instances.
 
-        Called once per Op by :meth:`Trace._compact_op_metadata` after
-        postprocessing. Every field keeps a value that is ``==`` to, and of the
+        Called once per Op by :func:`~torchlens.data_classes._compaction.compact_op_metadata`
+        at the freeze seam. Every field keeps a value that is ``==`` to, and of the
         same exact class as, the one it had before; only the object identity of
         immutable values is collapsed. See the pooling block near the top of
         this module for the safety argument.

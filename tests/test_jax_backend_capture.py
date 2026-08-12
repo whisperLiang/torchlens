@@ -18,7 +18,7 @@ from torchlens.backends.jax.backend import (
     _data_parent_arg_positions,
     _data_parent_labels,
 )
-from torchlens.data_classes.trace import _COMPACTED_TRACES
+from torchlens.data_classes._compaction import _COMPACTED_TRACES
 from torchlens.intervention.types import EdgeUseRecord
 from torchlens.postprocess.graph_traversal import _remove_orphan_nodes
 from torchlens.validation.invariants import MetadataInvariantError

@@ -207,3 +207,134 @@ def test_partial_core_prototype() -> None:
     # No freeze: the builder is still authoritative and readable.
     assert core.read("op", row, "func_name") == "conv2d"
     assert not core.table("op").frozen
+
+
+@pytest.mark.smoke
+def test_op_store_view_cow_isolation() -> None:
+    """M11 store view: bidirectional write isolation + container copy-on-read."""
+
+    from torchlens._trace_core.op_store import (
+        _MISSING,
+        OpRowStore,
+        OpStoreLayout,
+        OpStoreView,
+    )
+
+    layout = OpStoreLayout(("alpha", "beta", "items"))
+    store = OpRowStore(layout)
+    row = store.new_row()
+    store.cell_set(row, 0, "base")
+    store.cell_set(row, 2, {"k": [1, 2]})
+    store.freeze()
+
+    view = OpStoreView(store)
+    view.cell_set(row, 0, "fork")
+    assert store.cell_get(row, 0) == "base"
+    store.cell_set(row, 0, "parent-after")
+    assert view.cell_get(row, 0) == "fork"
+    assert store.cell_get(row, 0) == "parent-after"
+
+    forked_container = view.cell_get(row, 2)
+    assert forked_container == {"k": [1, 2]}
+    forked_container["k"].append(3)
+    assert store.cell_get(row, 2) == {"k": [1, 2]}
+    assert view.cell_get(row, 2)["k"] == [1, 2, 3]
+
+    assert view.cell_del(row, 2)
+    assert view.cell_get(row, 2) is _MISSING
+    assert store.cell_get(row, 2) == {"k": [1, 2]}
+    with pytest.raises(RuntimeError):
+        view.new_row()
+
+
+@pytest.mark.smoke
+def test_op_store_view_translates_group_refs() -> None:
+    """Group cells resolve through the fork's cloned tables, scrub-isolated."""
+
+    from torchlens._trace_core.groups import GroupRef, MembershipGroups
+    from torchlens._trace_core.op_store import OpRowStore, OpStoreLayout
+
+    core = TraceCore()
+    table = MembershipGroups(frozenset)
+    core.groups["equivalent_ops"] = table
+    group_id = table.add({"a", "b"})
+    ref = GroupRef(table, group_id)
+
+    layout = OpStoreLayout(("equivalent_ops",))
+    store = OpRowStore(layout)
+    row = store.new_row()
+    store.cell_set(row, 0, ref)
+    store.freeze()
+    core.ops = store
+
+    fork_core = core.fork()
+    fork_ref = fork_core.ops.cell_get(row, 0)
+    assert isinstance(fork_ref, GroupRef)
+    assert fork_ref is not ref
+    assert fork_ref.view() == frozenset({"a", "b"})
+    assert fork_ref.view() is not ref.view()
+
+    # Scrub on the parent never reaches the fork, and vice versa.
+    table.replace(group_id, {"a"})
+    assert fork_ref.view() == frozenset({"a", "b"})
+    fork_core.groups["equivalent_ops"].replace(group_id, set())
+    assert ref.view() == frozenset({"a"})
+
+
+@pytest.mark.smoke
+def test_core_transaction_rolls_back_stores_and_epochs() -> None:
+    """One transaction restores core overlay, store overlays, and epochs."""
+
+    from torchlens._trace_core.op_store import OpRowStore, OpStoreLayout
+
+    core = TraceCore()
+    layout = OpStoreLayout(("alpha",))
+    store = OpRowStore(layout)
+    row = store.new_row()
+    store.cell_set(row, 0, "committed")
+    store.freeze()
+    core.ops = store
+    kind_row = core.table("module").new_row()
+    core.freeze()
+    core.write("module", kind_row, "address", "committed-address")
+
+    txn = core.transaction()
+    store.cell_set(row, 0, "dirty")
+    core.write("module", kind_row, "address", "dirty-address")
+    core.backward_epochs.append(object())
+    txn.rollback()
+
+    assert store.cell_get(row, 0) == "committed"
+    assert core.read("module", kind_row, "address") == "committed-address"
+    assert core.backward_epochs == []
+
+
+@pytest.mark.smoke
+def test_facade_cache_weak_valued_with_strong_fallback() -> None:
+    """The facade cache never pins unreferenced weak-able facades (M11 flip)."""
+
+    import weakref
+
+    class _WeakFacade:
+        """Weak-referenceable facade stand-in."""
+
+    core = TraceCore()
+    row = core.table("op").new_row()
+    core.set_facade_factory(lambda kind, r: _WeakFacade())
+    first = core.facade("op", row)
+    assert core.facade("op", row) is first
+    facade_ref = weakref.ref(first)
+    del first
+    gc.collect()
+    assert facade_ref() is None, "weak-valued cache must not pin a dropped facade"
+    assert isinstance(core.facade("op", row), _WeakFacade)
+
+    # Facade classes that refuse weak references (Op) stay strongly held.
+    strong_core = TraceCore()
+    strong_row = strong_core.table("op").new_row()
+    strong_core.set_facade_factory(lambda kind, r: {"row": r})
+    held = strong_core.facade("op", strong_row)
+    assert strong_core.facade("op", strong_row) is held
+    del held
+    gc.collect()
+    assert strong_core.facade("op", strong_row) == {"row": strong_row}

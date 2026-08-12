@@ -30,13 +30,18 @@ class MembershipGroups:
         (recurrence).
     """
 
-    __slots__ = ("view_type", "_views")
+    __slots__ = ("_source_tables", "_views", "view_type")
 
     def __init__(self, view_type: type) -> None:
         """Create an empty group table."""
 
         self.view_type = view_type
         self._views: list[Any] = []
+        # Ancestor tables this table was cloned from (fork chains): pinned so
+        # a GroupRef bound to ANY ancestor — the root refs live in shared
+        # base storage — translates to this fork's clone by identity, and no
+        # recycled id can mistranslate.
+        self._source_tables: tuple["MembershipGroups", ...] = ()
 
     def __len__(self) -> int:
         """Return the number of group rows."""

@@ -187,7 +187,22 @@ exclusive with backward-related capture because it discards the autograd graph.
   its exact op-store COLUMN write set, enforced under
   `TORCHLENS_POSTPROCESS_ASSERTIONS` by a zero-cost-when-off write audit
   (class-swap instrumentation in `op_store.py`); widening a set is a
-  reviewed contract diff. Architecture of record:
+  reviewed contract diff.
+  M11: `Trace.fork()` is COPY-ON-WRITE (`data_classes/_trace_fork.py`): the
+  fork core wraps the sealed op store and every kind table in per-fork
+  `OpStoreView`s (own overlay; base overlay/rows snapshot at fork;
+  copy-on-first-read isolation for exact builtin containers with
+  tensor/callable identity preserved; GroupRef translation to cloned group
+  tables; record/accessor translation for cell-held references), fork
+  records are fresh two-word shells at the SAME rows, and only Layer shadow
+  dicts, record extras, and the policy-driven trace-side remainder are
+  copied. The object-graph forkcopier (typed deepcopy engine) is deleted;
+  differentiable replay forks drop the deep-cone/shallow-rest split. The
+  facade identity cache is weak-valued (strong side table only for
+  non-weakref-able `Op`, whose weakref refusal aliases-v1 pins); the
+  standalone compaction passes are folded into the core freeze seam
+  (`data_classes/_compaction.py`); `TraceCore.transaction()` checkpoints
+  every mutation surface atomically. Architecture of record:
   `docs/reference/trace_core_design.md`.
 - `backends/torch/` - torch function wrapping, explicit wrap/unwrap, module prep.
 - `fastlog/` - sparse predicate recording with RAM/disk storage and recovery.

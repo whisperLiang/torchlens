@@ -36,6 +36,16 @@ layer.ops             # dict[int, Op]
   legacy `run(model, x, ...)` remains the intervention-rerun compatibility path.
 - `graph_shape_hash` is computed before `_set_tracing_finished`.
 
+## Fork (M11)
+- `Trace.fork()` is COPY-ON-WRITE (`_trace_fork.build_fork`): fork records are
+  fresh two-word shells over per-fork `OpStoreView`s at the same rows; the
+  object-graph forkcopier (typed deepcopy engine) is deleted. Fork writes land
+  in view overlays; mutable builtin containers copy on first read; GroupRefs
+  translate to cloned group tables. Modules fork as detached duplicates (their
+  cells embed trace-strong accessors); coreless traces take the detached
+  fallback. Fork->parent isolation is pinned; parent in-place container
+  mutation before the fork's first read of that cell is visible to the fork.
+
 ## Op Gotchas
 - `Op.__slots__` is `("_core", "_row")` (M5 seam): fields are generated data
   descriptors over the per-trace `_trace_core` row store (detached single-row store

@@ -13,12 +13,13 @@ cache; base immutability makes sharing safe by construction.
 from __future__ import annotations
 
 import weakref
-from typing import Any, Callable, Iterator
+from collections.abc import Callable, Iterator
+from typing import Any
 
 from .columns import ColumnBuilder
-from .overlays import MISSING, RowOverlay
-from .payloads import PayloadArena
 from .groups import MembershipGroups
+from .overlays import MISSING, RowOverlay, Transaction
+from .payloads import PayloadArena
 from .pools import ClosurePool, InternPool
 from .relations import EdgeTable
 
@@ -26,7 +27,7 @@ from .relations import EdgeTable
 class KindTable:
     """Typed column block for one record kind."""
 
-    __slots__ = ("kind", "_columns", "_n_rows", "_frozen")
+    __slots__ = ("_columns", "_frozen", "_n_rows", "kind")
 
     def __init__(self, kind: str) -> None:
         """Create an empty table for ``kind``."""
@@ -99,20 +100,21 @@ class TraceCore:
     """One per-trace semantic store."""
 
     __slots__ = (
-        "tables",
-        "ops",
-        "kind_rows",
-        "label_rows",
-        "pool",
+        "__weakref__",
+        "_facade_factory",
+        "_facades",
+        "_strong_facades",
+        "backward_epochs",
         "closures",
         "edges",
         "groups",
-        "payloads",
+        "kind_rows",
+        "label_rows",
+        "ops",
         "overlay",
-        "_facades",
-        "_facade_factory",
-        "backward_epochs",
-        "__weakref__",
+        "payloads",
+        "pool",
+        "tables",
     )
 
     def __init__(self) -> None:
@@ -135,11 +137,16 @@ class TraceCore:
         self.groups: dict[str, MembershipGroups] = {}
         self.payloads = PayloadArena()
         self.overlay = RowOverlay()
-        # Strong facade cache first (byte-identical lifetime parity with the
-        # object graph); flips weak-valued at M11 per the design's
-        # strong-then-weak sequencing once the lifetime oracle proves no
-        # observable dependency on unreferenced-facade survival.
-        self._facades: dict[tuple[str, int], Any] = {}
+        # Weak-valued facade cache (the M11 strong->weak flip): identity is
+        # stable while ANY reference lives, and an uninspected row retains no
+        # facade. Record lifetime stays pinned by the trace-side lookup
+        # containers (aliases-v1 row 1b), never by this cache. ``Op`` is
+        # deliberately NOT weak-referenceable (aliases-v1 pins the refusal),
+        # so non-weakref-able facades fall back to the strong side table.
+        self._facades: "weakref.WeakValueDictionary[tuple[str, int], Any]" = (
+            weakref.WeakValueDictionary()
+        )
+        self._strong_facades: dict[tuple[str, int], Any] = {}
         self._facade_factory: Callable[[str, int], Any] | None = None
         self.backward_epochs: list[Any] = []
 
@@ -184,15 +191,26 @@ class TraceCore:
         self._facade_factory = factory
 
     def facade(self, kind: str, row: int) -> Any:
-        """Return the identity-cached facade for one row."""
+        """Return the identity-cached facade for one row.
+
+        Weak-valued: the cache guarantees ``facade(k, r) is facade(k, r)``
+        while any reference to the facade lives, and never pins an
+        unreferenced facade. Facades whose class refuses weak references
+        (``Op``) are held in the strong side table instead.
+        """
 
         key = (kind, row)
         cached = self._facades.get(key)
         if cached is None:
+            cached = self._strong_facades.get(key)
+        if cached is None:
             if self._facade_factory is None:
                 raise RuntimeError("no facade factory installed")
             cached = self._facade_factory(kind, row)
-            self._facades[key] = cached
+            try:
+                self._facades[key] = cached
+            except TypeError:
+                self._strong_facades[key] = cached
         return cached
 
     def freeze(self) -> None:
@@ -208,14 +226,46 @@ class TraceCore:
                 n_rows = max(len(table) for table in self.tables.values())
                 edges.freeze(n_rows, n_rows)
 
-    def fork(self) -> "TraceCore":
-        """COW fork: share the frozen base, detach mutation state."""
+    def fork(self) -> TraceCore:
+        """COW fork: share the frozen base, detach every mutation surface.
+
+        The fork receives ``OpStoreView`` wrappers over the sealed op store
+        and every kind table (fork writes land in per-view overlays), cloned
+        group tables (removal scrub on one trace never reaches the other),
+        its own label index and core overlay snapshot, a fresh facade cache,
+        and an empty backward-epoch list (fork projections rematerialize cold
+        from the fork's detached event stream).
+        """
+
+        from .op_store import OpStoreView
 
         child = TraceCore.__new__(TraceCore)
         child.tables = self.tables
-        child.ops = self.ops
-        child.kind_rows = self.kind_rows
-        child.label_rows = self.label_rows
+        group_tables: dict[int, MembershipGroups] = {}
+        child.groups = {}
+        for family, table in self.groups.items():
+            clone = MembershipGroups(table.view_type)
+            # Rebuild the view objects (not just the list): the parent and
+            # fork must never hand out the SAME live view object, matching
+            # the deepcopy fork's cross-trace distinctness. The inner list()
+            # defeats CPython's identity shortcut for frozenset(frozenset)/
+            # tuple(tuple).
+            clone._views = [table.view_type(list(view)) for view in table._views]
+            clone._source_tables = (*table._source_tables, table)
+            child.groups[family] = clone
+            # A GroupRef reachable through the fork's cells may bind THIS
+            # table or any ancestor (fork chains flatten onto root storage
+            # whose refs bind the root tables); all translate to the clone.
+            for source_table in clone._source_tables:
+                group_tables[id(source_table)] = clone
+        child.ops = (
+            OpStoreView(self.ops, group_tables) if self.ops is not None else None
+        )
+        child.kind_rows = {
+            kind: OpStoreView(store, group_tables)
+            for kind, store in self.kind_rows.items()
+        }
+        child.label_rows = dict(self.label_rows)
         child.pool = self.pool
         child.closures = self.closures
         child.edges = self.edges
@@ -223,12 +273,73 @@ class TraceCore:
         child.overlay = RowOverlay()
         for key, value in self.overlay.snapshot().items():
             child.overlay.write(key[0], key[1], value)
-        child._facades = {}
+        child._facades = weakref.WeakValueDictionary()
+        child._strong_facades = {}
         child._facade_factory = self._facade_factory
         child.backward_epochs = []
         return child
 
-    def weak_self(self) -> "weakref.ref[TraceCore]":
+    def store_views(self) -> Iterator[Any]:
+        """Yield every COW store view owned by this core (fork cores only)."""
+
+        from .op_store import OpStoreView
+
+        if isinstance(self.ops, OpStoreView):
+            yield self.ops
+        for store in self.kind_rows.values():
+            if isinstance(store, OpStoreView):
+                yield store
+
+    def view_for_store(self, store: Any) -> Any:
+        """Return this core's view over ``store``, or ``None``."""
+
+        for view in self.store_views():
+            if view.base is store:
+                return view
+        return None
+
+    def transaction(self) -> Transaction:
+        """Checkpoint every mutation surface for one atomic rollback.
+
+        Covers the core overlay, the op-store and kind-table overlays
+        (base stores and fork views alike), and the backward-epoch list —
+        the intervention-rollback substrate from the converged design.
+        Call ``rollback()`` on the returned transaction to restore all of
+        them atomically; dropping it commits.
+        """
+
+        txn = Transaction({"core": self.overlay})
+        stores = [self.ops, *self.kind_rows.values()]
+        for index, store in enumerate(stores):
+            if store is None:
+                continue
+
+            def _restore_store(snapshot: dict, _store: Any = store) -> None:
+                _store._overlay = dict(snapshot)
+
+            txn.stash(("store", index), dict(store._overlay), _restore_store)
+            # Sealed row-major stores (below the transpose threshold) write
+            # cells in place rather than through the overlay, so their rows
+            # checkpoint too.
+            rows = getattr(store, "_rows", None)
+            if rows is not None and store.frozen:
+
+                def _restore_rows(snapshot: list, _store: Any = store) -> None:
+                    _store._rows = [list(cells) for cells in snapshot]
+
+                txn.stash(
+                    ("store-rows", index),
+                    [list(cells) for cells in rows],
+                    _restore_rows,
+                )
+
+        def _restore_epochs(snapshot: list) -> None:
+            self.backward_epochs[:] = snapshot
+
+        txn.stash("epochs", list(self.backward_epochs), _restore_epochs)
+        return txn
+
+    def weak_self(self) -> weakref.ref[TraceCore]:
         """Return a weak reference to this core (facade back-pointer)."""
 
         return weakref.ref(self)

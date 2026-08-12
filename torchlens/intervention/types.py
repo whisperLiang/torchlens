@@ -743,11 +743,10 @@ def _build_trace_fork_policy() -> dict[str, ForkFieldPolicy]:
         reconstruct={"parent_run"},
     )
     # `_trace_core` (the columnar op row store) is not in MODEL_LOG_FIELD_ORDER
-    # (private runtime storage, FieldPolicy.DROP). The object-graph forkcopier
-    # recreates every Op as a detached-row shell, so deep-copying the parent's
-    # store would only produce an orphaned duplicate holding every payload
-    # tensor twice. Reconstruct (drop) it; the COW core fork replaces this
-    # forkcopier wholesale at M11.
+    # (private runtime storage, FieldPolicy.DROP). The generic field pass
+    # reconstructs (drops) it; the M11 COW fork builder installs the forked
+    # core (per-fork store views over the shared sealed base) explicitly
+    # after the field pass.
     table["_trace_core"] = ForkFieldPolicy.FORK_RECONSTRUCT
     return table
 
