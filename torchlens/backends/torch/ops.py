@@ -6121,6 +6121,19 @@ def _evaluate_trace_save_predicate(
     return spec, ctx
 
 
+def _module_filter_namespace(fields_dict: dict[str, Any]) -> SimpleNamespace:
+    """Build the legacy-shaped compatibility namespace ``module_filter`` sees.
+
+    The documented compatibility surface (producer unification 2.6): the
+    filter runs ONLY inside the exhaustive commit pipeline, and the namespace
+    carries the legacy key names WITHOUT ``fire_results`` (popped before the
+    filter today — preserved exactly). The decomposed producer builds this
+    same namespace lazily from its draft.
+    """
+
+    return SimpleNamespace(**fields_dict)
+
+
 def _make_layer_log_entry(
     self: "Trace",
     t: torch.Tensor,
@@ -6156,7 +6169,7 @@ def _make_layer_log_entry(
     keep_by_predicate = True
     module_filter = getattr(self, "module_filter", None)
     if module_filter is not None:
-        keep_by_predicate = bool(module_filter(SimpleNamespace(**fields_dict)))
+        keep_by_predicate = bool(module_filter(_module_filter_namespace(fields_dict)))
     layer_nums_to_save = cast(Any, self._layer_nums_to_save)
     raw_index = cast(int, fields_dict["raw_index"])
     predicate_spec, predicate_ctx = _evaluate_trace_save_predicate(self, fields_dict, t)

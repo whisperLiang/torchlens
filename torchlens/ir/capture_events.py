@@ -479,6 +479,24 @@ class CaptureEvents:
         self.grad_fn_handles_by_label_raw.clear()
         self.recent_events.clear()
 
+    def amended_op_records(self) -> list[OpEvent]:
+        """Return the canonical folded view of the op lane.
+
+        The ONE reducer every amended-state consumer reads (producer
+        unification P2). Today's in-place ``replace_op_event`` keeps the raw
+        list already folded, so this is a no-op passthrough; when the typed
+        amendment lane lands (P4), this becomes the amendment-seq-ordered
+        last-wins fold and the raw list becomes genuinely append-only. Raw
+        ``op_events`` reads for amended semantics are forbidden from P2 on.
+        """
+
+        return self.op_events
+
+    def amended_op_record(self, label_raw: str) -> OpEvent | None:
+        """Return one op record through the folded view."""
+
+        return self.op_event_by_label_raw.get(label_raw)
+
     def next_seq(self) -> int:
         """Return the next value of the one run-monotonic event sequence."""
 

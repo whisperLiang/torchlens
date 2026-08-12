@@ -380,7 +380,17 @@ def _snapshot_events(events: CaptureEvents) -> list[dict[str, Any]]:
         Raw-order operation event projections.
     """
 
-    return [_project_event(event) for event in events.op_events if event.kind == "op"]
+    # Producer-unification P2: every characterized record flows through the
+    # inverse oracle adapter (identity for compat OpEvents; reconstructs a
+    # genuine OpEvent for decomposed OpRecords from P3 on), so the UNCHANGED
+    # characterizer and its goldens survive the record-model migration.
+    from producer_parity._oracle_adapter import op_event_from_record
+
+    return [
+        _project_event(op_event_from_record(event))
+        for event in events.op_events
+        if event.kind == "op"
+    ]
 
 
 def _install_instrumentation() -> _Instrumentation:

@@ -810,6 +810,23 @@ _OPLOG_FIELDS_KNOWN_LATE = frozenset(
 )
 
 
+def _grad_fn_handle_from_index(trace: "Trace", event: OpEvent) -> Any:
+    """Read the live autograd handle from its single owner, the journal index.
+
+    grad_fn single ownership (producer unification P2): the journal's
+    ``grad_fn_handles_by_label_raw`` side index is the one handle authority.
+    The event-field fallback keeps byte-identity for detached streams until
+    the compat ``OpEvent`` field dies with the legacy producer.
+    """
+
+    events = getattr(trace, "capture_events", None)
+    if events is not None:
+        handle = events.grad_fn_handles_by_label_raw.get(event.label_raw)
+        if handle is not None:
+            return handle
+    return event.grad_fn_handle
+
+
 def _event_live_field(trace: "Trace", event: OpEvent, name: str) -> Any:
     """Return a forward-time field projected from an operation event.
 
@@ -953,9 +970,10 @@ def _event_live_field(trace: "Trace", event: OpEvent, name: str) -> Any:
     if name == "grad_fn_class_qualname":
         return event.grad_fn_class_qualname
     if name == "grad_fn_object_id":
-        return None if event.grad_fn_handle is None else id(event.grad_fn_handle)
+        handle = _grad_fn_handle_from_index(trace, event)
+        return None if handle is None else id(handle)
     if name == "grad_fn_handle":
-        return event.grad_fn_handle
+        return _grad_fn_handle_from_index(trace, event)
     if name == "grad_fn":
         return None
     if name == "in_multi_output":
