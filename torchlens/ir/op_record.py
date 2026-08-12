@@ -628,6 +628,21 @@ def record_with_flat_updates(record: "OpRecord", **updates: Any) -> "OpRecord":
     return dataclass_replace(record, **record_changes)
 
 
+def replace_op_fields(event: Any, **updates: Any) -> Any:
+    """Polymorphic flat-field replace over either journal record shape.
+
+    Compat ``OpEvent``s take a plain ``dataclasses.replace``; decomposed
+    ``OpRecord``s fold the same flat names onto facet paths. The P3 bridge
+    for the in-function update sites the P4 amendment migration will absorb.
+    """
+
+    from dataclasses import replace as dataclass_replace
+
+    if isinstance(event, OpRecord):
+        return record_with_flat_updates(event, **updates)
+    return dataclass_replace(event, **updates)
+
+
 # Identity fields are structurally unpatchable: outside every schema AND
 # refused by validation even on a forged raw OpAmendment.
 _UNPATCHABLE_PREFIXES: tuple[str, ...] = (

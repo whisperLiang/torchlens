@@ -19,6 +19,7 @@ from ...capture.session import capture_session_for
 from ...fastlog.types import CaptureSpec, ModuleStackFrame, StorageIntent
 from ...ir import replace_op_event
 from ...ir.events import OpEvent
+from ...ir.op_record import replace_op_fields
 from ...ir.intervention import FireResult, FunctionEventInput
 from ...ir.container import ContainerSpec, OutputPathComponent
 from ...ir.container_registry import ContainerLeafOccurrence, ModelSite, Phase, Role
@@ -220,7 +221,7 @@ def _promote_layers_to_save_output_parent(
         or getattr(trace, "_predicate_save_options", None) is None
         or event.output.has_saved_activation
     ):
-        return dataclasses.replace(event, is_output_parent=True)
+        return replace_op_fields(event, is_output_parent=True)
 
     from ...capture.projections import _record_context_from_event
     from ...fastlog._storage_resolver import _resolve_storage
@@ -294,7 +295,7 @@ def _promote_layers_to_save_output_parent(
         has_saved_activation=True,
     )
     policy = dataclasses.replace(event.policy, save_payload=True)
-    return dataclasses.replace(
+    return replace_op_fields(
         event,
         output=output_ref,
         policy=policy,
