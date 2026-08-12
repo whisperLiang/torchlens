@@ -279,3 +279,67 @@ def test_higher_order_mixed_order_pass_records_reused_and_created_nodes() -> Non
         )
     finally:
         trace.cleanup()
+
+
+def test_backward_epoch_publication_is_atomic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed epoch adoption publishes nothing, and the retry converges.
+
+    Sol review finding 2: revision/watermark were published and the epoch
+    list replaced BEFORE the three ``adopt_rows`` calls, so a mid-adoption
+    failure left the facade holding the complete projection, the core epoch
+    holding only ``grad_fn``, and the published revision suppressing retry
+    (permanent facade/store divergence).
+    """
+
+    import torchlens._trace_core.record_rows as record_rows
+
+    class TinyGrad(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(3, 2)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.lin(x).sum()
+
+    torch.manual_seed(0)
+    x = torch.randn(1, 3, requires_grad=True)
+    trace = tl.trace(TinyGrad(), x, save_grads="all", backward_ready=True)
+    try:
+        out = trace[trace.output_layers[0]].out
+        out.backward(retain_graph=True)
+        _ = trace.grad_fns  # materialize the baseline projection + epoch
+
+        real_adopt = record_rows.adopt_rows
+        adopt_calls: list[str] = []
+
+        def failing_adopt(store_registry: dict, kind: str, records: object) -> None:
+            adopt_calls.append(kind)
+            if kind == "grad_fn_call":
+                raise RuntimeError("injected epoch adoption failure")
+            real_adopt(store_registry, kind, records)
+
+        # A second backward invalidates the projection; the pass-end
+        # re-materialization hits the injected mid-adoption failure.
+        monkeypatch.setattr(record_rows, "adopt_rows", failing_adopt)
+        with pytest.raises(RuntimeError, match="injected epoch adoption failure"):
+            out.backward()
+        assert "grad_fn_call" in adopt_calls
+
+        core = trace.__dict__["_trace_core"]
+        # Nothing published: no partial epoch, no revision to suppress retry.
+        assert core.backward_epochs == []
+        assert trace._backward_projection_revision is None
+
+        # Retry (without the injection) fully converges: one epoch holding
+        # all three kinds, stamps matching the facade.
+        monkeypatch.setattr(record_rows, "adopt_rows", real_adopt)
+        grad_fns = trace.grad_fns
+        assert len(grad_fns) > 0
+        assert len(trace.backward_passes) == 2
+        assert len(core.backward_epochs) == 1
+        epoch = core.backward_epochs[0]
+        assert set(epoch.stores) == {"grad_fn", "grad_fn_call", "backward_pass"}
+        assert epoch.revision == trace._backward_projection_revision
+        assert epoch.watermark == trace._backward_projection_event_count
+    finally:
+        trace.cleanup()
