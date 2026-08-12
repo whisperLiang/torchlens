@@ -403,3 +403,46 @@ def test_postprocess_write_audit_trips_on_unsanctioned_row_removal(
     recording = tl.record(model, torch.randn(2, 3), save=tl.func("linear"))
     with pytest.raises(AssertionError, match="without a removes_rows sanction"):
         recording.to_trace()
+
+
+def test_write_audit_fingerprint_is_order_canonical() -> None:
+    """Equal container content fingerprints equal; real mutation differs.
+
+    ``hash(repr(value))`` on set cells was iteration-order sensitive: 8 and
+    16 collide in a small set table, so equal sets built in different
+    insertion orders repr differently, and a mutate-and-revert inside one
+    step could register as a write of an undeclared column (closure
+    review, F6 fragility). The fingerprint now sorts element fingerprints
+    for unordered containers.
+    """
+
+    from torchlens._trace_core.op_store import _cell_content_fingerprint
+
+    a = {8, 16}
+    b = {16, 8}
+    assert list(a) != list(b) or repr(a) != repr(b) or a == b  # equal content
+    assert _cell_content_fingerprint(a) == _cell_content_fingerprint(b)
+
+    # Mutate-and-revert keeps the fingerprint stable even when the revert
+    # changes iteration order (table resize).
+    grown = {8, 16}
+    before = _cell_content_fingerprint(grown)
+    for value in range(100, 200):
+        grown.add(value)
+    for value in range(100, 200):
+        grown.remove(value)
+    assert _cell_content_fingerprint(grown) == before
+
+    # Equal dicts with reordered keys fingerprint equal; nested unordered
+    # containers canonicalize recursively.
+    assert _cell_content_fingerprint({"a": {8, 16}, "b": 1}) == (
+        _cell_content_fingerprint({"b": 1, "a": {16, 8}})
+    )
+
+    # Real content changes are still caught, including nested ones.
+    assert _cell_content_fingerprint({8, 16}) != _cell_content_fingerprint({8, 17})
+    assert _cell_content_fingerprint([1, [2, 3]]) != _cell_content_fingerprint(
+        [1, [2, 4]]
+    )
+    # Lists stay ORDER-SENSITIVE (list equality is positional).
+    assert _cell_content_fingerprint([1, 2]) != _cell_content_fingerprint([2, 1])
