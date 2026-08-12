@@ -605,6 +605,113 @@ def test_fork_isolation_sweep_is_index_driven_and_never_stale() -> None:
 
 
 @pytest.mark.smoke
+def test_fork_sweep_plan_survives_inplace_empty_to_nonempty_mutation() -> None:
+    """A reused sweep plan must still snapshot an emptied-at-plan-build cell
+    that the parent later filled IN PLACE (sol closure round 3 blocker).
+
+    The cached plan classifies initially EMPTY dict/list/set cells as bare
+    class allocations. In-place empty->non-empty mutation never goes through
+    ``cell_set``, so no maintenance hook can invalidate the plan — the plan
+    itself must guard each alloc entry against its observed value and fall
+    back to a real copy when the container is no longer empty. The plan
+    stays cached (no blanket invalidation: that would reintroduce the F4
+    per-fork rebuild constant).
+    """
+
+    from torchlens._trace_core.op_store import OpRowStore, OpStoreLayout, OpStoreView
+
+    # --- Sealed row-major base (under the transpose threshold). ---
+    store = OpRowStore(OpStoreLayout(("d", "l", "s")))
+    row = store.new_row()
+    store.cell_set(row, 0, {})
+    store.cell_set(row, 1, [])
+    store.cell_set(row, 2, set())
+    store.freeze()
+    first = OpStoreView(store)
+    first.isolate_mutable_cells()
+    plan = store._sweep_plan
+    assert plan is not None, "first fork must build and cache the sweep plan"
+
+    # In-place empty->non-empty mutation of all three container classes:
+    # no cell_set fires, so the cached plan MUST survive and stay correct.
+    store.cell_get(row, 0)["present_before_second_fork"] = 1
+    store.cell_get(row, 1).append(2)
+    store.cell_get(row, 2).add(3)
+    assert store._sweep_plan is plan, (
+        "in-place mutation is invisible to the maintenance hooks; the fix "
+        "must guard plan execution, not blanket-invalidate the plan"
+    )
+
+    second = OpStoreView(store)
+    second.isolate_mutable_cells()
+    assert second.cell_get(row, 0) == {"present_before_second_fork": 1}
+    assert second.cell_get(row, 1) == [2]
+    assert second.cell_get(row, 2) == {3}
+
+    # Snapshot semantics both ways: later parent mutation stays invisible,
+    # and the second fork's own writes never reach the parent.
+    store.cell_get(row, 0)["late"] = 9
+    store.cell_get(row, 1).append(9)
+    store.cell_get(row, 2).add(9)
+    assert second.cell_get(row, 0) == {"present_before_second_fork": 1}
+    assert second.cell_get(row, 1) == [2]
+    assert second.cell_get(row, 2) == {3}
+    second.cell_get(row, 0)["fork_only"] = 0
+    assert "fork_only" not in store.cell_get(row, 0)
+
+    # --- Columnar base: cell BINDINGS are immutable post-seal, but the held
+    # container object is not — the same in-place transition must isolate.
+    big = OpRowStore(OpStoreLayout(("a", "b")))
+    for i in range(600):
+        r = big.new_row()
+        big.cell_set(r, 0, f"op_{i}")
+        big.cell_set(r, 1, {})
+    big.freeze()
+    assert big._columns is not None, "600 rows must have transposed to columns"
+    warm = OpStoreView(big)
+    warm.isolate_mutable_cells()
+    big_plan = big._sweep_plan
+    assert big_plan is not None
+    big.cell_get(5, 1)["present_before_second_fork"] = 1
+    assert big._sweep_plan is big_plan
+    later = OpStoreView(big)
+    later.isolate_mutable_cells()
+    assert later.cell_get(5, 1) == {"present_before_second_fork": 1}
+    big.cell_get(5, 1)["late"] = 9
+    assert later.cell_get(5, 1) == {"present_before_second_fork": 1}
+
+
+@pytest.mark.smoke
+def test_fork_snapshots_annotation_filled_inplace_between_forks() -> None:
+    """End-to-end: sol closure round 3's exact public two-fork repro.
+
+    Fork once (caches the sweep plan while ``annotations`` is empty), fill
+    the parent's dict in place, fork again: the second child must see the
+    pre-fork content, not a resurrected empty container.
+    """
+
+    import torchlens as tl
+
+    model = torch.nn.Sequential(torch.nn.Linear(3, 4), torch.nn.ReLU())
+    trace = tl.trace(model, torch.randn(1, 3))
+    op = trace.ops["linear_1_1"]
+    assert op.annotations == {}
+
+    trace.fork()  # builds + caches the sweep plan while the dict is empty
+    op.annotations["present_before_second_fork"] = 1
+
+    child = trace.fork()
+    child_op = child.ops["linear_1_1"]
+    assert child_op.annotations == {"present_before_second_fork": 1}
+
+    # Snapshot semantics still hold in both directions after the fix.
+    op.annotations["late"] = 9
+    assert "late" not in child_op.annotations
+    child_op.annotations["child_only"] = 2
+    assert "child_only" not in op.annotations
+
+
+@pytest.mark.smoke
 def test_sparse_isolation_fork_of_fork() -> None:
     """A fork-of-fork snapshots the parent view's container writes."""
 

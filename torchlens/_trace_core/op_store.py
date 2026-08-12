@@ -178,9 +178,11 @@ class OpRowStore:
         # flat parallel arrays of pre-resolved (key, allocation/copy) work so
         # the per-fork sweep is a tight guard+copy loop with no per-cell
         # backing fetch or classification. Built lazily with the index;
-        # sealed row-major maintenance hooks drop it on any post-seal change
-        # that could stale it (columnar cells are immutable once
-        # ``_cow_shared``, so the columnar plan never goes stale).
+        # sealed row-major maintenance hooks drop it on any post-seal cell
+        # REBINDING that could stale it (columnar cell bindings are immutable
+        # once ``_cow_shared``). In-place mutation of a held container fires
+        # no hook on either seal shape, so plan entries alias the observed
+        # values and execution re-checks them (``_build_sweep_plan``).
         self._sweep_plan: tuple[Any, ...] | None = None
         # The M6 dataflow family: bound at the freeze-time relation
         # conversion (same EdgeTable object registered in the owning
@@ -494,21 +496,26 @@ def _build_mutable_key_index(store: "OpRowStore") -> dict[int, Any]:
 def _build_sweep_plan(store: "OpRowStore") -> tuple[Any, ...]:
     """Flatten the mutable-cell index into pre-resolved per-fork sweep work.
 
-    Returns ``(alloc_keys, alloc_classes, copy_keys, copy_values,
-    copy_deep)`` — parallel sequences so ``isolate_mutable_cells`` runs a
-    tight guard+copy loop with no per-cell backing fetch, key arithmetic,
-    or classification (the F11 small-trace fork constant). Empty mutable
-    containers (the census-dominant case, ~11/op) become bare class
-    allocations; non-empty dict/list/set cells use ``_eager_copy``; nesting
-    tuples/frozensets use the generic translating copier.
+    Returns ``(alloc_keys, alloc_classes, alloc_values, copy_keys,
+    copy_values, copy_deep)`` — parallel sequences so
+    ``isolate_mutable_cells`` runs a tight guard+copy loop with no per-cell
+    backing fetch, key arithmetic, or classification (the F11 small-trace
+    fork constant). Empty mutable containers (the census-dominant case,
+    ~11/op) become bare class allocations; non-empty dict/list/set cells
+    use ``_eager_copy``; nesting tuples/frozensets use the generic
+    translating copier.
 
-    Validity mirrors the index's: columnar cells are immutable once
-    ``_cow_shared`` (the plan can never go stale), and the sealed
-    row-major write/delete hooks drop the cached plan whenever a post-seal
-    change touches an indexed cell or stores a new container (the next
-    fork rebuilds it from the maintained index). Plan values alias the
-    store's own cell backing, so the plan retains nothing the store does
-    not already retain.
+    Validity: cell BINDINGS cannot change under a cached plan — columnar
+    cells are immutable once ``_cow_shared``, and the sealed row-major
+    write/delete hooks drop the plan whenever a post-seal change touches
+    an indexed cell or stores a new container (the next fork rebuilds it
+    from the maintained index). The held container OBJECT can still mutate
+    in place with no hook firing, which is why every plan entry aliases
+    the observed value: copies read the live object, and each alloc entry
+    re-checks emptiness at execution, falling back to a real copy after an
+    in-place empty->non-empty transition (sol closure round 3). Plan
+    values alias the store's own cell backing, so the plan retains nothing
+    the store does not already retain.
     """
 
     from array import array
@@ -518,6 +525,7 @@ def _build_sweep_plan(store: "OpRowStore") -> tuple[Any, ...]:
     n_fields = store.layout.n_fields
     alloc_keys = array("q")
     alloc_classes: list[type] = []
+    alloc_values: list[Any] = []
     copy_keys = array("q")
     copy_values: list[Any] = []
     copy_deep = bytearray()
@@ -541,13 +549,14 @@ def _build_sweep_plan(store: "OpRowStore") -> tuple[Any, ...]:
                 else:
                     alloc_keys.append(row * n_fields + fid)
                     alloc_classes.append(cls)
+                    alloc_values.append(value)
             elif (cls is tuple or cls is frozenset) and _contains_mutable_container(
                 value
             ):
                 copy_keys.append(row * n_fields + fid)
                 copy_values.append(value)
                 copy_deep.append(1)
-    return (alloc_keys, alloc_classes, copy_keys, copy_values, copy_deep)
+    return (alloc_keys, alloc_classes, alloc_values, copy_keys, copy_values, copy_deep)
 
 
 def _eager_copy(value: Any, translate: Callable[[Any], Any] | None) -> Any:
@@ -1255,11 +1264,14 @@ class OpStoreView:
         # for the staleness contract). Empty containers dominate the census
         # (~11 of ~27 candidate cells per op), hence the dedicated bare
         # class-allocation loop.
-        alloc_keys, alloc_classes, copy_keys, copy_values, copy_deep = plan
-        for key, cls in zip(alloc_keys, alloc_classes):
+        alloc_keys, alloc_classes, alloc_values, copy_keys, copy_values, copy_deep = plan
+        for key, cls, value in zip(alloc_keys, alloc_classes, alloc_values):
             if key in overlay or key in base_overlay:
                 continue
-            overlay[key] = cls()
+            # Emptiness re-check: an in-place empty->non-empty mutation of
+            # the aliased container fires no maintenance hook, so the alloc
+            # classification alone would resurrect an empty cell here.
+            overlay[key] = _eager_copy(value, translate) if value else cls()
         for key, value, deep in zip(copy_keys, copy_values, copy_deep):
             if key in overlay or key in base_overlay:
                 continue
