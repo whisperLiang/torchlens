@@ -475,17 +475,30 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
             )
         ),
         # Probes (reviewed): out_ref gates load/stream-rehydrated
-        # payload refs in orphan_records; internal_source_parents is
-        # scrubbed tolerant of its not-yet-populated state (step 6 is
-        # its only writer). The label/layer_label reads are NOT probes:
-        # they record the never-populated placeholder as DATA into
-        # orphan_records — the pinned day-1 category-(c) finding
-        # (design-ppdag-v3 §2.4), reported for root-cause, never
-        # silenced.
+        # payload refs in orphan_records; internal_source_parents, the five
+        # conditional child views, and recurrent_ops are read by the
+        # removal-reference scrub (cleanup.py), which observes their
+        # not-yet-populated placeholders and tolerates them by design —
+        # the writers run later (5/9 for conditional views, 7 for
+        # recurrence groups, and internal_source_parents is
+        # placeholder-forever pending the materialize gap). These six were
+        # previously laundered through no-op self-writes / a no-op step-1
+        # writer (opus impl-review B1); probe-blessing is the same
+        # reviewed treatment internal_source_parents already had — the
+        # identical code path gets ONE disposition. The label read is NOT
+        # a probe: orphan_records stores the never-populated placeholder
+        # as DATA — the pinned day-1 category-(c) finding (design-ppdag-v3
+        # §2.4), reported for root-cause, never silenced.
         placeholder_probes=frozenset(
             (
+                "conditional_arm_children",
+                "conditional_elif_children",
+                "conditional_else_children",
+                "conditional_entry_children",
+                "conditional_then_children",
                 "internal_source_parents",
                 "out_ref",
+                "recurrent_ops",
             )
         ),
         row_effects=frozenset(("deletes",)),

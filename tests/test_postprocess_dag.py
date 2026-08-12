@@ -121,7 +121,16 @@ MULTI_WRITER_GOLDEN = {
 #: probe — so the full set is a golden and growing it is a reviewed diff.
 PROBES_GOLDEN = {
     "1": frozenset(("label", "layer_label", "out_ref")),
-    "3": frozenset(("internal_source_parents", "out_ref")),
+    "3": frozenset((
+        "conditional_arm_children",
+        "conditional_elif_children",
+        "conditional_else_children",
+        "conditional_entry_children",
+        "conditional_then_children",
+        "internal_source_parents",
+        "out_ref",
+        "recurrent_ops",
+    )),
     "6": frozenset(("internal_source_parents", "layer_label", "recurrent_ops")),
     "12": frozenset(("out_ref",)),
     "18": frozenset(
@@ -129,23 +138,31 @@ PROBES_GOLDEN = {
     ),
 }
 
-#: Day-1 category-(c) findings, PINNED BY NAME (design-ppdag-v3 §2.4): the
-#: step-3 orphan_records construction reads label/layer_label as DATA, but
-#: their only writer is step 8 — the read can only ever observe the
-#: placeholder. Reported for root-cause (record _label_raw instead, or
-#: bless as probe); NEVER silenced by widening the baseline. Any NEW
-#: finding fails this test and is root-caused the same way.
-PINNED_FINDINGS = {("3", "label"), ("3", "layer_label")}
+#: Day-1 category-(c) findings, PINNED BY NAME (design-ppdag-v3 §2.4),
+#: classified with guard 2's ledger (PINNED_NOOP_WRITERS) so a pinned
+#: no-op writer can never discharge a read. Reported for root-cause;
+#: NEVER silenced by widening the baseline. Any NEW finding fails this
+#: test and is root-caused the same way.
+PINNED_FINDINGS = {
+    # orphan_records stores op.label as DATA, but label's only writer is
+    # step 8 — every record ships the None placeholder into a serialized
+    # public field. Root-cause fix (record _label_raw instead) changes a
+    # persisted artifact's bytes: outside this lane's byte-identity
+    # mandate, JMT's call (opus impl review §4). NOT a probe.
+    ("3", "label"),
+    # _label_for_reference_removal's layer_label -> _label_raw fallback
+    # (cleanup.py) — a textbook fallback probe, NOT part of the
+    # orphan_records data read it was previously mis-attributed to. Held
+    # as a finding rather than probe-blessed pending the item-7
+    # disposition commit.
+    ("3", "layer_label"),
+}
 
 #: Declared-but-never-observed writes with their named config-gated
 #: exemptions (the Opus-4 phantom-declaration guard): each entry names WHY
 #: the recording matrix cannot observe it. An exemption without a reason is
 #: a laundering channel; removing the code path must remove the row.
 PHANTOM_WRITE_EXEMPTIONS = {
-    ("5", "is_terminal_bool"): (
-        "host-escape bool witness family; reviewed widening from the "
-        "hardening campaign's enforcement leg"
-    ),
     ("9", "args_template"): (
         "intervention-ready replay-template rename; observed on the "
         "closure-review intervention/observer suites"
@@ -229,14 +246,77 @@ def test_probes_golden() -> None:
 
 
 def test_read_findings_pinned_by_name() -> None:
-    """Category-(c) findings are exactly the pinned set; a NEW one fails."""
+    """Category-(c) findings are exactly the pinned set; a NEW one fails.
+
+    Classification runs with guard 2's ledger (the reviewed no-op-writer
+    table): a writer that is never content-effective on any matrix axis
+    cannot discharge a read, so the historical laundering path — a pinned
+    no-op self-write or no-op step-1 write silently blessing a
+    read-before-write — stays closed (opus impl-review B1).
+    """
+
+    from test_postprocess_enforcement import PINNED_NOOP_WRITERS
 
     findings = {
         key
-        for key, category in _executor.classify_declared_reads().items()
+        for key, category in _executor.classify_declared_reads(
+            PINNED_NOOP_WRITERS
+        ).items()
         if category == "finding"
     }
     assert findings == PINNED_FINDINGS
+
+
+def test_noop_writer_cannot_discharge_reads() -> None:
+    """B1 regression: un-probing a laundered read resurfaces it as a finding.
+
+    Step 3 reads recurrent_ops; its only lower-rank writer is step 1, whose
+    recurrent_ops write is a pinned permanent no-op (output-row placeholder
+    init). The read is probe-blessed today; if the probe is ever dropped,
+    the ledger-wired classifier must classify FINDING — never discharge
+    through the no-op writer (the pre-fix classifier said earlier_writer
+    here). The same holds for step 3's no-op self-writes of the
+    conditional child views.
+    """
+
+    from test_postprocess_enforcement import PINNED_NOOP_WRITERS
+
+    from torchlens.postprocess import PostprocessStepContract
+
+    original = POSTPROCESS_STEP_CONTRACTS["3"]
+    unblessed = PostprocessStepContract(
+        original.step,
+        original.name,
+        original.contract,
+        writes=original.writes,
+        reads=original.reads,
+        placeholder_probes=frozenset(("internal_source_parents", "out_ref")),
+        row_effects=original.row_effects,
+        trace_state=original.trace_state,
+    )
+    contracts = dict(POSTPROCESS_STEP_CONTRACTS)
+    contracts["3"] = unblessed
+    import unittest.mock as mock
+
+    with mock.patch.object(
+        _executor, "_registry_contracts",
+        lambda: {s: c for s, c in contracts.items() if s != "0"},
+    ):
+        with_ledger = _executor.classify_declared_reads(PINNED_NOOP_WRITERS)
+        without_ledger = _executor.classify_declared_reads()
+    for key in (
+        ("3", "recurrent_ops"),
+        ("3", "conditional_arm_children"),
+        ("3", "conditional_elif_children"),
+        ("3", "conditional_else_children"),
+        ("3", "conditional_entry_children"),
+        ("3", "conditional_then_children"),
+    ):
+        assert with_ledger[key] == "finding", key
+    # The structural (ledger-less) classifier is the lenient pre-fix view:
+    # it still discharges the recurrent_ops read through step 1 — which is
+    # exactly why the pinned-findings test always passes the ledger.
+    assert without_ledger[("3", "recurrent_ops")] == "earlier_writer"
 
 
 def test_phantom_write_exemptions_are_exact() -> None:

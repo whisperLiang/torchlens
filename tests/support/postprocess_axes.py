@@ -110,6 +110,53 @@ class DuplicateBufferModel(nn.Module):
         return self.lin(d)
 
 
+class ElifElseBranchModel(nn.Module):
+    """Two if/elif/else chains, one taking the elif arm and one the else arm.
+
+    Closes the matrix gap behind the ``conditional_elif_children`` /
+    ``conditional_else_children`` permanent no-op rows: without an
+    elif/else-bearing axis, steps 5 and 9 never write those views
+    effectively, and guard 2 would flag every later read of them as a
+    finding for the wrong reason (matrix gap, not laundering).
+    """
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        total = x.sum()
+        if total > 1e6:
+            y = x * 2.0
+        elif total > -1e6:  # taken
+            y = x - 1.0
+        else:
+            y = x + 3.0
+        pivot = y.mean()
+        if pivot > 1e6:
+            z = y * 2.0
+        elif pivot > 1e5:
+            z = y - 1.0
+        else:  # taken
+            z = y + 3.0
+        return z * 1.5
+
+
+class AssigningVarNamesModel(nn.Module):
+    """Direct torch-call assignments so step 11.5 resolves real var_names.
+
+    Closes the matrix gap behind the ``("11.5", "var_names")`` permanent
+    no-op row (module-internal calls never name the wrapped function in
+    their assignment line, so the oracle axes resolve to the empty
+    default). Runs under ``save_code_context=True``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = nn.Linear(3, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        hidden = self.linear(x)
+        activated = torch.relu(hidden)
+        return activated
+
+
 def _axis_oracle(model_axis: str) -> Callable[[], Any]:
     def run() -> Any:
         _seed_everything()
@@ -272,6 +319,18 @@ def _axis_conditional_alternate() -> Any:
     return tl.trace(model, torch.tensor([[-1.0, 0.25], [-0.5, -0.25]]))
 
 
+def _axis_conditional_elif_else() -> Any:
+    _seed_everything()
+    return tl.trace(ElifElseBranchModel(), torch.randn(2, 4))
+
+
+def _axis_var_names() -> Any:
+    _seed_everything()
+    return tl.trace(
+        AssigningVarNamesModel().eval(), torch.randn(2, 3), save_code_context=True
+    )
+
+
 def _axis_refresh() -> Any:
     _seed_everything()
     model, model_input = _oracle_case("plain_cnn")
@@ -329,6 +388,8 @@ def iter_axes(tmp_dir: str | None = None) -> list[tuple[str, Callable[[], Any]]]
         ("cooked_recording", _axis_cooked_recording),
         ("cooked_recording_halted", _axis_cooked_recording_halted),
         ("conditional_alternate", _axis_conditional_alternate),
+        ("conditional_elif_else", _axis_conditional_elif_else),
+        ("var_names", _axis_var_names),
         ("refresh", _axis_refresh),
     ]
     return axes

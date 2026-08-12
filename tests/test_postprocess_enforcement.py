@@ -30,7 +30,6 @@ _AXIS_IDS = [name for name, _ in _AXES]
 #: here against the LIVE matrix union (the Opus-4 anti-laundering guard: a
 #: fabricated declaration is red the day it lands).
 EXPECTED_PHANTOM_WRITES = {
-    ("5", "is_terminal_bool"),
     ("9", "args_template"),
     ("9", "kwargs_template"),
     ("18", "grad_ref"),
@@ -45,11 +44,12 @@ EXPECTED_PHANTOM_WRITES = {
 #: same-class value is deliberately classified no-op, so effectiveness can
 #: never launder a read discharge through an unprovable rewrite (the
 #: step-1 payload/memory columns land here by that rule). A permanent
-#: no-op writer cannot discharge a read-before-write finding; a NEW entry
-#: here is reviewed, never silently accepted. Matrix-relative: var_names
-#: IS effective on an assignment-bearing model (test_record_field_policy
-#: proves it) — the oracle models' forwards simply resolve to the empty
-#: default.
+#: no-op writer cannot discharge a read-before-write finding — this table
+#: is guard 2's ledger, passed to classify_declared_reads by the pinned-
+#: findings test. A NEW entry here is reviewed, never silently accepted;
+#: a matrix-gap entry is closed by adding the axis that makes the writer
+#: effective (the conditional_elif_else and var_names axes retired the
+#: 5/9 elif-else and 11.5 var_names rows exactly that way).
 PINNED_NOOP_WRITERS = {
     "1": frozenset((
         "activation_memory", "bytes_delta_at_call", "bytes_peak_at_call",
@@ -72,7 +72,11 @@ PINNED_NOOP_WRITERS = {
         "interventions", "kwargs_template",
     )),
     "4": frozenset(("has_output_descendant",)),
-    "5": frozenset(("conditional_elif_children", "conditional_else_children")),
+    # The elif/else axis retired the ("5","is_terminal_bool") phantom row:
+    # the write is now OBSERVED (host-escape witness classification runs)
+    # but rewrites the False placeholder on these models, so it lands here
+    # instead — still unable to discharge a read.
+    "5": frozenset(("is_terminal_bool",)),
     "6": frozenset((
         "args_template", "conditional_arm_children",
         "conditional_elif_children", "conditional_else_children",
@@ -81,11 +85,7 @@ PINNED_NOOP_WRITERS = {
         "kwargs_template",
     )),
     "7": frozenset(("equivalence_class",)),
-    "9": frozenset((
-        "conditional_elif_children", "conditional_else_children",
-        "is_buffer", "is_input", "is_output",
-    )),
-    "11.5": frozenset(("var_names",)),
+    "9": frozenset(("is_buffer", "is_input", "is_output")),
     "11.75": frozenset((
         "activation_memory", "dtype", "shape",
         "transformed_activation_memory", "transformed_out",

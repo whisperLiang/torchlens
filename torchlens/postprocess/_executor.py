@@ -26,7 +26,7 @@ from __future__ import annotations
 import heapq
 import sys
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, TYPE_CHECKING
+from typing import Any, Callable, Iterator, Mapping, TYPE_CHECKING
 
 from ._contracts import (
     CAPTURE_BASELINE_TOKENS,
@@ -516,17 +516,34 @@ def derived_pinnable_pairs() -> dict[tuple[str, str], set[str]]:
     return pairs
 
 
-def classify_declared_reads() -> dict[tuple[str, str], str]:
+def classify_declared_reads(
+    noop_writers: "Mapping[str, frozenset[str]] | None" = None,
+) -> dict[tuple[str, str], str]:
     """Classify every declared op-column read (design-ppdag-v3 §2.4).
 
     Returns ``(step, column) -> category`` over the declared reads:
     ``baseline`` (capture-populated), ``probe`` (reviewed placeholder
-    probe), ``self_write`` (read of the step's own written column),
-    ``earlier_writer`` (RAW dependency), or ``finding`` — a read of a
-    manifest-excluded column with no lower-rank writer: an undeclared
-    dependency or phantom read, the real latent-bug class. Findings are
-    PINNED by name in ``test_postprocess_dag.py``; a new one fails there
-    and is root-caused, never silenced.
+    probe), ``self_write`` (designed intra-step read-modify-write: the
+    step reads a column it also writes; the window-granular audit cannot
+    order the read against the write, so the discharge rests on
+    effectiveness evidence — guard 2 — plus review), ``earlier_writer``
+    (RAW dependency on a lower-rank writer), or ``finding`` — a read of a
+    manifest-excluded column with no content-effective writer to discharge
+    it: an undeclared dependency or phantom read, the real latent-bug
+    class. Findings are PINNED by name in ``test_postprocess_dag.py``; a
+    new one fails there and is root-caused, never silenced.
+
+    ``noop_writers`` is guard 2's ledger: the reviewed pinned table of
+    writers whose intercepted writes are never content-effective on any
+    matrix axis (``PINNED_NOOP_WRITERS``, the static mirror of
+    ``RECORDED_STEP_EFFECTIVE_WRITES``). A pinned no-op writer CANNOT
+    discharge a read — neither as the step's own ``self_write`` nor as an
+    ``earlier_writer`` — because a write that never changes the cell
+    anywhere is exactly the laundering path the design names (§2.4
+    guard 2: "a writer that never changes c anywhere in the matrix is a
+    finding"). ``None`` (the default) skips the ledger: classification is
+    then purely structural, which is LENIENT — the pinned-findings test
+    always passes the ledger.
     """
 
     from ._contracts import CAPTURE_BASELINE_COLUMNS
@@ -537,6 +554,12 @@ def classify_declared_reads() -> dict[tuple[str, str], str]:
     for step, contract in contracts.items():
         for column in contract.writes:
             writers.setdefault(column, []).append(step)
+
+    def _discharges(writer: str, column: str) -> bool:
+        if noop_writers is None:
+            return True
+        return column not in noop_writers.get(writer, frozenset())
+
     classified: dict[tuple[str, str], str] = {}
     for step, contract in contracts.items():
         for column in contract.reads:
@@ -544,9 +567,12 @@ def classify_declared_reads() -> dict[tuple[str, str], str]:
                 classified[(step, column)] = "baseline"
             elif column in contract.placeholder_probes:
                 classified[(step, column)] = "probe"
-            elif column in contract.writes:
+            elif column in contract.writes and _discharges(step, column):
                 classified[(step, column)] = "self_write"
-            elif any(rank[w] < rank[step] for w in writers.get(column, ())):
+            elif any(
+                rank[w] < rank[step] and _discharges(w, column)
+                for w in writers.get(column, ())
+            ):
                 classified[(step, column)] = "earlier_writer"
             else:
                 classified[(step, column)] = "finding"
