@@ -170,12 +170,16 @@ class RecordingFacet:
 
 @dataclass(frozen=True, slots=True)
 class InterventionFacet:
-    """Interventions that touched this op."""
+    """Interventions that touched this op.
+
+    ``intervention_template_ref`` is deliberately ABSENT: verified dead in P2
+    (every producer writes None; no consumer reads it), it stays on the compat
+    ``OpEvent`` only and dies with it in S15.
+    """
 
     intervention_fired: bool = False
     intervention_replaced: bool = False
     fire_results: tuple[object, ...] = ()
-    intervention_template_ref: object | None = None
 
 
 # Facet name -> class; ``function``/``templates`` reuse the journal ref types.
@@ -469,8 +473,9 @@ class OpRecord:
         return self._facet_or_default("intervention").fire_results
 
     @property
-    def intervention_template_ref(self) -> object | None:
-        return self._facet_or_default("intervention").intervention_template_ref
+    def intervention_template_ref(self) -> None:
+        # compat-only field, verified dead in P2; always None on OpRecord
+        return None
 
 
 _FACET_ATTRIBUTES: dict[str, str] = {
@@ -910,14 +915,8 @@ def op_record_from_event(event: Any) -> tuple[OpRecord, IngestExtras]:
             intervention_fired=event.intervention_fired,
             intervention_replaced=event.intervention_replaced,
             fire_results=tuple(event.fire_results),
-            intervention_template_ref=event.intervention_template_ref,
         )
-        if (
-            event.intervention_fired
-            or event.intervention_replaced
-            or event.fire_results
-            or event.intervention_template_ref is not None
-        )
+        if (event.intervention_fired or event.intervention_replaced or event.fire_results)
         else None
     )
 

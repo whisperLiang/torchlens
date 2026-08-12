@@ -404,7 +404,6 @@ TIER_CLASSIFICATION: dict[str, str] = {
     "InterventionFacet.intervention_fired": "F",
     "InterventionFacet.intervention_replaced": "F",
     "InterventionFacet.fire_results": "F",
-    "InterventionFacet.intervention_template_ref": "F",
     "OpRecord.core": "F",
     "OpRecord.function": "F",
     "OpRecord.templates": "F",
