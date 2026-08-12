@@ -73,7 +73,13 @@ PINNED_NOOP_WRITERS = {
     )),
     "4": frozenset(("has_output_descendant",)),
     "5": frozenset(("conditional_elif_children", "conditional_else_children")),
-    "6": frozenset(("has_children", "has_input_ancestor")),
+    "6": frozenset((
+        "args_template", "conditional_arm_children",
+        "conditional_elif_children", "conditional_else_children",
+        "conditional_entry_children", "conditional_then_children",
+        "has_children", "has_input_ancestor", "interventions",
+        "kwargs_template",
+    )),
     "7": frozenset(("equivalence_class",)),
     "9": frozenset((
         "conditional_elif_children", "conditional_else_children",
@@ -100,6 +106,45 @@ def test_axis_passes_read_and_write_enforcement(
     monkeypatch.setenv("TORCHLENS_POSTPROCESS_READ_AUDIT", "enforce")
     trace = axis_fn()
     if trace is not None:
+        trace.cleanup()
+
+
+def test_buffer_duplicate_axis_actually_merges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-vacuity: the buffer_duplicate axis really fires the merge.
+
+    Step 6's merge write family is enforced against this axis; if a model
+    or capture change ever stops the merge from triggering, the enforcement
+    leg would stay green while proving nothing — this pins the trigger, and
+    the scalar ``buffer_source`` repoint with it.
+    """
+
+    import torchlens.postprocess.control_flow as cf
+    from support.postprocess_axes import _axis_buffer_duplicate
+
+    merges: list[tuple[str, str]] = []
+    real_merge = cf._merge_buffer_entries
+
+    def spying_merge(trace: Any, survivor: Any, removed: Any) -> None:
+        merges.append((survivor._label_raw, removed._label_raw))
+        real_merge(trace, survivor, removed)
+
+    monkeypatch.setattr(cf, "_merge_buffer_entries", spying_merge)
+    trace = _axis_buffer_duplicate()
+    try:
+        assert merges, "the buffer_duplicate axis must reach _merge_buffer_entries"
+        survivor_label, removed_label = merges[0]
+        repointed = [
+            op
+            for op in trace.layer_list
+            if op.is_buffer and op.buffer_source == survivor_label
+        ]
+        assert repointed, "the scalar buffer_source repoint must have fired"
+        assert all(
+            op.buffer_source != removed_label for op in trace.layer_list
+        ), "no surviving op may still reference the merged-away buffer"
+    finally:
         trace.cleanup()
 
 

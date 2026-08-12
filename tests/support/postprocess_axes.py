@@ -79,6 +79,37 @@ class DoubleBufferModel(nn.Module):
         return self.bn(a + b)
 
 
+class DuplicateBufferModel(nn.Module):
+    """Genuinely triggers step 6's ``_merge_buffer_entries`` (B2 axis).
+
+    The merge needs two buffer nodes with the same module stack, the same
+    ``buffer_source``, the same address, and ``torch.equal`` values. A
+    module that reassigns its buffer to an equal-valued plain-attribute
+    tensor mid-forward (a cached mask, the speechbrain CRDNN pattern)
+    produces a second source-``None`` node that collides with the initial
+    read. The extra reassign-of-the-stash after an intervening version adds
+    a surviving node whose ``buffer_source`` names the REMOVED node, so the
+    merge's scalar ``buffer_source`` repoint (and its ``parent_arg_positions``
+    arg-0 mirror) fires too.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("mask", torch.ones(4))
+        self._stash = torch.ones(4)
+        self.lin = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        a = x * self.mask
+        self.mask = self._stash
+        b = a + self.mask  # source-None duplicate: merges into the initial node
+        self.mask = self.mask + 0.0
+        c = b * self.mask  # distinct source: survives as its own version
+        self.mask = self._stash
+        d = c + self.mask  # buffer_source names the merged-away node: repoint fires
+        return self.lin(d)
+
+
 def _axis_oracle(model_axis: str) -> Callable[[], Any]:
     def run() -> Any:
         _seed_everything()
@@ -168,6 +199,11 @@ def _axis_internal_source() -> Any:
 def _axis_buffer_pressure() -> Any:
     _seed_everything()
     return tl.trace(DoubleBufferModel().train(), torch.randn(3, 4))
+
+
+def _axis_buffer_duplicate() -> Any:
+    _seed_everything()
+    return tl.trace(DuplicateBufferModel(), torch.randn(2, 4))
 
 
 def _axis_lookback(tmp_dir: str, *, streaming: bool, transform: bool) -> Any:
@@ -283,6 +319,7 @@ def iter_axes(tmp_dir: str | None = None) -> list[tuple[str, Callable[[], Any]]]
         ("container_structure", _axis_container_structure),
         ("internal_source", _axis_internal_source),
         ("buffer_pressure", _axis_buffer_pressure),
+        ("buffer_duplicate", _axis_buffer_duplicate),
         ("lookback", lambda: _axis_lookback(tmp_dir, streaming=False, transform=False)),
         ("lookback_transform", lambda: _axis_lookback(tmp_dir, streaming=False, transform=True)),
         ("lookback_streaming", lambda: _axis_lookback(tmp_dir, streaming=True, transform=False)),

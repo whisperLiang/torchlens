@@ -64,21 +64,21 @@ RANK_GOLDEN = {
 #: dataflow edge to an orphan, and recurrence groups do not exist before
 #: step 7).
 MULTI_WRITER_GOLDEN = {
-    "_edge_uses": ("1", "3", "9"),
+    "_edge_uses": ("1", "3", "6", "9"),
     "_layer_label_raw": ("1", "7"),
     "_param_logs": ("1", "15", "16"),
     "activation_memory": ("1", "11.75"),
-    "args_template": ("3", "9"),
+    "args_template": ("3", "6", "9"),
     "atomic_module_call": ("1", "9"),
-    "children": ("1", "9"),
-    "conditional_arm_children": ("3", "5", "9"),
-    "conditional_elif_children": ("3", "5", "9"),
-    "conditional_else_children": ("3", "5", "9"),
-    "conditional_entry_children": ("3", "5", "9"),
-    "conditional_then_children": ("3", "5", "9"),
+    "children": ("1", "6", "9"),
+    "conditional_arm_children": ("3", "5", "6", "9"),
+    "conditional_elif_children": ("3", "5", "6", "9"),
+    "conditional_else_children": ("3", "5", "6", "9"),
+    "conditional_entry_children": ("3", "5", "6", "9"),
+    "conditional_then_children": ("3", "5", "6", "9"),
     "dtype": ("1", "11.75"),
     "equivalence_class": ("1", "7"),
-    "equivalent_ops": ("1", "3", "9"),
+    "equivalent_ops": ("1", "3", "6", "9"),
     "func": ("1", "6"),
     "func_name": ("1", "6"),
     "has_children": ("1", "6"),
@@ -86,21 +86,22 @@ MULTI_WRITER_GOLDEN = {
     "has_output_descendant": ("1", "2", "4"),
     "input_ancestors": ("4", "9"),
     "input_to_module_calls": ("1", "11"),
-    "interventions": ("1", "3", "9"),
+    "internal_source_ancestors": ("6", "9"),
+    "interventions": ("1", "3", "6", "9"),
     "is_buffer": ("1", "9"),
     "is_input": ("1", "9"),
     "is_output": ("1", "9"),
     "is_terminal_bool": ("3", "5"),
-    "kwargs_template": ("3", "9"),
+    "kwargs_template": ("3", "6", "9"),
     "module": ("1", "11"),
     "modules": ("1", "11"),
     "num_passes": ("1", "7"),
     "out": ("1", "11.75", "19"),
     "output_descendants": ("1", "2", "9"),
     "output_of_module_calls": ("1", "11"),
-    "parent_arg_positions": ("1", "9"),
+    "parent_arg_positions": ("1", "6", "9"),
     "parent_params": ("1", "15"),
-    "parents": ("1", "9"),
+    "parents": ("1", "6", "9"),
     "pass_index": ("1", "7"),
     "recurrent_ops": ("1", "7", "9"),
     "root_ancestors": ("6", "9"),
@@ -121,6 +122,7 @@ MULTI_WRITER_GOLDEN = {
 PROBES_GOLDEN = {
     "1": frozenset(("label", "layer_label", "out_ref")),
     "3": frozenset(("internal_source_parents", "out_ref")),
+    "6": frozenset(("internal_source_parents", "layer_label", "recurrent_ops")),
     "12": frozenset(("out_ref",)),
     "18": frozenset(
         ("_facets_cache", "_projective_field_cache", "_receptive_field_cache")
@@ -154,8 +156,13 @@ PHANTOM_WRITE_EXEMPTIONS = {
         "streaming re-run of the same function body"
     ),
     ("6", "internal_source_parents"): (
-        "buffer-merge in-place append (control_flow._merge_buffer_entries);"
-        " fires only on a real duplicate-buffer merge"
+        "buffer-merge remove/append sites are code-real but IN-PIPELINE "
+        "unreachable: step 0 materializes internal_source_parents as the [] "
+        "placeholder and nothing in the pipeline populates it (capture "
+        "computes internal_parent_layer_labels; _materialize drops it — "
+        "pre-existing gap on base main, flagged for root-cause). The "
+        "buffer_duplicate axis fires the merge itself; this row retires "
+        "loudly the day the materialize gap is fixed"
     ),
 }
 

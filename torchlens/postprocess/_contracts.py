@@ -568,19 +568,49 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         "6",
         "Fix buffer layers",
         "Consumes buffer events and graph links; mutates buffer metadata in place.",
+        # The buffer-merge write family (opus impl-review B2, evidence:
+        # the buffer_duplicate matrix axis fires _merge_buffer_entries):
+        # the merge rewires children/parents/parent_arg_positions across
+        # surviving rows, rebinds internal_source_ancestors closure sets,
+        # repoints scalar buffer_source cells at the survivor, and its
+        # _remove_log_entry(remove_references=True) husking runs the same
+        # reference scrub as step 3 (_edge_uses, equivalent_ops,
+        # interventions, args/kwargs_template, conditional child views).
         writes=frozenset(
             (
+                "_edge_uses",
+                "args_template",
                 "buffer_pass",
                 "buffer_replay_validated",
+                "buffer_source",
+                "children",
+                "conditional_arm_children",
+                "conditional_elif_children",
+                "conditional_else_children",
+                "conditional_entry_children",
+                "conditional_then_children",
+                "equivalent_ops",
                 "func",
                 "func_name",
                 "has_children",
                 "has_input_ancestor",
-                # Buffer merge appends the removed duplicate's
-                # internal-source parents onto the survivor in place
-                # (control_flow.py _merge_buffer_entries) — code-verified;
-                # config-gated on an actual duplicate-buffer merge.
+                "internal_source_ancestors",
+                # Code-real but IN-PIPELINE UNREACHABLE (day-1 finding,
+                # fix round): the merge's internal_source_parents
+                # remove/append sites (control_flow.py _merge_buffer_entries)
+                # are guarded by membership tests on a column that step 0
+                # materializes as the [] placeholder and NOTHING in the
+                # pipeline populates — capture computes
+                # internal_parent_layer_labels (backends/torch/ops.py) but
+                # _materialize.py drops it. Kept declared as the named
+                # phantom exemption; fixing the materialize gap is a public
+                # field-content change (JMT/root-cause), and the exemption
+                # retires loudly the day it lands.
                 "internal_source_parents",
+                "interventions",
+                "kwargs_template",
+                "parent_arg_positions",
+                "parents",
                 # Reviewed widening (sol finding 6 in-place audit): buffer
                 # rewiring mutates root_ancestors closure sets in place.
                 "root_ancestors",
@@ -588,26 +618,59 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         ),
         reads=frozenset(
             (
+                "_edge_uses",
                 "_label_raw",
                 "_source_trace_ref",
                 "_tracing_finished",
                 "address",
+                "args_template",
                 "buffer_source",
                 "children",
+                "conditional_arm_children",
+                "conditional_elif_children",
+                "conditional_else_children",
+                "conditional_entry_children",
+                "conditional_then_children",
+                "equivalent_ops",
                 "has_input_ancestor",
                 "input_ancestors",
+                "internal_source_ancestors",
+                "internal_source_parents",
+                "interventions",
+                "kwargs_template",
+                "layer_label",
                 "modules",
                 "out",
+                "out_versions_by_child",
+                "output_descendants",
                 "parent_arg_positions",
                 "parents",
+                "recurrent_ops",
                 "root_ancestors",
                 "saved_args",
+            )
+        ),
+        # Probes (reviewed): the merge-husking path observes three columns
+        # in their placeholder state and tolerates it by design —
+        # layer_label via _label_for_reference_removal's
+        # layer_label -> _label_raw fallback (the second reader,
+        # _materialize_layer_mirrors_for_removed, early-returns until
+        # layer_logs exist at step 15.5, so it never fires here);
+        # recurrent_ops via the removal scrub's group rebind (groups are
+        # built at step 7); internal_source_parents via the merge membership
+        # tests (placeholder-forever, see the write-side comment).
+        placeholder_probes=frozenset(
+            (
+                "internal_source_parents",
+                "layer_label",
+                "recurrent_ops",
             )
         ),
         # Buffer dedup removes merged duplicate rows through the same husking
         # path as orphan removal (_remove_log_entry at control_flow.py:951);
         # previously unsanctioned — a latent released-row trip on any
-        # buffer-merging axis (design-ppdag-v3 inventory row 6).
+        # buffer-merging axis (design-ppdag-v3 inventory row 6). Exercised
+        # by the buffer_duplicate axis.
         row_effects=frozenset(("deletes",)),
         trace_state=tokens("rw:raw_graph_ws"),
     ),
@@ -1653,19 +1716,27 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
         ("1", "6"): PinnedPair(
             "columns",
             frozenset((
+                    "_edge_uses",
                     "_label_raw",
                     "children",
+                    "equivalent_ops",
                     "func",
                     "func_name",
                     "has_children",
+                    "interventions",
                     "modules",
                     "out",
+                    "out_versions_by_child",
+                    "output_descendants",
                     "parent_arg_positions",
                     "parents",
+                    "recurrent_ops",
                     "saved_args",
                     "token:raw_graph_ws",
             )),
-            "step 6 consumes/refines _label_raw, children, func, func_name, ... after step 1 writes",
+            "buffer connect/merge rewires the raw graph only after step 1 has "
+            "added the output rows, and the merge husking re-scrubs the "
+            "step-1-seeded relation, template, and edge-use state",
         ),
         ("1", "7"): PinnedPair(
             "columns",
@@ -2021,11 +2092,25 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
             "step 4 depends on token:raw_graph_ws produced by step 3",
         ),
         ("3", "6"): PinnedPair(
-            "tokens",
+            "columns",
             frozenset((
+                    "_edge_uses",
+                    "args_template",
+                    "conditional_arm_children",
+                    "conditional_elif_children",
+                    "conditional_else_children",
+                    "conditional_entry_children",
+                    "conditional_then_children",
+                    "equivalent_ops",
+                    "interventions",
+                    "kwargs_template",
                     "token:raw_graph_ws",
             )),
-            "step 6 depends on token:raw_graph_ws produced by step 3",
+            "orphan removal settles the graph before buffer dedup re-walks "
+            "it; both steps remove rows through the same husking scrub, so "
+            "the shared reference state (edge uses, equivalence groups, "
+            "interventions, replay templates, conditional child views) "
+            "orders their removals (also a two-sided row barrier)",
         ),
         ("3", "7"): PinnedPair(
             "columns",
@@ -2224,10 +2309,16 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
         ("6", "7"): PinnedPair(
             "columns",
             frozenset((
+                    "children",
+                    "equivalent_ops",
                     "func_name",
+                    "parents",
                     "token:raw_graph_ws",
             )),
-            "step 7 consumes/refines func_name, token:raw_graph_ws after step 6 writes",
+            "loop detection walks the MERGED buffer graph: step 6 settles "
+            "children/parents rewires, equivalence-group membership after "
+            "duplicate removal, and identity func names before recurrence "
+            "grouping reads them",
         ),
         ("6", "8"): PinnedPair(
             "tokens",
@@ -2239,12 +2330,29 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
         ("6", "9"): PinnedPair(
             "columns",
             frozenset((
+                    "_edge_uses",
+                    "args_template",
+                    "children",
+                    "conditional_arm_children",
+                    "conditional_elif_children",
+                    "conditional_else_children",
+                    "conditional_entry_children",
+                    "conditional_then_children",
+                    "equivalent_ops",
                     "func_name",
+                    "internal_source_ancestors",
                     "internal_source_parents",
+                    "interventions",
+                    "kwargs_template",
+                    "parent_arg_positions",
+                    "parents",
                     "root_ancestors",
                     "token:raw_graph_ws",
             )),
-            "step 9 consumes/refines func_name, internal_source_parents, root_ancestors, token:raw_graph_ws after step 6 writes",
+            "final-info logging rewrites step 6's merged relation state — "
+            "children/parents/arg positions after duplicate-buffer rewiring, "
+            "the scrubbed templates and conditional views, ancestry closures "
+            "— into final-label space",
         ),
         ("6", "10"): PinnedPair(
             "tokens",
@@ -2272,22 +2380,31 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
             "columns",
             frozenset((
                     "func_name",
+                    "parents",
             )),
-            "step 11.75 consumes/refines func_name after step 6 writes",
+            "deferred retention resolves saved-layer selectors against the "
+            "merged graph: step 6's parents rewires and identity func names "
+            "must be settled first",
         ),
         ("6", "15.5"): PinnedPair(
             "columns",
             frozenset((
+                    "conditional_arm_children",
+                    "conditional_entry_children",
                     "has_input_ancestor",
+                    "parents",
             )),
-            "step 15.5 consumes/refines has_input_ancestor after step 6 writes",
+            "layer-log aggregation reads per-op ancestry, parents, and "
+            "conditional child views as step 6's merge left them",
         ),
         ("6", "16.5"): PinnedPair(
             "columns",
             frozenset((
                     "func_name",
+                    "parents",
             )),
-            "step 16.5 consumes/refines func_name after step 6 writes",
+            "the graph-shape hash digests topology (parents) and identity "
+            "func names as the buffer merge finalized them",
         ),
         ("6", "17.5"): PinnedPair(
             "tokens",
@@ -2299,16 +2416,34 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
         ("6", "18"): PinnedPair(
             "columns",
             frozenset((
+                    "_edge_uses",
+                    "args_template",
                     "buffer_pass",
                     "buffer_replay_validated",
+                    "buffer_source",
+                    "children",
+                    "conditional_arm_children",
+                    "conditional_elif_children",
+                    "conditional_else_children",
+                    "conditional_entry_children",
+                    "conditional_then_children",
+                    "equivalent_ops",
                     "func",
                     "func_name",
                     "has_children",
                     "has_input_ancestor",
+                    "internal_source_ancestors",
                     "internal_source_parents",
+                    "interventions",
+                    "kwargs_template",
+                    "parent_arg_positions",
+                    "parents",
                     "root_ancestors",
             )),
-            "step 18 consumes/refines buffer_pass, buffer_replay_validated, func, func_name, ... after step 6 writes",
+            "the streamed bundle persists per-op metadata — buffer "
+            "pass/source/validation state, merged relations, scrubbed "
+            "templates and conditional views — exactly as step 6 finalized "
+            "them",
         ),
         ("7", "8"): PinnedPair(
             "columns",
@@ -2811,6 +2946,26 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
             "structure",
             frozenset(),
             "workspace drops happen only after the finished-flag barrier flips facade behavior",
+        ),
+        ("2", "6"): PinnedPair(
+            "columns",
+            frozenset((
+                    "output_descendants",
+            )),
+            "the buffer-merge scrub filters removed labels out of the "
+            "output-descendant closures step 2 marks",
+        ),
+        ("5", "6"): PinnedPair(
+            "columns",
+            frozenset((
+                    "conditional_arm_children",
+                    "conditional_elif_children",
+                    "conditional_else_children",
+                    "conditional_entry_children",
+                    "conditional_then_children",
+            )),
+            "the buffer-merge husking scrubs removed buffer labels out of "
+            "the conditional child views step 5 attributes",
         ),
     }
 )
