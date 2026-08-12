@@ -505,6 +505,7 @@ STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {
         "_pending_transformed_out_blob_id": StorageBinding(StorageKind.RUNTIME),
         "_pending_grad_blob_id": StorageBinding(StorageKind.RUNTIME),
         "_pending_transformed_grad_blob_id": StorageBinding(StorageKind.RUNTIME),
+        "_facets_cache": StorageBinding(StorageKind.RUNTIME),
     },
     "layer": {
         "layer_label": StorageBinding(StorageKind.SCALAR),

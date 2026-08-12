@@ -1399,6 +1399,10 @@ class Op:
         "_pending_transformed_out_blob_id": FieldPolicy.DROP,
         "_pending_grad_blob_id": FieldPolicy.DROP,
         "_pending_transformed_grad_blob_id": FieldPolicy.DROP,
+        # Lazily-populated facet-view cache slot: popped by __getstate__,
+        # FORK_RECONSTRUCT on fork, disposable. Declared so the Op slot
+        # universe carries no shadow storage outside FIELD_POLICY.
+        "_facets_cache": FieldPolicy.DROP,
     }
     FIELD_POLICY = build_record_field_policy_table(
         LAYER_PASS_LOG_FIELD_ORDER,
