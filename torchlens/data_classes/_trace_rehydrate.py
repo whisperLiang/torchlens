@@ -31,10 +31,13 @@ Boundaries (documented, tested):
   epochs through the normal projection path.
 * Rehydration is strictly best-effort AND all-or-nothing: the op set is
   validated BEFORE anything is re-bound (a mixed-ownership or
-  layout-drifted op set aborts with zero mutations), and any unexpected
-  failure later rolls every adopted binding back to its detached store —
-  a load never fails because of it, and no partial-adoption island can
-  survive.
+  layout-drifted op set aborts with zero mutations), adoption copies each
+  detached row's cells (the relation freeze mutates adopted rows in
+  place, so the detached stores must never share the lists), and any
+  unexpected failure later rolls every adopted binding back to its
+  detached store — a load never fails because of it, no partial-adoption
+  island can survive, and a failed rehydration leaves the detached
+  topology byte-identical.
 * Compaction passes are not re-run: pickle already preserves shared
   identity within one artifact, so pooled metadata stays pooled.
 """
@@ -129,7 +132,13 @@ def rehydrate_trace_core(trace: "Trace") -> bool:
     records_by_kind: dict[str, dict[int, Any]] = {}
     try:
         for op, bound in adoptable:
-            row = store.adopt_row(bound._cells)
+            # Adopt a SNAPSHOT of the detached cells, never the live list:
+            # ``adopt_row`` takes ownership, and the relation freeze below
+            # mutates adopted rows in place (dataflow ``_CSR`` sentinel,
+            # ``GroupRef``/fact-block slot writes). An identity-shared list
+            # corrupted the detached stores before the rollback handler
+            # could rebind them (closure round 2, blocking item 1).
+            row = store.adopt_row(list(bound._cells))
             adopted.append((op, bound, row))
             _object_setattr(op, "_core", store)
             _object_setattr(op, "_row", row)

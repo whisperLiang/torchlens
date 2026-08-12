@@ -642,6 +642,72 @@ def test_rehydrate_mixed_ownership_aborts_with_zero_mutations() -> None:
             "earlier op re-bound to an orphaned store after abort"
         )
 @pytest.mark.smoke
+def test_rehydrate_rollback_after_relation_freeze_is_atomic() -> None:
+    """A failure AFTER the relation freeze leaves detached topology intact.
+
+    Rehydration used to adopt each detached store's ``_cells`` list BY
+    IDENTITY; the relation freeze then mutated those lists in place
+    (dataflow ``_CSR`` sentinel, ``GroupRef``/fact-block slot writes), so
+    the rollback rebound the original stores to already-corrupted rows —
+    sol's closure-round-2 injection showed ``parents`` flipping from
+    ``('input_1',)`` to ``()`` after a failed rehydration (blocking item
+    1). Adoption now snapshots the cells, making the documented
+    all-or-nothing rollback semantically atomic.
+    """
+
+    import pickle
+    from unittest import mock
+
+    import torchlens as tl
+    from torchlens._trace_core import relation_views
+    from torchlens._trace_core.groups import GroupRef
+    from torchlens._trace_core.op_store import _CSR, _FACT, DetachedOpStore
+
+    model = torch.nn.Sequential(torch.nn.Linear(3, 4), torch.nn.ReLU())
+    trace = tl.trace(model, torch.randn(1, 3))
+    payload = pickle.dumps(trace)
+
+    # Clean-load control: the public relation topology every op must keep.
+    control = pickle.loads(payload)
+    expected = {
+        op.layer_label: (op.parents, op.children) for op in control.layer_list
+    }
+
+    real_freeze = relation_views.freeze_trace_relation_views
+
+    def freeze_then_fail(target):
+        # Mutate the adopted rows exactly like a real run, THEN fail — the
+        # scenario the heterogeneous pre-scan tests never reach.
+        real_freeze(target)
+        raise RuntimeError("injected post-freeze rehydration failure")
+
+    with mock.patch.object(
+        relation_views, "freeze_trace_relation_views", side_effect=freeze_then_fail
+    ):
+        clone = pickle.loads(payload)  # load must survive (best-effort)
+
+    assert clone.__dict__.get("_trace_core") is None, "rollback must stay coreless"
+    for op in clone.layer_list:
+        bound = object.__getattribute__(op, "_core")
+        assert isinstance(bound, DetachedOpStore), (
+            f"{op.layer_label} not rolled back to its detached store"
+        )
+        # Byte-level probe: no freeze artifact may survive in detached rows.
+        for name, value in bound.items(0):
+            assert value is not _CSR and value is not _FACT, (
+                f"freeze sentinel leaked into detached cell {name}"
+            )
+            assert value.__class__ is not GroupRef, (
+                f"GroupRef leaked into detached cell {name}"
+            )
+    for op in clone.layer_list:
+        assert (op.parents, op.children) == expected[op.layer_label], (
+            f"detached topology corrupted for {op.layer_label}"
+        )
+    assert clone.ops["linear_1_1"].parents == ("input_1",)
+
+
+@pytest.mark.smoke
 def test_loaded_partial_capture_stays_staging() -> None:
     """A loaded partial/failed capture is never rehydrated or frozen.
 
