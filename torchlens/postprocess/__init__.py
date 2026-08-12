@@ -239,9 +239,12 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         "2",
         "Trace output ancestors",
         "Consumes raw graph links; mutates output-descendant ancestry flags in place.",
+        # Reviewed widening (sol finding 6 in-place audit): the traversal
+        # mutates each op's output_descendants staging SET in place.
         writes=frozenset(
             (
                 "has_output_descendant",
+                "output_descendants",
             )
         ),
     ),
@@ -273,6 +276,9 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
             (
                 "has_input_ancestor",
                 "has_output_descendant",
+                # Reviewed widening (sol finding 6 in-place audit): the
+                # distance traversal mutates input_ancestors sets in place.
+                "input_ancestors",
                 "max_distance_from_input",
                 "max_distance_to_output",
                 "min_distance_from_input",
@@ -296,6 +302,9 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "conditional_entry_children",
                 "conditional_then_children",
                 "conditional_wrapper_kind",
+                # Reviewed widening (sol finding 6 in-place audit): terminal
+                # scalar-bool classification writes is_terminal_bool.
+                "is_terminal_bool",
                 "is_terminal_conditional_bool",
                 "terminal_conditional_id",
             )
@@ -313,6 +322,9 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "func_name",
                 "has_children",
                 "has_input_ancestor",
+                # Reviewed widening (sol finding 6 in-place audit): buffer
+                # rewiring mutates root_ancestors closure sets in place.
+                "root_ancestors",
             )
         ),
     ),
@@ -368,6 +380,9 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "is_input",
                 "is_output",
                 "output_descendants",
+                # Reviewed widening (sol finding 6 in-place audit): final-info
+                # logging mutates parent_arg_positions dicts in place.
+                "parent_arg_positions",
                 "parents",
                 "recurrent_ops",
                 "root_ancestors",
@@ -424,8 +439,11 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         "15",
         "Finalize params",
         "Consumes Op param references; mutates Param reverse mappings.",
+        # Reviewed widening (sol finding 6 in-place audit): param
+        # finalization mutates the _param_logs containers in place.
         writes=frozenset(
             (
+                "_param_logs",
                 "parent_params",
             )
         ),
@@ -445,7 +463,9 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         "16",
         "Build module logs",
         "Consumes module build data and layer logs; rebuilds Module/ModuleCall logs.",
-        writes=frozenset(),
+        # Reviewed widening (sol finding 6 in-place audit): module-log
+        # building mutates the _param_logs containers in place.
+        writes=frozenset(("_param_logs",)),
     ),
     "16.5": PostprocessStepContract(
         "16.5",

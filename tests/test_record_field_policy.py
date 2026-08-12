@@ -327,3 +327,34 @@ def test_postprocess_write_audit_trips_on_undeclared_column(
     monkeypatch.setitem(POSTPROCESS_STEP_CONTRACTS, "4", narrowed)
     with pytest.raises(AssertionError, match="undeclared op-store columns"):
         tl.trace(_PolicyModel().eval(), torch.randn(2, 3), save_grads=False)
+
+
+def test_postprocess_write_audit_catches_in_place_container_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An in-place container mutation inside a step trips the write audit.
+
+    Sol review finding 6: the audit intercepted only cell assignment and
+    deletion, so an in-place ``annotations[...] = ...`` mutation smuggled an
+    undeclared write through a step with an EMPTY declared write set
+    (step 10). The content-fingerprint diff now surfaces it.
+    """
+
+    import torchlens.postprocess as postprocess_mod
+
+    real_rename = postprocess_mod._rename_model_history_layer_names
+
+    def smuggling_rename(trace: object) -> None:
+        real_rename(trace)
+        raw_layer_dict = trace._raw_graph_ws.raw_layer_dict
+        first_op = next(iter(raw_layer_dict.values()))
+        first_op.annotations["smuggled_in_place"] = 1
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    monkeypatch.setattr(
+        postprocess_mod, "_rename_model_history_layer_names", smuggling_rename
+    )
+    with pytest.raises(
+        AssertionError, match=r"Step 10 .* undeclared op-store columns.*annotations"
+    ):
+        tl.trace(_PolicyModel().eval(), torch.randn(2, 3), save_grads=False)

@@ -387,6 +387,33 @@ def _freeze_column(column_values: list[Any]) -> _FrozenColumn:
 #: contracts). Populated only while a postprocess step audit is active.
 _AUDIT_COLLECTORS: dict[int, set[int]] = {}
 
+#: Per-store ``(row_count, fingerprints)`` snapshots of mutable-container
+#: cells captured at audit begin, diffed at audit end so IN-PLACE mutations
+#: (invisible to the ``cell_set``/``cell_del`` interception) surface as
+#: column writes. Rows born mid-window are excluded — whole-row creation is
+#: a step's produces contract, not a column write.
+_AUDIT_FINGERPRINTS: dict[int, tuple[int, dict[int, int]]] = {}
+
+
+def _cell_content_fingerprint(value: Any) -> int | None:
+    """Content fingerprint for one exact builtin mutable-container cell.
+
+    ``repr`` recurses into nested content, so in-place mutation anywhere
+    inside the container changes the fingerprint. Non-container values (and
+    immutable views) return ``None`` — cell REPLACEMENT is already caught by
+    the write interception. Unreprable containers conservatively fingerprint
+    as their length so at least size changes are visible. Mutables nested in
+    NON-builtin custom objects remain the audit's disclosed residual.
+    """
+
+    cls = value.__class__
+    if cls is dict or cls is list or cls is set:
+        try:
+            return hash(repr(value))
+        except Exception:
+            return len(value)
+    return None
+
 
 class _AuditedOpRowStore(OpRowStore):
     """Write-recording twin used ONLY during env-gated step audits.
@@ -416,21 +443,62 @@ class _AuditedOpRowStore(OpRowStore):
 
 
 def begin_cell_write_audit(store: OpRowStore) -> None:
-    """Start recording column writes on ``store`` (idempotent)."""
+    """Start recording column writes on ``store`` (idempotent).
+
+    Besides arming the ``cell_set``/``cell_del`` interception, snapshots a
+    content fingerprint of every mutable-container cell so the audit end can
+    surface IN-PLACE mutations as writes of their column (sol review
+    finding 6: container mutations previously smuggled undeclared writes
+    through the enforcement).
+    """
 
     if store.__class__ is OpRowStore:
         store.__class__ = _AuditedOpRowStore
     _AUDIT_COLLECTORS.setdefault(id(store), set())
+    fingerprints: dict[int, int] = {}
+    rows = store._rows
+    baseline_rows = 0
+    if rows is not None:
+        baseline_rows = len(rows)
+        n_fields = store.layout.n_fields
+        for row_index, row_cells in enumerate(rows):
+            base = row_index * n_fields
+            for fid, value in enumerate(row_cells):
+                fingerprint = _cell_content_fingerprint(value)
+                if fingerprint is not None:
+                    fingerprints[base + fid] = fingerprint
+    _AUDIT_FINGERPRINTS[id(store)] = (baseline_rows, fingerprints)
 
 
 def end_cell_write_audit(store: OpRowStore) -> set[str]:
-    """Stop recording and return the written column NAMES."""
+    """Stop recording and return the written column NAMES.
+
+    Columns whose mutable-container cells changed CONTENT since the audit
+    began count as written even without an intercepted ``cell_set`` — the
+    in-place mutation path.
+    """
 
     observed = _AUDIT_COLLECTORS.pop(id(store), set())
+    snapshot = _AUDIT_FINGERPRINTS.pop(id(store), None)
     if store.__class__ is _AuditedOpRowStore:
         store.__class__ = OpRowStore  # type: ignore[assignment]
-    names = store.layout.names
-    return {names[fid] for fid in observed}
+    layout_names = store.layout.names
+    rows = store._rows
+    # The fingerprint diff only applies to stores this audit window ARMED
+    # (a store born mid-window — the step-0 materialize ingress — has no
+    # baseline and its whole-row bulk writes are its declared contract) and
+    # to rows that existed at begin (row creation is not a column write).
+    if rows is not None and snapshot is not None:
+        baseline_rows, baseline = snapshot
+        n_fields = store.layout.n_fields
+        for row_index in range(min(baseline_rows, len(rows))):
+            base = row_index * n_fields
+            for fid, value in enumerate(rows[row_index]):
+                if fid in observed:
+                    continue
+                if _cell_content_fingerprint(value) != baseline.get(base + fid):
+                    observed.add(fid)
+    return {layout_names[fid] for fid in observed}
 
 
 class DetachedOpStore:

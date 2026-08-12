@@ -303,6 +303,14 @@ dead fields (`grad_fn_strong_refs`, `output_container_specs*`) were deleted
 with the dissolution. The 21 step contracts declare ENFORCED op-store column
 write sets (env-gated zero-cost-when-off audit; recorded over the six
 surface-oracle axes plus backward; the sets are reviewed contract diffs).
+The audit catches BOTH assignment/deletion (write interception) and
+IN-PLACE container mutation (content fingerprints of mutable-container
+cells diffed per step window, existing rows only — row creation is a
+step's produces contract). Declared READ sets are the named remaining
+slice of the full read/write contract: reads are not audited yet, so a
+step reading an undeclared column is not caught. Disclosed audit
+residuals: mutables nested in non-builtin custom objects, and kind-table
+(non-op-store) cells.
 The Trace PHYSICAL component decomposition (components as storage owners
 behind 220 property forwards) is the named remaining slice: the declared
 per-field ownership map (`_trace_components.py`) partitions every field

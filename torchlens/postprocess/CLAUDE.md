@@ -27,7 +27,11 @@ Every step's `PostprocessStepContract` declares its exact op-store COLUMN
 write set (`writes`). Under `TORCHLENS_POSTPROCESS_ASSERTIONS` a
 zero-cost-when-off audit (class-swap instrumentation on the op row store)
 verifies each step writes only declared columns; a new column write fails the
-tripwire and widening a declared set is a reviewed contract diff. Transient
+tripwire and widening a declared set is a reviewed contract diff. The audit
+covers assignment/deletion AND in-place container mutation (per-step content
+fingerprints of mutable dict/list/set cells on rows that existed at step
+begin); read sets are not audited (named remaining slice), and mutables
+nested inside non-builtin custom objects are the disclosed residual. Transient
 build scratch lives in three named per-phase workspaces (`ir/workspaces.py`),
 not a flat `TraceBuildState` (deleted in M10): `RawGraphWorkspace` (capture
 ingress + steps 0-11, also the backend `finalize_forward_session` ownership
