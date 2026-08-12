@@ -23,6 +23,7 @@ into the emit and ingest paths.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field, fields as dataclass_fields
 from typing import Any
 
@@ -594,26 +595,22 @@ PATH_TO_FLAT: dict[str, str] = {
 FLAT_TO_PATH: dict[str, str] = {flat: path for path, flat in PATH_TO_FLAT.items()}
 
 
-def record_with_flat_updates(record: "OpRecord", **updates: Any) -> "OpRecord":
-    """Return a new record with legacy flat-field updates applied.
+def record_with_path_updates(
+    record: "OpRecord", items: Iterable[tuple[str, Any]]
+) -> "OpRecord":
+    """Return a new record with ordered ``(facet path, value)`` pairs applied.
 
-    Each flat name resolves through ``FLAT_TO_PATH`` onto its owning core
-    field or facet; an absent facet materializes from ``FACET_DEFAULTS``
-    before the patch (the same fold semantics the P4 reducer uses). Unknown
-    flat names refuse — the mutator set is closed by the registry.
+    Each path names its owning core field or facet slot directly; an absent
+    facet materializes from ``FACET_DEFAULTS`` before the patch. This is the
+    ONE decomposed-leg fold primitive: the amendment reducer applies patches
+    through it, and the legacy flat spelling below translates onto it.
     """
 
     from dataclasses import replace as dataclass_replace
 
     core_updates: dict[str, Any] = {}
     facet_updates: dict[str, dict[str, Any]] = {}
-    for flat_name, value in updates.items():
-        path = FLAT_TO_PATH.get(flat_name)
-        if path is None:
-            raise OpRecordAttributeError(
-                f"no registered facet path for flat update {flat_name!r} "
-                "(the post-commit mutator set is closed by PATH_TO_FLAT)"
-            )
+    for path, value in items:
         owner, _, field_name = path.partition(".")
         if owner == "core":
             core_updates[field_name] = value
@@ -626,6 +623,42 @@ def record_with_flat_updates(record: "OpRecord", **updates: Any) -> "OpRecord":
         current = record._facet_or_default(facet_name)
         record_changes[_FACET_ATTRIBUTES[facet_name]] = dataclass_replace(current, **kwargs)
     return dataclass_replace(record, **record_changes)
+
+
+def record_with_flat_updates(record: "OpRecord", **updates: Any) -> "OpRecord":
+    """Return a new record with legacy flat-field updates applied.
+
+    Each flat name resolves through ``FLAT_TO_PATH`` onto its owning core
+    field or facet path, then folds through :func:`record_with_path_updates`.
+    Unknown flat names refuse — the mutator set is closed by the registry.
+    """
+
+    items: list[tuple[str, Any]] = []
+    for flat_name, value in updates.items():
+        path = FLAT_TO_PATH.get(flat_name)
+        if path is None:
+            raise OpRecordAttributeError(
+                f"no registered facet path for flat update {flat_name!r} "
+                "(the post-commit mutator set is closed by PATH_TO_FLAT)"
+            )
+        items.append((path, value))
+    return record_with_path_updates(record, items)
+
+
+def apply_patch_items(event: Any, items: Iterable[tuple[str, Any]]) -> Any:
+    """Apply ordered ``(facet path, value)`` pairs to either journal shape.
+
+    The dual-leg amendment fold primitive (DoR 4.4): decomposed ``OpRecord``s
+    fold via facet ``dataclasses.replace`` (:func:`record_with_path_updates`);
+    compat ``OpEvent``s fold via the 1:1 ``PATH_TO_FLAT`` table. The table
+    outlives P7 only as the preview-journal fold guard and dies in S15.
+    """
+
+    from dataclasses import replace as dataclass_replace
+
+    if isinstance(event, OpRecord):
+        return record_with_path_updates(event, items)
+    return dataclass_replace(event, **{PATH_TO_FLAT[path]: value for path, value in items})
 
 
 def replace_op_fields(event: Any, **updates: Any) -> Any:

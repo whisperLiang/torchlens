@@ -833,16 +833,18 @@ def postprocess(
     if capture_events is not None:
         self._raw_event_shape_hash = compute_raw_event_shape_hash(capture_events)
         capture_session = capture_session_for_events(capture_events)
+        # Both branches read the AMENDED fold (never the raw list): the seal
+        # folds via the reducer, and a session-detached journal (cooked
+        # fastlog projection) folds directly. Seeding the working copy through
+        # ``projected_op_events`` also filters the carried amendment lane to
+        # seq > the seal watermark, so seal-folded knowledge cannot apply
+        # twice while genuinely-new pre-0 amendments keep riding the copy.
         sealed_op_events = (
             [_clone_op_event_for_replay(event) for event in capture_session.seal().events]
             if capture_session is not None
-            else list(capture_events.op_events)
+            else list(capture_events.amended_op_records())
         )
-        working_events = capture_events.copy_for_replay()
-        working_events.op_events = sealed_op_events
-        working_events.op_event_by_label_raw = {
-            event.label_raw: event for event in sealed_op_events
-        }
+        working_events = capture_events.copy_for_replay(projected_op_events=sealed_op_events)
         self._capture_events = working_events
         with _vtimed(self, "  Step 0: Materialize capture events"):
             materialize_from_events(self, working_events)

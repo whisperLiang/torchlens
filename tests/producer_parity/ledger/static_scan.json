@@ -6684,14 +6684,6 @@
 "field": "raw_index",
 "file": "torchlens/capture/projectors.py",
 "has_default": false,
-"line": 583,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/capture/projectors.py",
-"has_default": false,
 "line": 596,
 "via_getattr": false
 },
@@ -6700,7 +6692,15 @@
 "field": "label_raw",
 "file": "torchlens/capture/projectors.py",
 "has_default": false,
-"line": 598,
+"line": 609,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/capture/projectors.py",
+"has_default": false,
+"line": 611,
 "via_getattr": false
 },
 {
@@ -6772,7 +6772,7 @@
 "field": "layer_type",
 "file": "torchlens/capture/projectors.py",
 "has_default": false,
-"line": 596,
+"line": 609,
 "via_getattr": false
 },
 {
@@ -6780,7 +6780,7 @@
 "field": "layer_type",
 "file": "torchlens/capture/projectors.py",
 "has_default": false,
-"line": 600,
+"line": 613,
 "via_getattr": false
 },
 {
@@ -6788,7 +6788,7 @@
 "field": "parents",
 "file": "torchlens/capture/projectors.py",
 "has_default": false,
-"line": 600,
+"line": 613,
 "via_getattr": false
 },
 {
@@ -6796,7 +6796,7 @@
 "field": "parents",
 "file": "torchlens/capture/session.py",
 "has_default": false,
-"line": 324,
+"line": 350,
 "via_getattr": false
 },
 {
@@ -6804,7 +6804,7 @@
 "field": "raw_index",
 "file": "torchlens/capture/session.py",
 "has_default": false,
-"line": 416,
+"line": 442,
 "via_getattr": false
 },
 {
@@ -6812,7 +6812,7 @@
 "field": "raw_index",
 "file": "torchlens/capture/session.py",
 "has_default": false,
-"line": 323,
+"line": 349,
 "via_getattr": false
 },
 {
@@ -6820,7 +6820,7 @@
 "field": "raw_index",
 "file": "torchlens/capture/session.py",
 "has_default": false,
-"line": 369,
+"line": 395,
 "via_getattr": false
 },
 {
@@ -6828,7 +6828,7 @@
 "field": "raw_index",
 "file": "torchlens/capture/session.py",
 "has_default": false,
-"line": 371,
+"line": 397,
 "via_getattr": false
 },
 {
@@ -6836,7 +6836,7 @@
 "field": "raw_index",
 "file": "torchlens/capture/session.py",
 "has_default": false,
-"line": 372,
+"line": 398,
 "via_getattr": false
 },
 {
@@ -6844,7 +6844,7 @@
 "field": "parents",
 "file": "torchlens/capture/session.py",
 "has_default": false,
-"line": 378,
+"line": 404,
 "via_getattr": false
 },
 {
@@ -6852,7 +6852,7 @@
 "field": "raw_index",
 "file": "torchlens/capture/session.py",
 "has_default": false,
-"line": 421,
+"line": 447,
 "via_getattr": false
 },
 {
@@ -6860,7 +6860,7 @@
 "field": "layer_type",
 "file": "torchlens/capture/session.py",
 "has_default": true,
-"line": 421,
+"line": 447,
 "via_getattr": true
 },
 {
@@ -6868,7 +6868,7 @@
 "field": "raw_index",
 "file": "torchlens/capture/session.py",
 "has_default": false,
-"line": 428,
+"line": 454,
 "via_getattr": false
 },
 {
@@ -6876,7 +6876,7 @@
 "field": "raw_index",
 "file": "torchlens/capture/session.py",
 "has_default": false,
-"line": 326,
+"line": 352,
 "via_getattr": false
 },
 {
@@ -6884,7 +6884,7 @@
 "field": "raw_index",
 "file": "torchlens/capture/session.py",
 "has_default": false,
-"line": 355,
+"line": 381,
 "via_getattr": false
 },
 {
@@ -6892,7 +6892,7 @@
 "field": "raw_index",
 "file": "torchlens/capture/session.py",
 "has_default": false,
-"line": 376,
+"line": 402,
 "via_getattr": false
 },
 {
@@ -6900,7 +6900,87 @@
 "field": "layer_type",
 "file": "torchlens/capture/session.py",
 "has_default": true,
-"line": 377,
+"line": 403,
+"via_getattr": true
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/capture/session.py",
+"has_default": false,
+"line": 417,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/capture/session.py",
+"has_default": false,
+"line": 449,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/capture/session.py",
+"has_default": false,
+"line": 455,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/capture/session.py",
+"has_default": true,
+"line": 532,
+"via_getattr": true
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/capture/session.py",
+"has_default": false,
+"line": 387,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "layer_type",
+"file": "torchlens/capture/session.py",
+"has_default": true,
+"line": 388,
+"via_getattr": true
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/capture/session.py",
+"has_default": false,
+"line": 406,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/capture/session.py",
+"has_default": false,
+"line": 407,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "parents",
+"file": "torchlens/capture/session.py",
+"has_default": false,
+"line": 449,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "layer_type",
+"file": "torchlens/capture/session.py",
+"has_default": true,
+"line": 383,
 "via_getattr": true
 },
 {
@@ -6916,87 +6996,7 @@
 "field": "raw_index",
 "file": "torchlens/capture/session.py",
 "has_default": false,
-"line": 423,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/capture/session.py",
-"has_default": false,
-"line": 429,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/capture/session.py",
-"has_default": true,
-"line": 489,
-"via_getattr": true
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/capture/session.py",
-"has_default": false,
-"line": 361,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "layer_type",
-"file": "torchlens/capture/session.py",
-"has_default": true,
-"line": 362,
-"via_getattr": true
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/capture/session.py",
-"has_default": false,
-"line": 380,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/capture/session.py",
-"has_default": false,
-"line": 381,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "parents",
-"file": "torchlens/capture/session.py",
-"has_default": false,
-"line": 423,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "layer_type",
-"file": "torchlens/capture/session.py",
-"has_default": true,
-"line": 357,
-"via_getattr": true
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/capture/session.py",
-"has_default": false,
-"line": 365,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/capture/session.py",
-"has_default": false,
-"line": 385,
+"line": 411,
 "via_getattr": false
 },
 {
@@ -7004,7 +7004,7 @@
 "field": "raw_index",
 "file": "torchlens/capture/session.py",
 "has_default": true,
-"line": 342,
+"line": 368,
 "via_getattr": true
 },
 {
@@ -7012,7 +7012,7 @@
 "field": "parents",
 "file": "torchlens/capture/session.py",
 "has_default": false,
-"line": 366,
+"line": 392,
 "via_getattr": false
 },
 {
@@ -7020,7 +7020,7 @@
 "field": "raw_index",
 "file": "torchlens/capture/session.py",
 "has_default": false,
-"line": 394,
+"line": 420,
 "via_getattr": false
 },
 {
@@ -7172,7 +7172,7 @@
 "field": "pass_index",
 "file": "torchlens/captured_run.py",
 "has_default": true,
-"line": 205,
+"line": 207,
 "via_getattr": true
 },
 {
@@ -7180,7 +7180,7 @@
 "field": "pass_index",
 "file": "torchlens/captured_run.py",
 "has_default": true,
-"line": 204,
+"line": 206,
 "via_getattr": true
 },
 {
@@ -9028,7 +9028,7 @@
 "field": "record_context",
 "file": "torchlens/fastlog/_recorder.py",
 "has_default": true,
-"line": 589,
+"line": 591,
 "via_getattr": true
 },
 {
@@ -9036,7 +9036,7 @@
 "field": "label_raw",
 "file": "torchlens/fastlog/_recorder.py",
 "has_default": true,
-"line": 591,
+"line": 593,
 "via_getattr": true
 },
 {
@@ -9044,7 +9044,7 @@
 "field": "module_stack",
 "file": "torchlens/fastlog/_recorder.py",
 "has_default": false,
-"line": 653,
+"line": 655,
 "via_getattr": false
 },
 {
@@ -9052,7 +9052,7 @@
 "field": "kind",
 "file": "torchlens/fastlog/_recorder.py",
 "has_default": true,
-"line": 593,
+"line": 595,
 "via_getattr": true
 },
 {
@@ -9060,7 +9060,7 @@
 "field": "record_context",
 "file": "torchlens/fastlog/_recorder.py",
 "has_default": true,
-"line": 593,
+"line": 595,
 "via_getattr": true
 },
 {
@@ -9196,7 +9196,7 @@
 "field": "pass_index",
 "file": "torchlens/fastlog/types.py",
 "has_default": false,
-"line": 527,
+"line": 531,
 "via_getattr": false
 },
 {
@@ -9204,7 +9204,7 @@
 "field": "module_stack",
 "file": "torchlens/fastlog/types.py",
 "has_default": false,
-"line": 924,
+"line": 928,
 "via_getattr": false
 },
 {
@@ -9212,7 +9212,7 @@
 "field": "pass_index",
 "file": "torchlens/fastlog/types.py",
 "has_default": false,
-"line": 927,
+"line": 931,
 "via_getattr": false
 },
 {
@@ -9236,7 +9236,7 @@
 "field": "kind",
 "file": "torchlens/fastlog/types.py",
 "has_default": false,
-"line": 634,
+"line": 638,
 "via_getattr": false
 },
 {
@@ -9244,7 +9244,7 @@
 "field": "pass_index",
 "file": "torchlens/fastlog/types.py",
 "has_default": false,
-"line": 636,
+"line": 640,
 "via_getattr": false
 },
 {
@@ -9252,7 +9252,7 @@
 "field": "label_raw",
 "file": "torchlens/fastlog/types.py",
 "has_default": true,
-"line": 835,
+"line": 839,
 "via_getattr": true
 },
 {
@@ -9260,7 +9260,7 @@
 "field": "label_raw",
 "file": "torchlens/fastlog/types.py",
 "has_default": false,
-"line": 849,
+"line": 853,
 "via_getattr": false
 },
 {
@@ -9276,7 +9276,7 @@
 "field": "label_raw",
 "file": "torchlens/fastlog/types.py",
 "has_default": false,
-"line": 851,
+"line": 855,
 "via_getattr": false
 },
 {
@@ -9284,7 +9284,7 @@
 "field": "pass_index",
 "file": "torchlens/fastlog/types.py",
 "has_default": false,
-"line": 528,
+"line": 532,
 "via_getattr": false
 },
 {
@@ -9700,7 +9700,7 @@
 "field": "grad_fn_handle",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 840,
+"line": 1079,
 "via_getattr": false
 },
 {
@@ -9708,196 +9708,12 @@
 "field": "grad_fn_handle",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 841,
+"line": 1080,
 "via_getattr": false
 },
 {
 "ambiguous": true,
 "field": "label_raw",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 362,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "templates",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 458,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 520,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 841,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_config",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 160,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 297,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 297,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "output",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 444,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "output",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 452,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "seq",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 717,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "output",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 443,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_config",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 147,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 301,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 301,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 302,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 302,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "seq",
-"file": "torchlens/ir/capture_events.py",
-"has_default": true,
-"line": 655,
-"via_getattr": true
-},
-{
-"ambiguous": true,
-"field": "seq",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 690,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "parent_arg_positions",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 158,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 309,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 309,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 309,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 309,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "output",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
 "line": 449,
@@ -9905,10 +9721,282 @@
 },
 {
 "ambiguous": false,
+"field": "templates",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 560,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 624,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 674,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 688,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 1080,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_config",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 199,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 361,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 361,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "output",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 546,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "output",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 554,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 722,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 938,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "output",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 545,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 866,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_config",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 186,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 365,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 365,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 366,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 366,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/ir/capture_events.py",
+"has_default": true,
+"line": 445,
+"via_getattr": true
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 726,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 855,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 860,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/ir/capture_events.py",
+"has_default": true,
+"line": 875,
+"via_getattr": true
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 910,
+"via_getattr": false
+},
+{
+"ambiguous": false,
 "field": "parent_arg_positions",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 141,
+"line": 197,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 373,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 373,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 373,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 373,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 443,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "output",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 551,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "parent_arg_positions",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 180,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 858,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 863,
 "via_getattr": false
 },
 {
@@ -10196,7 +10284,7 @@
 "field": "seq",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 284,
+"line": 285,
 "via_getattr": false
 },
 {
@@ -10204,7 +10292,7 @@
 "field": "kind",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 288,
+"line": 289,
 "via_getattr": false
 },
 {
@@ -10212,7 +10300,7 @@
 "field": "label_raw",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 292,
+"line": 293,
 "via_getattr": false
 },
 {
@@ -10220,7 +10308,7 @@
 "field": "layer_label_raw",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 296,
+"line": 297,
 "via_getattr": false
 },
 {
@@ -10228,7 +10316,7 @@
 "field": "layer_type",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 300,
+"line": 301,
 "via_getattr": false
 },
 {
@@ -10236,7 +10324,7 @@
 "field": "raw_index",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 304,
+"line": 305,
 "via_getattr": false
 },
 {
@@ -10244,7 +10332,7 @@
 "field": "type_index",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 308,
+"line": 309,
 "via_getattr": false
 },
 {
@@ -10252,7 +10340,7 @@
 "field": "step_index",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 312,
+"line": 313,
 "via_getattr": false
 },
 {
@@ -10260,7 +10348,7 @@
 "field": "pass_index",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 316,
+"line": 317,
 "via_getattr": false
 },
 {
@@ -10268,7 +10356,7 @@
 "field": "parents",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 320,
+"line": 321,
 "via_getattr": false
 },
 {
@@ -10276,7 +10364,7 @@
 "field": "output",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 324,
+"line": 325,
 "via_getattr": false
 },
 {
@@ -10284,7 +10372,7 @@
 "field": "is_bottom_level",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 328,
+"line": 329,
 "via_getattr": false
 },
 {
@@ -10292,7 +10380,7 @@
 "field": "func_call_id",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 332,
+"line": 333,
 "via_getattr": false
 },
 {
@@ -10300,7 +10388,7 @@
 "field": "parent_arg_positions",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 337,
+"line": 338,
 "via_getattr": false
 },
 {
@@ -10308,7 +10396,7 @@
 "field": "unattributed_tensor_args",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 345,
+"line": 346,
 "via_getattr": false
 },
 {
@@ -10316,7 +10404,7 @@
 "field": "dropped_edge_tensor_args",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 349,
+"line": 350,
 "via_getattr": false
 },
 {
@@ -10324,7 +10412,7 @@
 "field": "is_output_parent",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 353,
+"line": 354,
 "via_getattr": false
 },
 {
@@ -10332,7 +10420,7 @@
 "field": "input_was_parameter",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 357,
+"line": 358,
 "via_getattr": false
 },
 {
@@ -10340,7 +10428,7 @@
 "field": "equivalence_class",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 361,
+"line": 362,
 "via_getattr": false
 },
 {
@@ -10348,7 +10436,7 @@
 "field": "module_stack",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 365,
+"line": 366,
 "via_getattr": false
 },
 {
@@ -10356,7 +10444,7 @@
 "field": "modules",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 369,
+"line": 370,
 "via_getattr": false
 },
 {
@@ -10364,7 +10452,7 @@
 "field": "input_ancestors",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 373,
+"line": 374,
 "via_getattr": false
 },
 {
@@ -10372,7 +10460,7 @@
 "field": "internal_source_ancestors",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 377,
+"line": 378,
 "via_getattr": false
 },
 {
@@ -10380,7 +10468,7 @@
 "field": "root_ancestors",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 381,
+"line": 382,
 "via_getattr": false
 },
 {
@@ -10388,7 +10476,7 @@
 "field": "has_internal_source_ancestor",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 385,
+"line": 386,
 "via_getattr": false
 },
 {
@@ -10396,7 +10484,7 @@
 "field": "grad_fn_class_qualname",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 389,
+"line": 390,
 "via_getattr": false
 },
 {
@@ -10404,7 +10492,7 @@
 "field": "is_transform",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 393,
+"line": 394,
 "via_getattr": false
 },
 {
@@ -10412,7 +10500,7 @@
 "field": "transform_kind",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 397,
+"line": 398,
 "via_getattr": false
 },
 {
@@ -10420,7 +10508,7 @@
 "field": "transform_chain",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 401,
+"line": 402,
 "via_getattr": false
 },
 {
@@ -10428,7 +10516,7 @@
 "field": "transform_config",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 405,
+"line": 406,
 "via_getattr": false
 },
 {
@@ -10436,7 +10524,7 @@
 "field": "transform_fn_name",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 409,
+"line": 410,
 "via_getattr": false
 },
 {
@@ -10444,7 +10532,7 @@
 "field": "transform_fn_qualname",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 413,
+"line": 414,
 "via_getattr": false
 },
 {
@@ -10452,7 +10540,7 @@
 "field": "transform_fn_source",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 417,
+"line": 418,
 "via_getattr": false
 },
 {
@@ -10460,7 +10548,7 @@
 "field": "is_scalar_bool",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 421,
+"line": 422,
 "via_getattr": false
 },
 {
@@ -10468,7 +10556,7 @@
 "field": "bool_value",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 425,
+"line": 426,
 "via_getattr": false
 },
 {
@@ -10476,7 +10564,7 @@
 "field": "params",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 429,
+"line": 430,
 "via_getattr": false
 },
 {
@@ -10484,7 +10572,7 @@
 "field": "parent_params",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 433,
+"line": 434,
 "via_getattr": false
 },
 {
@@ -10492,7 +10580,7 @@
 "field": "backend_semantics",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 437,
+"line": 438,
 "via_getattr": false
 },
 {
@@ -10500,7 +10588,7 @@
 "field": "policy",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 441,
+"line": 442,
 "via_getattr": false
 },
 {
@@ -10508,7 +10596,7 @@
 "field": "predicate_matched",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 445,
+"line": 446,
 "via_getattr": false
 },
 {
@@ -10516,7 +10604,7 @@
 "field": "tracing_finished",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 449,
+"line": 450,
 "via_getattr": false
 },
 {
@@ -10524,7 +10612,7 @@
 "field": "construction_done",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 453,
+"line": 454,
 "via_getattr": false
 },
 {
@@ -10532,7 +10620,7 @@
 "field": "record_context",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 457,
+"line": 458,
 "via_getattr": false
 },
 {
@@ -10540,7 +10628,7 @@
 "field": "capture_spec",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 461,
+"line": 462,
 "via_getattr": false
 },
 {
@@ -10548,7 +10636,7 @@
 "field": "intervention_fired",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 465,
+"line": 466,
 "via_getattr": false
 },
 {
@@ -10556,7 +10644,7 @@
 "field": "intervention_replaced",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 469,
+"line": 470,
 "via_getattr": false
 },
 {
@@ -10564,7 +10652,7 @@
 "field": "fire_results",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 473,
+"line": 474,
 "via_getattr": false
 },
 {
@@ -10572,7 +10660,7 @@
 "field": "transform_config",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 876,
+"line": 909,
 "via_getattr": false
 },
 {
@@ -10580,7 +10668,7 @@
 "field": "seq",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 881,
+"line": 914,
 "via_getattr": false
 },
 {
@@ -10588,7 +10676,7 @@
 "field": "kind",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 882,
+"line": 915,
 "via_getattr": false
 },
 {
@@ -10596,7 +10684,7 @@
 "field": "label_raw",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 883,
+"line": 916,
 "via_getattr": false
 },
 {
@@ -10604,7 +10692,7 @@
 "field": "layer_label_raw",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 884,
+"line": 917,
 "via_getattr": false
 },
 {
@@ -10612,7 +10700,7 @@
 "field": "layer_type",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 885,
+"line": 918,
 "via_getattr": false
 },
 {
@@ -10620,7 +10708,7 @@
 "field": "raw_index",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 886,
+"line": 919,
 "via_getattr": false
 },
 {
@@ -10628,7 +10716,7 @@
 "field": "type_index",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 887,
+"line": 920,
 "via_getattr": false
 },
 {
@@ -10636,7 +10724,7 @@
 "field": "step_index",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 888,
+"line": 921,
 "via_getattr": false
 },
 {
@@ -10644,7 +10732,7 @@
 "field": "pass_index",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 889,
+"line": 922,
 "via_getattr": false
 },
 {
@@ -10652,7 +10740,7 @@
 "field": "output",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 891,
+"line": 924,
 "via_getattr": false
 },
 {
@@ -10660,7 +10748,7 @@
 "field": "is_bottom_level",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 892,
+"line": 925,
 "via_getattr": false
 },
 {
@@ -10668,7 +10756,7 @@
 "field": "func_call_id",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 893,
+"line": 926,
 "via_getattr": false
 },
 {
@@ -10676,7 +10764,7 @@
 "field": "parent_arg_positions",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 897,
+"line": 930,
 "via_getattr": false
 },
 {
@@ -10684,7 +10772,7 @@
 "field": "is_output_parent",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 901,
+"line": 934,
 "via_getattr": false
 },
 {
@@ -10692,7 +10780,7 @@
 "field": "input_was_parameter",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 902,
+"line": 935,
 "via_getattr": false
 },
 {
@@ -10700,7 +10788,7 @@
 "field": "equivalence_class",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 903,
+"line": 936,
 "via_getattr": false
 },
 {
@@ -10708,7 +10796,7 @@
 "field": "module_stack",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 907,
+"line": 940,
 "via_getattr": false
 },
 {
@@ -10716,7 +10804,7 @@
 "field": "modules",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 907,
+"line": 940,
 "via_getattr": false
 },
 {
@@ -10724,7 +10812,7 @@
 "field": "input_ancestors",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 918,
+"line": 951,
 "via_getattr": false
 },
 {
@@ -10732,7 +10820,7 @@
 "field": "internal_source_ancestors",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 919,
+"line": 952,
 "via_getattr": false
 },
 {
@@ -10740,7 +10828,7 @@
 "field": "root_ancestors",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 920,
+"line": 953,
 "via_getattr": false
 },
 {
@@ -10748,7 +10836,7 @@
 "field": "has_internal_source_ancestor",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 921,
+"line": 954,
 "via_getattr": false
 },
 {
@@ -10756,7 +10844,7 @@
 "field": "grad_fn_class_qualname",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 927,
+"line": 960,
 "via_getattr": false
 },
 {
@@ -10764,7 +10852,7 @@
 "field": "is_transform",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 942,
+"line": 975,
 "via_getattr": false
 },
 {
@@ -10772,100 +10860,12 @@
 "field": "transform_chain",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 944,
+"line": 977,
 "via_getattr": false
 },
 {
 "ambiguous": true,
 "field": "params",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 960,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "parent_params",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 960,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "backend_semantics",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 969,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "policy",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 970,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "predicate_matched",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 971,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "tracing_finished",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 972,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "construction_done",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 973,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "intervention_fired",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 986,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "intervention_replaced",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 986,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "fire_results",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 986,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "function",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 992,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "templates",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
 "line": 993,
@@ -10873,210 +10873,50 @@
 },
 {
 "ambiguous": false,
-"field": "source_trace",
+"field": "parent_params",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 1007,
+"line": 993,
 "via_getattr": false
 },
 {
 "ambiguous": false,
-"field": "source_trace_id",
+"field": "backend_semantics",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 1008,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "grad_fn_handle",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 1009,
+"line": 1002,
 "via_getattr": false
 },
 {
 "ambiguous": true,
-"field": "parents",
+"field": "policy",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 890,
+"line": 1003,
 "via_getattr": false
 },
 {
 "ambiguous": false,
-"field": "_edge_uses",
+"field": "predicate_matched",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 898,
+"line": 1004,
 "via_getattr": false
 },
 {
 "ambiguous": false,
-"field": "unattributed_tensor_args",
+"field": "tracing_finished",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 899,
+"line": 1005,
 "via_getattr": false
 },
 {
 "ambiguous": false,
-"field": "dropped_edge_tensor_args",
+"field": "construction_done",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 900,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "has_internal_source_ancestor",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 915,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "grad_fn_class_qualname",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 926,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_kind",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 943,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_fn_name",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 946,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_fn_qualname",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 947,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_fn_source",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 948,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "is_transform",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 932,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_kind",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 933,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_fn_name",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 936,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_fn_qualname",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 937,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_fn_source",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 938,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "is_scalar_bool",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 955,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "bool_value",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 955,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "is_scalar_bool",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 954,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "bool_value",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 954,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "record_context",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 977,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "capture_spec",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 977,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "record_context",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 976,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "capture_spec",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 976,
+"line": 1006,
 "via_getattr": false
 },
 {
@@ -11084,7 +10924,7 @@
 "field": "intervention_fired",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 982,
+"line": 1019,
 "via_getattr": false
 },
 {
@@ -11092,71 +10932,7 @@
 "field": "intervention_replaced",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 983,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "module_stack",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 906,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "modules",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 906,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "input_ancestors",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 912,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "internal_source_ancestors",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 913,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "root_ancestors",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 914,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_chain",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 934,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "params",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 959,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "parent_params",
-"file": "torchlens/ir/op_record.py",
-"has_default": false,
-"line": 959,
+"line": 1019,
 "via_getattr": false
 },
 {
@@ -11164,7 +10940,319 @@
 "field": "fire_results",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 984,
+"line": 1019,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "function",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 1025,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "templates",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 1026,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "source_trace",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 1040,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "source_trace_id",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 1041,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "grad_fn_handle",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 1042,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "parents",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 923,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "_edge_uses",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 931,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "unattributed_tensor_args",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 932,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "dropped_edge_tensor_args",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 933,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "has_internal_source_ancestor",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 948,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "grad_fn_class_qualname",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 959,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_kind",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 976,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_fn_name",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 979,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_fn_qualname",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 980,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_fn_source",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 981,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "is_transform",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 965,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_kind",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 966,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_fn_name",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 969,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_fn_qualname",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 970,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_fn_source",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 971,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "is_scalar_bool",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 988,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "bool_value",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 988,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "is_scalar_bool",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 987,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "bool_value",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 987,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "record_context",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 1010,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "capture_spec",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 1010,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "record_context",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 1009,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "capture_spec",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 1009,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "intervention_fired",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 1015,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "intervention_replaced",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 1016,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "module_stack",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 939,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "modules",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 939,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "input_ancestors",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 945,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "internal_source_ancestors",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 946,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "root_ancestors",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 947,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_chain",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 967,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "params",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 992,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "parent_params",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 992,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "fire_results",
+"file": "torchlens/ir/op_record.py",
+"has_default": false,
+"line": 1017,
 "via_getattr": false
 },
 {
@@ -11172,7 +11260,7 @@
 "field": "label_raw",
 "file": "torchlens/ir/op_record.py",
 "has_default": false,
-"line": 277,
+"line": 278,
 "via_getattr": false
 },
 {
@@ -11688,19 +11776,11 @@
 "via_getattr": true
 },
 {
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/__init__.py",
-"has_default": false,
-"line": 844,
-"via_getattr": false
-},
-{
 "ambiguous": false,
 "field": "pass_index",
 "file": "torchlens/postprocess/__init__.py",
 "has_default": true,
-"line": 978,
+"line": 980,
 "via_getattr": true
 },
 {
@@ -11716,7 +11796,7 @@
 "field": "output",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 487,
+"line": 490,
 "via_getattr": false
 },
 {
@@ -11724,7 +11804,7 @@
 "field": "backend_semantics",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 490,
+"line": 493,
 "via_getattr": false
 },
 {
@@ -11732,7 +11812,7 @@
 "field": "_edge_uses",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 696,
+"line": 699,
 "via_getattr": false
 },
 {
@@ -11740,7 +11820,7 @@
 "field": "equivalence_class",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 826,
+"line": 829,
 "via_getattr": false
 },
 {
@@ -11748,7 +11828,7 @@
 "field": "equivalence_class",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 985,
+"line": 988,
 "via_getattr": false
 },
 {
@@ -11756,7 +11836,7 @@
 "field": "record_context",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": true,
-"line": 1877,
+"line": 1880,
 "via_getattr": true
 },
 {
@@ -11764,7 +11844,287 @@
 "field": "module_stack",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 1881,
+"line": 1884,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 277,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 295,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "params",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 500,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "pass_index",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 509,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 512,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "grad_fn_handle",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 515,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "parents",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 664,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "is_transform",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 830,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 874,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 875,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "parents",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 898,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "module_stack",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 1279,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "output",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 1780,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "output",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 1781,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 1836,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "layer_type",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 1927,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 1974,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 1975,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 347,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 740,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 803,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 809,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_kind",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 830,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_fn_qualname",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 837,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "modules",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 839,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "modules",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 879,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 915,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "output",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 1058,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "kind",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 1060,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "layer_type",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 1061,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "kind",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": true,
+"line": 1631,
+"via_getattr": true
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 1830,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 1835,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "layer_type",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 272,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 273,
 "via_getattr": false
 },
 {
@@ -11780,79 +12140,7 @@
 "field": "label_raw",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 292,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "params",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 497,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "pass_index",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 506,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 509,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "grad_fn_handle",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 512,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "parents",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 661,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "is_transform",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 827,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 871,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 872,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "parents",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 895,
+"line": 276,
 "via_getattr": false
 },
 {
@@ -11860,23 +12148,7 @@
 "field": "module_stack",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 1276,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "output",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 1777,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "output",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 1778,
+"line": 303,
 "via_getattr": false
 },
 {
@@ -11884,215 +12156,7 @@
 "field": "label_raw",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 1833,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "layer_type",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 1924,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 1971,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 1972,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 344,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 737,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 800,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 806,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_kind",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 827,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_fn_qualname",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 834,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "modules",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 836,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "modules",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 876,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 912,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "output",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 1055,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "kind",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 1057,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "layer_type",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 1058,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "kind",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": true,
-"line": 1628,
-"via_getattr": true
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 1827,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 1832,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "layer_type",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 269,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 270,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 271,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 273,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "module_stack",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 300,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 328,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 329,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 330,
+"line": 331,
 "via_getattr": false
 },
 {
@@ -12116,14 +12180,6 @@
 "field": "label_raw",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 334,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
 "line": 335,
 "via_getattr": false
 },
@@ -12136,11 +12192,35 @@
 "via_getattr": false
 },
 {
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 337,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 338,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 339,
+"via_getattr": false
+},
+{
 "ambiguous": false,
 "field": "raw_index",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 368,
+"line": 371,
 "via_getattr": false
 },
 {
@@ -12148,7 +12228,7 @@
 "field": "parent_params",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 503,
+"line": 506,
 "via_getattr": false
 },
 {
@@ -12156,7 +12236,7 @@
 "field": "label_raw",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 662,
+"line": 665,
 "via_getattr": false
 },
 {
@@ -12164,7 +12244,7 @@
 "field": "func_call_id",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 741,
+"line": 744,
 "via_getattr": false
 },
 {
@@ -12172,7 +12252,7 @@
 "field": "func_call_id",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 742,
+"line": 745,
 "via_getattr": false
 },
 {
@@ -12180,7 +12260,7 @@
 "field": "label_raw",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 804,
+"line": 807,
 "via_getattr": false
 },
 {
@@ -12188,7 +12268,7 @@
 "field": "transform_config",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 830,
+"line": 833,
 "via_getattr": false
 },
 {
@@ -12196,7 +12276,7 @@
 "field": "transform_kind",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 835,
+"line": 838,
 "via_getattr": false
 },
 {
@@ -12204,7 +12284,7 @@
 "field": "modules",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 838,
+"line": 841,
 "via_getattr": false
 },
 {
@@ -12212,7 +12292,7 @@
 "field": "function",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
-"line": 874,
+"line": 877,
 "via_getattr": false
 },
 {
@@ -12220,167 +12300,167 @@
 "field": "parent_arg_positions",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
+"line": 882,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 950,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "modules",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 992,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "layer_type",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 1826,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "output",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 1877,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "module_stack",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 1885,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "output",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 1905,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 332,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 497,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 666,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "kind",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 806,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "layer_type",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 806,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "kind",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 872,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "layer_type",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 872,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "modules",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
 "line": 879,
 "via_getattr": false
 },
 {
 "ambiguous": true,
-"field": "label_raw",
+"field": "kind",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 902,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "layer_type",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 903,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "module_stack",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 301,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "module_stack",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 301,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "output",
+"file": "torchlens/postprocess/_materialize.py",
+"has_default": false,
+"line": 943,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "output",
 "file": "torchlens/postprocess/_materialize.py",
 "has_default": false,
 "line": 947,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "modules",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 989,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "layer_type",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 1823,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "output",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 1874,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "module_stack",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 1882,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "output",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 1902,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 329,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 494,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 663,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "kind",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 803,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "layer_type",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 803,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "kind",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 869,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "layer_type",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 869,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "modules",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 876,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "kind",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 899,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "layer_type",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 900,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "module_stack",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 298,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "module_stack",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 298,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "output",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 940,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "output",
-"file": "torchlens/postprocess/_materialize.py",
-"has_default": false,
-"line": 944,
 "via_getattr": false
 },
 {

@@ -6,7 +6,7 @@
   "torchlens/backends/tf/backend.py:997",
   "torchlens/backends/tf/backend.py:1028",
   "torchlens/backends/tinygrad/backend.py:1159",
-  "torchlens/ir/capture_events.py:878"
+  "torchlens/ir/capture_events.py:1117"
  ],
  "replace_op_event_callers": [
   "torchlens/backends/torch/backend.py:878",

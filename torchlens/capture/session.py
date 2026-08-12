@@ -47,13 +47,20 @@ class CapturedRunCore:
     Parameters
     ----------
     events
-        Canonical immutable operation event spine in producer order.
+        Canonical immutable operation event spine in producer order, folded
+        through the journal's amendment reducer at seal time.
     projection_facts
         Snapshot of legacy run facts needed by Recording projections.
+    amendment_watermark
+        Highest amendment seq (lane-local domain) consumed by the seal fold,
+        or ``None`` when the session had no bound journal. Projectors source
+        working-copy watermarks from here (reviewer note S-N2) so carried
+        amendments the seal already folded can never apply twice.
     """
 
     events: tuple[OpEvent, ...]
     projection_facts: Mapping[str, Any]
+    amendment_watermark: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +138,7 @@ class CaptureSession:
     outcome: RunOutcome | None = None
     _event_spine: list[OpEvent] | None = field(default=None, init=False, repr=False)
     _sealed_core: CapturedRunCore | None = field(default=None, init=False, repr=False)
+    _event_journal: Any | None = field(default=None, init=False, repr=False)
     projection_facts: dict[str, Any] = field(default_factory=dict)
     activation_escrow: dict[int, ActivationEscrowPayload] = field(default_factory=dict)
     gradient_reference_escrow: dict[int, Any] = field(default_factory=dict)
@@ -159,6 +167,23 @@ class CaptureSession:
             raise RuntimeError("Cannot bind a capture spine after the run core is sealed.")
         self._event_spine = events
 
+    def bind_event_journal(self, events: Any) -> None:
+        """Bind the session to the whole ``CaptureEvents`` journal object.
+
+        The seal reads the op lane through the journal's amendment reducer
+        and stamps the seal watermark back onto it; the raw list binding
+        above remains the fallback for spine-only callers.
+
+        Parameters
+        ----------
+        events
+            Canonical mutable ``CaptureEvents`` buffer for this capture run.
+        """
+
+        if self._sealed_core is not None:
+            raise RuntimeError("Cannot bind a capture journal after the run core is sealed.")
+        self._event_journal = events
+
     def release(self) -> None:
         """Release all run-local compatibility sidecars.
 
@@ -174,6 +199,7 @@ class CaptureSession:
         """
 
         self._event_spine = None
+        self._event_journal = None
         self.output_bindings.clear()
         self.counters.clear()
         self.module_state.clear()
@@ -444,10 +470,27 @@ class CaptureSession:
         """
 
         if self._sealed_core is None:
-            events = tuple(self._event_spine or ())
+            journal = self._event_journal
+            if journal is not None:
+                # Fold the amendment lane into the sealed spine and stamp the
+                # watermark on BOTH the live journal and the pre-seal
+                # projection clone stored by snapshot_recording_projection —
+                # the clone predates this seal, so stamping only the live
+                # object would strand it without a filter anchor (S-N2).
+                events = tuple(journal.amended_op_records())
+                watermark = int(journal.amendment_seq or 0)
+                journal.core_seal_watermark = watermark
+                journal.amendments_sealed = True
+                projection_clone = self.projection_facts.get("capture_events")
+                if projection_clone is not None:
+                    projection_clone.core_seal_watermark = watermark
+            else:
+                events = tuple(self._event_spine or ())
+                watermark = None
             self._sealed_core = CapturedRunCore(
                 events=events,
                 projection_facts=MappingProxyType(dict(self.projection_facts)),
+                amendment_watermark=watermark,
             )
         return self._sealed_core
 
@@ -836,6 +879,8 @@ def attach_capture_events_session(events: object, session: CaptureSession) -> No
     if not isinstance(op_events, list):
         raise TypeError("Capture event buffers must expose a mutable op_events list.")
     session.bind_event_spine(op_events)
+    if hasattr(events, "amended_op_records"):
+        session.bind_event_journal(events)
     # Weak backref only: the session (via the trace) owns the run; the buffer
     # must never keep a completed session alive.
     events._tl_capture_session_ref = ref(session)  # type: ignore[attr-defined]

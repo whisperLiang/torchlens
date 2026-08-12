@@ -33,8 +33,8 @@ class JournalView:
     requirement, 2026-08-12).
     """
 
-    op_events: tuple[Any, ...]
-    op_amendments: tuple[Any, ...]  # empty until P4 wires the amendment lane
+    op_events: tuple[Any, ...]  # the FOLDED reducer view (amended facts)
+    op_amendments: tuple[Any, ...]  # provenance lane; already folded into op_events
     module_prep_events: tuple[Any, ...]
     module_enter_events: tuple[Any, ...]
     module_exit_events: tuple[Any, ...]
@@ -122,7 +122,7 @@ class Step0Result:
 # Contract rows: one line per lane/handle, mirrored into the joint seam note.
 INGEST_CONTRACT_ROWS: tuple[tuple[str, str], ...] = (
     ("journal.op_events", "read-only op lane (reducer view once P4 lands)"),
-    ("journal.op_amendments", "read-only amendment lane (empty until P4)"),
+    ("journal.op_amendments", "read-only amendment provenance lane (pre-folded)"),
     ("journal.module_prep_events", "read-only"),
     ("journal.module_enter_events", "read-only"),
     ("journal.module_exit_events", "read-only"),

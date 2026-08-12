@@ -167,8 +167,11 @@ def build_ingest_inputs(trace: "Trace", events: CaptureEvents) -> IngestInputs:
 
     return IngestInputs(
         journal=JournalView(
-            op_events=tuple(events.op_events),
-            op_amendments=(),
+            # The folded reducer view IS the op lane step 0 consumes; the
+            # amendment lane rides along as read-only provenance facts
+            # (already folded into op_events — consumers must never re-apply).
+            op_events=tuple(events.amended_op_records()),
+            op_amendments=tuple(getattr(events, "op_amendments", ()) or ()),
             module_prep_events=tuple(events.module_prep_events),
             module_enter_events=tuple(events.module_enter_events),
             module_exit_events=tuple(events.module_exit_events),

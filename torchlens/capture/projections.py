@@ -1697,6 +1697,10 @@ def _torch_device_from_string(device_name: Any) -> torch.device | None:
 
 
 def recording_trace_from_events(events: Any) -> tuple[RecordContext, ...]:
-    """Project capture events into fastlog ``RecordContext`` objects."""
+    """Project capture events into fastlog ``RecordContext`` objects.
 
-    return tuple(_record_context_from_event(event) for event in events.op_events)
+    Reads the amended reducer view: retention amendments rebind outputs and
+    policy facts the projected contexts must reflect.
+    """
+
+    return tuple(_record_context_from_event(event) for event in events.amended_op_records())

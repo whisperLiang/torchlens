@@ -583,7 +583,9 @@ class Recorder:
         """Stamp string-only failure metadata onto a frozen recording."""
 
         op_events = tuple(
-            self._capture_events.op_events if self._capture_events is not None else ()
+            self._capture_events.amended_op_records()
+            if self._capture_events is not None
+            else ()
         )
         last_event = op_events[-1] if op_events else None
         last_ctx = getattr(last_event, "record_context", None)

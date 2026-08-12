@@ -569,15 +569,28 @@ class RecordingProjector:
                 if record.ctx.address is not None:
                     by_address.setdefault(record.ctx.address, []).append(index)
         last_facts = captured_cores[-1].projection_facts if captured_cores else {}
-        capture_events = next(
+        selected = next(
             (
-                core.projection_facts.get("capture_events")
+                (core, core.projection_facts.get("capture_events"))
                 for core in captured_cores
                 if core.projection_facts.get("capture_events") is not None
             ),
             None,
         )
-        if capture_events is not None:
+        capture_events: Any = None
+        if selected is not None and selected[1] is not None:
+            source_core, capture_events = selected
+            # The projection clone was made BEFORE the capture-end seal, so
+            # its watermark normally arrives via the seal's dual-stamp; the
+            # sealed core's own watermark is the authoritative fallback
+            # (reviewer note S-N2 — either transport alone suffices, both are
+            # kept so a future re-ordering of snapshot/seal cannot silently
+            # strand the filter anchor).
+            if (
+                getattr(capture_events, "core_seal_watermark", None) is None
+                and source_core.amendment_watermark is not None
+            ):
+                capture_events.core_seal_watermark = source_core.amendment_watermark
             capture_events = capture_events.copy_for_replay(projected_op_events=all_events)
             capture_events.raw_layer_counter = max(
                 (event.raw_index for event in all_events), default=0
