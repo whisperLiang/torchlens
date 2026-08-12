@@ -546,8 +546,11 @@ def test_fork_isolation_sweep_is_index_driven_and_never_stale() -> None:
 
     # Sparse proof: the sweep TRUSTS the index. Drop the dict cell from it;
     # the next fork must skip the eager copy, and its lazy first read then
-    # sees the parent's later in-place write.
+    # sees the parent's later in-place write. The cached sweep plan derives
+    # from the index, so a hand-poisoned index drops it exactly like the
+    # post-seal maintenance hooks do.
     index[1].discard(row)
+    store._sweep_plan = None
     poisoned = OpStoreView(store)
     poisoned.isolate_mutable_cells()
     assert row * layout.n_fields + 1 not in poisoned._overlay, (
@@ -585,6 +588,7 @@ def test_fork_isolation_sweep_is_index_driven_and_never_stale() -> None:
     remaining = list(big_index[1])
     remaining.remove(7)
     big_index[1] = tuple(remaining)
+    big._sweep_plan = None
     poisoned_big = OpStoreView(big)
     poisoned_big.isolate_mutable_cells()
     n_fields = big.layout.n_fields
