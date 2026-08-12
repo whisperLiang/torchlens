@@ -110,6 +110,29 @@ class DuplicateBufferModel(nn.Module):
         return self.lin(d)
 
 
+class BufferFromInputModel(nn.Module):
+    """Buffer reassigned from an input-derived tensor (B2 residual closure).
+
+    The journaled write's version node carries ``buffer_source`` naming the
+    input-derived producer op, so step 6's buffer-source ancestry fallback
+    (``control_flow.py``) has real content to copy. Step 4 pre-propagates
+    transitive input ancestry whenever it runs — and it runs on default
+    captures — so the fallback is only content-effective with layer depths
+    OFF. The axis therefore captures with ``mark_layer_depths=False``: it
+    retired the former ``("6", "has_input_ancestor")`` permanent no-op row
+    and is the axis that observes step 6's ``input_ancestors`` write family.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("acc", torch.zeros(4))
+        self.lin = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.acc = self.acc + x.mean(dim=0)
+        return self.lin(x) * self.acc
+
+
 class ElifElseBranchModel(nn.Module):
     """Two if/elif/else chains, one taking the elif arm and one the else arm.
 
@@ -253,6 +276,13 @@ def _axis_buffer_duplicate() -> Any:
     return tl.trace(DuplicateBufferModel(), torch.randn(2, 4))
 
 
+def _axis_buffer_from_input() -> Any:
+    _seed_everything()
+    return tl.trace(
+        BufferFromInputModel(), torch.randn(2, 4), mark_layer_depths=False
+    )
+
+
 def _axis_lookback(tmp_dir: str, *, streaming: bool, transform: bool) -> Any:
     _seed_everything()
     model, model_input = _oracle_case("plain_cnn")
@@ -379,6 +409,7 @@ def iter_axes(tmp_dir: str | None = None) -> list[tuple[str, Callable[[], Any]]]
         ("internal_source", _axis_internal_source),
         ("buffer_pressure", _axis_buffer_pressure),
         ("buffer_duplicate", _axis_buffer_duplicate),
+        ("buffer_from_input", _axis_buffer_from_input),
         ("lookback", lambda: _axis_lookback(tmp_dir, streaming=False, transform=False)),
         ("lookback_transform", lambda: _axis_lookback(tmp_dir, streaming=False, transform=True)),
         ("lookback_streaming", lambda: _axis_lookback(tmp_dir, streaming=True, transform=False)),

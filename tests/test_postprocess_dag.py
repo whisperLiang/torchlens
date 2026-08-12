@@ -90,7 +90,7 @@ MULTI_WRITER_GOLDEN = {
     "has_children": ("1", "6"),
     "has_input_ancestor": ("4", "6"),
     "has_output_descendant": ("1", "2", "4"),
-    "input_ancestors": ("4", "9"),
+    "input_ancestors": ("4", "6", "9"),
     "input_to_module_calls": ("1", "11"),
     "internal_source_ancestors": ("6", "9"),
     "interventions": ("1", "3", "6", "9"),
@@ -186,6 +186,29 @@ PHANTOM_WRITE_EXEMPTIONS = {
         "pre-existing gap on base main, flagged for root-cause). The "
         "buffer_duplicate axis fires the merge itself; this row retires "
         "loudly the day the materialize gap is fixed"
+    ),
+    ("6", "address"): (
+        "the None-address recovery/anonymous fallback is code-real but no "
+        "known capture path materializes a buffer row without a display "
+        "address (every buffer source-logging call site records one, and "
+        "step 0 resolves it through the registered pool, the "
+        "equivalence-class recovery, and the recorded I/O address in turn; "
+        "bounded empirical sweep: registered read, journal write, dynamic "
+        "register_buffer, cooked recording, top-level read). Retires "
+        "loudly the day a path produces one"
+    ),
+}
+
+#: Declared-but-never-observed READS with their named exemptions — the
+#: read-side mirror of the table above, same discipline: each entry names
+#: WHY the recording matrix cannot observe it, and removing the code path
+#: must remove the row. Asserted against the live matrix union as
+#: EXPECTED_PHANTOM_READS in test_postprocess_enforcement.py.
+PHANTOM_READ_EXEMPTIONS = {
+    ("6", "equivalence_class"): (
+        "read only on the None-address recovery branch (the buffer_ prefix "
+        "strip), guarded by the same unreachability as the ('6', 'address') "
+        "phantom write — the two rows retire together"
     ),
 }
 
@@ -362,15 +385,18 @@ def test_noop_writer_cannot_discharge_reads() -> None:
 
 
 def test_phantom_write_exemptions_are_exact() -> None:
-    """Every phantom-exemption row names a real declared write.
+    """Every phantom-exemption row names a real declared write (or read).
 
     The full observed-vs-declared diff runs over the recording matrix (the
-    env-gated enforcement leg); this fast check keeps the exemption table
-    from referencing writes that no longer exist.
+    env-gated enforcement leg); this fast check keeps the exemption tables
+    from referencing declarations that no longer exist.
     """
 
     for (step, column), reason in PHANTOM_WRITE_EXEMPTIONS.items():
         assert column in POSTPROCESS_STEP_CONTRACTS[step].writes, (step, column)
+        assert reason
+    for (step, column), reason in PHANTOM_READ_EXEMPTIONS.items():
+        assert column in POSTPROCESS_STEP_CONTRACTS[step].reads, (step, column)
         assert reason
 
 

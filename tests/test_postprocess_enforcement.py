@@ -34,6 +34,18 @@ EXPECTED_PHANTOM_WRITES = {
     ("9", "kwargs_template"),
     ("18", "grad_ref"),
     ("6", "internal_source_parents"),
+    ("6", "address"),
+}
+
+#: Declared-but-never-observed READS, the read-side mirror of the table
+#: above (B2 residual closure): step 6's equivalence_class read sits on the
+#: None-address recovery branch, guarded by the same unreachability as the
+#: ("6", "address") phantom write — no capture path materializes a buffer
+#: row without a display address. Reason-bearing mirror:
+#: PHANTOM_READ_EXEMPTIONS in test_postprocess_dag.py. Growing this set is
+#: reviewed, never silent.
+EXPECTED_PHANTOM_READS = {
+    ("6", "equivalence_class"),
 }
 
 #: Writers whose intercepted writes are never content-effective on ANY
@@ -49,7 +61,8 @@ EXPECTED_PHANTOM_WRITES = {
 #: findings test. A NEW entry here is reviewed, never silently accepted;
 #: a matrix-gap entry is closed by adding the axis that makes the writer
 #: effective (the conditional_elif_else and var_names axes retired the
-#: 5/9 elif-else and 11.5 var_names rows exactly that way).
+#: 5/9 elif-else and 11.5 var_names rows exactly that way, and the
+#: depths-off buffer_from_input axis retired ("6", "has_input_ancestor")).
 PINNED_NOOP_WRITERS = {
     "1": frozenset((
         "activation_memory", "bytes_delta_at_call", "bytes_peak_at_call",
@@ -77,12 +90,14 @@ PINNED_NOOP_WRITERS = {
     # but rewrites the False placeholder on these models, so it lands here
     # instead — still unable to discharge a read.
     "5": frozenset(("is_terminal_bool",)),
+    # has_input_ancestor left this row when the buffer_from_input axis
+    # (layer depths OFF, so step 4 does not pre-propagate ancestry) made
+    # step 6's buffer-source ancestry fallback content-effective.
     "6": frozenset((
         "args_template", "conditional_arm_children",
         "conditional_elif_children", "conditional_else_children",
         "conditional_entry_children", "conditional_then_children",
-        "has_children", "has_input_ancestor", "interventions",
-        "kwargs_template",
+        "has_children", "interventions", "kwargs_template",
     )),
     "7": frozenset(("equivalence_class",)),
     "9": frozenset(("is_buffer", "is_input", "is_output")),
@@ -146,6 +161,50 @@ def test_buffer_duplicate_axis_actually_merges(
         ), "no surviving op may still reference the merged-away buffer"
     finally:
         trace.cleanup()
+
+
+def test_buffer_from_input_axis_makes_ancestry_writes_effective(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-vacuity: the buffer_from_input axis fires step 6's ancestry fallback.
+
+    The ("6", "has_input_ancestor") permanent no-op row was retired by this
+    axis, and step 6's input_ancestors write is declared on its evidence. If
+    a capture or model change ever stops the fallback from being
+    content-effective (e.g. something upstream starts pre-propagating
+    ancestry with depths off), the retirement goes vacuous silently — this
+    pins the trigger.
+    """
+
+    import torchlens.postprocess as pp
+    from support.postprocess_axes import _axis_buffer_from_input
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_WRITE_AUDIT", "record")
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_READ_AUDIT", "record")
+    for sink in (
+        pp.RECORDED_STEP_WRITES,
+        pp.RECORDED_STEP_READS,
+        pp.RECORDED_STEP_CLONE_READS,
+        pp.RECORDED_STEP_EFFECTIVE_WRITES,
+    ):
+        sink.clear()
+    try:
+        trace = _axis_buffer_from_input()
+        effective = pp.RECORDED_STEP_EFFECTIVE_WRITES.get("6", set())
+        assert {"has_input_ancestor", "input_ancestors"} <= effective, (
+            "step 6's buffer-source ancestry fallback must be "
+            f"content-effective on this axis; effective: {sorted(effective)}"
+        )
+        trace.cleanup()
+    finally:
+        for sink in (
+            pp.RECORDED_STEP_WRITES,
+            pp.RECORDED_STEP_READS,
+            pp.RECORDED_STEP_CLONE_READS,
+            pp.RECORDED_STEP_EFFECTIVE_WRITES,
+        ):
+            sink.clear()
 
 
 def test_reads_before_release_mark_still_record(
@@ -267,13 +326,15 @@ def test_matrix_union_reports(monkeypatch: pytest.MonkeyPatch) -> None:
         # is observed ⊆ declared, so a regression that stops RECORDING
         # reads (e.g. an over-broad released-row suppression in
         # _CombinedAuditOpRowStore.cell_get) makes the leg quieter, never
-        # red. Every declared read is observed on >=1 axis today; a
-        # declared read no axis observes is either a stale declaration or
-        # a recording hole — both reviewed, never exempted silently.
-        assert phantom_reads == set(), (
-            "declared-never-observed READS appeared; either the "
-            "declaration is stale or read recording lost coverage "
-            f"(suppression regression). Diff: {sorted(phantom_reads)}"
+        # red. Every declared read outside the named exemption set is
+        # observed on >=1 axis today; a declared read no axis observes is
+        # either a stale declaration or a recording hole — both reviewed,
+        # never exempted silently (the one current exemption carries its
+        # reason in PHANTOM_READ_EXEMPTIONS, test_postprocess_dag.py).
+        assert phantom_reads == EXPECTED_PHANTOM_READS, (
+            "declared-never-observed READS drifted; either a declaration "
+            "is stale or read recording lost coverage (suppression "
+            f"regression). Diff: {sorted(phantom_reads ^ EXPECTED_PHANTOM_READS)}"
         )
         assert noop == PINNED_NOOP_WRITERS, (
             "the permanent no-op writer report drifted; a new no-op writer "

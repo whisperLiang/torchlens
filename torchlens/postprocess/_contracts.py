@@ -610,9 +610,26 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         # _remove_log_entry(remove_references=True) husking runs the same
         # reference scrub as step 3 (_edge_uses, equivalent_ops,
         # interventions, args/kwargs_template, conditional child views).
+        # Correctly NOT declared: the guarded saved_args.append fires only
+        # when the buffer row's own saved_args is non-None, and source rows
+        # materialize it as None (backends/torch/sources.py) — same
+        # unreachability class as internal_source_parents below, without
+        # the code-real write sites that keep that one declared.
         writes=frozenset(
             (
                 "_edge_uses",
+                # B2 residual closure: the None-address recovery/anonymous
+                # fallback (control_flow.py, from d8155654) assigns a
+                # display address when a buffer row reaches step 6 without
+                # one. No known capture path materializes such a row (every
+                # buffer source-logging call site records an address, and
+                # step 0 resolves it through the registered pool, the
+                # equivalence-class recovery, and the recorded I/O address
+                # in turn — bounded empirical sweep: registered read,
+                # journal write, dynamic register_buffer, cooked recording,
+                # top-level read). Kept declared as a named phantom
+                # exemption; retires loudly the day a path produces one.
+                "address",
                 "args_template",
                 "buffer_pass",
                 "buffer_replay_validated",
@@ -628,6 +645,16 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "func_name",
                 "has_children",
                 "has_input_ancestor",
+                # B2 residual closure: the buffer-source ancestry fallback
+                # (control_flow.py lines 827-828) copies the source's
+                # input_ancestors onto journaled buffer version rows. Step 4
+                # pre-propagates transitive ancestry whenever it runs — and
+                # it runs on default captures — so this write is only
+                # content-effective with layer depths OFF; the
+                # buffer_from_input axis is exactly that configuration and
+                # retired the former ("6", "has_input_ancestor") permanent
+                # no-op row.
+                "input_ancestors",
                 "internal_source_ancestors",
                 # Code-real but IN-PIPELINE UNREACHABLE (day-1 finding,
                 # fix round): the merge's internal_source_parents
@@ -665,6 +692,11 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "conditional_else_children",
                 "conditional_entry_children",
                 "conditional_then_children",
+                # B2 residual closure: read only on the None-address
+                # recovery branch (the buffer_ prefix strip), which no
+                # known capture path reaches — the named phantom-READ
+                # exemption paired with the address write above.
+                "equivalence_class",
                 "equivalent_ops",
                 "has_input_ancestor",
                 "input_ancestors",
@@ -1758,6 +1790,7 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "_edge_uses",
                     "_label_raw",
                     "children",
+                    "equivalence_class",
                     "equivalent_ops",
                     "func",
                     "func_name",
@@ -2379,6 +2412,7 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "conditional_then_children",
                     "equivalent_ops",
                     "func_name",
+                    "input_ancestors",
                     "internal_source_ancestors",
                     "internal_source_parents",
                     "interventions",
@@ -2403,9 +2437,10 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
         ("6", "11"): PinnedPair(
             "columns",
             frozenset((
+                    "address",
                     "buffer_pass",
             )),
-            "step 11 consumes/refines buffer_pass after step 6 writes",
+            "step 11 consumes/refines address, buffer_pass after step 6 writes",
         ),
         ("6", "11.5"): PinnedPair(
             "columns",
@@ -2436,6 +2471,15 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
             "layer-log aggregation reads per-op ancestry, parents, and "
             "conditional child views as step 6's merge left them",
         ),
+        ("6", "16"): PinnedPair(
+            "columns",
+            frozenset((
+                    "address",
+            )),
+            "module-log construction reads per-op display addresses, which "
+            "for buffer rows are final only after step 6's recovery / "
+            "anonymous-fallback assignment",
+        ),
         ("6", "16.5"): PinnedPair(
             "columns",
             frozenset((
@@ -2456,6 +2500,7 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
             "columns",
             frozenset((
                     "_edge_uses",
+                    "address",
                     "args_template",
                     "buffer_pass",
                     "buffer_replay_validated",
@@ -2471,6 +2516,7 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "func_name",
                     "has_children",
                     "has_input_ancestor",
+                    "input_ancestors",
                     "internal_source_ancestors",
                     "internal_source_parents",
                     "interventions",
