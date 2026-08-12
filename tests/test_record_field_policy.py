@@ -366,6 +366,64 @@ def test_postprocess_write_audit_covers_streaming_axis(
         trace.cleanup()
 
 
+class _OrphanEquivalenceModel(nn.Module):
+    """Orphan island sharing an equivalence class with surviving ops.
+
+    The ``z``-side ops are a disconnected component (orphaned by step 3's
+    undirected flood) while ``z + 1``/``z ** 2`` are equivalence-classmates
+    of the surviving ``x + 1``/``x ** 2``, so the removal scrub must rebind
+    the survivors' ``equivalent_ops``.
+    """
+
+    @staticmethod
+    def forward(x: torch.Tensor) -> torch.Tensor:
+        x = x + 1
+        z = torch.ones(5, 5)
+        z = z + 1
+        _dead = z**2
+        return x**2
+
+
+def test_postprocess_write_audit_covers_orphan_keep_axis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Step 3 passes enforcement writing is_orphan under keep_orphans=True.
+
+    Design-ppdag-v3 defect 4a: with ``keep_orphans=True`` on an
+    orphan-bearing model, step 3 writes ``is_orphan`` on every retained
+    orphan and returns BEFORE the batch removal — a write set no recorded
+    enforcement axis exercised.
+    """
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    trace = tl.trace(_OrphanEquivalenceModel(), torch.ones(5, 5), keep_orphans=True)
+    try:
+        assert trace.orphans, "the island must be retained as orphans"
+        assert all(op.is_orphan for op in trace.orphans)
+    finally:
+        trace.cleanup()
+
+
+def test_postprocess_write_audit_covers_orphan_removal_scrub_axis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Step 3 passes enforcement scrubbing survivors' equivalent_ops.
+
+    Design-ppdag-v3 defect 4b: default orphan REMOVAL rebinds surviving
+    rows' ``equivalent_ops`` when an orphan shared an equivalence class —
+    an undeclared write that tripped the audit the day this axis landed.
+    """
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    trace = tl.trace(_OrphanEquivalenceModel(), torch.ones(5, 5))
+    try:
+        labels = {op.label for op in trace.layer_list}
+        for op in trace.layer_list:
+            assert set(op.equivalent_ops) <= labels, "scrub left a dead equivalence label"
+    finally:
+        trace.cleanup()
+
+
 def test_postprocess_write_audit_trips_on_undeclared_column(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

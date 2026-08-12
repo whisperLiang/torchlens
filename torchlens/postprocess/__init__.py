@@ -261,6 +261,19 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         "3",
         "Remove orphan nodes",
         "Consumes ancestry flags; removes or records orphan raw Ops in place.",
+        # Design-ppdag-v3 defect 4, evidence-narrowed: step 3's undeclared
+        # writes are two config-gated sets. (4a) keep_orphans=True on an
+        # orphan-bearing model writes is_orphan on every retained orphan and
+        # returns before the batch removal. (4b) default keep_orphans=False
+        # runs the removal scrub (_batch_remove_log_entries with
+        # remove_references=True), which rebinds SURVIVING rows'
+        # equivalent_ops when an orphan shared an equivalence class
+        # (verified live on the OrphanTensors fixture). The design's wider
+        # parents/children/recurrent_ops scrub columns CANNOT fire at step 3:
+        # the orphan flood is undirected, so orphans are whole disconnected
+        # components — no survivor holds a dataflow edge to one — and
+        # recurrence groups are not built until step 7. Declaring them here
+        # would be phantom declarations (the Opus-4 anti-laundering guard).
         writes=frozenset(
             (
                 "_edge_uses",
@@ -270,8 +283,10 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "conditional_else_children",
                 "conditional_entry_children",
                 "conditional_then_children",
+                "equivalent_ops",
                 "interventions",
                 "is_internal_sink",
+                "is_orphan",
                 "is_terminal_bool",
                 "kwargs_template",
             )
