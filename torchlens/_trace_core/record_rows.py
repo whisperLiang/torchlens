@@ -90,13 +90,22 @@ def install_record_facade(cls: type, stored_names: tuple[str, ...]) -> OpStoreLa
 
     Binds the shared layout as ``cls._TL_LAYOUT`` and refuses to overwrite an
     existing class attribute (a collision with a hand-written ``@property``
-    would silently change public behavior, so it fails at import time).
+    would silently change public behavior, so it fails at import time) —
+    EXCEPT a plain ``@dataclass`` field default: dataclass processing leaves
+    simple defaults as class attributes, but the generated ``__init__`` bakes
+    them into its own signature and never reads the class attribute again, so
+    replacing one with a descriptor is behavior-preserving.
     """
 
     layout = OpStoreLayout(stored_names)
     setattr(cls, "_TL_LAYOUT", layout)
     for name in stored_names:
-        if name in vars(cls):
+        existing = vars(cls).get(name)
+        if existing is not None and (
+            callable(existing)
+            or hasattr(existing, "__get__")
+            or isinstance(existing, (classmethod, staticmethod, property))
+        ):
             raise RuntimeError(
                 f"{cls.__name__} stored field {name!r} collides with an existing class attribute"
             )
@@ -156,14 +165,24 @@ def adopt_records(core: Any, kind: str, records: Any) -> None:
     untouched (idempotent for re-entrant build passes).
     """
 
+    adopt_rows(core.kind_rows, kind, records)
+
+
+def adopt_rows(store_registry: dict, kind: str, records: Any) -> None:
+    """Adopt detached facade records into ``store_registry[kind]``.
+
+    The registry-level twin of ``adopt_records`` used by owners other than
+    the forward core's kind tables (the M9 backward epochs).
+    """
+
     records = list(records)
     if not records:
         return
     layout = type(records[0])._TL_LAYOUT
-    store = core.kind_rows.get(kind)
+    store = store_registry.get(kind)
     if store is None:
         store = OpRowStore(layout)
-        core.kind_rows[kind] = store
+        store_registry[kind] = store
     elif store.frozen:
         # A refresh re-runs the build passes after the first capture sealed
         # the table; records built by the re-run stay detached-backed (the
@@ -180,6 +199,31 @@ def adopt_records(core: Any, kind: str, records: Any) -> None:
             row = store.adopt_row(bound._cells)
             instance_dict[CORE_KEY] = store
             instance_dict[ROW_KEY] = row
+
+
+class BackwardEpoch:
+    """One atomic backward-projection generation (M9).
+
+    Bound by the projection materializer AFTER a successful projection: a
+    full rebuild atomically replaces the core's epoch list with one fresh
+    epoch; a clean tail fold extends the live epoch in place. ``revision``
+    and ``watermark`` mirror the trace-side lazy invalidation fields
+    (``_backward_projection_revision`` / ``_backward_projection_event_count``)
+    — the invalidation SEMANTICS stay on the trace, the epoch records the
+    generation its rows belong to. ``stores`` holds the per-kind row stores
+    (``grad_fn`` / ``grad_fn_call`` / ``backward_pass``) backing the
+    projection's record facades; they stay unsealed because a later fold may
+    append rows.
+    """
+
+    __slots__ = ("revision", "watermark", "stores")
+
+    def __init__(self) -> None:
+        """Create an empty epoch."""
+
+        self.revision: Any = None
+        self.watermark: Any = None
+        self.stores: dict[str, Any] = {}
 
 
 def detach_record(record: Any) -> None:

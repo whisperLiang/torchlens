@@ -1229,12 +1229,54 @@ def _materialize_backward_projections(trace: Any) -> None:
             and _backward_tail_is_foldable(state, events[watermark:])
         ):
             _fold_backward_projection_tail(trace, state, events[watermark:])
+            full_rebuild = False
         else:
             _materialize_backward_projections_impl(trace, events, stream=stream)
+            full_rebuild = True
         trace._backward_projection_event_count = len(events)
         trace._backward_projection_revision = revision
+        _bind_backward_epoch(trace, full_rebuild=full_rebuild)
     finally:
         trace.__dict__.pop("_tl_materializing_backward_projection", None)
+
+
+def _bind_backward_epoch(trace: Any, *, full_rebuild: bool) -> None:
+    """Bind the projected backward records to the core's backward epoch (M9).
+
+    Runs AFTER a successful projection, so the swap is atomic with respect to
+    a failed rebuild: a full rebuild replaces the epoch list with ONE fresh
+    epoch (mirroring the in-place replacement of ``grad_fn_logs``); a clean
+    tail fold extends the live epoch. Every projected GradFn / GradFnCall /
+    BackwardPass record's detached row adopts into the epoch's stores
+    (already-adopted rows are skipped, so folds only add the new tail rows).
+    The lazy watermark/revision invalidation stays trace-side and unchanged;
+    the epoch mirrors both values as its generation stamp. Non-core-backed
+    traces (loaded artifacts, previews) keep detached-backed records.
+    """
+
+    core = trace.__dict__.get("_trace_core")
+    if core is None:
+        return
+    from torchlens._trace_core.record_rows import BackwardEpoch, adopt_rows
+
+    epochs = core.backward_epochs
+    if full_rebuild or not epochs:
+        epoch = BackwardEpoch()
+        core.backward_epochs = [epoch]
+    else:
+        epoch = epochs[-1]
+    epoch.revision = getattr(trace, "_backward_projection_revision", None)
+    epoch.watermark = getattr(trace, "_backward_projection_event_count", None)
+    grad_fn_logs = getattr(trace, "grad_fn_logs", None) or {}
+    grad_fns = list(grad_fn_logs.values())
+    calls: list[Any] = []
+    for grad_fn_record in grad_fns:
+        call_map = getattr(grad_fn_record.calls, "_dict", grad_fn_record.calls)
+        calls.extend(call_map.values())
+    passes = list((getattr(trace, "backward_pass_logs", None) or {}).values())
+    adopt_rows(epoch.stores, "grad_fn", grad_fns)
+    adopt_rows(epoch.stores, "grad_fn_call", calls)
+    adopt_rows(epoch.stores, "backward_pass", passes)
 
 
 def _materialize_backward_projections_impl(

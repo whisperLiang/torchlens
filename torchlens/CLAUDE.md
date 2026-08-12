@@ -169,7 +169,14 @@ exclusive with backward-related capture because it discards the autograd graph.
   over per-trace kind tables (`record_rows.py`, `TraceCore.kind_rows`,
   adopted by the build passes and sealed with the core; preview backends and
   loads stay detached-backed). The canonical label -> op-row index binds at
-  the freeze as `TraceCore.label_rows`. Architecture of record:
+  the freeze as `TraceCore.label_rows`.
+  M9 backward epochs: `GradFn`/`GradFnCall`/`BackwardPass` are row facades;
+  each successful backward projection binds an atomic `BackwardEpoch`
+  (`TraceCore.backward_epochs`) — a full rebuild atomically replaces the
+  epoch list, a clean tail fold extends the live epoch — whose per-kind row
+  stores back the projected records. The lazy watermark/revision
+  invalidation stays trace-side and byte-identical; loaded/preview traces
+  keep detached-backed backward records. Architecture of record:
   `docs/reference/trace_core_design.md`.
 - `backends/torch/` - torch function wrapping, explicit wrap/unwrap, module prep.
 - `fastlog/` - sparse predicate recording with RAM/disk storage and recovery.
