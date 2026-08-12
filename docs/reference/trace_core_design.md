@@ -318,6 +318,18 @@ packing for scalar planes beyond the transpose, and the `Trace` PHYSICAL
 component decomposition (declared ownership map only — `Trace` fields still
 live in its `__dict__`).
 
+Memory disposition (fix round, 2026-08-12, measured marginal census on a
+602-op Linear/ReLU stack, warmed process): ~112 objects/op and ~30 KB
+shallow bytes/op retained. Ownership: the retained capture-event stream is
+25.4 obj/op / 3.4 KB/op (a capability decision — it powers post-hoc
+backward and refresh); eager facade records are 5.5/op; the remaining ~81
+obj/op are per-op builtin containers (≈11 empty lists, ≈16 singleton
+lists, dicts of relation/arg metadata) nested in stored cells. The ≤1 KiB /
+<10 obj-per-UNINSPECTED-row success metric is therefore owned by the
+unlanded slices above (on-demand facades + typed column packing + event
+droppability policy), not reachable by spot fixes; no current number should
+be read as that metric being met.
+
 ### 3.7 Trace decomposition (THE deliverable) and TraceBuildState
 
 M10 as-landed disposition (2026-08-12): `TraceBuildState` is dissolved — its
