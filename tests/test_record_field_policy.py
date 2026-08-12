@@ -308,6 +308,64 @@ def test_postprocess_write_audit_enforces_declared_columns(
     trace.cleanup()
 
 
+def test_postprocess_write_audit_covers_save_code_context_axis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Step 11.5's var_names writes pass enforcement under save_code_context.
+
+    Design-ppdag-v3 defect 3: step 11.5 declared an EMPTY write set, silently
+    wrong under ``save_code_context=True`` (it assigns ``op.var_names`` on
+    every op). No recorded enforcement axis enabled the flag, so the audit
+    never tripped. This axis pins the repaired declaration.
+    """
+
+    class _AssigningModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = nn.Linear(3, 3)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            hidden = self.linear(x)
+            activated = torch.relu(hidden)
+            return activated
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    trace = tl.trace(
+        _AssigningModel().eval(), torch.randn(2, 3), save_code_context=True, save_grads=False
+    )
+    try:
+        assert any(op.var_names for op in trace.layer_list if op.type != "output")
+    finally:
+        trace.cleanup()
+
+
+def test_postprocess_write_audit_covers_streaming_axis(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Steps 18/19 pass enforcement with their hand-derived write sets.
+
+    Design-ppdag-v3 defect 1: steps 18/19 declared ``writes=None``
+    (wildcard), so the streaming finalization/eviction windows were never
+    audited. This axis runs a disk-streamed capture under enforcement and
+    asserts the streamed refs landed (step 18) and outs were evicted
+    (step 19).
+    """
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    trace = tl.trace(
+        _PolicyModel().eval(),
+        torch.randn(2, 3),
+        storage=tl.to_disk(tmp_path / "run.tlspec"),
+        save_grads=False,
+    )
+    try:
+        streamed = [op for op in trace.layer_list if getattr(op, "out_ref", None) is not None]
+        assert streamed, "step 18 must attach streamed out refs"
+        assert all(op._slot("out") is None for op in streamed), "step 19 must evict outs"
+    finally:
+        trace.cleanup()
+
+
 def test_postprocess_write_audit_trips_on_undeclared_column(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

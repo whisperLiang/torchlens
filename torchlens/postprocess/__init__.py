@@ -432,11 +432,18 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
             )
         ),
     ),
+    # Step 11.5 previously declared an EMPTY write set, silently wrong under
+    # save_code_context=True where it assigns op.var_names on every op
+    # (design-ppdag-v3 defect 3). The audit never tripped because no recorded
+    # enforcement axis enabled save_code_context. Note: the design's expected
+    # _arg_expressions_cache companion write does NOT fire here —
+    # resolve_var_names never reads op.arg_expressions (verified), so
+    # declaring it would be a phantom declaration.
     "11.5": PostprocessStepContract(
         "11.5",
         "Populate source var names",
         "Consumes code context; mutates Op var_names in place.",
-        writes=frozenset(),
+        writes=frozenset(("var_names",)),
     ),
     # Step 11.75 previously had NO contract boundary, so its writes were
     # misattributed to step 12's window and only surfaced on the selective/
