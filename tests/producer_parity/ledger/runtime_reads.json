@@ -7,7 +7,7 @@
 "backend_semantics": [
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/tests/producer_parity/_snapshot.py:308",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/backends/torch/ops.py:4115",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:833",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:850",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:341",
 "/home/johnmarktaylor91/.local/share/uv/python/cpython-3.10-linux-x86_64-gnu/lib/python3.10/dataclasses.py:1446"
 ],
@@ -19,7 +19,7 @@
 "capture_spec": [
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/tests/producer_parity/_snapshot.py:308",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/backends/torch/backend.py:884",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:1162",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:1180",
 "/home/johnmarktaylor91/.local/share/uv/python/cpython-3.10-linux-x86_64-gnu/lib/python3.10/dataclasses.py:1446"
 ],
 "construction_done": [
@@ -51,10 +51,10 @@
 ],
 "function": [
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/tests/producer_parity/_snapshot.py:308",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:832",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:849",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:340",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:873",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/utils/hashing.py:318",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/utils/hashing.py:327",
 "/home/johnmarktaylor91/.local/share/uv/python/cpython-3.10-linux-x86_64-gnu/lib/python3.10/dataclasses.py:1446"
 ],
 "grad_fn_class_qualname": [
@@ -64,8 +64,8 @@
 ],
 "grad_fn_handle": [
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/tests/producer_parity/_snapshot.py:308",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/backends/torch/ops.py:6232",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/backends/torch/ops.py:6234",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/backends/torch/ops.py:6245",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/backends/torch/ops.py:6247",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:361",
 "/home/johnmarktaylor91/.local/share/uv/python/cpython-3.10-linux-x86_64-gnu/lib/python3.10/dataclasses.py:1446"
 ],
@@ -77,7 +77,7 @@
 ],
 "input_ancestors": [
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/tests/producer_parity/_snapshot.py:308",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:1006",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:1024",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:515",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:516",
 "/home/johnmarktaylor91/.local/share/uv/python/cpython-3.10-linux-x86_64-gnu/lib/python3.10/dataclasses.py:1446"
@@ -89,7 +89,7 @@
 ],
 "internal_source_ancestors": [
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/tests/producer_parity/_snapshot.py:308",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:1024",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:1042",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:539",
 "/home/johnmarktaylor91/.local/share/uv/python/cpython-3.10-linux-x86_64-gnu/lib/python3.10/dataclasses.py:1446"
 ],
@@ -133,15 +133,15 @@
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:813",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:868",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:898",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/utils/hashing.py:336",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/utils/hashing.py:345",
 "/home/johnmarktaylor91/.local/share/uv/python/cpython-3.10-linux-x86_64-gnu/lib/python3.10/dataclasses.py:1446"
 ],
 "label_raw": [
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/tests/producer_parity/_snapshot.py:305",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/tests/producer_parity/_snapshot.py:308",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/tests/producer_parity/_snapshot.py:309",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/backends/torch/ops.py:6233",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:842",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/backends/torch/ops.py:6246",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:859",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projectors.py:596",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projectors.py:598",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/ir/capture_events.py:268",
@@ -184,7 +184,7 @@
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:871",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:911",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:946",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/utils/hashing.py:314",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/utils/hashing.py:323",
 "/home/johnmarktaylor91/.local/share/uv/python/cpython-3.10-linux-x86_64-gnu/lib/python3.10/dataclasses.py:1446"
 ],
 "layer_label_raw": [
@@ -207,7 +207,7 @@
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:813",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:868",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:899",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/utils/hashing.py:337",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/utils/hashing.py:346",
 "/home/johnmarktaylor91/.local/share/uv/python/cpython-3.10-linux-x86_64-gnu/lib/python3.10/dataclasses.py:1446"
 ],
 "module_stack": [
@@ -228,7 +228,7 @@
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:841",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:843",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:875",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/utils/hashing.py:331",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/utils/hashing.py:340",
 "/home/johnmarktaylor91/.local/share/uv/python/cpython-3.10-linux-x86_64-gnu/lib/python3.10/dataclasses.py:1446"
 ],
 "output": [
@@ -238,9 +238,9 @@
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/backends/torch/ops.py:4123",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/backends/torch/ops.py:5900",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/backends/torch/ops.py:5927",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:1164",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:1167",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:831",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:1182",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:1185",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:848",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/ir/capture_events.py:409",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/ir/capture_events.py:410",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/ir/capture_events.py:415",
@@ -249,7 +249,7 @@
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:1888",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:1916",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:337",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/utils/hashing.py:319",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/utils/hashing.py:328",
 "/home/johnmarktaylor91/.local/share/uv/python/cpython-3.10-linux-x86_64-gnu/lib/python3.10/dataclasses.py:1446"
 ],
 "params": [
@@ -259,7 +259,7 @@
 ],
 "parent_arg_positions": [
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/tests/producer_parity/_snapshot.py:308",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:990",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:1008",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/ir/capture_events.py:124",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:508",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:878",
@@ -273,7 +273,7 @@
 ],
 "parents": [
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/tests/producer_parity/_snapshot.py:308",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:988",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:1006",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projectors.py:600",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/ir/live_index.py:60",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/ir/live_index.py:94",
@@ -283,7 +283,7 @@
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:894",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/user_funcs.py:753",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/user_funcs.py:763",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/utils/hashing.py:326",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/utils/hashing.py:335",
 "/home/johnmarktaylor91/.local/share/uv/python/cpython-3.10-linux-x86_64-gnu/lib/python3.10/dataclasses.py:1446"
 ],
 "pass_index": [
@@ -301,7 +301,7 @@
 "predicate_matched": [
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/tests/producer_parity/_snapshot.py:308",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/backends/torch/backend.py:883",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:1156",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:1174",
 "/home/johnmarktaylor91/.local/share/uv/python/cpython-3.10-linux-x86_64-gnu/lib/python3.10/dataclasses.py:1446"
 ],
 "raw_index": [
@@ -327,9 +327,9 @@
 ],
 "seq": [
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/tests/producer_parity/_snapshot.py:308",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/ir/capture_events.py:585",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/ir/capture_events.py:620",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/ir/capture_events.py:647",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/ir/capture_events.py:603",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/ir/capture_events.py:638",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/ir/capture_events.py:665",
 "/home/johnmarktaylor91/.local/share/uv/python/cpython-3.10-linux-x86_64-gnu/lib/python3.10/dataclasses.py:1446"
 ],
 "source_trace": [
@@ -348,7 +348,7 @@
 ],
 "templates": [
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/tests/producer_parity/_snapshot.py:308",
-"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:834",
+"/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/capture/projections.py:851",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/ir/capture_events.py:424",
 "/home/johnmarktaylor91/.claude/worktrees/torchlens-producer/torchlens/postprocess/_materialize.py:348",
 "/home/johnmarktaylor91/.local/share/uv/python/cpython-3.10-linux-x86_64-gnu/lib/python3.10/dataclasses.py:1446"

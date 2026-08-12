@@ -391,6 +391,7 @@ ARTIFACT_VOLATILE_KEYS: frozenset[str] = frozenset(
         "created_at_utc",
         "save_duration",
         "rng_state_digests",
+        "git_commit_hash",  # artifact provenance: moves every commit by design
         "random_seed",
         "model_object_id",
         "input_object_id",
