@@ -40,21 +40,30 @@ EXPECTED_PHANTOM_WRITES = {
 #: Writers whose intercepted writes are never content-effective on ANY
 #: matrix axis (design §2.4 guard 2, pinned-findings discipline): these are
 #: placeholder-equal rewrites (output-row init, equal-content scrub
-#: rebinds, absent-feature configs). A permanent no-op writer cannot
-#: discharge a read-before-write finding; a NEW entry here is reviewed,
-#: never silently accepted. Matrix-relative: var_names IS effective on an
-#: assignment-bearing model (test_record_field_policy proves it) — the
-#: oracle models' forwards simply resolve to the empty default.
+#: rebinds, absent-feature configs) plus the FINDING-favoring ambiguity
+#: default — a rich-object cell (e.g. a tensor) rewritten with a distinct
+#: same-class value is deliberately classified no-op, so effectiveness can
+#: never launder a read discharge through an unprovable rewrite (the
+#: step-1 payload/memory columns land here by that rule). A permanent
+#: no-op writer cannot discharge a read-before-write finding; a NEW entry
+#: here is reviewed, never silently accepted. Matrix-relative: var_names
+#: IS effective on an assignment-bearing model (test_record_field_policy
+#: proves it) — the oracle models' forwards simply resolve to the empty
+#: default.
 PINNED_NOOP_WRITERS = {
     "1": frozenset((
+        "activation_memory", "bytes_delta_at_call", "bytes_peak_at_call",
         "container_path", "container_spec", "dropped_edge_tensor_args",
-        "dtype", "has_out_variations", "input_to_module_calls", "is_buffer",
-        "is_input", "is_internal_source", "is_transform", "non_tensor_kwargs",
-        "num_kwargs", "num_params_frozen", "num_passes",
-        "out_versions_by_child", "pass_index", "recurrent_ops", "shape",
-        "transform_chain", "transform_fn_name", "transform_fn_qualname",
-        "transform_fn_source", "transform_kind", "transformed_out_dtype",
-        "transformed_out_shape", "unattributed_tensor_args", "var_names",
+        "dtype", "func_duration", "has_out_variations",
+        "input_to_module_calls", "is_buffer", "is_input",
+        "is_internal_source", "is_transform", "non_tensor_kwargs",
+        "num_kwargs", "num_params_frozen", "num_passes", "out",
+        "out_versions_by_child", "param_memory", "pass_index",
+        "recurrent_ops", "shape", "transform_chain", "transform_fn_name",
+        "transform_fn_qualname", "transform_fn_source", "transform_kind",
+        "transformed_activation_memory", "transformed_out",
+        "transformed_out_dtype", "transformed_out_shape",
+        "unattributed_tensor_args", "var_names",
     )),
     "3": frozenset((
         "_edge_uses", "args_template", "conditional_arm_children",
@@ -72,7 +81,8 @@ PINNED_NOOP_WRITERS = {
     )),
     "11.5": frozenset(("var_names",)),
     "11.75": frozenset((
-        "dtype", "shape", "transformed_activation_memory", "transformed_out",
+        "activation_memory", "dtype", "shape",
+        "transformed_activation_memory", "transformed_out",
         "transformed_out_dtype", "transformed_out_shape",
     )),
 }
@@ -91,6 +101,36 @@ def test_axis_passes_read_and_write_enforcement(
     trace = axis_fn()
     if trace is not None:
         trace.cleanup()
+
+
+def test_write_effectiveness_classifier_is_finding_favoring() -> None:
+    """Guard 2's ambiguity default is NO-OP, never effective.
+
+    An EFFECTIVE verdict discharges read-before-write findings, so the
+    classifier may return it only when the change is provable; a distinct
+    same-class rich object (the tensor-rewrite residual) must classify as
+    a no-op even when its contents differ.
+    """
+
+    import torch
+
+    from torchlens._trace_core.op_store import (
+        _MISSING,
+        _write_is_content_effective,
+    )
+
+    same = [1, 2]
+    assert not _write_is_content_effective(same, same)  # identity rebind
+    assert _write_is_content_effective(_MISSING, None)  # first write
+    assert _write_is_content_effective(1, 2)  # scalar change
+    assert not _write_is_content_effective(1, 1)  # scalar-equal rewrite
+    assert _write_is_content_effective("a", 3)  # class change
+    assert _write_is_content_effective([1], [1, 2])  # container content change
+    assert not _write_is_content_effective([1], [1])  # equal-content rebind
+    # The documented residual, pinned: distinct same-class rich objects are
+    # AMBIGUOUS and must read as no-op (finding-favoring) even when the
+    # values genuinely differ.
+    assert not _write_is_content_effective(torch.zeros(2), torch.ones(2))
 
 
 @pytest.mark.heavy

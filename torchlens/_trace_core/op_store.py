@@ -841,21 +841,25 @@ class _AuditedOpRowStore(OpRowStore):
 def _write_is_content_effective(old: Any, new: Any) -> bool:
     """Classify one intercepted write as content-effective or no-op.
 
-    Conservative in the tripwire's favor: a write is a NO-OP only when that
-    is provable — identity-equal rebinding, scalar-safe equality, or exact
-    builtin containers with equal content fingerprints. Everything
-    ambiguous (tensors, rich objects) counts as effective; the disclosed
-    residual is a laundering write of an equal-but-distinct rich value,
-    bounded by the byte-identity oracles (design-ppdag-v3 §2.4 guard 2).
+    FINDING-favoring (design-ppdag-v3 §2.4 guard 2): under guard 2 an
+    EFFECTIVE verdict is the lenient one — effective writes discharge
+    read-before-write findings — so a write counts effective only when that
+    is PROVABLE: first write over the missing placeholder, class change,
+    scalar inequality, or a builtin-container content-fingerprint change.
+    Everything ambiguous defaults to NO-OP, which can only keep a writer in
+    the permanent no-op table and keep a downstream read visible as a
+    finding — a false alarm at worst, never a laundering pass. Honest
+    residual: a genuinely value-changing rich-object rewrite (e.g. a tensor
+    cell overwritten with a distinct same-class tensor holding different
+    contents) is classified no-op here, so reads it feeds must be
+    discharged by review (pinned finding/probe or a matrix axis whose
+    first-write is observed), never by effectiveness evidence.
     """
 
     if old is new:
-        cls = old.__class__
-        if cls is dict or cls is list or cls is set:
-            # Rebinding the same container object writes nothing the cell
-            # did not already hold; in-place mutation of it is judged by
-            # the begin/end fingerprint diff, never here (review note N3).
-            return False
+        # Rebinding the identical object writes nothing the cell did not
+        # already hold; in-place mutation of it is judged by the begin/end
+        # fingerprint diff, never here (review note N3).
         return False
     if old is _MISSING:
         return True
@@ -870,8 +874,8 @@ def _write_is_content_effective(old: Any, new: Any) -> bool:
         try:
             return _value_fingerprint(old) != _value_fingerprint(new)
         except Exception:
-            return True
-    return True
+            return False
+    return False
 
 
 class _CombinedAuditOpRowStore(OpRowStore):
