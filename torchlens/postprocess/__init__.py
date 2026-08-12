@@ -90,6 +90,7 @@ from .ast_branches import resolve_var_names
 
 if TYPE_CHECKING:
     from ..data_classes.trace import Trace
+    from .._trace_core.op_store import StepAuditResult
 
 from ..quantities import Bytes
 
@@ -901,11 +902,21 @@ def _postprocess_assertions_enabled() -> bool:
 
 
 _WRITE_AUDIT_RECORD_ENV = "TORCHLENS_POSTPROCESS_WRITE_AUDIT"
+_READ_AUDIT_ENV = "TORCHLENS_POSTPROCESS_READ_AUDIT"
 
 #: Recording-mode sink: step id -> union of observed written column names
 #: across every audited postprocess run in this process. Read by the
 #: declaration-generation tooling; never consulted in enforcement mode.
 RECORDED_STEP_WRITES: dict[str, set[str]] = {}
+
+#: Read-audit recording sinks (design-ppdag-v3 §2.4/§2.5): per step, the
+#: union of observed read columns, row-clone-scope read columns, and
+#: content-effective write columns across every audited run in this
+#: process. Inputs to the declaration seeding and the four-category
+#: findings classification; never consulted in enforcement mode.
+RECORDED_STEP_READS: dict[str, set[str]] = {}
+RECORDED_STEP_CLONE_READS: dict[str, set[str]] = {}
+RECORDED_STEP_EFFECTIVE_WRITES: dict[str, set[str]] = {}
 
 
 def _write_audit_record_mode() -> bool:
@@ -914,19 +925,26 @@ def _write_audit_record_mode() -> bool:
     return os.environ.get(_WRITE_AUDIT_RECORD_ENV, "").lower() == "record"
 
 
+def _read_audit_mode() -> str:
+    """Return the read-audit mode: '' (off), 'record', or 'enforce'."""
+
+    mode = os.environ.get(_READ_AUDIT_ENV, "").lower()
+    return mode if mode in ("record", "enforce") else ""
+
+
 def _open_step_write_audit(self: "Trace") -> None:
-    """Start the op-store column write audit for the next step window."""
+    """Start the op-store column audit for the next step window."""
 
     core = self.__dict__.get("_trace_core")
     if core is None or core.ops is None:
         return
     from .._trace_core.op_store import begin_cell_write_audit
 
-    begin_cell_write_audit(core.ops)
+    begin_cell_write_audit(core.ops, record_reads=bool(_read_audit_mode()))
 
 
-def _close_step_write_audit(self: "Trace") -> tuple[set[str], int] | None:
-    """Stop the audit; return (written column names, released-row count).
+def _close_step_write_audit(self: "Trace") -> "StepAuditResult | None":
+    """Stop the audit; return the window's ``StepAuditResult``.
 
     ``None`` when unarmed (no core-backed store yet).
     """
@@ -956,7 +974,8 @@ def _assert_postprocess_contract(self: "Trace", step: str) -> None:
     assert contract is not None, f"Unknown postprocess step contract: {step!r}"
     audit_result = _close_step_write_audit(self)
     if audit_result is not None:
-        observed_writes, released_rows = audit_result
+        observed_writes = audit_result.written_columns
+        released_rows = audit_result.released_rows
         assert not released_rows or "deletes" in contract.row_effects, (
             f"Step {step} ({contract.name}) released {released_rows} whole op "
             "row(s) without a 'deletes' row_effects sanction in "
@@ -973,7 +992,39 @@ def _assert_postprocess_contract(self: "Trace", step: str) -> None:
                 "write set in POSTPROCESS_STEP_CONTRACTS as a reviewed "
                 "schema-contract diff if the writes are intended."
             )
-    _open_step_write_audit(self)
+        read_mode = _read_audit_mode()
+        if read_mode == "record":
+            RECORDED_STEP_READS.setdefault(step, set()).update(
+                audit_result.read_columns
+            )
+            RECORDED_STEP_CLONE_READS.setdefault(step, set()).update(
+                audit_result.clone_read_columns
+            )
+            RECORDED_STEP_EFFECTIVE_WRITES.setdefault(step, set()).update(
+                audit_result.effective_write_columns
+            )
+        elif read_mode == "enforce":
+            undeclared_reads = audit_result.read_columns - (
+                contract.reads | contract.placeholder_probes
+            )
+            assert not undeclared_reads, (
+                f"Step {step} ({contract.name}) read undeclared op-store "
+                f"columns {sorted(undeclared_reads)}; declared reads are the "
+                "derivation authority — root-cause the dependency and land it "
+                "as a reviewed contract diff, never a silent widen."
+            )
+            assert (
+                not audit_result.clone_read_columns
+                or "creates" in contract.row_effects
+            ), (
+                f"Step {step} ({contract.name}) performed row-clone reads "
+                "without a 'creates' row_effects sanction; cloning is only "
+                "legal as part of row creation (design-ppdag-v3 §2.4d)."
+            )
+    # Postconditions run OUTSIDE any window (the next window opens after
+    # them): with reads audited, the historical order — open next window,
+    # then run postcondition reads — would attribute step N's assert reads
+    # to step N+1 as phantom reads (review note N10).
     step_name = f"Step {contract.step} ({contract.name})"
     if step == "1":
         assert self.output_layers, f"{step_name} must register output layers"
@@ -1006,6 +1057,7 @@ def _assert_postprocess_contract(self: "Trace", step: str) -> None:
         assert self.graph_shape_hash is not None, "Step 16.5 must compute graph_shape_hash"
     elif step == "17":
         assert self._tracing_finished is True, "Step 17 must mark tracing finished"
+    _open_step_write_audit(self)
 
 
 def _warn_unattributed_tensor_args(self: "Trace") -> None:
