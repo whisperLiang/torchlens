@@ -343,7 +343,38 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "var_names",
             )
         ),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "_label_raw",
+                "_layer_label_raw",
+                "_source_trace_ref",
+                "_tracing_finished",
+                "children",
+                "dtype",
+                "func_name",
+                "has_saved_activation",
+                "label",
+                "layer_label",
+                "modules",
+                "out",
+                "out_ref",
+                "output_device",
+                "shape",
+                "transformed_out",
+            )
+        ),
+        # Probes (reviewed): the transform/streaming path resolves
+        # _streaming_label via the label -> layer_label -> _label_raw
+        # fallback chain, and out_ref gates payload-ref reuse — all
+        # three intentionally observe the not-yet-set placeholder and
+        # fall back (op.py _streaming_label; graph_traversal _apply_transform).
+        placeholder_probes=frozenset(
+            (
+                "label",
+                "layer_label",
+                "out_ref",
+            )
+        ),
         # Row creation carries the row-clone read legality (design-ppdag-v3
         # §2.4d): step 1 clones the output node via Op.copy(), whose
         # whole-schema getattr loop is a mechanical row_clone access kind,
@@ -363,7 +394,13 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "output_descendants",
             )
         ),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "children",
+                "has_output_descendant",
+                "output_descendants",
+            )
+        ),
         trace_state=tokens("r:raw_graph_ws"),
     ),
     "3": PostprocessStepContract(
@@ -400,7 +437,57 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "kwargs_template",
             )
         ),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "_edge_uses",
+                "_label_raw",
+                "_source_trace_ref",
+                "_tracing_finished",
+                "args_template",
+                "buffer_write_kind",
+                "children",
+                "conditional_arm_children",
+                "conditional_elif_children",
+                "conditional_else_children",
+                "conditional_entry_children",
+                "conditional_then_children",
+                "equivalent_ops",
+                "func_call_id",
+                "func_id",
+                "has_saved_activation",
+                "input_ancestors",
+                "internal_source_ancestors",
+                "internal_source_parents",
+                "interventions",
+                "is_output",
+                "is_scalar_bool",
+                "kwargs_template",
+                "label",
+                "layer_label",
+                "out",
+                "out_ref",
+                "out_versions_by_child",
+                "output_descendants",
+                "parent_arg_positions",
+                "parents",
+                "recurrent_ops",
+                "root_ancestors",
+            )
+        ),
+        # Probes (reviewed): out_ref gates load/stream-rehydrated
+        # payload refs in orphan_records; internal_source_parents is
+        # scrubbed tolerant of its not-yet-populated state (step 6 is
+        # its only writer). The label/layer_label reads are NOT probes:
+        # they record the never-populated placeholder as DATA into
+        # orphan_records — the pinned day-1 category-(c) finding
+        # (design-ppdag-v3 §2.4), reported for root-cause, never
+        # silenced.
+        placeholder_probes=frozenset(
+            (
+                "internal_source_parents",
+                "out_ref",
+            )
+        ),
         row_effects=frozenset(("deletes",)),
         trace_state=tokens("rw:raw_graph_ws"),
     ),
@@ -421,7 +508,18 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "min_distance_to_output",
             )
         ),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "children",
+                "input_ancestors",
+                "max_distance_from_input",
+                "max_distance_to_output",
+                "min_distance_from_input",
+                "min_distance_to_output",
+                "output_descendants",
+                "parents",
+            )
+        ),
         trace_state=tokens("r:raw_graph_ws"),
     ),
     "5": PostprocessStepContract(
@@ -447,7 +545,23 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "terminal_conditional_id",
             )
         ),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "_label_raw",
+                "children",
+                "code_context",
+                "conditional_arm_children",
+                "conditional_branch_stack",
+                "conditional_entry_children",
+                "has_output_descendant",
+                "is_orphan",
+                "is_scalar_bool",
+                "is_terminal_conditional_bool",
+                "parents",
+                "pass_index",
+                "terminal_conditional_id",
+            )
+        ),
         trace_state=tokens("r:raw_graph_ws", "w:conditional_records"),
     ),
     "6": PostprocessStepContract(
@@ -462,12 +576,34 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "func_name",
                 "has_children",
                 "has_input_ancestor",
+                # Buffer merge appends the removed duplicate's
+                # internal-source parents onto the survivor in place
+                # (control_flow.py _merge_buffer_entries) — code-verified;
+                # config-gated on an actual duplicate-buffer merge.
+                "internal_source_parents",
                 # Reviewed widening (sol finding 6 in-place audit): buffer
                 # rewiring mutates root_ancestors closure sets in place.
                 "root_ancestors",
             )
         ),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "_label_raw",
+                "_source_trace_ref",
+                "_tracing_finished",
+                "address",
+                "buffer_source",
+                "children",
+                "has_input_ancestor",
+                "input_ancestors",
+                "modules",
+                "out",
+                "parent_arg_positions",
+                "parents",
+                "root_ancestors",
+                "saved_args",
+            )
+        ),
         # Buffer dedup removes merged duplicate rows through the same husking
         # path as orphan removal (_remove_log_entry at control_flow.py:951);
         # previously unsanctioned — a latent released-row trip on any
@@ -488,7 +624,26 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "recurrent_ops",
             )
         ),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "_label_raw",
+                "_layer_label_raw",
+                "_param_barcodes",
+                "children",
+                "equivalence_class",
+                "equivalent_ops",
+                "func_name",
+                "is_buffer",
+                "is_orphan",
+                "modules",
+                "multi_output_index",
+                "non_tensor_kwargs",
+                "non_tensor_pos_args",
+                "parents",
+                "raw_index",
+                "recurrent_ops",
+            )
+        ),
         trace_state=tokens("r:raw_graph_ws"),
     ),
     "8": PostprocessStepContract(
@@ -505,7 +660,19 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "type_index",
             )
         ),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "_label_raw",
+                "label",
+                "layer_label",
+                "num_passes",
+                "pass_index",
+                "recurrent_ops",
+                "step_index",
+                "type",
+                "type_index",
+            )
+        ),
         trace_state=tokens("r:raw_graph_ws", "w:label_maps"),
     ),
     "9": PostprocessStepContract(
@@ -551,7 +718,41 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "step_index",
             )
         ),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "_edge_uses",
+                "_param_barcodes",
+                "activation_memory",
+                "args_template",
+                "atomic_module_call",
+                "children",
+                "conditional_arm_children",
+                "conditional_entry_children",
+                "equivalent_ops",
+                "func_duration",
+                "func_name",
+                "fx_call_index",
+                "input_ancestors",
+                "internal_source_ancestors",
+                "internal_source_parents",
+                "interventions",
+                "kwargs_template",
+                "label",
+                "layer_label",
+                "modules",
+                "num_params",
+                "num_params_frozen",
+                "num_params_trainable",
+                "out_versions_by_child",
+                "output_descendants",
+                "param_memory",
+                "parent_arg_positions",
+                "parents",
+                "recurrent_ops",
+                "root_ancestors",
+                "type",
+            )
+        ),
         trace_state=tokens("r:label_maps", "rw:raw_graph_ws", "w:module_build"),
     ),
     "10": PostprocessStepContract(
@@ -559,7 +760,11 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         "Rename labels",
         "Consumes raw-to-final maps; mutates graph references to final labels.",
         writes=frozenset(),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "layer_label",
+            )
+        ),
         trace_state=tokens("r:label_maps", "r:raw_graph_ws", "w:lookup_containers"),
     ),
     "11": PostprocessStepContract(
@@ -576,7 +781,34 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "output_of_module_calls",
             )
         ),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "_label_raw",
+                "activation_memory",
+                "address",
+                "buffer_pass",
+                "fx_call_index",
+                "fx_qualpath",
+                "has_saved_activation",
+                "input_to_module_calls",
+                "io_role",
+                "is_buffer",
+                "is_input",
+                "is_orphan",
+                "is_output",
+                "label",
+                "label_short",
+                "layer_label",
+                "layer_label_short",
+                "module",
+                "modules",
+                "num_passes",
+                "output_of_module_calls",
+                "raw_index",
+                "type",
+                "unattributed_tensor_args",
+            )
+        ),
         # r:module_build makes the 9 -> 11 edge derivable: step 11 reads
         # module_build_data["module_num_calls"] (labeling.py:847).
         trace_state=tokens(
@@ -599,7 +831,13 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         "Populate source var names",
         "Consumes code context; mutates Op var_names in place.",
         writes=frozenset(("var_names",)),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "code_context",
+                "func_name",
+                "type",
+            )
+        ),
         trace_state=tokens("r:raw_graph_ws"),
     ),
     # Step 11.75 previously had NO contract boundary, so its writes were
@@ -629,7 +867,30 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "transformed_out_shape",
             )
         ),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "_layer_label_raw",
+                "_source_trace_ref",
+                "_tracing_finished",
+                "activation_memory",
+                "annotations",
+                "detach_saved_activations",
+                "dtype",
+                "func_name",
+                "has_saved_activation",
+                "is_inplace",
+                "is_orphan",
+                "label",
+                "layer_label",
+                "out",
+                "output_device",
+                "parents",
+                "raw_index",
+                "shape",
+                "transformed_out",
+                "type",
+            )
+        ),
         trace_state=tokens("w:payload_tensors"),
     ),
     "12": PostprocessStepContract(
@@ -637,7 +898,27 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         "Undecorate tensors",
         "Consumes saved tensors; mutates payload wrappers in place.",
         writes=frozenset(),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "_source_trace_ref",
+                "_tracing_finished",
+                "has_saved_activation",
+                "is_orphan",
+                "layer_label",
+                "out",
+                "out_ref",
+                "saved_args",
+                "saved_kwargs",
+                "transformed_out",
+            )
+        ),
+        # Probe (reviewed): undecorate checks out_ref to decide whether
+        # a payload lives behind a streamed ref.
+        placeholder_probes=frozenset(
+            (
+                "out_ref",
+            )
+        ),
         trace_state=tokens("w:payload_tensors"),
     ),
     "13": PostprocessStepContract(
@@ -668,7 +949,13 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "parent_params",
             )
         ),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "_param_logs",
+                "label",
+                "layer_label",
+            )
+        ),
         trace_state=tokens("rw:param_logs_kind"),
     ),
     "15.5": PostprocessStepContract(
@@ -681,7 +968,40 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "terminal_bool_for",
             )
         ),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "_is_in_conditional_body",
+                "_param_logs",
+                "_source_trace_ref",
+                "activation_memory",
+                "autograd_memory",
+                "bool_value",
+                "conditional_arm_children",
+                "conditional_branch_stack",
+                "conditional_entry_children",
+                "device_ref",
+                "dtype",
+                "flops_backward",
+                "flops_forward",
+                "has_input_ancestor",
+                "has_output_descendant",
+                "in_conditionals",
+                "io_role",
+                "is_atomic_module",
+                "label",
+                "layer_label",
+                "modules",
+                "num_autograd_tensors",
+                "parents",
+                "pass_index",
+                "shape",
+                "terminal_bool_for",
+                "terminal_conditional_id",
+                "transformed_activation_memory",
+                "transformed_out_dtype",
+                "transformed_out_shape",
+            )
+        ),
         trace_state=tokens("r:conditional_records", "w:layer_logs"),
     ),
     "16": PostprocessStepContract(
@@ -691,7 +1011,23 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         # Reviewed widening (sol finding 6 in-place audit): module-log
         # building mutates the _param_logs containers in place.
         writes=frozenset(("_param_logs",)),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "_grad_records",
+                "address",
+                "container_spec",
+                "has_saved_activation",
+                "input_to_module_calls",
+                "is_buffer",
+                "is_module_output",
+                "is_orphan",
+                "label",
+                "layer_label",
+                "module_call_stack",
+                "output_of_module_calls",
+                "raw_index",
+            )
+        ),
         trace_state=tokens(
             "r:layer_logs",
             "r:module_build",
@@ -710,7 +1046,22 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "_address_normalized",
             )
         ),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "container_path",
+                "container_spec",
+                "func_name",
+                "is_buffer",
+                "is_input",
+                "is_output",
+                "label",
+                "layer_label",
+                "module",
+                "num_passes",
+                "parents",
+                "type",
+            )
+        ),
         trace_state=tokens("r:lookup_containers", "w:graph_hash"),
     ),
     "17": PostprocessStepContract(
@@ -766,7 +1117,204 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "out_ref",
             )
         ),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "_address_normalized",
+                "_arg_expressions_cache",
+                "_construction_done",
+                "_edge_uses",
+                "_facets_cache",
+                "_grad_records",
+                "_is_in_conditional_body",
+                "_label_raw",
+                "_layer_label_raw",
+                "_param_barcodes",
+                "_param_logs",
+                "_pending_blob_id",
+                "_pending_grad_blob_id",
+                "_pending_transformed_grad_blob_id",
+                "_pending_transformed_out_blob_id",
+                "_projective_field_cache",
+                "_receptive_field_cache",
+                "_source_trace_ref",
+                "_tracing_finished",
+                "activation_memory",
+                "activation_transform",
+                "address",
+                "annotations",
+                "arg_names",
+                "args_template",
+                "atomic_module_call",
+                "autograd_memory",
+                "backend_address",
+                "bool_value",
+                "buffer_pass",
+                "buffer_replay_validated",
+                "buffer_source",
+                "buffer_source_func_name",
+                "buffer_value_changed",
+                "buffer_write_kind",
+                "bytes_delta_at_call",
+                "bytes_peak_at_call",
+                "children",
+                "code_context",
+                "conditional_arm_children",
+                "conditional_branch_depth",
+                "conditional_branch_stack",
+                "conditional_context_kind",
+                "conditional_elif_children",
+                "conditional_else_children",
+                "conditional_entry_children",
+                "conditional_then_children",
+                "conditional_wrapper_kind",
+                "container_path",
+                "container_spec",
+                "detach_saved_activations",
+                "device_ref",
+                "dropped_edge_tensor_args",
+                "dtype",
+                "dtype_ref",
+                "equivalence_class",
+                "equivalent_ops",
+                "flops_backward",
+                "flops_forward",
+                "func",
+                "func_autocast_state",
+                "func_call_id",
+                "func_config",
+                "func_duration",
+                "func_id",
+                "func_name",
+                "func_non_tensor_args",
+                "func_qualname",
+                "func_rng_states",
+                "fx_call_index",
+                "fx_qualpath",
+                "grad",
+                "grad_dtype",
+                "grad_fn",
+                "grad_fn_class_name",
+                "grad_fn_class_qualname",
+                "grad_fn_handle",
+                "grad_fn_object_id",
+                "grad_ref",
+                "grad_shape",
+                "gradient_memory",
+                "has_children",
+                "has_grad",
+                "has_input_ancestor",
+                "has_internal_source_ancestor",
+                "has_out_variations",
+                "has_output_descendant",
+                "has_saved_activation",
+                "has_saved_args",
+                "in_conditionals",
+                "in_multi_output",
+                "input_ancestors",
+                "input_to_module_calls",
+                "input_was_parameter",
+                "internal_source_ancestors",
+                "internal_source_parents",
+                "intervention_replaced",
+                "interventions",
+                "io_role",
+                "is_atomic_module",
+                "is_buffer",
+                "is_final_output",
+                "is_inplace",
+                "is_input",
+                "is_internal_sink",
+                "is_internal_source",
+                "is_module_output",
+                "is_orphan",
+                "is_output",
+                "is_output_parent",
+                "is_scalar_bool",
+                "is_terminal_bool",
+                "is_terminal_conditional_bool",
+                "is_transform",
+                "kwargs_template",
+                "label",
+                "label_short",
+                "layer_label",
+                "layer_label_short",
+                "lookup_keys",
+                "max_distance_from_input",
+                "max_distance_to_output",
+                "min_distance_from_input",
+                "min_distance_to_output",
+                "module",
+                "module_call_stack",
+                "module_entry_arg_keys",
+                "modules",
+                "multi_output_index",
+                "multi_output_name",
+                "non_tensor_kwargs",
+                "non_tensor_pos_args",
+                "num_args_total",
+                "num_autograd_tensors",
+                "num_kwargs",
+                "num_params",
+                "num_params_frozen",
+                "num_params_trainable",
+                "num_passes",
+                "num_pos_args",
+                "ordinal_index",
+                "out",
+                "out_ref",
+                "out_versions_by_child",
+                "output_descendants",
+                "output_device",
+                "output_of_module_calls",
+                "output_of_modules",
+                "param_memory",
+                "param_shapes",
+                "parent_arg_positions",
+                "parent_param_ops",
+                "parent_params",
+                "parents",
+                "pass_index",
+                "raw_index",
+                "recurrent_ops",
+                "resolver_status",
+                "root_ancestors",
+                "save_grads",
+                "saved_args",
+                "saved_kwargs",
+                "shape",
+                "step_index",
+                "terminal_bool_for",
+                "terminal_conditional_id",
+                "transform_chain",
+                "transform_config",
+                "transform_fn_name",
+                "transform_fn_qualname",
+                "transform_fn_source",
+                "transform_kind",
+                "transformed_activation_memory",
+                "transformed_grad",
+                "transformed_grad_dtype",
+                "transformed_grad_shape",
+                "transformed_gradient_memory",
+                "transformed_out",
+                "transformed_out_dtype",
+                "transformed_out_shape",
+                "type",
+                "type_index",
+                "unattributed_tensor_args",
+                "var_names",
+                "visualizer_path",
+            )
+        ),
+        # Probes (reviewed): the whole-row portable scrub serializes
+        # every set cell, legally observing unset lazy caches.
+        placeholder_probes=frozenset(
+            (
+                "_facets_cache",
+                "_projective_field_cache",
+                "_receptive_field_cache",
+            )
+        ),
         trace_state=tokens(
             "r:containers",
             "r:payload_tensors",
@@ -784,7 +1332,12 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "transformed_out",
             )
         ),
-        reads=frozenset(),
+        reads=frozenset(
+            (
+                "_pending_transformed_out_blob_id",
+                "out_ref",
+            )
+        ),
         trace_state=tokens("r:stream_writer", "rw:stream_lifecycle"),
     ),
     "20": PostprocessStepContract(
@@ -799,6 +1352,201 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         trace_state=tokens("rw:param_logs_kind", "r:stream_lifecycle"),
     ),
 }
+
+
+#: PROVISIONAL capture baseline (design-ppdag-v3 §2.4, integration point):
+#: op-store columns legal to read with NO earlier pipeline writer because
+#: step 0 populates them from capture-event data. The AUTHORITATIVE source
+#: is the producer lane's jointly frozen CellSourceManifest — its projection
+#: (``capture_baseline_from_manifest`` below) replaces this literal at
+#: integration. This provisional set was hand-derived from
+#: ``_materialize.py::_fields_from_event`` and the sibling-field builders
+#: (module enter/exit, buffer-write, call-stack fill): a column is included
+#: iff its materialize value derives from event/capture data — a literal
+#: constant assignment (``label = None``, ``is_orphan = False``) is a schema
+#: placeholder and is EXCLUDED, because presence cannot distinguish
+#: "capture produced this" from "placeholder" (the vacuous-baseline defect).
+#: Granularity disclosure: per-column and static — a union over
+#: configurations (a backward-gated column is baseline even on forward-only
+#: axes where it holds the default). Per-row provenance is out of scope.
+#: Fail-closed: a NEW schema column is NOT baseline until classified here
+#: (its reads report as findings).
+CAPTURE_BASELINE_COLUMNS: frozenset[str] = frozenset(
+    (
+        "_construction_done",
+        "_edge_uses",
+        "_grad_records",
+        "_label_raw",
+        "_layer_label_raw",
+        "_param_barcodes",
+        "_param_logs",
+        "_pending_blob_id",
+        "_pending_grad_blob_id",
+        "_pending_transformed_grad_blob_id",
+        "_pending_transformed_out_blob_id",
+        "_source_trace_ref",
+        "_tracing_finished",
+        "activation_memory",
+        "activation_transform",
+        "address",
+        "annotations",
+        "arg_names",
+        "args_template",
+        "atomic_module_call",
+        "autograd_memory",
+        "backend_address",
+        "bool_value",
+        "buffer_source",
+        "buffer_source_func_name",
+        "buffer_value_changed",
+        "buffer_write_kind",
+        "bytes_delta_at_call",
+        "bytes_peak_at_call",
+        "children",
+        "code_context",
+        "container_path",
+        "container_spec",
+        "detach_saved_activations",
+        "device_ref",
+        "dropped_edge_tensor_args",
+        "dtype",
+        "dtype_ref",
+        "equivalence_class",
+        "equivalent_ops",
+        "flops_backward",
+        "flops_forward",
+        "func",
+        "func_autocast_state",
+        "func_call_id",
+        "func_config",
+        "func_duration",
+        "func_id",
+        "func_name",
+        "func_non_tensor_args",
+        "func_qualname",
+        "func_rng_states",
+        "grad",
+        "grad_dtype",
+        "grad_fn",
+        "grad_fn_class_name",
+        "grad_fn_class_qualname",
+        "grad_fn_handle",
+        "grad_fn_object_id",
+        "grad_shape",
+        "gradient_memory",
+        "has_children",
+        "has_grad",
+        "has_input_ancestor",
+        "has_internal_source_ancestor",
+        "has_out_variations",
+        "has_saved_activation",
+        "has_saved_args",
+        "in_multi_output",
+        "input_ancestors",
+        "input_to_module_calls",
+        "input_was_parameter",
+        "internal_source_ancestors",
+        "intervention_replaced",
+        "interventions",
+        "io_role",
+        "is_atomic_module",
+        "is_buffer",
+        "is_inplace",
+        "is_input",
+        "is_internal_source",
+        "is_module_output",
+        "is_output_parent",
+        "is_scalar_bool",
+        "is_transform",
+        "kwargs_template",
+        "module",
+        "module_call_stack",
+        "module_entry_arg_keys",
+        "modules",
+        "multi_output_index",
+        "multi_output_name",
+        "non_tensor_kwargs",
+        "non_tensor_pos_args",
+        "num_args_total",
+        "num_autograd_tensors",
+        "num_kwargs",
+        "num_params",
+        "num_params_frozen",
+        "num_params_trainable",
+        "num_pos_args",
+        "out",
+        "out_versions_by_child",
+        "output_device",
+        "output_of_module_calls",
+        "output_of_modules",
+        "param_memory",
+        "param_shapes",
+        "parent_arg_positions",
+        "parent_param_ops",
+        "parent_params",
+        "parents",
+        "pass_index",
+        "raw_index",
+        "resolver_status",
+        "root_ancestors",
+        "save_grads",
+        "saved_args",
+        "saved_kwargs",
+        "shape",
+        "step_index",
+        "transform_chain",
+        "transform_config",
+        "transform_fn_name",
+        "transform_fn_qualname",
+        "transform_fn_source",
+        "transform_kind",
+        "transformed_activation_memory",
+        "transformed_grad",
+        "transformed_grad_dtype",
+        "transformed_grad_shape",
+        "transformed_gradient_memory",
+        "transformed_out",
+        "transformed_out_dtype",
+        "transformed_out_shape",
+        "type",
+        "type_index",
+        "unattributed_tensor_args",
+        "visualizer_path",
+    )
+)
+
+#: The manifest source classes whose columns are capture-populated (legal
+#: to read with no earlier pipeline writer) vs excluded (placeholder until
+#: a pipeline step writes). Frozen vocabulary of CellSourceManifest v1 —
+#: exactly these six; the projection refuses unknown classes at call time
+#: so a manifest v2 with a new class (e.g. an aten lane) must extend this
+#: table explicitly (review note N5).
+_MANIFEST_BASELINE_CLASSES: frozenset[str] = frozenset(("CORE", "FACET", "JOIN", "EXTRAS"))
+_MANIFEST_EXCLUDED_CLASSES: frozenset[str] = frozenset(("STEP", "DEFAULT"))
+
+
+def capture_baseline_from_manifest(source_classes: Mapping[str, str]) -> frozenset[str]:
+    """Project a CellSourceManifest column->class map onto the baseline.
+
+    Total over the frozen class vocabulary: an unknown class raises rather
+    than silently classifying (fail-closed against manifest growth). The
+    class argument is the manifest's per-column source-class NAME (the part
+    before any parameter, e.g. ``FACET(control)`` -> ``FACET``).
+    """
+
+    baseline: set[str] = set()
+    for column, source_class in source_classes.items():
+        head = source_class.split("(", 1)[0]
+        if head in _MANIFEST_BASELINE_CLASSES:
+            baseline.add(column)
+        elif head not in _MANIFEST_EXCLUDED_CLASSES:
+            raise ValueError(
+                f"Unknown CellSourceManifest source class {source_class!r} "
+                f"for column {column!r}; extend the projection table "
+                "explicitly (frozen vocabulary: CORE|FACET|JOIN|EXTRAS in, "
+                "STEP|DEFAULT out)."
+            )
+    return frozenset(baseline)
 
 
 @dataclass(frozen=True)
@@ -847,7 +1595,1225 @@ class PinnedPair:
 #: any derived RAW/WW edge not pinned here. Content lands with the
 #: declaration freeze (implementation plan step 5); the empty corpus is the
 #: pre-seed state, not a steady state.
-PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType({})
+PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
+    {
+        ("1", "2"): PinnedPair(
+            "columns",
+            frozenset((
+                    "children",
+                    "has_output_descendant",
+                    "output_descendants",
+                    "token:raw_graph_ws",
+            )),
+            "step 2 consumes/refines children, has_output_descendant, output_descendants, token:raw_graph_ws after step 1 writes",
+        ),
+        ("1", "3"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_edge_uses",
+                    "_label_raw",
+                    "children",
+                    "equivalent_ops",
+                    "interventions",
+                    "is_output",
+                    "out",
+                    "out_versions_by_child",
+                    "output_descendants",
+                    "parent_arg_positions",
+                    "parents",
+                    "recurrent_ops",
+                    "token:raw_graph_ws",
+            )),
+            "step 3 consumes/refines _edge_uses, _label_raw, children, equivalent_ops, ... after step 1 writes",
+        ),
+        ("1", "4"): PinnedPair(
+            "columns",
+            frozenset((
+                    "children",
+                    "has_output_descendant",
+                    "output_descendants",
+                    "parents",
+                    "token:raw_graph_ws",
+            )),
+            "step 4 consumes/refines children, has_output_descendant, output_descendants, parents, ... after step 1 writes",
+        ),
+        ("1", "5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_label_raw",
+                    "children",
+                    "code_context",
+                    "has_output_descendant",
+                    "parents",
+                    "pass_index",
+                    "token:raw_graph_ws",
+            )),
+            "step 5 consumes/refines _label_raw, children, code_context, has_output_descendant, ... after step 1 writes",
+        ),
+        ("1", "6"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_label_raw",
+                    "children",
+                    "func",
+                    "func_name",
+                    "has_children",
+                    "modules",
+                    "out",
+                    "parent_arg_positions",
+                    "parents",
+                    "saved_args",
+                    "token:raw_graph_ws",
+            )),
+            "step 6 consumes/refines _label_raw, children, func, func_name, ... after step 1 writes",
+        ),
+        ("1", "7"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_label_raw",
+                    "_layer_label_raw",
+                    "_param_barcodes",
+                    "children",
+                    "equivalence_class",
+                    "equivalent_ops",
+                    "func_name",
+                    "is_buffer",
+                    "modules",
+                    "non_tensor_kwargs",
+                    "non_tensor_pos_args",
+                    "num_passes",
+                    "parents",
+                    "pass_index",
+                    "raw_index",
+                    "recurrent_ops",
+                    "token:raw_graph_ws",
+            )),
+            "loop detection consumes the completed raw graph incl. output rows",
+        ),
+        ("1", "8"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_label_raw",
+                    "num_passes",
+                    "pass_index",
+                    "recurrent_ops",
+                    "token:raw_graph_ws",
+                    "type",
+            )),
+            "step 8 consumes/refines _label_raw, num_passes, pass_index, recurrent_ops, ... after step 1 writes",
+        ),
+        ("1", "9"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_edge_uses",
+                    "_param_barcodes",
+                    "activation_memory",
+                    "atomic_module_call",
+                    "children",
+                    "equivalent_ops",
+                    "func_duration",
+                    "func_name",
+                    "interventions",
+                    "is_buffer",
+                    "is_input",
+                    "is_output",
+                    "modules",
+                    "num_params",
+                    "num_params_frozen",
+                    "num_params_trainable",
+                    "out_versions_by_child",
+                    "output_descendants",
+                    "param_memory",
+                    "parent_arg_positions",
+                    "parents",
+                    "recurrent_ops",
+                    "token:raw_graph_ws",
+                    "type",
+            )),
+            "step 9 consumes/refines _edge_uses, _param_barcodes, activation_memory, atomic_module_call, ... after step 1 writes",
+        ),
+        ("1", "10"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:lookup_containers",
+                    "token:raw_graph_ws",
+            )),
+            "step 10 depends on token:lookup_containers, token:raw_graph_ws produced by step 1",
+        ),
+        ("1", "11"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_label_raw",
+                    "activation_memory",
+                    "input_to_module_calls",
+                    "io_role",
+                    "is_buffer",
+                    "is_input",
+                    "is_output",
+                    "module",
+                    "modules",
+                    "num_passes",
+                    "output_of_module_calls",
+                    "raw_index",
+                    "token:lookup_containers",
+                    "type",
+                    "unattributed_tensor_args",
+            )),
+            "step 11 consumes/refines _label_raw, activation_memory, input_to_module_calls, io_role, ... after step 1 writes",
+        ),
+        ("1", "11.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "code_context",
+                    "func_name",
+                    "token:raw_graph_ws",
+                    "type",
+                    "var_names",
+            )),
+            "step 11.5 consumes/refines code_context, func_name, token:raw_graph_ws, type, ... after step 1 writes",
+        ),
+        ("1", "11.75"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_layer_label_raw",
+                    "activation_memory",
+                    "dtype",
+                    "func_name",
+                    "out",
+                    "parents",
+                    "raw_index",
+                    "saved_args",
+                    "saved_kwargs",
+                    "shape",
+                    "transformed_activation_memory",
+                    "transformed_out",
+                    "transformed_out_dtype",
+                    "transformed_out_shape",
+                    "type",
+            )),
+            "step 11.75 consumes/refines _layer_label_raw, activation_memory, dtype, func_name, ... after step 1 writes",
+        ),
+        ("1", "12"): PinnedPair(
+            "columns",
+            frozenset((
+                    "out",
+                    "saved_args",
+                    "saved_kwargs",
+                    "transformed_out",
+            )),
+            "step 12 consumes/refines out, saved_args, saved_kwargs, transformed_out after step 1 writes",
+        ),
+        ("1", "15"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_param_logs",
+                    "parent_params",
+            )),
+            "step 15 consumes/refines _param_logs, parent_params after step 1 writes",
+        ),
+        ("1", "15.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_param_logs",
+                    "activation_memory",
+                    "autograd_memory",
+                    "dtype",
+                    "has_output_descendant",
+                    "io_role",
+                    "is_atomic_module",
+                    "modules",
+                    "num_autograd_tensors",
+                    "parents",
+                    "pass_index",
+                    "shape",
+                    "transformed_activation_memory",
+                    "transformed_out_dtype",
+                    "transformed_out_shape",
+            )),
+            "step 15.5 consumes/refines _param_logs, activation_memory, autograd_memory, dtype, ... after step 1 writes",
+        ),
+        ("1", "16"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_param_logs",
+                    "container_spec",
+                    "input_to_module_calls",
+                    "is_buffer",
+                    "is_module_output",
+                    "module_call_stack",
+                    "output_of_module_calls",
+                    "raw_index",
+            )),
+            "step 16 consumes/refines _param_logs, container_spec, input_to_module_calls, is_buffer, ... after step 1 writes",
+        ),
+        ("1", "16.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "container_path",
+                    "container_spec",
+                    "func_name",
+                    "is_buffer",
+                    "is_input",
+                    "is_output",
+                    "module",
+                    "num_passes",
+                    "parents",
+                    "token:lookup_containers",
+                    "type",
+            )),
+            "step 16.5 consumes/refines container_path, container_spec, func_name, is_buffer, ... after step 1 writes",
+        ),
+        ("1", "17.5"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:raw_graph_ws",
+            )),
+            "step 17.5 depends on token:raw_graph_ws produced by step 1",
+        ),
+        ("1", "18"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_arg_expressions_cache",
+                    "_edge_uses",
+                    "_label_raw",
+                    "_layer_label_raw",
+                    "_param_barcodes",
+                    "_param_logs",
+                    "activation_memory",
+                    "arg_names",
+                    "atomic_module_call",
+                    "autograd_memory",
+                    "bytes_delta_at_call",
+                    "bytes_peak_at_call",
+                    "children",
+                    "code_context",
+                    "container_path",
+                    "container_spec",
+                    "dropped_edge_tensor_args",
+                    "dtype",
+                    "equivalence_class",
+                    "equivalent_ops",
+                    "func",
+                    "func_config",
+                    "func_duration",
+                    "func_name",
+                    "func_non_tensor_args",
+                    "func_rng_states",
+                    "grad_fn_class_name",
+                    "has_children",
+                    "has_out_variations",
+                    "has_output_descendant",
+                    "input_to_module_calls",
+                    "intervention_replaced",
+                    "interventions",
+                    "io_role",
+                    "is_atomic_module",
+                    "is_buffer",
+                    "is_final_output",
+                    "is_input",
+                    "is_internal_source",
+                    "is_module_output",
+                    "is_output",
+                    "is_transform",
+                    "module",
+                    "module_call_stack",
+                    "modules",
+                    "non_tensor_kwargs",
+                    "non_tensor_pos_args",
+                    "num_args_total",
+                    "num_autograd_tensors",
+                    "num_kwargs",
+                    "num_params",
+                    "num_params_frozen",
+                    "num_params_trainable",
+                    "num_passes",
+                    "num_pos_args",
+                    "out",
+                    "out_versions_by_child",
+                    "output_descendants",
+                    "output_of_module_calls",
+                    "output_of_modules",
+                    "param_memory",
+                    "param_shapes",
+                    "parent_arg_positions",
+                    "parent_param_ops",
+                    "parent_params",
+                    "parents",
+                    "pass_index",
+                    "raw_index",
+                    "recurrent_ops",
+                    "saved_args",
+                    "saved_kwargs",
+                    "shape",
+                    "transform_chain",
+                    "transform_config",
+                    "transform_fn_name",
+                    "transform_fn_qualname",
+                    "transform_fn_source",
+                    "transform_kind",
+                    "transformed_activation_memory",
+                    "transformed_out",
+                    "transformed_out_dtype",
+                    "transformed_out_shape",
+                    "type",
+                    "unattributed_tensor_args",
+                    "var_names",
+            )),
+            "step 18 consumes/refines _arg_expressions_cache, _edge_uses, _label_raw, _layer_label_raw, ... after step 1 writes",
+        ),
+        ("1", "19"): PinnedPair(
+            "columns",
+            frozenset((
+                    "out",
+                    "transformed_out",
+            )),
+            "step 19 consumes/refines out, transformed_out after step 1 writes",
+        ),
+        ("2", "3"): PinnedPair(
+            "columns",
+            frozenset((
+                    "output_descendants",
+            )),
+            "step 3 consumes/refines output_descendants after step 2 writes",
+        ),
+        ("2", "4"): PinnedPair(
+            "columns",
+            frozenset((
+                    "has_output_descendant",
+                    "output_descendants",
+            )),
+            "step 4 consumes/refines has_output_descendant, output_descendants after step 2 writes",
+        ),
+        ("2", "5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "has_output_descendant",
+            )),
+            "step 5 consumes/refines has_output_descendant after step 2 writes",
+        ),
+        ("2", "9"): PinnedPair(
+            "columns",
+            frozenset((
+                    "output_descendants",
+            )),
+            "step 9 consumes/refines output_descendants after step 2 writes",
+        ),
+        ("2", "15.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "has_output_descendant",
+            )),
+            "step 15.5 consumes/refines has_output_descendant after step 2 writes",
+        ),
+        ("2", "18"): PinnedPair(
+            "columns",
+            frozenset((
+                    "has_output_descendant",
+                    "output_descendants",
+            )),
+            "step 18 consumes/refines has_output_descendant, output_descendants after step 2 writes",
+        ),
+        ("3", "4"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:raw_graph_ws",
+            )),
+            "step 4 depends on token:raw_graph_ws produced by step 3",
+        ),
+        ("3", "6"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:raw_graph_ws",
+            )),
+            "step 6 depends on token:raw_graph_ws produced by step 3",
+        ),
+        ("3", "7"): PinnedPair(
+            "columns",
+            frozenset((
+                    "equivalent_ops",
+                    "is_orphan",
+                    "token:raw_graph_ws",
+            )),
+            "step 7 consumes/refines equivalent_ops, is_orphan, token:raw_graph_ws after step 3 writes",
+        ),
+        ("3", "8"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:raw_graph_ws",
+            )),
+            "step 8 depends on token:raw_graph_ws produced by step 3",
+        ),
+        ("3", "9"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_edge_uses",
+                    "args_template",
+                    "conditional_arm_children",
+                    "conditional_elif_children",
+                    "conditional_else_children",
+                    "conditional_entry_children",
+                    "conditional_then_children",
+                    "equivalent_ops",
+                    "interventions",
+                    "kwargs_template",
+                    "token:raw_graph_ws",
+            )),
+            "step 9 consumes/refines _edge_uses, args_template, conditional_arm_children, conditional_elif_children, ... after step 3 writes",
+        ),
+        ("3", "10"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:raw_graph_ws",
+            )),
+            "step 10 depends on token:raw_graph_ws produced by step 3",
+        ),
+        ("3", "11"): PinnedPair(
+            "columns",
+            frozenset((
+                    "is_orphan",
+            )),
+            "retained-layer finalization consumes step 3's orphan verdicts",
+        ),
+        ("3", "11.5"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:raw_graph_ws",
+            )),
+            "step 11.5 depends on token:raw_graph_ws produced by step 3",
+        ),
+        ("3", "11.75"): PinnedPair(
+            "columns",
+            frozenset((
+                    "is_orphan",
+            )),
+            "step 11.75 consumes/refines is_orphan after step 3 writes",
+        ),
+        ("3", "12"): PinnedPair(
+            "columns",
+            frozenset((
+                    "is_orphan",
+            )),
+            "step 12 consumes/refines is_orphan after step 3 writes",
+        ),
+        ("3", "15.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "conditional_arm_children",
+                    "conditional_entry_children",
+            )),
+            "step 15.5 consumes/refines conditional_arm_children, conditional_entry_children after step 3 writes",
+        ),
+        ("3", "16"): PinnedPair(
+            "columns",
+            frozenset((
+                    "is_orphan",
+            )),
+            "step 16 consumes/refines is_orphan after step 3 writes",
+        ),
+        ("3", "17.5"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:raw_graph_ws",
+            )),
+            "step 17.5 depends on token:raw_graph_ws produced by step 3",
+        ),
+        ("3", "18"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_edge_uses",
+                    "args_template",
+                    "conditional_arm_children",
+                    "conditional_elif_children",
+                    "conditional_else_children",
+                    "conditional_entry_children",
+                    "conditional_then_children",
+                    "equivalent_ops",
+                    "interventions",
+                    "is_internal_sink",
+                    "is_orphan",
+                    "is_terminal_bool",
+                    "kwargs_template",
+            )),
+            "step 18 consumes/refines _edge_uses, args_template, conditional_arm_children, conditional_elif_children, ... after step 3 writes",
+        ),
+        ("4", "5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "has_output_descendant",
+            )),
+            "step 5 consumes/refines has_output_descendant after step 4 writes",
+        ),
+        ("4", "6"): PinnedPair(
+            "columns",
+            frozenset((
+                    "has_input_ancestor",
+                    "input_ancestors",
+            )),
+            "step 6 consumes/refines has_input_ancestor, input_ancestors after step 4 writes",
+        ),
+        ("4", "9"): PinnedPair(
+            "columns",
+            frozenset((
+                    "input_ancestors",
+            )),
+            "step 9 consumes/refines input_ancestors after step 4 writes",
+        ),
+        ("4", "15.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "has_input_ancestor",
+                    "has_output_descendant",
+            )),
+            "step 15.5 consumes/refines has_input_ancestor, has_output_descendant after step 4 writes",
+        ),
+        ("4", "18"): PinnedPair(
+            "columns",
+            frozenset((
+                    "has_input_ancestor",
+                    "has_output_descendant",
+                    "input_ancestors",
+                    "max_distance_from_input",
+                    "max_distance_to_output",
+                    "min_distance_from_input",
+                    "min_distance_to_output",
+            )),
+            "step 18 consumes/refines has_input_ancestor, has_output_descendant, input_ancestors, max_distance_from_input, ... after step 4 writes",
+        ),
+        ("5", "9"): PinnedPair(
+            "columns",
+            frozenset((
+                    "conditional_arm_children",
+                    "conditional_elif_children",
+                    "conditional_else_children",
+                    "conditional_entry_children",
+                    "conditional_then_children",
+            )),
+            "step 9 consumes/refines conditional_arm_children, conditional_elif_children, conditional_else_children, conditional_entry_children, ... after step 5 writes",
+        ),
+        ("5", "15.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_is_in_conditional_body",
+                    "conditional_arm_children",
+                    "conditional_branch_stack",
+                    "conditional_entry_children",
+                    "terminal_conditional_id",
+                    "token:conditional_records",
+            )),
+            "step 15.5 consumes/refines _is_in_conditional_body, conditional_arm_children, conditional_branch_stack, conditional_entry_children, ... after step 5 writes",
+        ),
+        ("5", "18"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_is_in_conditional_body",
+                    "conditional_arm_children",
+                    "conditional_branch_depth",
+                    "conditional_branch_stack",
+                    "conditional_context_kind",
+                    "conditional_elif_children",
+                    "conditional_else_children",
+                    "conditional_entry_children",
+                    "conditional_then_children",
+                    "conditional_wrapper_kind",
+                    "is_terminal_bool",
+                    "is_terminal_conditional_bool",
+                    "terminal_conditional_id",
+            )),
+            "step 18 consumes/refines _is_in_conditional_body, conditional_arm_children, conditional_branch_depth, conditional_branch_stack, ... after step 5 writes",
+        ),
+        ("6", "7"): PinnedPair(
+            "columns",
+            frozenset((
+                    "func_name",
+                    "token:raw_graph_ws",
+            )),
+            "step 7 consumes/refines func_name, token:raw_graph_ws after step 6 writes",
+        ),
+        ("6", "8"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:raw_graph_ws",
+            )),
+            "step 8 depends on token:raw_graph_ws produced by step 6",
+        ),
+        ("6", "9"): PinnedPair(
+            "columns",
+            frozenset((
+                    "func_name",
+                    "internal_source_parents",
+                    "root_ancestors",
+                    "token:raw_graph_ws",
+            )),
+            "step 9 consumes/refines func_name, internal_source_parents, root_ancestors, token:raw_graph_ws after step 6 writes",
+        ),
+        ("6", "10"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:raw_graph_ws",
+            )),
+            "step 10 depends on token:raw_graph_ws produced by step 6",
+        ),
+        ("6", "11"): PinnedPair(
+            "columns",
+            frozenset((
+                    "buffer_pass",
+            )),
+            "step 11 consumes/refines buffer_pass after step 6 writes",
+        ),
+        ("6", "11.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "func_name",
+                    "token:raw_graph_ws",
+            )),
+            "step 11.5 consumes/refines func_name, token:raw_graph_ws after step 6 writes",
+        ),
+        ("6", "11.75"): PinnedPair(
+            "columns",
+            frozenset((
+                    "func_name",
+            )),
+            "step 11.75 consumes/refines func_name after step 6 writes",
+        ),
+        ("6", "15.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "has_input_ancestor",
+            )),
+            "step 15.5 consumes/refines has_input_ancestor after step 6 writes",
+        ),
+        ("6", "16.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "func_name",
+            )),
+            "step 16.5 consumes/refines func_name after step 6 writes",
+        ),
+        ("6", "17.5"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:raw_graph_ws",
+            )),
+            "step 17.5 depends on token:raw_graph_ws produced by step 6",
+        ),
+        ("6", "18"): PinnedPair(
+            "columns",
+            frozenset((
+                    "buffer_pass",
+                    "buffer_replay_validated",
+                    "func",
+                    "func_name",
+                    "has_children",
+                    "has_input_ancestor",
+                    "internal_source_parents",
+                    "root_ancestors",
+            )),
+            "step 18 consumes/refines buffer_pass, buffer_replay_validated, func, func_name, ... after step 6 writes",
+        ),
+        ("7", "8"): PinnedPair(
+            "columns",
+            frozenset((
+                    "num_passes",
+                    "pass_index",
+                    "recurrent_ops",
+            )),
+            "label generation consumes step 7's recurrence groups and pass indexes",
+        ),
+        ("7", "9"): PinnedPair(
+            "columns",
+            frozenset((
+                    "recurrent_ops",
+            )),
+            "step 9 consumes/refines recurrent_ops after step 7 writes",
+        ),
+        ("7", "11"): PinnedPair(
+            "columns",
+            frozenset((
+                    "num_passes",
+            )),
+            "step 11 consumes/refines num_passes after step 7 writes",
+        ),
+        ("7", "11.75"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_layer_label_raw",
+            )),
+            "step 11.75 consumes/refines _layer_label_raw after step 7 writes",
+        ),
+        ("7", "15.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "pass_index",
+            )),
+            "step 15.5 consumes/refines pass_index after step 7 writes",
+        ),
+        ("7", "16.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "num_passes",
+            )),
+            "step 16.5 consumes/refines num_passes after step 7 writes",
+        ),
+        ("7", "18"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_layer_label_raw",
+                    "equivalence_class",
+                    "num_passes",
+                    "pass_index",
+                    "recurrent_ops",
+            )),
+            "step 18 consumes/refines _layer_label_raw, equivalence_class, num_passes, pass_index, ... after step 7 writes",
+        ),
+        ("8", "9"): PinnedPair(
+            "columns",
+            frozenset((
+                    "label",
+                    "layer_label",
+                    "step_index",
+                    "token:label_maps",
+            )),
+            "final-info logging consumes step 8's raw-to-final label maps",
+        ),
+        ("8", "10"): PinnedPair(
+            "columns",
+            frozenset((
+                    "layer_label",
+                    "token:label_maps",
+            )),
+            "step 10 consumes/refines layer_label, token:label_maps after step 8 writes",
+        ),
+        ("8", "11"): PinnedPair(
+            "columns",
+            frozenset((
+                    "label",
+                    "label_short",
+                    "layer_label",
+                    "layer_label_short",
+                    "token:label_maps",
+            )),
+            "step 11 consumes/refines label, label_short, layer_label, layer_label_short, ... after step 8 writes",
+        ),
+        ("8", "11.75"): PinnedPair(
+            "columns",
+            frozenset((
+                    "label",
+                    "layer_label",
+            )),
+            "step 11.75 consumes/refines label, layer_label after step 8 writes",
+        ),
+        ("8", "12"): PinnedPair(
+            "columns",
+            frozenset((
+                    "layer_label",
+            )),
+            "step 12 consumes/refines layer_label after step 8 writes",
+        ),
+        ("8", "15"): PinnedPair(
+            "columns",
+            frozenset((
+                    "label",
+                    "layer_label",
+            )),
+            "step 15 consumes/refines label, layer_label after step 8 writes",
+        ),
+        ("8", "15.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "label",
+                    "layer_label",
+            )),
+            "step 15.5 consumes/refines label, layer_label after step 8 writes",
+        ),
+        ("8", "16"): PinnedPair(
+            "columns",
+            frozenset((
+                    "label",
+                    "layer_label",
+            )),
+            "step 16 consumes/refines label, layer_label after step 8 writes",
+        ),
+        ("8", "16.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "label",
+                    "layer_label",
+            )),
+            "step 16.5 consumes/refines label, layer_label after step 8 writes",
+        ),
+        ("8", "18"): PinnedPair(
+            "columns",
+            frozenset((
+                    "label",
+                    "label_short",
+                    "layer_label",
+                    "layer_label_short",
+                    "step_index",
+                    "type_index",
+            )),
+            "step 18 consumes/refines label, label_short, layer_label, layer_label_short, ... after step 8 writes",
+        ),
+        ("9", "10"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:raw_graph_ws",
+            )),
+            "step 10 depends on token:raw_graph_ws produced by step 9",
+        ),
+        ("9", "11"): PinnedPair(
+            "columns",
+            frozenset((
+                    "fx_call_index",
+                    "fx_qualpath",
+                    "is_buffer",
+                    "is_input",
+                    "is_output",
+                    "token:module_build",
+            )),
+            "lookup keys consume step 9's module hierarchy/build data",
+        ),
+        ("9", "11.5"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:raw_graph_ws",
+            )),
+            "step 11.5 depends on token:raw_graph_ws produced by step 9",
+        ),
+        ("9", "11.75"): PinnedPair(
+            "columns",
+            frozenset((
+                    "parents",
+            )),
+            "step 11.75 consumes/refines parents after step 9 writes",
+        ),
+        ("9", "15.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "conditional_arm_children",
+                    "conditional_entry_children",
+                    "parents",
+            )),
+            "step 15.5 consumes/refines conditional_arm_children, conditional_entry_children, parents after step 9 writes",
+        ),
+        ("9", "16"): PinnedPair(
+            "columns",
+            frozenset((
+                    "is_buffer",
+                    "token:module_build",
+            )),
+            "step 16 consumes/refines is_buffer, token:module_build after step 9 writes",
+        ),
+        ("9", "16.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "is_buffer",
+                    "is_input",
+                    "is_output",
+                    "parents",
+            )),
+            "step 16.5 consumes/refines is_buffer, is_input, is_output, parents after step 9 writes",
+        ),
+        ("9", "17.5"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:raw_graph_ws",
+            )),
+            "step 17.5 depends on token:raw_graph_ws produced by step 9",
+        ),
+        ("9", "18"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_edge_uses",
+                    "args_template",
+                    "atomic_module_call",
+                    "children",
+                    "conditional_arm_children",
+                    "conditional_elif_children",
+                    "conditional_else_children",
+                    "conditional_entry_children",
+                    "conditional_then_children",
+                    "equivalent_ops",
+                    "fx_call_index",
+                    "fx_qualpath",
+                    "input_ancestors",
+                    "internal_source_ancestors",
+                    "interventions",
+                    "is_buffer",
+                    "is_input",
+                    "is_output",
+                    "kwargs_template",
+                    "output_descendants",
+                    "parent_arg_positions",
+                    "parents",
+                    "recurrent_ops",
+                    "root_ancestors",
+                    "step_index",
+            )),
+            "step 18 consumes/refines _edge_uses, args_template, atomic_module_call, children, ... after step 9 writes",
+        ),
+        ("10", "11"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:lookup_containers",
+            )),
+            "lookup keys are built over step 10's renamed references",
+        ),
+        ("10", "16.5"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:lookup_containers",
+            )),
+            "step 16.5 depends on token:lookup_containers produced by step 10",
+        ),
+        ("11", "15.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "modules",
+            )),
+            "step 15.5 consumes/refines modules after step 11 writes",
+        ),
+        ("11", "16"): PinnedPair(
+            "columns",
+            frozenset((
+                    "input_to_module_calls",
+                    "output_of_module_calls",
+                    "token:saved_summary",
+            )),
+            "step 16 consumes/refines input_to_module_calls, output_of_module_calls, token:saved_summary after step 11 writes",
+        ),
+        ("11", "16.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "module",
+                    "token:lookup_containers",
+            )),
+            "step 16.5 consumes/refines module, token:lookup_containers after step 11 writes",
+        ),
+        ("11", "18"): PinnedPair(
+            "columns",
+            frozenset((
+                    "input_to_module_calls",
+                    "lookup_keys",
+                    "module",
+                    "modules",
+                    "ordinal_index",
+                    "output_of_module_calls",
+            )),
+            "step 18 consumes/refines input_to_module_calls, lookup_keys, module, modules, ... after step 11 writes",
+        ),
+        ("11.5", "18"): PinnedPair(
+            "columns",
+            frozenset((
+                    "var_names",
+            )),
+            "step 18 consumes/refines var_names after step 11.5 writes",
+        ),
+        ("11.75", "12"): PinnedPair(
+            "columns",
+            frozenset((
+                    "has_saved_activation",
+                    "out",
+                    "saved_args",
+                    "saved_kwargs",
+                    "token:payload_tensors",
+                    "transformed_out",
+            )),
+            "step 12 consumes/refines has_saved_activation, out, saved_args, saved_kwargs, ... after step 11.75 writes",
+        ),
+        ("11.75", "13"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:payload_tensors",
+            )),
+            "step 13 depends on token:payload_tensors produced by step 11.75",
+        ),
+        ("11.75", "15.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "activation_memory",
+                    "dtype",
+                    "shape",
+                    "transformed_activation_memory",
+                    "transformed_out_dtype",
+                    "transformed_out_shape",
+            )),
+            "step 15.5 consumes/refines activation_memory, dtype, shape, transformed_activation_memory, ... after step 11.75 writes",
+        ),
+        ("11.75", "16"): PinnedPair(
+            "columns",
+            frozenset((
+                    "has_saved_activation",
+            )),
+            "step 16 consumes/refines has_saved_activation after step 11.75 writes",
+        ),
+        ("11.75", "18"): PinnedPair(
+            "columns",
+            frozenset((
+                    "activation_memory",
+                    "annotations",
+                    "dtype",
+                    "has_saved_activation",
+                    "out",
+                    "saved_args",
+                    "saved_kwargs",
+                    "shape",
+                    "token:payload_tensors",
+                    "transformed_activation_memory",
+                    "transformed_out",
+                    "transformed_out_dtype",
+                    "transformed_out_shape",
+            )),
+            "step 18 consumes/refines activation_memory, annotations, dtype, has_saved_activation, ... after step 11.75 writes",
+        ),
+        ("11.75", "19"): PinnedPair(
+            "columns",
+            frozenset((
+                    "out",
+                    "transformed_out",
+            )),
+            "step 19 consumes/refines out, transformed_out after step 11.75 writes",
+        ),
+        ("12", "13"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:payload_tensors",
+            )),
+            "step 13 depends on token:payload_tensors produced by step 12",
+        ),
+        ("12", "18"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:payload_tensors",
+            )),
+            "step 18 depends on token:payload_tensors produced by step 12",
+        ),
+        ("15", "15.5"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_param_logs",
+            )),
+            "step 15.5 consumes/refines _param_logs after step 15 writes",
+        ),
+        ("15", "16"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_param_logs",
+                    "token:param_logs_kind",
+            )),
+            "step 16 consumes/refines _param_logs, token:param_logs_kind after step 15 writes",
+        ),
+        ("15", "18"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_param_logs",
+                    "parent_params",
+            )),
+            "step 18 consumes/refines _param_logs, parent_params after step 15 writes",
+        ),
+        ("15", "20"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:param_logs_kind",
+            )),
+            "step 20 depends on token:param_logs_kind produced by step 15",
+        ),
+        ("15.5", "16"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:layer_logs",
+            )),
+            "Module.layers references the Layer keys step 15.5 builds",
+        ),
+        ("15.5", "18"): PinnedPair(
+            "columns",
+            frozenset((
+                    "in_conditionals",
+                    "terminal_bool_for",
+            )),
+            "step 18 consumes/refines in_conditionals, terminal_bool_for after step 15.5 writes",
+        ),
+        ("16", "18"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_param_logs",
+            )),
+            "step 18 consumes/refines _param_logs after step 16 writes",
+        ),
+        ("16", "20"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:param_logs_kind",
+            )),
+            "step 20 depends on token:param_logs_kind produced by step 16",
+        ),
+        ("16.5", "18"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_address_normalized",
+            )),
+            "step 18 consumes/refines _address_normalized after step 16.5 writes",
+        ),
+        ("17", "18"): PinnedPair(
+            "columns",
+            frozenset((
+                    "_tracing_finished",
+            )),
+            "step 18 consumes/refines _tracing_finished after step 17 writes",
+        ),
+        ("17.5", "18"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:containers",
+            )),
+            "the streamed bundle persists the containers step 17.5 adopts",
+        ),
+        ("18", "19"): PinnedPair(
+            "columns",
+            frozenset((
+                    "out_ref",
+                    "token:stream_lifecycle",
+                    "token:stream_writer",
+            )),
+            "step 19 consumes/refines out_ref, token:stream_lifecycle, token:stream_writer after step 18 writes",
+        ),
+        ("18", "20"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:stream_lifecycle",
+            )),
+            "param-ref release must follow optional stream finalization",
+        ),
+        ("19", "20"): PinnedPair(
+            "tokens",
+            frozenset((
+                    "token:stream_lifecycle",
+            )),
+            "param-ref release must follow optional out eviction",
+        ),
+        ("3", "5"): PinnedPair(
+            "columns",
+            frozenset(
+                (
+                    "conditional_arm_children",
+                    "conditional_elif_children",
+                    "conditional_else_children",
+                    "conditional_entry_children",
+                    "conditional_then_children",
+                    "is_orphan",
+                    "is_terminal_bool",
+                    "token:raw_graph_ws",
+                )
+            ),
+            "conditional attribution requires the orphan-free graph and step 3's "
+            "orphan/terminal-bool verdicts (also a two-sided row barrier)",
+        ),
+        ("17", "17.5"): PinnedPair(
+            "structure",
+            frozenset(),
+            "workspace drops happen only after the finished-flag barrier flips facade behavior",
+        ),
+    }
+)
 
 
 def _validate_contract_artifacts() -> None:

@@ -888,14 +888,23 @@ class _CombinedAuditOpRowStore(OpRowStore):
     __slots__ = ()
 
     def cell_get(self, row: int, fid: int) -> Any:
-        """Record the read column id, then perform the read."""
+        """Record the read column id, then perform the read.
+
+        Reads on rows already marked RELEASED this window (op removal
+        husking walks and clears every set cell) are row-lifecycle events
+        like the husking deletes — recording them would report the whole
+        schema as step-3/6 reads. Reads BEFORE the release mark (e.g. the
+        orphan-record construction) still record normally.
+        """
 
         store_id = id(self)
         if _CLONE_SCOPE_DEPTH.get(store_id, 0):
             collector = _AUDIT_CLONE_READS.get(store_id)
         else:
             collector = _AUDIT_READS.get(store_id)
-        if collector is not None:
+        if collector is not None and row not in _AUDIT_ROW_RELEASES.get(
+            store_id, _NO_RELEASES
+        ):
             collector.add(fid)
         return OpRowStore.cell_get(self, row, fid)
 

@@ -219,8 +219,12 @@ def derived_pinnable_pairs() -> dict[tuple[str, str], set[str]]:
 
     pairs: dict[tuple[str, str], set[str]] = {}
     for edge in derive_edges():
-        if edge.kind in ("raw", "ww", "token_raw", "token_ww"):
+        if edge.kind in ("raw", "ww"):
             pairs.setdefault((edge.src, edge.dst), set()).add(edge.carrier)
+        elif edge.kind in ("token_raw", "token_ww"):
+            # Token carriers are namespaced so a trace-state token can never
+            # collide with (or launder through) an op-column name.
+            pairs.setdefault((edge.src, edge.dst), set()).add(f"token:{edge.carrier}")
     return pairs
 
 
