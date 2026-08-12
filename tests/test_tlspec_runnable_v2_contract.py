@@ -57,7 +57,7 @@ def test_v2_descriptor_round_trips_with_required_context(tmp_path: Path) -> None
 
     bundle = _save_runnable(tmp_path, include_weights=True)
     loaded = tl.load(str(bundle))
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     assert descriptor.capability == RUNNABLE_TLSPEC_SCHEMA_VERSION
     assert descriptor.ambient_context.default_dtype == "torch.float32"
     for call in descriptor.calls:
@@ -100,7 +100,7 @@ def test_legacy_v1_capability_loads_analysis_only(tmp_path: Path) -> None:
 
     _rewrite_manifest(bundle, _to_legacy)
     loaded = tl.load(str(bundle))
-    readiness = loaded.__dict__["_runnable_readiness"]
+    readiness = loaded._runnable.readiness
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     assert readiness.capability == "sparse_recorded_taken_path_v1"
     codes = {diag.code for diag in readiness.diagnostics}
@@ -122,7 +122,7 @@ def test_v2_descriptor_missing_call_context_is_rejected(tmp_path: Path) -> None:
 
     _rewrite_manifest(bundle, _strip_call_context)
     loaded = tl.load(str(bundle))
-    readiness = loaded.__dict__["_runnable_readiness"]
+    readiness = loaded._runnable.readiness
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     with pytest.raises(RunCapabilityUnavailableError):
         loaded.run(inputs=torch.randn(2, 4))

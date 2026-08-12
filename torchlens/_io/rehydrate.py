@@ -35,24 +35,11 @@ from .scrub import (
 from ..backends import BackendRuntimeCompatibilityError
 from ..data_classes._state_adapter import state_items
 from ..data_classes.trace import Trace
+from ..ir.trace_build_state import LEGACY_TRACE_BUILD_STATE_KEYS
 
 _LEGACY_CAPTURE_TRACE_KEYS = {
-    "_raw_layer_dict",
-    "_raw_layer_labels_list",
-    "_layer_counter",
-    "_raw_layer_type_counter",
-    "_current_func_barcode",
-    "_mod_entered",
-    "_mod_exited",
-    "_mod_call_index",
-    "_mod_call_labels",
-    "_module_build_data",
-    "_module_metadata",
-    "_module_forward_args",
-    "_module_containment_engine",
-    "_exhaustive_module_stack",
-    "_grad_fn_strong_refs",
-    "_in_exhaustive_pass",
+    *LEGACY_TRACE_BUILD_STATE_KEYS,
+    "_build_state",
     "_pending_live_fire_records",
 }
 _TORCH_BACKEND_NAME = "torch"
@@ -297,7 +284,8 @@ def _normalize_legacy_trace_state(state: dict[str, Any], source_version: int) ->
     ``_mod_exited``, ``_mod_call_index``, ``_mod_call_labels``,
     ``_module_build_data``, ``_module_metadata``, ``_module_forward_args``,
     ``_module_containment_engine``, ``_exhaustive_module_stack``,
-    ``_grad_fn_strong_refs``, ``_in_exhaustive_pass``, and
+    ``_grad_fn_strong_refs``, ``_in_exhaustive_pass``, ``_input_tensor_addresses``,
+    ``_build_state``, and
     ``_pending_live_fire_records``.
 
     For v3 artifacts being loaded into v4, strip these keys if present. The

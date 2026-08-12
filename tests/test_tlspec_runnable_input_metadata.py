@@ -190,7 +190,7 @@ def test_h2_layout_oblivious_model_does_not_over_trigger(tmp_path: Path) -> None
         ),
     )
     # The recording is read-gated: no metadata-predicate read, no recorded fact.
-    assert trace.__dict__.get("_runnable_input_metadata_reads") is None
+    assert trace._runnable.input_metadata_reads == {}
     trace.save(tmp_path / "plain.tlspec", level="runnable", include_activations=True)
 
     result = tl.load(tmp_path / "plain.tlspec").run(inputs=x)

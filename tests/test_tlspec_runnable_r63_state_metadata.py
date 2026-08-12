@@ -393,7 +393,7 @@ def test_r63_named_user_state_refuses_before_staging(tmp_path: Path) -> None:
         loaded.load_state_dict({"w": _named_source()})
     message = str(excinfo.value)
     assert "state_metadata_mismatch" in message
-    assert loaded.__dict__.get("_runnable_staged_user_state") is None
+    assert loaded._runnable.staged_user_state is None
 
 
 def test_r63_exotic_supplied_state_refuses_typed(tmp_path: Path) -> None:
@@ -574,11 +574,11 @@ def test_r63_signatures_stamped_pre_clone() -> None:
             return x + self.b + self.c.real.sum()
 
     trace = _trace(OffsetConjState(), torch.randn(4))
-    signatures = trace.__dict__.get("_runnable_capture_state_signatures")
+    signatures = trace._runnable.capture_state_signatures
     assert isinstance(signatures, dict)
     assert signatures["b"]["storage_offset_is_zero"] is False
     assert signatures["c"]["is_conj"] is True
-    capture_state = trace.__dict__.get("_runnable_capture_state")
+    capture_state = trace._runnable.capture_state
     assert capture_state["b"].storage_offset() == 0  # the clone normalized it
     assert not capture_state["c"].is_conj()
 
@@ -589,10 +589,10 @@ def test_r63_runtime_tripwire_catches_mutated_staged_state(tmp_path: Path) -> No
 
     loaded = _plain_loaded(tmp_path)
     loaded.load_state_dict({"w": torch.ones(2, 3)})
-    staged = dict(loaded.__dict__["_runnable_staged_user_state"])
+    staged = dict(loaded._runnable.staged_user_state)
     slot_id = next(iter(staged))
     staged[slot_id] = torch.ones(3, 2).t()  # same shape/dtype, non-canonical stride
-    loaded.__dict__["_runnable_staged_user_state"] = MappingProxyType(staged)
+    loaded._runnable.staged_user_state = MappingProxyType(staged)
     with pytest.raises(PathDivergenceError) as excinfo:
         loaded.run(inputs=torch.randn(3))
     assert "canonical staged metadata signature" in str(excinfo.value)
@@ -603,7 +603,7 @@ def test_r63_staging_canonicalizes_physical_form(tmp_path: Path) -> None:
 
     loaded = _plain_loaded(tmp_path)
     loaded.load_state_dict({"w": torch.ones(3, 2).t()})  # non-contiguous source
-    staged = loaded.__dict__["_runnable_staged_user_state"]
+    staged = loaded._runnable.staged_user_state
     for value in staged.values():
         assert value.is_contiguous()
         assert value.stride() == (3, 1)

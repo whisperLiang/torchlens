@@ -79,28 +79,17 @@ def test_trace_field_set_subset_of_user_facing() -> None:
         "_warned_nonfinite_check_unavailable",
         "_stop_directive",
         # r65-r81 buffer-rung/RNG-registry sprint: capture-scratch that
-        # legitimately survives on a finished Trace (host-RNG monitor state,
-        # session-scoped param/buffer inventories, and storage-address maps
-        # used by the buffer-rung witness/completeness machinery).
+        # legitimately survives on a finished Trace (session-scoped
+        # param/buffer inventories and storage-address maps used by the
+        # buffer-rung witness/completeness machinery). Runnable state now has
+        # one declared MODEL_LOG_FIELD_ORDER owner: ``_runnable``.
         "_param_storage_addresses",
         "_buffer_storage_addresses",
-        "_runnable_host_rng_consumed",
-        "_runnable_host_rng_unreplayable",
-        "_runnable_host_rng_channels",
-        "_runnable_host_rng_replayable_reads",
-        "_runnable_rng_monitor_uncertain",
-        "_runnable_rng_monitor_uncertain_detail",
-        "_runnable_output_losslessness",
-        "_runnable_embedded_nonpersistent_buffers",
         "_orphan_pruned_func_call_ids",
         # r29 F3b: capture-time (slot -> producer) edge truth sealed for the
         # capture_edge_survival metadata invariant; runtime-only, never
         # persisted (registered in _io/scrub.py's runtime-only list).
         "_capture_parent_edge_truth",
-        # Pre-existing lockstep miss (RED on main before r29): the ambient
-        # execution-context snapshot is registered runtime-only in
-        # _io/scrub.py but was never added here.
-        "_runnable_capture_ambient",
         "_session_param_inventory",
         "_session_buffer_inventory",
         "_session_buffer_identity",

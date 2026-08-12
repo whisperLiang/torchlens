@@ -55,6 +55,7 @@ from torchlens._runnable_execution import (
     _tensor_leaf_paths,
     _value_at_path,
 )
+from torchlens._runnable_seam import runnable_trace_state
 from torchlens.capture.trace import (
     _OPAQUE_INPUT_LEAF,
     _record_runnable_input_literal_leaves,
@@ -109,7 +110,7 @@ def _w1_leaves(root: Any) -> tuple[tuple[object, tuple[Any, ...], Any], ...]:
 
     trace = _FakeTrace()
     _record_runnable_input_literal_leaves(trace, [root], {})
-    return trace.__dict__.get("_runnable_input_nontensor_leaves", ())
+    return runnable_trace_state(trace).input_nontensor_leaves or ()
 
 
 def _w1_paths(root: Any) -> set[tuple[Any, ...]]:
@@ -123,7 +124,7 @@ def _w2_paths(root: Any) -> set[tuple[Any, ...]]:
 
     trace = _FakeTrace()
     _record_runnable_input_tensor_sites(trace, [root], {})
-    sites = trace.__dict__.get("_runnable_input_tensor_sites", {})
+    sites = runnable_trace_state(trace).input_tensor_sites or {}
     return {path for _position, path in sites.values()}
 
 
@@ -437,7 +438,7 @@ def test_r64_dataclass_metadata_read_witnessed_and_layout_twin_diverges(
     x = torch.arange(16.0).reshape(4, 4).contiguous()
     path = tmp_path / "r64_dc_layout.tlspec"
     trace = _capture_runnable(_DataclassLayoutBranch(), _LayoutBox(x), path)
-    reads = trace.__dict__.get("_runnable_input_metadata_reads")
+    reads = trace._runnable.input_metadata_reads
     assert reads, (
         "the is_contiguous() read on the dataclass input field recorded no metadata "
         "witness -- the r64 Finding-1 walker gap has reopened"

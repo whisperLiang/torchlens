@@ -1115,7 +1115,7 @@ def _run_model_and_save_specified_outs(
             num_context_lines,
             source_loading_enabled=save_code_context,
         )
-        trace._module_containment_engine = module_containment_engine
+        trace._build_state.module_containment_engine = module_containment_engine
         forward_code = getattr(model.forward, "__code__", None)
         trace.forward_source_line = getattr(forward_code, "co_firstlineno", None)
         trace.intervention_ready = intervention_ready
@@ -1134,7 +1134,7 @@ def _run_model_and_save_specified_outs(
         trace._keep_outs_in_memory = keep_outs_in_memory
         trace._grad_stream_retain_in_memory = retain_grads_in_memory
         trace._defer_streaming_bundle_finalization = grad_storage_path is not None
-        trace._in_exhaustive_pass = True
+        trace._build_state.in_exhaustive_pass = True
         trace.raise_on_nan = raise_on_nan
         trace._stop_directive = StopDirective(
             halt_options=getattr(trace, "_predicate_save_options", None),

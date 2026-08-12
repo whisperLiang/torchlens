@@ -7271,7 +7271,7 @@ def test_genuine_raw_hook_untraceable_replacement_validates_nested_depth() -> No
     ``_ensure_module_output_tensor_logged``'s ``intervention_replacement``
     branch built a single-frame module stack instead of the full ancestor
     chain: by the time the raw hook fires, the hooked module's own frame has
-    already been popped off ``trace._exhaustive_module_stack``, so a
+    already been popped off ``trace._build_state.exhaustive_module_stack``, so a
     truncated single-frame stack wires the synthetic replacement op as a
     DIRECT CHILD OF ROOT while the module's real ops (which carry the correct
     full stack) simultaneously wire the same call label under its true
@@ -7302,7 +7302,7 @@ def test_genuine_raw_hook_untraceable_replacement_validates_depth_zero() -> None
     ALSO validate cleanly, and produce a correct module-call record.
 
     Cert round 6 found this hard-crashing with an uninterpretable ``KeyError``
-    at ``model_prep.py``'s ``trace._mod_call_index[id(module)]`` lookup: the
+    at ``model_prep.py``'s ``trace._build_state.mod_call_index[id(module)]`` lookup: the
     root model's ``forward`` is deliberately never decorated
     (``_prepare_model_once``'s ``_visit_once`` -- "Root module is handled
     separately by trace"), so it is never registered in ``_mod_call_index``

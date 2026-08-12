@@ -67,15 +67,11 @@ def cleanup(self: "Trace") -> None:
     # These hold back-references (e.g. _module_logs -> Module -> _source_trace)
     # and large data structures (layer_logs, layer_dict_all_keys).
     for attr in [
-        "_raw_layer_dict",
-        "_raw_layer_labels_list",
         "_capture_events",
+        "_build_state",
         "_saved_grad_labels",
         "_module_logs",
         "_buffer_accessor",
-        "_module_metadata",
-        "_module_forward_args",
-        "_module_build_data",
         "_param_logs_by_module",
         "layer_logs",
         "layer_dict_all_keys",
@@ -85,10 +81,6 @@ def cleanup(self: "Trace") -> None:
         "_source_bundle_manifest_sha256",
         "_source_bundle_path",
         "_source_bundle_created_at",
-        "_runnable_descriptor",
-        "_runnable_readiness",
-        "_runnable_callables_by_call_id",
-        "_runnable_archived_activations",
         "_fast_run_session",
         "_validation_replay_status",
     ]:

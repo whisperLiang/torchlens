@@ -797,7 +797,7 @@ def _capture_source_state(trace: Trace, *, option_name: str) -> Mapping[str, tor
     label.
     """
 
-    state = getattr(trace, "_runnable_capture_state", None)
+    state = trace._runnable.capture_state
     if not isinstance(state, Mapping) or any(
         not isinstance(name, str) or not isinstance(value, torch.Tensor)
         for name, value in state.items()
@@ -1257,7 +1257,7 @@ def _runnable_payload_disposition(trace: Trace, entries: tuple[Any, ...]) -> str
 
     if trace.runnable_descriptor is not None:
         return "bind"
-    readiness = trace.__dict__.get("_runnable_readiness")
+    readiness = trace._runnable.readiness
     if getattr(readiness, "provider", None) is RunProvider.LOADED_SPARSE:
         # A refused/legacy sparse descriptor degrades to analysis-only; skip binding.
         return "skip"
@@ -1493,7 +1493,7 @@ def _bind_archived_activation_payload(
             raise TorchLensIOError(
                 "Runnable activation blobs are present while their payload flag is false."
             )
-        trace.__dict__["_runnable_archived_activations"] = {}
+        trace._runnable.archived_activations = {}
         return
     if not isinstance(declared, ActivationPayloadLayerDescriptor):
         raise TorchLensIOError("Runnable activation payload metadata is incomplete.")
@@ -1553,7 +1553,7 @@ def _bind_archived_activation_payload(
         )
     if set(activation_entries) != {member.blob_id for member in declared.members}:
         raise TorchLensIOError("Runnable activation blobs and declared membership disagree.")
-    trace.__dict__["_runnable_archived_activations"] = archived
+    trace._runnable.archived_activations = archived
 
 
 def _load_unified_tlspec(
@@ -2942,7 +2942,7 @@ def _collect_provenance(trace: Trace) -> Provenance:
             if (device := getattr(op, "device_ref", None)) is not None
         }
     )
-    ambient = getattr(trace, "_runnable_capture_ambient", None)
+    ambient = trace._runnable.capture_ambient
     default_dtype = ambient.get("default_dtype") if isinstance(ambient, Mapping) else None
     autocast_facts: list[dict[str, Any]] = []
     seen_autocast: set[str] = set()

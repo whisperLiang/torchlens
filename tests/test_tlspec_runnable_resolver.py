@@ -315,7 +315,7 @@ def test_safe_load_survives_unresolved_key_and_run_fails_once_with_full_report(
     loaded = tl.load(path)
     assert len(loaded.layer_list) == len(source.layer_list)
     assert loaded.readiness.status is ReadinessStatus.UNAVAILABLE
-    assert "_runnable_callables_by_call_id" not in loaded.__dict__
+    assert loaded._runnable.callables_by_call_id is None
     with pytest.raises(ReattachError) as captured:
         loaded.run(torch.ones(1, 3))
     assert captured.value.fields["readiness"] is loaded.readiness

@@ -573,7 +573,7 @@ def test_held_ref_capture_never_false_verified(factory: Any, channel: str, tmp_p
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(factory(), x, tmp=tmp_path)
-    assert channel in getattr(trace, "_runnable_host_rng_channels", ())
+    assert channel in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 
@@ -674,7 +674,7 @@ def test_large_model_held_generator_end_to_end_unverifiable(
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_BigHeldGen(), x, tmp=tmp_path)
-    assert "model_attribute_generator" in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 
@@ -1222,7 +1222,7 @@ def test_tampered_device_literal_degrades_analysis_only(tmp_path: Path) -> None:
     trace.save(path, level="runnable")
     assert _tamper_device_qualname(path), "bundle carried no device literal to tamper"
     loaded = tl.load(path)  # must not hard-fail: corr2_3 analysis-only degradation
-    readiness = loaded._runnable_readiness
+    readiness = loaded._runnable.readiness
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     assert any("torch.device" in (d.message or "") for d in readiness.diagnostics)
     with pytest.raises(RunCapabilityUnavailableError):
@@ -1380,7 +1380,7 @@ def test_datetime_subclass_clock_reader_ceilings(reader: str, tmp_path: Path) ->
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_SubclassClockBranch(), x, tmp=tmp_path)
-    assert "datetime.datetime.%s" % reader in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "datetime.datetime.%s" % reader in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 
@@ -1432,7 +1432,7 @@ def test_custom_holder_generator_drawn_on_worker_ceilings(
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_CustomHolderGenModel(preexisting_worker), x, tmp=tmp_path)
-    assert "model_attribute_generator" in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 
@@ -1453,7 +1453,7 @@ def test_custom_holder_undrawn_generator_stays_clean(
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_UndrawnHolderModel(), x, tmp=tmp_path)
-    assert "model_attribute_generator" not in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" not in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
 
 
@@ -1605,7 +1605,7 @@ def test_unregistered_submodule_generator_end_to_end_unverifiable(
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_UnregGenModel(preexisting_worker), x, tmp=tmp_path)
-    assert "model_attribute_generator" in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 
@@ -1627,7 +1627,7 @@ def test_unregistered_submodule_undrawn_generator_stays_verified(tmp_path: Path)
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_UnregUndrawn(), x, tmp=tmp_path)
-    assert "model_attribute_generator" not in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" not in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
 
 
@@ -1920,7 +1920,7 @@ def test_r53_descriptor_owned_generator_end_to_end_unverifiable(
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_DescriptorRngModel(preexisting_worker), x, tmp=tmp_path)
-    assert "model_attribute_generator" in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 
@@ -1950,7 +1950,7 @@ def test_r53_weakref_reached_generator_end_to_end_unverifiable(
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_WeakrefRngModel(preexisting_worker), x, tmp=tmp_path)
-    assert "model_attribute_generator" in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 
@@ -1976,7 +1976,7 @@ def test_r53_callable_instance_generator_end_to_end_unverifiable(
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_CallableOpModel(preexisting_worker), x, tmp=tmp_path)
-    assert "model_attribute_generator" in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
     assert result.report.numeric_attestation is NumericAttestationStatus.NOT_APPLICABLE
 
@@ -2004,7 +2004,7 @@ def test_r53_inert_holders_present_undrawn_e2e_stays_verified(tmp_path: Path) ->
 
     x = torch.randn(2, 4)
     trace, result = _roundtrip(_BenignLoadedModel(), x, tmp=tmp_path)
-    assert "model_attribute_generator" not in getattr(trace, "_runnable_host_rng_channels", ())
+    assert "model_attribute_generator" not in trace._runnable.host_rng_channels
     assert result.report.path_faithfulness is PathFaithfulness.VERIFIED
 
 

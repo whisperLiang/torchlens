@@ -48,11 +48,11 @@ def test_plain_trace_does_not_arm_monitor_and_stamps_fail_closed():
     # No profile hook was installed for the user forward.
     assert model.profile_hook_during_forward is None
     # The fail-closed stamp: channel coverage is UNKNOWABLE, never "no consumption".
-    assert trace._runnable_rng_monitor_uncertain is True
-    assert trace._runnable_rng_monitor_uncertain_detail == ("monitor_not_armed",)
-    # The channel verdict fields were never observed and must not exist.
-    assert not hasattr(trace, "_runnable_host_rng_channels")
-    assert not hasattr(trace, "_runnable_host_rng_unreplayable")
+    assert trace._runnable.rng_monitor_uncertain is True
+    assert trace._runnable.rng_monitor_uncertain_detail == ("monitor_not_armed",)
+    # The channel verdict fields were never observed and must remain tri-state.
+    assert trace._runnable.host_rng_channels is None
+    assert trace._runnable.host_rng_unreplayable is None
 
 
 @pytest.mark.smoke
@@ -61,9 +61,9 @@ def test_intervention_ready_trace_arms_monitor_unchanged():
     trace = tl.trace(model, torch.randn(2, 4), capture=CaptureOptions(**_RUNNABLE_CAP))
     # The real monitor ran the forward under its profile hook.
     assert model.profile_hook_during_forward is not None
-    assert trace._runnable_rng_monitor_uncertain is False
-    assert trace._runnable_host_rng_channels == ()
-    assert trace._runnable_host_rng_unreplayable is False
+    assert trace._runnable.rng_monitor_uncertain is False
+    assert trace._runnable.host_rng_channels == ()
+    assert trace._runnable.host_rng_unreplayable is False
 
 
 @pytest.mark.smoke
@@ -87,8 +87,8 @@ def test_disarmed_stamp_ceilings_descriptor_build():
 
     model = _ProfileProbeModel()
     trace = tl.trace(model, torch.randn(2, 4), capture=CaptureOptions(**_RUNNABLE_CAP))
-    trace._runnable_rng_monitor_uncertain = True
-    trace._runnable_rng_monitor_uncertain_detail = ("monitor_not_armed",)
+    trace._runnable.rng_monitor_uncertain = True
+    trace._runnable.rng_monitor_uncertain_detail = ("monitor_not_armed",)
     descriptor = build_sparse_run_descriptor(trace)
     gap_kinds = {gap.gap_kind for gap in descriptor.coverage_gaps}
     assert WitnessGapKind.RNG_MONITOR_UNCERTAIN in gap_kinds

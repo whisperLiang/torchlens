@@ -170,7 +170,7 @@ def _rewrite_structseq_paths_to_positional(trace: tl.Trace) -> str:
         Rewritten call id.
     """
 
-    descriptor = trace.__dict__["_runnable_descriptor"]
+    descriptor = trace._runnable.descriptor
     call_id = _structseq_call_id(descriptor)
     call = next(item for item in descriptor.calls if item.call_id == call_id)
     positional_slots = {slot_id: (index,) for index, slot_id in enumerate(call.output_slot_ids)}
@@ -180,7 +180,7 @@ def _rewrite_structseq_paths_to_positional(trace: tl.Trace) -> str:
         else slot
         for slot in descriptor.tensor_slots
     )
-    trace.__dict__["_runnable_descriptor"] = dataclasses.replace(
+    trace._runnable.descriptor = dataclasses.replace(
         descriptor, tensor_slots=tensor_slots
     )
     return call_id
@@ -234,7 +234,7 @@ def test_plain_tuple_is_not_accepted_as_structseq_under_positional_paths(tmp_pat
     value = torch.tensor([[1.0, 4.0, -2.0], [3.0, 2.0, 5.0]])
     loaded = _save_load(_StructSeqModel("sort"), value, tmp_path / "wrong_tuple.tlspec")
     call_id = _rewrite_structseq_paths_to_positional(loaded)
-    loaded.__dict__["_runnable_callables_by_call_id"][call_id] = _plain_tuple_sort
+    loaded._runnable.callables_by_call_id[call_id] = _plain_tuple_sort
 
     with pytest.raises(PathDivergenceError):
         loaded.run(inputs=value.clone(), seed=0)

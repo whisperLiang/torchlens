@@ -473,7 +473,7 @@ def test_loaded_runnable_embedded_state_trace_pickles_and_deepcopies(tmp_path: P
         inputs=torch.ones(5, 3), on_divergence=DivergencePolicy.RETURN_DIVERGED
     ).trace
     for revived in (pickle.loads(pickle.dumps(diverged)), copy.deepcopy(diverged)):
-        assert revived.__dict__.get("_runnable_poisoned") is True
+        assert revived._runnable.poisoned is True
         with pytest.raises(PoisonedRunError):
             revived.to_pandas()
 
@@ -487,11 +487,11 @@ def test_capture_state_trace_pickles_deepcopies_and_forks() -> None:
         trace = _capture(model)
 
     for copied in (pickle.loads(pickle.dumps(trace)), copy.deepcopy(trace)):
-        state = copied.__dict__.get("_runnable_capture_state")
+        state = copied._runnable.capture_state
         assert isinstance(state, dict)
-        assert state is not trace._runnable_capture_state
+        assert state is not trace._runnable.capture_state
         for name, value in model.state_dict().items():
             assert torch.equal(state[name], value)
 
     fork = trace.fork()
-    assert fork._runnable_capture_state is trace._runnable_capture_state
+    assert fork._runnable.capture_state is trace._runnable.capture_state

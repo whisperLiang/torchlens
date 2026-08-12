@@ -18,6 +18,7 @@ from torchlens.backends.jax.backend import (
     _data_parent_arg_positions,
     _data_parent_labels,
 )
+from torchlens.data_classes.trace import _COMPACTED_TRACES
 from torchlens.intervention.types import EdgeUseRecord
 from torchlens.postprocess.graph_traversal import _remove_orphan_nodes
 from torchlens.validation.invariants import MetadataInvariantError
@@ -616,6 +617,7 @@ def test_jax_trace_captures_equation_ops_and_params() -> None:
     assert "dot_general" in primitive_names
     assert "tanh" in primitive_names
     assert all(op.has_saved_activation for op in trace.layer_list)
+    assert trace in _COMPACTED_TRACES
     assert trace.validate_forward_pass([])
 
 
@@ -957,13 +959,16 @@ def test_synthetic_control_parent_is_retained_by_orphan_pruning() -> None:
                 The raw graph fields are populated in place.
             """
 
+            from torchlens.ir.trace_build_state import TraceBuildState
+
+            self._build_state = TraceBuildState()
             decision = _fake_raw_node("decision")
             child = _fake_raw_node("child", parents=["decision"], children=["output"])
             output = _fake_raw_node("output", parents=["child"], is_output=True)
             orphan = _fake_raw_node("orphan")
             decision.children.append("child")
-            self._raw_layer_labels_list = ["decision", "child", "output", "orphan"]
-            self._raw_layer_dict = OrderedDict(
+            self._build_state.raw_layer_labels_list = ["decision", "child", "output", "orphan"]
+            self._build_state.raw_layer_dict = OrderedDict(
                 (node._label_raw, node) for node in (decision, child, output, orphan)
             )
             self.input_layers: list[str] = []
@@ -996,7 +1001,7 @@ def test_synthetic_control_parent_is_retained_by_orphan_pruning() -> None:
 
     _remove_orphan_nodes(fake_trace)  # type: ignore[arg-type]
 
-    assert fake_trace._raw_layer_labels_list == ["decision", "child", "output"]
+    assert fake_trace._build_state.raw_layer_labels_list == ["decision", "child", "output"]
     assert fake_trace._orphan_labels == ["orphan"]
 
 

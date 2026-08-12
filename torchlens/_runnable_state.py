@@ -825,7 +825,7 @@ def load_trace_state_dict(trace: Any, sd: Mapping[str, Any]) -> None:
 
     close_fast_run_session(trace)
     staged = _validate_state_mapping(trace, sd)
-    readiness = trace.__dict__.get("_runnable_readiness")
+    readiness = trace._runnable.readiness
     updated_readiness = readiness
     if readiness is not None and hasattr(readiness, "state_sources_available"):
         sources = tuple(
@@ -837,9 +837,9 @@ def load_trace_state_dict(trace: Any, sd: Mapping[str, Any]) -> None:
             readiness,
             state_sources_available=(StateSource.USER_STATE_DICT, *sources),
         )
-    trace.__dict__["_runnable_staged_user_state"] = staged
+    trace._runnable.staged_user_state = staged
     if updated_readiness is not readiness:
-        trace.__dict__["_runnable_readiness"] = updated_readiness
+        trace._runnable.readiness = updated_readiness
 
 
 def bind_embedded_trace_state(trace: Any, sd: Mapping[str, Any]) -> None:
@@ -864,7 +864,7 @@ def bind_embedded_trace_state(trace: Any, sd: Mapping[str, Any]) -> None:
     """
 
     _validate_state_mapping(trace, sd)
-    trace.__dict__["_runnable_embedded_state"] = MappingProxyType(
+    trace._runnable.embedded_state = MappingProxyType(
         {
             name: _staged_state_clone(value, state_dict_name=name)
             for name, value in sd.items()
@@ -891,7 +891,7 @@ def bind_embedded_nonpersistent_buffers(trace: Any, buffers: Mapping[str, Any]) 
 
     descriptor = _require_descriptor(trace)
     validate_nonpersistent_buffer_mapping_for_descriptor(descriptor, buffers)
-    trace.__dict__["_runnable_embedded_nonpersistent_buffers"] = {
+    trace._runnable.embedded_nonpersistent_buffers = {
         name: _staged_state_clone(value, state_dict_name=name)
         for name, value in buffers.items()
         if isinstance(name, str) and isinstance(value, torch.Tensor)
@@ -1102,7 +1102,7 @@ def _prepare_runnable_state(trace: Any, seed: int | None = None) -> PreparedRunn
         # recorded declared fact always wins over the source tensor's transport-lost bit.
         return _apply_state_metadata_facts(descriptor, staged)
 
-    user_state = trace.__dict__.get("_runnable_staged_user_state")
+    user_state = trace._runnable.staged_user_state
     if isinstance(user_state, Mapping):
         return _staged(
             _with_nonpersistent_buffers(
@@ -1111,7 +1111,7 @@ def _prepare_runnable_state(trace: Any, seed: int | None = None) -> PreparedRunn
             )
         )
 
-    embedded_state = trace.__dict__.get("_runnable_embedded_state")
+    embedded_state = trace._runnable.embedded_state
     if embedded_state is not None:
         if not isinstance(embedded_state, Mapping):
             raise _binding_error(
@@ -1191,7 +1191,7 @@ def _prepared_nonpersistent_buffers(
 
     slots = _nonpersistent_buffer_slots(descriptor)
     declared = descriptor.payload_layers.nonpersistent_buffers
-    embedded = trace.__dict__.get("_runnable_embedded_nonpersistent_buffers")
+    embedded = trace._runnable.embedded_nonpersistent_buffers
     if not slots:
         return MappingProxyType({})
     if (
@@ -2474,7 +2474,7 @@ def _nonpersistent_buffer_slots(
 def _require_descriptor(trace: Any) -> SparseRunDescriptor:
     """Return a sparse descriptor or raise a structured binding error."""
 
-    descriptor = trace.__dict__.get("_runnable_descriptor")
+    descriptor = trace._runnable.descriptor
     if not isinstance(descriptor, SparseRunDescriptor):
         raise _binding_error(
             (

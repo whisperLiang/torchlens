@@ -170,7 +170,7 @@ def test_archived_activation_digest_is_verified_against_the_loaded_tensor(
     loaded = tl.load(path)
     from torchlens._runnable_state import runnable_tensor_byte_digest
 
-    archived = loaded.__dict__["_runnable_archived_activations"]
+    archived = loaded._runnable.archived_activations
     assert archived
     for record in archived.values():
         assert runnable_tensor_byte_digest(record.value) == record.byte_digest

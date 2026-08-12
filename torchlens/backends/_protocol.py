@@ -271,7 +271,7 @@ class CaptureBackend(Protocol):
     def finalize_forward_session(
         self,
         session: object,
-        trace_state: TraceBuildState | None = None,
+        trace_state: TraceBuildState,
     ) -> None:
         """Finalize backend state after forward logging and before output extraction.
 
@@ -280,7 +280,7 @@ class CaptureBackend(Protocol):
         session:
             Active backend capture session.
         trace_state:
-            Optional transient trace build state for backends that materialize
+            Required transient trace build state for backends that materialize
             deferred payloads from event state at this seam.
 
         Returns

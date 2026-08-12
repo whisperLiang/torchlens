@@ -125,7 +125,7 @@ def test_capture_on_fallback_never_verifies(tmp_path: Path, model_cls: type[nn.M
     path = tmp_path / "fallback.tlspec"
     tl.save(trace, str(path), level="runnable", include_weights=True)
     loaded = tl.load(str(path))
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     assert descriptor.witness_completeness is not WitnessCompleteness.COMPLETE
 
     for runtime_input in (_non_pd_input(), _pd_input()):
@@ -170,7 +170,7 @@ def test_caught_mutating_failure_downgrades_opaque(tmp_path: Path) -> None:
     path = tmp_path / "mutating.tlspec"
     tl.save(trace, str(path), level="runnable", include_weights=True)
     loaded = tl.load(str(path))
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     assert descriptor.witness_completeness is WitnessCompleteness.INCOMPLETE_OPAQUE_SIDE_EFFECT
     result = loaded.run(inputs=x)
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE
@@ -199,7 +199,7 @@ def test_successful_unmodeled_host_return_also_downgrades(tmp_path: Path) -> Non
     path = tmp_path / "hostreturn.tlspec"
     tl.save(trace, str(path), level="runnable", include_weights=True)
     loaded = tl.load(str(path))
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     assert descriptor.witness_completeness is not WitnessCompleteness.COMPLETE
     result = loaded.run(inputs=x)
     assert result.report.path_faithfulness is PathFaithfulness.UNVERIFIABLE

@@ -199,7 +199,7 @@ def _live_op_count(trace: "Trace") -> int:
     events = getattr(trace, "capture_events", None)
     if events is not None and getattr(events, "op_events", None) is not None:
         return len(events.op_events)
-    return len(trace._raw_layer_dict)
+    return len(trace._build_state.raw_layer_dict)
 
 
 def format_discoverability_summary(
@@ -979,10 +979,11 @@ def _live_op_rows(trace: "Trace") -> list[dict[str, str]]:
             )
         return rows
 
-    if getattr(trace, "_raw_layer_dict", None):
+    build_state = trace.__dict__.get("_build_state")
+    if build_state is not None and build_state.raw_layer_dict:
         rows = []
-        for raw_label in trace._raw_layer_labels_list:
-            entry = trace._raw_layer_dict[raw_label]
+        for raw_label in trace._build_state.raw_layer_labels_list:
+            entry = trace._build_state.raw_layer_dict[raw_label]
             rows.append(
                 {
                     "name": str(

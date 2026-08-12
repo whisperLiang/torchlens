@@ -347,7 +347,7 @@ def test_untainted_archived_mismatch_still_raises(tmp_path: Path) -> None:
     path = tmp_path / "tripwire.tlspec"
     trace.save(path, level="runnable", include_weights=True, include_activations=True)
     loaded = tl.load(path)
-    archive = loaded.__dict__["_runnable_archived_activations"]
+    archive = loaded._runnable.archived_activations
     victim = next(key for key in archive if "linear" in key)
     record = archive[victim]
     archive[victim] = dataclasses.replace(record, value=record.value + 0.5)
