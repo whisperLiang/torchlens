@@ -343,9 +343,11 @@ with the dissolution. The 21 step contracts declare ENFORCED op-store column
 write sets (env-gated zero-cost-when-off audit; recorded over the six
 surface-oracle axes plus backward; the sets are reviewed contract diffs).
 The audit catches BOTH assignment/deletion (write interception) and
-IN-PLACE container mutation (content fingerprints of mutable-container
-cells diffed per step window, existing rows only — row creation is a
-step's produces contract). Declared READ sets are the named remaining
+IN-PLACE container mutation (order-canonical content fingerprints of
+mutable-container cells diffed per step window, existing rows only — row
+creation is a step's produces contract, and whole-row REMOVAL is checked
+against the contract's explicit `removes_rows` sanction instead of
+reading as per-column writes). Declared READ sets are the named remaining
 slice of the full read/write contract: reads are not audited yet, so a
 step reading an undeclared column is not caught. Disclosed audit
 residuals: mutables nested in non-builtin custom objects, and kind-table

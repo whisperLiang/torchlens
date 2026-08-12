@@ -28,10 +28,17 @@ write set (`writes`). Under `TORCHLENS_POSTPROCESS_ASSERTIONS` a
 zero-cost-when-off audit (class-swap instrumentation on the op row store)
 verifies each step writes only declared columns; a new column write fails the
 tripwire and widening a declared set is a reviewed contract diff. The audit
-covers assignment/deletion AND in-place container mutation (per-step content
-fingerprints of mutable dict/list/set cells on rows that existed at step
-begin); read sets are not audited (named remaining slice), and mutables
-nested inside non-builtin custom objects are the disclosed residual. Transient
+covers assignment/deletion AND in-place container mutation (per-step
+order-canonical content fingerprints of mutable dict/list/set cells on rows
+that existed at step begin — unordered containers hash sorted element
+fingerprints, so equal content never false-positives on iteration order).
+Whole-row lifecycle is audited separately from column writes: row creation is
+a step's produces contract, and row REMOVAL (op husking releases every cell)
+is checked against the contract's explicit `removes_rows` sanction — an
+unsanctioned removal fails with a precise message, and a sanctioned one
+(step 3 orphan removal) does not read as a wall of column writes. Read sets
+are not audited (named remaining slice), and mutables nested inside
+non-builtin custom objects are the disclosed residual. Transient
 build scratch lives in three named per-phase workspaces (`ir/workspaces.py`),
 not a flat `TraceBuildState` (deleted in M10): `RawGraphWorkspace` (capture
 ingress + steps 0-11, also the backend `finalize_forward_session` ownership
