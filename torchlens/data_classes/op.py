@@ -4200,6 +4200,21 @@ class _OpField:
             raise AttributeError(self._name)
 
 
+#: Internal storage encodings sanctioned to live in finished relation cells.
+#: Extended at import time by compat overlays whose reads materialize
+#: immutable views (the ancestor bitset in ``backends/torch/ops.py``); a
+#: refresh re-run can assign such an encoding onto a detached-backed op.
+_RELATION_CELL_ENCODINGS: tuple[type, ...] = ()
+
+
+def register_relation_cell_encoding(encoding_type: type) -> None:
+    """Sanction ``encoding_type`` as a finished relation-cell storage value."""
+
+    global _RELATION_CELL_ENCODINGS
+    if encoding_type not in _RELATION_CELL_ENCODINGS:
+        _RELATION_CELL_ENCODINGS = (*_RELATION_CELL_ENCODINGS, encoding_type)
+
+
 class _RelationViewField(_OpField):
     """Descriptor for one immutable-view relation field (M6, JMT-FORK-1).
 
@@ -4226,16 +4241,31 @@ class _RelationViewField(_OpField):
         already ran (preview backends convert without sealing), or a detached
         single-row store. Building-phase writes stay raw so postprocess can
         keep mutating its staging containers in place.
+
+        Finished-store assignment is CLOSED over container types: any
+        ``list``/``set``/``tuple``/``frozenset`` INSTANCE (subclasses
+        included — an exact-type check let a mutable subclass bypass the
+        view) normalizes to the field's view type, ``None`` passes through,
+        and every other value raises ``TypeError`` so a finished record can
+        never re-expose a mutable relation container regardless of which
+        write path assigned it.
         """
 
         store = _CORE_GET(op)
-        cls = value.__class__
-        if (cls is list or cls is set) and (
+        if (
             store.frozen
             or store.dataflow_edges is not None
             or store.__class__ is DetachedOpStore
         ):
-            value = self._view_type(value)
+            if isinstance(value, (list, set, frozenset, tuple)):
+                if value.__class__ is not self._view_type:
+                    value = self._view_type(value)
+            elif value is not None and not isinstance(value, _RELATION_CELL_ENCODINGS):
+                raise TypeError(
+                    f"cannot assign {type(value).__name__!r} to finished relation "
+                    f"field {self._name!r}; expected list/set/tuple/frozenset "
+                    f"(normalized to {self._view_type.__name__}) or None"
+                )
         store.cell_set(_ROW_GET(op), self._fid, value)
 
 

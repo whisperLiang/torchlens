@@ -71,6 +71,7 @@ from ...capture.flops import compute_backward_flops, compute_forward_flops
 from ...capture.projections import LiveOpView
 from ...data_classes.op import (
     Op,
+    register_relation_cell_encoding,
     _dtype_or_none,
     _dedup_saved_activation_out,
     _effective_activation_save_mode,
@@ -248,6 +249,12 @@ _ANCESTOR_FIELD_NAMES = ("root_ancestors", "internal_source_ancestors")
 _ANCESTOR_SLOT_DESCRIPTORS = {
     field_name: vars(Op)[field_name] for field_name in _ANCESTOR_FIELD_NAMES
 }
+
+# The bitset is a sanctioned finished-cell encoding: reads through the
+# overlay materialize its cached frozenset view, and a refresh re-run may
+# assign it onto a detached-backed op (which the closed finished-store
+# assignment check would otherwise refuse).
+register_relation_cell_encoding(_AncestorBitset)
 
 
 def _get_ancestor_field(op: Op, field_name: str) -> "set[str] | frozenset[str]":

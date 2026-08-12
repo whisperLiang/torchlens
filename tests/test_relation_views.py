@@ -299,6 +299,52 @@ class TestFinishedTraceSurface:
         assert isinstance(layer.children, tuple)
         assert isinstance(layer.modules, tuple)
 
+    def test_finished_assignment_normalizes_container_subclasses(self) -> None:
+        # Sol review finding 5: an exact-type check let mutable list/set
+        # SUBCLASSES bypass view normalization on finished ops.
+        class MutableList(list):
+            pass
+
+        class MutableSet(set):
+            pass
+
+        trace = _capture()
+        op = trace.ops["relu_1_2"]
+        op.children = MutableList(["mean_1_3"])
+        assert type(op.children) is tuple
+        op.input_ancestors = MutableSet({"input_1_1"})
+        assert type(op.input_ancestors) is frozenset
+        op.equivalent_ops = MutableSet({"relu_1_2"})
+        assert type(op.equivalent_ops) is frozenset
+
+    def test_finished_assignment_refuses_non_container_values(self) -> None:
+        import pytest
+
+        trace = _capture()
+        op = trace.ops["relu_1_2"]
+        with pytest.raises(TypeError, match="finished relation field"):
+            op.children = object()
+        # None passes through (immutable, not a container).
+        op.modules = None
+        assert op.modules is None
+
+    def test_layer_direct_assignment_normalizes_to_views(self) -> None:
+        # Sol review finding 5: Layer shadow setters stored raw mutable
+        # containers, so `layer.modules = [...]` re-exposed a mutable list
+        # and `layer.equivalent_ops = {...}` a mutable set on finished
+        # traces.
+        trace = _capture()
+        layer = trace["relu_1_2"]
+        escape = ["__mutable_escape__"]
+        layer.modules = escape
+        assert type(layer.modules) is tuple
+        escape.append("late_mutation")
+        assert "late_mutation" not in layer.modules
+        layer.equivalent_ops = {"relu_1_2"}
+        assert type(layer.equivalent_ops) is frozenset
+        layer.input_ancestors = {"input_1_1"}
+        assert type(layer.input_ancestors) is frozenset
+
     def test_staging_phase_stays_mutable_for_detached_building(self) -> None:
         # The building-phase write path must stay raw: a fresh building store
         # accepts and returns the mutable staging containers unchanged.

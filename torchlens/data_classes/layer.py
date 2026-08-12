@@ -345,6 +345,85 @@ _LAYER_STATE_ORDER: tuple[str, ...] = (
 _LAYER_STATE_ORDER_SET = frozenset(_LAYER_STATE_ORDER)
 
 
+#: Layer stored relation fields and their immutable view types (the same
+#: universe the relation freeze converts; ``equivalent_ops`` is handled by
+#: its dedicated property but shares the normalization).
+def _build_layer_view_types() -> dict[str, type]:
+    """Map each Layer stored relation field to its immutable view type."""
+
+    from .._trace_core.relation_views import (
+        LAYER_FROZENSET_VIEW_FIELDS,
+        LAYER_TUPLE_VIEW_FIELDS,
+    )
+
+    view_types: dict[str, type] = {name: tuple for name in LAYER_TUPLE_VIEW_FIELDS}
+    view_types.update({name: frozenset for name in LAYER_FROZENSET_VIEW_FIELDS})
+    view_types["equivalent_ops"] = frozenset
+    return view_types
+
+
+_LAYER_RELATION_VIEW_TYPES: dict[str, type] = _build_layer_view_types()
+
+
+def _layer_relations_finished(layer: "Layer") -> bool:
+    """Return whether this Layer's backing capture is finished.
+
+    Mirrors the Op descriptor's finished predicate through the
+    representative op's store — sealed, relation-frozen (preview backends
+    convert without sealing), or detached (copy/pickle/fork/loaded) — and
+    falls back to the owning trace's core op store while the pass accessor
+    is not yet populated. Layers with neither (husked after cleanup, bare
+    restore shells) are finished by definition.
+    """
+
+    store = None
+    rep = _layer_rep_op(layer)
+    if rep is not None:
+        try:
+            store = object.__getattribute__(rep, "_core")
+        except AttributeError:
+            store = None
+    if store is None:
+        ref = layer.__dict__.get("_source_trace_ref")
+        trace = ref() if ref is not None else None
+        core = trace.__dict__.get("_trace_core") if trace is not None else None
+        store = core.ops if core is not None else None
+    if store is None:
+        return True
+    from .._trace_core.op_store import DetachedOpStore
+
+    return bool(
+        getattr(store, "frozen", False)
+        or getattr(store, "dataflow_edges", None) is not None
+        or store.__class__ is DetachedOpStore
+    )
+
+
+def _layer_normalize_relation_write(layer: "Layer", name: str, value: Any) -> Any:
+    """Normalize a relation container assigned to a finished Layer.
+
+    Applies exactly the relation freeze's conversion rules (subclass-
+    inclusive, unlike the freeze's staging-exact checks): sequences
+    normalize to ``tuple`` on tuple-view fields, sets to ``frozenset`` on
+    frozenset-view fields. Other value shapes (the dict form of
+    ``conditional_branch_stack_ops``, scalars, ``None``) pass through
+    unchanged, and building-phase writes stay raw so postprocess aliasing
+    is preserved.
+    """
+
+    view_type = _LAYER_RELATION_VIEW_TYPES.get(name)
+    if view_type is None or value.__class__ is view_type:
+        return value
+    if view_type is tuple:
+        if not isinstance(value, (list, tuple)):
+            return value
+    elif not isinstance(value, (set, frozenset, list, tuple)):
+        return value
+    if not _layer_relations_finished(layer):
+        return value
+    return view_type(value)
+
+
 def _layer_rep_op(layer: "Layer") -> "Op | None":
     """Return the representative (first-pass) op backing one Layer's mirrors.
 
@@ -411,9 +490,16 @@ class _LayerMirrorField:
         return normalize(value) if normalize is not None else value
 
     def __set__(self, layer: Any, value: Any) -> None:
-        """Write a per-layer shadow (mirroring permanently stops)."""
+        """Write a per-layer shadow (mirroring permanently stops).
 
-        layer.__dict__[self._name] = value
+        Relation-view fields normalize to their immutable view on finished
+        layers, so a direct assignment can never re-expose a mutable
+        relation container (the invariant the op-cell descriptors enforce).
+        """
+
+        layer.__dict__[self._name] = _layer_normalize_relation_write(
+            layer, self._name, value
+        )
 
     def __delete__(self, layer: Any) -> None:
         """Tombstone the field so it stays deleted instead of re-mirroring."""
@@ -814,8 +900,15 @@ class Layer:
         # Cached conditional-body predicate (the ``is_in_conditional_body``
         # property's storage slot; multi-pass merge ORs into it).
         self.is_in_conditional_body = first_pass.is_in_conditional_body
-        self.conditional_role_stacks: List[List[Tuple[int, str]]] = []
-        self.conditional_branch_stack_ops: Dict[Tuple[Tuple[int, str], ...], List[int]] = {}
+        # Raw ``__dict__`` writes by contract: these are BUILD-PHASE staging
+        # containers the multi-pass merge mutates in place, so they must
+        # never pass through the finished-layer view normalization (a
+        # refresh-built Layer over detached-backed ops would otherwise
+        # freeze them at construction).
+        self.__dict__["conditional_role_stacks"] = cast("List[List[Tuple[int, str]]]", [])
+        self.__dict__["conditional_branch_stack_ops"] = cast(
+            "Dict[Tuple[Tuple[int, str], ...], List[int]]", {}
+        )
         self.conditional_arm_children: Dict[int, Dict[str, List[str]]] = {}
 
         # Pass management
@@ -1075,7 +1168,9 @@ class Layer:
 
     @equivalent_ops.setter
     def equivalent_ops(self, value: Any) -> None:
-        self.__dict__["equivalent_ops"] = value
+        self.__dict__["equivalent_ops"] = _layer_normalize_relation_write(
+            self, "equivalent_ops", value
+        )
 
     @equivalent_ops.deleter
     def equivalent_ops(self) -> None:
@@ -2011,7 +2106,69 @@ def _install_layer_mirror_descriptors() -> None:
         setattr(Layer, name, _LayerMirrorField(name, source, normalize))
 
 
+class _LayerViewField:
+    """Data descriptor for one plain-stored Layer relation-view field.
+
+    The relation-view fields NOT in the mirror spec are ordinary instance
+    attributes; this descriptor preserves their plain ``__dict__`` storage
+    and read/delete semantics while routing writes through the finished-
+    layer view normalization, so no assignment path can re-expose a mutable
+    relation container on a finished Layer.
+    """
+
+    __slots__ = ("_name",)
+
+    def __init__(self, name: str) -> None:
+        """Bind the descriptor to its field name."""
+
+        self._name = name
+
+    def __repr__(self) -> str:
+        """Return a debugging repr naming the stored field."""
+
+        return f"<Layer view descriptor {self._name!r}>"
+
+    def __get__(self, layer: Any, objtype: Any = None) -> Any:
+        """Return the stored value; missing fields raise ``AttributeError``."""
+
+        if layer is None:
+            return self
+        value = layer.__dict__.get(self._name, _LAYER_UNSET)
+        if value is _LAYER_UNSET:
+            raise AttributeError(self._name)
+        return value
+
+    def __set__(self, layer: Any, value: Any) -> None:
+        """Store the value, view-normalized on finished layers."""
+
+        layer.__dict__[self._name] = _layer_normalize_relation_write(
+            layer, self._name, value
+        )
+
+    def __delete__(self, layer: Any) -> None:
+        """Delete the stored value; a missing field raises ``AttributeError``."""
+
+        try:
+            del layer.__dict__[self._name]
+        except KeyError:
+            raise AttributeError(self._name) from None
+
+
+def _install_layer_view_descriptors() -> None:
+    """Install plain view descriptors for the non-mirror relation fields."""
+
+    for name in _LAYER_RELATION_VIEW_TYPES:
+        if name == "equivalent_ops" or name in _LAYER_MIRROR_SPEC:
+            continue
+        if name in vars(Layer):
+            raise RuntimeError(
+                f"Layer view field {name!r} collides with an existing class attribute"
+            )
+        setattr(Layer, name, _LayerViewField(name))
+
+
 _install_layer_mirror_descriptors()
+_install_layer_view_descriptors()
 
 
 class LayerAccessor(Accessor["Layer"]):
