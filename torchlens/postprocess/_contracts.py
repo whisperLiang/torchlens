@@ -485,10 +485,20 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         # previously laundered through no-op self-writes / a no-op step-1
         # writer (opus impl-review B1); probe-blessing is the same
         # reviewed treatment internal_source_parents already had — the
-        # identical code path gets ONE disposition. The label read is NOT
-        # a probe: orphan_records stores the never-populated placeholder
-        # as DATA — the pinned day-1 category-(c) finding (design-ppdag-v3
-        # §2.4), reported for root-cause, never silenced.
+        # identical code path gets ONE disposition. layer_label is the
+        # _label_for_reference_removal fallback (layer_label -> _label_raw;
+        # cleanup.py) — probe-blessed per the opus impl-review §4 split
+        # after confirming the second reader
+        # (_materialize_layer_mirrors_for_removed) is benign here: it
+        # early-returns until layer_logs exist (built at step 15.5), and if
+        # that guard ever moved earlier, the mirror materialization's ~86
+        # undeclared column reads would trip the enforcement axes long
+        # before this probe could mask anything. The label read is NOT a
+        # probe: orphan_records stores the never-populated placeholder as
+        # DATA — the pinned day-1 category-(c) finding (design-ppdag-v3
+        # §2.4), reported for root-cause, never silenced; the root-cause
+        # fix (record _label_raw instead) changes a serialized public
+        # field's content and is deferred to JMT by name.
         placeholder_probes=frozenset(
             (
                 "conditional_arm_children",
@@ -497,6 +507,7 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "conditional_entry_children",
                 "conditional_then_children",
                 "internal_source_parents",
+                "layer_label",
                 "out_ref",
                 "recurrent_ops",
             )

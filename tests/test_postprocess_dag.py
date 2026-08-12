@@ -128,6 +128,7 @@ PROBES_GOLDEN = {
         "conditional_entry_children",
         "conditional_then_children",
         "internal_source_parents",
+        "layer_label",
         "out_ref",
         "recurrent_ops",
     )),
@@ -144,18 +145,17 @@ PROBES_GOLDEN = {
 #: NEVER silenced by widening the baseline. Any NEW finding fails this
 #: test and is root-caused the same way.
 PINNED_FINDINGS = {
-    # orphan_records stores op.label as DATA, but label's only writer is
-    # step 8 — every record ships the None placeholder into a serialized
-    # public field. Root-cause fix (record _label_raw instead) changes a
-    # persisted artifact's bytes: outside this lane's byte-identity
-    # mandate, JMT's call (opus impl review §4). NOT a probe.
+    # THE day-1 finding, undiluted (opus impl-review §4 split the formerly
+    # co-pinned layer_label off as the _label_for_reference_removal
+    # fallback probe it actually is): orphan_records stores op.label as
+    # DATA, but label's only writer is step 8 — every record ships the
+    # None placeholder into a serialized public field
+    # (FieldPolicy.BLOB_RECURSIVE, round-tripped by the tlspec suite).
+    # Root-cause fix (record _label_raw instead) changes a persisted
+    # artifact's bytes: outside this lane's byte-identity mandate,
+    # deferred to JMT by name. NOT a probe — a data read into a persisted
+    # field is never an observe-not-set.
     ("3", "label"),
-    # _label_for_reference_removal's layer_label -> _label_raw fallback
-    # (cleanup.py) — a textbook fallback probe, NOT part of the
-    # orphan_records data read it was previously mis-attributed to. Held
-    # as a finding rather than probe-blessed pending the item-7
-    # disposition commit.
-    ("3", "layer_label"),
 }
 
 #: Declared-but-never-observed writes with their named config-gated
