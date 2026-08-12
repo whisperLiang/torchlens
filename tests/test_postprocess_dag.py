@@ -9,6 +9,8 @@ pin both halves of the coordinated-reversal counterexample.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 import torch
 from torch import nn
@@ -186,6 +188,42 @@ PHANTOM_WRITE_EXEMPTIONS = {
         "loudly the day the materialize gap is fixed"
     ),
 }
+
+
+#: Seed-era machine-templated corpus reasons, grandfathered (opus
+#: impl-review F4). The design sanctioned tooling for the one-time corpus
+#: SEED, not for the shipped steady state: "editing an entry is THE
+#: reviewed act that blesses a reorder" is hollow where the reason merely
+#: restates the derivation. Named follow-up: rewrite these as prose. The
+#: lint below refuses NEW templated reasons, so the set can only shrink —
+#: remove an entry here when its pair gets real prose.
+_TEMPLATED_REASON = re.compile(
+    r"^step [\d.]+ (consumes/refines .* after step [\d.]+ writes"
+    r"|depends on token:.* produced by step [\d.]+)$"
+)
+LEGACY_TEMPLATED_PAIRS = frozenset((
+    ("1", "2"), ("1", "4"), ("1", "5"), ("1", "8"), ("1", "9"),
+    ("1", "10"), ("1", "11"), ("1", "11.5"), ("1", "11.75"), ("1", "12"),
+    ("1", "15"), ("1", "15.5"), ("1", "16"), ("1", "16.5"), ("1", "17.5"),
+    ("1", "18"), ("1", "19"), ("2", "3"), ("2", "4"), ("2", "5"),
+    ("2", "9"), ("2", "15.5"), ("2", "18"), ("3", "4"), ("3", "7"),
+    ("3", "8"), ("3", "9"), ("3", "10"), ("3", "11.5"), ("3", "11.75"),
+    ("3", "12"), ("3", "15.5"), ("3", "16"), ("3", "17.5"), ("3", "18"),
+    ("4", "5"), ("4", "6"), ("4", "9"), ("4", "15.5"), ("4", "18"),
+    ("5", "9"), ("5", "15.5"), ("5", "18"), ("6", "8"), ("6", "10"),
+    ("6", "11"), ("6", "11.5"), ("6", "17.5"), ("7", "9"), ("7", "11"),
+    ("7", "11.75"), ("7", "15.5"), ("7", "16.5"), ("7", "18"), ("8", "10"),
+    ("8", "11"), ("8", "11.75"), ("8", "12"), ("8", "15"), ("8", "15.5"),
+    ("8", "16"), ("8", "16.5"), ("8", "18"), ("9", "10"), ("9", "11.5"),
+    ("9", "11.75"), ("9", "15.5"), ("9", "16"), ("9", "16.5"),
+    ("9", "17.5"), ("9", "18"), ("10", "16.5"), ("11", "15.5"),
+    ("11", "16"), ("11", "16.5"), ("11", "18"), ("11.5", "18"),
+    ("11.75", "12"), ("11.75", "13"), ("11.75", "15.5"), ("11.75", "16"),
+    ("11.75", "18"), ("11.75", "19"), ("12", "13"), ("12", "18"),
+    ("15", "15.5"), ("15", "16"), ("15", "18"), ("15", "20"),
+    ("15.5", "18"), ("16", "18"), ("16", "20"), ("16.5", "18"),
+    ("17", "18"), ("18", "19"),
+))
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +426,33 @@ def test_derived_pairs_pinned_in_corpus() -> None:
         assert pair in PINNED_ORDER_PAIRS, f"unpinned derived pair {pair}"
         missing = set(carriers) - PINNED_ORDER_PAIRS[pair].carriers
         assert not missing, f"pair {pair} missing carriers {sorted(missing)}"
+
+
+def test_no_new_templated_corpus_reasons() -> None:
+    """F4 lint: a NEW corpus entry must carry real reviewed prose.
+
+    The reason field is the corpus's entire value — design §2.1 makes
+    editing it THE reviewed act that blesses a reorder, which is hollow
+    when the text just restates the derivation. Seed-era templated
+    entries are grandfathered in LEGACY_TEMPLATED_PAIRS (named follow-up:
+    rewrite as prose); the set can only shrink.
+    """
+
+    templated = {
+        pair
+        for pair, entry in PINNED_ORDER_PAIRS.items()
+        if _TEMPLATED_REASON.match(entry.reason)
+    }
+    new_templated = templated - LEGACY_TEMPLATED_PAIRS
+    assert not new_templated, (
+        "new corpus entries must carry real reviewed prose reasons, not "
+        f"machine-templated derivation restatements: {sorted(new_templated)}"
+    )
+    stale_grandfathers = LEGACY_TEMPLATED_PAIRS - set(PINNED_ORDER_PAIRS)
+    assert not stale_grandfathers, (
+        "LEGACY_TEMPLATED_PAIRS names pairs no longer in the corpus; "
+        f"remove them: {sorted(stale_grandfathers)}"
+    )
 
 
 def test_docstring_invariants_carried_by_corpus() -> None:

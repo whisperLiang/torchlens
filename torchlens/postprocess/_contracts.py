@@ -1721,7 +1721,12 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "recurrent_ops",
                     "token:raw_graph_ws",
             )),
-            "step 3 consumes/refines _edge_uses, _label_raw, children, equivalent_ops, ... after step 1 writes",
+            "orphan removal floods and scrubs the COMPLETE raw graph: step 1 "
+            "must have added the output rows (else outputs read as orphans) "
+            "and initialized the relation/equivalence/edge-use state the "
+            "removal scrub rebinds; the recurrent_ops carrier is the B1 "
+            "probe-blessed placeholder observe (step 1's write is a pinned "
+            "no-op, the real writer is step 7)",
         ),
         ("1", "4"): PinnedPair(
             "columns",
