@@ -148,6 +148,45 @@ def test_buffer_duplicate_axis_actually_merges(
         trace.cleanup()
 
 
+def test_reads_before_release_mark_still_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The load-bearing half of the released-row read suppression (F6).
+
+    Removal husking re-reads every set cell of released rows; suppressing
+    those reads is what keeps step 3/6 read sets honest. The suppression
+    must NOT swallow reads made BEFORE the release mark — that is exactly
+    how the pinned ('3','label') orphan_records finding stays visible. This
+    pins both halves on the orphan-removal axis: the pre-release data read
+    records; the husking walk does not flood the step with whole-schema
+    reads.
+    """
+
+    import torchlens.postprocess as pp
+    from support.postprocess_axes import _axis_orphan_remove
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_READ_AUDIT", "record")
+    pp.RECORDED_STEP_READS.clear()
+    try:
+        trace = _axis_orphan_remove()
+        trace.cleanup()
+        step3_reads = pp.RECORDED_STEP_READS.get("3", set())
+        assert "label" in step3_reads, (
+            "the pre-release orphan_records label read must record — losing "
+            "it silently disarms the pinned day-1 finding"
+        )
+        assert "grad_fn_class_name" not in step3_reads, (
+            "released-row husking reads must stay suppressed (they would "
+            "report the whole schema as step-3 reads)"
+        )
+    finally:
+        pp.RECORDED_STEP_READS.clear()
+        pp.RECORDED_STEP_CLONE_READS.clear()
+        pp.RECORDED_STEP_EFFECTIVE_WRITES.clear()
+        pp.RECORDED_STEP_WRITES.clear()
+
+
 def test_write_effectiveness_classifier_is_finding_favoring() -> None:
     """Guard 2's ambiguity default is NO-OP, never effective.
 
@@ -201,14 +240,20 @@ def test_matrix_union_reports(monkeypatch: pytest.MonkeyPatch) -> None:
                 trace.cleanup()
 
         phantom: set[tuple[str, str]] = set()
+        phantom_reads: set[tuple[str, str]] = set()
         noop: dict[str, frozenset[str]] = {}
         for step, contract in pp.POSTPROCESS_STEP_CONTRACTS.items():
             if step == "0":
                 continue
             observed = pp.RECORDED_STEP_WRITES.get(step, set())
             effective = pp.RECORDED_STEP_EFFECTIVE_WRITES.get(step, set())
+            observed_reads = pp.RECORDED_STEP_READS.get(step, set())
             for column in contract.writes - observed:
                 phantom.add((step, column))
+            for column in (
+                contract.reads | contract.placeholder_probes
+            ) - observed_reads:
+                phantom_reads.add((step, column))
             never_effective = frozenset((observed & contract.writes) - effective)
             if never_effective:
                 noop[step] = never_effective
@@ -217,6 +262,18 @@ def test_matrix_union_reports(monkeypatch: pytest.MonkeyPatch) -> None:
             "declared-never-observed writes drifted; a NEW phantom "
             "declaration is the cheapest laundering path — root-cause it, "
             f"never exempt it silently. Diff: {phantom ^ EXPECTED_PHANTOM_WRITES}"
+        )
+        # The phantom-READ report (opus impl-review F6): read enforcement
+        # is observed ⊆ declared, so a regression that stops RECORDING
+        # reads (e.g. an over-broad released-row suppression in
+        # _CombinedAuditOpRowStore.cell_get) makes the leg quieter, never
+        # red. Every declared read is observed on >=1 axis today; a
+        # declared read no axis observes is either a stale declaration or
+        # a recording hole — both reviewed, never exempted silently.
+        assert phantom_reads == set(), (
+            "declared-never-observed READS appeared; either the "
+            "declaration is stale or read recording lost coverage "
+            f"(suppression regression). Diff: {sorted(phantom_reads)}"
         )
         assert noop == PINNED_NOOP_WRITERS, (
             "the permanent no-op writer report drifted; a new no-op writer "
