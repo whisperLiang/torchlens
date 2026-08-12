@@ -83,7 +83,7 @@ def _assert_context_field_invalid_analysis_only(path: Path, run_inputs: Any) -> 
     """Assert the typed analysis-only disposition: load OK, typed readiness, typed run."""
 
     loaded = tl.load(path)
-    readiness = loaded.__dict__.get("_runnable_readiness")
+    readiness = loaded._runnable.readiness
     assert readiness is not None
     assert readiness.status is ReadinessStatus.UNAVAILABLE
     codes = {diagnostic.code.value for diagnostic in readiness.diagnostics}

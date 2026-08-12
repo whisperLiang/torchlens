@@ -2834,12 +2834,12 @@ def _store_readiness(
 ) -> None:
     """Store transient descriptor/readiness state with atomic callable attachment."""
 
-    trace.__dict__["_runnable_descriptor"] = descriptor
-    trace.__dict__["_runnable_readiness"] = report
+    trace._runnable.descriptor = descriptor
+    trace._runnable.readiness = report
     if attachments is None:
-        trace.__dict__.pop("_runnable_callables_by_call_id", None)
+        trace._runnable.callables_by_call_id = None
     else:
-        trace.__dict__["_runnable_callables_by_call_id"] = dict(attachments)
+        trace._runnable.callables_by_call_id = dict(attachments)
 
 
 def _diagnostic(

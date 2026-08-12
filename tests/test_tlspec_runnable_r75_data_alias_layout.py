@@ -364,7 +364,7 @@ def test_r75_storage_identity_rung_resolves_when_ledger_missing(tmp_path: Path) 
     x = _nchw()
     path = _save(LedgerEvictedDataBranch().eval(), x, tmp_path / "storage.tlspec")
 
-    descriptor = tl.load(path).__dict__["_runnable_descriptor"]
+    descriptor = tl.load(path)._runnable.descriptor
     reads = [
         name
         for site in descriptor.input_boundary

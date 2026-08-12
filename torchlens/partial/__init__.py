@@ -65,7 +65,8 @@ class PartialTrace:
             Raw layer pass logs in capture order.
         """
 
-        return tuple(getattr(self.trace, "_raw_layer_dict", {}).values())
+        build_state = self.trace.__dict__.get("_build_state")
+        return tuple(getattr(build_state, "raw_layer_dict", {}).values())
 
     def first_nonfinite(self) -> str:
         """Return a text summary of the first raw non-finite tensor.
@@ -277,7 +278,8 @@ def _materialize_failed_capture_events(trace: Trace) -> None:
         Mutates the trace raw-layer lookup structures when live events are pending.
     """
 
-    if getattr(trace, "_raw_layer_dict", None):
+    build_state = trace.__dict__.get("_build_state")
+    if build_state is not None and build_state.raw_layer_dict:
         return
     events = getattr(trace, "capture_events", None)
     if events is None or not getattr(events, "op_events", None):

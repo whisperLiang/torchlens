@@ -25,6 +25,7 @@ from ._tl import (
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace
+    from ...ir.trace_build_state import TraceBuildState
 
 
 _FUSED_MUTATOR_NAMES = {
@@ -220,7 +221,7 @@ class _ParamBaselineMap(dict):  # dict[str, tuple[torch.Tensor | None, int | Non
     """Param address -> (whole-storage uint8 baseline, version), with shared-clone slots.
 
     W6 baseline coalescing: an ``intervention_ready`` capture already clones every
-    ``state_dict`` tensor into ``trace._runnable_capture_state`` (the embedded runnable
+    ``state_dict`` tensor into ``trace._runnable.capture_state`` (the embedded runnable
     state snapshot, taken pre-forward). For a conservatively-eligible parameter -- one
     whose live tensor densely covers its whole storage and whose ``state_dict`` entry is
     storage-identical to it -- the r18 byte baseline holds the SAME bytes as that clone,
@@ -247,7 +248,7 @@ class _ParamBaselineMap(dict):  # dict[str, tuple[torch.Tensor | None, int | Non
     def _resolve(
         self, address: str, entry: tuple[torch.Tensor | None, int | None]
     ) -> tuple[torch.Tensor | None, int | None]:
-        capture_state = self._trace.__dict__.get("_runnable_capture_state")
+        capture_state = self._trace._runnable.capture_state
         clone = capture_state.get(address) if isinstance(capture_state, Mapping) else None
         before: torch.Tensor | None = None
         if isinstance(clone, torch.Tensor):
@@ -989,8 +990,24 @@ def install_buffer_write_tracker(trace: "Trace", model: nn.Module) -> BufferWrit
     return tracker
 
 
-def reconcile_buffer_writes(trace: "Trace") -> None:
-    """Run the end-of-capture registered-buffer reconciliation diagnostic."""
+def reconcile_buffer_writes(trace: "Trace", trace_state: "TraceBuildState") -> None:
+    """Run end-of-capture registered-buffer reconciliation.
+
+    Parameters
+    ----------
+    trace:
+        Active Trace whose buffer tracker is reconciled.
+    trace_state:
+        Required build-state owner passed through the backend protocol.
+
+    Raises
+    ------
+    RuntimeError
+        If the protocol state is not the active Trace-owned build state.
+    """
+
+    if trace._build_state is not trace_state:
+        raise RuntimeError("Torch backend received a foreign TraceBuildState owner.")
 
     tracker = getattr(trace, "_buffer_write_tracker", None)
     if isinstance(tracker, BufferWriteTracker):

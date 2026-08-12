@@ -603,7 +603,7 @@ def _execute_loaded_sparse_transaction(
         input_derived_layout_stale=input_derived_layout_stale,
     )
     eligibility_verdict = provisional_verdict
-    inherited_status = fork.__dict__.get("_runnable_path_faithfulness")
+    inherited_status = fork._runnable.path_faithfulness
     if (
         isinstance(inherited_status, PathFaithfulness)
         and inherited_status is not PathFaithfulness.VERIFIED
@@ -917,7 +917,7 @@ def raise_analysis_run_unavailable(trace: Any) -> None:
         Always, with the load-time readiness report attached.
     """
 
-    readiness = trace.__dict__.get("_runnable_readiness")
+    readiness = trace._runnable.readiness
     diagnostics = () if readiness is None else readiness.diagnostics
     raise RunCapabilityUnavailableError(
         "This loaded Trace is analysis-only and has no sparse run descriptor.",
@@ -932,9 +932,9 @@ def _require_loaded_sparse_provider(
 ) -> tuple[SparseRunDescriptor, ReadinessReport, Mapping[str, Callable[..., Any]]]:
     """Return ready descriptor state or raise one aggregate typed error."""
 
-    readiness = trace.__dict__.get("_runnable_readiness")
-    descriptor = trace.__dict__.get("_runnable_descriptor")
-    callables = trace.__dict__.get("_runnable_callables_by_call_id")
+    readiness = trace._runnable.readiness
+    descriptor = trace._runnable.descriptor
+    callables = trace._runnable.callables_by_call_id
     if not isinstance(readiness, ReadinessReport) or not isinstance(
         descriptor, SparseRunDescriptor
     ):
@@ -3936,7 +3936,8 @@ def _fresh_bare_tensor_root(trace: Any) -> bool:
     could be wrongly blessed. A missing or malformed proof fails closed (returns ``False``).
     """
 
-    proof = getattr(trace, "__dict__", {}).get("_runnable_output_losslessness")
+    runnable_state = getattr(trace, "__dict__", {}).get("_runnable")
+    proof = getattr(runnable_state, "output_losslessness", None)
     if not isinstance(proof, Mapping):
         return False
     return (
@@ -5198,7 +5199,7 @@ def _numeric_attestation_check(
         return NumericAttestationStatus.NOT_APPLICABLE, None
     if not _attestation_state_matches(descriptor, layer, state, state_byte_digests, trace):
         return NumericAttestationStatus.NOT_APPLICABLE, None
-    archived = trace.__dict__.get("_runnable_archived_activations")
+    archived = trace._runnable.archived_activations
     if not isinstance(archived, Mapping):
         return NumericAttestationStatus.NOT_APPLICABLE, None
     saw_benign_layout_mismatch = False
@@ -6220,7 +6221,7 @@ def _attestation_state_matches(
         ):
             return False
     if nonpersistent_slots:
-        embedded = trace.__dict__.get("_runnable_embedded_nonpersistent_buffers")
+        embedded = trace._runnable.embedded_nonpersistent_buffers
         if not isinstance(embedded, Mapping):
             return False
         for name, slot in nonpersistent_slots.items():

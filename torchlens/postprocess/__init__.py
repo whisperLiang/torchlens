@@ -472,7 +472,7 @@ def postprocess(
         delattr(self, "capture_events")
 
     # Guard: if the model produced no logged layers, skip postprocessing (#153)
-    if len(self._raw_layer_labels_list) == 0:
+    if len(self._build_state.raw_layer_labels_list) == 0:
         import warnings
 
         warnings.warn("No layers were logged during the forward pass; skipping postprocessing.")
@@ -487,7 +487,7 @@ def postprocess(
 
     _vprint(
         self,
-        f"Postprocessing {len(self._raw_layer_labels_list):,} layers "
+        f"Postprocessing {len(self._build_state.raw_layer_labels_list):,} layers "
         f"({len(self.buffer_layers):,} buffers)...",
     )
     _post_t0 = time.time() if getattr(self, "verbose", False) else 0

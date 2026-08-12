@@ -2,6 +2,7 @@
 
 import copy
 import copyreg
+from dataclasses import fields
 import os
 from collections import OrderedDict
 from functools import cached_property
@@ -1376,15 +1377,19 @@ class TraceInterventionMixin(_TraceMixinBase):
             Field value for the fork.
         """
 
-        if field_name in {
-            "_runnable_staged_user_state",
-            "_runnable_embedded_state",
-            "_runnable_capture_state",
-        }:
-            # These bindings are immutable mapping proxies. Run execution only
-            # reads them, and mappingproxy does not implement the pickle hooks
-            # used by copy/deepcopy.
-            return value
+        if field_name == "_runnable":
+            # Preserve the pre-container fork contract: only the three immutable
+            # state bindings are shared, while every other runnable value follows
+            # the ordinary fork-copy path. In particular, verdict-steering witness
+            # dictionaries must never alias the parent.
+            shared_fields = {"staged_user_state", "embedded_state", "capture_state"}
+            forked = copy.copy(value)
+            for runnable_field in fields(value):
+                runnable_value = getattr(value, runnable_field.name)
+                if runnable_field.name not in shared_fields:
+                    runnable_value = self._copy_fork_value(runnable_value, memo)
+                setattr(forked, runnable_field.name, runnable_value)
+            return forked
         if field_name in ("capture_events", "_capture_events"):
             # Event streams never fork by copy: deep-copying one raises on the
             # frozen ``GradFnDiscovered.source`` proxies, which used to degrade

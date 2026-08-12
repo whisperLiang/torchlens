@@ -286,7 +286,7 @@ def test_r35_recorded_ambient_context_is_applied_during_run(tmp_path: Path) -> N
     finally:
         torch.set_float32_matmul_precision(caller_precision)
     loaded = tl.load(str(path))
-    descriptor = loaded.__dict__["_runnable_descriptor"]
+    descriptor = loaded._runnable.descriptor
     assert descriptor.ambient_context.float32_matmul_precision == "high"
     # Run under a DIFFERENT caller precision; the run must restore the caller's
     # value afterwards while the recorded one governed execution.

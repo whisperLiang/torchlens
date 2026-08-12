@@ -140,7 +140,7 @@ def test_literal_magnitude_bomb_degrades_to_analysis_only(tmp_path: Path) -> Non
 
     _tamper(bundle, _bomb)
     loaded = tl.load(str(bundle))
-    readiness = loaded.__dict__["_runnable_readiness"]
+    readiness = loaded._runnable.readiness
     from torchlens.runnable import ReadinessStatus
 
     assert readiness.status is ReadinessStatus.UNAVAILABLE

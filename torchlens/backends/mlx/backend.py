@@ -895,7 +895,7 @@ class MLXBackend:
     def finalize_forward_session(
         self,
         session: object,
-        trace_state: TraceBuildState | None = None,
+        trace_state: TraceBuildState,
     ) -> None:
         """Materialize deferred MLX payloads in a single batch."""
 
@@ -1021,7 +1021,7 @@ class MLXBackend:
                 output = cast(Any, model)(*args, **kwargs)
             trace.forward_duration = Duration(time.time() - trace.capture_start_time)
             trace.raw_output = output_transform(output) if callable(output_transform) else None
-            self.finalize_forward_session(trace, trace._ensure_build_state())
+            self.finalize_forward_session(trace, trace._build_state)
             self._mark_outputs(trace, output)
             materialize_from_events(trace, trace.capture_events)
             delattr(trace, "capture_events")

@@ -56,9 +56,7 @@ if TYPE_CHECKING:
     from .._io.streaming import BundleStreamWriter
     from ..runnable import (
         ArchivedActivation,
-        PathFaithfulness,
         ReadinessReport,
-        RunnableDiagnostic,
         SparseRunDescriptor,
     )
     from .func_call_location import FuncCallLocation
@@ -74,9 +72,14 @@ from .._io import (
     read_tlspec_version,
 )
 from .._save_budget import SaveBudget, SaveBudgetOption
+from .._runnable_seam import (
+    RunnableTraceState,
+    normalize_runnable_trace_state,
+    runnable_trace_state,
+)
 from ..constants import LAYER_PASS_LOG_FIELD_ORDER, MODEL_LOG_FIELD_ORDER
 from ..captured_run import CapturedRun
-from ..ir.trace_build_state import TraceBuildState
+from ..ir.trace_build_state import LEGACY_TRACE_BUILD_STATE_KEYS, TraceBuildState
 from ..intervention.types import (
     MODEL_LOG_FIELD_FORK_POLICY,
     InterventionSpec,
@@ -170,16 +173,7 @@ _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "module_identity_mode": "torch_module",
     "param_source": "native-module",
     "derived_grads": DerivedGradAccessor(),
-    "_runnable_descriptor": None,
-    "_runnable_readiness": None,
-    "_runnable_staged_user_state": None,
-    "_runnable_embedded_state": None,
-    "_runnable_capture_state": None,
-    "_runnable_embedded_nonpersistent_buffers": None,
-    "_runnable_archived_activations": None,
-    "_runnable_path_faithfulness": None,
-    "_runnable_first_mismatch": None,
-    "_runnable_poisoned": False,
+    "_runnable": None,
     "_fast_run_session": None,
     "_buffer_persistence": {},
     "intervention_ready": False,
@@ -346,31 +340,6 @@ _MODEL_LOG_DEFAULT_FILL = {
 }
 _MODEL_LOG_DEFAULT_FILL["tlspec_version"] = TLSPEC_VERSION
 
-# Legacy transient capture attribute name -> ``TraceBuildState`` field name.
-# Built ONCE at import: ``Trace.__getattr__`` / ``__setattr__`` / ``__delattr__``
-# consult it on every attribute miss/write during capture, so rebuilding it per
-# call showed up as ~1.3% of trace() self-time.
-_BUILD_STATE_ATTR_MAP: dict[str, str] = {
-    "_raw_layer_dict": "raw_layer_dict",
-    "_raw_layer_labels_list": "raw_layer_labels_list",
-    "_layer_counter": "layer_counter",
-    "_raw_layer_type_counter": "raw_layer_type_counter",
-    "_current_func_barcode": "current_func_barcode",
-    "_mod_call_index": "mod_call_index",
-    "_mod_call_labels": "mod_call_labels",
-    "_mod_entered": "mod_entered",
-    "_mod_exited": "mod_exited",
-    "_module_build_data": "module_build_data",
-    "_module_metadata": "module_metadata",
-    "_module_forward_args": "module_forward_args",
-    "_grad_fn_strong_refs": "grad_fn_strong_refs",
-    "_in_exhaustive_pass": "in_exhaustive_pass",
-    "_module_containment_engine": "module_containment_engine",
-    "_exhaustive_module_stack": "exhaustive_module_stack",
-    "_input_tensor_addresses": "input_tensor_addresses",
-}
-_BUILD_STATE_ATTR_MAP_GET = _BUILD_STATE_ATTR_MAP.get
-
 # Plausible-but-absent attribute names, mapped to the fields that answer them. A
 # frontier-scale user's first question is "how big is this capture?", and the
 # singular ``activation_memory`` spelling (which IS an ``Op`` field, meaning that
@@ -403,6 +372,28 @@ _MISSING_ATTR_HINTS: dict[str, str] = {
 # Held weakly and OFF the Trace itself so no new field enters ``__dict__``,
 # pickle state, or a portable artifact.
 _COMPACTED_TRACES: "weakref.WeakSet[Trace]" = weakref.WeakSet()
+
+
+def _raise_missing_trace_attribute(trace: "Trace", name: str) -> Any:
+    """Raise the canonical error for one missing Trace attribute.
+
+    Parameters
+    ----------
+    trace:
+        Trace on which attribute lookup failed.
+    name:
+        Missing attribute name.
+
+    Raises
+    ------
+    AttributeError
+        Always, with an actionable memory-field hint when available.
+    """
+
+    hint = _MISSING_ATTR_HINTS.get(name)
+    if hint is not None:
+        raise AttributeError(f"{type(trace).__name__!s} object has no attribute {name!r}; {hint}")
+    raise AttributeError(f"{type(trace).__name__!s} object has no attribute {name!r}")
 
 
 def _legacy_save_grads_from_state(state: dict[str, Any]) -> Any:
@@ -862,7 +853,7 @@ class Trace(
             Structured load-time report, or ``None`` for a live Trace.
         """
 
-        return cast("ReadinessReport | None", self.__dict__.get("_runnable_readiness"))
+        return cast("ReadinessReport | None", runnable_trace_state(self).readiness)
 
     @property
     def runnable_descriptor(self) -> "SparseRunDescriptor | None":
@@ -875,7 +866,7 @@ class Trace(
             structurally unparseable runnable descriptors.
         """
 
-        return cast("SparseRunDescriptor | None", self.__dict__.get("_runnable_descriptor"))
+        return cast("SparseRunDescriptor | None", runnable_trace_state(self).descriptor)
 
     @property
     def archived_activations(self) -> Mapping[str, "ArchivedActivation"]:
@@ -890,7 +881,7 @@ class Trace(
 
         return cast(
             Mapping[str, "ArchivedActivation"],
-            self.__dict__.get("_runnable_archived_activations", {}),
+            runnable_trace_state(self).archived_activations or {},
         )
 
     def load_state_dict(self, sd: Mapping[str, Any]) -> None:
@@ -952,92 +943,97 @@ class Trace(
 
         return audit_trace(self)
 
-    def _ensure_build_state(self) -> TraceBuildState:
-        """Return the transient capture/postprocess build state.
+    def __getattr__(self, name: str) -> Any:
+        """Explain common missing memory attributes before raising.
+
+        Parameters
+        ----------
+        name:
+            Missing attribute name.
 
         Returns
         -------
-        TraceBuildState
-            Private state holder used only while capture or postprocessing is active.
+        Any
+            This path never returns; the annotation preserves static typing
+            for explicitly installed session fields.
         """
 
-        build_state = self.__dict__.get("_build_state")
-        if not isinstance(build_state, TraceBuildState):
-            build_state = TraceBuildState()
-            build_state.module_build_data = _init_module_hierarchy_data()
-            self.__dict__["_build_state"] = build_state
-        elif not build_state.module_build_data:
-            build_state.module_build_data = _init_module_hierarchy_data()
-        return build_state
+        return _raise_missing_trace_attribute(self, name)
 
-    @staticmethod
-    def _build_state_attr_map() -> dict[str, str]:
-        """Map legacy transient attribute names to build-state field names."""
+    if TYPE_CHECKING:
 
-        return dict(_BUILD_STATE_ATTR_MAP)
+        def __setattr__(self, name: str, value: Any) -> None:
+            """Declare dynamically installed session fields to static tooling.
 
-    def __getattr__(self, name: str) -> Any:
-        """Route transient capture attributes through private build state."""
+            Parameters
+            ----------
+            name:
+                Session field name.
+            value:
+                Session field value.
+            """
 
-        if name == "_capture_events":
-            events = self.event_stream
-            if events is not None:
-                return events
-        if name == "_buffer_write_events":
-            # Buffer writes live in the capture journal now; this read-through
-            # keeps capture-time internals and diagnostics working unchanged.
-            stream = self.__dict__.get("capture_events") or self.__dict__.get("_capture_events")
-            return list(getattr(stream, "buffer_write_events", ()) or ())
-        state_field = _BUILD_STATE_ATTR_MAP_GET(name)
-        if state_field is None:
-            # A trace CAN self-report its footprint, but not under the singular name
-            # a user at scale reaches for first, and a bare AttributeError reads as
-            # "TorchLens does not know". One dict lookup on the miss path (which is
-            # hot: 30-40k internal misses per capture) routes the guessed names to
-            # the real fields instead.
-            hint = _MISSING_ATTR_HINTS.get(name)
-            if hint is not None:
-                raise AttributeError(
-                    f"{type(self).__name__!s} object has no attribute {name!r}; {hint}"
-                )
-            raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
-        # Hot path: during capture every mapped-attribute read lands here
-        # (30-40k misses per trace), and the build state is already the healthy
-        # object ``_ensure_build_state`` would return unchanged. Read it inline
-        # to skip that call's frame and its repeated dict/isinstance checks.
-        # Any other state (absent, wrong type, empty module_build_data,
-        # subclass) falls through to the original slow path unchanged.
-        build_state = self.__dict__.get("_build_state")
-        if build_state.__class__ is TraceBuildState and build_state.module_build_data:
-            return getattr(build_state, state_field)
-        if (
-            name != "_in_exhaustive_pass"
-            and "_build_state" not in self.__dict__
-            and self.__dict__.get("_tracing_finished", True)
-        ):
-            raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
-        return getattr(self._ensure_build_state(), state_field)
+            ...
 
-    def __setattr__(self, name: str, value: Any) -> None:
-        """Route transient capture attribute writes through private build state."""
+    @property
+    def _capture_events(self) -> Any:
+        """Return the retained raw capture event stream, if present.
 
-        state_field = _BUILD_STATE_ATTR_MAP_GET(name)
-        if state_field is None:
-            super().__setattr__(name, value)
-            # The flip to finished is the one moment where op metadata is final
-            # but the Trace is still ours; pool repeated immutables there. The
-            # ``value is True`` identity probe keeps this off the capture-time
-            # attribute-write hot path.
-            if value is True and name == "_tracing_finished":
-                self._compact_op_metadata()
-            return
-        if (
-            name != "_in_exhaustive_pass"
-            and "_build_state" not in self.__dict__
-            and self.__dict__.get("_tracing_finished", True)
-        ):
-            raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
-        setattr(self._ensure_build_state(), state_field, value)
+        Returns
+        -------
+        Any
+            Retained ``CaptureEvents`` instance.
+
+        Raises
+        ------
+        AttributeError
+            If no retained stream is installed.
+        """
+
+        if "_capture_events" not in self.__dict__:
+            raise AttributeError(
+                f"{type(self).__name__!s} object has no attribute '_capture_events'"
+            )
+        return self.__dict__["_capture_events"]
+
+    @_capture_events.setter
+    def _capture_events(self, value: Any) -> None:
+        """Install the retained raw capture event stream.
+
+        Parameters
+        ----------
+        value:
+            ``CaptureEvents`` instance retained by this Trace.
+        """
+
+        self.__dict__["_capture_events"] = value
+
+    @_capture_events.deleter
+    def _capture_events(self) -> None:
+        """Release the retained event stream and its working projection.
+
+        Returns
+        -------
+        None
+            The retained stream is removed and its working lanes are cleared.
+        """
+
+        from ..captured_run import forget_event_stream
+
+        forget_event_stream(self)
+
+    @property
+    def _buffer_write_events(self) -> list[Any]:
+        """Return capture-journal buffer writes through their read surface.
+
+        Returns
+        -------
+        list[Any]
+            Buffer-write events retained in the active or completed journal.
+        """
+
+        stream = self.__dict__.get("capture_events") or self.__dict__.get("_capture_events")
+        return list(getattr(stream, "buffer_write_events", ()) or ())
 
     def _compact_op_metadata(self) -> None:
         """Collapse repeated immutable Op metadata onto shared instances.
@@ -1068,26 +1064,6 @@ class Trace(
             seen_ops.add(op_id)
             op._compact_metadata(pool)
 
-    def __delattr__(self, name: str) -> None:
-        """Delete transient capture attributes from private build state."""
-
-        if name == "_capture_events":
-            from ..captured_run import forget_event_stream
-
-            # forget_event_stream pops the attribute itself and releases the
-            # stream's working lanes; popping here first would hand it nothing
-            # to release (the pre-migration weak registry used to find it).
-            forget_event_stream(self)
-            return
-        state_field = _BUILD_STATE_ATTR_MAP_GET(name)
-        if state_field is None:
-            super().__delattr__(name)
-            return
-        build_state = self.__dict__.get("_build_state")
-        if build_state is not None and hasattr(build_state, state_field):
-            default_state = TraceBuildState()
-            setattr(build_state, state_field, getattr(default_state, state_field))
-
     backend: BackendName
     backend_runtime_config: dict[str, Any] | None
     backend_runtime_device_summary: dict[str, Any] | None
@@ -1115,16 +1091,8 @@ class Trace(
     last_run: Any | None
     capture_start_time: float
     capture_end_time: float
-    _runnable_descriptor: "SparseRunDescriptor | None"
-    _runnable_readiness: "ReadinessReport | None"
-    _runnable_staged_user_state: Mapping[str, torch.Tensor] | None
-    _runnable_embedded_state: Mapping[str, torch.Tensor] | None
-    _runnable_capture_state: Mapping[str, torch.Tensor] | None
-    _runnable_embedded_nonpersistent_buffers: Mapping[str, torch.Tensor] | None
-    _runnable_archived_activations: Mapping[str, "ArchivedActivation"] | None
-    _runnable_path_faithfulness: "PathFaithfulness | None"
-    _runnable_first_mismatch: "RunnableDiagnostic | None"
-    _runnable_poisoned: bool
+    _runnable: RunnableTraceState
+    _build_state: TraceBuildState
     _fast_run_session: Any | None
     backward_root_grad_fn_object_ids: list[int]
     backward_pass_logs: Dict[int, BackwardPass]
@@ -1173,7 +1141,6 @@ class Trace(
         "_receptive_field_solution": FieldPolicy.DROP,
         "_rf_source_solutions": FieldPolicy.DROP,
         "_rf_target_solutions": FieldPolicy.DROP,
-        "_tl_rf_probe_active": FieldPolicy.DROP,
         "module_identity_mode": FieldPolicy.KEEP,
         "param_source": FieldPolicy.KEEP,
         "derived_grads": FieldPolicy.KEEP,
@@ -1182,16 +1149,7 @@ class Trace(
         "tlspec_version": FieldPolicy.KEEP,
         "_tracing_finished": FieldPolicy.KEEP,
         "capture_mode": FieldPolicy.KEEP,
-        "_runnable_descriptor": FieldPolicy.DROP,
-        "_runnable_readiness": FieldPolicy.DROP,
-        "_runnable_staged_user_state": FieldPolicy.DROP,
-        "_runnable_embedded_state": FieldPolicy.DROP,
-        "_runnable_capture_state": FieldPolicy.DROP,
-        "_runnable_embedded_nonpersistent_buffers": FieldPolicy.DROP,
-        "_runnable_archived_activations": FieldPolicy.DROP,
-        "_runnable_path_faithfulness": FieldPolicy.DROP,
-        "_runnable_first_mismatch": FieldPolicy.DROP,
-        "_runnable_poisoned": FieldPolicy.DROP,
+        "_runnable": FieldPolicy.DROP,
         "_fast_run_session": FieldPolicy.DROP,
         "detached_patch_policy": FieldPolicy.DROP,
         "detached_patch_epoch": FieldPolicy.DROP,
@@ -1414,20 +1372,6 @@ class Trace(
         "total_param_gradient_memory": FieldPolicy.KEEP,
         "forward_peak_memory": FieldPolicy.KEEP,
         "forward_memory_backend": FieldPolicy.KEEP,
-        "_raw_layer_dict": FieldPolicy.DROP,
-        "_raw_layer_labels_list": FieldPolicy.DROP,
-        "_layer_counter": FieldPolicy.DROP,
-        "_raw_layer_type_counter": FieldPolicy.DROP,
-        "_current_func_barcode": FieldPolicy.DROP,
-        "_mod_call_index": FieldPolicy.DROP,
-        "_mod_call_labels": FieldPolicy.DROP,
-        "_mod_entered": FieldPolicy.DROP,
-        "_mod_exited": FieldPolicy.DROP,
-        "_module_build_data": FieldPolicy.DROP,
-        "_module_metadata": FieldPolicy.DROP,
-        "_module_forward_args": FieldPolicy.DROP,
-        "_grad_fn_strong_refs": FieldPolicy.DROP,
-        "_in_exhaustive_pass": FieldPolicy.DROP,
         # r83 S4: live-capture scratch reinstated by ``__setstate__`` alongside
         # ``_tl_backward_hooked_tensor_keys``, but never registered here. Any
         # trace that went through ``__setstate__`` -- which ``cache=True`` makes
@@ -1436,28 +1380,15 @@ class Trace(
         # its sibling: pending live-fire records are session state and are
         # already reset on rehydrate.
         "_pending_live_fire_records": FieldPolicy.DROP,
-        "_module_containment_engine": FieldPolicy.DROP,
-        "_exhaustive_module_stack": FieldPolicy.DROP,
         "_module_logs": FieldPolicy.DROP,
         "_param_logs_by_module": FieldPolicy.DROP,
         "_build_state": FieldPolicy.DROP,
         "_pre_forward_rng_states": FieldPolicy.DROP,
-        "_runnable_host_rng_consumed": FieldPolicy.DROP,
-        "_runnable_capture_ambient": FieldPolicy.DROP,
-        "_runnable_state_alias_topology": FieldPolicy.DROP,
         # r63 C1: pre-clone per-slot state metadata signatures (producer-side only,
         # never portable) and the buffer storage-pointer attribution index.
-        "_runnable_capture_state_signatures": FieldPolicy.DROP,
         # r77 F2: capture-time persistent-buffer name universe + geometry
         # (producer-side only, never portable).
-        "_runnable_persistent_buffer_universe": FieldPolicy.DROP,
         "_buffer_storage_addresses": FieldPolicy.DROP,
-        "_runnable_host_rng_unreplayable": FieldPolicy.DROP,
-        "_runnable_host_rng_channels": FieldPolicy.DROP,
-        "_runnable_host_rng_replayable_reads": FieldPolicy.DROP,
-        "_runnable_rng_monitor_uncertain": FieldPolicy.DROP,
-        "_runnable_rng_monitor_uncertain_detail": FieldPolicy.DROP,
-        "_runnable_output_losslessness": FieldPolicy.DROP,
         "_mlx_saved_payloads": FieldPolicy.DROP,
         "_mlx_capture_depth": FieldPolicy.DROP,
         "_out_writer": FieldPolicy.DROP,
@@ -1646,17 +1577,10 @@ class Trace(
         # True after postprocessing.  Many custom_methods (len, getitem, str, iter)
         # branch on this flag to choose raw-barcode vs final-label access.
         self._tracing_finished = False
+        self._build_state = TraceBuildState()
+        self._build_state.module_build_data = _init_module_hierarchy_data()
         self.capture_mode: Literal["exhaustive", "predicate"] = "exhaustive"
-        self._runnable_descriptor: SparseRunDescriptor | None = None
-        self._runnable_readiness: ReadinessReport | None = None
-        self._runnable_staged_user_state: Mapping[str, torch.Tensor] | None = None
-        self._runnable_embedded_state: Mapping[str, torch.Tensor] | None = None
-        self._runnable_capture_state: Mapping[str, torch.Tensor] | None = None
-        self._runnable_embedded_nonpersistent_buffers: Mapping[str, torch.Tensor] | None = None
-        self._runnable_archived_activations: Mapping[str, ArchivedActivation] | None = None
-        self._runnable_path_faithfulness: PathFaithfulness | None = None
-        self._runnable_first_mismatch: RunnableDiagnostic | None = None
-        self._runnable_poisoned = False
+        self._runnable = RunnableTraceState()
         self._fast_run_session: Any | None = None
         self.halted = False
         self.halt_reason: str | None = None
@@ -1903,7 +1827,7 @@ class Trace(
         if self._tracing_finished:
             return len(self.layer_list)
         else:
-            return len(getattr(self, "_raw" + "_layer_dict"))
+            return len(self._build_state.raw_layer_dict)
 
     def __getitem__(self, ix: Any) -> Any:
         """Returns an object logging a model layer given an index. If the pass is finished,
@@ -2562,7 +2486,7 @@ class Trace(
         if self._tracing_finished:
             return iter(self.layer_list)
         else:
-            return iter(list(getattr(self, "_raw" + "_layer_dict").values()))
+            return iter(list(self._build_state.raw_layer_dict.values()))
 
     def save(self, path: str | Path, **kwargs: Any) -> None:
         """Call :func:`torchlens.save` for this model log.
@@ -2673,33 +2597,17 @@ class Trace(
         state["_activation_transform_repr"] = (
             repr(self.activation_transform) if self.activation_transform is not None else None
         )
-        # Runnable traces bind these as immutable MappingProxyType views, which cannot
-        # be pickled/deepcopied. The fork path special-cases them; the generic pickle
-        # path must neutralize them to a plain dict so capture-time, embedded, and
-        # staged state survives pickle/deepcopy. Run execution only reads these bindings.
-        state["_runnable_embedded_state"] = (
-            dict(self._runnable_embedded_state)
-            if self._runnable_embedded_state is not None
-            else None
-        )
-        state["_runnable_capture_state"] = (
-            dict(self._runnable_capture_state) if self._runnable_capture_state is not None else None
-        )
-        state["_runnable_embedded_nonpersistent_buffers"] = (
-            dict(self._runnable_embedded_nonpersistent_buffers)
-            if self._runnable_embedded_nonpersistent_buffers is not None
-            else None
-        )
-        state["_runnable_staged_user_state"] = (
-            dict(self._runnable_staged_user_state)
-            if self._runnable_staged_user_state is not None
-            else None
-        )
+        # Runnable traces bind state as immutable MappingProxyType views, which
+        # cannot be pickled/deepcopied. Preserve tensor identity while replacing
+        # only those mapping proxies with ordinary dictionaries.
+        state["_runnable"] = runnable_trace_state(self).pickle_safe_copy()
         state["tlspec_version"] = TLSPEC_VERSION
         return state
 
     def __setstate__(self, state: Dict[str, Any]) -> None:
         """Restore pickle state and rebuild weakref-backed links."""
+        for field_name in (*LEGACY_TRACE_BUILD_STATE_KEYS, "_build_state"):
+            state.pop(field_name, None)
         read_tlspec_version(state, cls_name=type(self).__name__)
         containers_were_serialized = "_containers" in state and state["_containers"] is not None
         setstate_defaults = {
@@ -2740,15 +2648,11 @@ class Trace(
             "total_autograd_memory": None,
             "_buffer_accessor": None,
             "_module_logs": None,
-            "_module" + "_build_data": None,
             "_out_writer": None,
             "_keep_outs_in_memory": True,
             "_defer_streaming_bundle_finalization": False,
             "_out_sink": None,
             "append_history": [],
-            "_in" + "_exhaustive_pass": False,
-            "_module" + "_containment_engine": "hook_stack",
-            "_exhaustive" + "_module_stack": [],
             "_source_code_blob": {},
             "_source_model_ref": None,
             "backward_ready": False,
@@ -2798,6 +2702,7 @@ class Trace(
             "_backward_gradfn_refs": [],
         }
         default_fill_state(state, defaults=setstate_defaults)
+        runnable_state = normalize_runnable_trace_state(state)
         coerce_container_typed_state(
             state,
             setstate_defaults,
@@ -2838,8 +2743,8 @@ class Trace(
             state["inference_only"] = False
         if state["chunked_forward"] is None:
             state["chunked_forward"] = False
-        if state["_runnable_poisoned"] is None:
-            state["_runnable_poisoned"] = False
+        if runnable_state.poisoned is None:
+            runnable_state.poisoned = False
         for field_name in (
             "setup_duration",
             "forward_duration",

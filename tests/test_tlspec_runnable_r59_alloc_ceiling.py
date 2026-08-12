@@ -136,7 +136,7 @@ def _stub_call(n_outputs: int = 1) -> Any:
 
 
 def _descriptor(trace: Any) -> Any:
-    return trace.__dict__["_runnable_descriptor"]
+    return trace._runnable.descriptor
 
 
 def _expected_retention_floor(descriptor: Any) -> int:
