@@ -307,9 +307,9 @@ def _clear_saved_activation_dedup_caches(trace: "Trace") -> None:
         cache = getattr(trace, cache_name, None)
         if isinstance(cache, dict):
             cache.clear()
-    build_state = trace.__dict__.get("_build_state")
-    if build_state is not None:
-        registry = getattr(build_state, "container_registry", None)
+    wrapper_ws = trace.__dict__.get("_wrapper_runtime_ws")
+    if wrapper_ws is not None:
+        registry = getattr(wrapper_ws, "container_registry", None)
         if registry is not None:
             registry.clear_live_state()
 
@@ -756,7 +756,7 @@ def _register_model_input_container_snapshots(
     ).capabilities.input_container_structure
     if capability == "none":
         return
-    registry = trace._build_state.container_registry
+    registry = trace._wrapper_runtime_ws.container_registry
     first_spec = None
     for index, arg in enumerate(input_args):
         result = walk_container(arg, role=Role.MODEL_INPUT, capability=capability)
@@ -1132,7 +1132,7 @@ def _finalize_halted_trace(
     backend.cleanup_model_session(self, (model, input_tensors))
     frontier_output = halt_exc.frontier_output
     if frontier_output is None:
-        raw_layer_dict = self._build_state.raw_layer_dict
+        raw_layer_dict = self._raw_graph_ws.raw_layer_dict
         for event in reversed(getattr(self.capture_events, "op_events", ())):
             entry = raw_layer_dict.get(event.label_raw)
             if entry is not None and getattr(entry, "out", None) is not None:
@@ -1291,7 +1291,7 @@ def run_and_log_inputs_through_model(
         finally:
             _ACTIVE_CAPTURE_BACKEND = previous_capture_backend
         input_tensors = list(input_tensors_any)
-        self._build_state.input_tensor_addresses = list(input_tensor_addresses)
+        self._raw_graph_ws.input_tensor_addresses = list(input_tensor_addresses)
         self._output_attribution_input_tensors = input_tensors
 
         # RNG state snapshot for deterministic explicit refreshes and legacy
@@ -1509,7 +1509,7 @@ def run_and_log_inputs_through_model(
                                 self._runnable.rng_monitor_uncertain = True
                                 self._runnable.rng_monitor_uncertain_detail = ("monitor_not_armed",)
 
-        backend.finalize_forward_session(self, self._build_state)
+        backend.finalize_forward_session(self, self._raw_graph_ws)
 
         output_transform = getattr(self, "_output_transform", None)
         self.raw_output = output_transform(outputs) if output_transform is not None else None

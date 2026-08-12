@@ -25,7 +25,7 @@ from ._tl import (
 
 if TYPE_CHECKING:
     from ...data_classes.trace import Trace
-    from ...ir.trace_build_state import TraceBuildState
+    from ...ir.workspaces import RawGraphWorkspace
 
 
 _FUSED_MUTATOR_NAMES = {
@@ -990,7 +990,7 @@ def install_buffer_write_tracker(trace: "Trace", model: nn.Module) -> BufferWrit
     return tracker
 
 
-def reconcile_buffer_writes(trace: "Trace", trace_state: "TraceBuildState") -> None:
+def reconcile_buffer_writes(trace: "Trace", trace_state: "RawGraphWorkspace") -> None:
     """Run end-of-capture registered-buffer reconciliation.
 
     Parameters
@@ -1006,8 +1006,8 @@ def reconcile_buffer_writes(trace: "Trace", trace_state: "TraceBuildState") -> N
         If the protocol state is not the active Trace-owned build state.
     """
 
-    if trace._build_state is not trace_state:
-        raise RuntimeError("Torch backend received a foreign TraceBuildState owner.")
+    if trace._raw_graph_ws is not trace_state:
+        raise RuntimeError("Torch backend received a foreign raw-graph workspace owner.")
 
     tracker = getattr(trace, "_buffer_write_tracker", None)
     if isinstance(tracker, BufferWriteTracker):

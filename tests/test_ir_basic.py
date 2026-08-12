@@ -39,7 +39,9 @@ from torchlens.ir import (
     RecordContext,
     ReservedLabel,
     TensorRef,
-    TraceBuildState,
+    ModuleCaptureWorkspace,
+    RawGraphWorkspace,
+    WrapperRuntimeWorkspace,
 )
 
 
@@ -361,12 +363,12 @@ def _build_ir_instances() -> dict[str, object]:
         warned_mutate_in_place=False,
         last_run=None,
     )
-    trace_build_state = TraceBuildState(
+    raw_graph_workspace = RawGraphWorkspace(
         raw_layer_dict={"linear_1_1_raw": object()},
         raw_layer_labels_list=["linear_1_1_raw"],
-        output_container_specs_by_raw_label={"linear_1_1_raw": container_spec},
-        output_container_specs=(container_spec,),
     )
+    module_capture_workspace = ModuleCaptureWorkspace()
+    wrapper_runtime_workspace = WrapperRuntimeWorkspace()
     return {
         "blob_ref": blob_ref,
         "deferred_ref": deferred_ref,
@@ -391,7 +393,9 @@ def _build_ir_instances() -> dict[str, object]:
         "function_event_input": function_event_input,
         "record_context": record_context,
         "intervention_state": intervention_state,
-        "trace_build_state": trace_build_state,
+        "raw_graph_workspace": raw_graph_workspace,
+        "module_capture_workspace": module_capture_workspace,
+        "wrapper_runtime_workspace": wrapper_runtime_workspace,
     }
 
 
@@ -423,7 +427,9 @@ def test_imports_every_public_ir_type() -> None:
         "function_event_input",
         "record_context",
         "intervention_state",
-        "trace_build_state",
+        "raw_graph_workspace",
+        "module_capture_workspace",
+        "wrapper_runtime_workspace",
     }
 
 
@@ -495,16 +501,16 @@ def test_mutable_slotted_state_dataclasses_reject_undeclared_fields() -> None:
     """Assert mutable state dataclasses are slotted but not frozen."""
     instances = _build_ir_instances()
     intervention_state = instances["intervention_state"]
-    trace_build_state = instances["trace_build_state"]
+    raw_graph_workspace = instances["raw_graph_workspace"]
 
     assert is_dataclass(intervention_state)
-    assert is_dataclass(trace_build_state)
+    assert is_dataclass(raw_graph_workspace)
     intervention_state.has_direct_writes = True
-    trace_build_state.raw_layer_labels_list = []
+    raw_graph_workspace.raw_layer_labels_list = []
     with pytest.raises(AttributeError):
         intervention_state.undeclared_slot = True
     with pytest.raises(AttributeError):
-        trace_build_state.undeclared_slot = True
+        raw_graph_workspace.undeclared_slot = True
 
 
 def test_capture_events_mutation_and_label_reservation() -> None:

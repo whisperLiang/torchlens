@@ -3614,7 +3614,7 @@ class Op:
             if out_sink is not None and isinstance(self.out, torch.Tensor):
                 out_sink(self._streaming_label, self.out)
 
-            if writer is not None and trace._build_state.in_exhaustive_pass:
+            if writer is not None and trace._wrapper_runtime_ws.in_exhaustive_pass:
                 self._stream_tensor_blob(
                     writer,
                     tensor_field="out",

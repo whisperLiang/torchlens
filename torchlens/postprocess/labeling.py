@@ -134,7 +134,7 @@ def _log_final_info_for_layers(self: "Trace") -> None:
     """
     unique_layers_seen = set()  # to avoid double-counting params of recurrent layers
     step_index = 1
-    mbd = self._build_state.module_build_data
+    mbd = self._module_capture_ws.module_build_data
 
     # Shadow sets for O(1) membership checks in _log_module_hierarchy_info_for_layer.
     # Lists are kept as primary storage (insertion order matters for downstream consumers),
@@ -276,7 +276,7 @@ def _finalize_output_compute_indexs(self: "Trace") -> None:
 
 def _build_module_hierarchy_dicts(self: "Trace") -> None:
     """Derive top_level_modules and module_children from their pass-level counterparts."""
-    mbd = self._build_state.module_build_data
+    mbd = self._module_capture_ws.module_build_data
     for module in mbd["top_level_module_ops"]:
         module_no_pass = module.rsplit(":", 1)[0]
         if module_no_pass == "self":
@@ -626,7 +626,7 @@ def _log_module_hierarchy_info_for_layer(
     _module_pass_children_seen = _shadow_sets["module_pass_children"]
     _addresses_seen = _shadow_sets["addresses"]
     _module_ops_seen = _shadow_sets["module_ops"]
-    mbd = self._build_state.module_build_data
+    mbd = self._module_capture_ws.module_build_data
 
     parent_call_label = None
     layer_label = layer_entry.layer_label
@@ -699,8 +699,8 @@ def _build_lookup_keys_and_finalize_retained_layers(self: "Trace") -> None:
     layer_labels_seen: set[str] = set()
 
     i = 0
-    for raw_tensor_label in self._build_state.raw_layer_labels_list:
-        layer_entry = self._build_state.raw_layer_dict[raw_tensor_label]
+    for raw_tensor_label in self._raw_graph_ws.raw_layer_labels_list:
+        layer_entry = self._raw_graph_ws.raw_layer_dict[raw_tensor_label]
         if getattr(layer_entry, "is_orphan", False):
             continue
         # Add the lookup keys for the layer, to itself and to Trace:
@@ -844,7 +844,7 @@ def _add_lookup_keys_for_layer_entry(
     for module_pass in layer_entry.output_of_module_calls:
         module_name, _ = module_pass.rsplit(":", 1)
         lookup_keys_for_tensor.append(f"{module_pass}")
-        if self._build_state.module_build_data["module_num_calls"][module_name] == 1:
+        if self._module_capture_ws.module_build_data["module_num_calls"][module_name] == 1:
             lookup_keys_for_tensor.append(f"{module_name}")
 
     # Allow using buffer/input/output address as key, too:
@@ -920,7 +920,7 @@ def _rename_model_history_layer_names(self: "Trace") -> None:
         setattr(
             self,
             field,
-            [self._build_state.raw_layer_dict[tensor_label].layer_label for tensor_label in tensor_labels],
+            [self._raw_graph_ws.raw_layer_dict[tensor_label].layer_label for tensor_label in tensor_labels],
         )
 
     # Remap halt provenance from raw to final labels, exactly as the special
@@ -939,8 +939,8 @@ def _rename_model_history_layer_names(self: "Trace") -> None:
     # strings) are left untouched.
     for halt_field in ("halt_reason", "halt_frontier"):
         raw_halt_label = getattr(self, halt_field, None)
-        if raw_halt_label is not None and raw_halt_label in self._build_state.raw_layer_dict:
-            setattr(self, halt_field, self._build_state.raw_layer_dict[raw_halt_label].layer_label)
+        if raw_halt_label is not None and raw_halt_label in self._raw_graph_ws.raw_layer_dict:
+            setattr(self, halt_field, self._raw_graph_ws.raw_layer_dict[raw_halt_label].layer_label)
 
     op_list_fields_to_rename = [
         "internal_source_ops",
@@ -1020,7 +1020,7 @@ def _rename_model_history_layer_names(self: "Trace") -> None:
             self._intervention_spec, self._raw_to_final_layer_labels
         )
 
-    mla = self._build_state.module_build_data["module_layer_argnames"]
+    mla = self._module_capture_ws.module_build_data["module_layer_argnames"]
     for module_pass, arglist in mla.items():
         new_arglist = []
         for raw_name, argname in arglist:

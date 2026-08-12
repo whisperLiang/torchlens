@@ -38,7 +38,7 @@ from ...ir.intervention import FireResult, FunctionEventInput
 from ...ir.predicate import RecordContext, _DEFERRED_VALUE
 from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
-from ...ir.trace_build_state import TraceBuildState
+from ...ir.workspaces import RawGraphWorkspace
 from ...postprocess._materialize import materialize_from_events
 from ...quantities import Duration
 from .._finalize import attach_function_root_module, attach_object_module_logs
@@ -896,7 +896,7 @@ class MLXBackend:
     def finalize_forward_session(
         self,
         session: object,
-        trace_state: TraceBuildState,
+        trace_state: RawGraphWorkspace,
     ) -> None:
         """Materialize deferred MLX payloads in a single batch."""
 
@@ -1022,7 +1022,7 @@ class MLXBackend:
                 output = cast(Any, model)(*args, **kwargs)
             trace.forward_duration = Duration(time.time() - trace.capture_start_time)
             trace.raw_output = output_transform(output) if callable(output_transform) else None
-            self.finalize_forward_session(trace, trace._build_state)
+            self.finalize_forward_session(trace, trace._raw_graph_ws)
             self._mark_outputs(trace, output)
             materialize_from_events(trace, trace.capture_events)
             delattr(trace, "capture_events")

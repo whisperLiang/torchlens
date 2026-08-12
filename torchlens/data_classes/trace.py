@@ -79,7 +79,12 @@ from .._runnable_seam import (
 )
 from ..constants import LAYER_PASS_LOG_FIELD_ORDER, MODEL_LOG_FIELD_ORDER
 from ..captured_run import CapturedRun
-from ..ir.trace_build_state import LEGACY_TRACE_BUILD_STATE_KEYS, TraceBuildState
+from ..ir.workspaces import (
+    LEGACY_TRACE_BUILD_STATE_KEYS,
+    ModuleCaptureWorkspace,
+    RawGraphWorkspace,
+    WrapperRuntimeWorkspace,
+)
 from ..intervention.types import (
     MODEL_LOG_FIELD_FORK_POLICY,
     InterventionSpec,
@@ -1103,7 +1108,9 @@ class Trace(
     capture_start_time: float
     capture_end_time: float
     _runnable: RunnableTraceState
-    _build_state: TraceBuildState
+    _raw_graph_ws: RawGraphWorkspace
+    _module_capture_ws: ModuleCaptureWorkspace
+    _wrapper_runtime_ws: WrapperRuntimeWorkspace
     _fast_run_session: Any | None
     backward_root_grad_fn_object_ids: list[int]
     backward_pass_logs: Dict[int, BackwardPass]
@@ -1393,7 +1400,9 @@ class Trace(
         "_pending_live_fire_records": FieldPolicy.DROP,
         "_module_logs": FieldPolicy.DROP,
         "_param_logs_by_module": FieldPolicy.DROP,
-        "_build_state": FieldPolicy.DROP,
+        "_raw_graph_ws": FieldPolicy.DROP,
+        "_module_capture_ws": FieldPolicy.DROP,
+        "_wrapper_runtime_ws": FieldPolicy.DROP,
         # The per-trace columnar Op row store (torchlens._trace_core). Never
         # portable: plain pickle re-materializes each Op as a detached row
         # from its own state, and .tlspec artifacts stay object-shaped until
@@ -1594,8 +1603,10 @@ class Trace(
         # True after postprocessing.  Many custom_methods (len, getitem, str, iter)
         # branch on this flag to choose raw-barcode vs final-label access.
         self._tracing_finished = False
-        self._build_state = TraceBuildState()
-        self._build_state.module_build_data = _init_module_hierarchy_data()
+        self._raw_graph_ws = RawGraphWorkspace()
+        self._module_capture_ws = ModuleCaptureWorkspace()
+        self._wrapper_runtime_ws = WrapperRuntimeWorkspace()
+        self._module_capture_ws.module_build_data = _init_module_hierarchy_data()
         self.capture_mode: Literal["exhaustive", "predicate"] = "exhaustive"
         self._runnable = RunnableTraceState()
         self._fast_run_session: Any | None = None
@@ -1844,7 +1855,7 @@ class Trace(
         if self._tracing_finished:
             return len(self.layer_list)
         else:
-            return len(self._build_state.raw_layer_dict)
+            return len(self._raw_graph_ws.raw_layer_dict)
 
     def __getitem__(self, ix: Any) -> Any:
         """Returns an object logging a model layer given an index. If the pass is finished,
@@ -2503,7 +2514,7 @@ class Trace(
         if self._tracing_finished:
             return iter(self.layer_list)
         else:
-            return iter(list(self._build_state.raw_layer_dict.values()))
+            return iter(list(self._raw_graph_ws.raw_layer_dict.values()))
 
     def save(self, path: str | Path, **kwargs: Any) -> None:
         """Call :func:`torchlens.save` for this model log.
@@ -2605,7 +2616,9 @@ class Trace(
         state["_code_context_cache"] = {}
         state.pop("_container_ordinals_by_output_op_label", None)
         state.pop("_container_ordinals_by_input_func_call_id", None)
-        state.pop("_build_state", None)
+        state.pop("_raw_graph_ws", None)
+        state.pop("_module_capture_ws", None)
+        state.pop("_wrapper_runtime_ws", None)
         state.pop("_trace_core", None)
         state["_backward_gradfn_refs"] = []
         state["_tl_backward_hooked_tensor_keys"] = set()
@@ -2624,7 +2637,17 @@ class Trace(
 
     def __setstate__(self, state: Dict[str, Any]) -> None:
         """Restore pickle state and rebuild weakref-backed links."""
-        for field_name in (*LEGACY_TRACE_BUILD_STATE_KEYS, "_build_state", "_trace_core"):
+        for field_name in (
+            *LEGACY_TRACE_BUILD_STATE_KEYS,
+            # "_build_state" is the pre-M10 flat scratchpad key; the three
+            # workspace keys are its dissolved successors. All transient,
+            # all dropped on restore.
+            "_build_state",
+            "_raw_graph_ws",
+            "_module_capture_ws",
+            "_wrapper_runtime_ws",
+            "_trace_core",
+        ):
             state.pop(field_name, None)
         read_tlspec_version(state, cls_name=type(self).__name__)
         containers_were_serialized = "_containers" in state and state["_containers"] is not None

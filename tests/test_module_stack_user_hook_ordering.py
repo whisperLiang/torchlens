@@ -51,7 +51,7 @@ def test_user_pre_hook_does_not_see_module_frame() -> None:
 
         del module, args
         trace = _state._active_trace
-        stack = trace._build_state.exhaustive_module_stack if trace is not None else ()
+        stack = trace._module_capture_ws.exhaustive_module_stack if trace is not None else ()
         snapshots.append([frame.address for frame in stack])
 
     handle = model.child.linear.register_forward_pre_hook(pre_hook)

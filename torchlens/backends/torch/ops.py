@@ -723,7 +723,7 @@ def _snapshot_exhaustive_module_stack(self: "Trace") -> list[tuple[str, int]]:
 
     return [
         (frame.address, frame.pass_index)
-        for frame in _mstack.snapshot(self._build_state.exhaustive_module_stack)
+        for frame in _mstack.snapshot(self._module_capture_ws.exhaustive_module_stack)
     ]
 
 
@@ -2473,7 +2473,7 @@ def log_function_output_tensors(
     if policy is None:
         policy = get_capture_producer_policy(cast(CaptureProducerMode, self.capture_mode))
         self._capture_producer_policy = policy
-    layer_counter_before = self._build_state.layer_counter
+    layer_counter_before = self._raw_graph_ws.layer_counter
     _emit_operation_events(
         policy,
         self,
@@ -2488,7 +2488,7 @@ def log_function_output_tensors(
         is_bottom_level_func,
         func_call_id,
     )
-    return self._build_state.layer_counter > layer_counter_before
+    return self._raw_graph_ws.layer_counter > layer_counter_before
 
 
 def _emit_operation_events(
@@ -2675,8 +2675,8 @@ def _apply_live_hooks_to_outputs_legacy(
     replacements: dict[tuple[OutputPathComponent, ...], torch.Tensor] = {}
     loggable_outputs = list(_iter_loggable_live_outputs(out_orig, is_bottom_level_func))
     events = self.capture_events
-    events.raw_layer_counter = self._build_state.layer_counter
-    events.raw_layer_type_counter = dict(self._build_state.raw_layer_type_counter)
+    events.raw_layer_counter = self._raw_graph_ws.layer_counter
+    events.raw_layer_type_counter = dict(self._raw_graph_ws.raw_layer_type_counter)
     reserved_labels = events.reserve_label_block(layer_type, len(loggable_outputs))
 
     for reserved, (out, container_path, _container_spec) in zip(reserved_labels, loggable_outputs):
@@ -2767,8 +2767,8 @@ def _apply_predicate_mode_interventions_to_outputs(
     output_ordinal = 0
     for out, container_path, _container_spec in loggable_outputs:
         output_ordinal += 1
-        raw_index = trace._build_state.layer_counter + output_ordinal
-        type_index = trace._build_state.raw_layer_type_counter[layer_type] + output_ordinal
+        raw_index = trace._raw_graph_ws.layer_counter + output_ordinal
+        type_index = trace._raw_graph_ws.raw_layer_type_counter[layer_type] + output_ordinal
         raw_label = f"{layer_type}_{type_index}_{raw_index}_raw"
         module_frame = state.module_stack[-1] if state.module_stack else None
         ctx = build_op_record_context(
@@ -3531,13 +3531,13 @@ def _emit_predicate_operation_events(
     function_ref: FunctionCallRef | None = None
 
     for output_index, (out, container_path, _container_spec) in enumerate(out_iter):
-        self._build_state.layer_counter += 1
-        self._build_state.raw_layer_type_counter[layer_type] += 1
+        self._raw_graph_ws.layer_counter += 1
+        self._raw_graph_ws.raw_layer_type_counter[layer_type] += 1
         state.op_counts[layer_type] = state.op_counts.get(layer_type, 0) + 1
         state.step_index += 1
         state.event_index += 1
-        raw_index = self._build_state.layer_counter
-        type_index = self._build_state.raw_layer_type_counter[layer_type]
+        raw_index = self._raw_graph_ws.layer_counter
+        type_index = self._raw_graph_ws.raw_layer_type_counter[layer_type]
         _label_raw = f"{layer_type}_{type_index}_{raw_index}_raw"
         set_tensor_label(out, _label_raw)
         module_frame = state.module_stack[-1] if state.module_stack else None
@@ -4894,7 +4894,7 @@ def _register_call_output_container_snapshot(
     spec = next((entry.container_spec for entry in output_entries if entry.container_spec), None)
     if spec is None:
         return
-    registry = trace._build_state.container_registry
+    registry = trace._wrapper_runtime_ws.container_registry
     registry.register_snapshot(
         output,
         site=FuncSite(func_call_id=func_call_id, position="return"),
@@ -4933,7 +4933,7 @@ def register_call_input_container_snapshots(
 
     if not getattr(trace, "_capture_container_structure", False):
         return
-    registry = trace._build_state.container_registry
+    registry = trace._wrapper_runtime_ws.container_registry
     for index, arg in enumerate(args):
         result = walk_container(arg, role=Role.CALL_INPUT, capability="full_spec")
         if result is None:
@@ -5052,10 +5052,10 @@ def _log_output_tensor_info(
     """
     layer_type = fields_dict["type"]
     indiv_param_barcodes = list(parent_param_ops.keys())
-    self._build_state.layer_counter += 1
-    self._build_state.raw_layer_type_counter[layer_type] += 1
-    raw_index = self._build_state.layer_counter
-    type_index = self._build_state.raw_layer_type_counter[layer_type]
+    self._raw_graph_ws.layer_counter += 1
+    self._raw_graph_ws.raw_layer_type_counter[layer_type] += 1
+    raw_index = self._raw_graph_ws.layer_counter
+    type_index = self._raw_graph_ws.raw_layer_type_counter[layer_type]
     _label_raw = f"{layer_type}_{type_index}_{raw_index}_raw"
 
     # Determine operation equivalence type — the fingerprint used by loop detection
@@ -5453,7 +5453,7 @@ def _stream_activation_fields(trace: "Trace", fields_dict: dict[str, Any]) -> No
     """
 
     writer = getattr(trace, "_out_writer", None)
-    if writer is None or not trace._build_state.in_exhaustive_pass:
+    if writer is None or not trace._wrapper_runtime_ws.in_exhaustive_pass:
         return
 
     label = fields_dict["_label_raw"]
@@ -5992,7 +5992,7 @@ def _build_trace_predicate_context(
         is_bottom_level_func=is_bottom_level_func,
         module_stack=_module_stack_frames_from_fields(fields_dict),
         history=history,
-        op_counts=dict(trace._build_state.raw_layer_type_counter),
+        op_counts=dict(trace._raw_graph_ws.raw_layer_type_counter),
         pass_index=int(fields_dict.get("pass_index", 0)),
         event_index=int(fields_dict["raw_index"]),
         step_index=fields_dict.get("step_index"),

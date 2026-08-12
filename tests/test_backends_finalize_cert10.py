@@ -180,7 +180,7 @@ def test_finalize_single_pass_trace_sets_per_op_tracing_finished_backend_agnosti
         # Simulate the pre-fix backend hook state: a plain int, not Bytes.
         op_log.param_memory = int(op_log.param_memory)
         raw_ops[label] = op_log
-    trace._build_state.raw_layer_dict = raw_ops
+    trace._raw_graph_ws.raw_layer_dict = raw_ops
 
     finalize_single_pass_trace(
         trace,

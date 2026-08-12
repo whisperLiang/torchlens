@@ -64,11 +64,17 @@ class _StubTrace:
         self._raw_to_final_layer_labels: Dict[str, str] = {}
         self._raw_to_final_parent_layer_labels: Dict[str, str] = {}
         self._raw_to_final_op_labels: Dict[str, str] = {}
-        from torchlens.ir.trace_build_state import TraceBuildState
+        from torchlens.ir.workspaces import (
+            ModuleCaptureWorkspace,
+            RawGraphWorkspace,
+            WrapperRuntimeWorkspace,
+        )
 
-        self._build_state = TraceBuildState(
+        self._raw_graph_ws = RawGraphWorkspace()
+        self._module_capture_ws = ModuleCaptureWorkspace(
             module_build_data={"module_layer_argnames": {}}
         )
+        self._wrapper_runtime_ws = WrapperRuntimeWorkspace()
 
     def __iter__(self) -> Iterator[SimpleNamespace]:
         """Iterate over surviving pass-level entries."""

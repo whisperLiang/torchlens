@@ -175,7 +175,7 @@ def _build_root_module_log(
     """
     from ..data_classes.param import ParamAccessor
 
-    module_metadata = cast(dict[str, dict[str, Any]], self._build_state.module_metadata)
+    module_metadata = cast(dict[str, dict[str, Any]], self._module_capture_ws.module_metadata)
     root_meta = module_metadata.get("self", {})
     root_layers = list(self.layer_logs.keys())
 
@@ -293,7 +293,7 @@ def _pre_hook_provenance_for_call(
         Before snapshot, after snapshot, and ordered effects.
     """
 
-    values = trace._build_state.module_build_data.get("module_pre_hook_provenance", {}).get(call_label)
+    values = trace._module_capture_ws.module_build_data.get("module_pre_hook_provenance", {}).get(call_label)
     if values is None:
         return None, None, ()
     before, after, effects = values
@@ -657,7 +657,7 @@ def _build_submodule_call_logs(
 
         # Forward args for this pass
         module_forward_args = cast(
-            dict[tuple[str, int], tuple[Any, Any]], self._build_state.module_forward_args
+            dict[tuple[str, int], tuple[Any, Any]], self._module_capture_ws.module_forward_args
         )
         fwd_args = module_forward_args.get((address, call_index))
         fwd_positional = fwd_args[0] if fwd_args else None
@@ -808,7 +808,7 @@ def _build_module_logs(self: "Trace") -> None:
     Clears temporary state (_module_metadata, _module_forward_args, _module_build_data)
     after building.
     """
-    mbd = self._build_state.module_build_data
+    mbd = self._module_capture_ws.module_build_data
     module_dict = {}  # address -> Module
     pass_dict: Dict[str, ModuleCall] = {}  # "addr:pass" -> ModuleCall
     module_order = []  # ordered by first appearance
@@ -836,7 +836,7 @@ def _build_module_logs(self: "Trace") -> None:
     # Module addresses may be overwritten to a LATER address by
     # _prepare_model_once. This map ensures all aliases resolve to the same meta.
     _metadata_by_alias: dict[str, dict[str, Any]] = {}
-    for _primary_addr, _meta in self._build_state.module_metadata.items():
+    for _primary_addr, _meta in self._module_capture_ws.module_metadata.items():
         for _alias in _meta.get("all_addresses", [_primary_addr]):
             _metadata_by_alias[_alias] = _meta
 
@@ -980,11 +980,11 @@ def _build_module_logs(self: "Trace") -> None:
 
     # Clean up temporary build state to free memory. These dicts are only
     # needed during construction and are not part of the user-facing API.
-    self._build_state.module_metadata = {}
-    self._build_state.module_forward_args = {}
+    self._module_capture_ws.module_metadata = {}
+    self._module_capture_ws.module_forward_args = {}
     from ..data_classes.trace import _init_module_hierarchy_data
 
-    self._build_state.module_build_data = _init_module_hierarchy_data()
+    self._module_capture_ws.module_build_data = _init_module_hierarchy_data()
 
     # GC-11: Clear forward_args/kwargs from ModuleCallLogs to release tensor references.
     # These can hold large tensors from the model's forward() call args.

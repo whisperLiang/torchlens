@@ -21,6 +21,20 @@ eviction plus parameter-reference release. Step order is load-bearing.
 | `finalization.py` | 12-20 | Undecorate, params, layers, modules, hash, streaming finalization/eviction, ref release |
 | `incremental.py` | fastlog enrichment | Adds module paths and param addresses to sparse recordings |
 
+## Step Contracts (M10)
+
+Every step's `PostprocessStepContract` declares its exact op-store COLUMN
+write set (`writes`). Under `TORCHLENS_POSTPROCESS_ASSERTIONS` a
+zero-cost-when-off audit (class-swap instrumentation on the op row store)
+verifies each step writes only declared columns; a new column write fails the
+tripwire and widening a declared set is a reviewed contract diff. Transient
+build scratch lives in three named per-phase workspaces (`ir/workspaces.py`),
+not a flat `TraceBuildState` (deleted in M10): `RawGraphWorkspace` (capture
+ingress + steps 0-11, also the backend `finalize_forward_session` ownership
+token), `ModuleCaptureWorkspace` (module prep/stack capture, consumed at step
+16), and `WrapperRuntimeWorkspace` (wrapper hot path). All three drop at the
+transient-state cleanup seam.
+
 ## The Ordered Steps
 
 | Step | Function | What |

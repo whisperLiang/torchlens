@@ -372,6 +372,56 @@ def _freeze_column(column_values: list[Any]) -> _FrozenColumn:
     return _FrozenColumn(object_values, present, False)
 
 
+#: Live write-audit collectors keyed by audited store id (M10 step
+#: contracts). Populated only while a postprocess step audit is active.
+_AUDIT_COLLECTORS: dict[int, set[int]] = {}
+
+
+class _AuditedOpRowStore(OpRowStore):
+    """Write-recording twin used ONLY during env-gated step audits.
+
+    ``begin_cell_write_audit`` swaps a store's ``__class__`` to this subclass
+    (layout-identical: empty ``__slots__``), so the un-audited hot path pays
+    ZERO extra cost — no per-write branch exists on ``OpRowStore`` itself.
+    """
+
+    __slots__ = ()
+
+    def cell_set(self, row: int, fid: int, value: Any) -> None:
+        """Record the written column id, then perform the write."""
+
+        collector = _AUDIT_COLLECTORS.get(id(self))
+        if collector is not None:
+            collector.add(fid)
+        OpRowStore.cell_set(self, row, fid, value)
+
+    def cell_del(self, row: int, fid: int) -> bool:
+        """Record the deleted column id, then perform the delete."""
+
+        collector = _AUDIT_COLLECTORS.get(id(self))
+        if collector is not None:
+            collector.add(fid)
+        return OpRowStore.cell_del(self, row, fid)
+
+
+def begin_cell_write_audit(store: OpRowStore) -> None:
+    """Start recording column writes on ``store`` (idempotent)."""
+
+    if store.__class__ is OpRowStore:
+        store.__class__ = _AuditedOpRowStore
+    _AUDIT_COLLECTORS.setdefault(id(store), set())
+
+
+def end_cell_write_audit(store: OpRowStore) -> set[str]:
+    """Stop recording and return the written column NAMES."""
+
+    observed = _AUDIT_COLLECTORS.pop(id(store), set())
+    if store.__class__ is _AuditedOpRowStore:
+        store.__class__ = OpRowStore  # type: ignore[assignment]
+    names = store.layout.names
+    return {names[fid] for fid in observed}
+
+
 class DetachedOpStore:
     """Single-row op store for detached facades (copy/pickle/fork/preview).
 

@@ -63,7 +63,12 @@ from .predicate import (
 )
 from .refs import DeferredRef, DeviceRef, DtypeRef, ParamRef, ReservedLabel, TensorRef
 from .semantics import BackendSemantics, CapturePolicy
-from .trace_build_state import TraceBuildState
+from .workspaces import (
+    LEGACY_TRACE_BUILD_STATE_KEYS,
+    ModuleCaptureWorkspace,
+    RawGraphWorkspace,
+    WrapperRuntimeWorkspace,
+)
 
 __all__ = [
     "ArgTemplateRef",
@@ -123,7 +128,10 @@ __all__ = [
     "WalkResult",
     "walk_container",
     "TensorRef",
-    "TraceBuildState",
+    "LEGACY_TRACE_BUILD_STATE_KEYS",
+    "ModuleCaptureWorkspace",
+    "RawGraphWorkspace",
+    "WrapperRuntimeWorkspace",
     "_DEFERRED_VALUE",
     "coerce_deferred_value",
     "is_deferred_value",

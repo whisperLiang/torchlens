@@ -267,7 +267,7 @@ class TestBranchFastSkip:
                 return x
 
         # The postprocess pipeline already guards a zero-layer log
-        # (``len(self._build_state.raw_layer_labels_list) == 0``) and returns early.
+        # (``len(self._raw_graph_ws.raw_layer_labels_list) == 0``) and returns early.
         # We still exercise the path to confirm the fast-skip change does
         # not introduce a regression upstream of that guard.
         model = _EmptyForward()

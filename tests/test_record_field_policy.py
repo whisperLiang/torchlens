@@ -290,3 +290,40 @@ def test_postprocess_contract_assertions_run_over_standard_model(
         assert trace.modules
     finally:
         trace.cleanup()
+
+
+def test_postprocess_write_audit_enforces_declared_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each postprocess step writes only its declared op-store columns (M10).
+
+    The declared ``PostprocessStepContract.writes`` sets were recorded over
+    the six surface-oracle model axes; the audit re-runs one representative
+    conditional+recurrent-free capture here so a step growing an undeclared
+    column write fails CI, not just the opt-in debug env.
+    """
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    trace = tl.trace(_PolicyModel().eval(), torch.randn(2, 3), save_grads=False)
+    trace.cleanup()
+
+
+def test_postprocess_write_audit_trips_on_undeclared_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An undeclared op-store column write fails the step-contract tripwire."""
+
+    from torchlens.postprocess import POSTPROCESS_STEP_CONTRACTS, PostprocessStepContract
+
+    original = POSTPROCESS_STEP_CONTRACTS["4"]
+    assert original.writes, "step 4 must declare a non-empty write set"
+    narrowed = PostprocessStepContract(
+        original.step,
+        original.name,
+        original.contract,
+        writes=frozenset(),
+    )
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    monkeypatch.setitem(POSTPROCESS_STEP_CONTRACTS, "4", narrowed)
+    with pytest.raises(AssertionError, match="undeclared op-store columns"):
+        tl.trace(_PolicyModel().eval(), torch.randn(2, 3), save_grads=False)

@@ -77,7 +77,9 @@ def cleanup(self: "Trace") -> None:
     # and large data structures (layer_logs, layer_dict_all_keys).
     for attr in [
         "_capture_events",
-        "_build_state",
+        "_raw_graph_ws",
+        "_module_capture_ws",
+        "_wrapper_runtime_ws",
         "_trace_core",
         "_saved_grad_labels",
         "_module_logs",

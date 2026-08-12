@@ -116,11 +116,21 @@ class PostprocessStepContract:
         Human-readable step name.
     contract:
         Short consumes/produces/mutation contract.
+    writes:
+        Declared op-store COLUMN write set for this step (M10): the exact
+        cell columns the step may write or delete, enforced under
+        ``TORCHLENS_POSTPROCESS_ASSERTIONS`` by the zero-cost-when-off
+        write audit (``op_store.begin_cell_write_audit``). ``None`` means
+        undeclared (wildcard) — steps that legitimately touch the whole
+        row (materialize, undecorate) or run before the store exists.
+        A step writing an undeclared column fails the tripwire; widening
+        a set is a REVIEWED schema-contract diff, never a silent drift.
     """
 
     step: str
     name: str
     contract: str
+    writes: frozenset[str] | None = None
 
 
 POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
@@ -128,106 +138,333 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         "0",
         "Materialize capture events",
         "Consumes capture events; rebuilds raw Op state; mutates Trace in place.",
+        writes=frozenset(),
     ),
     "1": PostprocessStepContract(
         "1",
         "Add output layers",
         "Consumes model outputs and parent labels; produces output Ops in raw state.",
+        writes=frozenset(
+            (
+                "_arg_expressions_cache",
+                "_edge_uses",
+                "_label_raw",
+                "_layer_label_raw",
+                "_param_barcodes",
+                "_param_logs",
+                "activation_memory",
+                "arg_names",
+                "atomic_module_call",
+                "autograd_memory",
+                "bytes_delta_at_call",
+                "bytes_peak_at_call",
+                "children",
+                "code_context",
+                "container_path",
+                "container_spec",
+                "dropped_edge_tensor_args",
+                "dtype",
+                "equivalence_class",
+                "equivalent_ops",
+                "func",
+                "func_config",
+                "func_duration",
+                "func_name",
+                "func_non_tensor_args",
+                "func_rng_states",
+                "grad_fn_class_name",
+                "has_children",
+                "has_out_variations",
+                "has_output_descendant",
+                "input_to_module_calls",
+                "intervention_replaced",
+                "interventions",
+                "io_role",
+                "is_atomic_module",
+                "is_buffer",
+                "is_final_output",
+                "is_input",
+                "is_internal_source",
+                "is_module_output",
+                "is_output",
+                "is_transform",
+                "module",
+                "module_call_stack",
+                "modules",
+                "non_tensor_kwargs",
+                "non_tensor_pos_args",
+                "num_args_total",
+                "num_autograd_tensors",
+                "num_kwargs",
+                "num_params",
+                "num_params_frozen",
+                "num_params_trainable",
+                "num_passes",
+                "num_pos_args",
+                "out",
+                "out_versions_by_child",
+                "output_descendants",
+                "output_of_module_calls",
+                "output_of_modules",
+                "param_memory",
+                "param_shapes",
+                "parent_arg_positions",
+                "parent_param_ops",
+                "parent_params",
+                "parents",
+                "pass_index",
+                "raw_index",
+                "recurrent_ops",
+                "saved_args",
+                "saved_kwargs",
+                "shape",
+                "transform_chain",
+                "transform_config",
+                "transform_fn_name",
+                "transform_fn_qualname",
+                "transform_fn_source",
+                "transform_kind",
+                "transformed_activation_memory",
+                "transformed_out",
+                "transformed_out_dtype",
+                "transformed_out_shape",
+                "type",
+                "unattributed_tensor_args",
+                "var_names",
+            )
+        ),
     ),
     "2": PostprocessStepContract(
         "2",
         "Trace output ancestors",
         "Consumes raw graph links; mutates output-descendant ancestry flags in place.",
+        writes=frozenset(
+            (
+                "has_output_descendant",
+            )
+        ),
     ),
     "3": PostprocessStepContract(
         "3",
         "Remove orphan nodes",
         "Consumes ancestry flags; removes or records orphan raw Ops in place.",
+        writes=frozenset(
+            (
+                "_edge_uses",
+                "args_template",
+                "conditional_arm_children",
+                "conditional_elif_children",
+                "conditional_else_children",
+                "conditional_entry_children",
+                "conditional_then_children",
+                "interventions",
+                "is_internal_sink",
+                "is_terminal_bool",
+                "kwargs_template",
+            )
+        ),
     ),
     "4": PostprocessStepContract(
         "4",
         "Input/output distances",
         "Consumes orphan-free graph; mutates distance fields in place.",
+        writes=frozenset(
+            (
+                "has_input_ancestor",
+                "has_output_descendant",
+                "max_distance_from_input",
+                "max_distance_to_output",
+                "min_distance_from_input",
+                "min_distance_to_output",
+            )
+        ),
     ),
     "5": PostprocessStepContract(
         "5",
         "Mark conditional branches",
         "Consumes orphan-free graph; mutates conditional metadata in place.",
+        writes=frozenset(
+            (
+                "_is_in_conditional_body",
+                "conditional_arm_children",
+                "conditional_branch_depth",
+                "conditional_branch_stack",
+                "conditional_context_kind",
+                "conditional_elif_children",
+                "conditional_else_children",
+                "conditional_entry_children",
+                "conditional_then_children",
+                "conditional_wrapper_kind",
+                "is_terminal_conditional_bool",
+                "terminal_conditional_id",
+            )
+        ),
     ),
     "6": PostprocessStepContract(
         "6",
         "Fix buffer layers",
         "Consumes buffer events and graph links; mutates buffer metadata in place.",
+        writes=frozenset(
+            (
+                "buffer_pass",
+                "buffer_replay_validated",
+                "func",
+                "func_name",
+                "has_children",
+                "has_input_ancestor",
+            )
+        ),
     ),
     "7": PostprocessStepContract(
         "7",
         "Loop detection",
         "Consumes final raw graph structure; mutates recurrence/equivalence metadata.",
+        writes=frozenset(
+            (
+                "_layer_label_raw",
+                "equivalence_class",
+                "num_passes",
+                "pass_index",
+                "recurrent_ops",
+            )
+        ),
     ),
     "8": PostprocessStepContract(
         "8",
         "Map labels",
         "Consumes raw labels and recurrence metadata; produces raw-to-final maps.",
+        writes=frozenset(
+            (
+                "label",
+                "label_short",
+                "layer_label",
+                "layer_label_short",
+                "step_index",
+                "type_index",
+            )
+        ),
     ),
     "9": PostprocessStepContract(
         "9",
         "Log final info",
         "Consumes mapped labels; mutates final Op metadata and module build data.",
+        writes=frozenset(
+            (
+                "_edge_uses",
+                "atomic_module_call",
+                "children",
+                "conditional_arm_children",
+                "conditional_elif_children",
+                "conditional_else_children",
+                "conditional_entry_children",
+                "conditional_then_children",
+                "equivalent_ops",
+                "fx_call_index",
+                "fx_qualpath",
+                "input_ancestors",
+                "internal_source_ancestors",
+                "is_buffer",
+                "is_input",
+                "is_output",
+                "output_descendants",
+                "parents",
+                "recurrent_ops",
+                "root_ancestors",
+                "step_index",
+            )
+        ),
     ),
     "10": PostprocessStepContract(
         "10",
         "Rename labels",
         "Consumes raw-to-final maps; mutates graph references to final labels.",
+        writes=frozenset(),
     ),
     "11": PostprocessStepContract(
         "11",
         "Build lookup keys",
         "Consumes final labels; rebuilds final lookup containers in place.",
+        writes=frozenset(
+            (
+                "input_to_module_calls",
+                "lookup_keys",
+                "module",
+                "modules",
+                "ordinal_index",
+                "output_of_module_calls",
+            )
+        ),
     ),
     "11.5": PostprocessStepContract(
         "11.5",
         "Populate source var names",
         "Consumes code context; mutates Op var_names in place.",
+        writes=frozenset(),
     ),
     "12": PostprocessStepContract(
         "12",
         "Undecorate tensors",
         "Consumes saved tensors; mutates payload wrappers in place.",
+        writes=frozenset(),
     ),
     "13": PostprocessStepContract(
         "13",
         "Clear CUDA cache",
         "Runs optional CUDA allocator cleanup; leaves Trace metadata unchanged.",
+        writes=frozenset(),
     ),
     "14": PostprocessStepContract(
         "14",
         "Log timing",
         "Consumes capture timestamps; mutates duration fields in place.",
+        writes=frozenset(),
     ),
     "15": PostprocessStepContract(
         "15",
         "Finalize params",
         "Consumes Op param references; mutates Param reverse mappings.",
+        writes=frozenset(
+            (
+                "parent_params",
+            )
+        ),
     ),
     "15.5": PostprocessStepContract(
         "15.5",
         "Build layer logs",
         "Consumes final Op list; rebuilds aggregate Layer logs and pass index.",
+        writes=frozenset(
+            (
+                "in_conditionals",
+                "terminal_bool_for",
+            )
+        ),
     ),
     "16": PostprocessStepContract(
         "16",
         "Build module logs",
         "Consumes module build data and layer logs; rebuilds Module/ModuleCall logs.",
+        writes=frozenset(),
     ),
     "16.5": PostprocessStepContract(
         "16.5",
         "Graph shape hash",
         "Consumes final graph; mutates normalized addresses and graph hash.",
+        writes=frozenset(
+            (
+                "_address_normalized",
+            )
+        ),
     ),
     "17": PostprocessStepContract(
         "17",
         "Mark pass finished",
         "Consumes finalized containers; mutates Trace to user-facing finished state.",
+        writes=frozenset(
+            (
+                "_tracing_finished",
+            )
+        ),
     ),
     "18": PostprocessStepContract(
         "18",
@@ -243,6 +480,7 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         "20",
         "Release param refs",
         "Consumes finalized Param logs; drops live parameter references in place.",
+        writes=frozenset(),
     ),
 }
 
@@ -257,6 +495,42 @@ def _postprocess_assertions_enabled() -> bool:
     """
 
     return os.environ.get(_POSTPROCESS_ASSERT_ENV, "").lower() in {"1", "true", "yes", "on"}
+
+
+_WRITE_AUDIT_RECORD_ENV = "TORCHLENS_POSTPROCESS_WRITE_AUDIT"
+
+#: Recording-mode sink: step id -> union of observed written column names
+#: across every audited postprocess run in this process. Read by the
+#: declaration-generation tooling; never consulted in enforcement mode.
+RECORDED_STEP_WRITES: dict[str, set[str]] = {}
+
+
+def _write_audit_record_mode() -> bool:
+    """Return whether the write audit RECORDS instead of enforcing."""
+
+    return os.environ.get(_WRITE_AUDIT_RECORD_ENV, "").lower() == "record"
+
+
+def _open_step_write_audit(self: "Trace") -> None:
+    """Start the op-store column write audit for the next step window."""
+
+    core = self.__dict__.get("_trace_core")
+    if core is None or core.ops is None:
+        return
+    from .._trace_core.op_store import begin_cell_write_audit
+
+    begin_cell_write_audit(core.ops)
+
+
+def _close_step_write_audit(self: "Trace") -> set[str] | None:
+    """Stop the audit and return written column names (None when unarmed)."""
+
+    core = self.__dict__.get("_trace_core")
+    if core is None or core.ops is None:
+        return None
+    from .._trace_core.op_store import end_cell_write_audit
+
+    return end_cell_write_audit(core.ops)
 
 
 def _assert_postprocess_contract(self: "Trace", step: str) -> None:
@@ -274,6 +548,19 @@ def _assert_postprocess_contract(self: "Trace", step: str) -> None:
         return
     contract = POSTPROCESS_STEP_CONTRACTS.get(step)
     assert contract is not None, f"Unknown postprocess step contract: {step!r}"
+    observed_writes = _close_step_write_audit(self)
+    if observed_writes is not None:
+        if _write_audit_record_mode():
+            RECORDED_STEP_WRITES.setdefault(step, set()).update(observed_writes)
+        elif contract.writes is not None:
+            undeclared_writes = observed_writes - contract.writes
+            assert not undeclared_writes, (
+                f"Step {step} ({contract.name}) wrote undeclared op-store "
+                f"columns {sorted(undeclared_writes)}; widen the declared "
+                "write set in POSTPROCESS_STEP_CONTRACTS as a reviewed "
+                "schema-contract diff if the writes are intended."
+            )
+    _open_step_write_audit(self)
     step_name = f"Step {contract.step} ({contract.name})"
     if step == "1":
         assert self.output_layers, f"{step_name} must register output layers"
@@ -286,7 +573,16 @@ def _assert_postprocess_contract(self: "Trace", step: str) -> None:
             assert op.layer_label, f"Step 11 left {op!r} without a final layer label"
             assert op.lookup_keys, f"Step 11 left {op.label} without lookup keys"
             assert self.layer_dict_all_keys[op.label] is op
-            assert self.layer_dict_all_keys[op.layer_label] is op
+            # The bare layer label resolves to ONE pass of that layer (the
+            # public lookup contract keeps the LAST pass for multi-pass
+            # layers), never to a foreign layer's op. The former exact
+            # `is op` form was wrong by construction for every recurrent
+            # model and unreachable outside the debug env flag.
+            resolved = self.layer_dict_all_keys[op.layer_label]
+            assert resolved.layer_label == op.layer_label, (
+                f"Step 11 mapped layer label {op.layer_label!r} to a foreign "
+                f"op {resolved.label!r}"
+            )
     elif step == "15.5":
         assert self.layer_logs, "Step 15.5 must build aggregate layer logs"
         assert len(self.layer_logs) == len(self.layer_labels)
@@ -370,13 +666,15 @@ def _drop_transient_capture_state(self: "Trace") -> None:
         and self.__dict__.get("_out_writer") is not None
     )
     keep_selective_sink = self.__dict__.get("_out_sink") is not None
-    build_state = self.__dict__.get("_build_state")
-    if build_state is not None:
-        registry = getattr(build_state, "container_registry", None)
+    wrapper_ws = self.__dict__.get("_wrapper_runtime_ws")
+    if wrapper_ws is not None:
+        registry = getattr(wrapper_ws, "container_registry", None)
         if registry is not None:
             registry.clear_live_state()
     field_names = [
-        "_build_state",
+        "_raw_graph_ws",
+        "_module_capture_ws",
+        "_wrapper_runtime_ws",
         "capture_events",
         "_output_container_specs_by_raw_label",
     ]
@@ -473,7 +771,7 @@ def postprocess(
         delattr(self, "capture_events")
 
     # Guard: if the model produced no logged layers, skip postprocessing (#153)
-    if len(self._build_state.raw_layer_labels_list) == 0:
+    if len(self._raw_graph_ws.raw_layer_labels_list) == 0:
         import warnings
 
         warnings.warn("No layers were logged during the forward pass; skipping postprocessing.")
@@ -488,7 +786,7 @@ def postprocess(
 
     _vprint(
         self,
-        f"Postprocessing {len(self._build_state.raw_layer_labels_list):,} layers "
+        f"Postprocessing {len(self._raw_graph_ws.raw_layer_labels_list):,} layers "
         f"({len(self.buffer_layers):,} buffers)...",
     )
     _post_t0 = time.time() if getattr(self, "verbose", False) else 0
@@ -618,15 +916,21 @@ def postprocess(
         _set_tracing_finished(self)
     _assert_postprocess_contract(self, "17")
 
-    build_state = self.__dict__.get("_build_state")
-    if build_state is not None:
-        registry = getattr(build_state, "container_registry", None)
+    wrapper_ws = self.__dict__.get("_wrapper_runtime_ws")
+    if wrapper_ws is not None:
+        registry = getattr(wrapper_ws, "container_registry", None)
         if registry is not None:
             if registry.records:
                 self.__dict__["_containers"] = dict(registry.records)
             registry.clear_live_state()
 
-    for field_name in ("_build_state", "capture_events", "_output_container_specs_by_raw_label"):
+    for field_name in (
+        "_raw_graph_ws",
+        "_module_capture_ws",
+        "_wrapper_runtime_ws",
+        "capture_events",
+        "_output_container_specs_by_raw_label",
+    ):
         self.__dict__.pop(field_name, None)
 
     should_finalize_streaming = getattr(self, "_out_writer", None) is not None and not getattr(
@@ -645,6 +949,9 @@ def postprocess(
     with _vtimed(self, "  Step 20: Release param refs"):
         self.release_param_refs(allow_iter_rehydrate=True)
     _assert_postprocess_contract(self, "20")
+    # Discard the trailing audit window opened by the step-20 assertion: the
+    # freeze conversion below legitimately rewrites relation cells wholesale.
+    _close_step_write_audit(self)
 
     _compact_ancestor_sets(self)
 

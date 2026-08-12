@@ -176,7 +176,18 @@ exclusive with backward-related capture because it discards the autograd graph.
   epoch list, a clean tail fold extends the live epoch — whose per-kind row
   stores back the projected records. The lazy watermark/revision
   invalidation stays trace-side and byte-identical; loaded/preview traces
-  keep detached-backed backward records. Architecture of record:
+  keep detached-backed backward records.
+  M10: `TraceBuildState` is GONE — its transient fields dissolved into three
+  named per-phase workspaces (`ir/workspaces.py`: `RawGraphWorkspace` for
+  capture ingress + steps 0-11, `ModuleCaptureWorkspace` for module
+  prep/stack capture consumed at step 16, `WrapperRuntimeWorkspace` for the
+  wrapper hot path), each dropped at the transient-state cleanup seam; the
+  backend `finalize_forward_session` protocol takes the raw-graph workspace
+  as its ownership token. Each `POSTPROCESS_STEP_CONTRACTS` entry declares
+  its exact op-store COLUMN write set, enforced under
+  `TORCHLENS_POSTPROCESS_ASSERTIONS` by a zero-cost-when-off write audit
+  (class-swap instrumentation in `op_store.py`); widening a set is a
+  reviewed contract diff. Architecture of record:
   `docs/reference/trace_core_design.md`.
 - `backends/torch/` - torch function wrapping, explicit wrap/unwrap, module prep.
 - `fastlog/` - sparse predicate recording with RAM/disk storage and recovery.

@@ -119,7 +119,9 @@ def test_trace_field_set_subset_of_user_facing() -> None:
     assert not extra, f"Trace carries unexpected fields: {extra}"
 
     gone_fields = [
-        "_build_state",
+        "_raw_graph_ws",
+        "_module_capture_ws",
+        "_wrapper_runtime_ws",
         "_raw_layer_dict",
         "_raw_layer_labels_list",
         "_layer_counter",

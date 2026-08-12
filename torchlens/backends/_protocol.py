@@ -10,7 +10,7 @@ from ..ir.intervention import FireResult, FunctionEventInput
 from ..ir.predicate import RecordContext
 from ..ir.refs import ReservedLabel, TensorRef
 from ..ir.semantics import BackendSemantics, CapturePolicy
-from ..ir.trace_build_state import TraceBuildState
+from ..ir.workspaces import RawGraphWorkspace
 
 
 class CaptureBackend(Protocol):
@@ -271,7 +271,7 @@ class CaptureBackend(Protocol):
     def finalize_forward_session(
         self,
         session: object,
-        trace_state: TraceBuildState,
+        trace_state: RawGraphWorkspace,
     ) -> None:
         """Finalize backend state after forward logging and before output extraction.
 
@@ -280,8 +280,9 @@ class CaptureBackend(Protocol):
         session:
             Active backend capture session.
         trace_state:
-            Required transient trace build state for backends that materialize
-            deferred payloads from event state at this seam.
+            The session trace's raw-graph workspace, passed as the explicit
+            ownership token (M10: the flat TraceBuildState dissolved into
+            named per-phase workspaces).
 
         Returns
         -------

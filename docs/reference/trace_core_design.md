@@ -293,6 +293,24 @@ private; computed collapse metadata stays out of serialization.
 
 ### 3.7 Trace decomposition (THE deliverable) and TraceBuildState
 
+M10 as-landed disposition (2026-08-12): `TraceBuildState` is dissolved — its
+transient fields live in three named per-phase workspaces
+(`ir/workspaces.py`: `RawGraphWorkspace` / `ModuleCaptureWorkspace` /
+`WrapperRuntimeWorkspace`), each owned by exactly one phase family, dropped at
+the transient-cleanup seam, with the backend `finalize_forward_session`
+protocol taking the raw-graph workspace as its ownership token; the three
+dead fields (`grad_fn_strong_refs`, `output_container_specs*`) were deleted
+with the dissolution. The 21 step contracts declare ENFORCED op-store column
+write sets (env-gated zero-cost-when-off audit; recorded over the six
+surface-oracle axes plus backward; the sets are reviewed contract diffs).
+The Trace PHYSICAL component decomposition (components as storage owners
+behind 220 property forwards) is the named remaining slice: the declared
+per-field ownership map (`_trace_components.py`) partitions every field
+(header 16 / capture_config 49 / witness 30 / source_metadata 20 / totals 35
+/ session 48 / runnable 1 / graph 99 — the graph plane is absorbed by the
+core, not built as an object), the lockstep ratchet enforces the map, and
+the physical move is mechanical against it.
+
 `Trace` (220 fields) decomposes into a presenter over lifecycle-owned components:
 `TraceHeader`, `CaptureConfigSnapshot` (~60), the owned `TraceCore` graph,
 `WitnessDiagnostics` (~23), `SourceMetadata` (~13), `Totals` (~28), and the existing

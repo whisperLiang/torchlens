@@ -10,7 +10,12 @@ import torch.nn as nn
 
 import torchlens as tl
 from torchlens.data_classes.trace import Trace
-from torchlens.ir.trace_build_state import LEGACY_TRACE_BUILD_STATE_KEYS, TraceBuildState
+from torchlens.ir.workspaces import (
+    LEGACY_TRACE_BUILD_STATE_KEYS,
+    ModuleCaptureWorkspace,
+    RawGraphWorkspace,
+    WrapperRuntimeWorkspace,
+)
 
 V3_GOLDEN = Path(__file__).parent / "golden" / "io_v3_sample.tlspec"
 _DROPPED_CAPTURE_FIELDS = (
@@ -63,10 +68,16 @@ def test_plain_restore_drops_legacy_flat_and_nested_build_scratch() -> None:
     try:
         state = source.__getstate__()
         state.update({field_name: object() for field_name in LEGACY_TRACE_BUILD_STATE_KEYS})
-        state["_build_state"] = TraceBuildState()
+        state["_build_state"] = object()
+        state["_raw_graph_ws"] = RawGraphWorkspace()
+        state["_module_capture_ws"] = ModuleCaptureWorkspace()
+        state["_wrapper_runtime_ws"] = WrapperRuntimeWorkspace()
         restored.__setstate__(state)
 
         assert "_build_state" not in restored.__dict__
+        assert "_raw_graph_ws" not in restored.__dict__
+        assert "_module_capture_ws" not in restored.__dict__
+        assert "_wrapper_runtime_ws" not in restored.__dict__
         assert not LEGACY_TRACE_BUILD_STATE_KEYS.intersection(restored.__dict__)
     finally:
         source.cleanup()

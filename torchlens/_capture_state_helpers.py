@@ -1505,12 +1505,13 @@ def _prepare_log_for_capture_cache(trace: Trace) -> None:
     trace.__dict__.pop("_capture_config", None)
     trace.__dict__.pop("_stop_directive", None)
     trace.__dict__.pop("_capture_events", None)
-    build_state = trace.__dict__.get("_build_state")
-    if build_state is not None:
-        registry = getattr(build_state, "container_registry", None)
+    wrapper_ws = trace.__dict__.get("_wrapper_runtime_ws")
+    if wrapper_ws is not None:
+        registry = getattr(wrapper_ws, "container_registry", None)
         if registry is not None:
             registry.clear_live_state()
-        trace.__dict__.pop("_build_state", None)
+    for workspace_key in ("_raw_graph_ws", "_module_capture_ws", "_wrapper_runtime_ws"):
+        trace.__dict__.pop(workspace_key, None)
 
 
 def _raw_cache_payload_field(layer: Any, field_name: str) -> Any:
