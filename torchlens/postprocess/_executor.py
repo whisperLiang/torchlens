@@ -108,7 +108,7 @@ def _op_touching(contract: PostprocessStepContract) -> bool:
     )
 
 
-def derive_edges() -> list[DerivedEdge]:
+def derive_edges(rank_override: "dict[str, int] | None" = None) -> list[DerivedEdge]:
     """Derive every ordering edge from the declared contracts.
 
     All rules orient by ``LEGACY_STEP_RANK`` (design-ppdag-v3 §2.3):
@@ -128,7 +128,7 @@ def derive_edges() -> list[DerivedEdge]:
     """
 
     contracts = _registry_contracts()
-    rank = LEGACY_STEP_RANK
+    rank = rank_override if rank_override is not None else dict(LEGACY_STEP_RANK)
     edges: list[DerivedEdge] = []
 
     def _directed(low: str, high: str) -> tuple[str, str] | None:
@@ -228,25 +228,64 @@ def derived_pinnable_pairs() -> dict[tuple[str, str], set[str]]:
     return pairs
 
 
-def execution_order() -> tuple[str, ...]:
+def classify_declared_reads() -> dict[tuple[str, str], str]:
+    """Classify every declared op-column read (design-ppdag-v3 §2.4).
+
+    Returns ``(step, column) -> category`` over the declared reads:
+    ``baseline`` (capture-populated), ``probe`` (reviewed placeholder
+    probe), ``self_write`` (read of the step's own written column),
+    ``earlier_writer`` (RAW dependency), or ``finding`` — a read of a
+    manifest-excluded column with no lower-rank writer: an undeclared
+    dependency or phantom read, the real latent-bug class. Findings are
+    PINNED by name in ``test_postprocess_dag.py``; a new one fails there
+    and is root-caused, never silenced.
+    """
+
+    from ._contracts import CAPTURE_BASELINE_COLUMNS
+
+    contracts = _registry_contracts()
+    rank = LEGACY_STEP_RANK
+    writers: dict[str, list[str]] = {}
+    for step, contract in contracts.items():
+        for column in contract.writes:
+            writers.setdefault(column, []).append(step)
+    classified: dict[tuple[str, str], str] = {}
+    for step, contract in contracts.items():
+        for column in contract.reads:
+            if column in CAPTURE_BASELINE_COLUMNS:
+                classified[(step, column)] = "baseline"
+            elif column in contract.placeholder_probes:
+                classified[(step, column)] = "probe"
+            elif column in contract.writes:
+                classified[(step, column)] = "self_write"
+            elif any(rank[w] < rank[step] for w in writers.get(column, ())):
+                classified[(step, column)] = "earlier_writer"
+            else:
+                classified[(step, column)] = "finding"
+        for column in contract.placeholder_probes - contract.reads:
+            classified[(step, column)] = "probe"
+    return classified
+
+
+def execution_order(rank: "dict[str, int] | None" = None) -> tuple[str, ...]:
     """Derive the execution order: Kahn with a min-heap keyed by rank.
 
     Ranks are unique integers, so no secondary key exists (the historical
     "registry-index tie-break" formulation is gone); R2 asserts the emitted
-    order equals ``REGISTRY_ORDER``.
+    order equals ``REGISTRY_ORDER``. ``rank`` exists for the swap tests.
     """
 
+    if rank is None:
+        rank = dict(LEGACY_STEP_RANK)
     contracts = _registry_contracts()
     indegree: dict[str, int] = {step: 0 for step in contracts}
     successors: dict[str, set[str]] = {step: set() for step in contracts}
-    for edge in derive_edges():
+    for edge in derive_edges(rank):
         if edge.dst not in successors[edge.src]:
             successors[edge.src].add(edge.dst)
             indegree[edge.dst] += 1
     heap = [
-        (LEGACY_STEP_RANK[step], step)
-        for step, degree in indegree.items()
-        if degree == 0
+        (rank[step], step) for step, degree in indegree.items() if degree == 0
     ]
     heapq.heapify(heap)
     order: list[str] = []
@@ -256,7 +295,7 @@ def execution_order() -> tuple[str, ...]:
         for successor in successors[step]:
             indegree[successor] -= 1
             if indegree[successor] == 0:
-                heapq.heappush(heap, (LEGACY_STEP_RANK[successor], successor))
+                heapq.heappush(heap, (rank[successor], successor))
     if len(order) != len(contracts):
         cyclic = sorted(step for step, degree in indegree.items() if degree > 0)
         raise ValueError(
@@ -266,12 +305,24 @@ def execution_order() -> tuple[str, ...]:
     return tuple(order)
 
 
-def _iter_structural_violations() -> Iterator[str]:
-    """Yield every 7.1-family structural violation (import checks)."""
+def _iter_structural_violations(
+    registry_order: tuple[str, ...] | None = None,
+    rank: "dict[str, int] | None" = None,
+) -> Iterator[str]:
+    """Yield every 7.1-family structural violation (import checks).
+
+    ``registry_order``/``rank`` exist for the swap regression tests, which
+    prove a permuted registry (and a coordinated rank+registry reversal)
+    refuse by name; production imports pass nothing.
+    """
 
     contracts = _registry_contracts()
+    if registry_order is None:
+        registry_order = REGISTRY_ORDER
+    if rank is None:
+        rank = dict(LEGACY_STEP_RANK)
     # 7.1-1: registry <-> contracts bijection (step "0" exempted).
-    registry_set = set(REGISTRY_ORDER)
+    registry_set = set(registry_order)
     contract_set = set(contracts)
     if registry_set != contract_set:
         yield (
@@ -281,12 +332,12 @@ def _iter_structural_violations() -> Iterator[str]:
         )
         return
     # 7.1-3 (R1): registry strictly rank-ascending.
-    registry_ranks = [LEGACY_STEP_RANK[step] for step in REGISTRY_ORDER]
+    registry_ranks = [rank[step] for step in registry_order]
     for i in range(1, len(registry_ranks)):
         if registry_ranks[i - 1] >= registry_ranks[i]:
             yield (
                 f"registry order contradicts LEGACY_STEP_RANK at steps "
-                f"{REGISTRY_ORDER[i - 1]!r}, {REGISTRY_ORDER[i]!r} (R1)"
+                f"{registry_order[i - 1]!r}, {registry_order[i]!r} (R1)"
             )
     # 7.1-5: token read-before-write analogue.
     token_writer_ranks: dict[str, int] = {}
@@ -295,7 +346,7 @@ def _iter_structural_violations() -> Iterator[str]:
             prefix, _, token = entry.partition(":")
             if prefix == "w":
                 current = token_writer_ranks.get(token)
-                step_rank = LEGACY_STEP_RANK[step]
+                step_rank = rank[step]
                 if current is None or step_rank < current:
                     token_writer_ranks[token] = step_rank
     for step, contract in contracts.items():
@@ -304,15 +355,15 @@ def _iter_structural_violations() -> Iterator[str]:
             if prefix != "r" or token in CAPTURE_BASELINE_TOKENS:
                 continue
             earliest = token_writer_ranks.get(token)
-            if earliest is None or earliest >= LEGACY_STEP_RANK[step]:
+            if earliest is None or earliest >= rank[step]:
                 yield (
                     f"step {step} declares r:{token} with no lower-rank "
                     f"w:{token} and {token!r} is not capture-baseline "
                     "(7.1-5)"
                 )
     # 7.1-4 (R2): the derived order reproduces the registry.
-    derived = execution_order()
-    if derived != REGISTRY_ORDER:
+    derived = execution_order(rank)
+    if derived != registry_order:
         yield (
             f"derived execution order diverges from the registry (R2): "
             f"derived={derived!r}"

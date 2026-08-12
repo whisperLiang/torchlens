@@ -2816,6 +2816,30 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
 )
 
 
+def iter_corpus_violations(rank: dict[str, int]) -> "list[str]":
+    """Return every K1 violation of the corpus against ``rank``.
+
+    Injectable for the coordinated-reversal regression test; production
+    import passes the frozen rank.
+    """
+
+    violations: list[str] = []
+    for (producer, consumer), pair in PINNED_ORDER_PAIRS.items():
+        if producer not in rank or consumer not in rank:
+            violations.append(
+                f"PINNED_ORDER_PAIRS[({producer!r}, {consumer!r})] names a "
+                "step absent from LEGACY_STEP_RANK."
+            )
+            continue
+        if rank[producer] >= rank[consumer]:
+            violations.append(
+                f"Reordering {consumer} before {producer} contradicts "
+                f"PINNED_ORDER_PAIRS[({producer!r}, {consumer!r})]: "
+                f"{pair.reason}"
+            )
+    return violations
+
+
 def _validate_contract_artifacts() -> None:
     """Import-time structural binding of contracts and the frozen rank.
 
@@ -2844,18 +2868,8 @@ def _validate_contract_artifacts() -> None:
     # reason — a coordinated rank+registry reversal re-orients every derived
     # edge and passes R1/R2, but cannot pass this without editing the named
     # reason-bearing corpus entry (design-ppdag-v3 §2.1).
-    for (producer, consumer), pair in PINNED_ORDER_PAIRS.items():
-        if producer not in LEGACY_STEP_RANK or consumer not in LEGACY_STEP_RANK:
-            raise ValueError(
-                f"PINNED_ORDER_PAIRS[({producer!r}, {consumer!r})] names a "
-                "step absent from LEGACY_STEP_RANK."
-            )
-        if LEGACY_STEP_RANK[producer] >= LEGACY_STEP_RANK[consumer]:
-            raise ValueError(
-                f"Reordering {consumer} before {producer} contradicts "
-                f"PINNED_ORDER_PAIRS[({producer!r}, {consumer!r})]: "
-                f"{pair.reason}"
-            )
+    for violation in iter_corpus_violations(dict(LEGACY_STEP_RANK)):
+        raise ValueError(violation)
 
 
 _validate_contract_artifacts()

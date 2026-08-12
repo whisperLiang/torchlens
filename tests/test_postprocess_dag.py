@@ -1,0 +1,603 @@
+"""Tripwires for the postprocess dependency derivation (design-ppdag-v3).
+
+The pipeline order is derived from declared contracts oriented by the frozen
+``LEGACY_STEP_RANK`` and semantically pinned by the reason-bearing
+``PINNED_ORDER_PAIRS`` corpus. These tests freeze the goldens, pin the day-1
+findings by name, re-derive the DAG independently (spec-drives-code), and
+pin both halves of the coordinated-reversal counterexample.
+"""
+
+from __future__ import annotations
+
+import pytest
+import torch
+from torch import nn
+
+import torchlens as tl
+from torchlens.postprocess import (
+    LEGACY_STEP_RANK,
+    PINNED_ORDER_PAIRS,
+    POSTPROCESS_STEP_CONTRACTS,
+    REGISTRY_ORDER,
+    execution_order,
+)
+from torchlens.postprocess import _executor
+from torchlens.postprocess._contracts import (
+    CAPTURE_BASELINE_COLUMNS,
+    iter_corpus_violations,
+)
+
+pytestmark = pytest.mark.smoke
+
+
+class _TinyModel(nn.Module):
+    """Minimal linear+relu model for dynamic audit tests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = nn.Linear(3, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(self.linear(x))
+
+
+# ---------------------------------------------------------------------------
+# Frozen goldens
+# ---------------------------------------------------------------------------
+
+#: The frozen rank (key 1 of the direction authority). Editing it is a
+#: reviewed semantic diff; this golden makes the edit loud.
+RANK_GOLDEN = {
+    "1": 10, "2": 20, "3": 30, "4": 40, "5": 50, "6": 60, "7": 70,
+    "8": 80, "9": 90, "10": 100, "11": 110, "11.5": 115, "11.75": 118,
+    "12": 120, "13": 130, "14": 140, "15": 150, "15.5": 155, "16": 160,
+    "16.5": 165, "17": 170, "17.5": 175, "18": 180, "19": 190, "20": 200,
+}
+
+#: Multi-writer columns with their writers in rank order — the post-repair
+#: golden (design-ppdag-v3 §4). Independently re-derived by both design
+#: reviewers for the pre-repair rows; the repairs added: the step-11.75
+#: save_activation family, steps 18/19 streaming columns, var_names (11.5),
+#: and equivalent_ops gaining step 3 (orphan-removal scrub, conditional —
+#: the design's wider parents/children/recurrent_ops scrub columns cannot
+#: fire at step 3: the orphan flood is undirected, so no survivor holds a
+#: dataflow edge to an orphan, and recurrence groups do not exist before
+#: step 7).
+MULTI_WRITER_GOLDEN = {
+    "_edge_uses": ("1", "3", "9"),
+    "_layer_label_raw": ("1", "7"),
+    "_param_logs": ("1", "15", "16"),
+    "activation_memory": ("1", "11.75"),
+    "args_template": ("3", "9"),
+    "atomic_module_call": ("1", "9"),
+    "children": ("1", "9"),
+    "conditional_arm_children": ("3", "5", "9"),
+    "conditional_elif_children": ("3", "5", "9"),
+    "conditional_else_children": ("3", "5", "9"),
+    "conditional_entry_children": ("3", "5", "9"),
+    "conditional_then_children": ("3", "5", "9"),
+    "dtype": ("1", "11.75"),
+    "equivalence_class": ("1", "7"),
+    "equivalent_ops": ("1", "3", "9"),
+    "func": ("1", "6"),
+    "func_name": ("1", "6"),
+    "has_children": ("1", "6"),
+    "has_input_ancestor": ("4", "6"),
+    "has_output_descendant": ("1", "2", "4"),
+    "input_ancestors": ("4", "9"),
+    "input_to_module_calls": ("1", "11"),
+    "interventions": ("1", "3", "9"),
+    "is_buffer": ("1", "9"),
+    "is_input": ("1", "9"),
+    "is_output": ("1", "9"),
+    "is_terminal_bool": ("3", "5"),
+    "kwargs_template": ("3", "9"),
+    "module": ("1", "11"),
+    "modules": ("1", "11"),
+    "num_passes": ("1", "7"),
+    "out": ("1", "11.75", "19"),
+    "output_descendants": ("1", "2", "9"),
+    "output_of_module_calls": ("1", "11"),
+    "parent_arg_positions": ("1", "9"),
+    "parent_params": ("1", "15"),
+    "parents": ("1", "9"),
+    "pass_index": ("1", "7"),
+    "recurrent_ops": ("1", "7", "9"),
+    "root_ancestors": ("6", "9"),
+    "saved_args": ("1", "11.75"),
+    "saved_kwargs": ("1", "11.75"),
+    "shape": ("1", "11.75"),
+    "step_index": ("8", "9"),
+    "transformed_activation_memory": ("1", "11.75"),
+    "transformed_out": ("1", "11.75", "19"),
+    "transformed_out_dtype": ("1", "11.75"),
+    "transformed_out_shape": ("1", "11.75"),
+    "var_names": ("1", "11.5"),
+}
+
+#: The TOTAL placeholder-probe set (review note N6): the one laundering
+#: channel neither anti-laundering guard touches is silently DECLARING a
+#: probe — so the full set is a golden and growing it is a reviewed diff.
+PROBES_GOLDEN = {
+    "1": frozenset(("label", "layer_label", "out_ref")),
+    "3": frozenset(("internal_source_parents", "out_ref")),
+    "12": frozenset(("out_ref",)),
+    "18": frozenset(
+        ("_facets_cache", "_projective_field_cache", "_receptive_field_cache")
+    ),
+}
+
+#: Day-1 category-(c) findings, PINNED BY NAME (design-ppdag-v3 §2.4): the
+#: step-3 orphan_records construction reads label/layer_label as DATA, but
+#: their only writer is step 8 — the read can only ever observe the
+#: placeholder. Reported for root-cause (record _label_raw instead, or
+#: bless as probe); NEVER silenced by widening the baseline. Any NEW
+#: finding fails this test and is root-caused the same way.
+PINNED_FINDINGS = {("3", "label"), ("3", "layer_label")}
+
+#: Declared-but-never-observed writes with their named config-gated
+#: exemptions (the Opus-4 phantom-declaration guard): each entry names WHY
+#: the recording matrix cannot observe it. An exemption without a reason is
+#: a laundering channel; removing the code path must remove the row.
+PHANTOM_WRITE_EXEMPTIONS = {
+    ("5", "is_terminal_bool"): (
+        "host-escape bool witness family; reviewed widening from the "
+        "hardening campaign's enforcement leg"
+    ),
+    ("9", "args_template"): (
+        "intervention-ready replay-template rename; observed on the "
+        "closure-review intervention/observer suites"
+    ),
+    ("9", "kwargs_template"): "same as args_template",
+    ("18", "grad_ref"): (
+        "written only by the post-backward OUT-OF-PIPELINE deferred-grad "
+        "streaming re-run of the same function body"
+    ),
+    ("6", "internal_source_parents"): (
+        "buffer-merge in-place append (control_flow._merge_buffer_entries);"
+        " fires only on a real duplicate-buffer merge"
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# Structural checks and goldens
+# ---------------------------------------------------------------------------
+
+
+def test_import_checks_pass_on_real_artifacts() -> None:
+    """The 7.1 family and K1 hold on the shipped artifacts."""
+
+    assert list(_executor._iter_structural_violations()) == []
+    assert iter_corpus_violations(dict(LEGACY_STEP_RANK)) == []
+
+
+def test_rank_golden() -> None:
+    """LEGACY_STEP_RANK is frozen; editing it is a reviewed semantic diff."""
+
+    assert dict(LEGACY_STEP_RANK) == RANK_GOLDEN
+
+
+def test_derived_order_reproduces_registry() -> None:
+    """R2: rank-keyed Kahn reproduces the hand order exactly (day-1 identity)."""
+
+    assert execution_order() == REGISTRY_ORDER
+
+
+def test_registry_contract_bijection() -> None:
+    """Every registry step has a contract and vice versa (step 0 fenced)."""
+
+    assert set(REGISTRY_ORDER) == set(POSTPROCESS_STEP_CONTRACTS) - {"0"}
+    for contract in POSTPROCESS_STEP_CONTRACTS.values():
+        assert contract.writes is not None
+        assert contract.reads is not None
+
+
+def test_multi_writer_golden() -> None:
+    """The multi-writer column table is frozen (reviewed-diff to change)."""
+
+    writers: dict[str, list[str]] = {}
+    for step, contract in POSTPROCESS_STEP_CONTRACTS.items():
+        if step == "0":
+            continue
+        for column in contract.writes:
+            writers.setdefault(column, []).append(step)
+    derived = {
+        column: tuple(sorted(steps, key=LEGACY_STEP_RANK.__getitem__))
+        for column, steps in writers.items()
+        if len(steps) > 1
+    }
+    assert derived == MULTI_WRITER_GOLDEN
+
+
+def test_probes_golden() -> None:
+    """The total placeholder-probe set is frozen (review note N6)."""
+
+    derived = {
+        step: contract.placeholder_probes
+        for step, contract in POSTPROCESS_STEP_CONTRACTS.items()
+        if contract.placeholder_probes
+    }
+    assert derived == PROBES_GOLDEN
+
+
+def test_read_findings_pinned_by_name() -> None:
+    """Category-(c) findings are exactly the pinned set; a NEW one fails."""
+
+    findings = {
+        key
+        for key, category in _executor.classify_declared_reads().items()
+        if category == "finding"
+    }
+    assert findings == PINNED_FINDINGS
+
+
+def test_phantom_write_exemptions_are_exact() -> None:
+    """Every phantom-exemption row names a real declared write.
+
+    The full observed-vs-declared diff runs over the recording matrix (the
+    env-gated enforcement leg); this fast check keeps the exemption table
+    from referencing writes that no longer exist.
+    """
+
+    for (step, column), reason in PHANTOM_WRITE_EXEMPTIONS.items():
+        assert column in POSTPROCESS_STEP_CONTRACTS[step].writes, (step, column)
+        assert reason
+
+
+# ---------------------------------------------------------------------------
+# The two-key direction authority (Sol 1's counterexample, both halves)
+# ---------------------------------------------------------------------------
+
+
+def test_registry_swap_refused_by_r1_and_r2() -> None:
+    """Permuting the registry alone refuses at R1 AND R2, by name."""
+
+    order = list(REGISTRY_ORDER)
+    i7, i8 = order.index("7"), order.index("8")
+    order[i7], order[i8] = order[i8], order[i7]
+    violations = list(_executor._iter_structural_violations(tuple(order)))
+    assert any("(R1)" in violation for violation in violations)
+    assert any("(R2)" in violation for violation in violations)
+
+
+def test_coordinated_reversal_refused_by_corpus() -> None:
+    """Rank AND registry swapped together: R1/R2 pass, K1 refuses.
+
+    Sol round-2 finding 1, pinned: a coordinated 7/8 reversal re-orients
+    every derived edge to the new rank, so the drift detectors are blind —
+    step 1 co-writes pass_index/recurrent_ops, so step 8's reads keep an
+    earlier writer and no finding fires either. The ONLY mechanical catch
+    is the reason-bearing corpus entry (key 2).
+    """
+
+    order = list(REGISTRY_ORDER)
+    i7, i8 = order.index("7"), order.index("8")
+    order[i7], order[i8] = order[i8], order[i7]
+    rank = dict(LEGACY_STEP_RANK)
+    rank["7"], rank["8"] = rank["8"], rank["7"]
+    # Both drift detectors are silent under the coordinated edit...
+    assert list(_executor._iter_structural_violations(tuple(order), rank)) == []
+    # ...and the corpus refuses by name, carrying the reviewed reason.
+    violations = iter_corpus_violations(rank)
+    assert violations, "K1 must catch the coordinated reversal"
+    assert any("('7', '8')" in violation for violation in violations)
+
+
+def test_derived_pairs_pinned_in_corpus() -> None:
+    """K2: every derived RAW/WW pair is pinned with its exact carriers.
+
+    A coordinated WAR reversal manufactures a NEW RAW pair under the new
+    rank, which lands here unpinned and turns the suite red until a
+    reason-bearing corpus entry is reviewed in.
+    """
+
+    pairs = _executor.derived_pinnable_pairs()
+    for pair, carriers in pairs.items():
+        assert pair in PINNED_ORDER_PAIRS, f"unpinned derived pair {pair}"
+        missing = set(carriers) - PINNED_ORDER_PAIRS[pair].carriers
+        assert not missing, f"pair {pair} missing carriers {sorted(missing)}"
+
+
+def test_docstring_invariants_carried_by_corpus() -> None:
+    """The absorbed prose invariants exist as reason-bearing entries (§7.3)."""
+
+    for pair in (
+        ("7", "8"),
+        ("8", "9"),
+        ("9", "11"),
+        ("10", "11"),
+        ("15.5", "16"),
+        ("17.5", "18"),
+        ("17", "17.5"),
+        ("18", "20"),
+        ("19", "20"),
+    ):
+        assert pair in PINNED_ORDER_PAIRS, pair
+        assert PINNED_ORDER_PAIRS[pair].reason
+
+
+# ---------------------------------------------------------------------------
+# Independent re-derivation (spec-drives-code cross-check)
+# ---------------------------------------------------------------------------
+
+
+def test_independent_edge_rederivation() -> None:
+    """A test-side reimplementation of the edge rules matches the module."""
+
+    contracts = {
+        step: contract
+        for step, contract in POSTPROCESS_STEP_CONTRACTS.items()
+        if step != "0"
+    }
+    rank = LEGACY_STEP_RANK
+    expected: set[tuple[str, str, str, str]] = set()
+
+    writers: dict[str, set[str]] = {}
+    readers: dict[str, set[str]] = {}
+    for step, contract in contracts.items():
+        for column in contract.writes:
+            writers.setdefault(column, set()).add(step)
+        for column in contract.reads | contract.placeholder_probes:
+            readers.setdefault(column, set()).add(step)
+    for column, its_writers in writers.items():
+        ordered = sorted(its_writers, key=rank.__getitem__)
+        for i, low in enumerate(ordered):
+            for high in ordered[i + 1 :]:
+                expected.add((low, high, "ww", column))
+        for reader in readers.get(column, ()):
+            for writer in its_writers:
+                if writer == reader:
+                    continue
+                if rank[writer] < rank[reader]:
+                    expected.add((writer, reader, "raw", column))
+                else:
+                    expected.add((reader, writer, "war", column))
+
+    token_writers: dict[str, set[str]] = {}
+    token_readers: dict[str, set[str]] = {}
+    for step, contract in contracts.items():
+        for entry in contract.trace_state:
+            prefix, _, token = entry.partition(":")
+            bucket = token_writers if prefix == "w" else token_readers
+            bucket.setdefault(token, set()).add(step)
+    for token, its_writers in token_writers.items():
+        ordered = sorted(its_writers, key=rank.__getitem__)
+        for i, low in enumerate(ordered):
+            for high in ordered[i + 1 :]:
+                expected.add((low, high, "token_ww", token))
+        for reader in token_readers.get(token, ()):
+            for writer in its_writers:
+                if writer == reader:
+                    continue
+                if rank[writer] < rank[reader]:
+                    expected.add((writer, reader, "token_raw", token))
+                else:
+                    expected.add((reader, writer, "token_war", token))
+
+    def op_touching(contract: object) -> bool:
+        return bool(
+            contract.writes
+            or contract.reads
+            or contract.placeholder_probes
+            or contract.row_effects
+        )
+
+    row_steps = [s for s, c in contracts.items() if c.row_effects]
+    op_steps = [s for s, c in contracts.items() if op_touching(c)]
+    for row_step in row_steps:
+        for other in op_steps:
+            if other == row_step:
+                continue
+            low, high = sorted((row_step, other), key=rank.__getitem__)
+            expected.add((low, high, "row_barrier", ""))
+    for barrier_step in (s for s, c in contracts.items() if c.barrier):
+        for other in contracts:
+            if other == barrier_step:
+                continue
+            low, high = sorted((barrier_step, other), key=rank.__getitem__)
+            expected.add((low, high, "barrier", ""))
+
+    derived = {
+        (edge.src, edge.dst, edge.kind, edge.carrier)
+        for edge in _executor.derive_edges()
+    }
+    assert derived == expected
+
+
+def test_all_edges_rank_ascending() -> None:
+    """Acyclicity by construction: every derived edge ascends in rank."""
+
+    for edge in _executor.derive_edges():
+        assert LEGACY_STEP_RANK[edge.src] < LEGACY_STEP_RANK[edge.dst], edge
+
+
+# ---------------------------------------------------------------------------
+# Non-vacuity: the tripwires can actually fire
+# ---------------------------------------------------------------------------
+
+
+def test_classifier_non_vacuity_synthetic_finding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A read of a non-baseline/no-writer/non-probe column IS a finding."""
+
+    from torchlens.postprocess import PostprocessStepContract
+
+    original = POSTPROCESS_STEP_CONTRACTS["10"]
+    assert "_facets_cache" not in CAPTURE_BASELINE_COLUMNS
+    synthetic = PostprocessStepContract(
+        original.step,
+        original.name,
+        original.contract,
+        writes=original.writes,
+        reads=original.reads | {"_facets_cache"},
+        placeholder_probes=original.placeholder_probes,
+        row_effects=original.row_effects,
+        trace_state=original.trace_state,
+    )
+    monkeypatch.setitem(POSTPROCESS_STEP_CONTRACTS, "10", synthetic)
+    findings = {
+        key
+        for key, category in _executor.classify_declared_reads().items()
+        if category == "finding"
+    }
+    assert ("10", "_facets_cache") in findings
+
+
+def test_token_read_before_write_check_fires(monkeypatch: pytest.MonkeyPatch) -> None:
+    """7.1-5: an r:token with no earlier writer and no baseline is refused."""
+
+    from torchlens.postprocess import PostprocessStepContract, tokens
+
+    original = POSTPROCESS_STEP_CONTRACTS["2"]
+    broken = PostprocessStepContract(
+        original.step,
+        original.name,
+        original.contract,
+        writes=original.writes,
+        reads=original.reads,
+        trace_state=original.trace_state | tokens("r:module_logs"),
+    )
+    monkeypatch.setitem(POSTPROCESS_STEP_CONTRACTS, "2", broken)
+    violations = list(_executor._iter_structural_violations())
+    assert any("r:module_logs" in violation for violation in violations)
+
+
+# ---------------------------------------------------------------------------
+# Dynamic: the combined audit through a real capture
+# ---------------------------------------------------------------------------
+
+
+def test_clone_scope_tags_step1_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Op.copy's whole-schema loop lands as category (d), not findings.
+
+    Step 1 clones the output node; naive recording would report ~180
+    category-(c) reads. The row-clone scope routes them into the clone
+    channel, and legality rides the step's 'creates' row effect.
+    """
+
+    import torchlens.postprocess as pp
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_READ_AUDIT", "record")
+    pp.RECORDED_STEP_READS.clear()
+    pp.RECORDED_STEP_CLONE_READS.clear()
+    trace = tl.trace(_TinyModel().eval(), torch.randn(2, 3))
+    try:
+        clone_reads = pp.RECORDED_STEP_CLONE_READS.get("1", set())
+        assert len(clone_reads) > 100, "clone loop must land in the clone channel"
+        plain_reads = pp.RECORDED_STEP_READS.get("1", set())
+        assert len(plain_reads) < 30, "clone reads must NOT land as plain reads"
+        assert "creates" in POSTPROCESS_STEP_CONTRACTS["1"].row_effects
+    finally:
+        pp.RECORDED_STEP_READS.clear()
+        pp.RECORDED_STEP_CLONE_READS.clear()
+        pp.RECORDED_STEP_EFFECTIVE_WRITES.clear()
+        trace.cleanup()
+
+
+def test_read_enforcement_green_on_default_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Observed reads stay a subset of declared reads+probes (enforce mode)."""
+
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_READ_AUDIT", "enforce")
+    trace = tl.trace(_TinyModel().eval(), torch.randn(2, 3))
+    trace.cleanup()
+
+
+def test_read_enforcement_trips_on_undeclared_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An undeclared read on a covered axis fails the day it is introduced."""
+
+    import torchlens.postprocess as pp
+    from torchlens.postprocess import PostprocessStepContract
+
+    original = POSTPROCESS_STEP_CONTRACTS["2"]
+    real_step2 = pp._find_output_ancestors
+
+    def snooping_step2(trace: object) -> None:
+        real_step2(trace)
+        first_op = next(iter(trace._raw_graph_ws.raw_layer_dict.values()))
+        _ = first_op.func_rng_states  # undeclared read on step 2
+
+    narrowed = PostprocessStepContract(
+        original.step,
+        original.name,
+        original.contract,
+        writes=original.writes,
+        reads=original.reads - {"func_rng_states"},
+        trace_state=original.trace_state,
+    )
+    monkeypatch.setitem(POSTPROCESS_STEP_CONTRACTS, "2", narrowed)
+    monkeypatch.setattr(pp, "_find_output_ancestors", snooping_step2)
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_ASSERTIONS", "1")
+    monkeypatch.setenv("TORCHLENS_POSTPROCESS_READ_AUDIT", "enforce")
+    with pytest.raises(AssertionError, match="read undeclared op-store columns"):
+        tl.trace(_TinyModel().eval(), torch.randn(2, 3))
+
+
+def test_row_clone_scope_free_when_unarmed() -> None:
+    """Op.copy works outside any audit (pickle/fork/preview paths)."""
+
+    trace = tl.trace(_TinyModel().eval(), torch.randn(2, 3))
+    try:
+        op = trace.layer_list[0]
+        copied = op.copy()
+        assert copied is not op
+        from torchlens._trace_core.op_store import (
+            _AUDIT_CLONE_READS,
+            _AUDIT_READS,
+            _CLONE_SCOPE_DEPTH,
+        )
+
+        assert not _AUDIT_READS
+        assert not _AUDIT_CLONE_READS
+        assert not _CLONE_SCOPE_DEPTH
+    finally:
+        trace.cleanup()
+
+
+def test_phase_timing_bucket_names_default_capture() -> None:
+    """The _vtimed bucket-name set for a default capture is frozen (§5.5).
+
+    The surface oracle normalizes timing fields, so a drift in WHICH
+    buckets exist would pass the byte gate silently; this pins the set
+    (step 13 and 17.5 are deliberately unwrapped; conditional steps absent
+    when skipped).
+    """
+
+    trace = tl.trace(_TinyModel().eval(), torch.randn(2, 3))
+    try:
+        buckets = {
+            name
+            for name in trace._phase_timings
+            if name.startswith("postprocess:Step")
+        }
+        assert buckets == {
+            "postprocess:Step 0: Materialize capture events",
+            "postprocess:Step 1: Add output layers",
+            "postprocess:Step 2: Trace output ancestors",
+            "postprocess:Step 3: Remove orphan nodes",
+            "postprocess:Step 4: Input/output distances",
+            "postprocess:Step 5: Mark conditional branches",
+            "postprocess:Step 6: Fix buffer layers",
+            "postprocess:Step 7: Loop detection (full)",
+            "postprocess:Step 8: Map labels",
+            "postprocess:Step 9: Log final info",
+            "postprocess:Step 10: Rename labels",
+            "postprocess:Step 11: Build lookup keys",
+            "postprocess:Step 11.5: Populate source var names",
+            "postprocess:Step 11.75: Resolve deferred retention",
+            "postprocess:Step 12: Undecorate tensors",
+            "postprocess:Step 14: Log timing",
+            "postprocess:Step 15: Finalize params",
+            "postprocess:Step 15.5: Build layer logs",
+            "postprocess:Step 16: Build module logs",
+            "postprocess:Step 16.5: Graph shape hash",
+            "postprocess:Step 17: Mark pass finished",
+            "postprocess:Step 20: Release param refs",
+        }
+    finally:
+        trace.cleanup()
