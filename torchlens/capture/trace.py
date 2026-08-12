@@ -345,7 +345,7 @@ def _run_predicate_forward_with_root_frame(
         Raw model output.
     """
 
-    from ..capture.predicates import _evaluate_keep_module, _is_halt_only_capture
+    from ..capture.predicates import _is_halt_only_capture, _module_capture_spec
     from ..capture.projections import (
         _build_record_context,
         append_projected_event,
@@ -386,7 +386,7 @@ def _run_predicate_forward_with_root_frame(
         if halt_only:
             evaluate_halt_stop(trace, enter_ctx, state.options)
         else:
-            enter_spec = _evaluate_keep_module(enter_ctx, state.options)
+            enter_spec = _module_capture_spec(state.options)
             append_projected_event(
                 trace,
                 enter_ctx,
@@ -439,7 +439,7 @@ def _run_predicate_forward_with_root_frame(
             if halt_only:
                 evaluate_halt_stop(trace, exit_ctx, state.options, frontier_output=outputs)
             else:
-                exit_spec = _evaluate_keep_module(exit_ctx, state.options)
+                exit_spec = _module_capture_spec(state.options)
                 append_projected_event(
                     trace,
                     exit_ctx,

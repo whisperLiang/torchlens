@@ -139,15 +139,12 @@ def _context_from_layer(
 def _select_predicate(
     predicate: Predicate | None,
     keep_op: Predicate | None,
-    keep_module: Predicate | None,
 ) -> Predicate | None:
     """Resolve the predicate callable for previewed layer events."""
 
     if predicate is not None:
         return predicate
-    if keep_op is not None:
-        return keep_op
-    return keep_module
+    return keep_op
 
 
 def _evaluate_preview_node(
@@ -309,7 +306,6 @@ def preview_fastlog(
     trace: Any,
     predicate: Predicate | None = None,
     keep_op: Predicate | None = None,
-    keep_module: Predicate | None = None,
     color_kept: str = "#98FB98",
     color_rejected: str = "#E6E6E6",
     color_unreachable: str = "#F7D460",
@@ -324,7 +320,7 @@ def preview_fastlog(
     ----------
     trace:
         Fully logged model graph to preview.
-    predicate, keep_op, keep_module:
+    predicate, keep_op:
         Predicate callables that receive synthesized ``RecordContext`` objects.
     color_kept, color_rejected, color_unreachable, color_predicate_error:
         Fill colors for preview decisions.
@@ -346,7 +342,7 @@ def preview_fastlog(
         raise NotImplementedError(
             "fastlog preview currently supports Graphviz only; dagua support is planned."
         )
-    resolved_predicate = _select_predicate(predicate, keep_op, keep_module)
+    resolved_predicate = _select_predicate(predicate, keep_op)
     preview_nodes = _build_preview_nodes(trace, resolved_predicate)
     node_spec_fn = _make_node_spec_fn(
         preview_nodes,

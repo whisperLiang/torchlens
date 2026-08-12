@@ -161,7 +161,6 @@ def _empty_recording(options: "RecordingOptions") -> Recording:
         halt_reason=None,
         halts_by_pass={},
         keep_op_repr=repr(options.keep_op) if options.keep_op is not None else None,
-        keep_module_repr=repr(options.keep_module) if options.keep_module is not None else None,
         history_size=options.history_size,
         save_grads_repr=repr(options.save_grads) if options.save_grads is not None else None,
         _activation_transform_repr=(

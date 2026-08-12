@@ -66,7 +66,6 @@ def _options() -> RecordingOptions:
 
     return RecordingOptions(
         keep_op=lambda ctx: ctx.kind == "op",
-        keep_module=lambda ctx: True,
         default_op=False,
         default_module=False,
         include_source_events=True,

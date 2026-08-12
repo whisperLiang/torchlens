@@ -433,7 +433,6 @@ def _write_metadata(path: Path, recording: Recording, options: RecordingOptions)
         "halt_reason": recording.halt_reason,
         "halts_by_pass": recording.halts_by_pass,
         "keep_op_repr": recording.keep_op_repr,
-        "keep_module_repr": recording.keep_module_repr,
         "_activation_transform_repr": recording._activation_transform_repr,
         "save_raw_activations": options.save_raw_activations,
         "history_size": options.history_size,

@@ -8,8 +8,8 @@ import pytest
 import torch
 
 from torchlens.capture.predicates import (
-    _evaluate_keep_module,
     _evaluate_keep_op,
+    _module_capture_spec,
     _normalize_capture_decision,
 )
 from torchlens.capture.projections import _build_record_context
@@ -82,17 +82,16 @@ def test_normalize_capture_decision_rejects_invalid_returns(bad_result: object) 
 
 
 def test_evaluate_keep_op_and_module_use_predicates_and_defaults() -> None:
-    """Slot evaluators call the right predicate and default."""
+    """The op slot calls its predicate; module events follow default_module."""
 
     ctx = _ctx()
     options = RecordingOptions(
         keep_op=lambda event: event.func_name == "linear",
-        keep_module=lambda event: None,
         default_module=True,
     )
 
     assert _evaluate_keep_op(ctx, options).save_out is True
-    assert _evaluate_keep_module(ctx, options) == CaptureSpec(
+    assert _module_capture_spec(options) == CaptureSpec(
         save_out=True,
         save_metadata=True,
     )

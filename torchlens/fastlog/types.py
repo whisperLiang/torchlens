@@ -270,16 +270,14 @@ class RecordingTrace:
     def repredicate(
         self,
         other_keep_op: Callable[[RecordContext], PredicateDecision] | None = None,
-        other_keep_module: Callable[[RecordContext], PredicateDecision] | None = None,
     ) -> "RecordingTrace":
-        """Return a new trace with decisions from new predicates.
+        """Return a new trace with decisions from a new op predicate.
 
         Parameters
         ----------
         other_keep_op:
-            Predicate for op, input, and buffer events.
-        other_keep_module:
-            Predicate for module entry and exit events.
+            Predicate for op, input, and buffer events. Module boundary
+            events have no predicate slot and are never re-selected.
 
         Returns
         -------
@@ -292,7 +290,7 @@ class RecordingTrace:
         decisions: list[bool] = []
         for ctx in self.contexts:
             predicate = (
-                other_keep_module if ctx.kind in {"module_enter", "module_exit"} else other_keep_op
+                None if ctx.kind in {"module_enter", "module_exit"} else other_keep_op
             )
             result = predicate(ctx) if predicate is not None else False
             spec = _normalize_capture_decision(result, ctx, False)
@@ -334,7 +332,6 @@ class Recording(CapturedRun):
     predicate_failures: list[PredicateFailure]
     predicate_failure_overflow_count: int
     keep_op_repr: str | None
-    keep_module_repr: str | None
     history_size: int
     orphan_records: list[dict[str, Any]] = field(default_factory=list)
     halted: bool = False

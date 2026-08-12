@@ -29,7 +29,6 @@ LookbackPayloadPolicy = Literal[
 
 _RECORDING_FIELDS: Final[tuple[str, ...]] = (
     "keep_op",
-    "keep_module",
     "default_op",
     "default_module",
     "history_size",
@@ -71,7 +70,6 @@ class RecordingOptions:
     """Grouped options for one fastlog predicate recording session."""
 
     keep_op: PredicateFn | None
-    keep_module: PredicateFn | None
     default_op: bool | CaptureSpec
     default_module: bool | CaptureSpec
     history_size: int
@@ -101,7 +99,6 @@ class RecordingOptions:
     def __init__(
         self,
         keep_op: PredicateFn | None | MissingType = MISSING,
-        keep_module: PredicateFn | None | MissingType = MISSING,
         default_op: bool | CaptureSpec | MissingType = MISSING,
         default_module: bool | CaptureSpec | MissingType = MISSING,
         history_size: int | MissingType = MISSING,
@@ -127,9 +124,6 @@ class RecordingOptions:
         specified_fields: set[str] = set()
         values: dict[str, Any] = {
             "keep_op": _resolve_recording_option("keep_op", keep_op, None, specified_fields),
-            "keep_module": _resolve_recording_option(
-                "keep_module", keep_module, None, specified_fields
-            ),
             "default_op": _resolve_recording_option(
                 "default_op", default_op, False, specified_fields
             ),
@@ -278,7 +272,6 @@ def merge_recording_options(
     *,
     recording: RecordingOptions | None,
     keep_op: PredicateFn | None | MissingType = MISSING,
-    keep_module: PredicateFn | None | MissingType = MISSING,
     default_op: bool | CaptureSpec | MissingType = MISSING,
     default_module: bool | CaptureSpec | MissingType = MISSING,
     history_size: int | MissingType = MISSING,
@@ -307,7 +300,6 @@ def merge_recording_options(
     )
     incoming = {
         "keep_op": keep_op,
-        "keep_module": keep_module,
         "default_op": default_op,
         "default_module": default_module,
         "history_size": history_size,

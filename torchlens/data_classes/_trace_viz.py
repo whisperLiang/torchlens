@@ -488,14 +488,13 @@ class TraceVisualizationMixin(_TraceMixinBase):
         self: "Trace",
         predicate: Optional[Callable[..., Any]] = None,
         keep_op: Optional[Callable[..., Any]] = None,
-        keep_module: Optional[Callable[..., Any]] = None,
         **kwargs: Any,
     ) -> str:
         """Render a fastlog predicate preview for this model graph.
 
         Parameters
         ----------
-        predicate, keep_op, keep_module:
+        predicate, keep_op:
             Predicate callables that receive synthesized fastlog ``RecordContext``
             objects.
         **kwargs:
@@ -513,7 +512,6 @@ class TraceVisualizationMixin(_TraceMixinBase):
             self,
             predicate=predicate,
             keep_op=keep_op,
-            keep_module=keep_module,
             **kwargs,
         )
 
