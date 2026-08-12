@@ -22,6 +22,7 @@ class CapturedEventSnapshot:
     module_prep_events: tuple[Any, ...]
     module_enter_events: tuple[Any, ...]
     module_exit_events: tuple[Any, ...]
+    grad_fn_handles_by_label_raw: dict[str, Any]
 
 
 def _trace_and_capture_events(
@@ -62,6 +63,9 @@ def _trace_and_capture_events(
                 module_prep_events=tuple(inputs.journal.module_prep_events),
                 module_enter_events=tuple(inputs.journal.module_enter_events),
                 module_exit_events=tuple(inputs.journal.module_exit_events),
+                grad_fn_handles_by_label_raw=dict(
+                    inputs.journal.grad_fn_handles_by_label_raw
+                ),
             )
         )
         return real_ingest(inputs, manifest)
@@ -123,7 +127,17 @@ def test_phase0_op_event_fields_are_populated(monkeypatch: pytest.MonkeyPatch) -
     assert add_event.source_trace_id is None
     assert add_event.pass_index == 1
     assert add_event.grad_fn_class_qualname is not None
-    assert add_event.grad_fn_handle is not None
+    # grad-fn single ownership: the journal side index is the ONE handle
+    # authority; the compat OpEvent field mirrors it on the legacy leg and
+    # does not exist on decomposed OpRecords (strict-protocol default None).
+    index_handle = snapshot.grad_fn_handles_by_label_raw.get(add_event.label_raw)
+    assert index_handle is not None
+    from torchlens.ir.events import OpEvent as _OpEvent
+
+    if isinstance(add_event, _OpEvent):
+        assert add_event.grad_fn_handle is index_handle
+    else:
+        assert getattr(add_event, "grad_fn_handle", None) is None
     assert add_event.parent_params == ()
     assert add_event.equivalence_class
     assert add_event.is_output_parent is True

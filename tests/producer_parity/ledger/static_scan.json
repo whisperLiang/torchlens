@@ -9700,7 +9700,7 @@
 "field": "grad_fn_handle",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 835,
+"line": 840,
 "via_getattr": false
 },
 {
@@ -9708,7 +9708,7 @@
 "field": "grad_fn_handle",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 836,
+"line": 841,
 "via_getattr": false
 },
 {
@@ -9716,7 +9716,7 @@
 "field": "label_raw",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 357,
+"line": 362,
 "via_getattr": false
 },
 {
@@ -9724,7 +9724,7 @@
 "field": "templates",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 453,
+"line": 458,
 "via_getattr": false
 },
 {
@@ -9732,7 +9732,7 @@
 "field": "label_raw",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 515,
+"line": 520,
 "via_getattr": false
 },
 {
@@ -9740,7 +9740,7 @@
 "field": "label_raw",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 836,
+"line": 841,
 "via_getattr": false
 },
 {
@@ -9748,151 +9748,23 @@
 "field": "transform_config",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 155,
+"line": 160,
 "via_getattr": false
 },
 {
 "ambiguous": false,
 "field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 292,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 292,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "output",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 439,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "output",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 447,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "seq",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 712,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "output",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 438,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "transform_config",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 142,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 296,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 296,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
 "line": 297,
 "via_getattr": false
 },
 {
-"ambiguous": true,
-"field": "label_raw",
+"ambiguous": false,
+"field": "raw_index",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
 "line": 297,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "seq",
-"file": "torchlens/ir/capture_events.py",
-"has_default": true,
-"line": 650,
-"via_getattr": true
-},
-{
-"ambiguous": true,
-"field": "seq",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 685,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "parent_arg_positions",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 153,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 304,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 304,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 304,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/ir/capture_events.py",
-"has_default": false,
-"line": 304,
 "via_getattr": false
 },
 {
@@ -9904,11 +9776,139 @@
 "via_getattr": false
 },
 {
+"ambiguous": true,
+"field": "output",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 452,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 717,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "output",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 443,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "transform_config",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 147,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 301,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 301,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 302,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 302,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/ir/capture_events.py",
+"has_default": true,
+"line": 655,
+"via_getattr": true
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 690,
+"via_getattr": false
+},
+{
 "ambiguous": false,
 "field": "parent_arg_positions",
 "file": "torchlens/ir/capture_events.py",
 "has_default": false,
-"line": 136,
+"line": 158,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 309,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 309,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 309,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 309,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "output",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 449,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "parent_arg_positions",
+"file": "torchlens/ir/capture_events.py",
+"has_default": false,
+"line": 141,
 "via_getattr": false
 },
 {
@@ -10068,7 +10068,7 @@
 "field": "parents",
 "file": "torchlens/ir/live_index.py",
 "has_default": false,
-"line": 60,
+"line": 62,
 "via_getattr": false
 },
 {
@@ -10076,47 +10076,7 @@
 "field": "module_stack",
 "file": "torchlens/ir/live_index.py",
 "has_default": false,
-"line": 203,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/ir/live_index.py",
-"has_default": false,
-"line": 52,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/ir/live_index.py",
-"has_default": false,
-"line": 58,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/ir/live_index.py",
-"has_default": false,
-"line": 59,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/ir/live_index.py",
-"has_default": false,
-"line": 79,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "parents",
-"file": "torchlens/ir/live_index.py",
-"has_default": false,
-"line": 94,
+"line": 205,
 "via_getattr": false
 },
 {
@@ -10132,7 +10092,47 @@
 "field": "label_raw",
 "file": "torchlens/ir/live_index.py",
 "has_default": false,
-"line": 62,
+"line": 60,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/ir/live_index.py",
+"has_default": false,
+"line": 61,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/ir/live_index.py",
+"has_default": false,
+"line": 81,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "parents",
+"file": "torchlens/ir/live_index.py",
+"has_default": false,
+"line": 96,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/ir/live_index.py",
+"has_default": false,
+"line": 56,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/ir/live_index.py",
+"has_default": false,
+"line": 64,
 "via_getattr": false
 },
 {
@@ -10140,15 +10140,7 @@
 "field": "output",
 "file": "torchlens/ir/live_index.py",
 "has_default": false,
-"line": 168,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "output",
-"file": "torchlens/ir/live_index.py",
-"has_default": false,
-"line": 185,
+"line": 170,
 "via_getattr": false
 },
 {
@@ -10161,10 +10153,10 @@
 },
 {
 "ambiguous": true,
-"field": "label_raw",
+"field": "output",
 "file": "torchlens/ir/live_index.py",
 "has_default": false,
-"line": 63,
+"line": 189,
 "via_getattr": false
 },
 {
@@ -10172,7 +10164,15 @@
 "field": "label_raw",
 "file": "torchlens/ir/live_index.py",
 "has_default": false,
-"line": 96,
+"line": 65,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/ir/live_index.py",
+"has_default": false,
+"line": 98,
 "via_getattr": false
 },
 {
@@ -10180,7 +10180,7 @@
 "field": "parents",
 "file": "torchlens/ir/live_index.py",
 "has_default": false,
-"line": 135,
+"line": 137,
 "via_getattr": false
 },
 {
@@ -10188,7 +10188,7 @@
 "field": "label_raw",
 "file": "torchlens/ir/live_index.py",
 "has_default": false,
-"line": 97,
+"line": 99,
 "via_getattr": false
 },
 {

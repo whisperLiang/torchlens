@@ -13,10 +13,14 @@ pytestmark = pytest.mark.smoke
 
 
 def test_adapter_is_identity_on_op_events(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every journal record passes through the adapter unchanged today."""
+    """Every LEGACY journal record passes through the adapter unchanged."""
 
     import torchlens.postprocess as postprocess_module
     import torchlens.postprocess._materialize as materialize_module
+
+    # This test pins the compat-OpEvent identity leg; force the legacy
+    # producer regardless of the ambient switch.
+    monkeypatch.setenv("TORCHLENS_CAPTURE_PRODUCER", "legacy")
 
     captured: list = []
     original = materialize_module.materialize_from_events

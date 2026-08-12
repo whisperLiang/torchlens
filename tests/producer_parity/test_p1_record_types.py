@@ -139,16 +139,22 @@ def test_strict_protocol_refusal_type() -> None:
 
 
 def _journal_events(model, inputs) -> list:
+    """Capture a LEGACY journal (compat OpEvents) for adapter-input tests."""
+
+    import os
+
     import torchlens.postprocess as postprocess_module
     import torchlens.postprocess._materialize as materialize_module
 
     captured: list = []
     original = materialize_module.materialize_from_events
+    producer_before = os.environ.get("TORCHLENS_CAPTURE_PRODUCER")
 
     def spy(trace, events):
         captured.extend(events.op_events)
         original(trace, events)
 
+    os.environ["TORCHLENS_CAPTURE_PRODUCER"] = "legacy"
     postprocess_module.materialize_from_events = spy
     materialize_module.materialize_from_events = spy
     try:
@@ -156,6 +162,10 @@ def _journal_events(model, inputs) -> list:
     finally:
         postprocess_module.materialize_from_events = original
         materialize_module.materialize_from_events = original
+        if producer_before is None:
+            os.environ.pop("TORCHLENS_CAPTURE_PRODUCER", None)
+        else:
+            os.environ["TORCHLENS_CAPTURE_PRODUCER"] = producer_before
     return captured
 
 
