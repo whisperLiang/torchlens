@@ -138,7 +138,18 @@ exclusive with backward-related capture because it discards the autograd graph.
   (`op_store.py`) held at `trace._trace_core` (declared `FieldPolicy.DROP`); rows are
   row-major lists while building and seal after step 20 (columnar transpose with
   numeric packing at >=512 rows). `Op.copy()`, pickle restore, fork shells, and
-  preview backends use detached single-row stores. Architecture of record:
+  preview backends use detached single-row stores. M6 relations are LIVE
+  (`relation_views.py`): on FINISHED traces the relation accessors return IMMUTABLE
+  views — `tuple` for label sequences (`parents`, `children`, `modules`,
+  `module_call_stack`, conditional child lists, ...), `frozenset` for label sets
+  (`input_ancestors`, `output_descendants`, `root_ancestors`,
+  `internal_source_ancestors`) — an authorized public type break (JMT 2026-08-12):
+  in-place mutation raises, assignment still works and normalizes to the view type,
+  and equal views may be shared across records. `parents`/`children` live in the
+  core's canonical dataflow edge-occurrence table (CSR by edge id) and rematerialize
+  lazily; dict-shaped relation metadata (`parent_arg_positions` etc.) stays mutable.
+  During postprocess the staging containers remain real mutable builtins; legacy
+  list/set state normalizes on load. Architecture of record:
   `docs/reference/trace_core_design.md`.
 - `backends/torch/` - torch function wrapping, explicit wrap/unwrap, module prep.
 - `fastlog/` - sparse predicate recording with RAM/disk storage and recovery.

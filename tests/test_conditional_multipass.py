@@ -241,7 +241,7 @@ def test_alternating_recurrent_if_model_merges_layerlog_conditionals() -> None:
     linear_layer = _find_multi_pass_linear_layer(trace)
 
     assert linear_layer.is_in_conditional_body is True
-    assert linear_layer.conditional_role_stacks == [
+    assert [list(s) for s in linear_layer.conditional_role_stacks] == [
         [(conditional_id, "then")],
         [(conditional_id, "else")],
     ]
@@ -302,7 +302,7 @@ def test_looped_if_alternating_model_has_exactly_two_signatures() -> None:
     conditional_id = _get_only_event(trace)
     linear_layer = _find_multi_pass_linear_layer(trace)
 
-    assert linear_layer.conditional_role_stacks == [
+    assert [list(s) for s in linear_layer.conditional_role_stacks] == [
         [(conditional_id, "then")],
         [(conditional_id, "else")],
     ]
@@ -320,13 +320,13 @@ def test_non_conditional_recurrent_model_keeps_empty_aggregate_views() -> None:
 
     assert trace.conditional_records == []
     assert linear_layer.is_in_conditional_body is False
-    assert linear_layer.conditional_role_stacks == [[]]
+    assert [list(s) for s in linear_layer.conditional_role_stacks] == [[]]
     assert linear_layer.conditional_branch_stack_ops == {(): [1, 2, 3]}
     assert linear_layer.conditional_arm_children == {}
-    assert linear_layer.conditional_entry_children == []
-    assert linear_layer.conditional_then_children == []
+    assert linear_layer.conditional_entry_children == ()
+    assert linear_layer.conditional_then_children == ()
     assert linear_layer.conditional_elif_children == {}
-    assert linear_layer.conditional_else_children == []
+    assert linear_layer.conditional_else_children == ()
 
 
 class SecondPassOnlyThenModel(nn.Module):
@@ -393,4 +393,4 @@ def test_then_children_from_second_pass_survive_layer_merge() -> None:
     assert branch_label in parent_layer.conditional_arm_children[conditional_id]["then"]
     assert branch_label in parent_layer.conditional_then_children
     assert parent_layer.conditional_elif_children == {}
-    assert parent_layer.conditional_else_children == []
+    assert parent_layer.conditional_else_children == ()

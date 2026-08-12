@@ -361,14 +361,14 @@ def test_op_setstate_absent_container_fields_restore_typed() -> None:
     restored = Op.__new__(Op)
     restored.__setstate__(state)
 
-    assert isinstance(restored.input_to_module_calls, list)
-    assert isinstance(restored.parents, list)
-    assert isinstance(restored.children, list)
+    assert isinstance(restored.input_to_module_calls, tuple)
+    assert isinstance(restored.parents, tuple)
+    assert isinstance(restored.children, tuple)
     assert isinstance(restored.equivalent_ops, set)
-    assert isinstance(restored.root_ancestors, set)
-    assert isinstance(restored._param_barcodes, list)
+    assert isinstance(restored.root_ancestors, frozenset)
+    assert isinstance(restored._param_barcodes, tuple)
     assert isinstance(restored.param_shapes, list)
-    assert isinstance(restored.modules, list)
+    assert isinstance(restored.modules, tuple)
     # Consumer patterns from finalization/loop_detection/invariants must work.
     assert "missing" not in restored.input_to_module_calls
     assert list(restored.input_to_module_calls) == []
@@ -415,8 +415,8 @@ def test_setstate_present_but_wrong_typed_container_is_coerced() -> None:
     op_state["_param_barcodes"] = {"legacy_barcode_as_set"}
     restored_op = Op.__new__(Op)
     restored_op.__setstate__(op_state)
-    assert isinstance(restored_op._param_barcodes, list)
-    assert restored_op._param_barcodes == ["legacy_barcode_as_set"]
+    assert isinstance(restored_op._param_barcodes, tuple)
+    assert restored_op._param_barcodes == ("legacy_barcode_as_set",)
 
     # Trace: `op_labels` declared as list but legacy state holds a set.
     trace_state = trace.__getstate__()

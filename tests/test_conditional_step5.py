@@ -292,9 +292,9 @@ def _assert_derived_views_consistent(trace: Trace) -> None:
         for elif_index, child_labels in sorted(grouped_elif_children.items()):
             expected_elif_children[elif_index] = sorted(child_labels)
 
-        assert layer.conditional_then_children == expected_then_children
+        assert list(layer.conditional_then_children) == expected_then_children
         assert layer.conditional_elif_children == expected_elif_children
-        assert layer.conditional_else_children == expected_else_children
+        assert list(layer.conditional_else_children) == expected_else_children
 
 
 def _has_upstream_path(trace: Trace, source_label: str, target_label: str) -> bool:
@@ -390,8 +390,8 @@ def test_simple_if_else_model_step5_pipeline() -> None:
 
     relu_layer = _find_single_layer(positive_log, "relu")
     sigmoid_layer = _find_single_layer(negative_log, "sigmoid")
-    assert relu_layer.conditional_branch_stack == [(0, "then")]
-    assert sigmoid_layer.conditional_branch_stack == [(0, "else")]
+    assert relu_layer.conditional_branch_stack == ((0, "then"),)
+    assert sigmoid_layer.conditional_branch_stack == ((0, "else"),)
 
     assert all(
         call_indexs == [1] for call_indexs in positive_log.conditional_edge_call_indices.values()
@@ -463,7 +463,7 @@ def test_elif_ladder_model_step5_pipeline() -> None:
         )
 
         target_layer = _find_single_layer(trace, func_name)
-        assert target_layer.conditional_branch_stack == [(0, branch_kind)]
+        assert target_layer.conditional_branch_stack == ((0, branch_kind),)
         observed_branch_kinds.add(branch_kind)
 
         _assert_derived_views_consistent(trace)
@@ -507,6 +507,6 @@ def test_save_code_context_false_still_attributes_branches() -> None:
     assert bool_layers[0].is_terminal_conditional_bool is True
     assert bool_layers[0].terminal_conditional_id == 0
     assert (0, "then") in trace.conditional_arm_entry_edges
-    assert relu_layer.conditional_branch_stack == [(0, "then")]
+    assert relu_layer.conditional_branch_stack == ((0, "then"),)
 
     _assert_derived_views_consistent(trace)

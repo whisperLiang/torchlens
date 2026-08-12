@@ -4238,12 +4238,20 @@ class _RelationViewField(_OpField):
         self._view_type = view_type
 
     def __set__(self, op: Any, value: Any) -> None:
-        """Write the cell, normalizing to the view type once finished."""
+        """Write the cell, normalizing to the view type once finished.
+
+        "Finished" is any of: a sealed store, a store whose relation freeze
+        already ran (preview backends convert without sealing), or a detached
+        single-row store. Building-phase writes stay raw so postprocess can
+        keep mutating its staging containers in place.
+        """
 
         store = _CORE_GET(op)
         cls = value.__class__
         if (cls is list or cls is set) and (
-            store.frozen or store.__class__ is DetachedOpStore
+            store.frozen
+            or store.dataflow_edges is not None
+            or store.__class__ is DetachedOpStore
         ):
             value = self._view_type(value)
         store.cell_set(_ROW_GET(op), self._fid, value)

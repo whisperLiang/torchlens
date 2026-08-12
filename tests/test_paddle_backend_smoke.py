@@ -73,8 +73,8 @@ def test_paddle_two_layer_mlp_parents_and_labels() -> None:
     assert "input.arg_0" in trace.layer_labels
     relu_label = next(label for label in trace.op_labels if "relu" in label)
     final_label = trace.output_layers[0] + ":1"
-    assert trace[relu_label].parents == ["functional.linear_1_2_raw"]
-    assert trace[final_label].parents == ["functional.relu_1_3_raw"]
+    assert trace[relu_label].parents == ("functional.linear_1_2_raw",)
+    assert trace[final_label].parents == ("functional.relu_1_3_raw",)
     assert all(capture.tensor_inputs for capture in trace._paddle_op_captures)
 
 
@@ -91,7 +91,7 @@ def test_paddle_source_input_labels_and_function_root() -> None:
     assert trace.module_identity_mode == "function_root"
     assert {"input.arg_0", "input.arg_1"} <= set(trace.layer_labels)
     add_label = next(label for label in trace.op_labels if "__add__" in label)
-    assert trace[add_label].parents == ["input.arg_0", "input.arg_1"]
+    assert trace[add_label].parents == ("input.arg_0", "input.arg_1")
 
 
 def test_paddle_recursion_guard_records_one_composite_op() -> None:
@@ -172,6 +172,6 @@ def test_paddle_same_dtype_astype_preserves_parent_label() -> None:
     trace = tl.trace(model, (x, weight), backend="paddle")
 
     matmul_label = next(label for label in trace.op_labels if "matmul" in label)
-    assert trace[matmul_label].parents == ["tensor.__add___1_3_raw", "input.arg_1"]
+    assert trace[matmul_label].parents == ("tensor.__add___1_3_raw", "input.arg_1")
     assert not any("astype" in label for label in trace.layer_labels)
     assert trace._paddle_alias_annotations[0]["preserved_label"] == "tensor.__add___1_3_raw"

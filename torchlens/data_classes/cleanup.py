@@ -373,20 +373,26 @@ def _scrub_layer_log_conditional_fields(self: "Trace", labels_to_remove_no_pass:
     for layer_log in getattr(self, "layer_logs", {}).values():
         if "conditional_entry_children" not in getattr(layer_log, "__dict__", {}):
             continue
-        layer_log.conditional_entry_children = [
+        # Layer is dict-backed (no normalizing descriptors until M8), so the
+        # scrub itself preserves the finished-trace immutable relation
+        # surface: tuple views in, tuple views out.
+        layer_log.conditional_entry_children = tuple(
             child_label
             for child_label in layer_log.conditional_entry_children
             if child_label not in labels_to_remove_no_pass
-        ]
+        )
         layer_log.conditional_arm_children = _filter_conditional_arm_children(
             layer_log.conditional_arm_children,
             labels_to_remove_no_pass,
         )
         (
-            layer_log.conditional_then_children,
-            layer_log.conditional_elif_children,
-            layer_log.conditional_else_children,
+            then_children,
+            elif_children,
+            else_children,
         ) = _project_aggregate_conditional_child_views(layer_log.conditional_arm_children)
+        layer_log.conditional_then_children = tuple(then_children)
+        layer_log.conditional_elif_children = elif_children
+        layer_log.conditional_else_children = tuple(else_children)
 
 
 def _scrub_conditional_fields_after_removal(
@@ -680,15 +686,19 @@ def _scrub_op_label_collections(op: "Op", labels_to_remove: Set[str]) -> None:
         value = getattr(op, field_name, None)
         if not value:
             continue
-        if isinstance(value, list):
+        if isinstance(value, (list, tuple)):
             # Only rebind when a dead label is actually present, for the same
             # reason as the set branch below: ``recurrent_ops`` shares ONE
             # canonical list across every Op of a recurrence group, and an
             # unconditional rebind would hand every Op its own equal-but-
-            # distinct copy for nothing.
+            # distinct copy for nothing. Finished traces store immutable
+            # tuple views here; reading one materializes any CSR-backed cell
+            # into an explicit view, and the rebind below writes the filtered
+            # view back, so removal can never resurrect through the edge
+            # table.
             if not labels_to_remove.isdisjoint(value):
                 setattr(op, field_name, [label for label in value if label not in labels_to_remove])
-        elif isinstance(value, set):
+        elif isinstance(value, (set, frozenset)):
             # Only rebind when a dead label is actually present. ``equivalent_ops``
             # shares ONE set object across every Op of an equivalence class, and
             # the Trace-level group behind it is scrubbed in place by the caller,

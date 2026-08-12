@@ -150,7 +150,7 @@ def test_h2_arange_tensor_end_is_parent_not_internal_source() -> None:
     arange_op = _ops_by_func(trace, "arange")[0]
     long_label = _ops_by_func(trace, "long")[0].layer_label
 
-    assert arange_op.parents == [long_label]
+    assert arange_op.parents == (long_label,)
     assert arange_op.parent_arg_positions["args"].get(0) == long_label
     assert not arange_op.is_internal_source
     assert arange_op.unattributed_tensor_args == ()
@@ -180,7 +180,7 @@ def test_h2_literal_control_args_stay_clean() -> None:
     trace = tl.trace(_LiteralRoll().eval(), torch.tensor([0.0, 1.0, 2.0]))
     roll_op = _ops_by_func(trace, "roll")[0]
 
-    assert roll_op.parents == ["input_1"]
+    assert roll_op.parents == ("input_1",)
     assert roll_op.unattributed_tensor_args == ()
 
 
@@ -258,8 +258,8 @@ def test_h1_foreach_inplace_threads_mutation_to_consumers() -> None:
     assert [len(op.parents) for op in foreach_ops] == [1, 1]
     assert foreach_ops[0].parents != foreach_ops[1].parents
     # Mutation nodes are NOT dead ends: each sum consumes its mutation node.
-    assert sum_ops[0].parents == [foreach_ops[0].layer_label]
-    assert sum_ops[1].parents == [foreach_ops[1].layer_label]
+    assert sum_ops[0].parents == (foreach_ops[0].layer_label,)
+    assert sum_ops[1].parents == (foreach_ops[1].layer_label,)
     assert all(op.children for op in foreach_ops)
     assert tl.validate(_ForeachInplace().eval(), x, scope="forward")
 
@@ -277,8 +277,8 @@ def test_m3_foreach_out_of_place_parents_are_zipped_without_duplicates() -> None
     foreach_ops = _ops_by_func(trace, "_foreach_add")
 
     assert len(foreach_ops) == 2
-    assert foreach_ops[0].parents == ["input_3", "input_1"]
-    assert foreach_ops[1].parents == ["input_4", "input_2"]
+    assert foreach_ops[0].parents == ("input_3", "input_1")
+    assert foreach_ops[1].parents == ("input_4", "input_2")
     assert foreach_ops[0].parent_arg_positions["args"] == {
         (1, 0): "input_3",
         (0, 0): "input_1",
@@ -385,7 +385,7 @@ def test_m4_element_disjoint_interleaved_views_get_no_mutation_edge() -> None:
     mul_op = _ops_by_func(trace, "__mul__")[0]
     odd_view_label = _ops_by_func(trace, "__getitem__")[1].layer_label
 
-    assert mul_op.parents == [odd_view_label]
+    assert mul_op.parents == (odd_view_label,)
     assert mutation_op.layer_label not in mul_op.parents
     assert tl.validate(_InterleavedDisjointViews().eval(), x, scope="forward")
 
@@ -398,7 +398,7 @@ def test_m4_genuinely_overlapping_views_keep_mutation_edge() -> None:
     mutation_op = _ops_by_func(trace, "add_")[0]
     mul_op = _ops_by_func(trace, "__mul__")[0]
 
-    assert mul_op.parents == [mutation_op.layer_label]
+    assert mul_op.parents == (mutation_op.layer_label,)
     assert tl.validate(_GenuinelyOverlappingViews().eval(), x, scope="forward")
 
 
@@ -527,8 +527,8 @@ def test_m6_real_setter_emits_op_with_receiver_and_rhs_parents() -> None:
     abs_op = _ops_by_func(trace, "__abs__")[0]
 
     assert set(setter_op.parents) == {complex_label, rhs_label}
-    assert abs_op.parents == [setter_op.layer_label]
-    assert setter_op.children == [abs_op.layer_label]
+    assert abs_op.parents == (setter_op.layer_label,)
+    assert setter_op.children == (abs_op.layer_label,)
     assert tl.validate(_RealSetterModel().eval(), x, scope="forward")
 
 
@@ -543,8 +543,8 @@ def test_m6_data_setter_emits_op_and_threads_consumers() -> None:
     )
     mul_op = _ops_by_func(trace, "__mul__")[0]
 
-    assert setter_op.parents == [rhs_label]
-    assert mul_op.parents == [setter_op.layer_label]
+    assert setter_op.parents == (rhs_label,)
+    assert mul_op.parents == (setter_op.layer_label,)
     assert torch.equal(setter_op.out, torch.tensor([6.0, 7.0]))
     assert tl.validate(_DataSetterModel().eval(), x, scope="forward")
 

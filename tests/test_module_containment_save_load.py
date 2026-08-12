@@ -74,7 +74,7 @@ def test_round_trip_save_load_preserves_module_containment(tmp_path: Path) -> No
 
     op_with_modules = next((op for op in loaded.layer_list if getattr(op, "modules", [])), None)
     assert op_with_modules is not None, "loaded trace should preserve module containment"
-    assert isinstance(op_with_modules.modules, list)
+    assert isinstance(op_with_modules.modules, tuple)
 
 
 def test_legacy_pickle_load_drops_thread_fields() -> None:

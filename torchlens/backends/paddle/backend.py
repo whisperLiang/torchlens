@@ -41,6 +41,7 @@ from .._finalize import attach_function_root_module, attach_object_module_logs
 from .._finalize import finalize_single_pass_trace
 from .._options import PADDLE_EXTRA_KWARG_POLICY, PADDLE_PREVIEW_TRACE_OPTION_POLICY
 from .._options import reject_extra_trace_kwargs, reject_unsupported_trace_options
+from ..._trace_core.relation_views import freeze_trace_relation_views
 from .._selective_save import apply_static_label_save_policy
 from .._selective_save import pop_static_label_save_predicate
 from .model_prep import (
@@ -444,6 +445,7 @@ class PaddleBackend:
                 )
             if hasattr(trace, "_paddle_module_stack"):
                 delattr(trace, "_paddle_module_stack")
+            freeze_trace_relation_views(trace)
             return trace
         finally:
             cleanup_model_session(trace, prepared_model, module_tree if use_object_module else None)

@@ -342,7 +342,9 @@ def test_invariant_3_child_labels_exist_in_trace() -> None:
     try:
         parent_label = trace.conditional_branch_edges[0][0]
         missing_label = "missing_bool_layer"
-        trace[parent_label].conditional_entry_children.append(missing_label)
+        trace[parent_label].conditional_entry_children = tuple(
+            trace[parent_label].conditional_entry_children
+        ) + (missing_label,)
         trace.conditional_branch_edges.append((parent_label, missing_label))
         _assert_invariant_error(trace, ("Invariant 3", missing_label))
     finally:

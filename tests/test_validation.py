@@ -2731,7 +2731,7 @@ def test_perturbation_validation_catches_spurious_third_recurrent_pass_edge() ->
     first_pass = next(op for op in trace.layer_list if op.label == "nantonum_1_1:1")
     assert third_pass.saved_args is not None
     third_pass.saved_args.append(first_pass.out.detach().clone())
-    third_pass.parents.append(first_pass.label)
+    third_pass.parents = tuple(third_pass.parents) + (first_pass.label,)
     third_pass.parent_arg_positions["args"][1] = first_pass.label
 
     decision_recorder = ValidationDecisionRecorder()
@@ -3926,7 +3926,7 @@ def test_runtime_tensor_fill_value_is_replayed_and_perturbation_sensitive(
         assert fill_parent in factory_layer.parents
         assert factory_layer.unattributed_tensor_args == ()
         if factory_name == "full":
-            assert factory_layer.parents == [fill_parent]
+            assert factory_layer.parents == (fill_parent,)
         else:
             assert set(factory_layer.parent_arg_positions["args"]) >= {0}
             assert len(factory_layer.parents) == 2
@@ -5473,7 +5473,9 @@ def test_edge_use_invariant_rejects_invalid_existing_record_kind() -> None:
     log = _make_clean_log()
     try:
         layer = next(layer for layer in log.layer_list if layer._edge_uses)
-        layer._edge_uses[0] = replace(layer._edge_uses[0], edge_use="bogus")
+        layer._edge_uses = (replace(layer._edge_uses[0], edge_use="bogus"),) + tuple(
+            layer._edge_uses[1:]
+        )
 
         with pytest.raises(MetadataInvariantError, match="invalid edge_use kind"):
             check_metadata_invariants(log)
@@ -6358,8 +6360,8 @@ def test_corruption_graph_ordering_pass_qualified_back_edge() -> None:
         assert back_edge_parent.label.endswith(":3")
         assert back_edge_child.label.endswith(":1")
 
-        back_edge_child.parents.append(back_edge_parent.label)
-        back_edge_parent.children.append(back_edge_child.label)
+        back_edge_child.parents = tuple(back_edge_child.parents) + (back_edge_parent.label,)
+        back_edge_parent.children = tuple(back_edge_parent.children) + (back_edge_child.label,)
 
         with pytest.raises(MetadataInvariantError, match="graph_ordering"):
             check_metadata_invariants(log)
@@ -6712,7 +6714,7 @@ def test_corruption_module_nested_path_leaf():
             # doesn't fail the module_layer_containment check but does fail
             # the leaf consistency check in module_containment_logic.
             # Use the first (parent) module as the last entry — valid module but wrong leaf
-            lpl.modules[-1] = lpl.modules[0]
+            lpl.modules = tuple(lpl.modules[:-1]) + (lpl.modules[0],)
             break
     with pytest.raises(MetadataInvariantError, match="module_containment_logic"):
         check_metadata_invariants(log)

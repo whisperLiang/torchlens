@@ -87,20 +87,24 @@ _MULTI_PASS_PER_CALL_LAYER_FIELDS: frozenset[str] = frozenset(
 _LAYER_LOG_CONTAINER_DEFAULTS: dict[str, Any] = {
     "arg_names": (),
     "param_shapes": [],
-    "_param_barcodes": [],
-    "_param_logs": [],
+    # Relation view fields (M6, JMT-FORK-1): declared restore type is the
+    # IMMUTABLE view; ``coerce_container_typed_state`` normalizes legacy
+    # list/set state on load so loaded Layers present the same immutable
+    # relation surface as live finished captures.
+    "_param_barcodes": (),
+    "_param_logs": (),
     "equivalent_ops": set(),
-    "in_conditionals": [],
-    "conditional_role_stacks": [],
+    "in_conditionals": (),
+    "conditional_role_stacks": (),
     "conditional_branch_stack_ops": {},
     "conditional_arm_children": {},
-    "modules": [],
-    "output_of_modules": [],
-    "output_of_module_calls": [],
-    "conditional_entry_children": [],
-    "conditional_then_children": [],
+    "modules": (),
+    "output_of_modules": (),
+    "output_of_module_calls": (),
+    "conditional_entry_children": (),
+    "conditional_then_children": (),
     "conditional_elif_children": {},
-    "conditional_else_children": [],
+    "conditional_else_children": (),
     "annotations": {},
     "call_labels": [],
 }
@@ -1031,8 +1035,13 @@ class Layer:
     # iterations.  Order is preserved (first-seen insertion order).
 
     @property
-    def children(self) -> list[str]:
-        """Union of child layers (no-pass labels) across all ops."""
+    def children(self) -> tuple[str, ...]:
+        """Union of child layers (no-pass labels) across all ops.
+
+        Immutable view (M6, JMT-FORK-1): computed per read, so mutating the
+        returned container could never reach stored state anyway; the tuple
+        makes that contract explicit and matches the Op relation surface.
+        """
         result = []
         seen = set()
         for pass_log in self.ops.values():
@@ -1041,11 +1050,14 @@ class Layer:
                 if no_pass not in seen:
                     seen.add(no_pass)
                     result.append(no_pass)
-        return result
+        return tuple(result)
 
     @property
-    def parents(self) -> list[str]:
-        """Union of parent layers (no-pass labels) across all ops."""
+    def parents(self) -> tuple[str, ...]:
+        """Union of parent layers (no-pass labels) across all ops.
+
+        Immutable view (M6, JMT-FORK-1); see ``children``.
+        """
         result = []
         seen = set()
         for pass_log in self.ops.values():
@@ -1054,7 +1066,7 @@ class Layer:
                 if no_pass not in seen:
                     seen.add(no_pass)
                     result.append(no_pass)
-        return result
+        return tuple(result)
 
     @property
     def has_children(self) -> bool:

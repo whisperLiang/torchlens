@@ -389,7 +389,7 @@ def test_cone_of_effect_follows_output_versions_per_child() -> None:
     log = _interventions(ResidualRelu(), torch.randn(2, 3))
     origin = _first_func(log, "linear")
     child_label = origin.children[0]
-    origin.children.remove(child_label)
+    origin.children = tuple(c for c in origin.children if c != child_label)
     origin.out_versions_by_child[child_label] = origin.out
 
     cone_labels = [site.layer_label for site in cone_of_effect(log, [origin])]
@@ -438,8 +438,8 @@ def test_cone_of_effect_handles_cycles() -> None:
 
     log = _interventions(ResidualRelu(), torch.randn(2, 3))
     relu_site = _first_func(log, "relu")
-    output = log[log.output_layers[0]]
-    output.children.append(relu_site.layer_label)
+    output = log.ops[log.output_layers[0]]
+    output.children = tuple(output.children) + (relu_site.layer_label,)
 
     cone = cone_of_effect(log, [relu_site])
 
@@ -451,7 +451,7 @@ def test_replay_warns_on_saved_edge_divergence() -> None:
 
     log = _interventions(ResidualRelu(), torch.randn(2, 3))
     relu_site = _first_func(log, "relu")
-    relu_site.parents.clear()
+    relu_site.parents = ()
 
     with pytest.warns(ControlFlowDivergenceWarning):
         log.replay(hooks={tl.func("relu"): _identity_hook})

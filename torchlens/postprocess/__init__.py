@@ -40,6 +40,7 @@ import warnings
 from ..capture.session import capture_session_for_events
 from ..ir.capture_events import _clone_op_event_for_replay
 from ..backends.torch.ops import _compact_ancestor_sets
+from .._trace_core.relation_views import freeze_trace_relation_views as _freeze_relation_views
 from ..utils.tensor_utils import _is_cuda_available
 from ..utils.hashing import (
     compute_graph_shape_hash,
@@ -658,7 +659,7 @@ def postprocess(
     # facade behavior is otherwise unchanged.
     _core = self.__dict__.get("_trace_core")
     if _core is not None and _core.ops is not None:
-        _freeze_relation_views(self, _core)
+        _freeze_relation_views(self)
         _core.ops.freeze()
 
     if getattr(self, "verbose", False):

@@ -165,22 +165,58 @@ def test_copy_on_read_fields_return_fresh_containers() -> None:
 
 
 @pytest.mark.smoke
-def test_plain_mutable_containers_are_observably_mutable() -> None:
-    """Row 3: ordinary container fields hand back the STORED container.
+def test_relation_reads_are_immutable_views() -> None:
+    """Row 3 (JMT-FORK-1, decided 2026-08-12): relation reads are views.
 
-    Appending through a read IS visible on the next read — this observable
-    behavior must survive lazy hydration (first public access materializes
-    the builtin into the row overlay, which becomes authoritative).
+    Finished-trace relation accessors return IMMUTABLE views — ``tuple`` for
+    label sequences, ``frozenset`` for label sets — with identity-stable
+    repeated reads. In-place mutation raises instead of sticking. This
+    supersedes the historical hand-back-the-stored-list contract; the break
+    is authorized and documented in trace_core_design.md section 3.2.
     """
 
     trace = _capture_cnn()
-    op = next(iter(trace.ops.values()))
+    op = next(op for op in trace.ops.values() if op.parents and op.children)
+
     children_read = op.children
-    assert children_read is op.children
-    children_read.append("__aliases_v1_child__")
-    assert "__aliases_v1_child__" in op.children
-    op.children.remove("__aliases_v1_child__")
-    assert "__aliases_v1_child__" not in op.children
+    assert isinstance(children_read, tuple)
+    assert children_read is op.children, "relation view reads must be identity-stable"
+    with pytest.raises(AttributeError):
+        children_read.append("__aliases_v1_child__")
+    assert isinstance(op.parents, tuple)
+    assert isinstance(op.input_ancestors, frozenset)
+    assert isinstance(op.output_descendants, frozenset)
+    assert isinstance(op.modules, tuple)
+    with pytest.raises(AttributeError):
+        op.input_ancestors.add("__aliases_v1_member__")
+
+    # Direct ASSIGNMENT still works (the storage write path is unchanged) and
+    # normalizes a raw builtin to the declared view type on a finished trace.
+    original = op.children
+    op.children = list(original) + ["__aliases_v1_assigned__"]
+    assert isinstance(op.children, tuple)
+    assert "__aliases_v1_assigned__" in op.children
+    op.children = original
+    assert op.children == original
+
+
+@pytest.mark.smoke
+def test_plain_mutable_containers_are_observably_mutable() -> None:
+    """Row 3b: NON-relation container fields keep the stored-container contract.
+
+    Dict-shaped metadata (``parent_arg_positions`` and friends) was excluded
+    from the immutable-view decision: reads hand back the stored dict and
+    mutation through a read IS visible on the next read.
+    """
+
+    trace = _capture_cnn()
+    op = next(op for op in trace.ops.values() if op.parent_arg_positions)
+    read = op.parent_arg_positions
+    assert read is op.parent_arg_positions
+    read["__aliases_v1_domain__"] = {}
+    assert "__aliases_v1_domain__" in op.parent_arg_positions
+    del op.parent_arg_positions["__aliases_v1_domain__"]
+    assert "__aliases_v1_domain__" not in op.parent_arg_positions
 
 
 @pytest.mark.smoke
@@ -197,12 +233,16 @@ def test_multi_output_siblings_share_call_facts_not_identity() -> None:
     assert first.multi_output_index != second.multi_output_index
     assert first.layer_label != second.layer_label
 
-    # Mutating one sibling's mutable container never reaches the other.
-    first.children.append("__aliases_v1_sibling__")
+    # Relation views are immutable (JMT-FORK-1), so sibling cross-talk through
+    # in-place mutation is impossible by construction. Assignment stays
+    # per-record: rebinding one sibling's cell never reaches the other.
+    original_first, original_second = first.children, second.children
+    first.children = tuple(original_first) + ("__aliases_v1_sibling__",)
     try:
         assert "__aliases_v1_sibling__" not in second.children
+        assert second.children == original_second
     finally:
-        first.children.remove("__aliases_v1_sibling__")
+        first.children = original_first
 
 
 @pytest.mark.smoke
@@ -246,11 +286,12 @@ def test_op_copy_selective_depth() -> None:
     if op.parent_params:
         assert clone.parent_params is op.parent_params
 
-    # Deep-copied mutable metadata: independent containers, equal content.
+    # Relation metadata: equal content; immutable views MAY be shared across
+    # records (JMT-FORK-1), so no distinct-identity requirement anymore.
     assert clone.children == op.children
-    if op.children:
-        assert clone.children is not op.children
-    clone.children.append("__aliases_v1_copy__")
+    assert isinstance(clone.children, tuple)
+    # Rebinding the clone's cell never reaches the source op.
+    clone.children = tuple(op.children) + ("__aliases_v1_copy__",)
     assert "__aliases_v1_copy__" not in op.children
 
 
@@ -265,9 +306,10 @@ def test_fork_isolation() -> None:
         assert fork.ops[label] is not op
 
     label = trace.ops.keys()[0]
-    fork.ops[label].children.append("__aliases_v1_fork__")
+    original = trace.ops[label].children
+    fork.ops[label].children = tuple(original) + ("__aliases_v1_fork__",)
     assert "__aliases_v1_fork__" not in trace.ops[label].children
-    trace.ops[label].children.append("__aliases_v1_parent__")
+    trace.ops[label].children = tuple(original) + ("__aliases_v1_parent__",)
     assert "__aliases_v1_parent__" not in fork.ops[label].children
 
 

@@ -334,8 +334,8 @@ def test_graph_relationships(small_input):
     mh = trace_fn(model, small_input)
     for label in mh.layer_labels:
         entry = mh[label]
-        assert isinstance(entry.parents, list)
-        assert isinstance(entry.children, list)
+        assert isinstance(entry.parents, tuple)
+        assert isinstance(entry.children, tuple)
         for parent_label in entry.parents:
             parent = mh[parent_label]
             assert label in parent.children

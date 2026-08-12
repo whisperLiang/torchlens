@@ -119,7 +119,7 @@ def test_ignored_tensor_producers_are_wrapped(route: str) -> None:
     op = next(layer for layer in log.layer_list if layer.func_name == route)
 
     if route in {"asarray", "fill"}:
-        assert op.parents == ["input_1"]
+        assert op.parents == ("input_1",)
 
 
 class SameObjectReturnModel(nn.Module):

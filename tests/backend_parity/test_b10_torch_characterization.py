@@ -327,7 +327,7 @@ def test_buffer_mutation_reconciliation_orders_initial_and_written_versions() ->
     assert buffer_versions[0].buffer_source is None
     assert buffer_versions[1].buffer_write_kind == "inplace"
     assert str(buffer_versions[1].buffer_source).startswith("add_2_")
-    assert buffer_versions[1].parents == ["add_2_2"]
+    assert buffer_versions[1].parents == ("add_2_2",)
     assert torch.equal(model.offset, torch.ones(2, 2))
 
 

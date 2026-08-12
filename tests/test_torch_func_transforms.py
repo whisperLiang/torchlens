@@ -538,7 +538,7 @@ def test_vmap_boundary_node_has_clean_parent_edge() -> None:
 
     assert len(vmap_ops) == 1
     assert vmap_ops[0].label == "vmap_1_1:1"
-    assert vmap_ops[0].parents == ["input_1"]
+    assert vmap_ops[0].parents == ("input_1",)
     assert vmap_ops[0].is_transform is True
     assert vmap_ops[0].transform_kind == "vmap"
     assert vmap_ops[0].transform_chain == ("vmap",)
@@ -581,7 +581,7 @@ def test_grad_boundary_node_has_clean_parent_edge() -> None:
     grad_ops = [op for op in log.ops if op.type == "grad"]
 
     assert len(grad_ops) == 1
-    assert grad_ops[0].parents == ["input_1"]
+    assert grad_ops[0].parents == ("input_1",)
     assert grad_ops[0].is_transform is True
     assert grad_ops[0].transform_kind == "grad"
     assert grad_ops[0].transform_chain == ("grad",)
@@ -650,7 +650,7 @@ def test_autograd_functional_direct_call_boundary(
     transform_ops = [op for op in log.ops if op.type == op_type]
 
     assert len(transform_ops) == 1
-    assert transform_ops[0].parents == ["input_1"]
+    assert transform_ops[0].parents == ("input_1",)
     assert transform_ops[0].is_transform is True
     assert transform_ops[0].transform_kind == kind
 
@@ -668,7 +668,7 @@ def test_functional_call_substituted_params_are_tensor_parents() -> None:
     assert linear.module == "inner:1"
     assert len(linear.parents) == 3
     assert linear.parents[0] == "input_1"
-    assert linear.parent_params == []
+    assert linear.parent_params == ()
 
 
 def test_functional_call_substituted_buffers_are_tensor_parents() -> None:
@@ -838,7 +838,7 @@ def test_arg_spec_table_cannot_silently_cost_a_parent_edge() -> None:
     assert [w for w in caught if "no graph/source provenance" in str(w.message)] == []
     op = next(op for op in trace.ops if op.type == "polygamma")
     multiply = next(other for other in trace.ops if other.type == "mul")
-    assert op.parents == [multiply.layer_label]
+    assert op.parents == (multiply.layer_label,)
     assert op.unattributed_tensor_args == ()
     assert op.dropped_edge_tensor_args == ()
 
@@ -886,7 +886,7 @@ def test_prebuilt_transform_wrap_order_and_raw_warning_contract() -> None:
     )
 
     assert [op.transform_kind for op in decorated_log.transforms] == ["vmap"]
-    assert decorated_log.transforms[0].parents == ["input_1"]
+    assert decorated_log.transforms[0].parents == ("input_1",)
 
     with pytest.warns(UserWarning, match="functorch"):
         raw_log = tl.trace(
@@ -958,7 +958,7 @@ def test_hf_style_runtime_vmap_mask_regression() -> None:
         )
 
     assert [op.transform_kind for op in log.transforms] == ["vmap"]
-    assert log.transforms[0].parents == ["input_1"]
+    assert log.transforms[0].parents == ("input_1",)
     assert any("functorch" in str(record.message).lower() for record in records)
     assert not any("no graph/source provenance" in str(record.message) for record in records)
 

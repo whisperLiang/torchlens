@@ -2389,6 +2389,8 @@ def _register_authorized_caller_namespace(
     """
 
     def _collect(code: types.CodeType) -> None:
+        """Register one module-local code object and its nested code constants."""
+
         if code.co_filename != module_file or id(code) in _AUTHORIZED_INTERNAL_CALLER_CODE_IDS:
             return
         _AUTHORIZED_INTERNAL_CALLER_CODE.append(code)
@@ -2398,6 +2400,8 @@ def _register_authorized_caller_namespace(
                 _collect(const)
 
     def _walk(value: Any, seen: set[int]) -> None:
+        """Recurse module attributes to find every locally defined callable."""
+
         if id(value) in seen:
             return
         seen.add(id(value))

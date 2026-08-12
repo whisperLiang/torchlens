@@ -179,7 +179,7 @@ def default_fill_state(state: dict[str, Any], *, defaults: dict[str, Any]) -> No
             state[field_name] = copy.deepcopy(default_value)
 
 
-_COERCIBLE_CONTAINER_TYPES = (list, dict, tuple, set)
+_COERCIBLE_CONTAINER_TYPES = (list, dict, tuple, set, frozenset)
 
 
 def coerce_container_typed_state(

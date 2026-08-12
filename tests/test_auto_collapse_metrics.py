@@ -2988,7 +2988,7 @@ def test_v2_max_op_segment_renders_dashed_box_and_contracts_edges(
         # r21: descriptor ops are concrete pass-qualified labels (exact keys).
         first_segment_members = [trace.ops[label] for label in first_segment.ops]
         assert first_segment.owner is None
-        assert any(op.is_atomic_module and op.modules == ["stem:1"] for op in first_segment_members)
+        assert any(op.is_atomic_module and op.modules == ("stem:1",) for op in first_segment_members)
         assert any(
             op.modules and op.modules[0].startswith("blocks:") for op in first_segment_members
         )

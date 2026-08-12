@@ -919,8 +919,8 @@ def test_jax_synthetic_control_parent_is_not_a_value_replay_parent() -> None:
     mul_op = _jax_equation_op(trace, "mul")
     control_parent = next(op for op in trace.layer_list if op.is_input)
 
-    mul_op.parents.append(control_parent._label_raw)
-    control_parent.children.append(mul_op._label_raw)
+    mul_op.parents = tuple(mul_op.parents) + (control_parent._label_raw,)
+    control_parent.children = tuple(control_parent.children) + (mul_op._label_raw,)
     mul_op._internal_set(
         "_edge_uses",
         [

@@ -65,6 +65,7 @@ from .._options import JAX_EXTRA_KWARG_POLICY, JAX_PREVIEW_TRACE_OPTION_POLICY
 from .._options import default_if_missing as _default_if_missing
 from .._options import is_missing as _is_missing
 from .._options import reject_extra_trace_kwargs, reject_unsupported_trace_options
+from ..._trace_core.relation_views import freeze_trace_relation_views
 from .._selective_save import apply_static_label_save_policy
 from .._selective_save import pop_static_label_save_predicate
 from .jaxpr import (
@@ -531,6 +532,7 @@ class JAXBackend:
                 jax_control_flow=cast(str, jax_control_flow),
                 jax_max_control_flow_unroll=cast(int, jax_max_control_flow_unroll),
             )
+        freeze_trace_relation_views(trace)
         return trace
 
     def validate_trace(
