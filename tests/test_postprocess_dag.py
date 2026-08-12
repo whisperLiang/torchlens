@@ -479,6 +479,16 @@ def test_no_new_templated_corpus_reasons() -> None:
         "LEGACY_TEMPLATED_PAIRS names pairs no longer in the corpus; "
         f"remove them: {sorted(stale_grandfathers)}"
     )
+    # The shrink-only guarantee's other half (closure-review nit): a
+    # grandfathered pair whose reason gained real prose must LEAVE the set,
+    # or "the set can only shrink" is unenforced — the entry could silently
+    # flip back to a templated reason later without this lint noticing.
+    retired_grandfathers = LEGACY_TEMPLATED_PAIRS - templated
+    assert not retired_grandfathers, (
+        "these grandfathered pairs now carry prose reasons; remove them "
+        "from LEGACY_TEMPLATED_PAIRS so the set provably only shrinks: "
+        f"{sorted(retired_grandfathers)}"
+    )
 
 
 def test_docstring_invariants_carried_by_corpus() -> None:
