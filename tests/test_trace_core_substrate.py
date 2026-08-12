@@ -446,3 +446,45 @@ def test_fork_parent_inplace_mutation_invisible_to_child() -> None:
     # Late parent write after the child HAS read: still invisible.
     parent_op.annotations["late"] = 3
     assert "late" not in child_op.annotations
+
+
+@pytest.mark.smoke
+def test_pickle_load_rehydrates_into_the_store() -> None:
+    """A pickle round-trip rejoins the single-truth core (sol finding 9).
+
+    Loaded traces used to be a coreless dict-backed island (one detached
+    single-row store per record); ``rehydrate_trace_core`` now adopts every
+    restored record into a fresh sealed core with the standard relation
+    freeze. Backward records stay detached by design (no event stream to
+    rebuild an epoch from).
+    """
+
+    import pickle
+
+    import torchlens as tl
+
+    model = torch.nn.Sequential(
+        torch.nn.Linear(3, 4), torch.nn.ReLU(), torch.nn.Linear(4, 2)
+    )
+    trace = tl.trace(model, torch.randn(1, 3))
+    clone = pickle.loads(pickle.dumps(trace))
+
+    core = clone.__dict__.get("_trace_core")
+    assert core is not None, "loaded trace must rehydrate a core"
+    assert core.ops is not None and core.ops.frozen
+    assert core.ops.dataflow_edges is not None, "dataflow rejoined the edge table"
+    assert core.label_rows, "label -> row index rebound"
+
+    op = clone.ops["relu_1_2"]
+    assert object.__getattribute__(op, "_core") is core.ops
+    assert op.parents == ("linear_1_1",)
+    assert type(op.equivalent_ops) is frozenset
+
+    param = next(iter(clone.params.values()))
+    assert param.__dict__["_tl_core"] is core.kind_rows["param"]
+
+    # The rehydrated trace forks through the COW path like a live one.
+    fork = clone.fork()
+    assert fork.ops["relu_1_2"].parents == ("linear_1_1",)
+    fork.ops["relu_1_2"].annotations["fork_only"] = 1
+    assert "fork_only" not in clone.ops["relu_1_2"].annotations

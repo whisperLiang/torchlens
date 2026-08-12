@@ -2833,6 +2833,13 @@ class Trace(
                 if op_passes is not None and hasattr(op_passes, "values"):
                     for layer_pass in op_passes.values():
                         layer_pass.grad_fn_handle = grad_fn_handle
+        # F9: adopt the restored detached records into a fresh sealed core so
+        # loaded traces rejoin the single-truth store (best-effort — an abort
+        # preserves the coreless-island behavior; backward records stay
+        # detached by design). See data_classes/_trace_rehydrate.py.
+        from ._trace_rehydrate import rehydrate_trace_core
+
+        rehydrate_trace_core(self)
         _state._register_log(self)
 
     def replace_state_from(self, new_log: "Trace") -> None:

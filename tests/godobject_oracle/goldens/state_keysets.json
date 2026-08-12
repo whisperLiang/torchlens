@@ -1727,6 +1727,7 @@
    "_spec_revision",
    "_stop_directive",
    "_tl_backward_hooked_tensor_keys",
+   "_trace_core",
    "_tracing_finished",
    "_transform",
    "_visualizer_dir",

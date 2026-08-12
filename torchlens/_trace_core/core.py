@@ -261,9 +261,13 @@ class TraceCore:
         child.ops = (
             OpStoreView(self.ops, group_tables) if self.ops is not None else None
         )
+        # An unfrozen kind table (born after a rehydrated load's seal and not
+        # yet sealed itself) cannot back a view; its records take the fork
+        # builder's detached-duplication fallback instead.
         child.kind_rows = {
             kind: OpStoreView(store, group_tables)
             for kind, store in self.kind_rows.items()
+            if store.frozen
         }
         child.label_rows = dict(self.label_rows)
         child.pool = self.pool
