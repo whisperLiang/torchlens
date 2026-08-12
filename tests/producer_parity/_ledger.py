@@ -170,10 +170,16 @@ def step0_trace_read_recorder() -> Iterator[set[str]]:
 
 
 def mutator_inventory(package_root: Path) -> dict[str, list[str]]:
-    """Exact post-commit mutation channels: replace_op_event callers, the
-    preview promotion in-place writes, and the journal lifecycle surfaces."""
+    """Exact post-commit mutation channels after the P4 migration.
+
+    The ONE sanctioned channel is the typed amendment lane
+    (``append_amendment`` callers); the legacy channels — ``replace_op_event``
+    callers and in-place ``op_events[i] = ...`` list writes — are scanned so
+    the ledger PROVES they stay at zero.
+    """
 
     replace_callers: list[str] = []
+    amendment_callers: list[str] = []
     inplace_list_writes: list[str] = []
     for path in sorted(package_root.rglob("*.py")):
         rel = str(path.relative_to(package_root.parent))
@@ -191,6 +197,8 @@ def mutator_inventory(package_root: Path) -> dict[str, list[str]]:
                 )
                 if name == "replace_op_event":
                     replace_callers.append(f"{rel}:{node.lineno}")
+                if name == "append_amendment":
+                    amendment_callers.append(f"{rel}:{node.lineno}")
             if (
                 isinstance(node, ast.Assign)
                 and len(node.targets) == 1
@@ -201,5 +209,6 @@ def mutator_inventory(package_root: Path) -> dict[str, list[str]]:
                 inplace_list_writes.append(f"{rel}:{node.lineno}")
     return {
         "replace_op_event_callers": replace_callers,
+        "append_amendment_callers": amendment_callers,
         "op_events_inplace_writes": inplace_list_writes,
     }

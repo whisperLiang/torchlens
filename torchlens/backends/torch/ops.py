@@ -94,7 +94,7 @@ from ...ir.events import (
     OutputVersionEvent,
     ParentEdge,
 )
-from ...ir.capture_events import replace_op_event
+from ...ir.op_record import amend_lookback_retention
 from ...ir.intervention import FireResult, FunctionEventInput
 from ...ir.container import (
     ContainerSpec,
@@ -6213,7 +6213,11 @@ def _replace_event_with_retained_payload(
         transformed_tensor=transformed_ref,
         has_saved_activation=True,
     )
-    replace_op_event(trace, raw_label, output=output_ref, predicate_matched=True)
+    trace.capture_events.append_amendment(
+        amend_lookback_retention(
+            event.seq, raw_label, output=output_ref, predicate_matched=True
+        )
+    )
 
 
 def _build_trace_predicate_context(

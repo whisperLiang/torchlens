@@ -1132,8 +1132,72 @@
 "field": "parents",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": true,
-"line": 4173,
+"line": 4175,
 "via_getattr": true
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/backends/jax/backend.py",
+"has_default": false,
+"line": 1116,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/backends/jax/backend.py",
+"has_default": false,
+"line": 1117,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "kind",
+"file": "torchlens/backends/jax/backend.py",
+"has_default": false,
+"line": 3694,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "kind",
+"file": "torchlens/backends/jax/backend.py",
+"has_default": false,
+"line": 4072,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/backends/jax/backend.py",
+"has_default": false,
+"line": 925,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/backends/jax/backend.py",
+"has_default": false,
+"line": 990,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/backends/jax/backend.py",
+"has_default": false,
+"line": 991,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "kind",
+"file": "torchlens/backends/jax/backend.py",
+"has_default": false,
+"line": 1026,
+"via_getattr": false
 },
 {
 "ambiguous": true,
@@ -1148,71 +1212,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1116,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "kind",
-"file": "torchlens/backends/jax/backend.py",
-"has_default": false,
-"line": 3692,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "kind",
-"file": "torchlens/backends/jax/backend.py",
-"has_default": false,
-"line": 4070,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/backends/jax/backend.py",
-"has_default": false,
-"line": 924,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/backends/jax/backend.py",
-"has_default": false,
-"line": 989,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/backends/jax/backend.py",
-"has_default": false,
-"line": 990,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "kind",
-"file": "torchlens/backends/jax/backend.py",
-"has_default": false,
-"line": 1025,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/backends/jax/backend.py",
-"has_default": false,
-"line": 1114,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/backends/jax/backend.py",
-"has_default": false,
-"line": 1183,
+"line": 1184,
 "via_getattr": false
 },
 {
@@ -1220,7 +1220,7 @@
 "field": "params",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1577,
+"line": 1579,
 "via_getattr": false
 },
 {
@@ -1228,7 +1228,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1952,
+"line": 1954,
 "via_getattr": false
 },
 {
@@ -1236,7 +1236,7 @@
 "field": "params",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 3834,
+"line": 3836,
 "via_getattr": false
 },
 {
@@ -1244,7 +1244,7 @@
 "field": "parent_arg_positions",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": true,
-"line": 4144,
+"line": 4146,
 "via_getattr": true
 },
 {
@@ -1252,7 +1252,7 @@
 "field": "parents",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": true,
-"line": 4253,
+"line": 4255,
 "via_getattr": true
 },
 {
@@ -1260,7 +1260,7 @@
 "field": "_edge_uses",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": true,
-"line": 4256,
+"line": 4258,
 "via_getattr": true
 },
 {
@@ -1268,7 +1268,7 @@
 "field": "kind",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 650,
+"line": 651,
 "via_getattr": false
 },
 {
@@ -1276,7 +1276,7 @@
 "field": "kind",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 664,
+"line": 665,
 "via_getattr": false
 },
 {
@@ -1284,7 +1284,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 992,
+"line": 993,
 "via_getattr": false
 },
 {
@@ -1292,15 +1292,7 @@
 "field": "module_stack",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1051,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/backends/jax/backend.py",
-"has_default": false,
-"line": 1194,
+"line": 1052,
 "via_getattr": false
 },
 {
@@ -1312,16 +1304,16 @@
 "via_getattr": false
 },
 {
-"ambiguous": false,
-"field": "raw_index",
+"ambiguous": true,
+"field": "label_raw",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1197,
+"line": 1196,
 "via_getattr": false
 },
 {
 "ambiguous": false,
-"field": "type_index",
+"field": "raw_index",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
 "line": 1198,
@@ -1329,10 +1321,18 @@
 },
 {
 "ambiguous": false,
-"field": "raw_index",
+"field": "type_index",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
 "line": 1199,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/backends/jax/backend.py",
+"has_default": false,
+"line": 1200,
 "via_getattr": false
 },
 {
@@ -1340,7 +1340,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1351,
+"line": 1352,
 "via_getattr": false
 },
 {
@@ -1348,20 +1348,12 @@
 "field": "raw_index",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1353,
+"line": 1354,
 "via_getattr": false
 },
 {
 "ambiguous": false,
 "field": "layer_type",
-"file": "torchlens/backends/jax/backend.py",
-"has_default": false,
-"line": 1355,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "type_index",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
 "line": 1356,
@@ -1369,23 +1361,23 @@
 },
 {
 "ambiguous": false,
-"field": "raw_index",
+"field": "type_index",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
 "line": 1357,
 "via_getattr": false
 },
 {
-"ambiguous": true,
-"field": "label_raw",
+"ambiguous": false,
+"field": "raw_index",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1375,
+"line": 1358,
 "via_getattr": false
 },
 {
-"ambiguous": false,
-"field": "layer_type",
+"ambiguous": true,
+"field": "label_raw",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
 "line": 1376,
@@ -1393,10 +1385,18 @@
 },
 {
 "ambiguous": false,
-"field": "raw_index",
+"field": "layer_type",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
 "line": 1377,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/backends/jax/backend.py",
+"has_default": false,
+"line": 1378,
 "via_getattr": false
 },
 {
@@ -1404,7 +1404,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1428,
+"line": 1429,
 "via_getattr": false
 },
 {
@@ -1412,15 +1412,7 @@
 "field": "output",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1430,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/backends/jax/backend.py",
-"has_default": false,
-"line": 1437,
+"line": 1431,
 "via_getattr": false
 },
 {
@@ -1428,7 +1420,7 @@
 "field": "params",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1708,
+"line": 1710,
 "via_getattr": false
 },
 {
@@ -1436,7 +1428,7 @@
 "field": "equivalence_class",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1981,
+"line": 1983,
 "via_getattr": false
 },
 {
@@ -1444,15 +1436,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 2001,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "modules",
-"file": "torchlens/backends/jax/backend.py",
-"has_default": false,
-"line": 2275,
+"line": 2003,
 "via_getattr": false
 },
 {
@@ -1461,6 +1445,14 @@
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
 "line": 2277,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "modules",
+"file": "torchlens/backends/jax/backend.py",
+"has_default": false,
+"line": 2279,
 "via_getattr": false
 },
 {
@@ -1468,7 +1460,7 @@
 "field": "parent_arg_positions",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 2447,
+"line": 2449,
 "via_getattr": false
 },
 {
@@ -1476,7 +1468,7 @@
 "field": "params",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 3833,
+"line": 3835,
 "via_getattr": false
 },
 {
@@ -1484,7 +1476,7 @@
 "field": "module_stack",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 974,
+"line": 975,
 "via_getattr": false
 },
 {
@@ -1492,7 +1484,7 @@
 "field": "module_stack",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1064,
+"line": 1065,
 "via_getattr": false
 },
 {
@@ -1500,15 +1492,15 @@
 "field": "module_stack",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1093,
+"line": 1094,
 "via_getattr": false
 },
 {
 "ambiguous": true,
-"field": "label_raw",
+"field": "seq",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1440,
+"line": 1439,
 "via_getattr": false
 },
 {
@@ -1524,7 +1516,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1945,
+"line": 1947,
 "via_getattr": false
 },
 {
@@ -1532,7 +1524,7 @@
 "field": "parents",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 2048,
+"line": 2050,
 "via_getattr": false
 },
 {
@@ -1540,7 +1532,7 @@
 "field": "modules",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 2277,
+"line": 2279,
 "via_getattr": false
 },
 {
@@ -1548,7 +1540,7 @@
 "field": "raw_index",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 2373,
+"line": 2375,
 "via_getattr": false
 },
 {
@@ -1556,7 +1548,7 @@
 "field": "equivalence_class",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 2374,
+"line": 2376,
 "via_getattr": false
 },
 {
@@ -1564,7 +1556,7 @@
 "field": "equivalence_class",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 2417,
+"line": 2419,
 "via_getattr": false
 },
 {
@@ -1572,7 +1564,7 @@
 "field": "parents",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 2440,
+"line": 2442,
 "via_getattr": false
 },
 {
@@ -1580,7 +1572,7 @@
 "field": "kind",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 717,
+"line": 718,
 "via_getattr": false
 },
 {
@@ -1588,7 +1580,7 @@
 "field": "output",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 924,
+"line": 925,
 "via_getattr": false
 },
 {
@@ -1596,7 +1588,7 @@
 "field": "kind",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 978,
+"line": 979,
 "via_getattr": false
 },
 {
@@ -1604,7 +1596,7 @@
 "field": "module_stack",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 985,
+"line": 986,
 "via_getattr": false
 },
 {
@@ -1612,7 +1604,7 @@
 "field": "module_stack",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1110,
+"line": 1111,
 "via_getattr": false
 },
 {
@@ -1620,7 +1612,7 @@
 "field": "equivalence_class",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1971,
+"line": 1973,
 "via_getattr": false
 },
 {
@@ -1628,7 +1620,7 @@
 "field": "kind",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 4087,
+"line": 4089,
 "via_getattr": false
 },
 {
@@ -1636,7 +1628,7 @@
 "field": "output",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 926,
+"line": 927,
 "via_getattr": false
 },
 {
@@ -1644,7 +1636,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1271,
+"line": 1272,
 "via_getattr": false
 },
 {
@@ -1652,7 +1644,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1283,
+"line": 1284,
 "via_getattr": false
 },
 {
@@ -1660,7 +1652,7 @@
 "field": "output",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1422,
+"line": 1423,
 "via_getattr": false
 },
 {
@@ -1668,7 +1660,7 @@
 "field": "output",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1425,
+"line": 1426,
 "via_getattr": false
 },
 {
@@ -1676,7 +1668,7 @@
 "field": "equivalence_class",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 1942,
+"line": 1944,
 "via_getattr": false
 },
 {
@@ -1684,7 +1676,7 @@
 "field": "_edge_uses",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 2452,
+"line": 2454,
 "via_getattr": false
 },
 {
@@ -1692,7 +1684,7 @@
 "field": "kind",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 725,
+"line": 726,
 "via_getattr": false
 },
 {
@@ -1700,7 +1692,7 @@
 "field": "params",
 "file": "torchlens/backends/jax/backend.py",
 "has_default": false,
-"line": 977,
+"line": 978,
 "via_getattr": false
 },
 {
@@ -2164,7 +2156,7 @@
 "field": "modules",
 "file": "torchlens/backends/mlx/backend.py",
 "has_default": true,
-"line": 2036,
+"line": 2032,
 "via_getattr": true
 },
 {
@@ -2340,7 +2332,7 @@
 "field": "step_index",
 "file": "torchlens/backends/mlx/backend.py",
 "has_default": true,
-"line": 2857,
+"line": 2853,
 "via_getattr": true
 },
 {
@@ -2353,10 +2345,10 @@
 },
 {
 "ambiguous": true,
-"field": "label_raw",
+"field": "seq",
 "file": "torchlens/backends/mlx/backend.py",
 "has_default": false,
-"line": 1849,
+"line": 1847,
 "via_getattr": false
 },
 {
@@ -2380,7 +2372,7 @@
 "field": "layer_type",
 "file": "torchlens/backends/mlx/backend.py",
 "has_default": false,
-"line": 2581,
+"line": 2577,
 "via_getattr": false
 },
 {
@@ -2388,7 +2380,7 @@
 "field": "func_call_id",
 "file": "torchlens/backends/mlx/backend.py",
 "has_default": false,
-"line": 2582,
+"line": 2578,
 "via_getattr": false
 },
 {
@@ -2412,7 +2404,7 @@
 "field": "parents",
 "file": "torchlens/backends/mlx/backend.py",
 "has_default": true,
-"line": 2583,
+"line": 2579,
 "via_getattr": true
 },
 {
@@ -2420,7 +2412,7 @@
 "field": "modules",
 "file": "torchlens/backends/mlx/backend.py",
 "has_default": true,
-"line": 2586,
+"line": 2582,
 "via_getattr": true
 },
 {
@@ -2476,7 +2468,7 @@
 "field": "modules",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": true,
-"line": 1578,
+"line": 1575,
 "via_getattr": true
 },
 {
@@ -2484,7 +2476,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
-"line": 900,
+"line": 901,
 "via_getattr": false
 },
 {
@@ -2492,7 +2484,7 @@
 "field": "params",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
-"line": 2112,
+"line": 2109,
 "via_getattr": false
 },
 {
@@ -2500,7 +2492,7 @@
 "field": "params",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
-"line": 735,
+"line": 736,
 "via_getattr": false
 },
 {
@@ -2508,7 +2500,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": true,
-"line": 843,
+"line": 844,
 "via_getattr": true
 },
 {
@@ -2516,7 +2508,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
-"line": 938,
+"line": 939,
 "via_getattr": false
 },
 {
@@ -2524,7 +2516,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
-"line": 953,
+"line": 954,
 "via_getattr": false
 },
 {
@@ -2532,20 +2524,12 @@
 "field": "raw_index",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
-"line": 955,
+"line": 956,
 "via_getattr": false
 },
 {
 "ambiguous": false,
 "field": "layer_type",
-"file": "torchlens/backends/paddle/backend.py",
-"has_default": false,
-"line": 957,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "type_index",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
 "line": 958,
@@ -2553,7 +2537,7 @@
 },
 {
 "ambiguous": false,
-"field": "raw_index",
+"field": "type_index",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
 "line": 959,
@@ -2561,23 +2545,23 @@
 },
 {
 "ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/backends/paddle/backend.py",
+"has_default": false,
+"line": 960,
+"via_getattr": false
+},
+{
+"ambiguous": false,
 "field": "module_stack",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
-"line": 964,
+"line": 965,
 "via_getattr": false
 },
 {
 "ambiguous": true,
 "field": "label_raw",
-"file": "torchlens/backends/paddle/backend.py",
-"has_default": false,
-"line": 977,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "layer_type",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
 "line": 978,
@@ -2585,18 +2569,18 @@
 },
 {
 "ambiguous": false,
-"field": "func_call_id",
+"field": "layer_type",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
 "line": 979,
 "via_getattr": false
 },
 {
-"ambiguous": true,
-"field": "label_raw",
+"ambiguous": false,
+"field": "func_call_id",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
-"line": 1168,
+"line": 980,
 "via_getattr": false
 },
 {
@@ -2608,8 +2592,8 @@
 "via_getattr": false
 },
 {
-"ambiguous": false,
-"field": "layer_type",
+"ambiguous": true,
+"field": "label_raw",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
 "line": 1170,
@@ -2617,7 +2601,7 @@
 },
 {
 "ambiguous": false,
-"field": "raw_index",
+"field": "layer_type",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
 "line": 1171,
@@ -2625,7 +2609,7 @@
 },
 {
 "ambiguous": false,
-"field": "type_index",
+"field": "raw_index",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
 "line": 1172,
@@ -2633,7 +2617,7 @@
 },
 {
 "ambiguous": false,
-"field": "raw_index",
+"field": "type_index",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
 "line": 1173,
@@ -2641,10 +2625,18 @@
 },
 {
 "ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/backends/paddle/backend.py",
+"has_default": false,
+"line": 1174,
+"via_getattr": false
+},
+{
+"ambiguous": false,
 "field": "module_stack",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
-"line": 1233,
+"line": 1234,
 "via_getattr": false
 },
 {
@@ -2652,7 +2644,7 @@
 "field": "layer_type",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
-"line": 1253,
+"line": 1254,
 "via_getattr": false
 },
 {
@@ -2660,15 +2652,15 @@
 "field": "func_call_id",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
-"line": 1268,
+"line": 1269,
 "via_getattr": false
 },
 {
 "ambiguous": true,
-"field": "label_raw",
+"field": "seq",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
-"line": 1421,
+"line": 1420,
 "via_getattr": false
 },
 {
@@ -2676,7 +2668,7 @@
 "field": "func_call_id",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": true,
-"line": 2246,
+"line": 2243,
 "via_getattr": true
 },
 {
@@ -2684,7 +2676,7 @@
 "field": "func_call_id",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
-"line": 1182,
+"line": 1183,
 "via_getattr": false
 },
 {
@@ -2692,7 +2684,7 @@
 "field": "module_stack",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
-"line": 1235,
+"line": 1236,
 "via_getattr": false
 },
 {
@@ -2700,7 +2692,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": false,
-"line": 1267,
+"line": 1268,
 "via_getattr": false
 },
 {
@@ -2708,7 +2700,7 @@
 "field": "parents",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": true,
-"line": 2248,
+"line": 2245,
 "via_getattr": true
 },
 {
@@ -2716,7 +2708,7 @@
 "field": "modules",
 "file": "torchlens/backends/paddle/backend.py",
 "has_default": true,
-"line": 2249,
+"line": 2246,
 "via_getattr": true
 },
 {
@@ -2756,7 +2748,7 @@
 "field": "modules",
 "file": "torchlens/backends/tf/backend.py",
 "has_default": true,
-"line": 1084,
+"line": 1077,
 "via_getattr": true
 },
 {
@@ -2764,7 +2756,7 @@
 "field": "output",
 "file": "torchlens/backends/tf/backend.py",
 "has_default": false,
-"line": 301,
+"line": 302,
 "via_getattr": false
 },
 {
@@ -2772,23 +2764,23 @@
 "field": "output",
 "file": "torchlens/backends/tf/backend.py",
 "has_default": false,
-"line": 296,
+"line": 297,
 "via_getattr": false
 },
 {
 "ambiguous": true,
-"field": "label_raw",
+"field": "seq",
 "file": "torchlens/backends/tf/backend.py",
 "has_default": false,
-"line": 996,
+"line": 995,
 "via_getattr": false
 },
 {
 "ambiguous": true,
-"field": "label_raw",
+"field": "seq",
 "file": "torchlens/backends/tf/backend.py",
 "has_default": false,
-"line": 1027,
+"line": 1022,
 "via_getattr": false
 },
 {
@@ -2796,7 +2788,7 @@
 "field": "output",
 "file": "torchlens/backends/tf/backend.py",
 "has_default": false,
-"line": 221,
+"line": 222,
 "via_getattr": false
 },
 {
@@ -3460,7 +3452,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 2301,
+"line": 2303,
 "via_getattr": false
 },
 {
@@ -3468,7 +3460,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 2845,
+"line": 2847,
 "via_getattr": false
 },
 {
@@ -3476,7 +3468,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 741,
+"line": 742,
 "via_getattr": false
 },
 {
@@ -3484,7 +3476,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 813,
+"line": 814,
 "via_getattr": false
 },
 {
@@ -3492,7 +3484,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 889,
+"line": 890,
 "via_getattr": false
 },
 {
@@ -3500,7 +3492,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 1129,
+"line": 1130,
 "via_getattr": false
 },
 {
@@ -3508,7 +3500,7 @@
 "field": "parents",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": true,
-"line": 1486,
+"line": 1488,
 "via_getattr": true
 },
 {
@@ -3516,16 +3508,8 @@
 "field": "parent_arg_positions",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": true,
-"line": 3045,
+"line": 3047,
 "via_getattr": true
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/backends/tinygrad/backend.py",
-"has_default": false,
-"line": 907,
-"via_getattr": false
 },
 {
 "ambiguous": true,
@@ -3536,16 +3520,16 @@
 "via_getattr": false
 },
 {
-"ambiguous": false,
-"field": "raw_index",
+"ambiguous": true,
+"field": "label_raw",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 910,
+"line": 909,
 "via_getattr": false
 },
 {
 "ambiguous": false,
-"field": "type_index",
+"field": "raw_index",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
 "line": 911,
@@ -3553,10 +3537,18 @@
 },
 {
 "ambiguous": false,
-"field": "raw_index",
+"field": "type_index",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
 "line": 912,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/backends/tinygrad/backend.py",
+"has_default": false,
+"line": 913,
 "via_getattr": false
 },
 {
@@ -3564,7 +3556,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 1065,
+"line": 1066,
 "via_getattr": false
 },
 {
@@ -3572,20 +3564,12 @@
 "field": "raw_index",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 1067,
+"line": 1068,
 "via_getattr": false
 },
 {
 "ambiguous": false,
 "field": "layer_type",
-"file": "torchlens/backends/tinygrad/backend.py",
-"has_default": false,
-"line": 1069,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "type_index",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
 "line": 1070,
@@ -3593,23 +3577,23 @@
 },
 {
 "ambiguous": false,
-"field": "raw_index",
+"field": "type_index",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
 "line": 1071,
 "via_getattr": false
 },
 {
-"ambiguous": true,
-"field": "label_raw",
+"ambiguous": false,
+"field": "raw_index",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 1091,
+"line": 1072,
 "via_getattr": false
 },
 {
-"ambiguous": false,
-"field": "layer_type",
+"ambiguous": true,
+"field": "label_raw",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
 "line": 1092,
@@ -3617,10 +3601,18 @@
 },
 {
 "ambiguous": false,
-"field": "raw_index",
+"field": "layer_type",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
 "line": 1093,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/backends/tinygrad/backend.py",
+"has_default": false,
+"line": 1094,
 "via_getattr": false
 },
 {
@@ -3628,7 +3620,7 @@
 "field": "output",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 1149,
+"line": 1150,
 "via_getattr": false
 },
 {
@@ -3636,7 +3628,7 @@
 "field": "params",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 1395,
+"line": 1397,
 "via_getattr": false
 },
 {
@@ -3644,7 +3636,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 1432,
+"line": 1434,
 "via_getattr": false
 },
 {
@@ -3652,7 +3644,7 @@
 "field": "parent_arg_positions",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": true,
-"line": 1485,
+"line": 1487,
 "via_getattr": true
 },
 {
@@ -3660,15 +3652,15 @@
 "field": "label_raw",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 2294,
+"line": 2296,
 "via_getattr": false
 },
 {
 "ambiguous": true,
-"field": "label_raw",
+"field": "seq",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 1158,
+"line": 1157,
 "via_getattr": false
 },
 {
@@ -3676,7 +3668,7 @@
 "field": "parent_arg_positions",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 1492,
+"line": 1494,
 "via_getattr": false
 },
 {
@@ -3684,7 +3676,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 816,
+"line": 817,
 "via_getattr": false
 },
 {
@@ -3692,7 +3684,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/tinygrad/backend.py",
 "has_default": false,
-"line": 996,
+"line": 997,
 "via_getattr": false
 },
 {
@@ -3756,7 +3748,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/torch/backend.py",
 "has_default": false,
-"line": 255,
+"line": 257,
 "via_getattr": false
 },
 {
@@ -3764,7 +3756,7 @@
 "field": "label_raw",
 "file": "torchlens/backends/torch/backend.py",
 "has_default": false,
-"line": 258,
+"line": 260,
 "via_getattr": false
 },
 {
@@ -3772,7 +3764,7 @@
 "field": "output",
 "file": "torchlens/backends/torch/backend.py",
 "has_default": false,
-"line": 273,
+"line": 275,
 "via_getattr": false
 },
 {
@@ -3780,7 +3772,7 @@
 "field": "output",
 "file": "torchlens/backends/torch/backend.py",
 "has_default": false,
-"line": 292,
+"line": 294,
 "via_getattr": false
 },
 {
@@ -3788,7 +3780,7 @@
 "field": "policy",
 "file": "torchlens/backends/torch/backend.py",
 "has_default": false,
-"line": 297,
+"line": 299,
 "via_getattr": false
 },
 {
@@ -3796,7 +3788,7 @@
 "field": "kind",
 "file": "torchlens/backends/torch/backend.py",
 "has_default": false,
-"line": 1184,
+"line": 1182,
 "via_getattr": false
 },
 {
@@ -3804,7 +3796,7 @@
 "field": "output",
 "file": "torchlens/backends/torch/backend.py",
 "has_default": false,
-"line": 222,
+"line": 224,
 "via_getattr": false
 },
 {
@@ -3812,103 +3804,7 @@
 "field": "output",
 "file": "torchlens/backends/torch/backend.py",
 "has_default": false,
-"line": 263,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "func_call_id",
-"file": "torchlens/backends/torch/backend.py",
-"has_default": false,
-"line": 1048,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/backends/torch/backend.py",
-"has_default": false,
-"line": 276,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/backends/torch/backend.py",
-"has_default": false,
-"line": 902,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/backends/torch/backend.py",
-"has_default": false,
-"line": 904,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "layer_type",
-"file": "torchlens/backends/torch/backend.py",
-"has_default": false,
-"line": 906,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "type_index",
-"file": "torchlens/backends/torch/backend.py",
-"has_default": false,
-"line": 907,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "raw_index",
-"file": "torchlens/backends/torch/backend.py",
-"has_default": false,
-"line": 908,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "module_stack",
-"file": "torchlens/backends/torch/backend.py",
-"has_default": false,
-"line": 913,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "label_raw",
-"file": "torchlens/backends/torch/backend.py",
-"has_default": false,
-"line": 926,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "layer_type",
-"file": "torchlens/backends/torch/backend.py",
-"has_default": false,
-"line": 927,
-"via_getattr": false
-},
-{
-"ambiguous": false,
-"field": "func_call_id",
-"file": "torchlens/backends/torch/backend.py",
-"has_default": false,
-"line": 928,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "output",
-"file": "torchlens/backends/torch/backend.py",
-"has_default": false,
-"line": 882,
+"line": 226,
 "via_getattr": false
 },
 {
@@ -3916,7 +3812,7 @@
 "field": "policy",
 "file": "torchlens/backends/torch/backend.py",
 "has_default": false,
-"line": 883,
+"line": 226,
 "via_getattr": false
 },
 {
@@ -3924,7 +3820,7 @@
 "field": "predicate_matched",
 "file": "torchlens/backends/torch/backend.py",
 "has_default": false,
-"line": 884,
+"line": 226,
 "via_getattr": false
 },
 {
@@ -3932,7 +3828,111 @@
 "field": "capture_spec",
 "file": "torchlens/backends/torch/backend.py",
 "has_default": false,
-"line": 885,
+"line": 226,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "output",
+"file": "torchlens/backends/torch/backend.py",
+"has_default": false,
+"line": 265,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "func_call_id",
+"file": "torchlens/backends/torch/backend.py",
+"has_default": false,
+"line": 1046,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/backends/torch/backend.py",
+"has_default": false,
+"line": 278,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/backends/torch/backend.py",
+"has_default": false,
+"line": 900,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/backends/torch/backend.py",
+"has_default": false,
+"line": 902,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "layer_type",
+"file": "torchlens/backends/torch/backend.py",
+"has_default": false,
+"line": 904,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "type_index",
+"file": "torchlens/backends/torch/backend.py",
+"has_default": false,
+"line": 905,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "raw_index",
+"file": "torchlens/backends/torch/backend.py",
+"has_default": false,
+"line": 906,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "module_stack",
+"file": "torchlens/backends/torch/backend.py",
+"has_default": false,
+"line": 911,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "label_raw",
+"file": "torchlens/backends/torch/backend.py",
+"has_default": false,
+"line": 924,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "layer_type",
+"file": "torchlens/backends/torch/backend.py",
+"has_default": false,
+"line": 925,
+"via_getattr": false
+},
+{
+"ambiguous": false,
+"field": "func_call_id",
+"file": "torchlens/backends/torch/backend.py",
+"has_default": false,
+"line": 926,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/backends/torch/backend.py",
+"has_default": false,
+"line": 876,
 "via_getattr": false
 },
 {
@@ -4436,7 +4436,7 @@
 "field": "modules",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 562,
+"line": 566,
 "via_getattr": false
 },
 {
@@ -4444,7 +4444,7 @@
 "field": "modules",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 661,
+"line": 665,
 "via_getattr": false
 },
 {
@@ -4452,7 +4452,7 @@
 "field": "modules",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 991,
+"line": 995,
 "via_getattr": false
 },
 {
@@ -4460,7 +4460,7 @@
 "field": "modules",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2780,
+"line": 2803,
 "via_getattr": false
 },
 {
@@ -4468,7 +4468,7 @@
 "field": "modules",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2785,
+"line": 2808,
 "via_getattr": false
 },
 {
@@ -4476,7 +4476,7 @@
 "field": "modules",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 394,
+"line": 398,
 "via_getattr": false
 },
 {
@@ -4484,7 +4484,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2058,
+"line": 2076,
 "via_getattr": false
 },
 {
@@ -4492,7 +4492,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2107,
+"line": 2125,
 "via_getattr": false
 },
 {
@@ -4500,7 +4500,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2348,
+"line": 2371,
 "via_getattr": false
 },
 {
@@ -4508,7 +4508,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 1152,
+"line": 1156,
 "via_getattr": false
 },
 {
@@ -4516,7 +4516,7 @@
 "field": "func_call_id",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": true,
-"line": 1418,
+"line": 1422,
 "via_getattr": true
 },
 {
@@ -4524,7 +4524,7 @@
 "field": "root_ancestors",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 1563,
+"line": 1567,
 "via_getattr": false
 },
 {
@@ -4532,7 +4532,7 @@
 "field": "input_ancestors",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 1564,
+"line": 1568,
 "via_getattr": false
 },
 {
@@ -4540,7 +4540,7 @@
 "field": "internal_source_ancestors",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 1565,
+"line": 1569,
 "via_getattr": false
 },
 {
@@ -4548,23 +4548,7 @@
 "field": "module_stack",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 1981,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "output",
-"file": "torchlens/backends/torch/model_prep.py",
-"has_default": false,
-"line": 2138,
-"via_getattr": false
-},
-{
-"ambiguous": true,
-"field": "policy",
-"file": "torchlens/backends/torch/model_prep.py",
-"has_default": false,
-"line": 2139,
+"line": 1999,
 "via_getattr": false
 },
 {
@@ -4572,7 +4556,7 @@
 "field": "module_stack",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2199,
+"line": 2222,
 "via_getattr": false
 },
 {
@@ -4580,7 +4564,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2202,
+"line": 2225,
 "via_getattr": false
 },
 {
@@ -4588,7 +4572,15 @@
 "field": "kind",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2055,
+"line": 2073,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/backends/torch/model_prep.py",
+"has_default": false,
+"line": 2158,
 "via_getattr": false
 },
 {
@@ -4596,7 +4588,7 @@
 "field": "module_stack",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2212,
+"line": 2235,
 "via_getattr": false
 },
 {
@@ -4604,7 +4596,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2215,
+"line": 2238,
 "via_getattr": false
 },
 {
@@ -4612,7 +4604,7 @@
 "field": "seq",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": true,
-"line": 1417,
+"line": 1421,
 "via_getattr": true
 },
 {
@@ -4620,7 +4612,23 @@
 "field": "has_internal_source_ancestor",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 1712,
+"line": 1716,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "output",
+"file": "torchlens/backends/torch/model_prep.py",
+"has_default": false,
+"line": 2160,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "policy",
+"file": "torchlens/backends/torch/model_prep.py",
+"has_default": false,
+"line": 2161,
 "via_getattr": false
 },
 {
@@ -4628,7 +4636,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2210,
+"line": 2233,
 "via_getattr": false
 },
 {
@@ -4636,7 +4644,7 @@
 "field": "module_stack",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2241,
+"line": 2264,
 "via_getattr": false
 },
 {
@@ -4644,7 +4652,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2272,
+"line": 2295,
 "via_getattr": false
 },
 {
@@ -4652,7 +4660,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2282,
+"line": 2305,
 "via_getattr": false
 },
 {
@@ -4660,7 +4668,7 @@
 "field": "module_stack",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2296,
+"line": 2319,
 "via_getattr": false
 },
 {
@@ -4668,7 +4676,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2299,
+"line": 2322,
 "via_getattr": false
 },
 {
@@ -4676,7 +4684,7 @@
 "field": "module_stack",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2342,
+"line": 2365,
 "via_getattr": false
 },
 {
@@ -4684,7 +4692,23 @@
 "field": "pass_index",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2370,
+"line": 2393,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/backends/torch/model_prep.py",
+"has_default": false,
+"line": 1842,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/backends/torch/model_prep.py",
+"has_default": false,
+"line": 1982,
 "via_getattr": false
 },
 {
@@ -4692,7 +4716,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2294,
+"line": 2317,
 "via_getattr": false
 },
 {
@@ -4700,7 +4724,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2402,
+"line": 2425,
 "via_getattr": false
 },
 {
@@ -4708,7 +4732,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2207,
+"line": 2230,
 "via_getattr": false
 },
 {
@@ -4716,7 +4740,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2291,
+"line": 2314,
 "via_getattr": false
 },
 {
@@ -4724,7 +4748,7 @@
 "field": "pass_index",
 "file": "torchlens/backends/torch/model_prep.py",
 "has_default": false,
-"line": 2399,
+"line": 2422,
 "via_getattr": false
 },
 {
@@ -4848,11 +4872,19 @@
 "via_getattr": false
 },
 {
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/backends/torch/ops.py",
+"has_default": false,
+"line": 6218,
+"via_getattr": false
+},
+{
 "ambiguous": false,
 "field": "pass_index",
 "file": "torchlens/backends/torch/ops.py",
 "has_default": false,
-"line": 6325,
+"line": 6329,
 "via_getattr": false
 },
 {
@@ -4860,7 +4892,7 @@
 "field": "parents",
 "file": "torchlens/backends/torch/ops.py",
 "has_default": true,
-"line": 6597,
+"line": 6601,
 "via_getattr": true
 },
 {
@@ -12908,7 +12940,7 @@
 "field": "parent_arg_positions",
 "file": "torchlens/postprocess/graph_traversal.py",
 "has_default": true,
-"line": 560,
+"line": 564,
 "via_getattr": true
 },
 {
@@ -12916,7 +12948,7 @@
 "field": "parent_arg_positions",
 "file": "torchlens/postprocess/graph_traversal.py",
 "has_default": true,
-"line": 654,
+"line": 658,
 "via_getattr": true
 },
 {
@@ -12924,7 +12956,7 @@
 "field": "modules",
 "file": "torchlens/postprocess/graph_traversal.py",
 "has_default": false,
-"line": 313,
+"line": 317,
 "via_getattr": false
 },
 {
@@ -12932,7 +12964,7 @@
 "field": "func_call_id",
 "file": "torchlens/postprocess/graph_traversal.py",
 "has_default": true,
-"line": 743,
+"line": 747,
 "via_getattr": true
 },
 {
@@ -12940,7 +12972,7 @@
 "field": "kind",
 "file": "torchlens/postprocess/graph_traversal.py",
 "has_default": false,
-"line": 176,
+"line": 180,
 "via_getattr": false
 },
 {
@@ -12948,7 +12980,7 @@
 "field": "layer_type",
 "file": "torchlens/postprocess/graph_traversal.py",
 "has_default": false,
-"line": 176,
+"line": 180,
 "via_getattr": false
 },
 {
@@ -12956,7 +12988,7 @@
 "field": "parents",
 "file": "torchlens/postprocess/graph_traversal.py",
 "has_default": false,
-"line": 476,
+"line": 480,
 "via_getattr": false
 },
 {
@@ -12964,7 +12996,7 @@
 "field": "is_scalar_bool",
 "file": "torchlens/postprocess/graph_traversal.py",
 "has_default": false,
-"line": 866,
+"line": 870,
 "via_getattr": false
 },
 {
@@ -12972,7 +13004,7 @@
 "field": "modules",
 "file": "torchlens/postprocess/graph_traversal.py",
 "has_default": false,
-"line": 312,
+"line": 316,
 "via_getattr": false
 },
 {
@@ -12980,8 +13012,16 @@
 "field": "func_call_id",
 "file": "torchlens/postprocess/graph_traversal.py",
 "has_default": true,
-"line": 521,
+"line": 525,
 "via_getattr": true
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/postprocess/graph_traversal.py",
+"has_default": false,
+"line": 151,
+"via_getattr": false
 },
 {
 "ambiguous": false,
@@ -14764,7 +14804,15 @@
 "field": "parent_arg_positions",
 "file": "torchlens/user_funcs.py",
 "has_default": false,
-"line": 755,
+"line": 756,
+"via_getattr": false
+},
+{
+"ambiguous": true,
+"field": "seq",
+"file": "torchlens/user_funcs.py",
+"has_default": false,
+"line": 762,
 "via_getattr": false
 },
 {
@@ -14772,7 +14820,7 @@
 "field": "raw_index",
 "file": "torchlens/user_funcs.py",
 "has_default": false,
-"line": 2763,
+"line": 2766,
 "via_getattr": false
 },
 {
@@ -14780,7 +14828,7 @@
 "field": "parents",
 "file": "torchlens/user_funcs.py",
 "has_default": false,
-"line": 753,
+"line": 754,
 "via_getattr": false
 },
 {
@@ -14788,7 +14836,7 @@
 "field": "raw_index",
 "file": "torchlens/user_funcs.py",
 "has_default": false,
-"line": 2664,
+"line": 2667,
 "via_getattr": false
 },
 {
@@ -14796,7 +14844,7 @@
 "field": "parents",
 "file": "torchlens/user_funcs.py",
 "has_default": false,
-"line": 763,
+"line": 765,
 "via_getattr": false
 },
 {
@@ -14804,7 +14852,7 @@
 "field": "layer_type",
 "file": "torchlens/user_funcs.py",
 "has_default": false,
-"line": 2765,
+"line": 2768,
 "via_getattr": false
 },
 {
@@ -14812,7 +14860,7 @@
 "field": "layer_type",
 "file": "torchlens/user_funcs.py",
 "has_default": false,
-"line": 2666,
+"line": 2669,
 "via_getattr": false
 },
 {

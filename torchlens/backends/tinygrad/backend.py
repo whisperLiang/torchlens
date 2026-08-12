@@ -22,6 +22,7 @@ from ...data_classes.param import Param, ParamAccessor
 from ...data_classes.trace import Trace
 from ...fastlog.types import CaptureSpec
 from ...ir.capture_events import CaptureEvents
+from ...ir.op_record import amend_preview_output_parent_rebind
 from ...ir.events import (
     ArgTemplateRef,
     FunctionCallRef,
@@ -1151,13 +1152,14 @@ class TinygradBackend:
                 in_multi_output=is_multi_output,
                 container_path=(leaf_index,) if is_multi_output else (),
             )
-            updated = replace(event, is_output_parent=True, output=updated_output)
-            trace.capture_events.op_event_by_label_raw[label] = updated
-            trace.capture_events.live_index.replace(updated)
-            for index, candidate in enumerate(trace.capture_events.op_events):
-                if candidate.label_raw == label:
-                    trace.capture_events.op_events[index] = updated
-                    break
+            trace.capture_events.append_amendment(
+                amend_preview_output_parent_rebind(
+                    event.seq,
+                    label,
+                    is_output_parent=True,
+                    output=updated_output,
+                )
+            )
 
     def _finish_trace(self, trace: Trace, module_tree: TinygradModuleTree | None = None) -> None:
         """Finalize materialized tinygrad raw logs into public accessors.

@@ -6,7 +6,7 @@ import random
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, cast
 
 from ... import _state
@@ -22,6 +22,7 @@ from ...data_classes.param import Param, ParamAccessor
 from ...data_classes.trace import Trace
 from ...fastlog.types import CaptureSpec
 from ...ir.capture_events import CaptureEvents
+from ...ir.op_record import amend_preview_output_parent_mark
 from ...ir.events import (
     ArgTemplateRef,
     FunctionCallRef,
@@ -1415,13 +1416,9 @@ class PaddleBackend:
             event = trace.capture_events.op_event_by_label_raw.get(label)
             if event is None:
                 continue
-            updated = replace(event, is_output_parent=True)
-            trace.capture_events.op_event_by_label_raw[label] = updated
-            for index, candidate in enumerate(trace.capture_events.op_events):
-                if candidate.label_raw == label:
-                    trace.capture_events.op_events[index] = updated
-                    trace.capture_events.live_index.replace(updated)
-                    break
+            trace.capture_events.append_amendment(
+                amend_preview_output_parent_mark(event.seq, label, is_output_parent=True)
+            )
 
     def _finish_trace(self, trace: Trace, module_tree: PaddleModuleTree | None = None) -> None:
         """Finalize a manually captured Paddle Trace."""

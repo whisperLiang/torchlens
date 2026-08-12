@@ -1,20 +1,22 @@
 {
+ "append_amendment_callers": [
+  "torchlens/backends/jax/backend.py:1437",
+  "torchlens/backends/mlx/backend.py:1846",
+  "torchlens/backends/paddle/backend.py:1419",
+  "torchlens/backends/tf/backend.py:994",
+  "torchlens/backends/tf/backend.py:1021",
+  "torchlens/backends/tinygrad/backend.py:1155",
+  "torchlens/backends/torch/backend.py:874",
+  "torchlens/backends/torch/model_prep.py:2156",
+  "torchlens/backends/torch/model_prep.py:1840",
+  "torchlens/backends/torch/model_prep.py:1980",
+  "torchlens/backends/torch/ops.py:6216",
+  "torchlens/ir/capture_events.py:956",
+  "torchlens/postprocess/graph_traversal.py:149",
+  "torchlens/user_funcs.py:760"
+ ],
  "op_events_inplace_writes": [
-  "torchlens/backends/jax/backend.py:1441",
-  "torchlens/backends/mlx/backend.py:1850",
-  "torchlens/backends/paddle/backend.py:1422",
-  "torchlens/backends/tf/backend.py:997",
-  "torchlens/backends/tf/backend.py:1028",
-  "torchlens/backends/tinygrad/backend.py:1159",
   "torchlens/ir/capture_events.py:1117"
  ],
- "replace_op_event_callers": [
-  "torchlens/backends/torch/backend.py:878",
-  "torchlens/backends/torch/model_prep.py:2135",
-  "torchlens/backends/torch/model_prep.py:1832",
-  "torchlens/backends/torch/model_prep.py:1964",
-  "torchlens/backends/torch/ops.py:6216",
-  "torchlens/postprocess/graph_traversal.py:149",
-  "torchlens/user_funcs.py:759"
- ]
+ "replace_op_event_callers": []
 }

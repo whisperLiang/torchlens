@@ -1,15 +1,17 @@
-"""P4 entry gate: hardened completeness fixture against the LIVE legacy sites.
+"""P4 completeness fixture: the live mutator sites against the closed registry.
 
-Captured BEFORE any amendment-lane wiring or site migration (DoR 4.2, Opus C7 /
-Sol 2). Four layers:
+Originally captured against the LIVE legacy ``replace_op_event`` sites BEFORE
+any wiring or migration (DoR 4.2, Opus C7 / Sol 2 — that pre-migration form is
+preserved at commit d4b1738d); re-targeted in P4c onto the amendment lane's
+single chokepoint, ``CaptureEvents.append_amendment``. Four layers:
 
-1. **Pair-wise identity** — every observed legacy ``replace_op_event`` kwarg is
-   checked as a ``(facet path, flat field)`` PAIR against its family's registry
-   row joined through ``PATH_TO_FLAT``, in registry order. A same-set identity
-   permutation (Sol's ``intervention_fired <-> intervention_replaced`` swap) is
-   red.
+1. **Pair-wise identity** — every observed live amendment's patch paths are
+   checked as ``(facet path, flat field)`` PAIRs against its family's registry
+   row joined through ``PATH_TO_FLAT``, in registry order, and its call site
+   must be the family's ONE intended site. A same-set identity permutation
+   (Sol's ``intervention_fired <-> intervention_replaced`` swap) is red.
 2. **Emit-site value round-trip** — at every live call the folded journal
-   record must carry each passed value at its own flat field AND (decomposed
+   record must carry each patch value at its own flat field AND (decomposed
    leg) at its own facet path, by object identity for non-interned values.
    The synthetic distinct-sentinel test below completes the value-level proof
    for interned (bool) paths with asymmetric patterns plus their complements.
@@ -19,10 +21,10 @@ Sol 2). Four layers:
    zero observations for any family is red (the vacuity guard). The preview
    promotion families get their scenarios on the preview acceptance leg
    (skipped where the backend is not importable).
-4. **Static AST guard** — no mutator call site uses ``**`` expansion or a
-   conditionally-present keyword, and the static site count matches the closed
-   inventory — the property that makes the dynamic characterization a sound
-   proof of the static set.
+4. **Static AST guard** — no typed-constructor call site uses ``**`` expansion
+   or a conditionally-present keyword, and the static site count matches the
+   closed inventory — the property that makes the dynamic characterization a
+   sound proof of the static set.
 
 The spy NEVER raises inside the wrapper: a raised exception at a capture-time
 site would be swallowed into failed-forward recovery (observed in P3), so
@@ -44,14 +46,14 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens.ir.capture_events import replace_op_event as _real_replace_op_event
+from torchlens.ir.capture_events import CaptureEvents
 from torchlens.ir.events import OpEvent
 from torchlens.ir.op_record import (
     AMENDMENT_FAMILIES,
     PATH_TO_FLAT,
     _FACET_ATTRIBUTES,
     OpRecord,
-    record_with_flat_updates,
+    apply_patch_items,
 )
 
 pytestmark = pytest.mark.smoke
@@ -67,18 +69,10 @@ _TORCH_FAMILIES = frozenset(AMENDMENT_FAMILIES) - {
     "preview_output_parent_rebind",
 }
 
-# Closed caller inventory (ledger mutators.json): importing module -> the
-# module attribute the spy patches.
-_CALLER_MODULES = (
-    "torchlens.backends.torch.ops",
-    "torchlens.user_funcs",
-    "torchlens.backends.torch.model_prep",
-    "torchlens.backends.torch.backend",
-    "torchlens.postprocess.graph_traversal",
-)
-
 # (caller file basename, enclosing function) -> intended family. The spy
 # resolves every observed call through this map; an unmapped caller is red.
+# The torch sites plus the six preview promotion sites (which only fire on
+# the preview acceptance leg).
 _SITE_FAMILIES: dict[tuple[str, str], str] = {
     ("ops.py", "_replace_event_with_retained_payload"): "lookback_retention",
     ("user_funcs.py", "_register_live_tensor_connection"): "graph_edge_insertion",
@@ -92,70 +86,77 @@ _SITE_FAMILIES: dict[tuple[str, str], str] = {
     ("graph_traversal.py", "_resolve_output_parent_labels"): "late_buffer_output_parent",
 }
 
+# Lane transport, not emit sites: concat re-appends already-emitted amendments
+# when a per-pass journal merges into an accumulating one (the fastlog
+# recorder path). Any family may legitimately pass through here.
+_TRANSPORT_SITES: frozenset[tuple[str, str]] = frozenset(
+    {("capture_events.py", "concat")}
+)
+
 
 @dataclass
 class _Observation:
-    """One live mutator call recorded by the spy."""
+    """One live amendment append recorded by the spy."""
 
     site: tuple[str, str]
-    family: str | None
+    family: str
     kwarg_names: tuple[str, ...]
     label_raw: str
     record_type: str
 
 
 @contextmanager
-def _spy_replace_op_event(
+def _spy_append_amendment(
     observations: list[_Observation], failures: list[str]
 ) -> Iterator[None]:
-    """Wrap every caller module's ``replace_op_event`` binding with the spy."""
+    """Wrap the ONE amendment chokepoint, ``CaptureEvents.append_amendment``."""
 
-    def wrapper(trace: Any, label_raw: str, **updates: Any) -> Any:
+    real_append = CaptureEvents.append_amendment
+
+    def wrapper(self: Any, amendment: Any) -> Any:
         frame = sys._getframe(1)
         site = (Path(frame.f_code.co_filename).name, frame.f_code.co_name)
-        family = _SITE_FAMILIES.get(site)
-        updated = _real_replace_op_event(trace, label_raw, **updates)
-        record_type = type(updated).__name__ if updated is not None else "None"
+        family = amendment.family
+        label_raw = amendment.target_label_raw
+        folded = real_append(self, amendment)
         observations.append(
             _Observation(
                 site=site,
                 family=family,
-                kwarg_names=tuple(updates),
+                kwarg_names=tuple(PATH_TO_FLAT[path] for path, _ in amendment.patch),
                 label_raw=label_raw,
-                record_type=record_type,
+                record_type=type(folded).__name__,
             )
         )
-        if updated is None:
-            failures.append(f"{site}: target {label_raw!r} not found in the journal")
-            return updated
-        folded = trace.capture_events.amended_op_record(label_raw)
-        if folded is not updated:
-            failures.append(
-                f"{site}: folded journal view for {label_raw!r} is not the "
-                "record the mutator produced (single-truth violation)"
-            )
-        if family is None:
-            return updated
-        schema_paths = tuple(path for path, _ in AMENDMENT_FAMILIES[family])
-        for path in schema_paths:
+        if site not in _TRANSPORT_SITES:
+            expected_site_family = _SITE_FAMILIES.get(site)
+            if expected_site_family != family:
+                failures.append(
+                    f"{site}: appended family {family!r} but the site map "
+                    f"expects {expected_site_family!r} (reached-intended-family)"
+                )
+        view = self.amended_op_record(label_raw)
+        for name in ("label_raw", "seq"):
+            if getattr(view, name) != getattr(folded, name):
+                failures.append(
+                    f"{site}: folded journal view for {label_raw!r} disagrees "
+                    f"with the appended fold on {name!r} (single-truth violation)"
+                )
+        for path, value in amendment.patch:
             flat = PATH_TO_FLAT[path]
-            if flat not in updates:
-                # pair-wise check in the test body reports the full mismatch
-                continue
-            value = updates[flat]
-            landed = getattr(updated, flat)
+            landed = getattr(folded, flat)
             identical = landed is value if not isinstance(value, bool) else landed == value
             if not identical:
                 failures.append(
                     f"{site}: flat field {flat!r} does not carry the emitted "
                     f"value (got {landed!r}, sent {value!r})"
                 )
-            if isinstance(updated, OpRecord):
+            if isinstance(folded, OpRecord):
                 owner, _, field_name = path.partition(".")
                 holder = (
-                    updated.core
+                    folded.core
                     if owner == "core"
-                    else getattr(updated, _FACET_ATTRIBUTES[owner])
+                    else getattr(folded, _FACET_ATTRIBUTES[owner])
                 )
                 if holder is None:
                     failures.append(
@@ -173,19 +174,13 @@ def _spy_replace_op_event(
                         f"{site}: facet path {path!r} does not carry the "
                         f"emitted value (got {facet_value!r}, sent {value!r})"
                     )
-        return updated
+        return folded
 
-    modules = [importlib.import_module(name) for name in _CALLER_MODULES]
-    for module in modules:
-        assert module.replace_op_event is _real_replace_op_event, (
-            f"{module.__name__} does not bind the canonical replace_op_event"
-        )
-        module.replace_op_event = wrapper
+    CaptureEvents.append_amendment = wrapper  # type: ignore[method-assign]
     try:
         yield
     finally:
-        for module in modules:
-            module.replace_op_event = _real_replace_op_event
+        CaptureEvents.append_amendment = real_append  # type: ignore[method-assign]
 
 
 # ---------------------------------------------------------------------------
@@ -361,18 +356,14 @@ def test_live_legacy_sites_completeness(
     monkeypatch.setenv(_PRODUCER_ENV, producer)
     observations: list[_Observation] = []
     failures: list[str] = []
-    with _spy_replace_op_event(observations, failures):
+    with _spy_append_amendment(observations, failures):
         for _family, build, capture in _BATTERY:
             model, inputs = build()
             capture(model, inputs)
 
-    unknown = [o for o in observations if o.family is None]
-    assert not unknown, f"unmapped mutator caller(s): {[o.site for o in unknown]}"
-
     for observation in observations:
         expected = tuple(
-            PATH_TO_FLAT[path]
-            for path, _ in AMENDMENT_FAMILIES[observation.family or ""]
+            PATH_TO_FLAT[path] for path, _ in AMENDMENT_FAMILIES[observation.family]
         )
         assert observation.kwarg_names == expected, (
             f"{observation.site} ({observation.family}): observed kwargs "
@@ -452,9 +443,9 @@ def test_distinct_sentinel_fold_routing(
 ) -> None:
     """Every registry path routes to its OWN destination on both fold legs.
 
-    For each family, per-path distinct sentinels are applied through the leg's
-    fold mechanism (flat ``dataclasses.replace`` for compat ``OpEvent``s,
-    ``record_with_flat_updates`` for decomposed ``OpRecord``s). Each
+    For each family, per-path distinct sentinels are applied through the ONE
+    dual-leg fold primitive (``apply_patch_items``: PATH_TO_FLAT flat replace
+    for compat ``OpEvent``s, facet replace for decomposed ``OpRecord``s). Each
     destination must carry exactly its sentinel and every other flat field
     must be untouched. Bool paths run BOTH asymmetric patterns, so a
     same-set permutation between two bool destinations is red.
@@ -482,10 +473,7 @@ def test_distinct_sentinel_fold_routing(
                     flip = not flip  # asymmetric across the family's bool paths
             updates = {PATH_TO_FLAT[path]: value for path, value in sentinels.items()}
             before = {name: _flat_read(template, name) for name in flat_names}
-            if isinstance(template, OpRecord):
-                folded = record_with_flat_updates(template, **updates)
-            else:
-                folded = replace(template, **updates)
+            folded = apply_patch_items(template, tuple(sentinels.items()))
             for path, value in sentinels.items():
                 flat = PATH_TO_FLAT[path]
                 landed = getattr(folded, flat)
@@ -525,10 +513,27 @@ def test_distinct_sentinel_fold_routing(
 # Layer 4: static AST guard over the closed caller inventory.
 # ---------------------------------------------------------------------------
 
-# Names whose call sites must stay statically characterizable. Post-migration
-# (P4c) the typed constructor names join this set and replace_op_event leaves.
-_GUARDED_CALLEES = frozenset({"replace_op_event"})
-_EXPECTED_SITE_COUNT = 7
+# Names whose call sites must stay statically characterizable: the nine typed
+# amendment constructors (post-migration; replace_op_event has zero production
+# callers and dies in the P4 deletion step). Production sites only — the
+# constructor definitions and tests are excluded by the file list.
+_GUARDED_CALLEES = frozenset(
+    {
+        "amend_lookback_retention",
+        "amend_graph_edge_insertion",
+        "amend_raw_hook_intervention",
+        "amend_module_exit_intervention",
+        "amend_module_boundary_retention",
+        "amend_output_parent_promotion",
+        "amend_late_buffer_output_parent",
+        "amend_preview_output_parent_mark",
+        "amend_preview_output_parent_rebind",
+        "replace_op_event",  # must stay at ZERO sites in these files
+    }
+)
+# 7 torch sites + 6 preview promotion sites (tf x2, mlx, paddle, jax,
+# tinygrad).
+_EXPECTED_SITE_COUNT = 13
 
 
 def _call_name(node: ast.Call) -> str | None:
@@ -550,6 +555,11 @@ def test_static_ast_guard_no_expansion_no_conditional_kwargs() -> None:
         "backends/torch/model_prep.py",
         "backends/torch/backend.py",
         "postprocess/graph_traversal.py",
+        "backends/tf/backend.py",
+        "backends/mlx/backend.py",
+        "backends/paddle/backend.py",
+        "backends/jax/backend.py",
+        "backends/tinygrad/backend.py",
     )
     sites: list[tuple[str, int]] = []
     for relative in relative_files:
@@ -560,6 +570,10 @@ def test_static_ast_guard_no_expansion_no_conditional_kwargs() -> None:
                 continue
             if _call_name(node) not in _GUARDED_CALLEES:
                 continue
+            assert _call_name(node) != "replace_op_event", (
+                f"{relative}:{node.lineno}: replace_op_event caller survived "
+                "the P4 migration"
+            )
             sites.append((relative, node.lineno))
             starred_kwargs = [kw for kw in node.keywords if kw.arg is None]
             assert not starred_kwargs, (

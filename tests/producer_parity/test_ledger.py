@@ -30,23 +30,24 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PACKAGE_ROOT = _REPO_ROOT / "torchlens"
 _LEDGER_DIR = Path(__file__).resolve().parent / "ledger"
 
-# The exact legacy post-commit mutation channel set (design-of-record section
-# 4.1): seven replace_op_event callers beyond the definition module, plus the
-# six preview promotion in-place list writes. P4 deletes the channel; until
-# then ANY change to this set is a reviewed diff here.
-EXPECTED_REPLACE_OP_EVENT_CALLER_FILES = {
+# The exact post-commit mutation channel set AFTER the P4 migration (DoR
+# 4.1/4.9): the typed amendment lane is the ONE channel. Emit sites are the
+# seven torch families' files plus the five preview backends; the journal's
+# own concat transport re-appends merged amendments. The legacy channels
+# (replace_op_event callers, in-place op_events[i] writes) must stay at ZERO.
+# ANY change to this set is a reviewed diff here.
+EXPECTED_APPEND_AMENDMENT_CALLER_FILES = {
     "torchlens/backends/torch/ops.py",  # lookback_retention
     "torchlens/user_funcs.py",  # graph_edge_insertion (register_tensor_connection)
     "torchlens/backends/torch/model_prep.py",  # raw hook / module exit / boundary retention
     "torchlens/backends/torch/backend.py",  # output_parent_promotion
     "torchlens/postprocess/graph_traversal.py",  # late_buffer_output_parent (pre-0)
-}
-EXPECTED_PREVIEW_INPLACE_WRITE_FILES = {
-    "torchlens/backends/tf/backend.py",
-    "torchlens/backends/jax/backend.py",
-    "torchlens/backends/mlx/backend.py",
-    "torchlens/backends/paddle/backend.py",
-    "torchlens/backends/tinygrad/backend.py",
+    "torchlens/backends/tf/backend.py",  # preview_output_parent_mark x2
+    "torchlens/backends/mlx/backend.py",  # preview_output_parent_mark
+    "torchlens/backends/paddle/backend.py",  # preview_output_parent_mark
+    "torchlens/backends/jax/backend.py",  # preview_output_parent_rebind
+    "torchlens/backends/tinygrad/backend.py",  # preview_output_parent_rebind
+    "torchlens/ir/capture_events.py",  # concat lane transport (re-append)
 }
 
 
@@ -120,23 +121,32 @@ def test_generate_and_close_ledger(tmp_path: Path) -> None:
     mutators = mutator_inventory(_PACKAGE_ROOT)
     (_LEDGER_DIR / "mutators.json").write_text(json.dumps(mutators, indent=1, sort_keys=True))
 
-    caller_files = {
-        site.rsplit(":", 1)[0]
-        for site in mutators["replace_op_event_callers"]
-        if "ir/capture_events.py" not in site and not site.startswith("tests/")
+    amendment_files = {
+        site.rsplit(":", 1)[0] for site in mutators["append_amendment_callers"]
     }
-    assert caller_files == EXPECTED_REPLACE_OP_EVENT_CALLER_FILES, (
-        "replace_op_event caller set drifted — a new post-commit mutation "
-        f"channel needs a registry family: {caller_files ^ EXPECTED_REPLACE_OP_EVENT_CALLER_FILES}"
+    assert amendment_files == EXPECTED_APPEND_AMENDMENT_CALLER_FILES, (
+        "append_amendment caller set drifted — a new post-commit mutation "
+        "channel needs a registry family: "
+        f"{amendment_files ^ EXPECTED_APPEND_AMENDMENT_CALLER_FILES}"
     )
-    preview_files = {
-        site.rsplit(":", 1)[0]
-        for site in mutators["op_events_inplace_writes"]
-        if site.startswith("torchlens/backends/")
-        and "ir/capture_events" not in site
+    # Legacy channels stay dead: no replace_op_event callers outside its
+    # definition module, no in-place op_events[i] list writes anywhere.
+    legacy_callers = {
+        site
+        for site in mutators["replace_op_event_callers"]
+        if "ir/capture_events.py" not in site
     }
-    assert preview_files == EXPECTED_PREVIEW_INPLACE_WRITE_FILES, (
-        f"preview in-place promotion sites drifted: {preview_files ^ EXPECTED_PREVIEW_INPLACE_WRITE_FILES}"
+    assert not legacy_callers, (
+        f"replace_op_event callers resurfaced after the P4 migration: {legacy_callers}"
+    )
+    inplace_writes = {
+        site
+        for site in mutators["op_events_inplace_writes"]
+        if "ir/capture_events.py" not in site  # replace_op_event's own body, deleted in P4
+    }
+    assert not inplace_writes, (
+        "in-place op_events[i] writes resurfaced after the P4 migration: "
+        f"{inplace_writes}"
     )
 
 

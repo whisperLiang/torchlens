@@ -17,9 +17,8 @@ from ...data_classes.internal_types import FuncExecutionContext
 from ..._io import BlobRef as PortableBlobRef
 from ...capture.session import capture_session_for
 from ...fastlog.types import CaptureSpec, ModuleStackFrame, StorageIntent
-from ...ir import replace_op_event
-from ...ir.events import OpEvent
-from ...ir.op_record import replace_op_fields
+from ...ir.events import OpEvent, OutputRef
+from ...ir.op_record import amend_output_parent_promotion
 from ...ir.intervention import FireResult, FunctionEventInput
 from ...ir.container import ContainerSpec, OutputPathComponent
 from ...ir.container_registry import ContainerLeafOccurrence, ModelSite, Phase, Role
@@ -196,8 +195,8 @@ def _promote_layers_to_save_output_parent(
     trace: "Trace",
     event: OpEvent,
     tensor: torch.Tensor,
-) -> OpEvent:
-    """Attach a saved payload to an absorbed ``layers_to_save`` output parent.
+) -> tuple[OutputRef, CapturePolicy, bool, object]:
+    """Resolve the ``output_parent_promotion`` amendment values for one output.
 
     Parameters
     ----------
@@ -211,9 +210,12 @@ def _promote_layers_to_save_output_parent(
 
     Returns
     -------
-    OpEvent
-        Event updated with output-parent state and, when required, saved payload
-        references.
+    tuple[OutputRef, CapturePolicy, bool, object]
+        ``(output, policy, predicate_matched, capture_spec)`` for the caller's
+        ``amend_output_parent_promotion`` — the event's current values when no
+        payload retention is required, otherwise the saved-payload rebinds.
+        The computed record context is deliberately NOT returned: the family
+        schema preserves the documented legacy quirk of dropping it.
     """
 
     if (
@@ -221,7 +223,7 @@ def _promote_layers_to_save_output_parent(
         or getattr(trace, "_predicate_save_options", None) is None
         or event.output.has_saved_activation
     ):
-        return replace_op_fields(event, is_output_parent=True)
+        return event.output, event.policy, event.predicate_matched, event.capture_spec
 
     from ...capture.projections import _record_context_from_event
     from ...fastlog._storage_resolver import _resolve_storage
@@ -295,15 +297,7 @@ def _promote_layers_to_save_output_parent(
         has_saved_activation=True,
     )
     policy = dataclasses.replace(event.policy, save_payload=True)
-    return replace_op_fields(
-        event,
-        output=output_ref,
-        policy=policy,
-        predicate_matched=True,
-        is_output_parent=True,
-        capture_spec=spec,
-        record_context=ctx,
-    )
+    return output_ref, policy, True, spec
 
 
 class TorchBackend:
@@ -870,19 +864,23 @@ class TorchBackend:
                 self_trace.output_layers.append(_label_raw)
                 event = self_trace.capture_events.op_event_by_label_raw.get(_label_raw)
                 if event is not None:
-                    updated_event = _promote_layers_to_save_output_parent(
-                        self_trace,
-                        event,
-                        t,
+                    promoted_output, promoted_policy, promoted_matched, promoted_spec = (
+                        _promote_layers_to_save_output_parent(
+                            self_trace,
+                            event,
+                            t,
+                        )
                     )
-                    replace_op_event(
-                        self_trace,
-                        _label_raw,
-                        is_output_parent=True,
-                        output=updated_event.output,
-                        policy=updated_event.policy,
-                        predicate_matched=updated_event.predicate_matched,
-                        capture_spec=updated_event.capture_spec,
+                    self_trace.capture_events.append_amendment(
+                        amend_output_parent_promotion(
+                            event.seq,
+                            _label_raw,
+                            is_output_parent=True,
+                            output=promoted_output,
+                            policy=promoted_policy,
+                            predicate_matched=promoted_matched,
+                            capture_spec=promoted_spec,
+                        )
                     )
 
         return attributable_output_tensors, attributable_output_tensor_addresses

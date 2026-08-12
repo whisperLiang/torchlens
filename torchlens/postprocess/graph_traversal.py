@@ -26,7 +26,7 @@ from ..utils.tensor_utils import (
 )
 from ..utils.introspection import _get_code_context
 from ..data_classes.op import Op, _dtype_or_none, _memory_or_none, _shape_or_none
-from ..ir import replace_op_event
+from ..ir.op_record import amend_late_buffer_output_parent
 from ._materialize import _recorded_buffer_address
 
 if TYPE_CHECKING:
@@ -146,7 +146,11 @@ def _resolve_output_parent_labels(
         if parent_label is not None:
             event = capture_events.op_event_by_label_raw.get(parent_label)
             if event is not None:
-                replace_op_event(self, parent_label, is_output_parent=True)
+                capture_events.append_amendment(
+                    amend_late_buffer_output_parent(
+                        event.seq, parent_label, is_output_parent=True
+                    )
+                )
         parent_labels.append(parent_label)
     return parent_labels
 

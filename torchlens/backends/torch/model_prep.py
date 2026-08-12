@@ -50,7 +50,11 @@ from ...ir import (
     ModuleExitEvent,
     ModuleFrame,
     ModulePrepEvent,
-    replace_op_event,
+)
+from ...ir.op_record import (
+    amend_module_boundary_retention,
+    amend_module_exit_intervention,
+    amend_raw_hook_intervention,
 )
 from ...ir.container_registry import ModuleSite, Phase, Role, walk_container
 from ...utils.tensor_utils import (
@@ -1829,7 +1833,17 @@ def _make_user_forward_hook_wrapper(
                 replacement, trace.capture_events.live_index.by_raw_label
             )
             if replacement_label is not None:
-                replace_op_event(trace, replacement_label, intervention_replaced=True)
+                replaced_event = trace.capture_events.op_event_by_label_raw.get(
+                    replacement_label
+                )
+                if replaced_event is not None:
+                    trace.capture_events.append_amendment(
+                        amend_raw_hook_intervention(
+                            replaced_event.seq,
+                            replacement_label,
+                            intervention_replaced=True,
+                        )
+                    )
                 # This frame directly observed the genuine replacement (the raw
                 # user hook returned a new object), so it is the authority that
                 # mints trace-level replacement-event evidence for validation.
@@ -1961,13 +1975,17 @@ def _record_module_exit_metadata(
             remaining_fire_results = _pop_tensor_live_fire_results(t)
             if remaining_fire_results:
                 any_replaced = any(result.replaced for result in remaining_fire_results)
-                replace_op_event(
-                    trace,
-                    tensor_label,
-                    intervention_fired=True,
-                    intervention_replaced=any_replaced,
-                    fire_results=remaining_fire_results,
-                )
+                exit_event = trace.capture_events.op_event_by_label_raw.get(tensor_label)
+                if exit_event is not None:
+                    trace.capture_events.append_amendment(
+                        amend_module_exit_intervention(
+                            exit_event.seq,
+                            tensor_label,
+                            intervention_fired=True,
+                            intervention_replaced=any_replaced,
+                            fire_results=remaining_fire_results,
+                        )
+                    )
                 if any_replaced and _live_intervention_machinery_armed():
                     _note_replacement_event(trace, tensor_label, origin="live_fire")
         is_atomic_module = _is_bottom_level_submodule_exit(trace, t, module)
@@ -2132,15 +2150,20 @@ def _record_predicate_module_boundary_outputs(
             predicate_matched=True,
             container_path=tuple(container_path),
         )
-        replace_op_event(
-            trace,
-            boundary_ctx.raw_label or boundary_ctx.label,
-            output=selected_event.output,
-            policy=selected_event.policy,
-            predicate_matched=True,
-            capture_spec=decision,
-            record_context=boundary_ctx,
-        )
+        boundary_label = boundary_ctx.raw_label or boundary_ctx.label
+        boundary_event = trace.capture_events.op_event_by_label_raw.get(boundary_label)
+        if boundary_event is not None:
+            trace.capture_events.append_amendment(
+                amend_module_boundary_retention(
+                    boundary_event.seq,
+                    boundary_label,
+                    output=selected_event.output,
+                    policy=selected_event.policy,
+                    predicate_matched=True,
+                    capture_spec=decision,
+                    record_context=boundary_ctx,
+                )
+            )
 
 
 def module_forward_decorator(
