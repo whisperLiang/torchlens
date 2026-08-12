@@ -291,6 +291,33 @@ private; computed collapse metadata stays out of serialization.
   round-trips to the same surface/alias behavior; where current deterministic member
   bytes are stable they remain a stronger regression check.
 
+### 3.6b As-landed single-truth boundary (fix round, 2026-08-12)
+
+What the store IS production truth for today, versus which planes exist as
+tested substrate awaiting their named follow-on wave — the record must never
+read as if the full section-2 target had landed:
+
+PRODUCTION-WIRED (single truth; every live write path routes through it, and
+the pickle/state stream serializes FROM it — a `__dict__` shadow of a
+declared field can neither shadow the live read nor the serialized value):
+`OpRowStore` for every captured `Op` (row-major under 512 rows, columnar
+transpose above — object fields stay object columns by design); the M8 kind
+tables (`Param`/`Buffer`/`FuncCallLocation`/`ModuleCall`/`Module`); the M9
+atomic backward epochs; the M6/M7 relation planes (edge-occurrence CSR,
+interned views, group tables, shared-fact blocks); `TraceCore.label_rows`;
+the M10 step write-audit (assignment + in-place content).
+
+SUBSTRATE-ONLY (constructed, unit-proven in `test_trace_core_substrate.py`,
+NOT yet production-wired — each names its wave): the identity-preserving
+payload arena (saved tensors currently live in cells; wiring is part of the
+payload-plane slice), the generic `TraceCore.facade()`/`set_facade_factory()`
+weak facade cache (facades are currently built eagerly at materialize and
+retained strongly by the trace containers; on-demand facade materialization
+is the memory-target slice, section 3.7 numbers), the numpy-typed column
+packing for scalar planes beyond the transpose, and the `Trace` PHYSICAL
+component decomposition (declared ownership map only — `Trace` fields still
+live in its `__dict__`).
+
 ### 3.7 Trace decomposition (THE deliverable) and TraceBuildState
 
 M10 as-landed disposition (2026-08-12): `TraceBuildState` is dissolved — its
