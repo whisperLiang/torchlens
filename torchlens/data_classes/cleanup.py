@@ -55,6 +55,14 @@ def cleanup(self: "Trace") -> None:
     if hasattr(self, "param_logs"):
         for pl in self.param_logs:
             pl.release_param_ref()
+    # Materialize the M8 Layer mirror fields BEFORE husking the ops that back
+    # them: a user-held Layer keeps exactly the readable metadata the dict-era
+    # per-layer copies kept after cleanup (the copies existed at this point in
+    # the dict era, so post-cleanup memory is unchanged).
+    from .layer import materialize_layer_mirrors
+
+    for layer_log in (self.__dict__.get("layer_logs") or {}).values():
+        materialize_layer_mirrors(layer_log)
     # First, clear all attributes from each Op entry.
     # This breaks the Op -> Trace circular reference
     # (via source_trace) without needing per-entry reference removal.

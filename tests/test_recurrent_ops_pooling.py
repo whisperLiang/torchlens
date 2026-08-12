@@ -142,13 +142,20 @@ def test_assignment_apply_pools_lists_without_pooling_member_keys() -> None:
 
 @pytest.mark.smoke
 def test_layer_equivalent_ops_shares_canonical_set(loop_trace) -> None:
-    """Layers store the canonical class set, not a private per-Layer copy."""
+    """Layers back onto the ops' canonical equivalence container (M8 mirror).
+
+    The dict era stored the shared canonical set per Layer; the M8 aggregate
+    facade stores NOTHING — the mirror read resolves to the group's ONE
+    cached immutable view, the same object the op read returns.
+    """
 
     for layer in loop_trace.layers:
         first_pass = layer.ops[0]
-        raw_layer_value = layer.__dict__["equivalent_ops"]
-        assert raw_layer_value is first_pass._slot("equivalent_ops"), (
-            "Layer must back onto the ops' canonical equivalent_ops object"
+        assert "equivalent_ops" not in layer.__dict__, (
+            "Layer must not retain a private equivalent_ops copy (M8 mirror)"
+        )
+        assert layer.equivalent_ops is first_pass.equivalent_ops, (
+            "Layer reads must resolve to the ops' one shared group view"
         )
 
 
