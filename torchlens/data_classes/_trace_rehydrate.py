@@ -21,6 +21,10 @@ Boundaries (documented, tested):
   documented as staying raw, so a load must not run the relation freeze
   on them. The ``_tracing_finished`` master switch (``FieldPolicy.KEEP``)
   gates rehydration.
+* Module / ModuleCall facades do not exist at ``__setstate__`` time
+  (pickle strips ``_module_logs``; ``.tlspec`` loads rebuild it later
+  through ``_io.accessor_rebuild``, which adopts them into the kind
+  tables at that point). Plain pickle loads legitimately have none.
 * Backward records (``GradFn``/``GradFnCall``/``BackwardPass``) stay
   detached-backed — loaded traces have no event stream, so there is no
   epoch to rebuild; a NEW backward on the restored trace binds fresh
@@ -50,6 +54,31 @@ _KIND_BY_CLASS_NAME = {
     "ModuleCall": "module_call",
     "FuncCallLocation": "func_call_location",
 }
+
+
+def _iter_op_cell_func_call_locations(store: Any, layout: Any) -> Any:
+    """Yield FuncCallLocation records held in op ``code_context`` cells.
+
+    Pickle empties ``_code_context_cache`` (the live discovery container),
+    but the restored op rows still hold the actual ``FuncCallLocation``
+    facades in their ``code_context`` cells — the same records the
+    capture-time freeze seam adopts from the cache. Scanning the adopted
+    rows keeps their kind table populated on BOTH load paths.
+    """
+
+    from .func_call_location import FuncCallLocation
+
+    fid = layout.fid_by_name.get("code_context")
+    if fid is None:
+        return
+    seen: set[int] = set()
+    for row in range(len(store)):
+        cell = store.cell_get(row, fid)
+        if isinstance(cell, (tuple, list)):
+            for item in cell:
+                if isinstance(item, FuncCallLocation) and id(item) not in seen:
+                    seen.add(id(item))
+                    yield item
 
 
 def rehydrate_trace_core(trace: "Trace") -> bool:
@@ -112,6 +141,10 @@ def rehydrate_trace_core(trace: "Trace") -> bool:
             if kind is None:
                 continue
             records_by_kind.setdefault(kind, {}).setdefault(id(record), record)
+        for record in _iter_op_cell_func_call_locations(store, _OP_STORE_LAYOUT):
+            records_by_kind.setdefault("func_call_location", {}).setdefault(
+                id(record), record
+            )
         for kind, records in records_by_kind.items():
             adopt_records(core, kind, records.values())
 

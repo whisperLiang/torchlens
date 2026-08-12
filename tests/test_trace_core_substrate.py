@@ -682,3 +682,79 @@ def test_loaded_partial_capture_stays_staging() -> None:
     if fid is not None:
         cell = store.cell_get(0, fid)
         assert type(cell).__name__ != "GroupRef"
+@pytest.mark.smoke
+def test_tlspec_load_adopts_every_record_kind() -> None:
+    """A ``.tlspec`` load leaves NO reachable facade outside the store (F9).
+
+    The closure review found module/module_call facades detached-backed
+    with empty kind tables after a load: the module accessor is rebuilt
+    AFTER ``__setstate__`` sealed the core, and the adoption iterator only
+    discovered records through accessors that do not survive pickling.
+    FuncCallLocation records had the same hole on both load paths (their
+    live discovery container ``_code_context_cache`` empties at pickle).
+    """
+
+    import pickle
+    import tempfile
+
+    import torchlens as tl
+    from torchlens._trace_core.op_store import DetachedOpStore
+
+    class Net(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin1 = torch.nn.Linear(3, 4)
+            self.act = torch.nn.ReLU()
+            self.bn = torch.nn.BatchNorm1d(4)
+            self.lin2 = torch.nn.Linear(4, 3)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            # ``act`` runs twice -> a multi-call module (two ModuleCalls).
+            return self.act(self.lin2(self.bn(self.act(self.lin1(x)))))
+
+    trace = tl.trace(Net(), torch.randn(2, 3))
+
+    def store_backed(record: object) -> bool:
+        store = record.__dict__.get("_tl_core")
+        return store is not None and not isinstance(store, DetachedOpStore)
+
+    def op_cell_fcls(t: object) -> list:
+        found = []
+        for op in t.layer_list:
+            for item in getattr(op, "code_context", None) or ():
+                if type(item).__name__ == "FuncCallLocation":
+                    found.append(item)
+        return found
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tl.save(trace, tmp + "/t.tlspec")
+        loaded = tl.load(tmp + "/t.tlspec")
+
+    core = loaded.__dict__.get("_trace_core")
+    assert core is not None and core.ops is not None and core.ops.frozen
+    for kind in ("param", "buffer", "module", "module_call", "func_call_location"):
+        table = core.kind_rows.get(kind)
+        assert table is not None and len(table) > 0, f"kind table {kind!r} empty"
+        assert table.frozen, f"kind table {kind!r} must seal with the core"
+
+    modules = list(loaded.modules.values())
+    module_calls = [c for m in modules for c in m.calls.values()]
+    assert len(module_calls) >= 5 and any(m.calls and len(m.calls) == 2 for m in modules)
+    for record in (
+        modules
+        + module_calls
+        + list(loaded.params.values())
+        + list(loaded.buffers.values())
+        + op_cell_fcls(loaded)
+    ):
+        assert store_backed(record), f"detached facade survived load: {record!r}"
+
+    # Plain pickle strips modules/buffers entirely (no facades exist), but
+    # params and op-cell FuncCallLocations must still rejoin the store.
+    clone = pickle.loads(pickle.dumps(trace))
+    clone_core = clone.__dict__.get("_trace_core")
+    assert clone_core is not None
+    assert len(clone_core.kind_rows["param"]) > 0
+    assert len(clone_core.kind_rows["func_call_location"]) > 0
+    for record in list(clone.params.values()) + op_cell_fcls(clone):
+        assert store_backed(record), f"detached facade survived pickle: {record!r}"
