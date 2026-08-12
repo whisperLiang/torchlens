@@ -1405,6 +1405,7 @@ class Op:
         PORTABLE_STATE_SPEC,
         fork_policy=LAYER_PASS_LOG_FIELD_FORK_POLICY,
         default_fill_state=_LAYER_PASS_LOG_DEFAULT_FILL,
+        schema_key="op",
     )
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
     FIELD_FORK_POLICY = fork_policy_from_policy(FIELD_POLICY)

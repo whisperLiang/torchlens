@@ -120,7 +120,7 @@ class Param:
         "_derived_grad_payload": FieldPolicy.KEEP,
         "_derived_grad_record_path": FieldPolicy.KEEP,
     }
-    FIELD_POLICY = build_record_field_policy_table(PARAM_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC)
+    FIELD_POLICY = build_record_field_policy_table(PARAM_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="param")
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     def __init__(

@@ -249,7 +249,7 @@ class GradFn:
         "backward_signature": FieldPolicy.KEEP,
         "backward_docstring": FieldPolicy.KEEP,
     }
-    FIELD_POLICY = build_record_field_policy_table(GRAD_FN_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC)
+    FIELD_POLICY = build_record_field_policy_table(GRAD_FN_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="grad_fn")
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     grad_fn_object_id: int

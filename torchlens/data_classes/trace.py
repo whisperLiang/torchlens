@@ -1454,6 +1454,7 @@ class Trace(
         PORTABLE_STATE_SPEC,
         fork_policy=MODEL_LOG_FIELD_FORK_POLICY,
         default_fill_state=_MODEL_LOG_DEFAULT_FILL,
+        schema_key="trace",
     )
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 

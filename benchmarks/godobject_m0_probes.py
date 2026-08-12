@@ -126,12 +126,9 @@ def probe_scale(target_ops: int) -> None:
     if events is not None:
         journal_bytes, journal_objects, _ = _deep_size(events)
 
-    op_bytes = op_objects = payload = 0
-    for op in trace.ops.values():
-        b, o, p = _deep_size(op)
-        op_bytes += b
-        op_objects += o
-        payload += p
+    # One traversal over the whole op family with a SHARED visited set, so
+    # shared containers/labels count once (per-op sums overstate sharing).
+    op_bytes, op_objects, payload = _deep_size(list(trace.ops.values()))
 
     print(f"[scale {target_ops}] ops={n_ops} capture_peak={peak / 1e6:.1f}MB")
     print(
@@ -145,7 +142,7 @@ def probe_scale(target_ops: int) -> None:
         f"-> ratio {journal_bytes / max(op_bytes, 1):.2f}x"
     )
 
-    from torchlens.capture.record_context import RecordContext
+    from torchlens.ir.predicate import RecordContext
 
     gc.collect()
     contexts = sum(

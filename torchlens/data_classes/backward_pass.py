@@ -92,6 +92,7 @@ class BackwardPass:
     FIELD_POLICY = build_record_field_policy_table(
         BACKWARD_PASS_FIELD_ORDER,
         _PORTABLE_STATE_POLICY,
+        schema_key="backward_pass",
     )
     PORTABLE_STATE_SPEC: ClassVar[dict[str, FieldPolicy]] = portable_state_spec_from_policy(
         FIELD_POLICY

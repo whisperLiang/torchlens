@@ -52,6 +52,7 @@ class GradFnCall:
             **PORTABLE_STATE_SPEC,
             "call_label": PORTABLE_STATE_SPEC["label"],
         },
+        schema_key="grad_fn_call",
     )
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 

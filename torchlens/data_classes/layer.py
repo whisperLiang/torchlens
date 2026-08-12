@@ -347,7 +347,7 @@ class Layer:
         "ops": FieldPolicy.KEEP,
         "call_labels": FieldPolicy.KEEP,
     }
-    FIELD_POLICY = build_record_field_policy_table(LAYER_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC)
+    FIELD_POLICY = build_record_field_policy_table(LAYER_LOG_FIELD_ORDER, PORTABLE_STATE_SPEC, schema_key="layer")
     PORTABLE_STATE_SPEC = portable_state_spec_from_policy(FIELD_POLICY)
 
     def __init__(self, first_pass: "Op") -> None:

@@ -30,6 +30,8 @@ from typing import Any, Dict, List, Optional, Union
 
 from .._io import FieldPolicy, TLSPEC_VERSION, default_fill_state, read_tlspec_version
 from .._source_links import vscode_file_line_link
+from ..constants import FUNC_CALL_LOCATION_FIELD_ORDER
+from .field_policy import build_record_field_policy_table
 
 # Sentinel object to distinguish "not yet loaded" from an actual None value.
 # Used as the default for lazy-loading placeholders so we can tell the
@@ -97,6 +99,12 @@ class FuncCallLocation:
         "_func_docstring": FieldPolicy.KEEP,
         "_linecache_entry": FieldPolicy.DROP,
     }
+
+    FIELD_POLICY = build_record_field_policy_table(
+        FUNC_CALL_LOCATION_FIELD_ORDER,
+        PORTABLE_STATE_SPEC,
+        schema_key="func_call_location",
+    )
 
     def __init__(
         self,
