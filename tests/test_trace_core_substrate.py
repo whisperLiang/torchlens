@@ -496,19 +496,29 @@ def test_pickle_load_rehydrates_into_the_store() -> None:
 
 
 @pytest.mark.smoke
-def test_sparse_isolation_index_tracks_post_seal_writes() -> None:
-    """The fork-isolation index never goes stale (F4 sparse sweep).
+def test_fork_isolation_sweep_is_index_driven_and_never_stale() -> None:
+    """The eager fork sweep is SPARSE (index-driven) and the index never
+    goes stale (F4; closure round 2, item 4).
 
-    The eager sweep visits only the base store's cached mutable-cell index,
-    so a container written AFTER the index was built (post-seal, post-fork
-    parent write) must still isolate in the NEXT fork — sealed row-major
-    stores register such writes via ``_SealedRowMajorOpRowStore.cell_set``,
-    columnar stores route them through the overlay the sweep also visits.
+    Two facts, each impossible on the eager whole-store implementation
+    (which this test must FAIL against — the prior version passed there):
+
+    * SPARSE: the sweep visits ONLY the base store's cached mutable-cell
+      index. Poisoning the index (dropping one known-mutable cell) makes
+      the next fork skip that cell's eager copy, so its copy-on-first-read
+      backstop snapshots the parent's LATER in-place mutation — a sweep
+      that ignored the index would have isolated the cell at fork time and
+      kept the pre-mutation value. The index is also built once and reused
+      by identity across forks.
+    * NEVER STALE: a container written AFTER the index was built still
+      isolates in the NEXT fork — sealed row-major stores register such
+      writes in the index (``_SealedRowMajorOpRowStore.cell_set``),
+      columnar stores route them through the overlay every fork snapshots.
     """
 
     from torchlens._trace_core.op_store import OpRowStore, OpStoreLayout, OpStoreView
 
-    # Sealed row-major base (under the transpose threshold).
+    # --- Sealed row-major base (under the transpose threshold). ---
     layout = OpStoreLayout(("a", "b"))
     store = OpRowStore(layout)
     row = store.new_row()
@@ -516,15 +526,41 @@ def test_sparse_isolation_index_tracks_post_seal_writes() -> None:
     store.cell_set(row, 1, {"x": 0})
     store.freeze()
     first = OpStoreView(store)
-    first.isolate_mutable_cells()  # builds and caches the index
-    store.cell_set(row, 0, ["post-index"])  # container into an atomic cell
+    first.isolate_mutable_cells()
+    index = store._mutable_keys
+    assert index is not None and row in index.get(1, set()), (
+        "first sweep must build and cache the mutable-cell index"
+    )
+
+    # Never stale: a container written into an atomic cell after the index
+    # was built registers there, so the next fork still isolates it.
+    store.cell_set(row, 0, ["post-index"])
+    assert row in index.get(0, set()), (
+        "post-seal container write must register in the cached index"
+    )
     second = OpStoreView(store)
     second.isolate_mutable_cells()
+    assert store._mutable_keys is index, "index is cached, never rebuilt per fork"
     store.cell_get(row, 0).append("parent-mutation")
     assert second.cell_get(row, 0) == ["post-index"]
 
-    # Columnar base: the post-seal write lands in the overlay, which every
-    # fork snapshots and the sweep visits.
+    # Sparse proof: the sweep TRUSTS the index. Drop the dict cell from it;
+    # the next fork must skip the eager copy, and its lazy first read then
+    # sees the parent's later in-place write.
+    index[1].discard(row)
+    poisoned = OpStoreView(store)
+    poisoned.isolate_mutable_cells()
+    assert row * layout.n_fields + 1 not in poisoned._overlay, (
+        "sweep visited a cell the index does not name — not index-driven"
+    )
+    store.cell_get(row, 1)["x"] = 99
+    assert poisoned.cell_get(row, 1) == {"x": 99}, (
+        "index-skipped cell was isolated eagerly — the sweep is not sparse"
+    )
+    index[1].add(row)
+
+    # --- Columnar base: post-seal writes land in the overlay, which every
+    # fork snapshots; unindexed frozen cells are likewise never visited. ---
     big = OpRowStore(OpStoreLayout(("a", "b")))
     for i in range(600):
         r = big.new_row()
@@ -533,11 +569,35 @@ def test_sparse_isolation_index_tracks_post_seal_writes() -> None:
     big.freeze()
     warm = OpStoreView(big)
     warm.isolate_mutable_cells()
+    big_index = big._mutable_keys
+    assert big_index is not None and list(big_index) == [1], (
+        "packed numeric column must not enter the index"
+    )
     big.cell_set(5, 0, {"late": 0})  # packed-column cell -> overlay write
     view = OpStoreView(big)
     view.isolate_mutable_cells()
+    assert big._mutable_keys is big_index, "index is cached, never rebuilt per fork"
     big.cell_get(5, 0)["mut"] = 1
     assert view.cell_get(5, 0) == {"late": 0}
+
+    # Sparse proof, columnar shape: drop one row from the index and the
+    # next fork skips exactly that cell while its neighbors stay eager.
+    remaining = list(big_index[1])
+    remaining.remove(7)
+    big_index[1] = tuple(remaining)
+    poisoned_big = OpStoreView(big)
+    poisoned_big.isolate_mutable_cells()
+    n_fields = big.layout.n_fields
+    assert 7 * n_fields + 1 not in poisoned_big._overlay, (
+        "sweep visited a cell the index does not name — not index-driven"
+    )
+    assert 8 * n_fields + 1 in poisoned_big._overlay, (
+        "indexed neighbor cells must still isolate eagerly at fork time"
+    )
+    big.cell_get(7, 1)["i"] = -1
+    assert poisoned_big.cell_get(7, 1) == {"i": -1}, (
+        "index-skipped cell was isolated eagerly — the sweep is not sparse"
+    )
 
 
 @pytest.mark.smoke
