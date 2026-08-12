@@ -374,6 +374,13 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         writes=frozenset(
             (
                 "_edge_uses",
+                # Reviewed widening (closure review, enforcement leg over the
+                # intervention/observer suites): the final-label rename in
+                # _replace_layer_names_for_layer_entry rewrites raw parent
+                # refs inside replay templates and intervention records —
+                # cells that exist only on intervention-ready captures, an
+                # axis absent from the six surface-oracle recording models.
+                "args_template",
                 "atomic_module_call",
                 "children",
                 "conditional_arm_children",
@@ -386,9 +393,13 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
                 "fx_qualpath",
                 "input_ancestors",
                 "internal_source_ancestors",
+                # Same reviewed widening as args_template above.
+                "interventions",
                 "is_buffer",
                 "is_input",
                 "is_output",
+                # Same reviewed widening as args_template above.
+                "kwargs_template",
                 "output_descendants",
                 # Reviewed widening (sol finding 6 in-place audit): final-info
                 # logging mutates parent_arg_positions dicts in place.
@@ -426,6 +437,34 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         "Populate source var names",
         "Consumes code context; mutates Op var_names in place.",
         writes=frozenset(),
+    ),
+    # Step 11.75 previously had NO contract boundary, so its writes were
+    # misattributed to step 12's window and only surfaced on the selective/
+    # fastlog axis (deferred retention runs only with a capture session) —
+    # an axis absent from the recorded contract runs (closure review,
+    # enforcement leg). The declared set is retention's payload family:
+    # saving a deferred out writes the payload cells and their derived
+    # shape/dtype/memory metadata.
+    "11.75": PostprocessStepContract(
+        "11.75",
+        "Resolve deferred retention",
+        "Consumes deferred retention decisions; saves selected payloads.",
+        writes=frozenset(
+            (
+                "activation_memory",
+                "annotations",
+                "dtype",
+                "has_saved_activation",
+                "out",
+                "saved_args",
+                "saved_kwargs",
+                "shape",
+                "transformed_activation_memory",
+                "transformed_out",
+                "transformed_out_dtype",
+                "transformed_out_shape",
+            )
+        ),
     ),
     "12": PostprocessStepContract(
         "12",
@@ -907,6 +946,7 @@ def postprocess(
     if capture_session is not None:
         with _vtimed(self, "  Step 11.75: Resolve deferred retention"):
             capture_session.resolve_deferred_retention(self, list(output_tensors))
+    _assert_postprocess_contract(self, "11.75")
 
     # Step 12: Undecorate all saved tensors and remove saved grad_fns.
     with _vtimed(self, "  Step 12: Undecorate tensors"):
