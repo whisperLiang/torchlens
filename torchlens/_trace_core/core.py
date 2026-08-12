@@ -102,6 +102,7 @@ class TraceCore:
         "tables",
         "ops",
         "kind_rows",
+        "label_rows",
         "pool",
         "closures",
         "edges",
@@ -124,6 +125,10 @@ class TraceCore:
         # The M8 non-Op kind tables (param/buffer/module/module_call/
         # func_call_location), populated by the build passes' adopt_records.
         self.kind_rows: dict[str, Any] = {}
+        # The canonical label -> op-row index, bound at the relation freeze
+        # (final layer_label per live core-backed op). The core-side index
+        # the M10 Trace decomposition resolves lookups through.
+        self.label_rows: dict[str, int] = {}
         self.pool = InternPool()
         self.closures = ClosurePool()
         self.edges: dict[str, EdgeTable] = {}
@@ -210,6 +215,7 @@ class TraceCore:
         child.tables = self.tables
         child.ops = self.ops
         child.kind_rows = self.kind_rows
+        child.label_rows = self.label_rows
         child.pool = self.pool
         child.closures = self.closures
         child.edges = self.edges

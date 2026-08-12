@@ -80,6 +80,20 @@ conditional consistency when removing entries.
 ### Layer Building
 `_build_layer_logs()` merges multiple `Op` entries into one aggregate. Most fields
 use first-pass values; only selected graph/role fields are merged across ops.
+Since M8, `Layer` no longer COPIES the first-pass fields: they are mirror
+descriptors reading through to `ops[0]` on demand, with per-layer `__dict__`
+shadows for merged/overwritten values (`_LAYER_MIRROR_SPEC` in `layer.py`).
+`in_conditionals`/`terminal_bool_for` remain build-time snapshots because
+`_build_conditional_records` rebinds them on the OPS after layers are built.
+
+### M8 record facades (Param/Buffer/FuncCallLocation/ModuleCall/Module)
+These classes are row facades over per-trace kind tables
+(`_trace_core/record_rows.py`): declared stored fields are row-cell
+descriptors; the instance `__dict__` keeps only the store binding, user
+extras (JMT-FORK-7), and the few names whose properties hardcode `__dict__`
+access (template/source-trace/facets slots). Torch build passes adopt records
+into `TraceCore.kind_rows`; direct construction, preview backends, pickle
+restore, and fork shells stay detached single-row stores.
 
 ### Module / ModuleCall Fields
 `Module.training` mirrors `nn.Module.training`; `Module.layer_labels` stores Layer

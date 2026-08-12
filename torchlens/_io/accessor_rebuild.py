@@ -67,4 +67,11 @@ def rebuild_trace_accessors(
         )
         for address, versions in buffer_versions.items()
     }
+    # Adopt Buffer rows into the per-trace kind table (M8) when this trace is
+    # core-backed (live captures; loaded traces stay detached-backed).
+    _core = trace.__dict__.get("_trace_core")
+    if _core is not None and buffer_dict:
+        from torchlens._trace_core.record_rows import adopt_records
+
+        adopt_records(_core, "buffer", buffer_dict.values())
     trace._buffer_accessor = BufferAccessor(buffer_dict, source_trace=trace)  # type: ignore[assignment]

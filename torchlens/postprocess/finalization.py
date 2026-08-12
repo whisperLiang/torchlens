@@ -967,6 +967,15 @@ def _build_module_logs(self: "Trace") -> None:
     # --- Compute nesting depths ---
     _compute_call_depths(module_dict, root_module)
 
+    # Adopt the finished Module/ModuleCall rows into the per-trace kind
+    # tables (M8) before the accessors are rebuilt around them.
+    _core = self.__dict__.get("_trace_core")
+    if _core is not None:
+        from .._trace_core.record_rows import adopt_records
+
+        adopt_records(_core, "module", module_dict.values())
+        adopt_records(_core, "module_call", pass_dict.values())
+
     rebuild_trace_accessors(self, module_dict, module_order, pass_dict)
 
     # Clean up temporary build state to free memory. These dicts are only

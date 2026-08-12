@@ -467,6 +467,11 @@ def freeze_trace_relation_views(trace: Any) -> RelationFreezeStats | None:
         if label is not None:
             label_rows[label] = entry._row
 
+    # Bind the canonical label -> row index on the core (M8): the freeze-time
+    # resolver IS the core-side lookup index the Trace-side label maps
+    # progressively delegate to (M10 decomposition).
+    core.label_rows = label_rows
+
     pool: dict[Any, Any] = {}
     stats = freeze_op_relation_views(core, store, label_rows.get, pool)
 

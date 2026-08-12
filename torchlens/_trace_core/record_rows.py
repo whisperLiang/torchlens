@@ -164,6 +164,11 @@ def adopt_records(core: Any, kind: str, records: Any) -> None:
     if store is None:
         store = OpRowStore(layout)
         core.kind_rows[kind] = store
+    elif store.frozen:
+        # A refresh re-runs the build passes after the first capture sealed
+        # the table; records built by the re-run stay detached-backed (the
+        # dict-era equivalent of their fresh per-record dicts).
+        return
     for record in records:
         instance_dict = record.__dict__
         bound = instance_dict.get(CORE_KEY)

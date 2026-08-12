@@ -663,6 +663,21 @@ def postprocess(
     if _core is not None and _core.ops is not None:
         _freeze_relation_views(self)
         _core.ops.freeze()
+        # Adopt the trace-scoped FuncCallLocation records (cached per call
+        # site in _code_context_cache) into their kind table before sealing.
+        # Cache entries mix FuncCallLocation records with plain metadata, so
+        # filter by type.
+        from ..data_classes.func_call_location import FuncCallLocation as _FCL
+
+        _fcl_seen: dict[int, object] = {}
+        for _fcl_group in (self.__dict__.get("_code_context_cache") or {}).values():
+            for _fcl in _fcl_group or ():
+                if isinstance(_fcl, _FCL):
+                    _fcl_seen.setdefault(id(_fcl), _fcl)
+        if _fcl_seen:
+            from .._trace_core.record_rows import adopt_records
+
+            adopt_records(_core, "func_call_location", _fcl_seen.values())
         # The M8 non-Op kind tables (param/module/module_call/buffer/
         # func_call_location) seal with the same lifecycle: appends stop,
         # later writes keep landing in row cells via the sealed-store path.

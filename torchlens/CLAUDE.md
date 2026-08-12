@@ -159,7 +159,17 @@ exclusive with backward-related capture because it discards the autograd graph.
   mutable copy, cached back — per-row isolation is unchanged). Sibling outputs of one
   wrapped call also share ONE journal-side `FunctionCallRef`.
   During postprocess the staging containers remain real mutable builtins; legacy
-  list/set state normalizes on load. Architecture of record:
+  list/set state normalizes on load.
+  M8 remaining kinds: `Layer` is an AGGREGATE FACADE — the ~86 representative
+  fields the dict era copied from the first pass are class-level mirror
+  descriptors reading through to `ops[0]` (with the exact copy-time
+  normalizations); writes shadow per-layer in `__dict__`, deletes tombstone,
+  and cleanup/removal materialize mirrors before husking the backing ops.
+  `Param`/`Buffer`/`FuncCallLocation`/`ModuleCall`/`Module` are row facades
+  over per-trace kind tables (`record_rows.py`, `TraceCore.kind_rows`,
+  adopted by the build passes and sealed with the core; preview backends and
+  loads stay detached-backed). The canonical label -> op-row index binds at
+  the freeze as `TraceCore.label_rows`. Architecture of record:
   `docs/reference/trace_core_design.md`.
 - `backends/torch/` - torch function wrapping, explicit wrap/unwrap, module prep.
 - `fastlog/` - sparse predicate recording with RAM/disk storage and recovery.
