@@ -410,3 +410,17 @@ def test_resave_preserves_capture_provenance_certificate(tmp_path: Path) -> None
     first_manifest = json.loads((first_path / "manifest.json").read_text(encoding="utf-8"))
     second_manifest = json.loads((second_path / "manifest.json").read_text(encoding="utf-8"))
     assert second_manifest["provenance"] == first_manifest["provenance"]
+
+
+def test_resave_preserves_model_fingerprint_with_buffers(tmp_path: Path) -> None:
+    """Loaded traces carry their buffer fingerprint instead of claiming no buffers."""
+
+    first_path = tmp_path / "first-buffered.tlspec"
+    second_path = tmp_path / "second-buffered.tlspec"
+    trace = tl.trace(_BufferedModel(), torch.ones(1, 2))
+    tl.save(trace, first_path)
+    tl.save(tl.load(first_path), second_path)
+
+    first_manifest = json.loads((first_path / "manifest.json").read_text(encoding="utf-8"))
+    second_manifest = json.loads((second_path / "manifest.json").read_text(encoding="utf-8"))
+    assert second_manifest["model_fingerprint"] == first_manifest["model_fingerprint"]

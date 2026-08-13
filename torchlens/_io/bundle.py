@@ -1687,7 +1687,7 @@ def _load_unified_tlspec(
     if kind == "trace":
         _preflight_unified_trace_manifest(manifest, bundle_path=bundle_path)
         parsed_manifest = _manifest_for_unified_trace_load(manifest)
-        return _load_trace_payload(
+        loaded_trace = _load_trace_payload(
             bundle_path,
             parsed_manifest,
             lazy=lazy,
@@ -1698,6 +1698,10 @@ def _load_unified_tlspec(
             trust_custom_callables=trust_custom_callables,
             allowed_custom_callable_modules=allowed_custom_callable_modules,
         )
+        model_fingerprint = manifest.get("model_fingerprint")
+        if isinstance(model_fingerprint, dict):
+            setattr(loaded_trace, "_source_bundle_model_fingerprint", model_fingerprint)
+        return loaded_trace
     if kind == "bundle":
         return _load_unified_bundle(bundle_path, bundle_visited=bundle_visited)
     raise TorchLensIOError(f"Unsupported unified tlspec kind={kind!r}.")
@@ -2516,6 +2520,7 @@ def _scrub_trace_for_bundle(
         "_source_bundle_path",
         "_source_bundle_created_at",
         "_source_bundle_provenance",
+        "_source_bundle_model_fingerprint",
         "payload_load_status",
         "_validation_replay_status",
     ):

@@ -601,6 +601,10 @@ class _TlSpecWriter:
         if kind == "bundle":
             return cls._bundle_fingerprint(source, model_signature)
 
+        source_fingerprint = getattr(source, "_source_bundle_model_fingerprint", None)
+        if isinstance(source_fingerprint, dict):
+            return dict(source_fingerprint)
+
         model = _source_model(source)
         if model is not None:
             parameter_hash = _hash_named_tensor_meta(model.named_parameters())
