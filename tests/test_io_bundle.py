@@ -18,7 +18,7 @@ pytest.importorskip("safetensors")
 from torchlens import Trace, load, trace as trace_fn, save
 from torchlens._io import bundle as bundle_io
 from torchlens.io import cleanup_tmp, detect_tlspec_format
-from torchlens._io import TLSPEC_VERSION, TorchLensIOError
+from torchlens._io import MIN_TLSPEC_VERSION, TLSPEC_VERSION, TorchLensIOError
 from torchlens._io.paths import resolve_bundle_blob_path
 from torchlens._io.manifest import Manifest
 from torchlens._io.payload_codec import (
@@ -549,10 +549,16 @@ def test_bundle_save_complex64_still_round_trips(tmp_path: Path) -> None:
             str(TLSPEC_VERSION + 1),
         ),
         (
-            "io_format_older",
-            lambda manifest: manifest.__setitem__("tlspec_version", TLSPEC_VERSION - 1),
+            "io_format_below_floor",
+            lambda manifest: manifest.__setitem__("tlspec_version", MIN_TLSPEC_VERSION - 1),
             "raise",
             "below the supported rehydration floor",
+        ),
+        (
+            "io_format_between_floor_and_current",
+            lambda manifest: manifest.__setitem__("tlspec_version", MIN_TLSPEC_VERSION),
+            "deprecation_warning",
+            "older than runtime tlspec_version",
         ),
         (
             "io_format_equal",

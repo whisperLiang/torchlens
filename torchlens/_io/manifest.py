@@ -653,11 +653,18 @@ def enforce_version_policy(manifest: Manifest) -> None:
             f"a torchlens release >= {MIN_TORCHLENS_VERSION_TEXT} that still "
             "reads it."
         )
-    # No older-version warning branch: the rehydration floor equals the current
-    # TLSPEC_VERSION, so every accepted bundle is exactly current. When a future
-    # schema bump raises TLSPEC_VERSION above MIN_TLSPEC_VERSION, reintroduce an
-    # honest between-floor-and-current advisory here (see r6 L7: it must not
-    # promise default-filling -- ``Manifest.from_dict`` fails closed).
+    if manifest.tlspec_version < TLSPEC_VERSION:
+        # Honest between-floor-and-current advisory (r6 L7): the artifact loads
+        # at its recorded schema; fields introduced by later schema versions are
+        # absent, never default-filled (``Manifest.from_dict`` fails closed on
+        # required fields).
+        warnings.warn(
+            f"Bundle tlspec_version={manifest.tlspec_version} is older than "
+            f"runtime tlspec_version={TLSPEC_VERSION}; loading at the recorded "
+            "schema. Re-save the artifact with this release to upgrade it.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     runtime_torch = _parse_version(torch.__version__, label="runtime torch")
     manifest_torch = _parse_version(manifest.torch_version, label="manifest torch")

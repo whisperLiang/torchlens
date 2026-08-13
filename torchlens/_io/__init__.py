@@ -23,6 +23,7 @@ import torch
 from ..errors._base import CompatibilityError
 
 # v6 adds persisted ModuleCall forward-pre-hook provenance value objects.
+# v7 adds the persisted capture outcome (`_capture_outcome`, string-only payload).
 TLSPEC_VERSION = 7
 _LEGACY_THREAD_WARNING_EMITTED: dict[str, bool] = {"flag": False}
 

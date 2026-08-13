@@ -20,7 +20,7 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens._io import TorchLensIOError
+from torchlens._io import MIN_TLSPEC_VERSION, TorchLensIOError
 from torchlens._io.manifest import Manifest
 from torchlens._io.payload_codec import get_payload_codec
 from torchlens.options import CaptureOptions
@@ -379,12 +379,13 @@ def test_bfloat16_payload_round_trips_through_the_real_routing(tmp_path: Path) -
 
 @pytest.mark.smoke
 def test_older_version_refuses_at_rehydration_floor(tmp_path: Path) -> None:
-    """A sub-current tlspec_version refuses typed instead of warning.
+    """A sub-floor tlspec_version refuses typed instead of warning.
 
-    The 2.33 rehydration floor equals the current ``TLSPEC_VERSION``, so the
-    former older-but-parsed ``DeprecationWarning`` branch is gone: nothing can
-    be both accepted and older. ``Manifest.from_dict`` refuses first with the
-    floor named.
+    Since the v7 schema bump the current ``TLSPEC_VERSION`` sits above the 2.33
+    rehydration floor (``MIN_TLSPEC_VERSION``), so the refusal boundary is the
+    floor, not the current version: a between-floor-and-current artifact loads
+    with the advisory ``DeprecationWarning``, while anything below the floor
+    refuses. ``Manifest.from_dict`` refuses first with the floor named.
     """
 
     from torchlens.errors import ArtifactVersionBelowFloorError
@@ -392,7 +393,7 @@ def test_older_version_refuses_at_rehydration_floor(tmp_path: Path) -> None:
     path = tmp_path / "versioned.tlspec"
     tl.trace(ParamsOnlyModel().eval(), torch.ones(2, 3), capture=_CAP).save(path)
     manifest_dict = _manifest(path)
-    manifest_dict["tlspec_version"] = int(manifest_dict["tlspec_version"]) - 1
+    manifest_dict["tlspec_version"] = MIN_TLSPEC_VERSION - 1
 
     with pytest.raises(ArtifactVersionBelowFloorError, match="torchlens 2.33"):
         Manifest.from_dict(manifest_dict)
