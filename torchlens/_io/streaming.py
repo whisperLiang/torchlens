@@ -385,7 +385,7 @@ class BundleStreamWriter:
         """Write one supported tensor blob and return its manifest entry."""
 
         with pause_logging():
-            contiguous_tensor = tensor.contiguous()
+            contiguous_tensor = tensor.resolve_conj().resolve_neg().contiguous()
         relative_path = Path("blobs") / f"{blob_id}.safetensors"
         blob_path = self.tmp_path / relative_path
         save_file({_BLOB_TENSOR_KEY: contiguous_tensor}, str(blob_path))

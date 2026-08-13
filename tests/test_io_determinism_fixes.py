@@ -36,6 +36,26 @@ class _LinearModel(torch.nn.Module):
         return self.linear(value)
 
 
+class _ComplexModel(torch.nn.Module):
+    """Tiny complex-valued model used by payload transport tests."""
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Return a supported complex64 activation.
+
+        Parameters
+        ----------
+        value:
+            Complex input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Complex activation.
+        """
+
+        return value * (1 + 0j)
+
+
 def _save_seeded_trace(path: Path, *, random_seed: int) -> tl.Trace:
     """Capture, save, and reload one trace with a chosen capture seed.
 
@@ -103,3 +123,20 @@ def test_save_scrub_remaps_autograd_identity_joins(tmp_path: Path) -> None:
         and set(grad_fn.next_grad_fn_ids) <= set(expected_ids)
         for grad_fn_id, grad_fn in loaded.grad_fn_logs.items()
     )
+
+
+def test_bundle_writer_resolves_lazy_conjugate_payloads(tmp_path: Path) -> None:
+    """Saved tensor bytes represent the logical value, not lazy physical storage."""
+
+    trace = tl.trace(
+        _ComplexModel(),
+        torch.tensor([1 + 2j], dtype=torch.complex64),
+        layers_to_save="all",
+        activation_transform=lambda value: value.conj(),
+    )
+    expected = trace.output_ops[0].transformed_out.clone()
+    path = tmp_path / "conjugate.tlspec"
+    tl.save(trace, path)
+
+    loaded = tl.load(path)
+    assert torch.equal(loaded.output_ops[0].transformed_out, expected)
