@@ -18,6 +18,27 @@ from typing import Any
 import numpy as np
 
 
+class _ReplaySlot:
+    """Sentinel standing in for a labeled array leaf in a capture template.
+
+    Replay never reads the stored value of a labeled leaf — it substitutes
+    the DECLARED parent's saved payload — so retaining the emit-time array
+    only pinned every intermediate activation for the lifetime of the trace.
+    The sentinel keeps the container structure and flatten order intact
+    (paddle's ``_template_value`` retention model).
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        """Return the sentinel's stable display form."""
+
+        return "<mlx-replay-slot>"
+
+
+REPLAY_SLOT = _ReplaySlot()
+
+
 @dataclass(frozen=True)
 class MLXOpCapture:
     """One captured MLX call retained for live replay validation.
@@ -32,11 +53,14 @@ class MLXOpCapture:
     func:
         Original (unwrapped) callable invoked by the wrapper.
     args:
-        Positional arguments as observed at call time.
+        Positional argument templates: labeled array leaves are replaced by
+        ``REPLAY_SLOT`` (replay sources them from saved parent payloads);
+        unlabeled leaves (parameters, constants) keep their emit-time values.
     kwargs:
-        Keyword arguments as observed at call time.
+        Keyword argument templates with the same slotting.
     output:
-        Raw output object returned by the call.
+        Unused legacy slot retained for constructor compatibility; the
+        expected replay values come from the trace's saved payloads.
     arg_leaf_labels:
         Per positional argument, the raw parent label of each array leaf in
         deterministic flatten order (``None`` for unlabeled leaves such as
@@ -54,6 +78,42 @@ class MLXOpCapture:
     output: Any = None
     arg_leaf_labels: tuple[tuple[str | None, ...], ...] = ()
     kwarg_leaf_labels: dict[str, tuple[str | None, ...]] = field(default_factory=dict)
+
+
+def build_capture_template(
+    value: Any,
+    leaf_labels: tuple[str | None, ...],
+) -> Any:
+    """Return ``value`` with labeled array leaves replaced by ``REPLAY_SLOT``.
+
+    Parameters
+    ----------
+    value:
+        Emit-time argument value.
+    leaf_labels:
+        Recorded per-leaf parent labels for ``value`` in flatten order.
+
+    Returns
+    -------
+    Any
+        Template retaining structure and unlabeled leaves only.
+    """
+
+    cursor = iter(leaf_labels)
+
+    def _slot(node: Any) -> Any:
+        if _is_mlx_array(node):
+            label = next(cursor, None)
+            return node if label is None else REPLAY_SLOT
+        if isinstance(node, tuple):
+            return tuple(_slot(item) for item in node)
+        if isinstance(node, list):
+            return [_slot(item) for item in node]
+        if isinstance(node, dict):
+            return {key: _slot(item) for key, item in node.items()}
+        return node
+
+    return _slot(value)
 
 
 def _is_mlx_array(value: Any) -> bool:
@@ -387,9 +447,15 @@ def _reconstruct_value(
     cursor = iter(leaf_labels)
 
     def _rebuild(node: Any) -> Any:
-        if _is_mlx_array(node):
+        if _is_mlx_array(node) or isinstance(node, _ReplaySlot):
             label = next(cursor, None)
             if label is None:
+                if isinstance(node, _ReplaySlot):
+                    # A slot with no recorded label means the template and
+                    # label fingerprint disagree; fail closed, never guess.
+                    raise ValueError(
+                        "MLX replay template slot has no recorded parent label."
+                    )
                 return node
             return _saved_payload(trace, ops_by_label, label)
         if isinstance(node, tuple):

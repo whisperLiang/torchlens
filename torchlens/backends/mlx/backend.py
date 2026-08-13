@@ -47,7 +47,7 @@ from ...validation.status import ValidationReplaySource, ValidationReplayStatus 
 from .._finalize import finalize_single_pass_trace
 from .._options import MLX_PREVIEW_TRACE_OPTION_POLICY, reject_unsupported_trace_options
 from . import capabilities
-from .validation import MLXOpCapture
+from .validation import MLXOpCapture, build_capture_template
 from .model_prep import (
     MLXModuleTree,
     cleanup_model_session,
@@ -1637,14 +1637,26 @@ class MLXBackend:
             key: tuple(self.tensor_store.get_label(leaf) for leaf in self._iter_arrays(value))
             for key, value in kwargs.items()
         }
+        # Template retention (paddle's _template_value model): labeled leaves
+        # become REPLAY_SLOT sentinels because replay sources them from saved
+        # parent payloads; keeping the raw arrays here pinned every
+        # intermediate activation for the trace's lifetime.
         op_captures.append(
             MLXOpCapture(
                 labels_raw=labels_raw,
                 op_name=op_name,
                 func=func,
-                args=args,
-                kwargs=dict(kwargs),
-                output=output,
+                args=tuple(
+                    build_capture_template(
+                        value,
+                        arg_leaf_labels[index] if index < len(arg_leaf_labels) else (),
+                    )
+                    for index, value in enumerate(args)
+                ),
+                kwargs={
+                    key: build_capture_template(value, kwarg_leaf_labels.get(key, ()))
+                    for key, value in kwargs.items()
+                },
                 arg_leaf_labels=arg_leaf_labels,
                 kwarg_leaf_labels=kwarg_leaf_labels,
             )
