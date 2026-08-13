@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import warnings
 from typing import Any
 
 import pytest
@@ -185,6 +186,43 @@ def test_rerun_with_hook_updates_downstream_out() -> None:
     assert torch.equal(log[log.output_layers[0]].out, torch.ones_like(original_output))
     assert not torch.equal(log[log.output_layers[0]].out, original_output)
     assert relu_site.interventions[-1].engine == "live"
+    assert log.last_run["hooks_fired"] >= 1
+    assert log.last_run["hooks_unfired"] == 0
+
+
+def test_rerun_warns_when_value_dependent_sticky_hook_stops_matching() -> None:
+    """A hook resolved on the source trace reports an unfired rerun plan entry."""
+    model = ReluAdd()
+    x = torch.randn(2, 3)
+    log = _capture(model, x)
+    gate = {"active": True}
+    selector = tl.func("relu") & tl.where(
+        lambda _op: gate["active"],
+        name_hint="runtime_gate",
+    )
+    log.attach_hooks(selector, tl.zero_ablate())
+    gate["active"] = False
+
+    with pytest.warns(UserWarning, match="fired at zero sites on the new inputs"):
+        log.run(model, x + 1)
+
+    assert log.last_run["hooks_fired"] == 0
+    assert log.last_run["hooks_unfired"] == 1
+
+
+def test_rerun_matching_sticky_hook_has_no_unfired_warning() -> None:
+    """A sticky hook that fires is reconciled without a zero-site warning."""
+    model = ReluAdd()
+    log = _capture(model, torch.randn(2, 3))
+    log.attach_hooks(tl.func("relu"), tl.zero_ablate())
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        log.run(model, torch.randn(2, 3))
+
+    assert not any("fired at zero sites" in str(item.message) for item in caught)
+    assert log.last_run["hooks_fired"] >= 1
+    assert log.last_run["hooks_unfired"] == 0
 
 
 @pytest.mark.smoke
