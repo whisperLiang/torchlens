@@ -703,6 +703,22 @@ def _tinygrad_capture_trace(*args: Any, **kwargs: Any) -> Any:
     return TinygradBackend().capture_trace(*args, **kwargs)
 
 
+def _paddle_interventions_implementation() -> object:
+    """Resolve the Paddle live-intervention implementing surface.
+
+    Returns
+    -------
+    object
+        Runtime class the Paddle capture wrapper dispatches for
+        ``trace(intervene=...)`` / ``trace(halt=...)`` sites. Import-light:
+        the module defers the paddle import to apply time.
+    """
+
+    from .paddle.interventions import PaddleInterventionRuntime
+
+    return PaddleInterventionRuntime
+
+
 def _paddle_capture_trace(*args: Any, **kwargs: Any) -> Any:
     """Dispatch to the Paddle backend preview.
 
@@ -1163,7 +1179,7 @@ def register_default_backend_specs() -> None:
                 backward_capture=False,
                 validation_replay=True,
                 fastlog=False,
-                interventions=False,
+                interventions=True,
                 rng_replay=False,
                 payload_materialization=True,
                 streaming=False,
@@ -1173,6 +1189,9 @@ def register_default_backend_specs() -> None:
                 module_identity_modes=("function_root", "object_module"),
                 trace_options=PADDLE_TRACE_OPTIONS,
             ),
+            capability_implementations={
+                "interventions": _paddle_interventions_implementation,
+            },
             serialization_policy=SerializationPolicy(
                 payload_policy="array_payloads",
                 body_format="safetensors",

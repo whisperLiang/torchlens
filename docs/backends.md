@@ -14,7 +14,7 @@ preview, explicit `backend="tinygrad"` enables the tinygrad preview, and explici
 | `mlx` | Technical preview | Live per-op replay and parent perturbation over the captured (whitelisted) op set | Materialized forward/derived array `.tlspec` payloads | `function_root`, object `object_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
 | `jax` | Preview jaxpr-first functional capture | Live per-equation replay and parent perturbation | Materialized forward/derived array `.tlspec` payloads | `function_root`, Equinox/NNX `pytree_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
 | `tinygrad` | Preview UOp-snapshot functional capture | Live UOp replay and parent perturbation on `DEV=PYTHON` payloads | Materialized forward/derived array `.tlspec` payloads | `function_root`, object `object_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
-| `paddle` | Preview dygraph/eager capture | Live replay/perturbation plus static inventory guard | Materialized forward/derived array `.tlspec` payloads | `function_root`, object `object_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
+| `paddle` | Preview dygraph/eager capture with live forward `intervene=`/`halt=` | Live replay/perturbation plus static inventory guard; corroborated user-intervention carve-out | Materialized forward/derived array `.tlspec` payloads | `function_root`, object `object_module` | `trace.derived_grads`; opt-in `trace.intermediate_derived_grads` |
 | `tf` | Preview eager op-callback capture; implemented graph-only FuncGraph static path for compiled/SavedModel entries | Callback self-consistency plus per-op replay/perturbation accounting | Materialized forward array `.tlspec` payloads | `function_root`, Keras/`tf.Module` object `object_module` | Deferred |
 
 Two cross-backend honesty notes apply to every preview row above:
@@ -75,20 +75,23 @@ mirrors, cache keys, docs, and tests changing together.
 ## Predicate Control and Mutation
 
 PyTorch eager capture can evaluate a predicate while a concrete tensor value is flowing through
-the wrapped operation, then mutate that value or halt capture at the matching frontier. JAX,
-tinygrad, Paddle, and TensorFlow do not expose the same point in the current TorchLens preview backends. JAX
+the wrapped operation, then mutate that value or halt capture at the matching frontier. Paddle
+dygraph exposes the same point — the capture wrapper holds each concrete output before the caller
+sees it — so the Paddle preview now supports live `intervene=` and `halt=` (see the Paddle Preview
+section). The other previews do not expose that point. JAX
 first builds a jaxpr over tracers and TorchLens labels are finalized after interpretation; a
 low-level primitive interpreter can replace a primitive by position, but that is not the public
 static-label `intervene=`/`halt=` contract. tinygrad builds a lazy UOp graph and concrete values
 appear only after `Tensor.realize()`/`Tensor.item()`, with no stable public API for replacing one
-internal UOp and rebuilding all descendants. Paddle preview capture is eager but denies live
-predicate-time mutation/halt while its op inventory and alias guards are still preview-scoped.
+internal UOp and rebuilding all descendants.
 TensorFlow eager `op_callbacks` are read-only in the supported Keras-3 / TF>=2.16 runtime, so
 interventions require a later writable monkeypatch layer.
 
-For that reason, non-torch backends support static-label `save=` only. Value-dependent `save=`,
-`intervene=`, and `halt=` are rejected with typed backend errors instead of false partial traces or
-validation passes. Live JAX/tinygrad/Paddle/TF selective-save traces still run real replay validation
+For that reason, non-torch backends other than Paddle support static-label `save=` only, and
+their `intervene=` and `halt=` are rejected with typed backend errors instead of false partial
+traces or validation passes. Value-dependent `save=` predicates stay rejected on every preview,
+Paddle included: preview `save=` is a post-finalization payload filter, not single-pass selective
+capture. Live JAX/tinygrad/Paddle/TF selective-save traces still run real replay validation
 through runtime-only hidden payloads; loaded traces report replay unavailable when those runtime
 captures were stripped. MLX supports static-label `save=` for `tl.func`, `tl.label`, `tl.module`,
 `tl.in_module`, `tl.contains`, and boolean composites of those; MLX validation is currently
@@ -208,8 +211,38 @@ trace = tl.trace(model, x, backend="paddle")
 
 Paddle module roots default to object module hierarchy when TorchLens can inspect the
 `paddle.nn.Layer` tree, with `function_root` available for raw callables. Static-label `save=`
-selectors are applied after full graph capture; value-dependent predicates, `intervene=`, `halt=`,
-streaming, `save_grads=`, `backward_ready=True`, and `tl.record(backend="paddle")` are rejected.
+selectors are applied after full graph capture; value-dependent `save=` predicates, streaming,
+`save_grads=`, `backward_ready=True`, and `tl.record(backend="paddle")` are rejected.
+
+Paddle supports live forward `intervene=` and `halt=` because dygraph capture is eager: the
+wrapper holds each wrapped call's concrete output before the caller sees it, so predicates run
+with real values and replacements flow into downstream computation.
+
+```python
+ablated = tl.trace(
+    model,
+    x,
+    backend="paddle",
+    intervene=tl.when(tl.func("functional.relu"), tl.zero_ablate()),
+)
+partial = tl.trace(model, x, backend="paddle", halt=tl.func("functional.relu"))
+assert partial.halted
+```
+
+Intervention semantics on Paddle are honest by construction. The intervened op keeps its real
+identity; its recorded payload is the replacement that actually flowed downstream, stamped with
+`op.intervention_replaced` and hook-minted `FireRecord` entries, and replay validation checks the
+original callable against the recorded pre-hook value through a narrow corroborated carve-out — a
+replacement value presented as captured-native FAILS validation. Builtin helpers with Paddle
+adapters are `tl.zero_ablate`, `tl.scale`, `tl.add`, and `tl.replace_with`; other helpers refuse
+typed, and raw callables receiving/returning `paddle.Tensor` are supported. Hook internals run
+outside capture logging (they do not appear as graph ops). Decisions are forward-only
+(`direction="backward"` refuses), intervention predicates and `halt=` may be value-dependent
+callables (the eager `RecordContext` carries real `tensor_requires_grad` / `is_scalar_bool` /
+`bool_value`), `halt=` finalizes an honest partial trace at the matched frontier without executing
+past it, and `recipes=` attaches per-trace facet recipes. `grad_options` cannot combine with
+`intervene=`/`halt=` because the derived-gradient replay re-runs the forward without
+interventions.
 
 Paddle validation is a live preview guard, not a completeness proof for arbitrary Paddle releases.
 Each wrapped op emits an independent capture record, replay reconstructs argument templates and
