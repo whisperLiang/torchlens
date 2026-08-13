@@ -716,7 +716,7 @@ def count_committed_ops(trace: object) -> int | None:
     return live
 
 
-def _stamp(trace: object, session: object, outcome: CaptureOutcome) -> CaptureOutcome:
+def _stamp(trace: object, session: Any, outcome: CaptureOutcome) -> CaptureOutcome:
     """Write one settled outcome to both homes and perform the one transition.
 
     The trace sidecar is rebound unconditionally (settle and demotion are the
@@ -861,7 +861,7 @@ def settle_failed(
     )
 
 
-def demote_outcome(trace: object, session: object, *, note: str) -> CaptureOutcome | None:
+def demote_outcome(trace: object, session: Any, *, note: str) -> CaptureOutcome | None:
     """Demote an already-settled outcome after a post-settlement teardown failure.
 
     The sole sanctioned post-settlement writer: permitted transitions are

@@ -6,7 +6,7 @@ import random
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 from ... import _state
@@ -40,7 +40,6 @@ from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
 from ...postprocess._materialize import materialize_from_events
 from ...quantities import Duration
-from ..._trace_core.relation_views import freeze_trace_relation_views
 from ...capture.outcome import stamp_backend_finalized
 from ...validation.status import ValidationReplaySource, ValidationReplayStatus
 from .._finalize import (

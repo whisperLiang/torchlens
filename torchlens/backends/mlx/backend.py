@@ -8,7 +8,7 @@ import warnings
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, cast
 
 import numpy as np
