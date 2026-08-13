@@ -5,6 +5,7 @@ plus environment checks (Jupyter detection, parallel-processing guard).
 """
 
 import multiprocessing as mp
+import os
 import sys
 import time
 from collections.abc import Iterable
@@ -19,6 +20,11 @@ if TYPE_CHECKING:
     from ..data_classes.trace import Trace
 
 _T = TypeVar("_T")
+
+# Package directory, resolved once at import: `user_stacklevel` compares frame
+# filenames against it to find the first non-torchlens frame. Matches the
+# already-established approach in utils/introspection.py's stack filter.
+_PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + os.sep
 
 
 def _record_phase_timing(trace: "Trace", bucket: str, elapsed_s: float) -> None:
@@ -420,6 +426,43 @@ def _vtimed(trace: "Trace", description: str) -> Iterator[None]:
         elapsed = time.perf_counter() - start
         _record_phase_timing(trace, bucket, elapsed)
         print(f" done ({elapsed:.2f}s)")
+
+
+def user_stacklevel(extra: int = 0) -> int:
+    """Return the ``warnings.warn`` stacklevel that blames the caller's caller.
+
+    A warning about the user's model or arguments should point at the user's own
+    line, not at whichever torchlens internal happened to notice. A fixed
+    ``stacklevel=`` cannot do that from deep in the pipeline: the capture path is
+    ~10 frames below ``tl.trace`` and the depth is not even constant (the rescue
+    re-run adds a frame), so a hardcoded number is wrong about as often as it is
+    right.
+
+    This walks outward from the caller and returns the depth of the first frame
+    outside the torchlens package, which is what ``stacklevel`` wants. Falls back
+    to ``2`` (the caller's caller) when every frame is internal -- e.g. under a
+    test that drives postprocess directly.
+
+    Parameters
+    ----------
+    extra:
+        Frames between the caller of this function and the ``warnings.warn``
+        call, for helpers that warn on someone else's behalf.
+
+    Returns
+    -------
+    int
+        Stacklevel to pass to ``warnings.warn``.
+    """
+
+    frame = sys._getframe(1)
+    depth = 1
+    while frame is not None:
+        if not frame.f_code.co_filename.startswith(_PACKAGE_ROOT):
+            return depth + extra
+        frame = frame.f_back
+        depth += 1
+    return 2 + extra
 
 
 def warn_parallel() -> None:

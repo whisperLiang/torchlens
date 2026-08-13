@@ -130,7 +130,7 @@ __all__ = [
     "group_recurrent_nodes",
     "postprocess",
 ]
-from ..utils.display import _vprint, _vtimed
+from ..utils.display import _vprint, _vtimed, user_stacklevel
 
 #: The executor resolves every step callable through THIS module namespace
 #: at call time (late binding, design-ppdag-v3 §5.2) — the names below are
@@ -543,7 +543,11 @@ def postprocess(
     if len(self._raw_graph_ws.raw_layer_labels_list) == 0:
         import warnings
 
-        warnings.warn("No layers were logged during the forward pass; skipping postprocessing.")
+        # This is about the user's model, so blame the user's line, not this one.
+        warnings.warn(
+            "No layers were logged during the forward pass; skipping postprocessing.",
+            stacklevel=user_stacklevel(),
+        )
         _set_tracing_finished(self)
         _drop_transient_capture_state(self)
         if capture_events is not None:
@@ -618,8 +622,7 @@ def postprocess(
         for _kind_store in _core.kind_rows.values():
             _kind_store.freeze()
 
-    if getattr(self, "verbose", False):
-        print(f"[torchlens] Postprocessing complete ({time.time() - _post_t0:.2f}s)")
+    _vprint(self, f"Postprocessing complete ({time.time() - _post_t0:.2f}s)")
     _drop_transient_capture_state(self)
     if capture_events is not None:
         capture_events.release_runtime_sidecars()

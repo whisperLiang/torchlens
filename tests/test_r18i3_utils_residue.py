@@ -16,7 +16,8 @@ not reach from its options.py lease:
 
 from __future__ import annotations
 
-from typing import Annotated
+import os
+from typing import Annotated, Any
 
 import pytest
 import torch
@@ -183,3 +184,66 @@ def test_m14_status_is_a_valid_doctorcheck_value() -> None:
     valid = tl_utils.DoctorCheck.__annotations__["status"]
     # Literal["PASS", "FAIL", "SKIP", "WARN"] -> the string must mention WARN.
     assert "WARN" in str(valid) and "PASS" in str(valid)
+
+
+def test_user_stacklevel_points_at_the_first_non_torchlens_frame() -> None:
+    """``user_stacklevel`` must blame the caller's code, not a torchlens internal.
+
+    Warnings raised deep in the capture pipeline used to carry no ``stacklevel=``
+    at all, so each pointed at whichever torchlens file happened to notice the
+    problem. A fixed integer cannot fix that either: the capture path sits ~10
+    frames below ``tl.trace`` and the depth varies (the rescue re-run adds a
+    frame), so the level has to be derived from the live stack.
+    """
+
+    import warnings
+
+    from torchlens.utils import display as display_module
+    from torchlens.utils.display import user_stacklevel
+
+    # Stand in for the pipeline: three nested frames that all report a torchlens
+    # filename, warning from the innermost. Compiling with display.py's own path
+    # is what makes the synthetic frames count as internal.
+    source = (
+        "def outer():\n"
+        "    return middle()\n"
+        "def middle():\n"
+        "    return inner()\n"
+        "def inner():\n"
+        "    level = user_stacklevel()\n"
+        "    warnings.warn('probe', UserWarning, stacklevel=level)\n"
+        "    return level\n"
+    )
+    namespace: dict[str, Any] = {"user_stacklevel": user_stacklevel, "warnings": warnings}
+    exec(compile(source, display_module.__file__, "exec"), namespace)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        level = namespace["outer"]()
+
+    # inner -> middle -> outer are internal (depths 1-3); this test is the first
+    # frame outside the package, at depth 4.
+    assert level == 4
+    assert len(caught) == 1
+    assert os.path.basename(caught[0].filename) == os.path.basename(__file__), (
+        f"warning was attributed to {caught[0].filename}, not the calling test"
+    )
+
+
+def test_user_stacklevel_extra_offsets_for_warn_on_behalf_helpers() -> None:
+    """``extra`` shifts the level for helpers that warn on someone else's behalf."""
+
+    from torchlens.utils import display as display_module
+    from torchlens.utils.display import user_stacklevel
+
+    source = (
+        "def outer(extra):\n"
+        "    return inner(extra)\n"
+        "def inner(extra):\n"
+        "    return user_stacklevel(extra)\n"
+    )
+    namespace: dict[str, Any] = {"user_stacklevel": user_stacklevel}
+    exec(compile(source, display_module.__file__, "exec"), namespace)
+
+    assert namespace["outer"](0) == 3
+    assert namespace["outer"](2) == 5
