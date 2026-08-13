@@ -47,7 +47,6 @@ _SCOPED_CAPTURE_STATE = frozenset(
         ("torchlens/backends/torch/completeness_witness.py", "_CAPTURED_STORAGE_PTRS"),
         ("torchlens/backends/torch/completeness_witness.py", "_DISPATCH_TENSOR_ORIGINS"),
         ("torchlens/backends/torch/completeness_witness.py", "_RUNNABLE_LEDGER_FACTS"),
-        ("torchlens/backends/torch/rescue.py", "_rescue_active"),
         ("torchlens/capture/projections.py", "_active_recording_state"),
         ("torchlens/capture/trace.py", "_ACTIVE_CAPTURE_BACKEND"),
         ("torchlens/experimental/__init__.py", "_STOP_AFTER_SITE"),
@@ -553,7 +552,7 @@ def _capture_scope_snapshot() -> dict[str, Any]:
         "runnable_ledger_armed": _state._runnable_ledger_armed,
         "active_label_session": torch_tl._ACTIVE_LABEL_SESSION,
         "active_witness_state": completeness_witness._ACTIVE_WITNESS_STATE,
-        "rescue_active": rescue._rescue_active,
+        "rescue_active": rescue._rescue_is_active(),
         "active_recording_state": projections._active_recording_state,
         "active_capture_backend": capture_trace._ACTIVE_CAPTURE_BACKEND,
     }
