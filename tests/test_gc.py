@@ -381,6 +381,39 @@ class TestTraceGC:
             "the registry pinned the dead exception's traceback frame locals"
         )
 
+    def test_backward_trigger_registry_evicts_with_its_trace(self):
+        """Dropping a backward-armed trace clears its grad-fn registry keys.
+
+        The table maps ``id(grad_fn) -> weakref(trace)``. Entries for a trace
+        dropped WITHOUT ``cleanup()`` used to linger until some later, unrelated
+        backward happened to walk past that grad-fn id, so a process that
+        discarded traces accreted dead keys indefinitely.
+        """
+
+        from torchlens.backends.torch import backward as backward_module
+
+        registry = backward_module._BACKWARD_GRAD_FN_REGISTRY
+        model = _TwoLayerNet()
+        x = torch.randn(1, 5, requires_grad=True)
+
+        trace = tl.trace(
+            model,
+            x,
+            capture=tl.options.CaptureOptions(backward_ready=True),
+            save_mode="reference",
+        )
+        armed_keys = {key for key, ref in registry.items() if ref() is trace}
+        assert armed_keys, "capture registered no backward triggers to observe"
+
+        del trace
+        gc.collect()
+
+        leaked = armed_keys & set(registry)
+        assert not leaked, (
+            f"{len(leaked)} backward-registry keys survived their trace "
+            "(eviction still waits for an unrelated later backward)"
+        )
+
     def test_failed_capture_registry_falls_back_for_unweakrefable_exceptions(self):
         """A non-weak-referenceable exception still recovers, under the entry cap.
 

@@ -213,6 +213,58 @@ def _strong_grad_fn_refs(trace: Any) -> list[Any]:
     return trace.__dict__.setdefault("_backward_gradfn_refs", [])
 
 
+_BACKWARD_TRACE_SLOTS: weakref.WeakKeyDictionary[Any, tuple[weakref.ReferenceType[Any], set[int]]]
+_BACKWARD_TRACE_SLOTS = weakref.WeakKeyDictionary()
+"""Per-trace registration slot: its ONE self-evicting weakref plus its owned keys.
+
+Values hold the trace only WEAKLY, so this table never pins its own keys.
+"""
+
+
+def _backward_registry_slot(trace: Any) -> tuple[weakref.ReferenceType[Any], set[int]]:
+    """Return (and lazily build) one trace's backward-registry slot.
+
+    A single weak reference per trace is created here, carrying an eviction
+    callback: when the trace dies, every ``_BACKWARD_GRAD_FN_REGISTRY`` key it
+    owns is removed immediately. Before this, dead entries only left the table
+    opportunistically -- when some LATER, unrelated backward happened to walk
+    past that grad-fn id, or when an explicit purge ran -- so a process that
+    dropped traces without ``cleanup()`` accreted entries indefinitely.
+
+    Reusing one weakref for all of a trace's ops also removes a per-op
+    ``weakref.ref`` allocation from the capture path.
+
+    Parameters
+    ----------
+    trace:
+        Trace registering a backward trigger.
+
+    Returns
+    -------
+    tuple[weakref.ReferenceType[Any], set[int]]
+        The trace's shared weak reference and the set of registry keys it owns.
+    """
+
+    slot = _BACKWARD_TRACE_SLOTS.get(trace)
+    if slot is not None:
+        return slot
+    owned_ids: set[int] = set()
+
+    def _evict(dead_reference: weakref.ReferenceType[Any]) -> None:
+        """Drop every registry key this now-dead trace owned."""
+
+        for grad_fn_object_id in owned_ids:
+            # Only evict keys still owned by THIS reference: a new grad-fn
+            # object can reuse the id of a collected one.
+            if _BACKWARD_GRAD_FN_REGISTRY.get(grad_fn_object_id) is dead_reference:
+                _BACKWARD_GRAD_FN_REGISTRY.pop(grad_fn_object_id, None)
+        owned_ids.clear()
+
+    slot = (weakref.ref(trace, _evict), owned_ids)
+    _BACKWARD_TRACE_SLOTS[trace] = slot
+    return slot
+
+
 def _active_forward_op_count_at_trigger() -> int | None:
     """Return active forward op count before autograd graph walking.
 
@@ -254,7 +306,9 @@ def _register_forward_grad_fn(trace: Any, grad_fn_handle: Any, _raw_label: str |
     refs = _strong_grad_fn_refs(trace)
     refs.append(grad_fn_handle)
     grad_fn_object_id = id(grad_fn_handle)
-    _BACKWARD_GRAD_FN_REGISTRY[grad_fn_object_id] = weakref.ref(trace)
+    trace_ref, owned_ids = _backward_registry_slot(trace)
+    owned_ids.add(grad_fn_object_id)
+    _BACKWARD_GRAD_FN_REGISTRY[grad_fn_object_id] = trace_ref
 
 
 def _purge_trace_from_backward_registry(trace: Any) -> None:
@@ -278,6 +332,11 @@ def _purge_trace_from_backward_registry(trace: Any) -> None:
     ]
     for grad_fn_object_id in stale_ids:
         _BACKWARD_GRAD_FN_REGISTRY.pop(grad_fn_object_id, None)
+    slot = _BACKWARD_TRACE_SLOTS.get(trace)
+    if slot is not None:
+        # Keep the owned-key set in step with the table, so a re-armed trace
+        # never carries keys it no longer owns into its eviction callback.
+        slot[1].clear()
 
 
 def _close_implicit_backward_pass_if_open(trace: Any) -> None:
