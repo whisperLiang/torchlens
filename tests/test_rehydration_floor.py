@@ -16,7 +16,12 @@ import torch
 from torch import nn
 
 import torchlens as tl
-from torchlens._io import MIN_TLSPEC_VERSION, TLSPEC_VERSION, TorchLensIOError
+from torchlens._io import (
+    MIN_TLSPEC_VERSION,
+    TLSPEC_VERSION,
+    ArtifactSchemaAgeWarning,
+    TorchLensIOError,
+)
 from torchlens.data_classes.op import Op
 from torchlens.errors import ArtifactVersionBelowFloorError
 
@@ -49,7 +54,7 @@ def test_current_artifacts_load_clean(tmp_path: Path) -> None:
     tl.save(trace, path)
 
     with warnings.catch_warnings():
-        warnings.simplefilter("error", DeprecationWarning)
+        warnings.simplefilter("error", ArtifactSchemaAgeWarning)
         loaded = tl.load(path)
 
     assert isinstance(loaded, tl.Trace)
@@ -108,6 +113,43 @@ def test_pre_floor_bundle_manifest_refuses_typed(tmp_path: Path) -> None:
 
     with pytest.raises(ArtifactVersionBelowFloorError, match=FLOOR_MATCH):
         tl.load(path)
+
+
+@pytest.mark.smoke
+def test_between_floor_advisory_is_a_visible_user_warning(tmp_path: Path) -> None:
+    """The between-floor artifact-age advisory is visible, not a ``DeprecationWarning``.
+
+    R15-F1: the advisory deprecates no API -- it reports the AGE of one
+    artifact -- and Python's default filters hide ``DeprecationWarning`` from
+    end users, so the category made the advisory invisible exactly where it
+    matters. It is an ``ArtifactSchemaAgeWarning`` (``UserWarning`` subclass),
+    reachable through ``tl.errors``, and it must survive the default filters.
+    """
+
+    assert issubclass(ArtifactSchemaAgeWarning, UserWarning)
+    assert not issubclass(ArtifactSchemaAgeWarning, DeprecationWarning)
+    assert issubclass(ArtifactSchemaAgeWarning, tl.errors.TorchLensWarning)
+    assert tl.errors.ArtifactSchemaAgeWarning is ArtifactSchemaAgeWarning
+
+    trace = _build_trace()
+    path = tmp_path / "between_floor.tlspec"
+    tl.save(trace, path)
+    manifest_path = path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert MIN_TLSPEC_VERSION < TLSPEC_VERSION, "no between-floor range to exercise"
+    manifest["tlspec_version"] = MIN_TLSPEC_VERSION
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    # resetwarnings() drops pytest's own filters so this asserts against the
+    # DEFAULT interpreter filters -- the exact regime that hid the old category.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.resetwarnings()
+        loaded = tl.load(path)
+
+    assert isinstance(loaded, tl.Trace)
+    advisories = [w for w in caught if issubclass(w.category, ArtifactSchemaAgeWarning)]
+    assert advisories, [str(w.category) for w in caught]
+    assert "older than runtime tlspec_version" in str(advisories[0].message)
 
 
 @pytest.mark.smoke

@@ -18,7 +18,12 @@ pytest.importorskip("safetensors")
 from torchlens import Trace, load, trace as trace_fn, save
 from torchlens._io import bundle as bundle_io
 from torchlens.io import cleanup_tmp, detect_tlspec_format
-from torchlens._io import MIN_TLSPEC_VERSION, TLSPEC_VERSION, TorchLensIOError
+from torchlens._io import (
+    MIN_TLSPEC_VERSION,
+    TLSPEC_VERSION,
+    ArtifactSchemaAgeWarning,
+    TorchLensIOError,
+)
 from torchlens._io.paths import resolve_bundle_blob_path
 from torchlens._io.manifest import Manifest
 from torchlens._io.payload_codec import (
@@ -557,7 +562,7 @@ def test_bundle_save_complex64_still_round_trips(tmp_path: Path) -> None:
         (
             "io_format_between_floor_and_current",
             lambda manifest: manifest.__setitem__("tlspec_version", MIN_TLSPEC_VERSION),
-            "deprecation_warning",
+            "schema_age_warning",
             "older than runtime tlspec_version",
         ),
         (
@@ -646,8 +651,8 @@ def test_bundle_version_policy_rows(
             load(bundle_path)
         return
 
-    if expectation == "deprecation_warning":
-        with pytest.warns(DeprecationWarning, match=resolved_expected_text or ""):
+    if expectation == "schema_age_warning":
+        with pytest.warns(ArtifactSchemaAgeWarning, match=resolved_expected_text or ""):
             loaded = load(bundle_path)
         assert loaded.model_class_name == "_ConvBundleModel"
         return

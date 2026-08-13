@@ -25,6 +25,7 @@ from . import (
     MIN_TLSPEC_VERSION,
     MIN_TORCHLENS_VERSION_TEXT,
     TLSPEC_VERSION,
+    ArtifactSchemaAgeWarning,
     ArtifactVersionBelowFloorError,
     TorchLensIOError,
 )
@@ -636,6 +637,12 @@ def enforce_version_policy(manifest: Manifest) -> None:
     TorchLensIOError
         If the bundle targets a newer I/O format or an incompatible torch
         major version.
+
+    Warns
+    -----
+    ArtifactSchemaAgeWarning
+        If the bundle is between the rehydration floor and the current
+        ``tlspec_version`` and therefore loads at its own recorded schema.
     """
 
     if manifest.tlspec_version > TLSPEC_VERSION:
@@ -657,12 +664,15 @@ def enforce_version_policy(manifest: Manifest) -> None:
         # Honest between-floor-and-current advisory (r6 L7): the artifact loads
         # at its recorded schema; fields introduced by later schema versions are
         # absent, never default-filled (``Manifest.from_dict`` fails closed on
-        # required fields).
+        # required fields). Categorized ``ArtifactSchemaAgeWarning`` (a visible
+        # ``UserWarning`` subclass), never ``DeprecationWarning``: this advisory
+        # deprecates no API, and the default warning filters hide
+        # ``DeprecationWarning`` from end users (grind r3, R15-F1).
         warnings.warn(
             f"Bundle tlspec_version={manifest.tlspec_version} is older than "
             f"runtime tlspec_version={TLSPEC_VERSION}; loading at the recorded "
             "schema. Re-save the artifact with this release to upgrade it.",
-            DeprecationWarning,
+            ArtifactSchemaAgeWarning,
             stacklevel=2,
         )
 
