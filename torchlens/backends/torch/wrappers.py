@@ -28,6 +28,7 @@ import torch
 from torch.overrides import handle_torch_function, has_torch_function_unary  # noqa: F401
 
 from ... import _state
+from ..._errors import CaptureContextError
 from ...capture.arg_positions import _ensure_schema_tensor_position_corrections
 from ...constants import _get_torchvision_funcs, get_orig_torch_funcs
 from ...data_classes.func_call_location import FuncCallLocation
@@ -2487,6 +2488,26 @@ _torchvision_ops_ensured = False
 """Whether torchvision custom ops are confirmed decorated (or confirmed no-op)."""
 
 
+_wrapper_install_lock = threading.RLock()
+"""Serializes wrapper INSTALL / UNINSTALL so the torch namespaces never interleave.
+
+``wrap_torch`` and ``unwrap_torch`` are check-then-mutate sequences over
+``_state._is_decorated``, the ``_orig_to_decorated`` / ``_decorated_to_orig`` id
+maps, and hundreds of torch namespace attributes. Unsynchronized, two threads
+reaching their FIRST capture together can double-populate the id maps, double
+register the JIT builtins, or -- worst -- store thread A's WRAPPER as
+``_ORIGINAL_AUTOGRAD_BACKWARD``, which permanently leaks a wrapper into torch on
+the next uninstall. Both entry points run wholly under this lock.
+
+Reentrant (``RLock``) because the install path legitimately re-enters itself:
+``unwrap_torch`` -> ``uninstall_autograd_wrappers`` and
+``wrap_torch`` -> ``_ensure_torchvision_ops_decorated`` -> ``_register_jit_builtin_wrappers``
+sit under the same top-level call, and ``TorchBackend.wrap``/``unwrap`` may be
+reached from a caller that already holds it. Install is once-per-process (and
+per explicit re-wrap), so the lock is never on the capture hot path.
+"""
+
+
 def _ensure_torchvision_ops_decorated() -> None:
     """Decorate torchvision custom ops when torchvision appears after first wrap.
 
@@ -2522,7 +2543,54 @@ def unwrap_torch() -> None:
     ``wrap_torch()`` is called (or ``trace`` auto-wraps).
 
     Safe to call multiple times — no-op if already unwrapped.
+
+    Raises
+    ------
+    CaptureContextError
+        If a capture is currently active. Removing the wrappers mid-forward
+        leaves the rest of that forward unlogged and returns a silently
+        truncated Trace, so the call is refused instead (code
+        ``unwrap_during_active_capture``). This is reachable single-threaded —
+        from a forward hook, an ``activation_transform``, or any user callback
+        that runs inside the traced forward.
     """
+    with _wrapper_install_lock:
+        _refuse_unwrap_during_active_capture()
+        _unwrap_torch_locked()
+
+
+def _refuse_unwrap_during_active_capture() -> None:
+    """Refuse wrapper removal while a capture owns the logging globals.
+
+    Raises
+    ------
+    CaptureContextError
+        If ``_active_trace`` is set or logging is enabled.
+    """
+
+    if _state._active_trace is None and not _state._logging_enabled:
+        return
+    trace = _state._active_trace
+    model_label = getattr(trace, "model_label", None) or getattr(
+        trace, "model_class_name", None
+    )
+    raise CaptureContextError(
+        "unwrap_torch() was called while a TorchLens capture is still active"
+        + (f" for model {model_label!r}" if model_label else ""),
+        code="unwrap_during_active_capture",
+        remedy=(
+            "let the capture finish before removing the wrappers (pass "
+            "unwrap_when_done=True to tl.trace, or call unwrap_torch() after "
+            "trace() returns) — unwrapping mid-forward silently truncates the Trace"
+        ),
+        owner_thread_id=_state._active_owner_thread_id,
+        calling_thread_id=threading.get_ident(),
+    )
+
+
+def _unwrap_torch_locked() -> None:
+    """Remove torchlens wrappers; caller holds ``_wrapper_install_lock``."""
+
     _state._logging_enabled = False
     _state._active_trace = None
     reset_detector_tables()
@@ -2688,12 +2756,6 @@ def wrap_torch(
         Opt-in aten dispatcher census. ``True`` or ``"shadow"`` reports
         unaccounted dispatches and marks traces unverified; default is off.
     """
-    from .backward import install_autograd_wrappers
-
-    # Torch-only setup deferred out of arg_positions import time: the corrected
-    # spec table must exist before any wrapper can build an op record.
-    _ensure_schema_tensor_position_corrections()
-
     if patch_policy is not None or patch_modules:
         warnings.warn(
             "wrap_torch(patch_policy=, patch_modules=) are deprecated and ignored: "
@@ -2702,6 +2764,36 @@ def wrap_torch(
             DeprecationWarning,
             stacklevel=2,
         )
+    # Whole install under one lock: every mutation below is a check-then-mutate
+    # over process-global wrapper state (see ``_wrapper_install_lock``).
+    with _wrapper_install_lock:
+        _wrap_torch_locked(
+            escape_detector=escape_detector,
+            completeness_witness=completeness_witness,
+        )
+
+
+def _wrap_torch_locked(
+    *,
+    escape_detector: EscapeDetectorMode | None,
+    completeness_witness: bool | CompletenessWitnessMode | None,
+) -> None:
+    """Install torchlens wrappers; caller holds ``_wrapper_install_lock``.
+
+    Parameters
+    ----------
+    escape_detector:
+        Optional diagnostic detector mode, as passed to ``wrap_torch``.
+    completeness_witness:
+        Optional dispatcher-census mode, as passed to ``wrap_torch``.
+    """
+
+    from .backward import install_autograd_wrappers
+
+    # Torch-only setup deferred out of arg_positions import time: the corrected
+    # spec table must exist before any wrapper can build an op record.
+    _ensure_schema_tensor_position_corrections()
+
     _configure_escape_detector(escape_detector)
     _configure_completeness_witness(completeness_witness)
 

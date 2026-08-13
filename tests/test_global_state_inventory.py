@@ -508,3 +508,54 @@ def test_contended_admission_never_publishes_partial_owner_state() -> None:
     assert admitted + refused == contenders * rounds
     assert admitted >= 1, "no capture was admitted at all"
     assert _capture_scope_snapshot() == before
+
+
+def test_unwrap_torch_refuses_during_an_active_capture() -> None:
+    """Mid-capture ``unwrap_torch()`` is a typed refusal, not a silent truncation.
+
+    Reachable single-threaded: from a forward hook, an ``activation_transform``,
+    or any user callback running inside the traced forward. Removing the
+    wrappers there left the rest of the forward unlogged and returned a
+    truncated Trace with no error at all.
+    """
+
+    from torchlens.backends.torch.wrappers import unwrap_torch
+
+    seen: list[BaseException] = []
+
+    class _UnwrapMidForward(nn.Module):
+        """Attempt an unwrap between two logged operations."""
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Run one op, try to unwrap, then run another op.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                Activation after both operations.
+            """
+
+            x = torch.relu(x)
+            try:
+                unwrap_torch()
+            except BaseException as error:
+                seen.append(error)
+            return torch.relu(x)
+
+    trace = tl.trace(_UnwrapMidForward(), torch.ones(2))
+
+    assert len(seen) == 1, "unwrap_torch() mid-capture did not refuse"
+    error = seen[0]
+    assert isinstance(error, tl.errors.CaptureContextError)
+    assert error.fields["code"] == "unwrap_during_active_capture"
+    relu_ops = [op for op in trace.compute_ops if op.func_name == "relu"]
+    assert len(relu_ops) == 2, "the refused unwrap still truncated the capture"
+
+    # The wrappers survived the refusal: the next capture needs no re-wrap.
+    recovered = tl.trace(nn.ReLU(), torch.ones(2))
+    assert any(op.func_name == "relu" for op in recovered.compute_ops)
