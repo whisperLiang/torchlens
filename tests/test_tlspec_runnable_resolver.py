@@ -37,6 +37,58 @@ from torchlens.utils._torch_compat import (
 )
 
 
+def _restamp_runtime_fingerprints(run: dict) -> None:
+    """Re-derive every call's ``runtime_fingerprint`` from the (edited) manifest.
+
+    Parse now re-derives and enforces the per-call fingerprint, so a fixture
+    that edits a signature-relevant fact (e.g. the callable registry key) must
+    model a COHERENT re-authoring -- edit plus matching fingerprint -- or the
+    tamper tripwire fires before the behavior under test is reached.
+    """
+
+    from hashlib import sha256
+
+    keys_by_registry_id = {
+        entry["registry_id"]: entry["key"] for entry in run["callable_registry"]
+    }
+    slots_by_id = {slot["slot_id"]: slot for slot in run["tensor_slots"]}
+    for call in run["calls"]:
+        key = keys_by_registry_id[call["registry_id"]]
+        payload = {
+            "callable": {
+                "namespace": key["namespace"],
+                "qualname": key["qualname"],
+                "dispatch_kind": key["dispatch_kind"],
+                "version": key["version"],
+                "import_path": key["import_path"],
+            },
+            "argument_names": list(call["argument_names"]),
+            "num_positional_args": int(call["num_positional_args"]),
+            "num_keyword_args": int(call["num_keyword_args"]),
+            "outputs": [
+                {
+                    "shape": list(slots_by_id[slot_id]["shape"]),
+                    "dtype": slots_by_id[slot_id]["dtype"],
+                }
+                for slot_id in call["output_slot_ids"]
+            ],
+            "execution_context": {
+                "autocast": [
+                    {
+                        "device_type": entry["device_type"],
+                        "enabled": entry["enabled"],
+                        "dtype": entry.get("dtype"),
+                    }
+                    for entry in call["execution_context"]["autocast"]
+                ],
+                "grad_enabled": call["execution_context"]["grad_enabled"],
+                "inference_mode": call["execution_context"]["inference_mode"],
+            },
+        }
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        call["runtime_fingerprint"] = sha256(serialized.encode("utf-8")).hexdigest()
+
+
 class ResolverModel(nn.Module):
     """Small graph covering exact, private-to-public, and decorated resolution."""
 
@@ -311,6 +363,7 @@ def test_safe_load_survives_unresolved_key_and_run_fails_once_with_full_report(
         "version": 1,
         "import_path": None,
     }
+    _restamp_runtime_fingerprints(manifest["run"])
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     loaded = tl.load(path)

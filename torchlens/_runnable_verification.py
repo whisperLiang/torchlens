@@ -431,12 +431,21 @@ def _raise_monotonic_divergence(
     status: PathFaithfulness,
     mismatch: RunnableDiagnostic | None,
     policy: DivergencePolicy,
+    *,
+    unregister_fork: bool = True,
 ) -> None:
-    """Enforce strict policy for an inherited monotonic divergence mark."""
+    """Enforce strict policy for an inherited monotonic divergence mark.
+
+    ``unregister_fork=False`` is the fast-live provider's spelling: its "fork"
+    is the USER'S live Trace, which a refusal must never evict from the process
+    registry. Every other provider passes a throwaway transactional fork and
+    keeps the default discard.
+    """
 
     if status is not PathFaithfulness.DIVERGED or policy is DivergencePolicy.RETURN_DIVERGED:
         return
-    _state._unregister_log(fork)
+    if unregister_fork:
+        _state._unregister_log(fork)
     raise PathDivergenceError(
         "Sparse run Trace retains a prior path divergence and cannot become faithful.",
         code=(

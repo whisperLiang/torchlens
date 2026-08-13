@@ -7,11 +7,13 @@ modules, binds state, constructs runtime calls, or executes a recorded graph.
 from __future__ import annotations
 
 import inspect
+import json
 import operator
 import platform
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
+from hashlib import sha256
 from typing import Any, cast
 
 import torch
@@ -166,6 +168,7 @@ def parse_sparse_run_descriptor(value: Mapping[str, Any]) -> SparseRunDescriptor
     )
     calls = tuple(_parse_call(item) for item in _mapping_sequence(value, "calls"))
     slots = tuple(_parse_slot(item) for item in _mapping_sequence(value, "tensor_slots"))
+    _verify_runtime_fingerprints(registry, calls, slots)
     witnesses = tuple(
         _parse_witness(item) for item in _mapping_sequence(value, "control_witnesses")
     )
@@ -1568,7 +1571,14 @@ def _validated_device_literal(field: str, raw: str) -> str:
 
 
 def _validated_dtype_literal(field: str, raw: str) -> str:
-    """Validate a persisted ``torch.<dtype>`` literal against the live dtype table."""
+    """Validate a persisted ``torch.<dtype>`` literal against the live dtype table.
+
+    Returns the CANONICAL ``torch.<name>`` spelling, never ``raw`` verbatim:
+    downstream consumers compare the stored literal against ``str(tensor.dtype)``
+    (always ``torch.``-prefixed), so accepting a bare ``"float32"`` here and
+    storing it unchanged would produce an artifact that loads and advertises
+    runnable but can never bind its state.
+    """
 
     name = raw.removeprefix("torch.")
     # r42 secC_1 / r45: the shared ``torch_attr`` helper never fires ``torch.__getattr__`` (no
@@ -1577,7 +1587,7 @@ def _validated_dtype_literal(field: str, raw: str) -> str:
     resolved = torch_attr(name)
     if not isinstance(resolved, torch.dtype):
         raise ContextFieldInvalidError(field, f"{raw!r} does not name a torch dtype")
-    return raw
+    return f"torch.{name}"
 
 
 def _parse_ambient_context(value: Mapping[str, Any]) -> AmbientExecutionContext:
@@ -1734,21 +1744,42 @@ def _parse_input_fingerprint(value: Mapping[str, Any]) -> InputAttestationFinger
 
 
 def _parse_rng_profile(value: Any) -> RunnableRngProfile:
-    """Parse the optional host-RNG profile, defaulting legacy manifests to deterministic.
+    """Parse the REQUIRED host-RNG profile strictly, refusing typed when malformed.
 
-    Manifests written before host-RNG honesty tracking omit this object; they are
-    treated as ``host_rng_consumed=False`` (deterministic) because their capture
-    predates the recorded signal and cannot be recovered.
+    ``rng_profile`` is a required v2 descriptor field (schema-pinned through the
+    public ``tl.load`` door) and legacy capabilities short-circuit to an
+    analysis-only readiness refusal before parse, so no reachable artifact
+    legitimately omits it. Defaulting an absent profile to
+    ``host_rng_consumed=False`` would silently promote a host-RNG capture to
+    deterministic for any caller reaching the parser directly; the sibling
+    ambient-context posture applies instead -- absent or mistyped context is a
+    typed refusal, never a defaulted control.
     """
 
     if not isinstance(value, Mapping):
-        return RunnableRngProfile(host_rng_consumed=False, capture_seed=None)
+        raise ContextFieldInvalidError(
+            "rng_profile",
+            "required host-RNG profile object is absent or not an object; "
+            "absent context is never defaulted",
+        )
     consumed = value.get("host_rng_consumed")
-    seed = value.get("capture_seed")
-    return RunnableRngProfile(
-        host_rng_consumed=bool(consumed),
-        capture_seed=int(seed) if isinstance(seed, int) and not isinstance(seed, bool) else None,
-    )
+    if not isinstance(consumed, bool):
+        raise ContextFieldInvalidError(
+            "rng_profile.host_rng_consumed",
+            f"{consumed!r} is not a strict boolean",
+        )
+    if "capture_seed" not in value:
+        raise ContextFieldInvalidError(
+            "rng_profile.capture_seed",
+            "required field is absent (null is the explicit no-seed spelling)",
+        )
+    seed = value["capture_seed"]
+    if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+        raise ContextFieldInvalidError(
+            "rng_profile.capture_seed",
+            f"{seed!r} is neither an integer nor null",
+        )
+    return RunnableRngProfile(host_rng_consumed=consumed, capture_seed=seed)
 
 
 def attach_sparse_run_readiness(
@@ -2995,6 +3026,79 @@ def _parse_call(value: Mapping[str, Any]) -> RunnableCallDescriptor:
     )
 
 
+def _verify_runtime_fingerprints(
+    registry: Sequence[CallableRegistryEntry],
+    calls: Sequence[RunnableCallDescriptor],
+    slots: Sequence[TensorSlotDescriptor],
+) -> None:
+    """Recompute every per-call ``runtime_fingerprint`` and refuse on mismatch.
+
+    The save side hashes each call's signature-relevant replay facts (callable
+    key, argument names, arity, output shapes/dtypes, canonical execution
+    context). A persisted fingerprint that was written but never re-derived is
+    a disarmed tripwire: a hand-edited ``execution_context.grad_enabled`` (or
+    ``argument_names`` / arity) would parse cleanly and replay VERIFIED under
+    the edited context. Every hash input is recomputable from the parsed
+    descriptor, so the fingerprint is re-derived here byte-for-byte against the
+    save-side payload and any disagreement is a typed parse refusal
+    (analysis-only load), never a silently trusted signature.
+    """
+
+    keys_by_registry_id = {entry.registry_id: entry.key for entry in registry}
+    slots_by_id = {slot.slot_id: slot for slot in slots}
+    for call in calls:
+        key = keys_by_registry_id.get(call.registry_id)
+        if key is None:
+            raise ContextFieldInvalidError(
+                "calls.registry_id",
+                f"call {call.call_id!r} names unknown registry entry "
+                f"{call.registry_id!r}",
+            )
+        outputs = []
+        for slot_id in call.output_slot_ids:
+            slot = slots_by_id.get(slot_id)
+            if slot is None:
+                raise ContextFieldInvalidError(
+                    "calls.output_slot_ids",
+                    f"call {call.call_id!r} names unknown output slot {slot_id!r}",
+                )
+            outputs.append({"shape": list(slot.shape), "dtype": slot.dtype})
+        payload = {
+            "callable": {
+                "namespace": key.namespace,
+                "qualname": key.qualname,
+                "dispatch_kind": key.dispatch_kind,
+                "version": key.version,
+                "import_path": key.import_path,
+            },
+            "argument_names": list(call.argument_names),
+            "num_positional_args": int(call.num_positional_args),
+            "num_keyword_args": int(call.num_keyword_args),
+            "outputs": outputs,
+            "execution_context": {
+                "autocast": [
+                    {
+                        "device_type": entry.device_type,
+                        "enabled": entry.enabled,
+                        "dtype": entry.dtype,
+                    }
+                    for entry in call.execution_context.autocast
+                ],
+                "grad_enabled": call.execution_context.grad_enabled,
+                "inference_mode": call.execution_context.inference_mode,
+            },
+        }
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        recomputed = sha256(serialized.encode("utf-8")).hexdigest()
+        if recomputed != call.runtime_fingerprint:
+            raise ContextFieldInvalidError(
+                "calls.runtime_fingerprint",
+                f"call {call.call_id!r} carries a fingerprint that does not match "
+                "its recorded signature facts (callable key, argument names, "
+                "arity, output geometry, or execution context was edited)",
+            )
+
+
 def _parse_slot(value: Mapping[str, Any]) -> TensorSlotDescriptor:
     """Parse one value-free tensor slot descriptor."""
 
@@ -3102,13 +3206,24 @@ def _parse_state_binding(value: Mapping[str, Any]) -> StateSlotBinding:
             "tensor_slots.state_binding.captured_grad_fn",
             "grad_fn presence cannot be reproduced by staged state",
         )
+    alias_group = _optional_string(value.get("alias_group"), "alias_group")
+    if alias_group is not None and alias_group.startswith("name:"):
+        # The staging loader keys unaliased slots by the synthetic fallback
+        # ``name:<state_dict_name>``. Save never emits that prefix, so a crafted
+        # ``name:``-prefixed group could silently share one allocation between a
+        # declared alias member and an unrelated named slot -- exactly the
+        # ``state_alias_topology_unsupported`` class the save side refuses.
+        raise ContextFieldInvalidError(
+            "tensor_slots.state_binding.alias_group",
+            f"alias group {alias_group!r} uses the reserved 'name:' namespace",
+        )
     return StateSlotBinding(
         module_path=_string(value, "module_path"),
         state_dict_name=_string(value, "state_dict_name"),
         semantic_role=StateSlotRole(_string(value, "semantic_role")),
         trainable=_boolean(value, "trainable"),
         persistent=_boolean(value, "persistent"),
-        alias_group=_optional_string(value.get("alias_group"), "alias_group"),
+        alias_group=alias_group,
         captured_requires_grad=_boolean(value, "captured_requires_grad"),
         captured_grad_fn=captured_grad_fn,
         host_escape_disposition=cast(Any, disposition),

@@ -1347,8 +1347,15 @@ def _add_persistent_buffer_slot_drafts(
             for name in names
         }
     else:
-        # r75 F2 capture-time fallback: the model died before the save.
+        # r75 F2 capture-time fallback: the model died before the save. A LOADED
+        # runnable artifact has no capture-time snapshot either, but it embeds the
+        # full capture-time ``state_dict`` (the ``state_dict_v1`` family: parameters
+        # plus persistent buffers with real values) -- the same universe basis --
+        # so a runnable->load->runnable re-save is served from it instead of
+        # refusing with a factually false "no state records" claim.
         snapshot = trace._runnable.capture_state
+        if not isinstance(snapshot, Mapping):
+            snapshot = trace._runnable.embedded_state
         if isinstance(snapshot, Mapping):
             parameter_names = set()
             param_logs = getattr(trace, "param_logs", None)
@@ -1382,15 +1389,20 @@ def _add_persistent_buffer_slot_drafts(
             universe = trace._runnable.persistent_buffer_universe
             if not isinstance(universe, Mapping):
                 # No capture-time record either (``state_dict()`` failed at the
-                # capture boundary): the universe is UNKNOWN. Refuse loudly and
-                # typed -- mirroring the include_weights=True lane -- never
-                # silently under-declare.
+                # capture boundary, or the artifact was saved without embedded
+                # weights): the universe is UNKNOWN. Refuse loudly and typed --
+                # mirroring the include_weights=True lane -- never silently
+                # under-declare.
                 raise TorchLensIOError(
                     "Runnable save requires the persistent-buffer state universe, "
-                    "but the source model is no longer alive and no capture-time "
-                    "state records are available. The declared slot universe "
-                    "cannot be proven complete, so the runnable save is refused. "
-                    "Ordinary analysis save levels remain available."
+                    "but no source is available: the source model is not alive, "
+                    "no capture-time state records exist, and the trace carries "
+                    "no embedded capture state (a runnable artifact saved with "
+                    "include_weights=True re-saves; one saved without embedded "
+                    "weights cannot prove its slot universe complete). Ordinary "
+                    "analysis save levels remain available.",
+                    code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+                    detection_stage="runnable_resave_state_universe",
                 )
             buffer_names = tuple(str(name) for name in universe)
             geometry_by_name = {
@@ -1402,7 +1414,18 @@ def _add_persistent_buffer_slot_drafts(
                 for name, record in universe.items()
             }
         topology = trace._runnable.state_alias_topology
-        topology_groups = (topology.get("groups") if isinstance(topology, Mapping) else None) or {}
+        topology_groups = topology.get("groups") if isinstance(topology, Mapping) else None
+        if topology_groups is None and trace._runnable.descriptor is not None:
+            # Loaded re-save: the session-time alias-topology record does not
+            # survive save/load, but the loaded descriptor's state bindings carry
+            # the exact declared groups -- carry them forward rather than silently
+            # weakening a tied-state declaration on the re-saved artifact.
+            topology_groups = {
+                slot.state_binding.state_dict_name: slot.state_binding.alias_group
+                for slot in trace._runnable.descriptor.tensor_slots
+                if slot.state_binding is not None and slot.state_binding.alias_group is not None
+            }
+        topology_groups = topology_groups or {}
         buffer_name_set = set(buffer_names)
         names_by_group: dict[str, list[str]] = defaultdict(list)
         for name in buffer_names:
@@ -4352,7 +4375,20 @@ def _tensor_container_skeleton(component: Any) -> NonTensorLiteral:
     return _encode_literal(component)
 
 
-def _encode_literal(value: Any) -> NonTensorLiteral:
+_MAX_ENCODE_LITERAL_NESTING_DEPTH = 64
+"""Save-side literal nesting bound, strictly below every decode ceiling.
+
+The load side bounds decoded literals at 200 levels AND the bounded JSON
+reader refuses ``manifest.json`` documents deeper than 200 levels; one
+encoded literal level costs several JSON levels, so an unbounded save could
+succeed while producing a bundle no loader can open (~65-70 literal levels)
+or die inside ``save()`` with a raw ``RecursionError`` (~1000 levels).
+Refusing at 64 keeps every successfully saved bundle loadable and routes the
+refusal through the existing typed ``UNSUPPORTED_LITERAL`` diagnostic.
+"""
+
+
+def _encode_literal(value: Any, _depth: int = 0) -> NonTensorLiteral:
     """Encode a Python value using only the frozen safe literal grammar.
 
     r69 B: scalar admission is CLASSIFIER-FIRST (``torchlens._input_walk.
@@ -4362,9 +4398,23 @@ def _encode_literal(value: Any) -> NonTensorLiteral:
     ``_UnsupportedLiteralError`` (typed refusal / opaque routing at the caller).
     Stock NumPy numeric/bool wrappers normalize through the RATIFIED transparent
     value lane (``.item()``); exact builtin atoms encode as before.
+
+    Container admission is EXACT-TYPE (same r69 B discipline as the key codec):
+    a namedtuple, ``OrderedDict``/``defaultdict``, or user list/dict subclass
+    carries semantic type identity or extra state the decode side rebuilds as
+    plain builtins, so it refuses typed instead of laundering. ``torch.Size``
+    is the one ratified allowlisted subclass: it encodes as a plain int tuple
+    (a documented value normalization with no hidden state).
     """
 
     from torchlens._input_walk import classify_scalar
+
+    if _depth > _MAX_ENCODE_LITERAL_NESTING_DEPTH:
+        raise _UnsupportedLiteralError(
+            "Literal nesting exceeds the maximum encodable depth of "
+            f"{_MAX_ENCODE_LITERAL_NESTING_DEPTH}; a deeper value could not be "
+            "decoded by any loader."
+        )
 
     scalar_kind, scalar_payload = classify_scalar(value)
     if scalar_kind == "semantic":
@@ -4405,20 +4455,20 @@ def _encode_literal(value: Any) -> NonTensorLiteral:
     torch_symbol = _torch_symbol_qualname(value)
     if torch_symbol is not None:
         return LiteralTorchSymbol(torch_symbol)
-    if isinstance(value, list):
+    if type(value) is list:
         return LiteralSequence(
             LiteralSequenceKind.LIST,
-            tuple(_encode_literal(item) for item in value),
+            tuple(_encode_literal(item, _depth + 1) for item in value),
         )
-    if isinstance(value, tuple):
+    if type(value) is tuple or type(value) is torch.Size:
         return LiteralSequence(
             LiteralSequenceKind.TUPLE,
-            tuple(_encode_literal(item) for item in value),
+            tuple(_encode_literal(item, _depth + 1) for item in value),
         )
-    if isinstance(value, Mapping):
+    if type(value) is dict:
         return LiteralMapping(
             tuple(
-                LiteralMappingEntry(_encode_literal_key(key), _encode_literal(item))
+                LiteralMappingEntry(_encode_literal_key(key), _encode_literal(item, _depth + 1))
                 for key, item in value.items()
             )
         )

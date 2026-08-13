@@ -246,6 +246,7 @@ def _finalize_provider_run(
     numeric_attestation: NumericAttestationStatus,
     divergence_policy: DivergencePolicy,
     nondeterministic_sources: Iterable[str] = (),
+    unregister_fork_on_divergence: bool = True,
 ) -> RunResult:
     """THE single provider settlement finalizer (r39 CLASS B sparse<->live parity immunizer).
 
@@ -264,7 +265,13 @@ def _finalize_provider_run(
         provisional_path_faithfulness,
         provisional_mismatch,
     )
-    _raise_monotonic_divergence(fork, path_faithfulness, mismatch, divergence_policy)
+    _raise_monotonic_divergence(
+        fork,
+        path_faithfulness,
+        mismatch,
+        divergence_policy,
+        unregister_fork=unregister_fork_on_divergence,
+    )
     report = _run_report(
         readiness,
         state_source=state_source,

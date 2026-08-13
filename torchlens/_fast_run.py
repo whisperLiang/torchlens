@@ -18,21 +18,31 @@ from ._runnable_execution import (
     _ambient_execution_context_restored,
     _call_execution_context_entered,
     _call_witness_checks,
+    _container_spec_reconstruction_lossy,
     _contract_check,
+    _control_witness_source_slot_ids,
+    _declared_nondeterministic_sources,
     _decode_literal,
     _descriptor_has_seeded_rng,
     _finalize_provider_run,
     _first_failed_live_input_check,
+    _host_rng_unreproduced,
     _input_alias_topology_checks,
+    _input_derived_layout_stale,
     _input_literal_contract_checks,
     _input_metadata_contract_checks,
     _input_nontensor_tree_contract_checks,
     _input_site_value,
     _input_tree_contract_checks,
     _live_runtime_input_leaves,
+    _mode_sensitive_op_unwitnessed,
     _model_input_arity_positions,
     _mutation_target_slot_id,
+    _nondeterministic_value_sources,
     _out_argument_slot_id,
+    _output_container_spec,
+    _output_not_reproduced,
+    _path_faithfulness,
     _raise_failed_contract_as_divergence,
     _raise_first_divergence,
     _require_loaded_sparse_provider,
@@ -40,8 +50,12 @@ from ._runnable_execution import (
     _seed_run_generators,
     _seeded_fork_devices,
     _split_mixed_inputs,
+    _tensor_derived_scalar_stale,
+    _tensor_derived_scalar_witness_slot_ids,
     _tensor_leaf_paths,
     _top_level_input_site_contract_checks,
+    _unbound_state_escape_stale,
+    _uninit_taint_reaches,
     _value_at_path,
     _write_argument,
     run_loaded_sparse_trace,
@@ -65,6 +79,7 @@ from .runnable import (
     TensorSlotDescriptor,
     TensorSlotRole,
     is_mode_sensitive_qualname,
+    mark_trace_path_status,
 )
 from .utils._torch_compat import tensor_has_named_dims
 from .utils.rng import restore_host_rng, set_random_seed, snapshot_host_rng
@@ -427,11 +442,25 @@ def _state_mutating_call_ids(
 
 
 def _remove_fast_live_hooks(handles: list[Any]) -> None:
-    """Remove and discard module-hook handles without retaining their session."""
+    """Remove and discard module-hook handles without retaining their session.
 
+    Every handle gets its own removal attempt: ``weakref.finalize`` pops its
+    registry entry BEFORE invoking the callback, so this is the one chance to
+    remove these hooks -- a single raising ``remove()`` must never strand the
+    remaining handles on the user's modules forever. The first failure
+    re-raises only after every handle was attempted and the list cleared.
+    """
+
+    first_error: BaseException | None = None
     for handle in handles:
-        handle.remove()
+        try:
+            handle.remove()
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
     handles.clear()
+    if first_error is not None:
+        raise first_error
 
 
 class _FastSparseSession:
@@ -486,6 +515,19 @@ class _FastSparseSession:
         self.reseed_torch = _descriptor_has_seeded_rng(descriptor)
         self.reseed_host = descriptor.rng_profile.host_rng_consumed
         self.seeded_devices = _seeded_fork_devices(descriptor, seed)
+        # Frozen-descriptor faithfulness ceilings, computed once per session; the
+        # per-INPUT dynamic ceilings (escape staleness, derived layout, unbound
+        # state, alias topology) are re-derived every iteration in ``run`` and
+        # settled through ``_path_faithfulness`` -- never a hardcoded verdict.
+        self.escape_witness_slot_ids = _tensor_derived_scalar_witness_slot_ids(descriptor)
+        self.mode_sensitive_op_unwitnessed = _mode_sensitive_op_unwitnessed(descriptor)
+        value_source_taint = _nondeterministic_value_sources(descriptor)
+        self.nondeterministic_control_source = _uninit_taint_reaches(
+            value_source_taint, _control_witness_source_slot_ids(descriptor)
+        )
+        self.declared_nondeterministic_sources = _declared_nondeterministic_sources(
+            descriptor, value_source_taint
+        )
 
     @classmethod
     def build(
@@ -533,9 +575,16 @@ class _FastSparseSession:
         )
 
     def _bind_inputs(
-        self, inputs: Any
-    ) -> tuple[dict[str, torch.Tensor], tuple[ContractCheck, ...]]:
-        """Validate raw runtime inputs and bind independent defensive mirrors."""
+        self, inputs: Any, ceiling: RunResourceCeiling
+    ) -> tuple[dict[str, torch.Tensor], tuple[ContractCheck, ...], bool]:
+        """Validate raw runtime inputs and bind independent defensive mirrors.
+
+        Returns the bound mirrors, the ordered contract checks, and the alias
+        engine's ``unresolved`` ceiling flag -- ``True`` when the three-valued
+        alias engine could prove neither overlap nor disjointness for a
+        same-storage input pair. The caller MUST thread that flag into
+        ``_path_faithfulness`` (r35 decision D: unknown is never VERIFIED).
+        """
 
         values: dict[str, torch.Tensor] = {}
         checks: list[ContractCheck] = []
@@ -561,23 +610,25 @@ class _FastSparseSession:
         checks.extend(
             _input_nontensor_tree_contract_checks(self.descriptor, inputs, self.positions)
         )
-        alias_checks, _unresolved = _input_alias_topology_checks(
+        alias_checks, alias_unresolved = _input_alias_topology_checks(
             self.descriptor, self.input_slots, raw_values
         )
         checks.extend(alias_checks)
         if all(check.passed for check in checks):
-            ceiling = RunResourceCeiling(self.descriptor)
             for slot in self.input_slots:
                 raw = raw_values.get(slot.slot_id)
                 if isinstance(raw, torch.Tensor):
                     values[slot.slot_id] = _runtime_mirror_clone(raw, ceiling, slot)
-        return values, tuple(checks)
+        return values, tuple(checks), alias_unresolved
 
     def _bind_outputs(
         self,
         compiled: _CompiledSparseCall,
         output: Any,
         slot_values: dict[str, torch.Tensor],
+        *,
+        ceiling: RunResourceCeiling,
+        witness_source_snapshots: dict[str, torch.Tensor],
     ) -> tuple[ContractCheck, ...]:
         """Bind produced tensors and enforce the per-call static guard."""
 
@@ -643,10 +694,24 @@ class _FastSparseSession:
                     ),
                 )
             slot_values[slot_id] = value
+            produced_slot_ids = {slot_id}
             if out_slot is not None:
                 slot_values[out_slot] = value
+                produced_slot_ids.add(out_slot)
             for alias_id in self.version_alias_ids.get(slot_id, ()):
                 slot_values[alias_id] = value
+                produced_slot_ids.add(alias_id)
+            # Snapshot every escape-witness source slot at its production point so a
+            # later in-place mutation of the live tensor cannot restale the digest
+            # comparison -- the run-digest then matches the pre-mutation save-digest
+            # (same rule as the ordinary transaction's ``_bind_call_outputs``).
+            for produced_slot_id in produced_slot_ids & self.escape_witness_slot_ids:
+                witness_source_snapshots[produced_slot_id] = ceiling.guarded_clone(
+                    value,
+                    call_id=call.call_id,
+                    slot_id=produced_slot_id,
+                    affected_op_labels=call.op_labels,
+                )
             if op_label in self.saved_labels:
                 op = self.target.layer_dict_all_keys.get(op_label)
                 if op is not None:
@@ -730,10 +795,23 @@ class _FastSparseSession:
                 code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
                 detection_stage="fast_seed_guard",
             )
-        input_values, input_checks = self._bind_inputs(inputs)
+        ceiling = RunResourceCeiling(self.descriptor)
+        input_values, input_checks, input_alias_unresolved = self._bind_inputs(inputs, ceiling)
         _raise_first_divergence(input_checks, DivergencePolicy.RAISE, fork=None)
         slot_values = dict(self.prepared_state.slot_values)
         slot_values.update(input_values)
+        # Input/state escape-witness sources are snapshotted at bind (their
+        # production point); produced sources are snapshotted in ``_bind_outputs``.
+        witness_source_snapshots: dict[str, torch.Tensor] = {}
+        for witness_slot_id in self.escape_witness_slot_ids:
+            bound = slot_values.get(witness_slot_id)
+            if isinstance(bound, torch.Tensor):
+                witness_source_snapshots[witness_slot_id] = ceiling.guarded_clone(
+                    bound,
+                    call_id=None,
+                    slot_id=witness_slot_id,
+                    affected_op_labels=(),
+                )
         call_outputs: dict[str, Any] = {}
         checks: list[ContractCheck] = list(input_checks)
         from .utils._torch_compat import autocast_is_enabled
@@ -766,7 +844,13 @@ class _FastSparseSession:
                 for compiled in self.compiled_calls:
                     output = compiled.execute(slot_values)
                     call_outputs[compiled.descriptor.call_id] = output
-                    call_checks = self._bind_outputs(compiled, output, slot_values)
+                    call_checks = self._bind_outputs(
+                        compiled,
+                        output,
+                        slot_values,
+                        ceiling=ceiling,
+                        witness_source_snapshots=witness_source_snapshots,
+                    )
                     checks.extend(call_checks)
                     failed = next((check for check in call_checks if not check.passed), None)
                     if failed is not None:
@@ -783,6 +867,30 @@ class _FastSparseSession:
                 "Fast static guard passed.",
             )
         )
+        # Settle through the ONE faithfulness derivation every provider uses. The
+        # verify-once gate proved only the FIRST input; each iteration re-derives
+        # the per-input dynamic ceilings (tensor->host escape staleness, unbound
+        # state escape, input-derived layout, alias-topology unknown) exactly like
+        # the ordinary transaction, so a changed input that restales a baked
+        # literal or layout predicate settles UNVERIFIABLE, never a false VERIFIED.
+        output_container_spec = _output_container_spec(self.target)
+        provisional_verdict, provisional_mismatch = _path_faithfulness(
+            self.descriptor,
+            checks,
+            host_rng_unreproduced=_host_rng_unreproduced(self.descriptor, seed),
+            tensor_derived_scalar_stale=_tensor_derived_scalar_stale(
+                self.descriptor, slot_values, witness_source_snapshots
+            ),
+            unbound_state_escape_stale=_unbound_state_escape_stale(self.descriptor, slot_values),
+            container_reconstruction_lossy=_container_spec_reconstruction_lossy(
+                output_container_spec
+            ),
+            output_not_reproduced=_output_not_reproduced(self.descriptor, output_container_spec),
+            mode_sensitive_op_unwitnessed=self.mode_sensitive_op_unwitnessed,
+            input_alias_unresolved=input_alias_unresolved,
+            nondeterministic_control_source=self.nondeterministic_control_source,
+            input_derived_layout_stale=_input_derived_layout_stale(self.descriptor, inputs),
+        )
         return _finalize_provider_run(
             fork=self.target,
             output=output,
@@ -792,10 +900,11 @@ class _FastSparseSession:
             seed=self.prepared_state.seed,
             random_filled_slot_ids=self.prepared_state.random_filled_slot_ids,
             contract_checks=tuple(checks),
-            provisional_path_faithfulness=PathFaithfulness.VERIFIED,
-            provisional_mismatch=None,
+            provisional_path_faithfulness=provisional_verdict,
+            provisional_mismatch=provisional_mismatch,
             numeric_attestation=NumericAttestationStatus.NOT_APPLICABLE,
             divergence_policy=DivergencePolicy.RAISE,
+            nondeterministic_sources=self.declared_nondeterministic_sources,
         )
 
 
@@ -838,6 +947,19 @@ class _FastLiveSession:
                 code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
                 detection_stage="fast_live_function_plan",
             )
+        modules = dict(model.named_modules())
+        plan_addresses = tuple(
+            dict.fromkeys(plan.address_or_name for plan in self.module_plans)
+        )
+        # Every typed refusal must fire BEFORE the unsupported-activation wipe
+        # below: a refused session must never destroy the user's saved payloads.
+        for address in plan_addresses:
+            if modules.get("" if address == "self" else address) is None:
+                raise RunCapabilityUnavailableError(
+                    f"Captured module address {address!r} is absent from the live model.",
+                    code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+                    detection_stage="fast_live_module_plan",
+                )
         for op in trace.layer_list:
             if (
                 bool(getattr(op, "has_saved_activation", False))
@@ -849,17 +971,10 @@ class _FastLiveSession:
         self.function_names = frozenset(plan.address_or_name for plan in self.function_plans)
         self.handles: list[Any] = []
         self._hook_finalizer = weakref.finalize(self, _remove_fast_live_hooks, self.handles)
-        modules = dict(model.named_modules())
         session_ref = weakref.ref(self)
         try:
-            for address in dict.fromkeys(plan.address_or_name for plan in self.module_plans):
-                module = modules.get("" if address == "self" else address)
-                if module is None:
-                    raise RunCapabilityUnavailableError(
-                        f"Captured module address {address!r} is absent from the live model.",
-                        code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
-                        detection_stage="fast_live_module_plan",
-                    )
+            for address in plan_addresses:
+                module = modules["" if address == "self" else address]
 
                 def hook(
                     _module: nn.Module,
@@ -970,6 +1085,21 @@ class _FastLiveSession:
         """Remove persistent module hooks owned by this session."""
 
         self._hook_finalizer()
+
+    def _poison_and_raise(self, failed: ContractCheck) -> None:
+        """Poison the half-refreshed user Trace, then raise the typed divergence.
+
+        Boundary payloads are overwritten in place as the native forward passes
+        each site, so a divergence detected at site N leaves sites 1..N-1 holding
+        new-input activations while later sites keep capture-time ones. The
+        mixed-activation Trace must never pass downstream faithful consumers
+        (validation, export, faithful comparison, chaining), so it is
+        monotonically poisoned before the raise -- the documented "always raises
+        on divergence" posture plus an honest mark on the user-owned object.
+        """
+
+        mark_trace_path_status(self.trace, PathFaithfulness.DIVERGED, failed.diagnostic)
+        _raise_failed_contract_as_divergence(failed, fork=None)
 
     def wants_function(self, func_name: str) -> bool:
         """Return whether the active scoped collector needs this function type."""
@@ -1146,7 +1276,7 @@ class _FastLiveSession:
             else:
                 output = model(input_args, **dict(input_kwargs))
         if self.failure is not None:
-            _raise_failed_contract_as_divergence(self.failure, fork=None)
+            self._poison_and_raise(self.failure)
         if self.module_index != len(self.module_plans):
             failed = _contract_check(
                 "fast_live_module_missing",
@@ -1155,7 +1285,7 @@ class _FastLiveSession:
                 f"Live module path ended after {self.module_index} of "
                 f"{len(self.module_plans)} captured atomic calls.",
             )
-            _raise_failed_contract_as_divergence(failed, fork=None)
+            self._poison_and_raise(failed)
         if self.function_index != len(self.function_plans):
             failed = _contract_check(
                 "fast_live_function_missing",
@@ -1164,7 +1294,7 @@ class _FastLiveSession:
                 f"Live functional path ended after {self.function_index} of "
                 f"{len(self.function_plans)} requested calls.",
             )
-            _raise_failed_contract_as_divergence(failed, fork=None)
+            self._poison_and_raise(failed)
         self._refresh_boundary_payloads(input_args, input_kwargs, output)
         readiness = ReadinessReport(
             status=ReadinessStatus.READY,
@@ -1182,6 +1312,15 @@ class _FastLiveSession:
             RunnableErrorCode.CALL_STRUCTURE_MISMATCH,
             "Fast static guard passed.",
         )
+        # Derive the verdict instead of asserting it: fast-live returns the model's
+        # real native output, but the refreshed trace payloads carry the same honesty
+        # obligation as the ordinary live provider, which ceilings a lossy output
+        # container at UNVERIFIABLE. fast=True must never improve the verdict the
+        # ordinary provider would settle on the same trace.
+        lossy = _container_spec_reconstruction_lossy(_output_container_spec(self.trace))
+        provisional = (
+            PathFaithfulness.UNVERIFIABLE if lossy else PathFaithfulness.VERIFIED
+        )
         return _finalize_provider_run(
             fork=self.trace,
             output=output,
@@ -1191,10 +1330,13 @@ class _FastLiveSession:
             seed=seed,
             random_filled_slot_ids=(),
             contract_checks=(guard_check,),
-            provisional_path_faithfulness=PathFaithfulness.VERIFIED,
+            provisional_path_faithfulness=provisional,
             provisional_mismatch=None,
             numeric_attestation=NumericAttestationStatus.NOT_PRESENT,
             divergence_policy=DivergencePolicy.RAISE,
+            # The fast-live "fork" IS the user's live Trace: an inherited
+            # divergence must raise without evicting it from the registry.
+            unregister_fork_on_divergence=False,
         )
 
     def _refresh_boundary_payloads(
@@ -1221,7 +1363,7 @@ class _FastLiveSession:
                 "Native model output tensor structure changed from the captured boundary.",
                 affected_op_labels=output_labels,
             )
-            _raise_failed_contract_as_divergence(failed, fork=None)
+            self._poison_and_raise(failed)
         for label, path in zip(output_labels, output_paths):
             value = _value_at_path(output, path)
             op = self.trace.layer_dict_all_keys[label]
@@ -1235,7 +1377,7 @@ class _FastLiveSession:
                     f"Native model output {label!r} is no longer a tensor.",
                     affected_op_labels=(label,),
                 )
-                _raise_failed_contract_as_divergence(failed, fork=None)
+                self._poison_and_raise(failed)
             if expected_shape is not None and tuple(value.shape) != expected_shape:
                 failed = _contract_check(
                     f"fast_live_model_output_shape:{label}",
@@ -1245,7 +1387,7 @@ class _FastLiveSession:
                     f"{tuple(value.shape)}.",
                     affected_op_labels=(label,),
                 )
-                _raise_failed_contract_as_divergence(failed, fork=None)
+                self._poison_and_raise(failed)
             if expected_dtype is not None and str(value.dtype) != expected_dtype:
                 failed = _contract_check(
                     f"fast_live_model_output_dtype:{label}",
@@ -1255,7 +1397,7 @@ class _FastLiveSession:
                     f"{value.dtype}.",
                     affected_op_labels=(label,),
                 )
-                _raise_failed_contract_as_divergence(failed, fork=None)
+                self._poison_and_raise(failed)
             if isinstance(value, torch.Tensor) and bool(getattr(op, "has_saved_activation", False)):
                 op.save_activation(value, (), {}, False)
 
@@ -1323,8 +1465,14 @@ def run_fast_live_trace(trace: Any, inputs: Any, *, seed: int | None) -> RunResu
 
 
 def close_fast_run_session(trace: Any) -> None:
-    """Close and discard a Trace's internal fast-run session, if present."""
+    """Close and discard a Trace's internal fast-run session, if present.
 
-    session = trace.__dict__.pop("_fast_run_session", None)
+    Close BEFORE discarding: a raising ``close()`` leaves the session attached
+    (and therefore retryable) instead of popping it into an unreachable state
+    with its hooks still installed.
+    """
+
+    session = trace.__dict__.get("_fast_run_session")
     if hasattr(session, "close"):
         session.close()
+    trace.__dict__.pop("_fast_run_session", None)
