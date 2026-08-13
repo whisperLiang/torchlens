@@ -372,6 +372,12 @@ def test_torch_capability_snapshot_contract() -> None:
         # structural name matching. Build-dependent, so mirror the live values.
         "HAS_DYNAMO_IS_COMPILING": tc.HAS_DYNAMO_IS_COMPILING,
         "HAS_TRACING_TENSOR_TYPES": tc.HAS_TRACING_TENSOR_TYPES,
+        # Compile rung-2 probes: set_stance (torch >= 2.6) lets capture run
+        # compiled callables through their original eager Python, and Dynamo's
+        # compile counters back tl.debug.count_compiles. Build-dependent, so
+        # mirror the live values.
+        "HAS_SET_STANCE": tc.HAS_SET_STANCE,
+        "HAS_DYNAMO_COMPILE_COUNTERS": tc.HAS_DYNAMO_COMPILE_COUNTERS,
         # fp8 dtypes exist on every torch build we support, but the set grew across
         # 2.x, so mirror the live value rather than hardcoding True.
         "HAS_FP8_DTYPES": tc.HAS_FP8_DTYPES,
