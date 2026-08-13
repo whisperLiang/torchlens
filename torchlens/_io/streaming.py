@@ -287,10 +287,9 @@ class BundleStreamWriter:
         try:
             self.tmp_path.rename(self.final_path)
         except OSError as exc:
-            self._closed = True
-            raise TorchLensIOError(
-                f"Failed to atomically rename {self.tmp_path} to {self.final_path}."
-            ) from exc
+            reason = f"Failed to atomically rename {self.tmp_path} to {self.final_path}."
+            self.abort(reason)
+            raise TorchLensIOError(reason) from exc
 
         self._closed = True
         self._finalized = True
