@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from .._errors import InvalidArgumentError
 from .request import RenderContext
 
 if TYPE_CHECKING:
@@ -267,7 +268,12 @@ class CollapseSchedule:
         """
 
         if not 0.0 <= t <= 1.0:
-            raise ValueError("collapse float level must be in [0.0, 1.0].")
+            raise InvalidArgumentError(
+                f"collapse float level must be in [0.0, 1.0]; received {t!r}",
+                code="collapse_level_invalid",
+                remedy="pass a collapse level between 0.0 and 1.0",
+                argument="t",
+            )
         if t == 0.0:
             return self.steps[0]
         for step in reversed(self.steps):

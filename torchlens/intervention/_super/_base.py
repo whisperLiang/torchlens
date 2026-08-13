@@ -7,6 +7,7 @@ from typing import Any, Callable, Generic, Literal, TypeVar, cast
 
 import torch
 
+from ..._errors import InvalidArgumentError, PayloadUnavailableError
 from .._metrics import is_scalar_like, relative_l1_scalar, resolve_metric
 
 T = TypeVar("T")
@@ -345,8 +346,11 @@ class _TensorBearing:
             if getattr(member, "shape", None) is not None
         }
         if len(shapes) > 1:
-            raise ValueError(
-                f"Shape mismatch across bundle members at label {self._label!r}: {sorted(shapes)}"
+            raise InvalidArgumentError(
+                f"Shape mismatch across bundle members at label {self._label!r}: {sorted(shapes)}",
+                code="bundle_shape_mismatch",
+                remedy="query members with matching shapes at this label",
+                label=str(self._label),
             )
         return next(iter(shapes), ())
 
@@ -403,9 +407,19 @@ class _TensorBearing:
         tensors = [tensor_dict[name] for name in names]
         if other is not None:
             if other not in tensor_dict:
-                raise ValueError(f"Unknown bundle member {other!r}. Known: {list(tensor_dict)}")
+                raise InvalidArgumentError(
+                    f"Unknown bundle member {other!r}. Known: {list(tensor_dict)}",
+                    code="bundle_member_unknown",
+                    remedy="pass one of the known bundle member names",
+                    member=str(other),
+                )
             if other not in names:
-                raise ValueError(f"Bundle member {other!r} has no usable {on} at this node.")
+                raise PayloadUnavailableError(
+                    f"Bundle member {other!r} has no usable {on} at this node",
+                    code="bundle_member_payload_missing",
+                    remedy="compare against a member with a stored tensor at this node",
+                    member=str(other),
+                )
             ref_idx = names.index(other)
             return self._diff_row(tensors, ref_idx, metric_fn)
         return self._diff_matrix(tensors, metric_fn)
@@ -434,10 +448,19 @@ class _TensorBearing:
             tensor for tensor in self._tensor_dict(on).values() if isinstance(tensor, torch.Tensor)
         ]
         if not tensors:
-            raise ValueError(f"No bundle members have stored {on} at label {self._label!r}.")
+            raise PayloadUnavailableError(
+                f"No bundle members have stored {on} at label {self._label!r}",
+                code="bundle_member_payload_missing",
+                remedy="aggregate at a label where members retained tensors",
+                label=str(self._label),
+            )
         shapes = {tuple(tensor.shape) for tensor in tensors}
         if len(shapes) > 1:
-            raise ValueError(f"Cannot aggregate tensors with different shapes: {sorted(shapes)}")
+            raise InvalidArgumentError(
+                f"Cannot aggregate tensors with different shapes: {sorted(shapes)}",
+                code="bundle_shape_mismatch",
+                remedy="aggregate members with matching shapes",
+            )
         stacked = torch.stack([tensor.to(torch.float32) for tensor in tensors], dim=0)
         if statistic == "mean":
             return stacked.mean(dim=0)
@@ -447,7 +470,12 @@ class _TensorBearing:
             return stacked.var(dim=0)
         if statistic == "norm":
             return cast(torch.Tensor, torch.linalg.vector_norm(stacked, dim=0))
-        raise ValueError("statistic must be one of 'mean', 'std', 'var', or 'norm'.")
+        raise InvalidArgumentError(
+            f"statistic must be one of 'mean', 'std', 'var', or 'norm'; received {statistic!r}",
+            code="bundle_statistic_invalid",
+            remedy="pass statistic='mean', 'std', 'var', or 'norm'",
+            argument="statistic",
+        )
 
     def _tensor_dict(self, field: _TENSOR_FIELD_LITERAL) -> dict[str, torch.Tensor | None]:
         """Return a tensor field keyed by member name.
@@ -511,17 +539,28 @@ class _TensorBearing:
             value for value in self._tensor_dict(field).values() if isinstance(value, torch.Tensor)
         ]
         if len(tensors) != len(self._members):
-            raise ValueError(
+            raise PayloadUnavailableError(
                 f"Cannot stack {field!r} for label {self._label!r}: "
-                "not every member has a stored tensor."
+                "not every member has a stored tensor",
+                code="bundle_stack_incomplete",
+                remedy="stack at a label where every member retained a tensor",
+                label=str(self._label),
+                field=str(field),
             )
         shapes = {tuple(tensor.shape[1:]) if tensor.dim() > 0 else () for tensor in tensors}
         if len(shapes) > 1:
-            raise ValueError(
-                f"Cannot stack tensors with different non-batch shapes: {sorted(shapes)}"
+            raise InvalidArgumentError(
+                f"Cannot stack tensors with different non-batch shapes: {sorted(shapes)}",
+                code="bundle_shape_mismatch",
+                remedy="stack members with matching non-batch shapes",
             )
         if not tensors:
-            raise ValueError(f"Cannot stack {field!r}: no tensors are available.")
+            raise PayloadUnavailableError(
+                f"Cannot stack {field!r}: no tensors are available",
+                code="bundle_stack_incomplete",
+                remedy="stack at a label where members retained tensors",
+                field=str(field),
+            )
         if tensors[0].dim() == 0:
             return torch.stack(tensors, dim=0)
         return torch.cat(tensors, dim=0)

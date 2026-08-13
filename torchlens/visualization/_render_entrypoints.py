@@ -4,6 +4,7 @@
 
 from dataclasses import replace
 
+from .._errors import InvalidArgumentError, PayloadUnavailableError
 from ._render_common import *
 from ._render_leaf import *
 from ._render_edges import *
@@ -81,10 +82,19 @@ def render_backward_graph(
     """
 
     if not self.has_backward_pass or not self.grad_fn_logs:
-        raise ValueError("No backward graph is available; call log_backward(loss) first.")
+        raise PayloadUnavailableError(
+            "No backward graph is available",
+            code="backward_graph_unavailable",
+            remedy="call log_backward(loss) first",
+        )
     _ = collapsed_node_spec_fn, vis_node_mode
     if vis_mode not in {"rolled", "unrolled"}:
-        raise ValueError("vis_mode must be either 'rolled' or 'unrolled'")
+        raise InvalidArgumentError(
+            f"vis_mode must be either 'rolled' or 'unrolled'; received {vis_mode!r}",
+            code="visualization_mode_invalid",
+            remedy="pass vis_mode='rolled' or 'unrolled'",
+            argument="vis_mode",
+        )
     pass_filter = _normalize_backward_pass_filter(bwd)
 
     rankdir = direction_to_rankdir(direction)
@@ -299,12 +309,23 @@ def render_combined_graph(
     if vis_mode == "rolled":
         raise NotImplementedError("draw_combined does not support vis_mode='rolled' yet.")
     if vis_mode != "unrolled":
-        raise ValueError("vis_mode must be either 'unrolled' or 'rolled'")
+        raise InvalidArgumentError(
+            f"vis_mode must be either 'unrolled' or 'rolled'; received {vis_mode!r}",
+            code="visualization_mode_invalid",
+            remedy="pass vis_mode='unrolled' or 'rolled'",
+            argument="vis_mode",
+        )
     if not self.has_backward_pass or not self.grad_fn_logs:
-        raise ValueError("No backward graph is available; call log_backward(loss) first.")
+        raise PayloadUnavailableError(
+            "No backward graph is available",
+            code="backward_graph_unavailable",
+            remedy="call log_backward(loss) first",
+        )
     if not self._layers_logged:
-        raise ValueError(
-            "Must have all layers logged in order to render the graph; use show_model_graph."
+        raise PayloadUnavailableError(
+            "Must have all layers logged in order to render the graph",
+            code="layers_not_logged",
+            remedy="capture with full layer logging (e.g. show_model_graph) before drawing",
         )
     pass_filter = _normalize_backward_pass_filter(bwd)
 

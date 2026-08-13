@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 from .._deprecations import MISSING, MissingType
+from .._errors import InvalidArgumentError
 from .._chunking import iter_chunked_inputs, normalize_chunk_paths, plan_chunks
 from .._input_coerce import _coerce_input_args
 from .._trace_state import TraceState
@@ -805,9 +806,11 @@ def _preflight(log: "Trace", model: nn.Module, x: Any) -> None:
     """
 
     if x is None:
-        raise ValueError(
-            "run(..., x=None) cannot recover the original input. "
-            "Pass the forward input explicitly as log.run(model, x)."
+        raise InvalidArgumentError(
+            "run(..., x=None) cannot recover the original input",
+            code="run_input_missing",
+            remedy="pass the forward input explicitly as log.run(model, x)",
+            argument="x",
         )
     from ..user_funcs import _reject_opaque_wrappers
 

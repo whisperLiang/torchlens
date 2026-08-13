@@ -6,6 +6,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
+from .._errors import CaptureContextError, InvalidArgumentError, PayloadUnavailableError
 from ._render_common import *
 from ._render_leaf import *
 from ._render_edges import *
@@ -201,9 +202,12 @@ def _validate_draw_options(
     """
 
     if node_mode not in MODE_REGISTRY:
-        raise ValueError(
+        raise InvalidArgumentError(
             "Visualization node_style/node_mode must be one of 'default', "
-            "'profiling', 'vision', or 'attention'."
+            f"'profiling', 'vision', or 'attention'; received {node_mode!r}",
+            code="visualization_node_style_invalid",
+            remedy="pass node_style='default', 'profiling', 'vision', or 'attention'",
+            argument="node_style",
         )
     if node_mode in DOMAIN_NODE_MODES:
         warnings.warn(
@@ -214,14 +218,36 @@ def _validate_draw_options(
             stacklevel=3,
         )
     if intervention_mode not in {"node_mark", "as_node"}:
-        raise ValueError("vis_intervention_mode must be either 'node_mark' or 'as_node'.")
+        raise InvalidArgumentError(
+            "vis_intervention_mode must be either 'node_mark' or 'as_node'; "
+            f"received {intervention_mode!r}",
+            code="visualization_intervention_mode_invalid",
+            remedy="pass vis_intervention_mode='node_mark' or 'as_node'",
+            argument="vis_intervention_mode",
+        )
     if isinstance(collapse, float):
         if not 0.0 <= collapse <= 1.0:
-            raise ValueError("collapse float level must be in [0.0, 1.0].")
+            raise InvalidArgumentError(
+                f"collapse float level must be in [0.0, 1.0]; received {collapse!r}",
+                code="collapse_level_invalid",
+                remedy="pass a collapse level between 0.0 and 1.0",
+                argument="collapse",
+            )
     elif collapse not in {"none", "auto", "max"}:
-        raise ValueError("collapse must be 'none', 'auto', 'max', or a float in [0.0, 1.0].")
+        raise InvalidArgumentError(
+            "collapse must be 'none', 'auto', 'max', or a float in [0.0, 1.0]; "
+            f"received {collapse!r}",
+            code="collapse_mode_invalid",
+            remedy="pass collapse='none', 'auto', 'max', or an in-range float",
+            argument="collapse",
+        )
     if fold_repeats not in {None, True, False}:
-        raise ValueError("fold_repeats must be None, True, or False.")
+        raise InvalidArgumentError(
+            f"fold_repeats must be None, True, or False; received {fold_repeats!r}",
+            code="fold_repeats_invalid",
+            remedy="pass fold_repeats=None, True, or False",
+            argument="fold_repeats",
+        )
 
 
 def _resolve_draw_request(
@@ -322,8 +348,10 @@ def _resolve_collapse_request(
         segments = dict(getattr(collapse_fn, "_torchlens_v2_segments", {}) or {})
     segment_lookup = _build_segment_lookup(segments)
     if not trace._layers_logged:
-        raise ValueError(
-            "Must have all layers logged in order to render the graph; use show_model_graph."
+        raise PayloadUnavailableError(
+            "Must have all layers logged in order to render the graph",
+            code="layers_not_logged",
+            remedy="capture with full layer logging (e.g. show_model_graph) before drawing",
         )
     return request, repeat_folds, segments, segment_lookup
 
@@ -937,9 +965,10 @@ def draw(
     if vis_renderer == "dagua":
         opted_in_module = sys.modules.get("torchlens.experimental.dagua")
         if not getattr(opted_in_module, "__torchlens_dagua_opted_in__", False):
-            raise RuntimeError(
-                "dagua renderer is experimental; opt in via "
-                "`from torchlens.experimental import dagua` first"
+            raise CaptureContextError(
+                "dagua renderer is experimental and has not been opted into",
+                code="dagua_renderer_not_opted_in",
+                remedy="opt in via `from torchlens.experimental import dagua` first",
             )
         from ..experimental.dagua import render_trace_with_dagua
 
@@ -955,7 +984,12 @@ def draw(
             vis_theme=vis_theme,
         )
     if vis_renderer not in {"graphviz", "dagua"}:
-        raise ValueError("vis_renderer must be 'graphviz' or 'dagua'")
+        raise InvalidArgumentError(
+            f"vis_renderer must be 'graphviz' or 'dagua'; received {vis_renderer!r}",
+            code="visualization_renderer_invalid",
+            remedy="pass vis_renderer='graphviz' or 'dagua'",
+            argument="vis_renderer",
+        )
     request, repeat_folds, segments, segment_lookup = _resolve_collapse_request(self, request)
 
     target = RenderTarget(
@@ -1221,7 +1255,12 @@ def _normalize_backward_pass_filter(bwd: int | Iterable[int] | None) -> Backward
     else:
         pass_indices = {int(pass_index) for pass_index in bwd}
     if any(pass_index < 1 for pass_index in pass_indices):
-        raise ValueError("bwd pass filters use one-based positive backward pass numbers.")
+        raise InvalidArgumentError(
+            "bwd pass filters use one-based positive backward pass numbers",
+            code="backward_pass_filter_invalid",
+            remedy="pass a positive one-based backward pass number",
+            argument="bwd",
+        )
     return pass_indices
 
 

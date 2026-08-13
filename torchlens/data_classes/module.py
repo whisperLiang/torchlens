@@ -39,7 +39,7 @@ from typing import (
 
 import torch
 
-from .._errors import AmbiguousOpLookupError
+from .._errors import AmbiguousOpLookupError, InvalidArgumentError, RecordBindingError
 from .._io import (
     FieldPolicy,
     TLSPEC_VERSION,
@@ -385,7 +385,11 @@ def _visible_call_children(call: "ModuleCall", include_atomic: bool) -> list["Mo
 
     trace = call._source_trace
     if trace is None:
-        raise RuntimeError("ModuleCall not bound to a Trace")
+        raise RecordBindingError(
+            "ModuleCall not bound to a Trace",
+            code="record_not_bound",
+            remedy="keep the owning Trace alive and read records through it",
+        )
     children = [trace.module_calls[child_label] for child_label in call.call_children]
     if include_atomic:
         return children
@@ -705,7 +709,11 @@ class ModuleCall:
 
         trace = self._source_trace
         if trace is None:
-            raise RuntimeError("ModuleCall not bound to a Trace")
+            raise RecordBindingError(
+                "ModuleCall not bound to a Trace",
+                code="record_not_bound",
+                remedy="keep the owning Trace alive and read records through it",
+            )
         return cast("Module", trace.modules[self.address])
 
     @property
@@ -1000,7 +1008,11 @@ class ModuleCall:
             yield self
         trace = self._source_trace
         if trace is None:
-            raise RuntimeError("ModuleCall not bound to a Trace")
+            raise RecordBindingError(
+                "ModuleCall not bound to a Trace",
+                code="record_not_bound",
+                remedy="keep the owning Trace alive and read records through it",
+            )
         for child_label in self.call_children:
             child = trace.module_calls[child_label]
             yield from child.walk_descendants(include_self=True)
@@ -1122,7 +1134,11 @@ class ModuleCall:
             )
         trace = self._source_trace
         if trace is None:
-            raise RuntimeError("ModuleCall not bound to a Trace")
+            raise RecordBindingError(
+                "ModuleCall not bound to a Trace",
+                code="record_not_bound",
+                remedy="keep the owning Trace alive and read records through it",
+            )
         return trace.ops[self.output_ops[0]].receptive_field
 
     @property
@@ -1137,7 +1153,11 @@ class ModuleCall:
             )
         trace = self._source_trace
         if trace is None:
-            raise RuntimeError("ModuleCall not bound to a Trace")
+            raise RecordBindingError(
+                "ModuleCall not bound to a Trace",
+                code="record_not_bound",
+                remedy="keep the owning Trace alive and read records through it",
+            )
         return trace.ops[self.output_ops[0]].projective_field
 
     @property
@@ -2380,8 +2400,12 @@ class Module:
         """Return the only ModuleCall or raise for multi-call modules."""
 
         if self.num_calls != 1 or len(self.ops) != 1:
-            raise ValueError(
-                f"Module '{self.address}' has {self.num_calls} calls; use module.calls[N]."
+            raise InvalidArgumentError(
+                f"Module '{self.address}' has {self.num_calls} calls; use module.calls[N]",
+                code="module_call_ambiguous",
+                remedy="access one call via module.calls[N]",
+                address=self.address,
+                num_calls=self.num_calls,
             )
         return self.ops[0]
 
@@ -2547,7 +2571,11 @@ class Module:
         Supports int indexing and string label lookup (#120).
         """
         if self._source_trace is None:
-            raise RuntimeError("No source Trace reference; cannot index into layers.")
+            raise RecordBindingError(
+                "No source Trace reference; cannot index into layers",
+                code="record_not_bound",
+                remedy="keep the owning Trace alive and index layers through it",
+            )
         if isinstance(ix, str):
             # String label lookup within this module's layers
             if ix in self.layer_labels:
@@ -2557,9 +2585,11 @@ class Module:
             if len(matches) == 1:
                 return self._source_trace[matches[0]]
             elif len(matches) > 1:
-                raise ValueError(
+                raise AmbiguousOpLookupError(
                     f"Ambiguous lookup: '{ix}' matches {len(matches)} layers in module "
-                    f"'{self.address}': {', '.join(matches[:5])}"
+                    f"'{self.address}': {', '.join(matches[:5])}",
+                    key=str(ix),
+                    address=self.address,
                 )
             raise KeyError(f"'{ix}' not found in module '{self.address}' layers")
         return self._source_trace[self.layer_labels[ix]]
@@ -2591,7 +2621,11 @@ class Module:
 
         trace: Trace | None = self._source_trace
         if trace is None:
-            raise RuntimeError("Module not bound to a Trace")
+            raise RecordBindingError(
+                "Module not bound to a Trace",
+                code="record_not_bound",
+                remedy="keep the owning Trace alive and read records through it",
+            )
         return cast(str, trace.draw(module=self, **kwargs))
 
     def to_pandas(self) -> "pd.DataFrame":
@@ -2613,7 +2647,11 @@ class Module:
             ``LAYER_LOG_FIELD_ORDER`` plus a trailing ``num_ops`` column.
         """
         if self._source_trace is None:
-            raise RuntimeError("No source Trace reference; cannot build DataFrame.")
+            raise RecordBindingError(
+                "No source Trace reference; cannot build DataFrame",
+                code="record_not_bound",
+                remedy="keep the owning Trace alive and export through it",
+            )
         try:
             import pandas as pd
         except ImportError as e:

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 else:
     _TraceMixinBase = object
 from .._deprecations import MISSING, MissingType
+from .._errors import InvalidArgumentError
 from .._literals import (
     BufferVisibilityLiteral,
     CollapseLiteral,
@@ -366,7 +367,13 @@ class TraceVisualizationMixin(_TraceMixinBase):
                 elif link_format == "text":
                     location = file_line_text(file_path, line_number)
                 else:
-                    raise ValueError("link_format must be 'terminal', 'html', or 'text'.")
+                    raise InvalidArgumentError(
+                        "link_format must be 'terminal', 'html', or 'text'; "
+                        f"received {link_format!r}",
+                        code="link_format_invalid",
+                        remedy="pass link_format='terminal', 'html', or 'text'",
+                        argument="link_format",
+                    )
             parents = ", ".join(getattr(layer, "parents", None) or []) or "none"
             module = getattr(layer, "module", None) or "no module"
             return (

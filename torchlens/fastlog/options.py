@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Final, Literal, Mapping
 
 from .._deprecations import MISSING, MissingType
+from .._errors import InvalidArgumentError
 from ..ir.predicate import RetroactiveCaptureDecision
 from ..intervention.predicates import InterventionPredicate
 from ..options import StreamingOptions
@@ -226,9 +227,19 @@ def _validate_recording_values(values: Mapping[str, Any]) -> None:
     grad_transform = values["grad_transform"]
     save_raw_gradients = values["save_raw_gradients"]
     if not isinstance(history_size, int) or not 0 <= history_size <= 1024:
-        raise ValueError("history_size must be an integer in [0, 1024]")
+        raise InvalidArgumentError(
+            f"history_size must be an integer in [0, 1024]; received {history_size!r}",
+            code="history_size_invalid",
+            remedy="pass an integer history_size between 0 and 1024",
+            argument="history_size",
+        )
     if not isinstance(lookback, int) or not 0 <= lookback <= 1024:
-        raise ValueError("lookback must be an integer in [0, 1024]")
+        raise InvalidArgumentError(
+            f"lookback must be an integer in [0, 1024]; received {lookback!r}",
+            code="lookback_invalid",
+            remedy="pass an integer lookback between 0 and 1024",
+            argument="lookback",
+        )
     if lookback_payload_policy not in {
         "metadata_only",
         "detached_raw",
@@ -236,36 +247,100 @@ def _validate_recording_values(values: Mapping[str, Any]) -> None:
         "grad_connected",
         "disk_spilled",
     }:
-        raise ValueError(
+        raise InvalidArgumentError(
             "lookback_payload_policy must be one of 'metadata_only', 'detached_raw', "
-            "'transformed', 'grad_connected', or 'disk_spilled'"
+            f"'transformed', 'grad_connected', or 'disk_spilled'; "
+            f"received {lookback_payload_policy!r}",
+            code="lookback_payload_policy_invalid",
+            remedy="choose a documented lookback payload policy",
+            argument="lookback_payload_policy",
         )
     if intervene is not None and not callable(intervene):
-        raise ValueError("intervene must be callable or None")
+        raise InvalidArgumentError(
+            f"intervene must be callable or None; received {type(intervene).__name__}",
+            code="intervention_predicate_type_invalid",
+            remedy="pass tl.when(...), another predicate, or None",
+            argument="intervene",
+        )
     if halt is not None and not callable(halt):
-        raise ValueError("halt must be callable or None")
+        raise InvalidArgumentError(
+            f"halt must be callable or None; received {type(halt).__name__}",
+            code="halt_predicate_type_invalid",
+            remedy="pass a halt predicate or None",
+            argument="halt",
+        )
     if not isinstance(max_predicate_failures, int) or max_predicate_failures < 0:
-        raise ValueError("max_predicate_failures must be a non-negative integer")
+        raise InvalidArgumentError(
+            f"max_predicate_failures must be a non-negative integer; "
+            f"received {max_predicate_failures!r}",
+            code="max_predicate_failures_invalid",
+            remedy="pass a non-negative integer max_predicate_failures",
+            argument="max_predicate_failures",
+        )
     if on_predicate_error not in {"auto", "accumulate", "fail-fast"}:
-        raise ValueError("on_predicate_error must be 'auto', 'accumulate', or 'fail-fast'")
+        raise InvalidArgumentError(
+            "on_predicate_error must be 'auto', 'accumulate', or 'fail-fast'; "
+            f"received {on_predicate_error!r}",
+            code="on_predicate_error_invalid",
+            remedy="pass on_predicate_error='auto', 'accumulate', or 'fail-fast'",
+            argument="on_predicate_error",
+        )
     if on_forward_error not in {"raise", "attach_partial", "return_partial"}:
-        raise ValueError("on_forward_error must be 'raise', 'attach_partial', or 'return_partial'")
+        raise InvalidArgumentError(
+            "on_forward_error must be 'raise', 'attach_partial', or 'return_partial'; "
+            f"received {on_forward_error!r}",
+            code="on_forward_error_invalid",
+            remedy="pass on_forward_error='raise', 'attach_partial', or 'return_partial'",
+            argument="on_forward_error",
+        )
     if activation_transform is not None and not callable(activation_transform):
-        raise ValueError("activation_transform must be callable or None")
+        raise InvalidArgumentError(
+            f"activation_transform must be callable or None; "
+            f"received {type(activation_transform).__name__}",
+            code="recording_option_type_invalid",
+            remedy="pass a callable activation_transform or None",
+            argument="activation_transform",
+        )
     if not isinstance(save_raw_activations, bool):
-        raise ValueError("save_raw_activations must be a bool")
+        raise InvalidArgumentError(
+            f"save_raw_activations must be a bool; received {type(save_raw_activations).__name__}",
+            code="recording_option_type_invalid",
+            remedy="pass save_raw_activations=True or False",
+            argument="save_raw_activations",
+        )
     if (
         save_grads is not None
         and not isinstance(save_grads, (bool, CaptureSpec))
         and not callable(save_grads)
     ):
-        raise ValueError("save_grads must be callable, bool, CaptureSpec, or None")
+        raise InvalidArgumentError(
+            f"save_grads must be callable, bool, CaptureSpec, or None; "
+            f"received {type(save_grads).__name__}",
+            code="recording_option_type_invalid",
+            remedy="pass a predicate, bool, CaptureSpec, or None as save_grads",
+            argument="save_grads",
+        )
     if not isinstance(default_grad, (bool, CaptureSpec)):
-        raise ValueError("default_grad must be bool or CaptureSpec")
+        raise InvalidArgumentError(
+            f"default_grad must be bool or CaptureSpec; received {type(default_grad).__name__}",
+            code="recording_option_type_invalid",
+            remedy="pass a bool or CaptureSpec default_grad",
+            argument="default_grad",
+        )
     if grad_transform is not None and not callable(grad_transform):
-        raise ValueError("grad_transform must be callable or None")
+        raise InvalidArgumentError(
+            f"grad_transform must be callable or None; received {type(grad_transform).__name__}",
+            code="recording_option_type_invalid",
+            remedy="pass a callable grad_transform or None",
+            argument="grad_transform",
+        )
     if not isinstance(save_raw_gradients, bool):
-        raise ValueError("save_raw_gradients must be a bool")
+        raise InvalidArgumentError(
+            f"save_raw_gradients must be a bool; received {type(save_raw_gradients).__name__}",
+            code="recording_option_type_invalid",
+            remedy="pass save_raw_gradients=True or False",
+            argument="save_raw_gradients",
+        )
 
 
 def merge_recording_options(
@@ -324,7 +399,12 @@ def merge_recording_options(
         if value is MISSING:
             continue
         if field_name in specified_fields:
-            raise ValueError(f"Recording option {field_name!r} was specified twice")
+            raise InvalidArgumentError(
+                f"Recording option {field_name!r} was specified twice",
+                code="recording_option_duplicate",
+                remedy="pass each recording option exactly once",
+                argument=field_name,
+            )
         base_values[field_name] = value
         specified_fields.add(field_name)
     return RecordingOptions.from_values(base_values, frozenset(specified_fields))

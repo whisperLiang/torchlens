@@ -14,6 +14,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from .._errors import InvalidArgumentError
 from .._literals import CollapseLiteral, FoldRepeatsLiteral, VisModeLiteral
 from .collapse_plan import RenderContext, collapse_plan_for_trace, count
 
@@ -379,7 +380,12 @@ def collapse_order(
 
     _ = weights
     if mode not in {"auto", "max"}:
-        raise ValueError("mode must be 'auto' or 'max'.")
+        raise InvalidArgumentError(
+            f"mode must be 'auto' or 'max'; received {mode!r}",
+            code="collapse_mode_invalid",
+            remedy="pass mode='auto' or 'max'",
+            argument="mode",
+        )
     analysis = analyze_collapse(trace)
     scores = _v2_selected_module_scores(trace, analysis, mode=mode)
     return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
@@ -454,7 +460,12 @@ def resolve_collapse_fn(
     resolved_context = RenderContext(vis_mode=vis_mode) if context is None else context
     if isinstance(collapse, float):
         if not 0.0 <= collapse <= 1.0:
-            raise ValueError("collapse float level must be in [0.0, 1.0].")
+            raise InvalidArgumentError(
+                f"collapse float level must be in [0.0, 1.0]; received {collapse!r}",
+                code="collapse_level_invalid",
+                remedy="pass a collapse level between 0.0 and 1.0",
+                argument="collapse",
+            )
         if collapse == 0.0:
             return None
         from .collapse_optimizer import select_collapse_level
@@ -476,7 +487,13 @@ def resolve_collapse_fn(
     if collapse == "none":
         return None
     if collapse not in {"auto", "max"}:
-        raise ValueError("collapse must be 'none', 'auto', 'max', or a float in [0.0, 1.0].")
+        raise InvalidArgumentError(
+            "collapse must be 'none', 'auto', 'max', or a float in [0.0, 1.0]; "
+            f"received {collapse!r}",
+            code="collapse_mode_invalid",
+            remedy="pass collapse='none', 'auto', 'max', or an in-range float",
+            argument="collapse",
+        )
     if collapse in {"auto", "max"}:
         from .collapse_optimizer import select_collapse_plan
 
@@ -526,7 +543,12 @@ def resolve_repeat_folds(
 
     resolved_context = RenderContext() if context is None else context
     if fold_repeats not in {None, True, False}:
-        raise ValueError("fold_repeats must be None, True, or False.")
+        raise InvalidArgumentError(
+            f"fold_repeats must be None, True, or False; received {fold_repeats!r}",
+            code="fold_repeats_invalid",
+            remedy="pass fold_repeats=None, True, or False",
+            argument="fold_repeats",
+        )
     if fold_repeats is False:
         return {}
     if collapse_fn is None and fold_repeats is not True:

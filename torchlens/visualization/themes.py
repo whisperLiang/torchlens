@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .._errors import InvalidArgumentError
 from .node_spec import NodeSpec
 
 
@@ -130,8 +131,11 @@ def resolve_theme(theme: str, *, for_paper: bool = False) -> VisualizationTheme:
     resolved_name = "paper" if for_paper else theme
     if resolved_name not in THEME_PRESETS:
         supported = ", ".join(sorted(THEME_PRESETS))
-        raise ValueError(
-            f"Unsupported visualization theme {resolved_name!r}; choose one of {supported}."
+        raise InvalidArgumentError(
+            f"Unsupported visualization theme {resolved_name!r}; choose one of {supported}",
+            code="visualization_theme_invalid",
+            remedy=f"pass one of the supported themes ({supported})",
+            argument="theme",
         )
     return THEME_PRESETS[resolved_name]
 

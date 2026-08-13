@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     _TraceMixinBase = Trace
 else:
     _TraceMixinBase = object
+from .._errors import CaptureContextError, InvalidArgumentError, PayloadUnavailableError
 from ..constants import LAYER_PASS_LOG_FIELD_ORDER
 from .interface import _format_conditional_branch_stack
 
@@ -113,7 +114,12 @@ def _normalize_batch_items(
     available = sorted({int(row.get("batch_item", 0)) for row in rows})
     if isinstance(batch_items, int):
         if batch_items < 0:
-            raise ValueError("batch_items count must be >= 0.")
+            raise InvalidArgumentError(
+                f"batch_items count must be >= 0; received {batch_items!r}",
+                code="batch_items_invalid",
+                remedy="pass a non-negative integer batch_items count",
+                argument="batch_items",
+            )
         return set(available[:batch_items])
     return {int(item) for item in batch_items}
 
@@ -227,9 +233,11 @@ class TraceExportMixin(_TraceMixinBase):
 
         refuse_poisoned_trace(self, "tabular export")
         if not self._tracing_finished:
-            raise RuntimeError(
-                "to_pandas() cannot be called before the forward pass is complete. "
-                "Please wait until trace has returned."
+            raise CaptureContextError(
+                "to_pandas() cannot be called before the forward pass is complete",
+                code="trace_not_finished",
+                remedy="wait until trace(...) has returned before exporting",
+                operation="to_pandas",
             )
         try:
             import pandas as pd
@@ -356,9 +364,13 @@ class TraceExportMixin(_TraceMixinBase):
         if self.decoded_output is None:
             recomputed = self._recompute_decoded_output(top_n=top_n)
             if recomputed is None:
-                raise ValueError(
-                    "logits not retained; re-decode unavailable. Capture with semantic "
-                    "output decoding enabled and retained logits to recompute."
+                raise PayloadUnavailableError(
+                    "logits not retained; re-decode unavailable",
+                    code="decoded_output_unavailable",
+                    remedy=(
+                        "capture with semantic output decoding enabled and retained "
+                        "logits to recompute"
+                    ),
                 )
             return recomputed
         if top_n is None:
@@ -368,8 +380,14 @@ class TraceExportMixin(_TraceMixinBase):
             recomputed = self._recompute_decoded_output(top_n=top_n)
             if recomputed is not None:
                 return recomputed
-            raise ValueError(
-                f"logits not retained; re-decode unavailable above captured top_n={captured_top_n}."
+            raise PayloadUnavailableError(
+                f"logits not retained; re-decode unavailable above captured top_n={captured_top_n}",
+                code="decoded_output_unavailable",
+                remedy=(
+                    f"request top_n <= {captured_top_n} or capture with retained logits "
+                    "to recompute"
+                ),
+                captured_top_n=captured_top_n,
             )
         if _is_batch_topk_decoded(self.decoded_output):
             return {
@@ -421,11 +439,23 @@ class TraceExportMixin(_TraceMixinBase):
             ) from e
 
         if top_n < 1:
-            raise ValueError("top_n must be >= 1.")
+            raise InvalidArgumentError(
+                f"top_n must be >= 1; received {top_n!r}",
+                code="top_n_invalid",
+                remedy="pass a positive integer top_n",
+                argument="top_n",
+            )
         decoded = self.decode_output(top_n=top_n)
         rows = _decoded_batch_topk_rows(decoded)
         if rows is None:
-            raise ValueError("decoded output is not a batch top-k classification table.")
+            raise PayloadUnavailableError(
+                "decoded output is not a batch top-k classification table",
+                code="decoded_output_not_classification",
+                remedy=(
+                    "capture with output_style='classification' to produce a batch "
+                    "top-k table"
+                ),
+            )
         selected_items = _normalize_batch_items(batch_items, rows)
         filtered_rows = [
             {

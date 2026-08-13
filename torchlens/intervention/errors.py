@@ -2,6 +2,7 @@
 
 from typing import Literal
 
+from .._errors import ArgumentConflictError
 from ..errors._base import (
     CaptureError,
     CompatibilityError,
@@ -53,7 +54,11 @@ class TorchLensInterventionError(InterventionError, RuntimeError):
         """
 
         if args and fields:
-            raise TypeError("Use either positional message args or named error fields, not both.")
+            raise ArgumentConflictError(
+                "Use either positional message args or named error fields, not both",
+                code="error_constructor_args_conflict",
+                remedy="pass a message OR named fields when constructing this error",
+            )
         self.fields = dict(fields)
         if fields:
             super().__init__(_message_from_fields(type(self).__name__, self.fields))
@@ -82,7 +87,11 @@ class TorchLensInterventionWarning(TorchLensWarning):
         """
 
         if args and fields:
-            raise TypeError("Use either positional message args or named warning fields, not both.")
+            raise ArgumentConflictError(
+                "Use either positional message args or named warning fields, not both",
+                code="error_constructor_args_conflict",
+                remedy="pass a message OR named fields when constructing this warning",
+            )
         self.fields = dict(fields)
         if fields:
             super().__init__(_message_from_fields(type(self).__name__, self.fields))

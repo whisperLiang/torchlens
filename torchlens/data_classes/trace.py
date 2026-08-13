@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from .func_call_location import FuncCallLocation
 
 from .. import _state
+from .._errors import InvalidArgumentError
 from ..backends import BackendName
 from .._trace_state import TraceState
 from .._io import (
@@ -1966,7 +1967,11 @@ class Trace(
         """
 
         if data is None and image is None:
-            raise ValueError("annotate() requires data=, image=, or both.")
+            raise InvalidArgumentError(
+                "annotate() requires data=, image=, or both",
+                code="annotation_payload_missing",
+                remedy="pass data=, image=, or both to annotate()",
+            )
         sites = self.resolve_sites(selector, max_fanout=max_fanout)
         image_value = str(image) if image is not None else None
         data_kind = self._annotation_data_kind(data)
@@ -2019,17 +2024,24 @@ class Trace(
 
         backend_name = str(getattr(self, "backend", "torch"))
         if backend_name != "torch":
-            raise ValueError(
+            raise InvalidArgumentError(
                 "annotate(data=torch.Tensor) is supported only for torch traces in this "
-                f"release; this trace uses backend={backend_name!r}."
+                f"release; this trace uses backend={backend_name!r}",
+                code="annotation_backend_unsupported",
+                remedy="pass JSON-serializable annotation data for non-torch traces",
+                backend=backend_name,
             )
         from .._io.payload_codec import get_payload_codec
 
         decision = get_payload_codec(backend_name).validate_for_save(tensor, strict=True)
         if decision.__class__.__name__ != "Ok":
             reason = getattr(decision, "text", "unsupported tensor payload")
-            raise ValueError(
-                f"Annotation tensor is not portable for backend {backend_name!r}: {reason}."
+            raise InvalidArgumentError(
+                f"Annotation tensor is not portable for backend {backend_name!r}: {reason}",
+                code="annotation_tensor_not_portable",
+                remedy="pass a dense, codec-supported tensor as annotation data",
+                backend=backend_name,
+                reason=reason,
             )
 
     @staticmethod
@@ -2050,10 +2062,12 @@ class Trace(
         try:
             json.dumps(data, sort_keys=True)
         except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "annotate(data=...) must be JSON-serializable or a torch.Tensor. "
-                "Convert arrays to torch.Tensor for blob persistence; values are never "
-                "silently stringified."
+            raise InvalidArgumentError(
+                "annotate(data=...) must be JSON-serializable or a torch.Tensor; "
+                "values are never silently stringified",
+                code="annotation_not_json_serializable",
+                remedy="convert arrays to torch.Tensor for blob persistence",
+                argument="data",
             ) from exc
 
     def _annotation_key_for_site(self, site: Any) -> str:
@@ -2136,7 +2150,12 @@ class Trace(
 
         user_annotations = annotations.setdefault("user", {})
         if not isinstance(user_annotations, dict):
-            raise ValueError('annotations["user"] must be a dict to store user annotations.')
+            raise InvalidArgumentError(
+                'annotations["user"] must be a dict to store user annotations; '
+                f"found {type(user_annotations).__name__}",
+                code="annotation_namespace_invalid",
+                remedy='restore annotations["user"] to a dict before annotating',
+            )
         return user_annotations
 
     def _mark_annotations_mutated(self) -> None:

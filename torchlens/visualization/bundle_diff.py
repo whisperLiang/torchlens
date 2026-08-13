@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import graphviz
 import torch
 
+from .._errors import InvalidArgumentError
 from ._render_utils import html_escape, render_dot_to_file, strip_known_extension
 from .themes import resolve_theme, theme_edge_attrs, theme_graph_attrs, theme_node_attrs
 
@@ -78,7 +79,12 @@ def bundle_diff(
     """
 
     if layout != "paired":
-        raise ValueError("bundle_diff layout must be 'paired'.")
+        raise InvalidArgumentError(
+            f"bundle_diff layout must be 'paired'; received {layout!r}",
+            code="bundle_diff_layout_invalid",
+            remedy="pass layout='paired'",
+            argument="layout",
+        )
 
     left_name, right_name = _resolve_side_names(bundle, left=left, right=right)
     baseline_ref = baseline if baseline is not None else left_name
@@ -139,11 +145,19 @@ def _resolve_side_names(
 
     names = bundle.names
     if len(names) < 2 and (left is None or right is None):
-        raise ValueError("bundle_diff requires at least two bundle members.")
+        raise InvalidArgumentError(
+            "bundle_diff requires at least two bundle members",
+            code="bundle_diff_members_invalid",
+            remedy="diff a bundle with at least two members, or name both sides",
+        )
     left_name = _resolve_member_name(bundle, left if left is not None else names[0])
     right_name = _resolve_member_name(bundle, right if right is not None else names[1])
     if left_name == right_name:
-        raise ValueError("bundle_diff requires distinct left and right members.")
+        raise InvalidArgumentError(
+            "bundle_diff requires distinct left and right members",
+            code="bundle_diff_members_invalid",
+            remedy="pass two different member names for left and right",
+        )
     return left_name, right_name
 
 
@@ -498,7 +512,12 @@ def _select_pairs(
     if max_pairs is None or len(pairs) <= max_pairs:
         return pairs
     if max_pairs < 1:
-        raise ValueError("max_pairs must be at least 1 or None.")
+        raise InvalidArgumentError(
+            f"max_pairs must be at least 1 or None; received {max_pairs!r}",
+            code="max_pairs_invalid",
+            remedy="pass max_pairs >= 1 or None",
+            argument="max_pairs",
+        )
     scored: list[tuple[float, int, tuple[Any, Any]]] = []
     for index, (left_layer, right_layer) in enumerate(pairs):
         left_label = str(getattr(left_layer, "layer_label", ""))

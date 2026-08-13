@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from .._errors import InvalidArgumentError, PayloadUnavailableError
 from ..ir.container import (
     ContainerSpec,
     DataclassField,
@@ -167,14 +168,27 @@ class Container:
         """
 
         if self.spec is None:
-            raise ValueError("Path-only container views cannot be reconstructed.")
+            raise PayloadUnavailableError(
+                "Path-only container views cannot be reconstructed",
+                code="container_not_reconstructable",
+                remedy="capture with capture_container_structure=True to persist the spec",
+            )
         if not self.supports_reconstruct:
-            raise ValueError("This container view is not reconstructable for the current backend.")
+            raise PayloadUnavailableError(
+                "This container view is not reconstructable for the current backend",
+                code="container_not_reconstructable",
+                remedy="use a backend that persists container structure for this view",
+            )
         leaves = []
         for op in self._leaf_ops():
             value = _value_for_op(op, values)
             if value is None:
-                raise ValueError(f"Container leaf {op.layer_label!r} has no saved {values} value.")
+                raise PayloadUnavailableError(
+                    f"Container leaf {op.layer_label!r} has no saved {values} value",
+                    code="container_leaf_not_saved",
+                    remedy="re-run the capture with save= covering the container leaves",
+                    label=op.layer_label,
+                )
             leaves.append(value)
         return rebuild_container_from_spec(self.spec, leaves)
 
@@ -212,11 +226,19 @@ class Container:
         trace = self._source_trace()
         if ordinal is None or trace is None:
             if site is not None or role is not None:
-                raise ValueError("Snapshot selectors require a registry-backed container view.")
+                raise InvalidArgumentError(
+                    "Snapshot selectors require a registry-backed container view",
+                    code="container_selector_requires_registry",
+                    remedy="call reconstruct() without site/role on this view",
+                )
             return self.reconstruct(values=values)
         record = getattr(trace, "_containers", {}).get(ordinal)
         if not isinstance(record, ContainerRecord):
-            raise ValueError("Snapshot selectors require a registry-backed container record.")
+            raise InvalidArgumentError(
+                "Snapshot selectors require a registry-backed container record",
+                code="container_selector_requires_registry",
+                remedy="call reconstruct() without site/role on this view",
+            )
         snapshot = record.snapshot_at(site=site, role=role)
         selected = _container_from_snapshot(trace, record, snapshot)
         return selected.reconstruct(values=values)
@@ -830,9 +852,10 @@ def reconstruct_output(trace: Any, values: Literal["out", "transformed"] = "out"
             return container.reconstruct(values=values)
     if len(output_labels) == 1:
         return trace.ops[output_labels[0]].out
-    raise ValueError(
-        "No reconstructable final-output container was captured. "
-        "Trace with capture_container_structure=True to persist container structure."
+    raise PayloadUnavailableError(
+        "No reconstructable final-output container was captured",
+        code="container_not_reconstructable",
+        remedy="trace with capture_container_structure=True to persist container structure",
     )
 
 
@@ -879,9 +902,11 @@ def reconstruct_container(
             selected.append((record, snapshot))
     if len(selected) != 1:
         detail = "matched no containers" if not selected else "matched multiple containers"
-        raise ValueError(
-            f"Container reconstruct selector {detail}; pass a more specific site=... "
-            "and role=... selector."
+        raise InvalidArgumentError(
+            f"Container reconstruct selector {detail}",
+            code="container_selector_unresolved",
+            remedy="pass a more specific site= and role= selector",
+            matched=len(selected),
         )
     record, snapshot = selected[0]
     return _container_from_snapshot(trace, record, snapshot).reconstruct(values=values)
@@ -1017,7 +1042,12 @@ def _value_for_op(op: "Op", source: str) -> Any:
         return getattr(op, "out", None)
     if source == "transformed":
         return getattr(op, "transformed_out", None)
-    raise ValueError(f"Unsupported container value source {source!r}.")
+    raise InvalidArgumentError(
+        f"Unsupported container value source {source!r}",
+        code="container_value_source_invalid",
+        remedy="pass values='out' or values='transformed'",
+        argument="values",
+    )
 
 
 def _element_keys(spec: ContainerSpec) -> tuple[Any, ...]:

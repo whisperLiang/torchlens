@@ -21,6 +21,7 @@ from .._io.paths import reject_symlink_path
 from .._io.tensor_policy import Ok, is_supported_for_save
 from .._io.tlspec import _TlSpecWriter
 from ..ir.container import DataclassField, DictKey, HFKey, NamedField, TupleIndex
+from .._errors import InvalidArgumentError
 from .errors import (
     DirectActivationWriteWarning,
     DirectWriteInExecutableSaveError,
@@ -364,9 +365,12 @@ def _validate_format_version(format_version: Any) -> None:
 
     if str(format_version) not in SUPPORTED_TLSPEC_FORMAT_VERSIONS:
         supported = ", ".join(sorted(SUPPORTED_TLSPEC_FORMAT_VERSIONS))
-        raise ValueError(
+        raise InvalidArgumentError(
             f"Unsupported intervention .tlspec format_version={format_version!r}; "
-            f"expected one of {supported}."
+            f"expected one of {supported}",
+            code="spec_format_version_unsupported",
+            remedy=f"use a supported intervention format version ({supported})",
+            format_version=str(format_version),
         )
 
 
@@ -1832,7 +1836,12 @@ def _write_tensor_sidecars(
     for tensor_id, tensor in tensor_refs.items():
         decision = is_supported_for_save(tensor, strict=True)
         if not isinstance(decision, Ok):
-            raise ValueError(f"Unsupported tensor for intervention save {tensor_id}: {decision}")
+            raise InvalidArgumentError(
+                f"Unsupported tensor for intervention save {tensor_id}: {decision}",
+                code="intervention_tensor_unsupported",
+                remedy="use dense, codec-supported tensors in the intervention spec",
+                tensor_id=str(tensor_id),
+            )
         tensor_entries.append(
             writer(
                 tmp_path=tmp_path,

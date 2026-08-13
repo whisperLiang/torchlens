@@ -6,6 +6,7 @@ import functools
 from collections import deque
 from contextvars import ContextVar
 
+from .._errors import InvalidArgumentError
 from ..utils._multipass_access import get_multipass_attr, is_multipass_layer
 from ._render_common import *
 
@@ -431,7 +432,13 @@ def _module_key_for_grad_fn(
         return _infer_intervening_module_upstream(trace, grad_fn_handle)
     if mode == "downstream":
         return _infer_intervening_module_downstream(trace, grad_fn_handle)
-    raise ValueError("intervening_cluster must be 'upstream', 'outside', 'downstream', or 'own'.")
+    raise InvalidArgumentError(
+        f"intervening_cluster must be 'upstream', 'outside', 'downstream', or 'own'; "
+        f"received {mode!r}",
+        code="intervening_cluster_invalid",
+        remedy="pass intervening_cluster='upstream', 'outside', 'downstream', or 'own'",
+        argument="intervening_cluster",
+    )
 
 
 def _forward_op_is_module_output(op: "Layer") -> bool:

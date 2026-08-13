@@ -214,6 +214,72 @@ class CaptureContextError(_ActionableErrorMixin, CaptureError, RuntimeError):
         )
 
 
+class RecordBindingError(_ActionableErrorMixin, CaptureError, RuntimeError):
+    """Raised when a record's owning Trace or live model is no longer reachable."""
+
+    def __init__(
+        self,
+        problem: str,
+        *,
+        code: str,
+        remedy: str,
+        **context: object,
+    ) -> None:
+        """Initialize an actionable record-binding refusal.
+
+        Parameters
+        ----------
+        problem:
+            Description of the detached record and the unavailable owner.
+        code:
+            Stable machine-readable refusal code.
+        remedy:
+            Concrete caller action that resolves the refusal.
+        **context:
+            Structured, non-authoritative diagnostic context.
+        """
+
+        super().__init__(
+            _actionable_message(problem, remedy),
+            code=code,
+            remedy=remedy,
+            **cast(dict[str, Any], context),
+        )
+
+
+class PayloadUnavailableError(_ActionableErrorMixin, CaptureError, ValueError):
+    """Raised when a requested saved payload was never retained or cannot be rebuilt."""
+
+    def __init__(
+        self,
+        problem: str,
+        *,
+        code: str,
+        remedy: str,
+        **context: object,
+    ) -> None:
+        """Initialize an actionable payload-availability refusal.
+
+        Parameters
+        ----------
+        problem:
+            Description of the missing payload and why it is unavailable.
+        code:
+            Stable machine-readable refusal code.
+        remedy:
+            Concrete caller action that resolves the refusal.
+        **context:
+            Structured, non-authoritative diagnostic context.
+        """
+
+        super().__init__(
+            _actionable_message(problem, remedy),
+            code=code,
+            remedy=remedy,
+            **cast(dict[str, Any], context),
+        )
+
+
 class TorchLensCaptureGapError(CaptureError, RuntimeError):
     """Reserved enforcement error for an unrepresented torch invocation."""
 

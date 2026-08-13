@@ -585,14 +585,17 @@ def test_skip_validation_entirely_entries_carry_justifications() -> None:
         )
 
 
-#: FINDING (r2 row 19, filed not silently fixed): ``SKIP_PERTURBATION_ENTIRELY``
-#: is the only registry that is a bare ``set`` -- its members carry no per-entry
-#: justification, only a shared block comment. Every other tier records a reason
-#: per row (``SKIP_VALIDATION_ENTIRELY`` maps name -> justification; the posthoc
-#: tier returns a reason code; ``STRUCTURAL_ARG_POSITIONS`` carries inline
-#: per-entry comments). The ledger below supplies the missing per-entry audit
-#: record WITHOUT touching the tripwire; converting the registry itself into a
-#: justification mapping is the proposed fix and is queued, not applied here.
+#: FINDING R19-F1 (r2 row 19; FIXED r3): ``SKIP_PERTURBATION_ENTIRELY`` was the
+#: only registry shaped as a bare ``set`` -- its members carried no per-entry
+#: justification, only a shared block comment, while every other tier records a
+#: reason per row (``SKIP_VALIDATION_ENTIRELY`` maps name -> justification; the
+#: posthoc tier returns a reason code; ``STRUCTURAL_ARG_POSITIONS`` carries
+#: inline per-entry comments). The r3 fix converted the registry itself into a
+#: justification mapping under contract clause C2 (perturbation sensitivity);
+#: membership semantics are unchanged. This ledger stays as the independent
+#: audit record: the test below pins the live mapping's keys AND values against
+#: it, so a registry edit without a matching audit-record edit still fails --
+#: the tripwire got stricter, never looser.
 SKIP_PERTURBATION_JUSTIFICATIONS: dict[str, str] = {
     "new_zeros": "output is all zeros by construction; no parent value reaches it",
     "new_ones": "output is all ones by construction; no parent value reaches it",
@@ -629,6 +632,10 @@ def test_skip_perturbation_registry_has_a_per_entry_audit_record() -> None:
         "SKIP_PERTURBATION_ENTIRELY changed without an audit record; only live: "
         f"{sorted(live - ledgered)}; only ledgered: {sorted(ledgered - live)}"
     )
+    # R19-F1 fix: the registry itself now carries the justification per entry.
+    # Pin the VALUES against this independent ledger too, so rewriting a
+    # justification in the tripwire without updating the audit record fails.
+    assert dict(ex.SKIP_PERTURBATION_ENTIRELY) == SKIP_PERTURBATION_JUSTIFICATIONS
     for func_name, justification in SKIP_PERTURBATION_JUSTIFICATIONS.items():
         assert len(justification.strip()) >= 30, f"{func_name} needs a real justification"
 

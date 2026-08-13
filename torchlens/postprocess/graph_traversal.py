@@ -817,7 +817,7 @@ def _flood_graph_from_input_or_output_nodes(self: "Trace", mode: str) -> None:
         forward_field = "parents"
         traversal_order = reversed(self._raw_graph_ws.raw_layer_labels_list)
     else:
-        raise ValueError("Mode but be either 'input' or 'output'")
+        raise ValueError("Mode must be either 'input' or 'output'")
 
     for starting_node_label in starting_nodes:
         starting_node = self[starting_node_label]

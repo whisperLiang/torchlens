@@ -16,6 +16,7 @@ from typing import (
     cast,
 )
 
+from ..._errors import InvalidArgumentError
 from ...utils.display import format_flops, human_readable_size
 from ..._source_links import terminal_file_line_link
 
@@ -828,11 +829,20 @@ def _resolve_level(*, level: SummaryLevel, preset: SummaryLevel | None) -> str:
         If conflicting selectors are provided.
     """
     if preset is not None and preset != level:
-        raise ValueError("Pass either `level` or `preset`, not both with different values.")
+        raise InvalidArgumentError(
+            "Pass either `level` or `preset`, not both with different values",
+            code="summary_option_conflict",
+            remedy="pass level= or preset=, or give both the same value",
+        )
     selected_name: str = preset or level
     selected_name = _LEVEL_ALIASES.get(selected_name, selected_name)
     if selected_name not in _LEVEL_DEFAULT_FIELDS:
-        raise ValueError(f"Unsupported summary level: {selected_name!r}.")
+        raise InvalidArgumentError(
+            f"Unsupported summary level: {selected_name!r}",
+            code="summary_level_invalid",
+            remedy="pass a documented summary level",
+            argument="level",
+        )
     return selected_name
 
 
@@ -860,7 +870,11 @@ def _resolve_show_ops(*, show_ops: bool, include_ops: Optional[bool]) -> bool:
     # This implementation treats them as strict aliases and rejects conflicting
     # values rather than silently guessing precedence.
     if include_ops is not None and include_ops != show_ops:
-        raise ValueError("Pass either `show_ops` or `include_ops`, not both with different values.")
+        raise InvalidArgumentError(
+            "Pass either `show_ops` or `include_ops`, not both with different values",
+            code="summary_option_conflict",
+            remedy="pass show_ops= or include_ops=, or give both the same value",
+        )
     return include_ops if include_ops is not None else show_ops
 
 
@@ -892,13 +906,22 @@ def _resolve_fields(
         If conflicting values are provided.
     """
     if fields is not None and columns is not None and fields != columns:
-        raise ValueError("Pass either `fields` or `columns`, not both with different values.")
+        raise InvalidArgumentError(
+            "Pass either `fields` or `columns`, not both with different values",
+            code="summary_option_conflict",
+            remedy="pass fields= or columns=, or give both the same value",
+        )
     selected = columns if columns is not None else fields
     if selected is None:
         return list(_LEVEL_DEFAULT_FIELDS[level])
     unknown = [field for field in selected if field not in _COLUMN_LABELS]
     if unknown:
-        raise ValueError(f"Unsupported summary fields: {unknown}.")
+        raise InvalidArgumentError(
+            f"Unsupported summary fields: {unknown}",
+            code="summary_fields_invalid",
+            remedy="pass documented summary field names",
+            fields=unknown,
+        )
     return list(selected)
 
 

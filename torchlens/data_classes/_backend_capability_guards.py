@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .._errors import InvalidArgumentError
 from ..backends.registry import BackendRegistryError, get_backend_spec
 
 
@@ -51,22 +52,32 @@ def raise_if_no_backward_capture(trace: Any, *, plural_subject: str) -> None:
     try:
         capabilities = get_backend_spec(backend).capabilities
     except BackendRegistryError as exc:
-        raise ValueError(
+        raise InvalidArgumentError(
             f"trace.backend={backend!r} is not a registered backend, so "
             f"{plural_subject} availability cannot be capability-checked; "
-            "refusing instead of returning silently-empty results."
+            "refusing instead of returning silently-empty results",
+            code="unknown_backend",
+            remedy="use a trace whose backend is registered in this session",
+            backend=backend,
         ) from exc
     if capabilities.backward_capture:
         return
     if capabilities.intermediate_derived_grads:
-        raise ValueError(
+        raise InvalidArgumentError(
             f"{backend} traces do not expose {plural_subject} because they do not "
-            "capture true backward graphs. Use trace.derived_grads for leaf-level "
-            "derived gradients and op.derived_grad for exact op-level derived "
-            "gradients when available."
+            "capture true backward graphs",
+            code="backend_unsupported",
+            remedy=(
+                "use trace.derived_grads for leaf-level derived gradients and "
+                "op.derived_grad for exact op-level derived gradients"
+            ),
+            backend=backend,
         )
-    raise ValueError(
+    raise InvalidArgumentError(
         f"{backend} traces do not expose {plural_subject} because they do not "
         f"capture true backward graphs, and the {backend} preview declares no "
-        "derived-gradient surface. Use the PyTorch backend for backward capture."
+        "derived-gradient surface",
+        code="backend_unsupported",
+        remedy="use the PyTorch backend for backward capture",
+        backend=backend,
     )

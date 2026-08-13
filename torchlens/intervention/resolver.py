@@ -11,6 +11,7 @@ import warnings
 
 import torch
 
+from .._errors import InvalidArgumentError
 from .errors import (
     MultiMatchWarning,
     ReplayPreconditionError,
@@ -648,7 +649,12 @@ def resolve_import_ref(
 
     module_name, separator, qualname = import_path.partition(":")
     if not separator or not module_name or not qualname:
-        raise ValueError(f"Invalid import path {import_path!r}")
+        raise InvalidArgumentError(
+            f"Invalid import path {import_path!r}",
+            code="import_path_invalid",
+            remedy="use the 'module:qualname' import reference form",
+            import_path=import_path,
+        )
     key = _import_ref_registry_key(module_name, qualname)
     return resolve_function_registry_key(
         key,

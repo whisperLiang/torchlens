@@ -15,6 +15,7 @@ from typing import Any, Literal, TypeAlias, cast
 import graphviz
 from torch import nn
 
+from .._errors import ArgumentTypeError, InvalidArgumentError, RecordBindingError
 from .._source_links import file_line_text
 
 CodePanelMode: TypeAlias = Literal["forward", "class", "init+forward"]
@@ -196,14 +197,21 @@ def resolve_code_panel_source(
     if callable(code_panel):
         model = model_ref() if model_ref is not None else None
         if model is None:
-            raise RuntimeError(
+            raise RecordBindingError(
                 "Callable code_panel options require the original model object to "
-                "still be alive. Use a built-in code_panel mode for saved Trace "
-                "rendering."
+                "still be alive",
+                code="code_panel_model_collected",
+                remedy="use a built-in code_panel mode for saved Trace rendering",
             )
         source_text = code_panel(model)
         if not isinstance(source_text, str):
-            raise TypeError("Callable code_panel options must return a string.")
+            raise ArgumentTypeError(
+                f"Callable code_panel options must return a string; "
+                f"returned {type(source_text).__name__}",
+                code="code_panel_option_invalid",
+                remedy="return the panel text as a string from the code_panel callable",
+                argument="code_panel",
+            )
         return source_text
     mode: CodePanelMode
     if code_panel is True:
@@ -211,8 +219,12 @@ def resolve_code_panel_source(
     elif code_panel in {"forward", "class", "init+forward"}:
         mode = code_panel
     else:
-        raise ValueError(
-            "code_panel must be False, True, 'forward', 'class', 'init+forward', or a callable."
+        raise InvalidArgumentError(
+            "code_panel must be False, True, 'forward', 'class', 'init+forward', or a "
+            f"callable; received {code_panel!r}",
+            code="code_panel_option_invalid",
+            remedy="pass a documented code_panel mode or a callable",
+            argument="code_panel",
         )
     captured_source = source_code_blob.get(mode) if source_code_blob else None
     if captured_source is None:
@@ -244,7 +256,12 @@ def render_code_panel_subgraph(
     """
 
     if side not in {"right", "left"}:
-        raise ValueError("side must be either 'right' or 'left'.")
+        raise InvalidArgumentError(
+            f"side must be either 'right' or 'left'; received {side!r}",
+            code="code_panel_side_invalid",
+            remedy="pass side='right' or 'left'",
+            argument="side",
+        )
 
     label = _code_panel_label(source_text)
     # Pure Graphviz keeps graph and code in one output file. The invisible edge
@@ -438,7 +455,12 @@ def compose_graph_with_code_panel(
     """
 
     if side not in {"right", "left"}:
-        raise ValueError("side must be either 'right' or 'left'.")
+        raise InvalidArgumentError(
+            f"side must be either 'right' or 'left'; received {side!r}",
+            code="code_panel_side_invalid",
+            remedy="pass side='right' or 'left'",
+            argument="side",
+        )
     code_svg = render_code_panel_svg(source_text)
     if side == "right":
         return compose_svgs_horizontally(graph_svg, code_svg)
