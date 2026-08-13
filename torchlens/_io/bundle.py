@@ -1053,7 +1053,10 @@ def load(
         merged_manifest_path = bundle_path / "manifest.json"
         if merged_manifest_path.is_file() and not merged_manifest_path.is_symlink():
             try:
-                candidate = _json.loads_bounded(merged_manifest_path.read_text(encoding="utf-8"))
+                # ``read_text`` allocated the entire attacker-sized file BEFORE the
+                # ceiling could refuse it; the bounded path reader reads at most
+                # ``max_bytes + 1``, so discovery cannot be an allocation DoS.
+                candidate = _json.read_bounded(merged_manifest_path)
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                 candidate = None
             if isinstance(candidate, dict) and candidate.get("bundle_format") == "merged-directory":

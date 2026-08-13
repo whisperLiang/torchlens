@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import IO, Any
 
 # Manifests for large models carry many tensor entries but are shallow (nesting is
@@ -165,3 +166,78 @@ def load_bounded(
 
     text = handle.read(max_bytes + 1)
     return loads_bounded(text, max_depth=max_depth, max_bytes=max_bytes)
+
+
+def read_bounded(
+    path: Path,
+    *,
+    encoding: str = "utf-8",
+    max_depth: int = _MAX_JSON_DEPTH,
+    max_bytes: int = _MAX_JSON_BYTES,
+) -> Any:
+    """Read and parse a JSON file without ever allocating the whole file first.
+
+    ``Path.read_text()`` materializes the ENTIRE attacker-controlled file before
+    any ceiling can be applied, so a multi-GiB ``manifest.json`` is an allocation
+    DoS even though :func:`loads_bounded` would have refused it a microsecond
+    later. This helper opens the file and reads at most ``max_bytes + 1`` bytes, so
+    the ceiling is enforced BEFORE the allocation.
+
+    Parameters
+    ----------
+    path:
+        JSON file to read.
+    encoding:
+        Text encoding of the file.
+    max_depth:
+        Maximum permitted bracket nesting depth.
+    max_bytes:
+        Maximum permitted payload size.
+
+    Returns
+    -------
+    Any
+        The decoded JSON value.
+
+    Raises
+    ------
+    json.JSONDecodeError
+        On an over-size or over-nested payload, so the existing JSON-boundary
+        handlers at each call site catch it unchanged.
+    """
+
+    with path.open("r", encoding=encoding) as handle:
+        return load_bounded(handle, max_depth=max_depth, max_bytes=max_bytes)
+
+
+def read_bytes_bounded(path: Path, *, max_bytes: int = _MAX_JSON_BYTES) -> bytes:
+    """Read a JSON file's RAW bytes under the same ceiling as :func:`read_bounded`.
+
+    For the boundaries that must hash the exact on-disk bytes (the merged-artifact
+    descriptor checksum) before parsing them. ``Path.read_bytes()`` would allocate
+    the whole attacker-sized file first; this reads at most ``max_bytes + 1`` and
+    refuses over-size payloads through the same ``JSONDecodeError`` channel.
+
+    Parameters
+    ----------
+    path:
+        JSON file to read.
+    max_bytes:
+        Maximum permitted payload size.
+
+    Returns
+    -------
+    bytes
+        The file's raw bytes.
+
+    Raises
+    ------
+    json.JSONDecodeError
+        When the payload exceeds ``max_bytes``.
+    """
+
+    with path.open("rb") as handle:
+        data = handle.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise _refuse(f"manifest JSON exceeds the maximum size of {max_bytes} bytes", "")
+    return data

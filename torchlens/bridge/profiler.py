@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+from .._io import _json
+
 
 def execution_trace(log: Any, trace_path: str | Path) -> dict[str, Any]:
     """Export a lightweight TorchLens execution-trace JSON file.
@@ -104,7 +106,12 @@ def _load_trace(kineto_trace: str | Path | dict[str, Any]) -> dict[str, Any]:
     if isinstance(kineto_trace, dict):
         return kineto_trace
     path = Path(kineto_trace)
-    return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
+    # A Kineto trace file is external, potentially attacker-supplied input on the
+    # same footing as a ``.tlspec`` manifest, so it routes through the ONE bounded
+    # reader: ``read_text`` allocated the whole file before any ceiling applied, and
+    # stdlib ``json.loads`` answered a deeply nested payload with an untyped
+    # ``RecursionError`` rather than a typed refusal.
+    return cast(dict[str, Any], _json.read_bounded(path))
 
 
 def _trace_events(trace: dict[str, Any]) -> list[dict[str, Any]]:

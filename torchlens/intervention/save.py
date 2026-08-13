@@ -17,6 +17,7 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from .._errors import InvalidArgumentError
+from .._io._json import read_bounded
 from .._io.manifest import TensorEntry, sha256_of_file
 from .._io.paths import reject_symlink_path
 from .._io.tensor_policy import Ok, is_supported_for_save
@@ -2149,7 +2150,15 @@ def _write_text_file(path: Path, text: str) -> None:
 
 
 def _read_json_file(path: Path) -> dict[str, Any]:
-    """Read JSON object data.
+    """Read JSON object data from an UNTRUSTED intervention-spec directory.
+
+    A loaded spec directory is attacker-controlled input on the same footing as a
+    ``.tlspec`` bundle, so this routes through the ONE bounded reader
+    (:mod:`torchlens._io._json`: byte ceiling + non-recursive depth prescan) rather
+    than stdlib ``json.load``. Stdlib ``json`` answered a 10,000-deep nested array
+    with an untyped ``RecursionError`` escaping ``load_intervention_spec``; the
+    bounded reader refuses at the depth boundary and is re-raised here as the
+    already-documented typed ``ReplayPreconditionError``.
 
     Parameters
     ----------
@@ -2160,10 +2169,17 @@ def _read_json_file(path: Path) -> dict[str, Any]:
     -------
     dict[str, Any]
         Decoded JSON object.
+
+    Raises
+    ------
+    ReplayPreconditionError
+        When the payload is over-size, over-nested, malformed, or not an object.
     """
 
-    with path.open(encoding="utf-8") as handle:
-        data = json.load(handle)
+    try:
+        data = read_bounded(path)
+    except json.JSONDecodeError as exc:
+        raise ReplayPreconditionError(f"{path} is not parsable JSON ({exc})") from exc
     if not isinstance(data, dict):
         raise ReplayPreconditionError(f"{path} must contain a JSON object")
     return data

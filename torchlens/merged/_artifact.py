@@ -246,7 +246,9 @@ def load_merged(path: str | Path) -> MergedTrace:
     if not manifest_path.is_file():
         raise _schema_refusal(f"{root} has no manifest.json")
     try:
-        manifest = _json.loads_bounded(manifest_path.read_text(encoding="utf-8"))
+        # Bounded PATH read: ``read_text`` allocated the whole attacker-sized file
+        # before the ceiling applied, so the byte limit was advisory only here.
+        manifest = _json.read_bounded(manifest_path)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise _schema_refusal(f"root manifest does not parse ({exc})") from exc
     if not isinstance(manifest, dict):
@@ -264,7 +266,12 @@ def load_merged(path: str | Path) -> MergedTrace:
     descriptor_path = root / "merge" / "descriptor.json"
     if not descriptor_path.is_file():
         raise _tamper("merge/descriptor.json is missing")
-    descriptor_bytes = descriptor_path.read_bytes()
+    # The descriptor's EXACT on-disk bytes are the checksum subject, so they must be
+    # read raw -- but under the same ceiling, not via an unbounded ``read_bytes``.
+    try:
+        descriptor_bytes = _json.read_bytes_bounded(descriptor_path)
+    except json.JSONDecodeError as exc:
+        raise _schema_refusal(f"descriptor does not parse ({exc})") from exc
     recorded_sha = manifest.get("descriptor_sha256")
     if hashlib.sha256(descriptor_bytes).hexdigest() != recorded_sha:
         raise _tamper("descriptor bytes do not match the root-manifest checksum")

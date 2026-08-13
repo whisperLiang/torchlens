@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .._io import _json
 from ..intervention.resolver import resolve_sites
 from ..intervention.save import check_spec_compat
 from ..user_funcs import (
@@ -72,9 +73,12 @@ def validate_tlspec(
 
     manifest_path = tlspec_path / "manifest.json"
     if manifest_path.exists():
+        # Same untrusted artifact as ``tl.load(path)``, different door: route the
+        # manifest read through the ONE bounded reader (byte ceiling + depth
+        # prescan) so a hostile depth-900 manifest refuses typed here too instead
+        # of escaping as an uncaught RecursionError from stdlib ``json.load``.
         try:
-            with manifest_path.open("r", encoding="utf-8") as handle:
-                manifest_value = json.load(handle)
+            manifest_value = _json.read_bounded(manifest_path)
         except json.JSONDecodeError as exc:
             raise ValueError(f"Failed to parse .tlspec manifest JSON at {manifest_path}.") from exc
         if not isinstance(manifest_value, dict):
@@ -159,8 +163,9 @@ def _load_tlspec_manifest_schema(schema_version: int) -> dict[str, Any]:
     schema_path = (
         Path(__file__).resolve().parents[1] / "schemas" / f"tlspec_manifest_v{schema_version}.json"
     )
-    with schema_path.open("r", encoding="utf-8") as handle:
-        schema = json.load(handle)
+    # First-party shipped data, not an attacker boundary -- but routed through the
+    # same bounded reader so the package-wide gate needs no exemption here.
+    schema = _json.read_bounded(schema_path)
     if not isinstance(schema, dict):
         raise ValueError(f"TorchLens schema at {schema_path} is not a JSON object.")
     return schema
