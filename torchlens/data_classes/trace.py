@@ -30,6 +30,7 @@ import copy
 import difflib
 import inspect
 import json
+import pickle
 import weakref
 from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Iterator, Mapping
@@ -2686,6 +2687,30 @@ class Trace(
         )
         state["tlspec_version"] = TLSPEC_VERSION
         return state
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "Trace":
+        """Return a detached deep copy using the supported pickle semantics.
+
+        Parameters
+        ----------
+        memo:
+            Standard deepcopy memo populated with the cloned trace.
+
+        Returns
+        -------
+        Trace
+            Detached trace copy whose tensor payloads no longer carry autograd history.
+        """
+
+        existing = memo.get(id(self))
+        if existing is not None:
+            return cast("Trace", existing)
+        cloned = cast(
+            "Trace",
+            pickle.loads(pickle.dumps(self, protocol=pickle.HIGHEST_PROTOCOL)),
+        )
+        memo[id(self)] = cloned
+        return cloned
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore pickle state and rebuild weakref-backed links."""

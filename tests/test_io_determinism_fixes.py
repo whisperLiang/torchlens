@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import pickle
 from pathlib import Path
@@ -183,3 +184,13 @@ def test_pickle_preserves_module_and_buffer_hierarchy() -> None:
         buffer.address for buffer in trace.buffers
     ]
     assert restored.modules["linear"]._source_trace is restored
+
+
+def test_deepcopy_uses_supported_detached_pickle_semantics() -> None:
+    """Deepcopy succeeds for grad-connected activations and detaches the clone."""
+
+    trace = tl.trace(_LinearModel(), torch.ones(1, 2, requires_grad=True))
+    cloned = copy.deepcopy(trace)
+
+    assert torch.equal(cloned.output_ops[0].out, trace.output_ops[0].out)
+    assert cloned.output_ops[0].out.grad_fn is None
