@@ -9,16 +9,16 @@ by partial saves. The bundle format is intentionally a plain directory with
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Mapping
-from dataclasses import dataclass
 import json
-import platform
 import pickle
+import platform
 import shutil
 import subprocess
 import sys
 import uuid
 import warnings
+from collections.abc import Collection, Iterable, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
@@ -27,6 +27,11 @@ import torch
 from safetensors import SafetensorError
 from safetensors.torch import load_file, save_file
 
+from .. import __version__ as TORCHLENS_VERSION
+from .._errors import InvalidArgumentError
+from ..backends import BackendPayloadUnsupportedError, BackendSpec, get_backend_spec
+from ..data_classes._state_adapter import state_items
+from ..data_classes.trace import Trace
 from . import (
     MIN_TLSPEC_VERSION,
     MIN_TORCHLENS_VERSION_TEXT,
@@ -36,30 +41,28 @@ from . import (
     FieldPolicy,
     PayloadLoadHints,
     TorchLensIOError,
+    _json,
 )
-from . import _json
 from ._safe_unpickle import SafeBundleUnpickler
 from .lazy import LazyActivationRef
 from .manifest import Manifest, Provenance, TensorEntry, enforce_version_policy, sha256_of_file
+from .paths import (
+    reject_symlink_path as _reject_symlink_path,
+)
+from .paths import (
+    resolve_bundle_blob_path,
+    resolve_bundle_blobs_dir,
+)
 from .payload_codec import (
     PayloadCodec,
     get_payload_codec,
     numpy_to_transport_tensor,
-)
-from .paths import (
-    reject_symlink_path as _reject_symlink_path,
-    resolve_bundle_blob_path,
-    resolve_bundle_blobs_dir,
 )
 from .rehydrate import rehydrate_trace
 from .scrub import BlobSpec, scrub_for_save
 from .state_keys import invalidate_static_class_attr_cache
 from .tensor_policy import FailReason, Ok
 from .tlspec import _TlSpecWriter, coerce_tlspec_save_level
-from .. import __version__ as TORCHLENS_VERSION
-from ..backends import BackendPayloadUnsupportedError, BackendSpec, get_backend_spec
-from ..data_classes._state_adapter import state_items
-from ..data_classes.trace import Trace
 
 if TYPE_CHECKING:
     from ..bundle import Bundle
@@ -315,9 +318,19 @@ def save(
     nonpersistent_buffer_blob_specs: list[BlobSpec] = []
     activation_blob_specs: list[BlobSpec] = []
     if include_weights and save_level != "runnable":
-        raise ValueError("include_weights=True requires level='runnable'.")
+        raise InvalidArgumentError(
+            f"include_weights=True cannot be used with save level {save_level!r}",
+            code="save_payload_level_conflict",
+            remedy="set level='runnable' or set include_weights=False",
+            arguments=("include_weights", "level"),
+        )
     if include_activations and save_level != "runnable":
-        raise ValueError("include_activations=True requires level='runnable'.")
+        raise InvalidArgumentError(
+            f"include_activations=True cannot be used with save level {save_level!r}",
+            code="save_payload_level_conflict",
+            remedy="set level='runnable' or set include_activations=False",
+            arguments=("include_activations", "level"),
+        )
     if save_level == "runnable":
         from .runnable import (
             require_sparse_run_descriptor,
@@ -728,8 +741,8 @@ def _capture_activation_blob_specs(
         If a selected payload is unavailable or is not a dense torch tensor.
     """
 
-    from .._runnable_state import runnable_tensor_byte_digest
     from .._runnable_execution import build_input_attestation_fingerprint
+    from .._runnable_state import runnable_tensor_byte_digest
     from ..runnable import ActivationPayloadMember, SlotByteDigest, StateByteDigest
 
     slot_ids = {slot.slot_id for slot in descriptor.tensor_slots}

@@ -30,8 +30,12 @@ def _validate_severity(severity: Severity | str) -> Severity:
     """
 
     if severity not in _VALID_SEVERITIES:
-        raise ValueError(
-            f"severity must be one of 'recoverable', 'informational', or 'fatal'; got {severity!r}"
+        raise DiagnosticSeverityError(
+            f"severity={severity!r} is not a supported TorchLens diagnostic severity. "
+            "Remedy: set severity to 'recoverable', 'informational', or 'fatal'.",
+            code="diagnostic_severity_invalid",
+            remedy="set severity to 'recoverable', 'informational', or 'fatal'",
+            argument="severity",
         )
     return severity  # type: ignore[return-value]
 
@@ -117,6 +121,10 @@ class ConfigurationError(TorchLensError):
     """Base for invalid options, selectors, and user-supplied configuration."""
 
 
+class DiagnosticSeverityError(ConfigurationError, ValueError):
+    """Raised when a diagnostic severity value is outside the closed vocabulary."""
+
+
 class CompatibilityError(TorchLensError):
     """Base for model, storage, dtype/device, and downstream compatibility failures."""
 
@@ -186,6 +194,7 @@ __all__ = [
     "CaptureError",
     "CompatibilityError",
     "ConfigurationError",
+    "DiagnosticSeverityError",
     "InterventionError",
     "Severity",
     "ScalarEscapeWarning",

@@ -25,22 +25,73 @@ import re
 import tempfile
 import time
 import warnings
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable, Iterable, Literal, Sequence, cast
+from typing import Any, Literal, cast
 
 import torch
 from torch import nn
 
+from . import _state
+from ._capture_state_helpers import (
+    _capture_cache_dir,
+    _capture_cache_key,
+    _capture_output_metadata_from_model_config,
+    _facet_recipe_cache_key,
+    _fingerprint_model_weights,
+    _hash_input_signatures,
+    _input_id_for_relationship_evidence,
+    _move_tensors_to_device,
+    _prepare_log_for_capture_cache,
+    _qualname_for_model,
+    _reject_opaque_wrappers,
+    _unwrap_data_parallel,
+    unwrap_compiled_model,
+)
+from ._capture_state_helpers import (
+    _clone_state_dict_with_metadata as _clone_state_dict_with_metadata,
+)
+from ._capture_state_helpers import (
+    decide_recording_of_batch as decide_recording_of_batch,
+)
+from ._chunked_capture_helpers import (
+    _append_chunk_trace_state,
+    _should_store_auto_coerced_raw_input,
+    _validate_chunked_forward_capture,
+)
+from ._chunking import iter_chunked_inputs, normalize_chunk_paths, normalize_chunk_size, plan_chunks
 from ._deprecations import MISSING, MissingType, warn_deprecated_alias
-from ._errors import TorchLensPostfuncError
-from .fastlog.exceptions import PredicateError
+from ._errors import (
+    ArgumentConflictError,
+    ArgumentTypeError,
+    CaptureContextError,
+    InvalidArgumentError,
+    TorchLensPostfuncError,
+)
 from ._input_coerce import _coerce_input_args
 from ._io import TorchLensIOError
 from ._io.streaming import BundleStreamWriter
 from ._literals import (
     OutputDeviceLiteral,
 )
+from ._robustness import check_model_and_input_variants
+from ._save_budget import SaveBudgetExceededError, SaveBudgetOption
+from ._trace_selector_helpers import (
+    _TRACE_OPTION_FILTERED_NAMES,
+    _combine_save_predicates,
+    _is_selective_label_save,
+    _layers_to_save_has_negative_index,
+    _layers_to_save_live_subset,
+    _layers_to_save_mentions_identity,
+    _layers_to_save_mentions_output,
+    _make_layers_to_save_predicate,
+    _predicate_cache_key,
+    _split_save_options_and_predicate,
+)
+from ._trace_state import TraceState
+from ._training_validation import TrainingModeConfigError, validate_training_compatibility
+from .autoroute._builtin_output import semantic_output_cache_key
 from .backends import (
     BackendName,
     BackendSpec,
@@ -57,81 +108,40 @@ from .backends._options import (
 from .backends._selective_save import apply_static_label_save_policy, reject_selector_outside_kinds
 from .backends.torch._tl import get_tensor_label
 from .bridge import hf as _hf_bridge
-from .ir import ParentEdge
-from .ir.op_record import amend_graph_edge_insertion
-from ._training_validation import TrainingModeConfigError, validate_training_compatibility
-from .utils._torch_compat import is_dynamo_compiled_callable
-from . import _state
-from .types import ActivationPostfunc, GradientPostfunc
+from .capture.stop import StopDirective
 from .data_classes.trace import (
     Trace,
 )
-from .autoroute._builtin_output import semantic_output_cache_key
+from .fastlog.exceptions import PredicateError
+from .fastlog.options import HaltPredicateFn, PredicateFn, RecordingOptions
+from .fastlog.types import CaptureSpec
+from .intervention.errors import ChunkedForwardConfigError
+from .intervention.hooks import normalize_hook_plan
+from .intervention.predicates import InterventionPredicate
+from .intervention.resolver import _selector_resolution_direction, resolve_sites
+from .intervention.selectors import BaseSelector
+from .intervention.types import InterventionDecision, InterventionSpec, TargetSpec
+from .ir import ParentEdge
+from .ir.op_record import amend_graph_edge_insertion
+from .ir.selector_eval import selector_contains_kind
 from .options import (
     CaptureOptions,
+    ReplayOptions,
     SaveOptions,
     StreamingOptions,
     VisualizationOptions,
     merge_capture_options,
-    ReplayOptions,
     merge_save_options,
     merge_streaming_options,
 )
-from ._robustness import check_model_and_input_variants
-from ._save_budget import SaveBudgetExceededError, SaveBudgetOption
+from .types import ActivationPostfunc, GradientPostfunc
+from .utils._torch_compat import is_dynamo_compiled_callable
 from .utils.display import _vprint, warn_parallel
 from .utils.introspection import _get_code_context
 from .utils.tensor_utils import SaveMode
 from .visualization.code_panel import (
     capture_model_source_code,
     make_weak_model_ref,
-)
-from .intervention.errors import ChunkedForwardConfigError
-from .intervention.predicates import InterventionPredicate
-from .intervention.types import InterventionDecision, InterventionSpec, TargetSpec
-from .intervention.hooks import normalize_hook_plan
-from .intervention.selectors import BaseSelector
-from .ir.selector_eval import selector_contains_kind
-from .intervention.resolver import _selector_resolution_direction
-from .intervention.resolver import resolve_sites
-from ._chunking import iter_chunked_inputs, normalize_chunk_paths, normalize_chunk_size, plan_chunks
-from .fastlog.options import HaltPredicateFn, PredicateFn, RecordingOptions
-from .fastlog.types import CaptureSpec
-from .capture.stop import StopDirective
-from ._trace_state import TraceState
-from ._capture_state_helpers import (
-    _capture_cache_dir,
-    _capture_cache_key,
-    _capture_output_metadata_from_model_config,
-    _clone_state_dict_with_metadata as _clone_state_dict_with_metadata,  # noqa: F401
-    decide_recording_of_batch as decide_recording_of_batch,  # noqa: F401
-    _facet_recipe_cache_key,
-    _fingerprint_model_weights,
-    _hash_input_signatures,
-    _input_id_for_relationship_evidence,
-    _move_tensors_to_device,
-    _prepare_log_for_capture_cache,
-    _qualname_for_model,
-    _reject_opaque_wrappers,
-    _unwrap_data_parallel,
-    unwrap_compiled_model,
-)
-from ._chunked_capture_helpers import (
-    _append_chunk_trace_state,
-    _should_store_auto_coerced_raw_input,
-    _validate_chunked_forward_capture,
-)
-from ._trace_selector_helpers import (
-    _combine_save_predicates,
-    _is_selective_label_save,
-    _layers_to_save_has_negative_index,
-    _layers_to_save_live_subset,
-    _layers_to_save_mentions_identity,
-    _layers_to_save_mentions_output,
-    _make_layers_to_save_predicate,
-    _predicate_cache_key,
-    _split_save_options_and_predicate,
-    _TRACE_OPTION_FILTERED_NAMES,
 )
 
 _can_resolve_hf_processor = _hf_bridge._can_resolve_hf_processor
@@ -294,7 +304,12 @@ def _trace_mlx_model(
             "Omit hooks or use the PyTorch backend."
         )
     if visualization is not None and visualization.mode not in ["none", "rolled", "unrolled"]:
-        raise ValueError("Visualization option must be either 'none', 'rolled', or 'unrolled'.")
+        raise InvalidArgumentError(
+            f"MLX visualization mode={visualization.mode!r} is not supported",
+            code="visualization_mode_invalid",
+            remedy="set visualization.mode to 'none', 'rolled', or 'unrolled'",
+            argument="visualization.mode",
+        )
     if capture_options.save_grads:
         raise BackendUnsupportedError("backward capture is not supported on the mlx backend")
     raw_input = None
@@ -488,10 +503,7 @@ def _backward_intervention_spec_from_predicate(
     decision = getattr(intervene_predicate, "decision", None)
     if selector is None or not isinstance(decision, InterventionDecision):
         return None
-    try:
-        selector_direction = _selector_resolution_direction(selector)
-    except Exception:
-        return None
+    selector_direction = _selector_resolution_direction(selector)
     if selector_direction == "backward" and decision.direction not in {"backward", "both"}:
         warnings.warn(
             "Forward intervention helper attached to a backward-only selector will not fire. "
@@ -699,7 +711,12 @@ def record_kpi_in_graph(name: str, value: Any) -> None:
 
     trace = _state._active_trace
     if trace is None:
-        raise RuntimeError("record_kpi_in_graph() must be called during trace.")
+        raise CaptureContextError(
+            "record_kpi_in_graph() was called without an active trace",
+            code="capture_context_required",
+            remedy="call record_kpi_in_graph() from model.forward() while tl.trace() is running",
+            operation="record_kpi_in_graph",
+        )
     trace.annotations[str(name)] = value
 
 
@@ -723,11 +740,23 @@ def register_tensor_connection(parent: torch.Tensor, child: torch.Tensor) -> Non
 
     trace = _state._active_trace
     if trace is None:
-        raise RuntimeError("register_tensor_connection() must be called during trace.")
+        raise CaptureContextError(
+            "register_tensor_connection() was called without an active trace",
+            code="capture_context_required",
+            remedy=(
+                "call register_tensor_connection() from model.forward() while tl.trace() is running"
+            ),
+            operation="register_tensor_connection",
+        )
     parent_label = get_tensor_label(parent)
     child_label = get_tensor_label(child)
     if parent_label is None or child_label is None:
-        raise ValueError("Both tensors must have TorchLens labels before registering an edge.")
+        raise InvalidArgumentError(
+            "register_tensor_connection() received a tensor without a TorchLens capture label",
+            code="tensor_connection_labels_missing",
+            remedy="pass tensors produced by already-captured operations in the active trace",
+            argument="parent/child",
+        )
     trace.manual_tensor_connections.append((parent_label, child_label))
     _register_live_tensor_connection(trace, parent_label, child_label)
 
@@ -1521,9 +1550,7 @@ def _enforce_capability_option_gates(
     for option_name, flag in TRACE_OPTION_CAPABILITY_GATES.items():
         if getattr(resolved_spec.capabilities, flag):
             continue
-        requested = _capability_option_requested(
-            public_trace_kwargs.get(option_name, MISSING)
-        )
+        requested = _capability_option_requested(public_trace_kwargs.get(option_name, MISSING))
         if (
             not requested
             and isinstance(capture_value, CaptureOptions)
@@ -1857,16 +1884,21 @@ def trace(
         A ``Trace`` containing layer outs (if requested) and full metadata.
     """
     if not isinstance(model, nn.Module) and is_dynamo_compiled_callable(model):
-        raise ValueError(
-            "TorchLens cannot capture this torch.compile-produced callable; applying "
-            "torch.compile more than once can return a plain function. Pass the original "
-            "eager nn.Module instead."
+        raise InvalidArgumentError(
+            "TorchLens cannot capture a torch.compile-produced plain callable because it is "
+            "not an nn.Module",
+            code="compiled_callable_unsupported",
+            remedy="pass the original eager nn.Module instead of the compiled callable",
+            argument="model",
         )
     if capture_output_structure is not MISSING:
         if capture_container_structure is not MISSING:
-            raise TypeError(
-                "kwarg capture_output_structure deprecated, use "
-                "capture_container_structure; do not pass both"
+            raise ArgumentConflictError(
+                "Deprecated capture_output_structure and replacement "
+                "capture_container_structure were both supplied",
+                code="deprecated_argument_conflict",
+                remedy="remove capture_output_structure and pass only capture_container_structure",
+                arguments=("capture_output_structure", "capture_container_structure"),
             )
         warn_deprecated_alias("capture_output_structure", "capture_container_structure")
         capture_container_structure = capture_output_structure
@@ -1961,7 +1993,12 @@ def trace(
             if result is not None:
                 return cast("Trace", result)
     if os.environ.get("TORCHLENS_AUTO") == "1":
-        raise RuntimeError("TORCHLENS_AUTO=1 is intentionally unsupported; use auto_capture().")
+        raise CaptureContextError(
+            "TORCHLENS_AUTO=1 requested an unsupported implicit capture mode",
+            code="auto_environment_unsupported",
+            remedy="unset TORCHLENS_AUTO and call auto_capture() explicitly",
+            environment_variable="TORCHLENS_AUTO",
+        )
     resolved_spec = explicit_backend_spec or resolve_backend_spec(
         backend, model, input_args, input_kwargs
     )
@@ -2069,7 +2106,14 @@ def _trace_torch_model(
     # nn.Module. A non-Module input previously leaked an AttributeError from that call
     # instead of the documented "Unsupported model type" ValueError.
     if not isinstance(model, nn.Module):
-        raise ValueError("Unsupported model type for capture")
+        raise InvalidArgumentError(
+            f"Unsupported model type for capture: received {type(model).__name__}, "
+            "not torch.nn.Module",
+            code="model_type_unsupported",
+            remedy="pass a torch.nn.Module or select the backend that owns the supplied model",
+            argument="model",
+            received_type=type(model).__name__,
+        )
     _reject_opaque_wrappers(model)
     model = unwrap_compiled_model(model)
     model = _unwrap_data_parallel(model)
@@ -2146,11 +2190,28 @@ def _trace_torch_model(
     check_model_and_input_variants(model, input_args, input_kwargs)
     grouped_save_options, save_predicate = _split_save_options_and_predicate(save)
     if intervene is not None and not callable(intervene):
-        raise TypeError("intervene must be a predicate callable or None")
+        raise ArgumentTypeError(
+            f"intervene received non-callable type {type(intervene).__name__}",
+            code="intervention_predicate_type_invalid",
+            remedy="pass a predicate callable such as tl.when(...) or None",
+            argument="intervene",
+            received_type=type(intervene).__name__,
+        )
     if halt is not None and not callable(halt):
-        raise TypeError("halt must be a predicate callable or None")
+        raise ArgumentTypeError(
+            f"halt received non-callable type {type(halt).__name__}",
+            code="halt_predicate_type_invalid",
+            remedy="pass a predicate callable or None",
+            argument="halt",
+            received_type=type(halt).__name__,
+        )
     if not isinstance(lookback, int) or not 0 <= lookback <= 1024:
-        raise ValueError("lookback must be an integer in [0, 1024]")
+        raise InvalidArgumentError(
+            f"lookback={lookback!r} is not an integer in the supported range [0, 1024]",
+            code="lookback_invalid",
+            remedy="set lookback to an integer from 0 through 1024 inclusive",
+            argument="lookback",
+        )
     if lookback_payload_policy not in {
         "metadata_only",
         "detached_raw",
@@ -2158,9 +2219,14 @@ def _trace_torch_model(
         "grad_connected",
         "disk_spilled",
     }:
-        raise ValueError(
-            "lookback_payload_policy must be one of 'metadata_only', 'detached_raw', "
-            "'transformed', 'grad_connected', or 'disk_spilled'"
+        raise InvalidArgumentError(
+            f"lookback_payload_policy={lookback_payload_policy!r} is not supported",
+            code="lookback_payload_policy_invalid",
+            remedy=(
+                "set lookback_payload_policy to 'metadata_only', 'detached_raw', "
+                "'transformed', 'grad_connected', or 'disk_spilled'"
+            ),
+            argument="lookback_payload_policy",
         )
     save_options = merge_save_options(
         save=grouped_save_options,
@@ -2170,7 +2236,12 @@ def _trace_torch_model(
         save_raw_gradients=save_raw_gradients,
     )
     if storage is not None and streaming is not None:
-        raise TypeError("Do not pass both `storage` and `streaming`.")
+        raise ArgumentConflictError(
+            "Both storage and streaming options were supplied",
+            code="storage_argument_conflict",
+            remedy="remove streaming and pass only storage, or remove storage",
+            arguments=("storage", "streaming"),
+        )
     streaming_options = merge_streaming_options(
         streaming=storage if storage is not None else streaming,
         save_outs_to=save_outs_to,
@@ -2201,7 +2272,12 @@ def _trace_torch_model(
     save_raw_gradients = save_options.save_raw_gradients
     save_mode_value = "copy" if save_mode is MISSING else save_mode
     if save_mode_value not in {"copy", "reference", "view", "cpu_async"}:
-        raise ValueError("save_mode must be one of 'copy', 'reference', 'view', or 'cpu_async'")
+        raise InvalidArgumentError(
+            f"save_mode={save_mode_value!r} is not supported",
+            code="save_mode_invalid",
+            remedy="set save_mode to 'copy', 'reference', 'view', or 'cpu_async'",
+            argument="save_mode",
+        )
     save_arg_values = capture_options.save_arg_values
     capture_tensor_grad_hooks = capture_options.capture_tensor_grad_hooks
     save_code_context = capture_options.save_code_context
@@ -2241,9 +2317,19 @@ def _trace_torch_model(
     retain_grads_in_memory_value = streaming_options.retain_in_memory
 
     if output_device not in ["same", "cpu", "cuda"]:
-        raise ValueError("output_device must be either 'same', 'cpu', or 'cuda'.")
+        raise InvalidArgumentError(
+            f"output_device={output_device!r} is not supported",
+            code="output_device_invalid",
+            remedy="set output_device to 'same', 'cpu', or 'cuda'",
+            argument="output_device",
+        )
     if streaming_options.bundle_path is not None and streaming_options.out_callback is not None:
-        raise ValueError("save_outs_to and out_sink are mutually exclusive.")
+        raise ArgumentConflictError(
+            "Both disk-backed output storage and an output callback were configured",
+            code="output_sink_conflict",
+            remedy="choose either bundle_path/save_outs_to or out_callback/out_sink",
+            arguments=("bundle_path", "out_callback"),
+        )
     train_mode_explicit = capture_options.is_field_explicit("backward_ready")
     train_mode_value = capture_options.backward_ready
     inference_only_conflicts: list[str] = []
@@ -2263,9 +2349,12 @@ def _trace_torch_model(
         should_save_grads = True
     if backward_opted_in:
         if train_mode_explicit and train_mode_value is False:
-            raise ValueError(
-                "save_grads opts into backward capture, which requires backward_ready=True. "
-                "Omit backward_ready or set backward_ready=True."
+            raise InvalidArgumentError(
+                "save_grads requests backward capture and requires backward_ready=True, but "
+                "backward_ready=False was supplied",
+                code="backward_capture_conflict",
+                remedy="omit backward_ready or set backward_ready=True",
+                arguments=("save_grads", "backward_ready"),
             )
         train_mode_value = True
         should_save_grads = True

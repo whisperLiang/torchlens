@@ -17,6 +17,7 @@ from typing import cast
 
 import torch
 
+from .._errors import ArgumentTypeError, InvalidArgumentError
 
 # Small floor used to keep denominators away from zero. Empirically chosen to be
 # negligible compared to typical out magnitudes while preventing 0/0
@@ -33,7 +34,13 @@ def _as_flat_float(t: torch.Tensor) -> torch.Tensor:
     """
 
     if not isinstance(t, torch.Tensor):
-        raise TypeError(f"expected torch.Tensor, got {type(t).__name__}")
+        raise ArgumentTypeError(
+            f"Intervention metric input has type {type(t).__name__}, not torch.Tensor",
+            code="metric_tensor_type_invalid",
+            remedy="pass torch.Tensor operands to the metric",
+            argument="metric operand",
+            received_type=type(t).__name__,
+        )
     if t.is_floating_point():
         flat = t.detach().reshape(-1)
     else:
@@ -54,8 +61,11 @@ def cosine_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     fa = _as_flat_float(a)
     fb = _as_flat_float(b)
     if fa.numel() != fb.numel():
-        raise ValueError(
-            f"cosine_distance requires equal element counts, got {fa.numel()} vs {fb.numel()}"
+        raise InvalidArgumentError(
+            f"cosine_distance received {fa.numel()} and {fb.numel()} elements",
+            code="metric_shape_mismatch",
+            remedy="pass operands with equal element counts",
+            metric="cosine_distance",
         )
     na = torch.linalg.vector_norm(fa)
     nb = torch.linalg.vector_norm(fb)
@@ -78,8 +88,11 @@ def relative_l2(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     fa = _as_flat_float(a)
     fb = _as_flat_float(b)
     if fa.numel() != fb.numel():
-        raise ValueError(
-            f"relative_l2 requires equal element counts, got {fa.numel()} vs {fb.numel()}"
+        raise InvalidArgumentError(
+            f"relative_l2 received {fa.numel()} and {fb.numel()} elements",
+            code="metric_shape_mismatch",
+            remedy="pass operands with equal element counts",
+            metric="relative_l2",
         )
     diff = torch.linalg.vector_norm(fa - fb)
     denom = torch.linalg.vector_norm(fa)
@@ -101,9 +114,12 @@ def pearson_correlation_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tens
     fa = _as_flat_float(a)
     fb = _as_flat_float(b)
     if fa.numel() != fb.numel():
-        raise ValueError(
-            f"pearson_correlation_distance requires equal element counts, got "
-            f"{fa.numel()} vs {fb.numel()}"
+        raise InvalidArgumentError(
+            "pearson_correlation_distance received operands with different element counts",
+            code="metric_shape_mismatch",
+            remedy="pass operands with equal element counts",
+            metric="pearson_correlation_distance",
+            element_counts=(fa.numel(), fb.numel()),
         )
     if fa.numel() < 2:
         if torch.equal(fa, fb):
@@ -136,10 +152,12 @@ def relative_l1_scalar(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     # meaningless distance, so validate matching numel and raise on mismatch --
     # matching the numel guards on cosine_distance/relative_l2/pearson.
     if fa.numel() != fb.numel():
-        raise ValueError(
-            f"relative_l1_scalar requires equal element counts, got "
-            f"{fa.numel()} vs {fb.numel()}; it is a scalar fallback and must not "
-            "silently truncate a longer vector to its first element"
+        raise InvalidArgumentError(
+            "relative_l1_scalar received operands with different element counts",
+            code="metric_shape_mismatch",
+            remedy="pass scalar-like operands with equal element counts",
+            metric="relative_l1_scalar",
+            element_counts=(fa.numel(), fb.numel()),
         )
     if fa.numel() == 0:
         return torch.tensor(0.0, dtype=fa.dtype)
@@ -171,13 +189,22 @@ def resolve_metric(
     if isinstance(metric, str):
         if metric not in METRIC_REGISTRY:
             valid = ", ".join(sorted(METRIC_REGISTRY))
-            raise ValueError(
-                f"Unknown metric '{metric}'. Valid metrics: {valid}, or pass a callable."
+            raise InvalidArgumentError(
+                f"Intervention metric {metric!r} is unknown",
+                code="metric_name_invalid",
+                remedy=f"choose {valid}, or pass a callable",
+                argument="metric",
             )
         return METRIC_REGISTRY[metric]
     if callable(metric):
         return metric
-    raise TypeError(f"metric must be a string or callable, got {type(metric).__name__}")
+    raise ArgumentTypeError(
+        f"Intervention metric has unsupported type {type(metric).__name__}",
+        code="metric_type_invalid",
+        remedy="pass a registered metric name or a callable",
+        argument="metric",
+        received_type=type(metric).__name__,
+    )
 
 
 def is_scalar_like(t: torch.Tensor) -> bool:

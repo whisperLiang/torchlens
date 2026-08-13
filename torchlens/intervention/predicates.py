@@ -7,6 +7,7 @@ from typing import Any, TypeAlias, cast
 
 import torch
 
+from .._errors import ArgumentTypeError, InvalidArgumentError
 from .types import HelperDirection, HelperSpec, InterventionDecision
 
 InterventionPredicateDecision: TypeAlias = (
@@ -54,14 +55,23 @@ def as_intervention_decision(
     if callable(action):
         callable_direction = direction or getattr(action, "direction", "forward")
         if callable_direction not in {"forward", "backward", "both"}:
-            raise TypeError("intervention direction must be 'forward', 'backward', or 'both'")
+            raise InvalidArgumentError(
+                f"Intervention direction={callable_direction!r} is not supported",
+                code="intervention_direction_invalid",
+                remedy="set direction to 'forward', 'backward', or 'both'",
+                argument="direction",
+            )
         return InterventionDecision(
             action="transform",
             hook=action,
             direction=cast(HelperDirection, callable_direction),
         )
-    raise TypeError(
-        "intervention action must be InterventionDecision, HelperSpec, callable, or None"
+    raise ArgumentTypeError(
+        f"Intervention action has unsupported type {type(action).__name__}",
+        code="intervention_action_type_invalid",
+        remedy="pass an InterventionDecision, HelperSpec, callable, or None",
+        argument="action",
+        received_type=type(action).__name__,
     )
 
 

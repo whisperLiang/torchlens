@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Final, Literal, Mapping, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
 
 import torch
 
 from ._deprecations import MISSING, MissingType, warn_deprecated_alias
-from ._save_budget import SaveBudgetOption
+from ._errors import ArgumentConflictError, ArgumentTypeError, InvalidArgumentError
 from ._literals import (
     BufferVisibilityLiteral,
     CollapseLiteral,
@@ -23,6 +24,7 @@ from ._literals import (
     VisNodePlacementLiteral,
     VisRendererLiteral,
 )
+from ._save_budget import SaveBudgetOption
 from .visualization.node_spec import NodeSpec
 
 if TYPE_CHECKING:
@@ -375,6 +377,33 @@ def _resolve_option_value(
     return supplied_value
 
 
+def _deprecated_argument_conflict(
+    old_name: str,
+    replacement_name: str,
+) -> ArgumentConflictError:
+    """Build a typed refusal for old and replacement arguments supplied together.
+
+    Parameters
+    ----------
+    old_name:
+        Deprecated argument supplied by the caller.
+    replacement_name:
+        Current replacement argument supplied by the caller.
+
+    Returns
+    -------
+    ArgumentConflictError
+        Actionable conflict with the shared stable code.
+    """
+
+    return ArgumentConflictError(
+        f"kwarg {old_name} deprecated, use {replacement_name}; do not pass both",
+        code="deprecated_argument_conflict",
+        remedy=f"remove {old_name!r} and pass only {replacement_name!r}",
+        arguments=(old_name, replacement_name),
+    )
+
+
 def _validate_node_style(node_style: VisNodeModeLiteral) -> None:
     """Validate a visualization node-style preset name.
 
@@ -390,9 +419,11 @@ def _validate_node_style(node_style: VisNodeModeLiteral) -> None:
     """
 
     if node_style not in {"default", "profiling", "vision", "attention"}:
-        raise ValueError(
-            "Visualization node_style/node_mode must be one of 'default', "
-            "'profiling', 'vision', or 'attention'."
+        raise InvalidArgumentError(
+            f"Visualization node_style={node_style!r} is not a supported preset",
+            code="visualization_node_style_invalid",
+            remedy="set node_style to 'default', 'profiling', 'vision', or 'attention'",
+            argument="node_style",
         )
     if node_style in {"vision", "attention"}:
         warnings.warn(
@@ -424,7 +455,12 @@ def _normalize_layout(layout: VisNodePlacementLiteral) -> VisNodePlacementLitera
     """
 
     if layout not in {"auto", "dot", "rank"}:
-        raise ValueError("Visualization layout must be one of 'auto', 'dot', or 'rank'.")
+        raise InvalidArgumentError(
+            f"Visualization layout={layout!r} is not supported",
+            code="visualization_layout_invalid",
+            remedy="set layout to 'auto', 'dot', or 'rank'",
+            argument="layout",
+        )
     return layout
 
 
@@ -443,7 +479,12 @@ def _validate_intervention_mode(intervention_mode: VisInterventionModeLiteral) -
     """
 
     if intervention_mode not in {"node_mark", "as_node"}:
-        raise ValueError("vis_intervention_mode must be either 'node_mark' or 'as_node'.")
+        raise InvalidArgumentError(
+            f"Visualization intervention_mode={intervention_mode!r} is not supported",
+            code="visualization_intervention_mode_invalid",
+            remedy="set intervention_mode to 'node_mark' or 'as_node'",
+            argument="intervention_mode",
+        )
 
 
 def _validate_buffer_visibility(value: BufferVisibilityLiteral | bool) -> None:
@@ -467,7 +508,12 @@ def _validate_buffer_visibility(value: BufferVisibilityLiteral | bool) -> None:
         return
     if value in {"never", "meaningful", "always"}:
         return
-    raise ValueError("Buffer visibility must be 'never', 'meaningful', 'always', or a bool.")
+    raise InvalidArgumentError(
+        f"Visualization show_buffers={value!r} is not a supported visibility policy",
+        code="buffer_visibility_invalid",
+        remedy="set show_buffers to 'never', 'meaningful', 'always', True, or False",
+        argument="show_buffers",
+    )
 
 
 def _validate_collapse(value: CollapseLiteral) -> None:
@@ -487,9 +533,19 @@ def _validate_collapse(value: CollapseLiteral) -> None:
     if isinstance(value, float):
         if 0.0 <= value <= 1.0:
             return
-        raise ValueError("collapse float level must be in [0.0, 1.0].")
+        raise InvalidArgumentError(
+            f"Visualization collapse={value!r} is outside the supported float range",
+            code="collapse_level_invalid",
+            remedy="set collapse to a float from 0.0 through 1.0 inclusive",
+            argument="collapse",
+        )
     if value not in {"none", "auto", "max"}:
-        raise ValueError("collapse must be 'none', 'auto', 'max', or a float in [0.0, 1.0].")
+        raise InvalidArgumentError(
+            f"Visualization collapse={value!r} is not a supported collapse mode",
+            code="collapse_mode_invalid",
+            remedy="set collapse to 'none', 'auto', 'max', or a float in [0.0, 1.0]",
+            argument="collapse",
+        )
 
 
 def _validate_fold_repeats(value: FoldRepeatsLiteral) -> None:
@@ -507,7 +563,12 @@ def _validate_fold_repeats(value: FoldRepeatsLiteral) -> None:
     """
 
     if value not in {None, True, False}:
-        raise ValueError("fold_repeats must be None, True, or False.")
+        raise InvalidArgumentError(
+            f"Visualization fold_repeats={value!r} is not a supported policy",
+            code="fold_repeats_invalid",
+            remedy="set fold_repeats to None, True, or False",
+            argument="fold_repeats",
+        )
 
 
 def _validate_capture_values(values: Mapping[str, Any]) -> None:
@@ -534,23 +595,48 @@ def _validate_capture_values(values: Mapping[str, Any]) -> None:
     """
 
     if values["_module_containment_engine"] not in {"thread_replay", "hook_stack", "both"}:
-        raise ValueError(
-            "_module_containment_engine must be 'thread_replay', 'hook_stack', or 'both'"
+        raise InvalidArgumentError(
+            "Capture option _module_containment_engine has an unsupported value",
+            code="module_containment_engine_invalid",
+            remedy="set _module_containment_engine to 'thread_replay', 'hook_stack', or 'both'",
+            argument="_module_containment_engine",
         )
     if values["jax_control_flow"] not in {"reject", "unroll", "region"}:
-        raise ValueError("jax_control_flow must be 'reject', 'unroll', or 'region'")
+        raise InvalidArgumentError(
+            f"Capture option jax_control_flow={values['jax_control_flow']!r} is unsupported",
+            code="jax_control_flow_invalid",
+            remedy="set jax_control_flow to 'reject', 'unroll', or 'region'",
+            argument="jax_control_flow",
+        )
     if not isinstance(values["jax_max_control_flow_unroll"], int):
-        raise TypeError("jax_max_control_flow_unroll must be an integer")
+        raise ArgumentTypeError(
+            "Capture option jax_max_control_flow_unroll is not an integer",
+            code="jax_unroll_type_invalid",
+            remedy="pass an integer greater than or equal to 1",
+            argument="jax_max_control_flow_unroll",
+            received_type=type(values["jax_max_control_flow_unroll"]).__name__,
+        )
     if values["jax_max_control_flow_unroll"] < 1:
-        raise ValueError("jax_max_control_flow_unroll must be >= 1")
+        raise InvalidArgumentError(
+            "Capture option jax_max_control_flow_unroll is less than 1",
+            code="jax_unroll_range_invalid",
+            remedy="set jax_max_control_flow_unroll to an integer greater than or equal to 1",
+            argument="jax_max_control_flow_unroll",
+        )
     if values["distributed_witness"] not in {"none", "digest", "payload"}:
-        raise ValueError("distributed_witness must be 'none', 'digest', or 'payload'")
+        raise InvalidArgumentError(
+            f"Capture option distributed_witness={values['distributed_witness']!r} is unsupported",
+            code="distributed_witness_invalid",
+            remedy="set distributed_witness to 'none' or 'digest'",
+            argument="distributed_witness",
+        )
     if values["distributed_witness"] == "payload":
-        raise ValueError(
-            "distributed_witness='payload' is reserved: the C1 merged-artifact "
-            "story ships digest witnesses only; payload witnesses are "
-            "tensor-valued and require their own blob family (a future "
-            "reviewed schema change in merged_trace_contract.md). Use 'digest'."
+        raise InvalidArgumentError(
+            "Capture option distributed_witness='payload' is reserved because payload "
+            "witness blobs are not implemented",
+            code="distributed_payload_witness_unsupported",
+            remedy="set distributed_witness to 'digest' for byte-exact witness digests",
+            argument="distributed_witness",
         )
 
 
@@ -656,9 +742,13 @@ def _merge_grouped_options(
     default_option = option_factory()
     option_type = type(default_option)
     if option is not None and not isinstance(option, option_type):
-        raise TypeError(
-            f"{group_name} must be a {option_type.__name__} instance or None; "
-            f"got {type(option).__name__}."
+        raise ArgumentTypeError(
+            f"Grouped option {group_name!r} received {type(option).__name__}, not "
+            f"{option_type.__name__}",
+            code="option_group_type_invalid",
+            remedy=f"pass a {option_type.__name__} instance or None as {group_name}",
+            argument=group_name,
+            received_type=type(option).__name__,
         )
 
     if option is None:
@@ -674,8 +764,18 @@ def _merge_grouped_options(
             continue
         if option is not None and group_field in specified_fields:
             if conflict_message is not None:
-                raise ValueError(conflict_message)
-            raise TypeError(f"Do not pass both `{flat_name}` and `{group_name}.{group_field}`.")
+                raise InvalidArgumentError(
+                    conflict_message,
+                    code="option_group_conflict",
+                    remedy=f"pass either {group_name} or its individual keyword arguments",
+                    arguments=(flat_name, f"{group_name}.{group_field}"),
+                )
+            raise ArgumentConflictError(
+                f"Do not pass both `{flat_name}` and `{group_name}.{group_field}`",
+                code="option_group_conflict",
+                remedy=f"remove either {flat_name!r} or {group_name}.{group_field!r}",
+                arguments=(flat_name, f"{group_name}.{group_field}"),
+            )
         should_warn = warn_individual_kwargs
         if deprecated_flat_names is not None:
             should_warn = flat_name in deprecated_flat_names
@@ -948,24 +1048,25 @@ class CaptureOptions:
 
         if mark_layer_depths is not MISSING:
             if compute_input_output_distances is not MISSING:
-                raise TypeError(
-                    "kwarg mark_layer_depths deprecated, use "
-                    "compute_input_output_distances; do not pass both"
+                raise _deprecated_argument_conflict(
+                    "mark_layer_depths",
+                    "compute_input_output_distances",
                 )
             warn_deprecated_alias("mark_layer_depths", "capture.compute_input_output_distances")
             compute_input_output_distances = mark_layer_depths
         if num_context_lines is not MISSING:
             if source_context_lines is not MISSING:
-                raise TypeError(
-                    "kwarg num_context_lines deprecated, use source_context_lines; do not pass both"
+                raise _deprecated_argument_conflict(
+                    "num_context_lines",
+                    "source_context_lines",
                 )
             warn_deprecated_alias("num_context_lines", "capture.source_context_lines")
             source_context_lines = num_context_lines
         if capture_output_structure is not MISSING:
             if capture_container_structure is not MISSING:
-                raise TypeError(
-                    "kwarg capture_output_structure deprecated, use "
-                    "capture_container_structure; do not pass both"
+                raise _deprecated_argument_conflict(
+                    "capture_output_structure",
+                    "capture_container_structure",
                 )
             warn_deprecated_alias(
                 "capture_output_structure",
@@ -1404,22 +1505,22 @@ class VisualizationOptions:
 
         if mode is not MISSING:
             if view is not MISSING:
-                raise TypeError("kwarg mode deprecated, use view; do not pass both")
+                raise _deprecated_argument_conflict("mode", "view")
             warn_deprecated_alias("mode", "visualization.view")
             view = mode
         if max_module_depth is not MISSING:
             if depth is not MISSING:
-                raise TypeError("kwarg max_module_depth deprecated, use depth; do not pass both")
+                raise _deprecated_argument_conflict("max_module_depth", "depth")
             warn_deprecated_alias("max_module_depth", "visualization.depth")
             depth = max_module_depth
         if layout_engine is not MISSING:
             if layout is not MISSING:
-                raise TypeError("kwarg layout_engine deprecated, use layout; do not pass both")
+                raise _deprecated_argument_conflict("layout_engine", "layout")
             warn_deprecated_alias("layout_engine", "visualization.layout")
             layout = layout_engine
         if node_mode is not MISSING:
             if node_style is not MISSING:
-                raise TypeError("kwarg node_mode deprecated, use node_style; do not pass both")
+                raise _deprecated_argument_conflict("node_mode", "node_style")
             warn_deprecated_alias("node_mode", "visualization.node_style")
             node_style = node_mode
 
@@ -1790,19 +1891,20 @@ class StreamingOptions:
 
         if save_outs_to is not MISSING:
             if bundle_path is not MISSING:
-                raise TypeError("kwarg save_outs_to deprecated, use bundle_path; do not pass both")
+                raise _deprecated_argument_conflict("save_outs_to", "bundle_path")
             warn_deprecated_alias("save_outs_to", "streaming.bundle_path")
             bundle_path = save_outs_to
         if keep_outs_in_memory is not MISSING:
             if retain_in_memory is not MISSING:
-                raise TypeError(
-                    "kwarg keep_outs_in_memory deprecated, use retain_in_memory; do not pass both"
+                raise _deprecated_argument_conflict(
+                    "keep_outs_in_memory",
+                    "retain_in_memory",
                 )
             warn_deprecated_alias("keep_outs_in_memory", "streaming.retain_in_memory")
             retain_in_memory = keep_outs_in_memory
         if out_sink is not MISSING:
             if out_callback is not MISSING:
-                raise TypeError("kwarg out_sink deprecated, use out_callback; do not pass both")
+                raise _deprecated_argument_conflict("out_sink", "out_callback")
             warn_deprecated_alias("out_sink", "streaming.out_callback")
             out_callback = out_sink
 
@@ -1881,7 +1983,7 @@ def merge_capture_options(
             flat_values.get(old_name, MISSING) is not MISSING
             and flat_values.get(new_name, MISSING) is not MISSING
         ):
-            raise TypeError(f"kwarg {old_name} deprecated, use {new_name}; do not pass both")
+            raise _deprecated_argument_conflict(old_name, new_name)
 
     return cast(
         CaptureOptions,
@@ -1989,7 +2091,12 @@ def merge_visualization_options(
         if flat_value is MISSING:
             continue
         if visualization is not None and group_name in specified_fields:
-            raise TypeError(f"Do not pass both `{flat_name}` and `visualization.{group_name}`.")
+            raise ArgumentConflictError(
+                f"Do not pass both `{flat_name}` and `visualization.{group_name}`",
+                code="option_group_conflict",
+                remedy=f"remove either {flat_name!r} or visualization.{group_name!r}",
+                arguments=(flat_name, f"visualization.{group_name}"),
+            )
         if flat_name in _VISUALIZATION_DEPRECATED_FLAT:
             warn_deprecated_alias(flat_name, f"visualization.{group_name}")
         values[group_name] = flat_value

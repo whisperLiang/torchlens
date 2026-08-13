@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from collections.abc import Collection
+from pathlib import Path
 from typing import Any
 
-from .._io import JaxPayloadLoadHint, PayloadLoadHints, TorchLensIOError, rehydrate_nested
-from .._io import _json
+from .._errors import ArgumentTypeError
+from .._io import JaxPayloadLoadHint, PayloadLoadHints, TorchLensIOError, _json, rehydrate_nested
 from .._io.bundle import cleanup_tmp, load, save
 from .._trace_state import TraceState
 from ..intervention.save import save_intervention
@@ -215,7 +215,13 @@ def load_intervention_spec(
         allowed_custom_callable_modules=allowed_custom_callable_modules,
     )
     if not isinstance(loaded, InterventionSpec):
-        raise TypeError("torchlens.io.load_intervention_spec expected an intervention spec.")
+        raise ArgumentTypeError(
+            f"load_intervention_spec loaded {type(loaded).__name__}, not InterventionSpec",
+            code="artifact_kind_mismatch",
+            remedy="pass the path of an intervention .tlspec artifact or use torchlens.io.load",
+            argument="path",
+            loaded_type=type(loaded).__name__,
+        )
     return loaded
 
 

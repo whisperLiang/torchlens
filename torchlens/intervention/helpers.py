@@ -8,6 +8,7 @@ from typing import Any, cast
 import torch
 from torch import nn
 
+from .._errors import InvalidArgumentError
 from .errors import (
     AxisAmbiguityError,
     HookValueError,
@@ -1133,7 +1134,12 @@ def helper_from_serialized(
         "grad_scale": grad_scale,
     }
     if name not in constructors:
-        raise ValueError(f"Unknown builtin helper {name!r}")
+        raise InvalidArgumentError(
+            f"Builtin intervention helper {name!r} is unknown",
+            code="intervention_helper_unknown",
+            remedy=f"choose one of {', '.join(sorted(constructors))}",
+            argument="name",
+        )
     return constructors[name](*args, **kwargs)
 
 
