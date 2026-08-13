@@ -63,7 +63,7 @@ def _is_allowed_visualization_name(path: Path, name: str) -> bool:
     return any(allowed in name for allowed in VISUALIZATION_ALLOWLIST)
 
 
-@pytest.mark.smoke
+@pytest.mark.slow
 def test_no_retired_tl_host_object_attrs_in_source() -> None:
     """Source files should not access or store retired TorchLens metadata names."""
     failures: list[str] = []

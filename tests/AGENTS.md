@@ -24,12 +24,12 @@ pytest config excludes `rare` tests via `addopts = -m 'not rare'`.
 ## Running Tests
 
 ```bash
-pytest tests/                              # default suite excluding rare
-pytest tests/ -m smoke                     # critical path
-pytest tests/ -m "not rare and not slow and not heavy" -x --tb=short  # fast per-step gate
-pytest tests/ -m "not slow"                # skip slow real-world tests
-pytest tests/test_toy_models.py            # single file
+pytest tests/test_toy_models.py            # single file — targeted suites ARE the per-step gate
 pytest tests/test_toy_models.py::test_name # single test
+pytest tests/ -m smoke                     # commit-level gate (~20 min loaded; measured 2026-08-13)
+pytest tests/ -m "not rare and not slow and not heavy" -x --tb=short  # mid backstop
+pytest tests/ -m "not slow"                # phase-boundary backstop (skips slow real-world tests)
+pytest tests/                              # default suite excluding rare
 pytest tests/ -k "loop"                    # keyword filter
 ```
 
@@ -37,10 +37,15 @@ Run memory-heavy real-world tests sequentially. Optional dependency tests should
 `pytest.importorskip()` or extras-aware skips.
 
 ## Markers
-- `slow` - long-running real-world or heavy tests.
-- `heavy` - mid-cost tests excluded from the fast per-step gate.
-- `smoke` - fast critical-path checks.
+- `smoke` - critical-path checks, <5s each (measured); the commit-level gate, NOT per-step.
+- `heavy` - mid-cost (5-20s) tests, excluded from smoke and the mid backstop.
+- `slow` - long-running (>20s) real-world tests.
 - `rare` - excluded by default unless explicitly selected.
+
+Markers are additive: a test carrying `smoke` together with `heavy`/`slow` still runs
+under `-m smoke`, so the combination is forbidden — drop `smoke` instead.
+`tests/test_marker_lint.py` enforces the partition (no smoke+heavy/slow combos, plus a
+15s runtime budget on smoke-marked tests, checked at the end of every session).
 
 ## Fixtures
 `tests/conftest.py` owns deterministic seeding and common inputs such as image tensors,

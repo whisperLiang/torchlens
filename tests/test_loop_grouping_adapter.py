@@ -632,7 +632,7 @@ def _unrestricted_merge_iso_groups_oracle(
     return {leader: nodes for leader, nodes in merged_layer_groups.items() if len(nodes) > 1}
 
 
-@pytest.mark.smoke
+@pytest.mark.heavy
 def test_bare_group_restriction_matches_unrestricted_merge_oracle(monkeypatch: Any) -> None:
     """Restricted iso-group merge is merge-identical to the full-triangle oracle.
 

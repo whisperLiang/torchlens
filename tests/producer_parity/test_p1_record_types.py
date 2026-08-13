@@ -41,9 +41,11 @@ from torchlens.ir.op_record_scatter import (
     EXTRA_KEY_CHANNELS,
 )
 
-pytestmark = pytest.mark.smoke
+# Markers are additive: a file-level smoke pytestmark would keep the heavy test
+# in the `-m smoke` tier, so the smoke mark is applied per test instead.
 
 
+@pytest.mark.smoke
 def test_three_way_manifest_closure() -> None:
     from torchlens.data_classes.op import _OP_SLOT_NAMES
 
@@ -56,6 +58,7 @@ def test_three_way_manifest_closure() -> None:
     assert not stale, f"manifest rows without a store cell: {sorted(stale)}"
 
 
+@pytest.mark.smoke
 def test_manifest_regenerate_and_diff() -> None:
     from tools.generate_op_record_manifest import generate
 
@@ -68,6 +71,7 @@ def test_manifest_regenerate_and_diff() -> None:
     assert CELL_SOURCE_MANIFEST == CELL_SOURCES
 
 
+@pytest.mark.smoke
 def test_amendment_registry_exact_sets() -> None:
     union = {path for schema in AMENDMENT_FAMILIES.values() for path, _ in schema}
     assert union == set(PATH_TO_FLAT), "PATH_TO_FLAT must cover exactly the path union"
@@ -124,6 +128,7 @@ def test_amendment_registry_exact_sets() -> None:
         )
 
 
+@pytest.mark.smoke
 def test_strict_protocol_refusal_type() -> None:
     from ._models import SmallCNN, _cnn_input
 
@@ -231,6 +236,7 @@ def test_scatter_is_the_single_ingest_truth(tmp_path: Path) -> None:
                 assert cells["type_index"] is not None
 
 
+@pytest.mark.smoke
 def test_ingest_inputs_v1_reserves_aten_lane_and_covers_step0_reads() -> None:
     import json
 

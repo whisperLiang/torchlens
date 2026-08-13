@@ -350,7 +350,7 @@ def classics_resolver_coverage_report(
     }
 
 
-@pytest.mark.smoke
+@pytest.mark.heavy
 def test_representative_resolver_coverage_release_threshold(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

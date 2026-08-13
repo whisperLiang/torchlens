@@ -1026,7 +1026,7 @@ def _environment_invariant_record(record: dict[str, Any]) -> dict[str, Any]:
     return _normalize_environment_value(invariant)
 
 
-@pytest.mark.smoke
+@pytest.mark.heavy
 def test_viz_render_identity_oracle(tmp_path: Path) -> None:
     """Characterize every draw axis with bytes and structural goldens."""
 

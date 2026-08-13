@@ -51,7 +51,8 @@ from torchlens.intervention.types import TargetSpec
 _GOLDEN_PATH = Path(__file__).parent / "golden" / "selector_semantics_matrix.json"
 _REGEN = bool(os.environ.get("TL_SELECTOR_MATRIX_REGEN"))
 
-pytestmark = pytest.mark.smoke
+# Markers are additive: a file-level smoke pytestmark would keep the heavy test
+# in the `-m smoke` tier, so tier marks are applied per test instead.
 
 
 class TinyConvNet(nn.Module):
@@ -681,6 +682,7 @@ _CELL_KEYS: tuple[str, ...] = tuple(
 )
 
 
+@pytest.mark.heavy
 def test_matrix_covers_golden_exactly() -> None:
     """The computed cell-key set and the golden's key set must be identical."""
 
@@ -688,6 +690,7 @@ def test_matrix_covers_golden_exactly() -> None:
 
 
 @pytest.mark.parametrize("cell_key", _CELL_KEYS)
+@pytest.mark.smoke
 def test_selector_semantics_cell(cell_key: str) -> None:
     """One selector x lifecycle cell matches its committed characterization."""
 

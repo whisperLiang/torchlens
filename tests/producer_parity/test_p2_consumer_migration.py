@@ -10,15 +10,18 @@ from torchlens.utils.hashing import compute_raw_event_shape_hash
 
 from ._models import SmallCNN, _cnn_input
 
-pytestmark = pytest.mark.smoke
+# Markers are additive: a file-level smoke pytestmark would keep the heavy test
+# in the `-m smoke` tier, so tier marks are applied per test instead.
 
 
+@pytest.mark.smoke
 def test_reducer_passthrough_is_the_raw_list_today() -> None:
     events = CaptureEvents()
     assert events.amended_op_records() is events.op_events
     assert events.amended_op_record("missing") is None
 
 
+@pytest.mark.smoke
 def test_hash_reads_through_the_reducer(monkeypatch: pytest.MonkeyPatch) -> None:
     """The persisted hash consumes the folded view, not the raw list."""
 
@@ -50,6 +53,7 @@ def test_hash_reads_through_the_reducer(monkeypatch: pytest.MonkeyPatch) -> None
     assert seen["hash_via_reducer"] == seen["hash_raw"], "passthrough must be byte-identical"
 
 
+@pytest.mark.smoke
 def test_live_view_handle_reads_route_through_index() -> None:
     """LiveOpView grad_fn reads come from the single-owner side index."""
 
@@ -63,6 +67,7 @@ def test_live_view_handle_reads_route_through_index() -> None:
     assert hasattr(projections, "_grad_fn_handle_from_index")
 
 
+@pytest.mark.heavy
 def test_intervention_template_ref_is_dead() -> None:
     """No producer writes a non-None intervention_template_ref and no
     consumer reads it at materialize: confirm-and-delete evidence (P2)."""
