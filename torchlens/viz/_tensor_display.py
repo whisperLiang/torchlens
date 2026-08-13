@@ -243,7 +243,14 @@ def show_tensor(
         return fig
 
     if resolved_method == "channels":
-        channel_data = data if data.ndim == 3 else data.reshape(1, *tuple(_to_2d(data).shape))
+        if data.ndim >= 3:
+            # Slice leading batch-like dims (matching _to_2d semantics) down to
+            # one (C, H, W) stack; a bare reshape cannot drop those elements.
+            channel_data = data
+            while channel_data.ndim > 3:
+                channel_data = channel_data[0]
+        else:
+            channel_data = data.reshape(1, *tuple(_to_2d(data).shape))
         channels = min(int(channel_data.shape[0]), 8)
         if channels == 0:
             fig, ax = plt.subplots()
