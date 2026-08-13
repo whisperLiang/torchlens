@@ -22,10 +22,13 @@ _SCOPED_CAPTURE_STATE = frozenset(
         ("torchlens/_state.py", "_active_hook_plan"),
         ("torchlens/_state.py", "_active_intervention_spec"),
         ("torchlens/_state.py", "_active_owner_thread_id"),
+        ("torchlens/_state.py", "_active_record_spans"),
         ("torchlens/_state.py", "_active_trace"),
         ("torchlens/_state.py", "_capture_replay_templates"),
         ("torchlens/_state.py", "_dynamo_warning_emitted"),
         ("torchlens/_state.py", "_func_call_id_counter"),
+        ("torchlens/_state.py", "_function_call_counts"),
+        ("torchlens/_state.py", "_function_call_models"),
         ("torchlens/_state.py", "_functorch_warning_emitted"),
         ("torchlens/_state.py", "_logging_enabled"),
         ("torchlens/_state.py", "_relationship_input_id"),
@@ -33,20 +36,44 @@ _SCOPED_CAPTURE_STATE = frozenset(
         ("torchlens/_state.py", "_relationship_model_class"),
         ("torchlens/_state.py", "_relationship_model_id"),
         ("torchlens/_state.py", "_relationship_weight_fingerprint"),
-        ("torchlens/backends/torch/_tl.py", "_ACTIVE_LABEL_SESSION"),
-        # The ``global`` statement is LEXICALLY in the split fragment, while the name it
-        # binds lives in ``completeness_witness``: the fragment's functions are rebound to
-        # that module's globals dict (``_rebind_function(..., globals())``). This inventory
-        # keys on the lexical site, which is what the AST detector can see.
+        ("torchlens/_state.py", "_tagged_buffer_ids"),
+        ("torchlens/_trace_core/op_store.py", "_CLONE_SCOPE_DEPTH"),
+        ("torchlens/backends/mlx/wrappers.py", "_ACTIVE_TAP_OBSERVER"),
+        ("torchlens/backends/paddle/wrappers.py", "_ACTIVE_TAP_OBSERVER"),
+        ("torchlens/backends/tinygrad/backend.py", "_ACTIVE_TINYGRAD_MODULE_STACK"),
         ("torchlens/backends/torch/_completeness_finalize.py", "_ACTIVE_WITNESS_STATE"),
+        ("torchlens/backends/torch/_tl.py", "_ACTIVE_LABEL_SESSION"),
+        ("torchlens/backends/torch/buffer_writes.py", "_WITNESS_MARKER_STATE"),
+        ("torchlens/backends/torch/completeness_witness.py", "_CAPTURED_STORAGE_PTRS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_DISPATCH_TENSOR_ORIGINS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_RUNNABLE_LEDGER_FACTS"),
         ("torchlens/backends/torch/rescue.py", "_rescue_active"),
         ("torchlens/capture/projections.py", "_active_recording_state"),
         ("torchlens/capture/trace.py", "_ACTIVE_CAPTURE_BACKEND"),
+        ("torchlens/experimental/__init__.py", "_STOP_AFTER_SITE"),
+        ("torchlens/utils/introspection.py", "_FUNC_CALL_LOCATION"),
+        ("torchlens/utils/rng.py", "_ACTIVE_MONITOR"),
+        ("torchlens/utils/tensor_utils.py", "_DEFER_BUSY"),
+        ("torchlens/utils/tensor_utils.py", "_DEFER_PENDING"),
+        ("torchlens/utils/tensor_utils.py", "_DEFER_STATE_PTRS"),
+        ("torchlens/utils/tensor_utils.py", "_DEFER_WINDOW_DEPTH"),
     }
 )
+"""Per-capture state: set during one capture and cleared or restored on exit.
+
+A leak here is a correctness bug -- the next capture inherits a live owner, an
+open session, or a stale window depth. ``test_mid_capture_failure_restores_process_state``
+pins the high-risk members against exception and interruption paths.
+"""
 
 _INSTALL_STATE_AND_CACHES = frozenset(
     {
+        ("torchlens/_state.py", "_decorated_func_mapper"),
+        ("torchlens/_state.py", "_decorated_to_orig"),
+        ("torchlens/_state.py", "_orig_to_decorated"),
+        ("torchlens/_state.py", "_prepared_models"),
+        ("torchlens/_state.py", "_prepared_root_by_module"),
+        ("torchlens/_state.py", "_stale_prepared_roots"),
         ("torchlens/backends/torch/_tl.py", "_RETIRED_LABEL_SESSION"),
         ("torchlens/backends/torch/backward.py", "_AUTOGRAD_WRAPPERS_INSTALLED"),
         ("torchlens/backends/torch/backward.py", "_ORIGINAL_AUTOGRAD_BACKWARD"),
@@ -54,23 +81,302 @@ _INSTALL_STATE_AND_CACHES = frozenset(
         ("torchlens/backends/torch/backward.py", "_ORIGINAL_SAVED_TENSORS_HOOKS_ENTER"),
         ("torchlens/backends/torch/backward.py", "_ORIGINAL_SAVED_TENSORS_HOOKS_INIT"),
         ("torchlens/backends/torch/backward.py", "_SAVED_TENSORS_HOOKS_INIT_PATCHED"),
+        ("torchlens/backends/torch/belt.py", "_ledger"),
         ("torchlens/backends/torch/belt.py", "_member_map"),
         ("torchlens/backends/torch/belt.py", "_report"),
-        ("torchlens/backends/torch/buffer_writes.py", "_WITNESS_MARKER_STATE"),
+        ("torchlens/backends/torch/belt.py", "_swept_module_ids"),
+        ("torchlens/backends/torch/completeness_witness.py", "_AUTHORIZED_INTERNAL_CALLER_CODE"),
+        (
+            "torchlens/backends/torch/completeness_witness.py",
+            "_AUTHORIZED_INTERNAL_CALLER_CODE_IDS",
+        ),
         ("torchlens/backends/torch/escape_detection.py", "_TABLES"),
+        ("torchlens/backends/torch/wrappers.py", "_DEVICE_CONSTRUCTOR_NAMES"),
         ("torchlens/backends/torch/wrappers.py", "_DeviceContext"),
         ("torchlens/backends/torch/wrappers.py", "_torchvision_ops_ensured"),
         ("torchlens/capture/arg_positions.py", "_schema_corrections_applied"),
+        ("torchlens/distributed/_lifecycle.py", "_STATE"),
     }
 )
+"""Wrapper install / uninstall bookkeeping and prepared-model registration.
+
+Process-lifetime by design: these hold the torch originals, the decorated-callable
+id maps, the belt ledger, and the prepared-model registry. They must survive
+between captures and be restored by ``unwrap_torch()`` / ``release_model()``,
+not reset per capture.
+"""
 
 _WARN_ONCE_STATE = frozenset(
-    {("torchlens/validation/_stock_layer_grads.py", "_PASS_INDEX_PARSE_WARNED")}
+    {
+        ("torchlens/_capture_state_helpers.py", "_COMPILED_FORCED_EAGER_WARNED"),
+        ("torchlens/_capture_state_helpers.py", "_COMPILED_MODEL_UNWRAP_WARNED"),
+        ("torchlens/_capture_state_helpers.py", "_VALIDATION_DEEPCOPY_WARNING_TYPES"),
+        ("torchlens/_deprecations.py", "_WARNED_DEPRECATIONS"),
+        ("torchlens/_io/bundle.py", "_NONPERSISTENT_DISCLOSURE_WARNED"),
+        ("torchlens/_io/bundle.py", "_UNATTESTABLE_ACTIVATION_DISCLOSURE_WARNED"),
+        ("torchlens/backends/tf/_tf_compat.py", "_warned_missing_capabilities"),
+        ("torchlens/backends/torch/buffer_writes.py", "_PARAM_BYTE_WITNESS_NOT_ARMED"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_OBSERVER_FAILED"),
+        ("torchlens/backends/torch/ops.py", "_UNSUPPORTED_OUTPUT_CONTAINER_WARNED"),
+        ("torchlens/data_classes/op.py", "_WARNED_REFERENCE_SAVE_MODE"),
+        ("torchlens/distributed/_lifecycle.py", "_AUTO_ARM_WARNED"),
+        ("torchlens/fastlog/_storage_resolver.py", "_WARNED_REFERENCE_SAVE_MODE"),
+        ("torchlens/utils/_torch_compat.py", "_warned_missing_capabilities"),
+        ("torchlens/utils/introspection.py", "_col_offset_cache_warned"),
+        ("torchlens/validation/_stock_layer_grads.py", "_PASS_INDEX_PARSE_WARNED"),
+        ("torchlens/visualization/_render_dot.py", "_SIBLING_ORDER_WARNING_EMITTED"),
+        ("torchlens/visualization/auto_collapse.py", "_COUNT_MISMATCH_WARNING_EMITTED"),
+    }
 )
+"""Once-per-process disclosure sentinels.
+
+Each suppresses a repeat warning. They are ORDER-COUPLING for tests: whichever
+test fires the warning first consumes it, so a suite that asserts on the warning
+must reset them (the reset fixture is owned by ``tests/conftest.py``). Any new
+sentinel landing here without a reset is an order-dependence bug waiting to
+happen.
+"""
+
+_CAPABILITY_PROBE_STATE = frozenset(
+    {
+        ("torchlens/utils/_torch_compat.py", "HAS_C10D_ABORT_PG"),
+        ("torchlens/utils/_torch_compat.py", "HAS_C10D_GROUP_REGISTRY"),
+        ("torchlens/utils/_torch_compat.py", "HAS_C10D_GROUP_SEQ"),
+        ("torchlens/utils/_torch_compat.py", "HAS_DEVICE_MESH"),
+        ("torchlens/utils/_torch_compat.py", "HAS_DTENSOR"),
+        ("torchlens/utils/_torch_compat.py", "HAS_DYNAMO_COMPILE_COUNTERS"),
+        ("torchlens/utils/_torch_compat.py", "HAS_DYNAMO_IS_COMPILING"),
+        ("torchlens/utils/_torch_compat.py", "HAS_DYNAMO_OPTIMIZED_MODULE"),
+        ("torchlens/utils/_torch_compat.py", "HAS_DYNAMO_ORIG_CALLABLE_MARKER"),
+        ("torchlens/utils/_torch_compat.py", "HAS_FP8_DTYPES"),
+        ("torchlens/utils/_torch_compat.py", "HAS_FSDP_WRAPPER"),
+        ("torchlens/utils/_torch_compat.py", "HAS_PIPELINING"),
+        ("torchlens/utils/_torch_compat.py", "HAS_TRACING_TENSOR_TYPES"),
+        ("torchlens/utils/_torch_compat.py", "_C10D_ABORT_PG_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_C10D_GROUP_REGISTRY_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_C10D_GROUP_SEQ_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_DEVICE_MESH_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_DEVICE_MESH_TYPE"),
+        ("torchlens/utils/_torch_compat.py", "_DTENSOR_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_DTENSOR_TYPE"),
+        ("torchlens/utils/_torch_compat.py", "_DYNAMO_COMPILE_COUNTERS"),
+        ("torchlens/utils/_torch_compat.py", "_DYNAMO_COMPILE_COUNTERS_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_DYNAMO_IS_COMPILING_FN"),
+        ("torchlens/utils/_torch_compat.py", "_DYNAMO_IS_COMPILING_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_DYNAMO_OPTIMIZED_MODULE_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_DYNAMO_OPTIMIZED_MODULE_TYPE"),
+        ("torchlens/utils/_torch_compat.py", "_DYNAMO_ORIG_CALLABLE_MARKER_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_FP8_DTYPES"),
+        ("torchlens/utils/_torch_compat.py", "_FP8_DTYPES_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_FSDP_WRAPPER_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_FSDP_WRAPPER_TYPE"),
+        ("torchlens/utils/_torch_compat.py", "_PIPELINING_PROBED"),
+        ("torchlens/utils/_torch_compat.py", "_PIPELINING_TYPES"),
+        ("torchlens/utils/_torch_compat.py", "_TOP_SAVED_TENSORS_DEFAULT_HOOKS_ARGS"),
+        ("torchlens/utils/_torch_compat.py", "_TRACING_TENSOR_TYPES"),
+        ("torchlens/utils/_torch_compat.py", "_TRACING_TENSOR_TYPES_PROBED"),
+        ("torchlens/utils/rng.py", "_cuda_rng_unusable"),
+        ("torchlens/utils/tensor_utils.py", "_cuda_available"),
+    }
+)
+"""Feature-detection memos for the running torch build.
+
+Written once by a lazy probe and then immutable for the process. They are facts
+of the runtime, never capture state, and must never be reset to force a
+behavioral branch -- ``CLAUDE.md`` forbids version parsing precisely because
+these flags are the sanctioned mechanism.
+"""
+
+_DIAGNOSTIC_AUDIT_STATE = frozenset(
+    {
+        ("torchlens/_trace_core/op_store.py", "_AUDIT_CLONE_READS"),
+        ("torchlens/_trace_core/op_store.py", "_AUDIT_COLLECTORS"),
+        ("torchlens/_trace_core/op_store.py", "_AUDIT_FINGERPRINTS"),
+        ("torchlens/_trace_core/op_store.py", "_AUDIT_READS"),
+        ("torchlens/_trace_core/op_store.py", "_AUDIT_ROW_RELEASES"),
+        ("torchlens/_trace_core/op_store.py", "_AUDIT_WRITE_EFFECTS"),
+        ("torchlens/postprocess/__init__.py", "RECORDED_STEP_CLONE_READS"),
+        ("torchlens/postprocess/__init__.py", "RECORDED_STEP_EFFECTIVE_WRITES"),
+        ("torchlens/postprocess/__init__.py", "RECORDED_STEP_READS"),
+        ("torchlens/postprocess/__init__.py", "RECORDED_STEP_WRITES"),
+    }
+)
+"""Audit instrumentation armed only by an environment variable.
+
+Empty and untouched in production runs (``TORCHLENS_POSTPROCESS_ASSERTIONS`` /
+``TORCHLENS_POSTPROCESS_READ_AUDIT`` off). They accumulate within one armed
+window and are scoped by the executor's begin/end pass.
+"""
+
+_WEAK_SUBJECT_TABLES = frozenset(
+    {
+        ("torchlens/_state.py", "_log_registry"),
+        ("torchlens/backends/torch/backward.py", "_BACKWARD_TRACE_SLOTS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_ALIAS_MUTATION_CANDIDATE_LABELS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_DATA_ALIAS_MUTATION_TRACES"),
+        (
+            "torchlens/backends/torch/completeness_witness.py",
+            "_HOST_ESCAPE_BOOL_CONSUMER_LOCATIONS",
+        ),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_BOOL_SOURCE_LABELS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_CROSS_THREAD_CAPTURED"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_LABEL_LEAF_ORIGINS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_MUTABLE_WRITEBACK"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_RAW_POINTER"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_SOURCE_LABELS"),
+        (
+            "torchlens/backends/torch/completeness_witness.py",
+            "_HOST_ESCAPE_STATE_METADATA_OBSERVATIONS",
+        ),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_STATE_METADATA_READS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_STATE_SOURCE_LABELS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_STATE_SOURCE_NAMES"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_UNATTRIBUTABLE_BOOL"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE"),
+        ("torchlens/backends/torch/completeness_witness.py", "_INPUT_METADATA_VIEW_READ"),
+        ("torchlens/backends/torch/completeness_witness.py", "_LAYOUT_ANCESTRY_CLEAN"),
+        ("torchlens/backends/torch/completeness_witness.py", "_PRUNED_ALIAS_MUTATION_LABELS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_PRUNED_RNG_CONTROL_LABELS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_RUNNABLE_INPUT_STORAGE_SITES"),
+        ("torchlens/backends/torch/completeness_witness.py", "_STATE_METADATA_FACTS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_STORAGE_REBIND_BARRIER_LABELS"),
+        ("torchlens/backends/torch/model_prep.py", "_source_line_cache"),
+        ("torchlens/backends/torch/wrappers.py", "_COW_STATE_PTRS_CACHE"),
+        ("torchlens/data_classes/_compaction.py", "_COMPACTED_TRACES"),
+        ("torchlens/data_classes/_nonfinite.py", "_MEMOS"),
+        ("torchlens/data_classes/_trace_accessors.py", "_TRACE_LAYER_ACCESSOR_CACHE"),
+        ("torchlens/data_classes/_trace_accessors.py", "_TRACE_OP_ACCESSOR_CACHE"),
+        ("torchlens/partial/__init__.py", "_FAILED_CAPTURE_RESULTS"),
+        ("torchlens/visualization/auto_collapse.py", "_ANALYSIS_CACHE"),
+        ("torchlens/visualization/auto_collapse.py", "_OP_ADJACENCY_INDEX_CACHE"),
+        ("torchlens/visualization/code_panel.py", "_SOURCE_MEMO"),
+        ("torchlens/visualization/collapse_optimizer.py", "_BOX_UNITS_CACHE"),
+        ("torchlens/visualization/collapse_optimizer.py", "_RESULT_CACHE"),
+        ("torchlens/visualization/collapse_optimizer.py", "_SCHEDULE_CACHE"),
+    }
+)
+"""Side tables keyed WEAKLY by their subject (trace, tensor, model, code).
+
+Entries die with the subject, so these can neither pin memory nor leak state
+across captures. The test below verifies mechanically that every member really
+is bound to a ``weakref`` container -- a member that silently becomes a strong
+dict would otherwise keep its whole subject graph alive.
+"""
+
+_PUBLIC_REGISTRATION_STATE = frozenset(
+    {
+        ("torchlens/backends/registry.py", "_REGISTRY"),
+        ("torchlens/capture/flops.py", "_CUSTOM_OP_RULES"),
+        ("torchlens/ir/container.py", "_CONTAINER_REGISTRY"),
+        ("torchlens/receptive_field/_rules.py", "_BUILTIN_RF_RULES"),
+        ("torchlens/receptive_field/_rules.py", "_RF_RULES"),
+        ("torchlens/receptive_field/_rules.py", "_RF_RULES_EPOCH"),
+        ("torchlens/semantic/facets.py", "_BUILTIN_REGISTRY"),
+        ("torchlens/semantic/facets.py", "_REGISTRY"),
+        ("torchlens/semantic/facets.py", "_REGISTRY_VERSION"),
+        ("torchlens/semantic/facets.py", "_TRANSFORMERLENS_ALIASES_ENABLED"),
+    }
+)
+"""Process state a PUBLIC API mutates: registries, rule tables, feature toggles.
+
+Distinct from a cache because a user call CHANGES capture behavior for the rest
+of the process (a registered facet, an RF rule, an enabled alias set). These are
+the members whose leakage across a test session can silently change results, so
+they carry an epoch/version counter where downstream caches must invalidate.
+"""
+
+_PROCESS_CACHES = frozenset(
+    {
+        ("torchlens/_input_walk.py", "_STOCK_NP_SCALAR_CACHE"),
+        ("torchlens/_io/bundle.py", "_NESTED_BLOB_KINDS"),
+        ("torchlens/_io/payload_codec.py", "_CODECS"),
+        ("torchlens/_io/rehydrate.py", "_REHYDRATE_KINDS"),
+        ("torchlens/_io/runnable.py", "_DATACLASS_FIELD_NAMES"),
+        ("torchlens/_io/runnable.py", "_SPARSE_CORE_NODE_KINDS"),
+        ("torchlens/_io/runnable.py", "_TORCH_SYMBOL_NAMES"),
+        ("torchlens/_io/runnable.py", "_TORCH_SYMBOL_NAMESPACE_SIZE"),
+        ("torchlens/_io/scrub.py", "_SCRUB_VALUE_KINDS"),
+        ("torchlens/_io/state_keys.py", "_CACHE_GENERATION"),
+        ("torchlens/_state.py", "_arg_names"),
+        ("torchlens/_state.py", "_dir_cache"),
+        ("torchlens/_state.py", "_dynamic_arg_specs"),
+        ("torchlens/_state.py", "_naming_counters"),
+        ("torchlens/_training_validation.py", "_NON_GRAD_DTYPES"),
+        ("torchlens/backends/torch/backward.py", "_BACKWARD_GRAD_FN_REGISTRY"),
+        ("torchlens/backends/torch/completeness_witness.py", "_FRAMEWORK_FILENAME_VERDICTS"),
+        ("torchlens/backends/torch/model_prep.py", "_module_class_metadata_cache"),
+        ("torchlens/backends/torch/ops.py", "_CAPTURE_PRODUCER_POLICIES"),
+        ("torchlens/capture/arg_positions.py", "FUNC_ARG_SPECS"),
+        ("torchlens/capture/projections.py", "_CAPTURE_POLICY_CACHE"),
+        ("torchlens/capture/projectors.py", "_REFRESH_SOURCES"),
+        ("torchlens/capture/salient_args.py", "_EXTRACTORS"),
+        ("torchlens/constants.py", "_TORCHVISION_FUNCS_CACHE"),
+        ("torchlens/data_classes/op.py", "_RELATION_CELL_ENCODINGS"),
+        ("torchlens/data_classes/trace.py", "_MODEL_LOG_DEFAULT_FILL"),
+        ("torchlens/partial/__init__.py", "_FAILED_CAPTURE_REGISTRY"),
+        ("torchlens/postprocess/ast_branches.py", "_file_cache"),
+        ("torchlens/receptive_field/_engine.py", "_SCHEMA_OPERAND_SLOTS_CACHE"),
+        ("torchlens/utils/introspection.py", "_COL_OFFSET_CACHE"),
+    }
+)
+"""Process-lifetime memos holding strong references.
+
+Correctness-neutral (a cleared cache only costs time) but they are the class
+that PINS objects, so each strong key/value must be justified: prefer a weak
+table when the key is a user object, and clear the cache in the capture epilogue
+when its entries are session-scoped (see ``_module_class_metadata_cache``).
+"""
+
+MUTATING_METHODS = frozenset(
+    {
+        "append",
+        "appendleft",
+        "add",
+        "clear",
+        "discard",
+        "extend",
+        "insert",
+        "move_to_end",
+        "pop",
+        "popitem",
+        "popleft",
+        "remove",
+        "setdefault",
+        "sort",
+        "update",
+        "__setitem__",
+    }
+)
+"""Method names whose call mutates a container in place."""
+
+MUTABLE_FACTORIES = frozenset(
+    {
+        "ChainMap",
+        "Counter",
+        "OrderedDict",
+        "WeakKeyDictionary",
+        "WeakSet",
+        "WeakValueDictionary",
+        "defaultdict",
+        "deque",
+        "dict",
+        "list",
+        "set",
+    }
+)
+"""Callables whose result is a mutable container."""
 
 
-def _lane_python_paths(repo: Path) -> list[Path]:
-    """Return Python files governed by the trust lane.
+def _package_python_paths(repo: Path) -> list[Path]:
+    """Return every Python source file in the package.
+
+    The inventory used to scan only ``_state.py`` plus ``capture/``,
+    ``validation/`` and ``backends/torch/``, which governed a MINORITY of the
+    surface it claimed: the process-global per-capture tap observers in the
+    mlx/paddle backends, the mutable facet toggle, the RF rule registry, the
+    warn-once sentinels in ``_io``/``visualization``/``distributed`` and the
+    whole ``_torch_compat`` capability block were all out of scope, so a new
+    unclassified global could land in them without failing anything.
 
     Parameters
     ----------
@@ -80,17 +386,116 @@ def _lane_python_paths(repo: Path) -> list[Path]:
     Returns
     -------
     list[Path]
-        Sorted in-lane Python source paths.
+        Sorted package Python source paths.
     """
 
-    paths = [repo / "torchlens/_state.py"]
-    for relative in ("torchlens/capture", "torchlens/validation", "torchlens/backends/torch"):
-        paths.extend((repo / relative).rglob("*.py"))
-    return sorted(paths)
+    return sorted((repo / "torchlens").rglob("*.py"))
 
 
-def _declared_globals(repo: Path) -> set[tuple[str, str]]:
-    """Return exact ``(path, name)`` pairs declared with ``global``.
+def _module_level_mutable_bindings(tree: ast.Module) -> dict[str, str]:
+    """Return module-level names bound to a mutable container, with their source.
+
+    Parameters
+    ----------
+    tree:
+        Parsed module.
+
+    Returns
+    -------
+    dict[str, str]
+        Name -> unparsed initializer for each module-level mutable binding.
+    """
+
+    bindings: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        mutable = isinstance(
+            value, (ast.Dict, ast.Set, ast.List, ast.DictComp, ast.SetComp, ast.ListComp)
+        )
+        if isinstance(value, ast.Call):
+            factory = value.func
+            factory_name = (
+                factory.id
+                if isinstance(factory, ast.Name)
+                else factory.attr
+                if isinstance(factory, ast.Attribute)
+                else None
+            )
+            mutable = mutable or factory_name in MUTABLE_FACTORIES
+        if not mutable:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                bindings[target.id] = ast.unparse(value)
+    return bindings
+
+
+def _names_mutated_in_place(trees: dict[str, ast.Module]) -> set[str]:
+    """Return every name mutated in place anywhere in the package.
+
+    Both spellings count, because module state is routinely mutated through an
+    imported module alias: a bare ``_CACHE[key] = value`` in the owning module
+    AND an ``_state._dir_cache[key] = value`` from another one. The attribute
+    spelling is matched by ATTRIBUTE NAME, which can over-include a same-named
+    attribute on an unrelated object; over-inclusion only ever asks for one more
+    classification row, whereas under-inclusion is the blind spot this closes.
+
+    Parameters
+    ----------
+    trees:
+        Relative path -> parsed module for the whole package.
+
+    Returns
+    -------
+    set[str]
+        Names observed under an in-place mutation.
+    """
+
+    mutated: set[str] = set()
+    for tree in trees.values():
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AugAssign, ast.Delete)):
+                targets = (
+                    node.targets if isinstance(node, (ast.Assign, ast.Delete)) else [node.target]
+                )
+                for target in targets:
+                    if not isinstance(target, ast.Subscript):
+                        continue
+                    base = target.value
+                    if isinstance(base, ast.Name):
+                        mutated.add(base.id)
+                    elif isinstance(base, ast.Attribute):
+                        mutated.add(base.attr)
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in MUTATING_METHODS
+            ):
+                base = node.func.value
+                if isinstance(base, ast.Name):
+                    mutated.add(base.id)
+                elif isinstance(base, ast.Attribute):
+                    mutated.add(base.attr)
+    return mutated
+
+
+def _mutable_module_state(repo: Path) -> dict[tuple[str, str], str]:
+    """Return every mutable module global in the package, with its initializer.
+
+    Two detectors, because either alone has a structural blind spot:
+
+    * ``global`` declarations catch REBINDING (``_flag = True``) but can never
+      see a container mutated in place -- ``_CACHE[key] = value`` needs no
+      ``global`` statement at all, so the whole cache/registry class was
+      invisible to the previous gate.
+    * Module-level mutable bindings catch the container class, qualified by
+      package-wide evidence that something actually mutates them, so frozen
+      lookup tables are not dragged in.
 
     Parameters
     ----------
@@ -99,18 +504,27 @@ def _declared_globals(repo: Path) -> set[tuple[str, str]]:
 
     Returns
     -------
-    set[tuple[str, str]]
-        Unique global declarations in trust-lane source files.
+    dict[tuple[str, str], str]
+        ``(relative path, name)`` -> unparsed initializer (empty for names known
+        only from a ``global`` declaration).
     """
 
-    declarations: set[tuple[str, str]] = set()
-    for path in _lane_python_paths(repo):
-        tree = ast.parse(path.read_text())
-        relative = path.relative_to(repo).as_posix()
+    trees = {
+        path.relative_to(repo).as_posix(): ast.parse(path.read_text())
+        for path in _package_python_paths(repo)
+    }
+    mutated_names = _names_mutated_in_place(trees)
+    state: dict[tuple[str, str], str] = {}
+    for relative, tree in trees.items():
+        bindings = _module_level_mutable_bindings(tree)
         for node in ast.walk(tree):
             if isinstance(node, ast.Global):
-                declarations.update((relative, name) for name in node.names)
-    return declarations
+                for name in node.names:
+                    state.setdefault((relative, name), bindings.get(name, ""))
+        for name, initializer in bindings.items():
+            if name in mutated_names:
+                state[(relative, name)] = initializer
+    return state
 
 
 def _capture_scope_snapshot() -> dict[str, Any]:
@@ -297,17 +711,144 @@ class _PauseFromForeignThread(nn.Module):
         return x
 
 
+_WEAKLY_HELD = frozenset(
+    {
+        ("torchlens/_capture_state_helpers.py", "_VALIDATION_DEEPCOPY_WARNING_TYPES"),
+        ("torchlens/_state.py", "_log_registry"),
+        ("torchlens/_state.py", "_prepared_models"),
+        ("torchlens/_state.py", "_prepared_root_by_module"),
+        ("torchlens/_state.py", "_stale_prepared_roots"),
+        ("torchlens/backends/torch/backward.py", "_BACKWARD_TRACE_SLOTS"),
+        ("torchlens/backends/torch/buffer_writes.py", "_PARAM_BYTE_WITNESS_NOT_ARMED"),
+        ("torchlens/backends/torch/completeness_witness.py", "_ALIAS_MUTATION_CANDIDATE_LABELS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_CAPTURED_STORAGE_PTRS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_DATA_ALIAS_MUTATION_TRACES"),
+        ("torchlens/backends/torch/completeness_witness.py", "_DISPATCH_TENSOR_ORIGINS"),
+        (
+            "torchlens/backends/torch/completeness_witness.py",
+            "_HOST_ESCAPE_BOOL_CONSUMER_LOCATIONS",
+        ),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_BOOL_SOURCE_LABELS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_CROSS_THREAD_CAPTURED"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_LABEL_LEAF_ORIGINS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_MUTABLE_WRITEBACK"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_OBSERVER_FAILED"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_RAW_POINTER"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_SOURCE_LABELS"),
+        (
+            "torchlens/backends/torch/completeness_witness.py",
+            "_HOST_ESCAPE_STATE_METADATA_OBSERVATIONS",
+        ),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_STATE_METADATA_READS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_STATE_SOURCE_LABELS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_STATE_SOURCE_NAMES"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_UNATTRIBUTABLE_BOOL"),
+        ("torchlens/backends/torch/completeness_witness.py", "_HOST_ESCAPE_UNATTRIBUTABLE_OPAQUE"),
+        ("torchlens/backends/torch/completeness_witness.py", "_INPUT_METADATA_VIEW_READ"),
+        ("torchlens/backends/torch/completeness_witness.py", "_LAYOUT_ANCESTRY_CLEAN"),
+        ("torchlens/backends/torch/completeness_witness.py", "_PRUNED_ALIAS_MUTATION_LABELS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_PRUNED_RNG_CONTROL_LABELS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_RUNNABLE_INPUT_STORAGE_SITES"),
+        ("torchlens/backends/torch/completeness_witness.py", "_RUNNABLE_LEDGER_FACTS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_STATE_METADATA_FACTS"),
+        ("torchlens/backends/torch/completeness_witness.py", "_STORAGE_REBIND_BARRIER_LABELS"),
+        ("torchlens/backends/torch/model_prep.py", "_source_line_cache"),
+        ("torchlens/backends/torch/wrappers.py", "_COW_STATE_PTRS_CACHE"),
+        ("torchlens/data_classes/_compaction.py", "_COMPACTED_TRACES"),
+        ("torchlens/data_classes/_nonfinite.py", "_MEMOS"),
+        ("torchlens/data_classes/_trace_accessors.py", "_TRACE_LAYER_ACCESSOR_CACHE"),
+        ("torchlens/data_classes/_trace_accessors.py", "_TRACE_OP_ACCESSOR_CACHE"),
+        ("torchlens/partial/__init__.py", "_FAILED_CAPTURE_RESULTS"),
+        ("torchlens/visualization/auto_collapse.py", "_ANALYSIS_CACHE"),
+        ("torchlens/visualization/auto_collapse.py", "_OP_ADJACENCY_INDEX_CACHE"),
+        ("torchlens/visualization/code_panel.py", "_SOURCE_MEMO"),
+        ("torchlens/visualization/collapse_optimizer.py", "_BOX_UNITS_CACHE"),
+        ("torchlens/visualization/collapse_optimizer.py", "_RESULT_CACHE"),
+        ("torchlens/visualization/collapse_optimizer.py", "_SCHEDULE_CACHE"),
+    }
+)
+"""Every inventory member whose container is bound WEAKLY, across all classes.
+
+Orthogonal to the lifecycle classes on purpose: weakness is a storage fact, and
+``_prepared_models`` is both a weak registry AND install state, while
+``_VALIDATION_DEEPCOPY_WARNING_TYPES`` is both weak AND a warn-once sentinel.
+Freezing the weak set separately means a member that silently changes from
+``WeakKeyDictionary()`` to ``{}`` -- and so starts pinning its whole subject
+graph -- fails a gate instead of hiding behind a reassuring lifecycle row.
+"""
+
+
+_LIFECYCLE_CLASSES = (
+    _SCOPED_CAPTURE_STATE,
+    _INSTALL_STATE_AND_CACHES,
+    _WARN_ONCE_STATE,
+    _CAPABILITY_PROBE_STATE,
+    _DIAGNOSTIC_AUDIT_STATE,
+    _WEAK_SUBJECT_TABLES,
+    _PUBLIC_REGISTRATION_STATE,
+    _PROCESS_CACHES,
+)
+"""Every lifecycle class, in declaration order. The union must be exact."""
+
+
 def test_global_state_inventory_is_classified_and_shrink_only() -> None:
-    """Every trust-lane ``global`` declaration has one lifecycle class."""
+    """Every mutable module global in the PACKAGE has exactly one lifecycle class.
+
+    Scope and detection are both wider than they were. The inventory covered
+    ``_state.py`` plus three subpackages, and classified only ``global``
+    declarations -- so the majority of the surface it claimed to govern was
+    unreachable by it, and the entire mutated-in-place class (``_CACHE[key] =
+    value`` needs no ``global`` statement) was structurally invisible even
+    in-lane. See ``_package_python_paths`` and ``_mutable_module_state``.
+    """
 
     repo = Path(__file__).resolve().parents[1]
-    categories = (_SCOPED_CAPTURE_STATE, _INSTALL_STATE_AND_CACHES, _WARN_ONCE_STATE)
-    classified = set().union(*categories)
+    classified = set().union(*_LIFECYCLE_CLASSES)
 
-    assert sum(len(category) for category in categories) == len(classified), (
+    assert sum(len(category) for category in _LIFECYCLE_CLASSES) == len(classified), (
         "global lifecycle classes overlap"
     )
-    assert _declared_globals(repo) == classified
+    observed = _mutable_module_state(repo)
+    missing = sorted(set(observed) - classified)
+    stale = sorted(classified - set(observed))
+    assert not missing, (
+        f"unclassified mutable module state (assign it a lifecycle class above): {missing}"
+    )
+    assert not stale, f"inventory rows no longer present in the package: {stale}"
+
+
+def test_weakly_held_state_is_exactly_the_declared_ledger() -> None:
+    """The weak/strong split of every inventory member is frozen and exact.
+
+    This is what keeps the inventory from being a rubber stamp. A lifecycle row
+    says what a global is FOR; this says how it HOLDS its subjects, which is the
+    difference between a side table that dies with its trace and one that pins
+    every captured graph in the process. Both directions are checked, so neither
+    weakening nor strengthening a container can pass unreviewed.
+    """
+
+    repo = Path(__file__).resolve().parents[1]
+    observed = _mutable_module_state(repo)
+    weakly_held = {
+        entry for entry, initializer in observed.items() if "weakref.Weak" in initializer
+    }
+
+    became_strong = sorted(_WEAKLY_HELD - weakly_held)
+    became_weak = sorted(weakly_held - _WEAKLY_HELD)
+    assert not became_strong, (
+        "declared-weak module state is no longer bound to a weakref container "
+        f"(it now pins its subjects): {became_strong}"
+    )
+    assert not became_weak, (
+        "module state became weak without updating the ledger (welcome, but the "
+        f"row has to move): {became_weak}"
+    )
+    assert set().union(*_LIFECYCLE_CLASSES) >= _WEAKLY_HELD, (
+        "weak-ledger rows missing from every lifecycle class"
+    )
+    assert _WEAK_SUBJECT_TABLES <= _WEAKLY_HELD, (
+        "a member of the weak-subject-table CLASS is not in the weak ledger"
+    )
 
 
 @pytest.mark.parametrize("error_type", [RuntimeError, _InjectedBaseFailure])
@@ -611,3 +1152,73 @@ def test_main_process_capture_is_never_refused() -> None:
     worker.start()
     worker.join(timeout=5.0)
     assert errors == [], f"a main-process worker thread was refused: {errors!r}"
+
+
+def test_interrupted_partial_diagnostics_still_restore_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interruption during partial-trace recovery still tears the session down.
+
+    The failed-forward epilogue builds best-effort partial diagnostics and then
+    restores the model. Both arms of that construction catch ``Exception``, so a
+    ``KeyboardInterrupt`` raised inside it escaped straight past
+    ``cleanup_model_session`` — leaving the user's model with TorchLens-forced
+    ``requires_grad``, ``tl_*`` attributes, and an installed buffer tracker.
+    """
+
+    from torchlens import partial as partial_module
+
+    class _FailingModel(nn.Module):
+        """Register a frozen parameter and then fail the forward."""
+
+        def __init__(self) -> None:
+            """Build a model with one explicitly frozen parameter."""
+
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(2), requires_grad=False)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Run one logged op and then raise.
+
+            Parameters
+            ----------
+            x:
+                Input tensor.
+
+            Returns
+            -------
+            torch.Tensor
+                This path never returns.
+
+            Raises
+            ------
+            ValueError
+                Always, after one logged operation.
+            """
+
+            _ = torch.relu(x * self.weight)
+            raise ValueError("forward failure with interrupted diagnostics")
+
+    def _interrupt_partial_construction(*_args: Any, **_kwargs: Any) -> Any:
+        """Interrupt partial-trace construction the way Ctrl-C would."""
+
+        raise KeyboardInterrupt("interrupted during partial construction")
+
+    monkeypatch.setattr(partial_module.PartialTrace, "from_trace", _interrupt_partial_construction)
+
+    model = _FailingModel()
+    before = _capture_scope_snapshot()
+
+    with pytest.raises(KeyboardInterrupt):
+        tl.trace(model, torch.ones(2))
+
+    assert model.weight.requires_grad is False, (
+        "the interrupted epilogue left TorchLens-forced requires_grad on a frozen parameter"
+    )
+    assert not [name for name in vars(model) if name.startswith("tl_")], (
+        "the interrupted epilogue left tl_* session metadata on the model"
+    )
+    assert _capture_scope_snapshot() == before
+    # The process is still usable for the next capture.
+    recovered = tl.trace(nn.ReLU(), torch.ones(2))
+    assert any(op.func_name == "relu" for op in recovered.compute_ops)
