@@ -186,7 +186,9 @@ _KNOWN_UNSUPPORTED_ARG_SPEC_REASONS = {
     "getdevice": "metadata/control helper with no validated tensor-input schema",
     "getsoftmaxdim": "metadata/control helper with no validated tensor-input schema",
     "h": "demoted fragment: no operator schema available",
-    "handletorchfunction": "internal/private helper left on dynamic fallback until independently validated",
+    # "handletorchfunction" was removed: __torch_function__ protocol plumbing is
+    # deliberately no longer decorated at all (safety-net stage 0, 8cc709a2), so
+    # the entry became exactly the stale class this table's cross-check catches.
     "hsmm": "demoted fragment: no operator schema available",
     "ipu": "demoted fragment: no operator schema available",
     "issamesize": "metadata/control helper with no validated tensor-input schema",
