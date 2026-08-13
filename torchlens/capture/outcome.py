@@ -964,8 +964,43 @@ def stamp_backend_finalized(trace: object) -> CaptureOutcome:
     object derives UNATTESTED -- never COMPLETE. A backend that ever needs an
     early stamp must demote through :func:`demote_outcome` on post-stamp
     teardown failure; premature stamping is closed by rule.
+
+    HALT-AWARE BY CONSTRUCTION (B1-01). A preview backend that supports
+    ``halt=`` (paddle's shipped capability, MLX's ``_mlx_halt_selector``)
+    catches its ``HaltSignal``, writes the structural halt fields, and then
+    falls through the SAME tail to this one stamp. Reading ``trace.halted``
+    here mirrors :func:`settle_halted` at the chokepoint, so no preview
+    backend can stamp a halted product COMPLETE -- a wrongly-blessed settled
+    status that the load-time coherence matrix would have to degrade to
+    UNKNOWN, taking N1 re-save and N2 validation entry down with it. Backends
+    with no halt path are unaffected: ``halted`` is falsey and the COMPLETE
+    arm is byte-identical to before.
     """
 
+    if bool(getattr(trace, "halted", False)):
+        reason = getattr(trace, "halt_reason", None)
+        frontier_label = getattr(trace, "halt_frontier", None)
+        # The preview tail ran to completion (module attachment, relation
+        # freeze), so ``output_layers`` holds this backend's final labels for
+        # the halt frontier -- the same fact settle_halted reads on the
+        # postprocess-ran path. Absence stays None (unknown), never ().
+        frontier: tuple[str, ...] | None = None
+        try:
+            frontier = tuple(str(label) for label in getattr(trace, "output_layers", ())) or None
+        except Exception:
+            frontier = None
+        return _stamp(
+            trace,
+            None,
+            CaptureOutcome(
+                status=CaptureStatus.HALTED,
+                reason=reason if isinstance(reason, str) else None,
+                boundary_label=frontier_label if isinstance(frontier_label, str) else None,
+                frontier_labels=frontier,
+                n_ops_committed=count_committed_ops(trace),
+                inference_only=bool(getattr(trace, "inference_only", False)),
+            ),
+        )
     return _stamp(
         trace,
         None,
