@@ -2094,7 +2094,7 @@ def merge_visualization_options(
             raise KeywordConflictError(
                 f"Do not pass both `{flat_name}` and `visualization.{group_name}`",
                 code="option_group_keyword_conflict",
-                remedy=f"remove either {flat_name!r} or visualization.{group_name!r}",
+                remedy=f"remove either {flat_name!r} or {f'visualization.{group_name}'!r}",
                 arguments=(flat_name, f"visualization.{group_name}"),
             )
         if flat_name in _VISUALIZATION_DEPRECATED_FLAT:
