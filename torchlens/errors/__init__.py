@@ -33,6 +33,7 @@ from .runnable import (
 
 _LEGACY_EXCEPTION_PATHS = {
     "MutatedReferenceError": ("torchlens._errors", "MutatedReferenceError"),
+    "OutputAttributionError": ("torchlens._errors", "OutputAttributionError"),
     "TorchLensCaptureGapError": ("torchlens._errors", "TorchLensCaptureGapError"),
     "TorchLensCaptureGapWarning": ("torchlens._errors", "TorchLensCaptureGapWarning"),
     "PostTraceParamUnavailable": ("torchlens._errors", "PostTraceParamUnavailable"),

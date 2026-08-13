@@ -13,6 +13,17 @@ class TorchLensCaptureGapWarning(TorchLensWarning):
     """Shadow-mode report for a possible unrepresented torch invocation."""
 
 
+class OutputAttributionError(CaptureError, RuntimeError):
+    """Raised when a model output tensor cannot be attributed to any traced op.
+
+    The classic producer is a stale pre-wrap torch function reference in
+    OUTPUT position: the escaped call is invisible to the wrappers, so its
+    result reaches the output walk with no label. Typed so the capture entry
+    can treat it as an escape signal (rescue re-run trigger) instead of
+    string-matching ``RuntimeError`` text.
+    """
+
+
 class TorchLensPostfuncError(CaptureError, RuntimeError):
     """Raised when activation_transform or grad_transform raises."""
 

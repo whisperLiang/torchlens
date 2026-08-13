@@ -15428,7 +15428,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 188,
+    "func_call_id": 186,
     "func_config": {},
     "func_duration": "<measured>",
     "func_id": null,
@@ -16670,7 +16670,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 169,
+    "func_call_id": 167,
     "func_config": {
      "\"p\"": "0.0"
     },
@@ -17096,7 +17096,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 183,
+    "func_call_id": 181,
     "func_config": {
      "\"p\"": "0.0"
     },
@@ -19532,7 +19532,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 195,
+    "func_call_id": 193,
     "func_config": {
      "\"eps\"": "1e-05",
      "\"normalized_shape\"": [
@@ -21275,7 +21275,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 174,
+    "func_call_id": 172,
     "func_config": {
      "\"in_features\"": 8,
      "\"out_features\"": 4
@@ -21668,7 +21668,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 195,
+    "func_call_id": 193,
     "func_config": {},
     "func_duration": "<measured>",
     "func_id": null,
@@ -22484,7 +22484,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 162,
+    "func_call_id": 161,
     "func_config": {},
     "func_duration": "<measured>",
     "func_id": null,
@@ -32662,8 +32662,6 @@
    "decoded_output": null,
    "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
    "detach_saved_activations": false,
-   "detached_patch_epoch": 1,
-   "detached_patch_policy": "legacy",
    "emit_nvtx": false,
    "escape_detector_backward_coverage": "not_armed",
    "escape_detector_callback_ns": 0,
@@ -35183,6 +35181,7 @@
     "\"weights\"": "unknown"
    },
    "replay_frontier": {},
+   "rescue_rerun": null,
    "root_module": {
     "__ref__": "Module",
     "label": "self"
@@ -50672,7 +50671,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 188,
+    "func_call_id": 186,
     "func_config": {},
     "func_duration": "<measured>",
     "func_id": null,
@@ -51914,7 +51913,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 169,
+    "func_call_id": 167,
     "func_config": {
      "\"p\"": "0.0"
     },
@@ -52340,7 +52339,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 183,
+    "func_call_id": 181,
     "func_config": {
      "\"p\"": "0.0"
     },
@@ -54776,7 +54775,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 195,
+    "func_call_id": 193,
     "func_config": {
      "\"eps\"": "1e-05",
      "\"normalized_shape\"": [
@@ -56519,7 +56518,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 174,
+    "func_call_id": 172,
     "func_config": {
      "\"in_features\"": 8,
      "\"out_features\"": 4
@@ -56912,7 +56911,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 195,
+    "func_call_id": 193,
     "func_config": {},
     "func_duration": "<measured>",
     "func_id": null,
@@ -57728,7 +57727,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 162,
+    "func_call_id": 161,
     "func_config": {},
     "func_duration": "<measured>",
     "func_id": null,
@@ -67906,8 +67905,6 @@
    "decoded_output": null,
    "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
    "detach_saved_activations": false,
-   "detached_patch_epoch": 1,
-   "detached_patch_policy": "legacy",
    "emit_nvtx": false,
    "escape_detector_backward_coverage": "not_armed",
    "escape_detector_callback_ns": 0,
@@ -70461,6 +70458,7 @@
     "\"weights\"": "unknown"
    },
    "replay_frontier": {},
+   "rescue_rerun": null,
    "root_module": {
     "__ref__": "Module",
     "label": "self"
@@ -85980,7 +85978,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 188,
+    "func_call_id": 186,
     "func_config": {},
     "func_duration": "<measured>",
     "func_id": null,
@@ -87222,7 +87220,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 169,
+    "func_call_id": 167,
     "func_config": {
      "\"p\"": "0.0"
     },
@@ -87648,7 +87646,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 183,
+    "func_call_id": 181,
     "func_config": {
      "\"p\"": "0.0"
     },
@@ -90084,7 +90082,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 195,
+    "func_call_id": 193,
     "func_config": {
      "\"eps\"": "1e-05",
      "\"normalized_shape\"": [
@@ -91827,7 +91825,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 174,
+    "func_call_id": 172,
     "func_config": {
      "\"in_features\"": 8,
      "\"out_features\"": 4
@@ -92220,7 +92218,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 195,
+    "func_call_id": 193,
     "func_config": {},
     "func_duration": "<measured>",
     "func_id": null,
@@ -93036,7 +93034,7 @@
       "\"enabled\"": false
      }
     },
-    "func_call_id": 162,
+    "func_call_id": 161,
     "func_config": {},
     "func_duration": "<measured>",
     "func_id": null,
@@ -103214,8 +103212,6 @@
    "decoded_output": null,
    "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
    "detach_saved_activations": false,
-   "detached_patch_epoch": 1,
-   "detached_patch_policy": "legacy",
    "emit_nvtx": false,
    "escape_detector_backward_coverage": "not_armed",
    "escape_detector_callback_ns": 0,
@@ -105735,6 +105731,7 @@
     "\"weights\"": "unknown"
    },
    "replay_frontier": {},
+   "rescue_rerun": null,
    "root_module": {
     "__ref__": "Module",
     "label": "self"

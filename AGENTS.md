@@ -43,7 +43,7 @@ Key entry points:
   swallowed halt/nonfinite signals raise `tl.errors.StopSignalSwallowedError`.
   Doc of record: `docs/reference/capture_outcomes.md`.
 - Lazy decoration: `torchlens/backends/torch/model_prep.py:_ensure_model_prepared()` calls
-  `wrap_torch()` and `patch_detached_references()`
+  `wrap_torch()` and the belt/rescue stale-reference machinery
 - Forward-pass orchestration: `torchlens/capture/trace.py`
 - Postprocess: `torchlens/postprocess/__init__.py` current 20-step pipeline
 - Portable I/O: `torchlens/_io/bundle.py`, `torchlens/_io/tlspec.py`, `torchlens/io/__init__.py`

@@ -310,6 +310,19 @@ print(tl.compat.report(model, x).to_markdown())
   exact-type `_to_functional_tensor` values are covered, while slots-only holders and values created
   inside `forward` remain disclosed by the compat row.
   Gated by `HAS_SET_STANCE` / `HAS_DYNAMO_IS_COMPILING` / `HAS_TRACING_TENSOR_TYPES`.
+- Stale pre-wrap torch references (safety net, stage 2): the sys.modules crawler is DELETED —
+  TorchLens never crawls `__main__`, reads module sources, or mutates user objects. A capture with
+  an escape signal (provenance warning / detector diagnostic / output-attribution failure) is
+  re-run ONCE with a `TorchFunctionMode` net that redirects stale calls to their exact wrappers
+  (`backends/torch/rescue.py`); the result is disclosed (`capture_verified=False`, reason
+  `"mode_rescue_rerun"`, session-time `trace.rescue_rerun`). Primary captures are NEVER mode-armed
+  (fused-path observer effect). Protocol-invisible constructors that no mode can see (derived
+  per build: `from_numpy`, `frombuffer`, `Tensor.as_subclass`) keep targeted module-attr patching
+  (`backends/torch/belt.py`). Residuals declared, typed, never silent: worker-thread stale refs
+  (modes are thread-local) and de-moded `handle_torch_function` composite interiors disclose
+  `"escape_rescue_unrecovered"`; an authoritative witness/detector/dynamo verdict stays in place,
+  and a witness-VERIFIED capture suppresses the rescue. `wrap_torch(patch_policy=, patch_modules=)`
+  are deprecated no-ops. Full contract: `docs/migration/scoped_detached_patching.md`.
 - `torchlens._io` and `torchlens.io` own portable `.tlspec` save/load helpers. Manifest
   schema v2 is backend-aware; non-torch preview bundles may be audit-only or metadata-only.
   Rehydration floor: artifacts older than torchlens 2.33 (`tlspec_version` 6) refuse to load

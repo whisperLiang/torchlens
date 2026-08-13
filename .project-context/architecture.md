@@ -74,7 +74,10 @@ barcode hashing, object introspection, display formatting, collection manipulati
 ```
 import torchlens
   → decorate_all_once()       # wraps ~2000 torch functions permanently
-  → patch_detached_references()  # patches `from torch import cos` style refs
+  → sweep_stale_belt_references()  # patches stale refs to the derived protocol-invisible set
+  # (other `from torch import cos` style stale refs are recovered by the rescue re-run:
+  #  an escape signal triggers ONE re-run with a TorchFunctionMode net that redirects
+  #  stale calls to their wrappers; disclosed via trace.rescue_rerun)
 
 log_forward_pass(model, input)
   → _prepare_model_once(model)   # permanent: tl_module_address, forward wrappers

@@ -716,6 +716,7 @@ def _is_runtime_only_trace_field(field_name: str) -> bool:
     """
 
     return field_name in {
+        "_had_unattributed_tensor_args",
         "_last_sibling_ordering_decision",
         "_pending_container_collapse_nodes",
         "_defer_streaming_bundle_finalization",

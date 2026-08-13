@@ -223,7 +223,9 @@ exclusive with backward-related capture because it discards the autograd graph.
   logging is off.
 - `active_logging(trace)` enables logging during the forward; `pause_logging()` protects
   internal TorchLens tensor ops from recursive capture.
-- `patch_detached_references()` patches `from torch import cos` style references in loaded modules.
+- Stale `from torch import cos` style references are recovered by the rescue re-run
+  (`backends/torch/rescue.py`, disclosed via `trace.rescue_rerun`); the protocol-invisible
+  constructors keep targeted module-attr patching via the mechanical belt (`backends/torch/belt.py`).
 
 ### Module Containment
 Module containment is captured via a wrap-forward stack helper at

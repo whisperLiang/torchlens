@@ -2701,7 +2701,8 @@ def _trace_torch_model(
                 pickle.dump(trace, file)
         return trace
 
-    trace = _run_model_and_save_specified_outs(
+    run_capture = functools.partial(
+        _run_model_and_save_specified_outs,
         model=model,
         input_args=cast(torch.Tensor | list[Any] | tuple[Any, ...], input_args),
         input_kwargs=input_kwargs,
@@ -2776,6 +2777,17 @@ def _trace_torch_model(
             else ("all" if uses_deferred_activation and train_mode_value else None)
         ),
     )
+    from .backends.torch.rescue import capture_with_rescue
+
+    # Streaming saves, sinks, and halt-predicate partials are not re-runnable;
+    # they report an escape as before instead of attempting a rescue re-run.
+    rescue_eligible = (
+        streaming_options.bundle_path is None
+        and streaming_options.out_callback is None
+        and grad_storage_path_value is None
+        and halt is None
+    )
+    trace = capture_with_rescue(run_capture, eligible=rescue_eligible)
     trace.profile_enabled = profile_enabled
     trace.save_grads = save_grads_policy
     if uses_selective_layers_to_save:

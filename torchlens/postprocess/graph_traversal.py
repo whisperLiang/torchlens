@@ -105,7 +105,9 @@ def _resolve_output_parent_labels(
             )
         buffer_address = buffer_addresses_by_id.get(id(output_tensor))
         if buffer_address is None:
-            raise RuntimeError(
+            from .._errors import OutputAttributionError
+
+            raise OutputAttributionError(
                 "TorchLens could not attribute a model output tensor to any traced op "
                 f"(shape={tuple(output_tensor.shape)}, dtype={output_tensor.dtype}). "
                 "This may indicate an opaque execution boundary or a pre-bound torch "

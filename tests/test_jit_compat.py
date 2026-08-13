@@ -7,7 +7,6 @@ import pytest
 import torch
 from torch import nn
 
-import torchlens as tl
 from torchlens import _state
 import torchlens.backends.torch.wrappers as torch_wrappers
 
@@ -88,36 +87,6 @@ def test_jit_builtin_registration_sanitizes_dtype_annotations(
     assert _jit_builtins._builtin_table[id(torch.cos)] == builtin_name
     assert torch.cos.__annotations__["dtype"] is int
     assert not hasattr(torch.cos, "__wrapped__")
-
-
-def test_patch_model_instance_rescans_each_trace(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Tracing the same model twice should rescan reassigned callable attributes."""
-
-    original_relu = _state._decorated_to_orig[id(torch.relu)]
-    model = _StoredFuncModel(original_relu)
-    walk_count = 0
-    original_patch_model_instance = torch_wrappers.patch_model_instance
-
-    def counted_patch_model_instance(model_arg: Any) -> None:
-        """Count model-instance scans and delegate to the implementation."""
-
-        nonlocal walk_count
-        if model_arg is model:
-            walk_count += 1
-        original_patch_model_instance(model_arg)
-
-    monkeypatch.setattr(torch_wrappers, "patch_model_instance", counted_patch_model_instance)
-
-    first_trace = tl.trace(model, torch.randn(4), layers_to_save="all")
-    model.act = original_relu
-    second_trace = tl.trace(model, torch.randn(4), layers_to_save="all")
-
-    assert walk_count == 2
-    assert model.act is _state._orig_to_decorated[id(original_relu)]
-    assert any("relu" in label.lower() for label in first_trace.layer_labels)
-    assert any("relu" in label.lower() for label in second_trace.layer_labels)
 
 
 def _calls_softsign(x: torch.Tensor) -> torch.Tensor:
