@@ -510,6 +510,7 @@ def save(
             legacy_manifest=manifest,
             save_level=save_level,
             sparse_run=sparse_run_json,
+            scrubbed_state=scrubbed_state,
         )
         with (tmp_path / "metadata.pkl").open("wb") as handle:
             pickle.dump(scrubbed_state, handle, protocol=pickle.HIGHEST_PROTOCOL)
