@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 import time
+import warnings
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -481,6 +482,130 @@ class _MLXBoundaryReplacementObserver:
             self.labels_by_id[id(replacement)] = raw_label
             replacements[id(leaf)] = replacement
         return _replace_mlx_array_leaves(self.backend, output, replacements)
+
+
+def _mlx_probe_identity(value: Any) -> Any:
+    """Return ``value`` unchanged; probe body for traced-transform detection.
+
+    Parameters
+    ----------
+    value
+        Probe argument.
+
+    Returns
+    -------
+    Any
+        ``value`` unchanged.
+    """
+
+    return value
+
+
+def _mlx_traced_transform_type(mx: Any) -> type | None:
+    """Resolve the MLX traced-transform wrapper type from the runtime itself.
+
+    ``mx.compile``, ``mx.grad``, ``mx.value_and_grad``, and ``mx.vmap`` all
+    return the same opaque wrapper type, which replays a traced graph and
+    therefore bypasses (or worse, tracer-pollutes) the monkeypatched eager
+    capture surface. The type is resolved by compiling a trivial probe so the
+    authority is the runtime, never a spoofable ``__module__`` string.
+
+    Parameters
+    ----------
+    mx
+        Imported ``mlx.core`` module.
+
+    Returns
+    -------
+    type | None
+        Exact wrapper type, or ``None`` when the runtime exposes no
+        ``compile`` entry (detection then degrades gracefully).
+    """
+
+    compile_fn = getattr(mx, "compile", None)
+    if not callable(compile_fn):
+        return None
+    try:
+        return type(compile_fn(_mlx_probe_identity))
+    except Exception:
+        return None
+
+
+def _find_mlx_compiled_attributes(
+    model: object,
+    transform_type: type | None,
+    *,
+    max_depth: int = 8,
+) -> tuple[str, ...]:
+    """Return dotted paths of traced-transform callables reachable from ``model``.
+
+    The scan is bounded and disclosed: instance ``__dict__`` values of the
+    model and nested ``mlx.nn.Module`` children, plus one level inside plain
+    ``list``/``tuple``/``dict`` containers. Slots-only holders, values created
+    inside ``__call__``, and hot global/free compiled callables remain
+    documented residuals.
+
+    Parameters
+    ----------
+    model
+        Capture entry object.
+    transform_type
+        Exact traced-transform wrapper type from
+        :func:`_mlx_traced_transform_type`.
+    max_depth
+        Recursion bound over nested module attributes.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Sorted dotted attribute paths holding traced-transform wrappers.
+    """
+
+    if transform_type is None:
+        return ()
+    try:
+        import mlx.nn as mlx_nn
+    except ImportError:
+        return ()
+    found: set[str] = set()
+    seen: set[int] = set()
+
+    def _scan_value(path: str, value: Any, depth: int) -> None:
+        if type(value) is transform_type:
+            found.add(path)
+            return
+        if isinstance(value, mlx_nn.Module):
+            _scan_module(path, value, depth)
+            return
+        if isinstance(value, (list, tuple)):
+            for index, item in enumerate(value):
+                if type(item) is transform_type:
+                    found.add(f"{path}[{index}]")
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if type(item) is transform_type:
+                    found.add(f"{path}[{key!r}]")
+
+    def _scan_module(prefix: str, module: object, depth: int) -> None:
+        if depth > max_depth or id(module) in seen:
+            return
+        seen.add(id(module))
+        # mlx.nn.Module subclasses dict: children/arrays live in the dict
+        # items while plain Python attributes land in __dict__ — scan both.
+        surfaces: list[dict[str, Any]] = []
+        attributes = getattr(module, "__dict__", None)
+        if isinstance(attributes, dict):
+            surfaces.append(attributes)
+        if isinstance(module, dict):
+            surfaces.append(module)
+        for surface in surfaces:
+            for name, value in surface.items():
+                child_path = f"{prefix}.{name}" if prefix else str(name)
+                _scan_value(child_path, value, depth + 1)
+
+    if isinstance(model, mlx_nn.Module):
+        _scan_module("", model, 0)
+    return tuple(sorted(found))
 
 
 def _mlx_loaded_replay_unavailable(trace: Trace) -> bool:
@@ -966,6 +1091,15 @@ class MLXBackend:
                 "MLX backend preview does not support random_seed; pass explicit MLX RNG "
                 "state through the model/input surface instead."
             )
+        transform_type = _mlx_traced_transform_type(self.mx)
+        if transform_type is not None and type(model) is transform_type:
+            raise BackendUnsupportedError(
+                "MLX capture entry is an mx.compile/mx.grad/mx.vmap traced-transform "
+                "wrapper. Traced replays bypass the eager capture surface, so logging "
+                "them would silently under-capture. Trace the eager mlx.nn.Module or "
+                "plain Python callable instead of its compiled/transformed wrapper."
+            )
+        compiled_attribute_paths = _find_mlx_compiled_attributes(model, transform_type)
         module_tree = discover_mlx_module_tree(model)
         use_object_module = _resolve_mlx_module_identity_mode(module_identity_mode, module_tree)
         trace = Trace(
@@ -1000,6 +1134,20 @@ class MLXBackend:
         )
         trace.trace_label = name
         trace.backend = cast(BackendName, self.name)
+        if compiled_attribute_paths:
+            # Conservative ceiling, not a refusal: the attribute may never be
+            # called, but a call would bypass wrapper capture (cold trace) or
+            # replay a cached graph (warm), so honesty cannot depend on it.
+            names = ", ".join(compiled_attribute_paths)
+            warnings.warn(
+                "MLX model holds mx.compile/traced-transform attribute(s) "
+                f"({names}); their interiors are not logged, so this capture "
+                "is marked capture_verified=False.",
+                UserWarning,
+                stacklevel=2,
+            )
+            trace.capture_verified = False
+            trace.capture_verification_reason = "mlx_compiled_attribute_not_logged"
         trace.capture_events = CaptureEvents()
         trace._mlx_saved_payloads = []
         trace._mlx_capture_depth = 0
