@@ -129,14 +129,20 @@ class MergeReport:
 
     @property
     def gaps(self) -> tuple[MergedFinding, ...]:
+        """The ``presence_gap`` findings: boundaries a rank never recorded."""
+
         return tuple(f for f in self.findings if f.kind == "presence_gap")
 
     @property
     def divergences(self) -> tuple[MergedFinding, ...]:
+        """The ``value_divergence`` findings: ranks disagreeing on a witnessed value."""
+
         return tuple(f for f in self.findings if f.kind == "value_divergence")
 
     @property
     def conflicts(self) -> tuple[MergedFinding, ...]:
+        """The structural conflict findings, which never join and never become gaps."""
+
         structural = {
             "group_lifetime_evidence_conflict",
             "relation_violation",
@@ -402,6 +408,8 @@ class MergedTrace:
                 successors[earlier].add(later)
 
         def reachable(source: JoinKey, target: JoinKey) -> bool:
+            """Whether ``target`` is reachable from ``source`` in the merged successor graph."""
+
             frontier, seen = [source], {source}
             while frontier:
                 node = frontier.pop()

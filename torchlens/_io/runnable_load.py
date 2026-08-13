@@ -1439,6 +1439,8 @@ def _validate_call_arity(
     """
 
     def _refuse(detail: str) -> DescriptorStructuralBoundError:
+        """Build the typed call-arity refusal for this call id."""
+
         return DescriptorStructuralBoundError(
             RunnableErrorCode.CALL_ARITY_MISMATCH, f"calls[{call_id}]", detail
         )
@@ -1500,6 +1502,8 @@ def _validate_slot_shape(
     """
 
     def _refuse(detail: str) -> DescriptorStructuralBoundError:
+        """Build the typed slot-shape refusal for this slot id."""
+
         return DescriptorStructuralBoundError(
             RunnableErrorCode.STATE_SHAPE_MISMATCH, f"tensor_slots[{slot_id}]", detail
         )
@@ -1591,6 +1595,12 @@ def _parse_ambient_context(value: Mapping[str, Any]) -> AmbientExecutionContext:
     """
 
     def _optional_bool_field(name: str) -> bool | None:
+        """Read one strictly-boolean-or-null ambient field, refusing when it is absent.
+
+        An absent ambient field is a typed parse refusal (analysis-only load), never
+        a defaulted control.
+        """
+
         if name not in value:
             # r53 hon_1 posture: an absent ambient field is a typed parse
             # refusal (analysis-only load), never a defaulted control.
@@ -1613,6 +1623,13 @@ def _parse_ambient_context(value: Mapping[str, Any]) -> AmbientExecutionContext:
         # boolean -- there is NO honest default (a defaulted grad mode could
         # bless a different-ambient comparison as verified), and ``null`` is not
         # a legal producer value (every supported torch exposes both queries).
+        """Read one ambient field that must be a strict boolean, never ``null``.
+
+        The global autograd/inference mode has no honest default and no legal
+        ``null``: every supported torch exposes both queries, and a defaulted grad
+        mode could bless a different-ambient comparison as verified.
+        """
+
         raw = _optional_bool_field(name)
         if raw is None:
             raise ContextFieldInvalidError(
@@ -1623,6 +1640,8 @@ def _parse_ambient_context(value: Mapping[str, Any]) -> AmbientExecutionContext:
         return raw
 
     def _optional_str_field(name: str) -> str | None:
+        """Read one ambient field that must be a string or ``null``."""
+
         raw = value[name]
         if raw is None:
             return None

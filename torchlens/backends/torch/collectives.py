@@ -117,6 +117,8 @@ class _RankRole:
 
     @property
     def is_root(self) -> bool:
+        """Whether this rank is the collective's root (``False`` for rootless calls)."""
+
         return self.root_global_rank is not None and (
             self.my_global_rank == self.root_global_rank
         )
@@ -133,18 +135,26 @@ def _tensors(value: Any) -> list[torch.Tensor]:
 
 
 def _arg(name: str) -> Callable[[dict[str, Any], _RankRole], list[torch.Tensor]]:
+    """Build a role extractor reading one bound argument on every rank."""
+
     return lambda bound, role: _tensors(bound.get(name))
 
 
 def _arg_if_root(name: str) -> Callable[[dict[str, Any], _RankRole], list[torch.Tensor]]:
+    """Build a role extractor reading one bound argument on the root rank only."""
+
     return lambda bound, role: _tensors(bound.get(name)) if role.is_root else []
 
 
 def _arg_if_not_root(name: str) -> Callable[[dict[str, Any], _RankRole], list[torch.Tensor]]:
+    """Build a role extractor reading one bound argument on non-root ranks only."""
+
     return lambda bound, role: [] if role.is_root else _tensors(bound.get(name))
 
 
 def _nothing(bound: dict[str, Any], role: _RankRole) -> list[torch.Tensor]:
+    """Role extractor for a slot that never carries tensors on any rank."""
+
     return []
 
 
@@ -176,6 +186,8 @@ _BOUNDARY_DEPTH = threading.local()
 
 
 def _inside_boundary() -> bool:
+    """Whether the calling thread is already inside a recorded collective boundary."""
+
     return getattr(_BOUNDARY_DEPTH, "depth", 0) > 0
 
 
@@ -473,6 +485,14 @@ def _make_collective_wrap(site: CollectiveSite, original: Callable[..., Any]) ->
 
     @wraps(original)
     def wrapped_collective(*args: Any, **kwargs: Any) -> Any:
+        """Record the boundary op around one public c10d call, then delegate.
+
+        Falls through to the original untouched -- under a reentrancy scope, so no
+        seq tick and no record -- when arming is inactive, when this is a nested
+        inner c10d call, or when argument binding fails (the call is about to raise
+        its own ``TypeError`` anyway).
+        """
+
         from torchlens.distributed._lifecycle import armed_state, next_seq, resolve_group_identity
 
         state = armed_state()

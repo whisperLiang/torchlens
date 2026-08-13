@@ -93,6 +93,8 @@ class StepSpec:
 
 
 def _run_step_1(ctx: StepContext) -> None:
+    """Step 1: create dedicated output nodes for each attributable output tensor."""
+
     with _vtimed(ctx.trace, "  Step 1: Add output layers"):
         _pp()._add_output_layers(
             ctx.trace,
@@ -103,35 +105,53 @@ def _run_step_1(ctx: StepContext) -> None:
 
 
 def _run_step_2(ctx: StepContext) -> None:
+    """Step 2: mark every node that is an ancestor of a model output."""
+
     with _vtimed(ctx.trace, "  Step 2: Trace output ancestors"):
         _pp()._find_output_ancestors(ctx.trace)
 
 
 def _run_step_3(ctx: StepContext) -> None:
+    """Step 3: drop raw nodes that reach no model output."""
+
     with _vtimed(ctx.trace, "  Step 3: Remove orphan nodes"):
         _pp()._remove_orphan_nodes(ctx.trace)
 
 
 def _run_step_4(ctx: StepContext) -> None:
+    """Step 4: write the optional input/output distance metadata."""
+
     with _vtimed(ctx.trace, "  Step 4: Input/output distances"):
         _pp()._mark_layer_depths(ctx.trace)
 
 
 def _should_run_step_4(ctx: StepContext) -> bool:
+    """Gate step 4 on the opt-in ``Trace.mark_layer_depths`` flag."""
+
     return bool(ctx.trace.mark_layer_depths)
 
 
 def _run_step_5(ctx: StepContext) -> None:
+    """Step 5: attribute conditional branches (AST, bool, event, and edge evidence)."""
+
     with _vtimed(ctx.trace, "  Step 5: Mark conditional branches"):
         _pp()._mark_conditional_branches(ctx.trace)
 
 
 def _run_step_6(ctx: StepContext) -> None:
+    """Step 6: deduplicate buffer layers and reconnect their edges."""
+
     with _vtimed(ctx.trace, "  Step 6: Fix buffer layers"):
         _pp()._fix_buffer_layers(ctx.trace)
 
 
 def _run_step_7(ctx: StepContext) -> None:
+    """Step 7: group recurrent calls into multi-pass layers.
+
+    With ``recurrence_detection`` off this degrades to shared-parameter
+    grouping only, which is the historical single-pass layout.
+    """
+
     trace = ctx.trace
     loop_desc = (
         "  Step 7: Loop detection (full)"
@@ -146,21 +166,34 @@ def _run_step_7(ctx: StepContext) -> None:
 
 
 def _run_step_8(ctx: StepContext) -> None:
+    """Step 8: build the raw-label to final-label map."""
+
     with _vtimed(ctx.trace, "  Step 8: Map labels"):
         _pp()._map_raw_labels_to_final_labels(ctx.trace)
 
 
 def _run_step_9(ctx: StepContext) -> None:
+    """Step 9: write the final per-layer and per-module fields."""
+
     with _vtimed(ctx.trace, "  Step 9: Log final info"):
         _pp()._log_final_info_for_layers(ctx.trace)
 
 
 def _run_step_10(ctx: StepContext) -> None:
+    """Step 10: rename global label references to their final names."""
+
     with _vtimed(ctx.trace, "  Step 10: Rename labels"):
         _pp()._rename_model_history_layer_names(ctx.trace)
 
 
 def _run_step_11(ctx: StepContext) -> None:
+    """Step 11: build lookup keys, finalize retained layers, warn on unattributed args.
+
+    The three calls share one step because the saved-summary refresh and the
+    unattributed-arg warning both read the retained-layer lists this step
+    finalizes.
+    """
+
     module = _pp()
     with _vtimed(ctx.trace, "  Step 11: Build lookup keys"):
         module._build_lookup_keys_and_finalize_retained_layers(ctx.trace)
@@ -169,11 +202,19 @@ def _run_step_11(ctx: StepContext) -> None:
 
 
 def _run_step_11_5(ctx: StepContext) -> None:
+    """Step 11.5: resolve source assignment variable names from the AST index."""
+
     with _vtimed(ctx.trace, "  Step 11.5: Populate source var names"):
         _pp()._populate_var_names(ctx.trace)
 
 
 def _run_step_11_75(ctx: StepContext) -> None:
+    """Step 11.75: let the capture session resolve deferred retention decisions.
+
+    Runs only when a ``CaptureSession`` is attached; ``should_run`` gates on
+    that, so the body may assert it.
+    """
+
     capture_session = ctx.capture_session
     assert capture_session is not None  # should_run gates on this
     with _vtimed(ctx.trace, "  Step 11.75: Resolve deferred retention"):
@@ -181,11 +222,15 @@ def _run_step_11_75(ctx: StepContext) -> None:
 
 
 def _run_step_12(ctx: StepContext) -> None:
+    """Step 12: strip TorchLens ``tl_*`` attributes from every saved tensor."""
+
     with _vtimed(ctx.trace, "  Step 12: Undecorate tensors"):
         _pp()._undecorate_all_saved_tensors(ctx.trace)
 
 
 def _run_step_13(ctx: StepContext) -> None:
+    """Step 13: clear the CUDA caching allocator when CUDA is available."""
+
     # Unwrapped by _vtimed (historical); the CUDA availability test lives
     # in the body so the contract assert fires unconditionally (§5.4).
     module = _pp()
@@ -194,16 +239,27 @@ def _run_step_13(ctx: StepContext) -> None:
 
 
 def _run_step_14(ctx: StepContext) -> None:
+    """Step 14: record elapsed capture timing on the trace."""
+
     with _vtimed(ctx.trace, "  Step 14: Log timing"):
         _pp()._log_time_elapsed(ctx.trace)
 
 
 def _run_step_15(ctx: StepContext) -> None:
+    """Step 15: build and complete the ``Param`` records."""
+
     with _vtimed(ctx.trace, "  Step 15: Finalize params"):
         _pp()._finalize_param_logs(ctx.trace)
 
 
 def _run_step_15_5(ctx: StepContext) -> None:
+    """Step 15.5: build aggregate ``Layer`` records and the pass-index index.
+
+    ``Trace.by_pass`` maps each pass index to the ``layer_list`` positions of
+    the layers recorded at that pass; layers with no ``pass_index`` are absent
+    rather than bucketed.
+    """
+
     trace = ctx.trace
     with _vtimed(trace, "  Step 15.5: Build layer logs"):
         _pp()._build_layer_logs(trace)
@@ -215,6 +271,8 @@ def _run_step_15_5(ctx: StepContext) -> None:
 
 
 def _run_step_16(ctx: StepContext) -> None:
+    """Step 16: build ``Module`` records and refresh the saved module-call count."""
+
     module = _pp()
     with _vtimed(ctx.trace, "  Step 16: Build module logs"):
         module._build_module_logs(ctx.trace)
@@ -222,6 +280,12 @@ def _run_step_16(ctx: StepContext) -> None:
 
 
 def _run_step_16_5(ctx: StepContext) -> None:
+    """Step 16.5: normalize layer addresses, then hash the graph shape.
+
+    The hash is taken here, before step 17 flips the trace to user-facing
+    behavior and changes what the traversal observes.
+    """
+
     module = _pp()
     trace = ctx.trace
     with _vtimed(trace, "  Step 16.5: Graph shape hash"):
@@ -230,11 +294,21 @@ def _run_step_16_5(ctx: StepContext) -> None:
 
 
 def _run_step_17(ctx: StepContext) -> None:
+    """Step 17: switch the trace from build-time to user-facing behavior."""
+
     with _vtimed(ctx.trace, "  Step 17: Mark pass finished"):
         _pp()._set_tracing_finished(ctx.trace)
 
 
 def _run_step_17_5(ctx: StepContext) -> None:
+    """Step 17.5: adopt container records, then drop the per-phase workspaces.
+
+    This is the contracted terminal consume of ``RawGraphWorkspace``,
+    ``ModuleCaptureWorkspace``, and ``WrapperRuntimeWorkspace``: nothing after
+    this step may read them. The container registry's records are copied onto
+    the trace before its live state is cleared.
+    """
+
     # Unwrapped by _vtimed (historical). Adopt container records, then drop
     # the per-phase workspaces (terminal consumes).
     trace = ctx.trace
@@ -266,20 +340,28 @@ def _should_run_step_18(ctx: StepContext) -> bool:
 
 
 def _run_step_18(ctx: StepContext) -> None:
+    """Step 18: finalize the streamed out bundle."""
+
     with _vtimed(ctx.trace, "  Step 18: Finalize streamed bundle"):
         _pp()._finalize_streamed_bundle(ctx.trace)
 
 
 def _should_run_step_19(ctx: StepContext) -> bool:
+    """Gate step 19 on step 18 having run with in-memory outs not requested."""
+
     return bool(ctx.finalize_streaming) and not ctx.trace._keep_outs_in_memory
 
 
 def _run_step_19(ctx: StepContext) -> None:
+    """Step 19: evict streamed outs from memory."""
+
     with _vtimed(ctx.trace, "  Step 19: Evict streamed outs"):
         _pp()._evict_streamed_outs(ctx.trace)
 
 
 def _run_step_20(ctx: StepContext) -> None:
+    """Step 20: release live parameter references held for finalization."""
+
     with _vtimed(ctx.trace, "  Step 20: Release param refs"):
         ctx.trace.release_param_refs(allow_iter_rehydrate=True)
 
@@ -413,6 +495,12 @@ def derive_edges(rank_override: "dict[str, int] | None" = None) -> list[DerivedE
     edges: list[DerivedEdge] = []
 
     def _directed(low: str, high: str) -> tuple[str, str] | None:
+        """Order one step pair rank-ascending, or ``None`` when both are the same step.
+
+        Ranks are unique across distinct steps, so the ``None`` result means
+        ``low is high`` (a self-conflict, which generates no edge).
+        """
+
         if rank[low] < rank[high]:
             return (low, high)
         if rank[high] < rank[low]:
@@ -549,6 +637,13 @@ def classify_declared_reads(
             writers.setdefault(column, []).append(step)
 
     def _discharges(writer: str, column: str) -> bool:
+        """Whether ``writer``'s declared write of ``column`` can discharge a read.
+
+        A writer recorded as a permanent no-op for that column never discharges:
+        that is exactly the laundering path guard 2 names. With no ledger
+        supplied every declared write discharges, which is the LENIENT direction.
+        """
+
         if noop_writers is None:
             return True
         return column not in noop_writers.get(writer, frozenset())

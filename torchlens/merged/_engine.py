@@ -248,6 +248,8 @@ def _relation_findings(
     ranks = tuple(sorted(entries))
 
     def violation(detail: str) -> None:
+        """Append one ``relation_violation`` finding for this key."""
+
         findings.append(
             MergedFinding(
                 kind="relation_violation",
@@ -268,6 +270,8 @@ def _relation_findings(
         violation(f"ranks disagree on the reduce op: {sorted(map(str, reduce_ops))}")
 
     def shapes(entry: dict[str, Any], names: Iterable[str]) -> tuple[tuple[int, ...], ...]:
+        """Collect the shapes of ``entry``'s roles matching any of ``names``, in order."""
+
         return tuple(tuple(role["shape"]) for role in _roles_of(entry, names))
 
     group_size = len(membership)
@@ -422,6 +426,8 @@ def _check_order(
     parent: dict[Any, Any] = {}
 
     def find(node: Any) -> Any:
+        """Union-find representative of ``node``, with path compression."""
+
         root = node
         while parent.get(root, root) != root:
             root = parent[root]
@@ -430,6 +436,8 @@ def _check_order(
         return root
 
     def union(a: Any, b: Any) -> None:
+        """Merge the classes of ``a`` and ``b``."""
+
         parent[find(a)] = find(b)
 
     for (rank, index), key in joined_nodes.items():
