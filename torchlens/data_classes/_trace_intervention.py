@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 else:
     _TraceMixinBase = object
 from .._deprecations import MISSING, MissingType
+from .._errors import InvalidArgumentError
 from .._trace_state import TraceState
 from ..intervention.types import (
     FrozenInterventionSpec,
@@ -151,7 +152,13 @@ class TraceInterventionMixin(_TraceMixinBase):
 
         self._warn_if_root_mutation(confirm_mutation=confirm_mutation)
         if direction not in {"forward", "backward", "both"}:
-            raise ValueError("set(..., direction=...) must be 'forward', 'backward', or 'both'.")
+            raise InvalidArgumentError(
+                "set(..., direction=...) must be 'forward', 'backward', or 'both'; "
+                f"received {direction!r}",
+                code="intervention_direction_invalid",
+                remedy="pass direction='forward', 'backward', or 'both'",
+                argument="direction",
+            )
         if direction in {"backward", "both"}:
 
             def _backward_set_hook(grad: torch.Tensor, *, hook: Any) -> torch.Tensor:
@@ -287,8 +294,12 @@ class TraceInterventionMixin(_TraceMixinBase):
         from ..intervention.hooks import normalize_hook_plan
 
         if direction is not None and direction not in {"forward", "backward", "both"}:
-            raise ValueError(
-                "attach_hooks(..., direction=...) must be 'forward', 'backward', or 'both'."
+            raise InvalidArgumentError(
+                "attach_hooks(..., direction=...) must be 'forward', 'backward', or 'both'; "
+                f"received {direction!r}",
+                code="intervention_direction_invalid",
+                remedy="pass direction='forward', 'backward', 'both', or None",
+                argument="direction",
             )
         if extra_hooks:
             if hook is None:
@@ -523,8 +534,12 @@ class TraceInterventionMixin(_TraceMixinBase):
         strict_value = intervention_options.strict
 
         if engine_value not in {"auto", "replay", "rerun", "set_only"}:
-            raise ValueError(
-                "do(..., engine=...) must be 'auto', 'replay', 'rerun', or 'set_only'."
+            raise InvalidArgumentError(
+                "do(..., engine=...) must be 'auto', 'replay', 'rerun', or 'set_only'; "
+                f"received {engine_value!r}",
+                code="intervention_engine_invalid",
+                remedy="pass engine='auto', 'replay', 'rerun', or 'set_only'",
+                argument="engine",
             )
 
         selected_engine = self._select_do_engine(engine_value, model=model, x=x)

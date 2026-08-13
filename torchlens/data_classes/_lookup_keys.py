@@ -3,6 +3,8 @@
 import random
 from typing import TYPE_CHECKING, Union, cast
 
+from .._errors import InvalidArgumentError
+
 if TYPE_CHECKING:
     from .trace import Trace
     from .module import Module
@@ -26,30 +28,47 @@ def _give_user_feedback_about_lookup_key(
         ``"query_multiple"`` for multi-layer queries.
     """
     if isinstance(key, int) and (key >= len(self.layer_list) or key < -len(self.layer_list)):
-        raise ValueError(
+        raise InvalidArgumentError(
             f"You specified the layer with index {key}, but there are only {len(self.layer_list)} "
             f"layers; please specify an index in the range "
-            f"-{len(self.layer_list)} - {len(self.layer_list) - 1}."
+            f"-{len(self.layer_list)} - {len(self.layer_list) - 1}",
+            code="op_lookup_index_out_of_range",
+            remedy=(
+                f"pass an index in the range -{len(self.layer_list)} - "
+                f"{len(self.layer_list) - 1}"
+            ),
+            key=key,
         )
 
     if not isinstance(key, str):
-        raise ValueError(_get_lookup_help_str(self, key, mode))
+        raise InvalidArgumentError(
+            _get_lookup_help_str(self, key, mode),
+            code="op_lookup_not_found",
+            remedy="pass an in-range integer, a layer label, or a module address",
+            key=repr(key),
+        )
 
     if hasattr(self, "_module_logs") and key.rsplit(":", 1)[0] in self._module_logs:
         module, call_index = key.rsplit(":", 1)
         module_log = self._module_logs[module]
         module_num_calls = getattr(module_log, "num_calls")
-        raise ValueError(
+        raise InvalidArgumentError(
             f"You specified module {module} pass {call_index}, but {module} only has "
-            f"{module_num_calls} ops; specify a lower number."
+            f"{module_num_calls} ops; specify a lower number",
+            code="op_lookup_pass_out_of_range",
+            remedy=f"specify a pass number of at most {module_num_calls}",
+            key=key,
         )
 
     if key in self.layer_labels:
         layer_num_calls = self.layer_num_calls.get(key, 1)
         if layer_num_calls > 1:
-            raise ValueError(
+            raise InvalidArgumentError(
                 f"You specified output of layer {key}, but it has {layer_num_calls} ops; "
-                f"please specify e.g. {key}:2 for the second pass of {key}."
+                f"please specify e.g. {key}:2 for the second pass of {key}",
+                code="op_lookup_pass_required",
+                remedy=f"append a pass qualifier such as {key}:2",
+                key=key,
             )
 
     if key.rsplit(":", 1)[0] in self.layer_labels:
@@ -58,12 +77,20 @@ def _give_user_feedback_about_lookup_key(
         layer_num_calls_msg: int | str = (
             layer_num_calls_for_label if layer_num_calls_for_label is not None else "unknown"
         )
-        raise ValueError(
+        raise InvalidArgumentError(
             f"You specified layer {layer_label} pass {call_index}, but {layer_label} only has "
-            f"{layer_num_calls_msg} ops. Specify a lower number."
+            f"{layer_num_calls_msg} ops. Specify a lower number",
+            code="op_lookup_pass_out_of_range",
+            remedy=f"specify a pass number of at most {layer_num_calls_msg}",
+            key=key,
         )
 
-    raise ValueError(_get_lookup_help_str(self, key, mode))
+    raise InvalidArgumentError(
+        _get_lookup_help_str(self, key, mode),
+        code="op_lookup_not_found",
+        remedy="pass an in-range integer, a layer label, or a module address",
+        key=key,
+    )
 
 
 def _get_lookup_help_str(self: "Trace", layer_label: Union[int, str], mode: str) -> str:

@@ -35,7 +35,7 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, cast
 
 from .._deprecations import MISSING
-from .._errors import AmbiguousOpLookupError
+from .._errors import AmbiguousOpLookupError, InvalidArgumentError, RecordBindingError
 from .._io import (
     FieldPolicy,
     TLSPEC_VERSION,
@@ -1120,7 +1120,11 @@ class Layer:
             return None  # type: ignore[return-value]
         obj = ref()
         if obj is None:
-            raise RuntimeError("Trace has been garbage-collected.")
+            raise RecordBindingError(
+                "Trace has been garbage-collected",
+                code="trace_reference_collected",
+                remedy="keep the owning Trace alive while reading its records",
+            )
         return cast("Trace", obj)
 
     @source_trace.setter
@@ -1318,10 +1322,14 @@ class Layer:
         the attribute as missing and falls through to __getattr__.
         """
         if self.num_passes > 1:
-            raise ValueError(
+            raise InvalidArgumentError(
                 f"Layer '{self.layer_label}' has {self.num_passes} ops. "
                 f"Access '{field_name}' on a specific pass: "
-                f"log['{self.layer_label}'].ops[0].{field_name}"
+                f"log['{self.layer_label}'].ops[0].{field_name}",
+                code="layer_pass_ambiguous",
+                remedy=f"access {field_name!r} on one pass via .ops[k]",
+                layer_label=self.layer_label,
+                field_name=field_name,
             )
         return getattr(self.ops[0], field_name)
 

@@ -9,7 +9,7 @@ import weakref
 
 import torch
 
-from .._errors import AmbiguousOpLookupError
+from .._errors import AmbiguousOpLookupError, InvalidArgumentError
 from .._io import (
     FieldPolicy,
     TLSPEC_VERSION,
@@ -87,9 +87,13 @@ class GradFnCallAccessor(Accessor[GradFnCall]):
         if len(matches) == 1:
             return matches[0]
         if matches:
-            raise ValueError(
+            raise InvalidArgumentError(
                 f"GradFn '{self._label}' fired {len(matches)} times in backward pass "
-                f"{pass_index}; use 0-based positional access."
+                f"{pass_index}; use 0-based positional access",
+                code="gradient_pass_ambiguous",
+                remedy="use 0-based positional access to pick one firing",
+                label=self._label,
+                pass_index=pass_index,
             )
         available = [
             getattr(call, "backward_pass_index", None)

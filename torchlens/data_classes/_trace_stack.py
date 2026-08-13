@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from .._errors import InvalidArgumentError, PayloadUnavailableError
+
 if TYPE_CHECKING:
     from .trace import Trace
 
@@ -100,16 +102,29 @@ class TraceStackMixin(_TraceMixinBase):
         max_fanout = max(1, len(self.layer_list))
         sites = tuple(self.find_sites(selector, max_fanout=max_fanout))
         if not sites:
-            raise ValueError(f"trace.stack selector {selector!r} matched 0 sites.")
+            raise InvalidArgumentError(
+                f"trace.stack selector {selector!r} matched 0 sites",
+                code="stack_selector_no_match",
+                remedy="pass a selector matching at least one saved operation",
+                selector=repr(selector),
+            )
 
         ordered_pairs: list[tuple[int, Any]] = []
         for site in sites:
             ordinal = getattr(site, "ordinal_index", None)
             if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal < 0:
-                raise ValueError("trace.stack requires matched operations with recorded ordinals.")
+                raise InvalidArgumentError(
+                    "trace.stack requires matched operations with recorded ordinals",
+                    code="stack_ordinals_unavailable",
+                    remedy="select operations captured with recorded execution ordinals",
+                )
             ordered_pairs.append((ordinal, site))
         if len({ordinal for ordinal, _ in ordered_pairs}) != len(ordered_pairs):
-            raise ValueError("trace.stack found duplicate recorded execution ordinals.")
+            raise InvalidArgumentError(
+                "trace.stack found duplicate recorded execution ordinals",
+                code="stack_ordinals_duplicate",
+                remedy="narrow the selector so each matched op has a distinct ordinal",
+            )
         ordered_sites = [site for _, site in sorted(ordered_pairs, key=lambda pair: pair[0])]
 
         tensors: list[torch.Tensor] = []
@@ -119,21 +134,31 @@ class TraceStackMixin(_TraceMixinBase):
         for site in ordered_sites:
             label = str(getattr(site, "layer_label", getattr(site, "label", "<unknown>")))
             if not bool(getattr(site, "has_saved_activation", False)):
-                raise ValueError(f"{label!r} has no saved activation payload.")
+                raise PayloadUnavailableError(
+                    f"{label!r} has no saved activation payload",
+                    code="activation_not_saved",
+                    remedy="re-run the capture with save= covering this operation",
+                    label=label,
+                )
             output = getattr(site, "out", None)
             if not isinstance(output, torch.Tensor):
-                raise ValueError(
+                raise InvalidArgumentError(
                     f"trace.stack requires a single tensor primary saved out; {label!r} "
-                    f"has {type(output).__name__}."
+                    f"has {type(output).__name__}",
+                    code="stack_output_not_tensor",
+                    remedy="select operations whose saved primary output is one tensor",
+                    label=label,
                 )
             shape = tuple(output.shape)
             if expected_shape is None:
                 expected_shape = shape
                 expected_label = label
             elif shape != expected_shape:
-                raise ValueError(
+                raise InvalidArgumentError(
                     "trace.stack refuses shape mismatch between "
-                    f"{expected_label!r} {expected_shape} and {label!r} {shape}."
+                    f"{expected_label!r} {expected_shape} and {label!r} {shape}",
+                    code="stack_shape_mismatch",
+                    remedy="select operations with identical saved output shapes",
                 )
             tensors.append(output)
             labels.append(label)

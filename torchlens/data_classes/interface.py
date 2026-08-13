@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 from ._lookup_keys import _give_user_feedback_about_lookup_key
 from .op import Op
-from .._errors import AmbiguousOpLookupError
+from .._errors import AmbiguousOpLookupError, InvalidArgumentError
 from ..capture.projections import LiveOpView
 from ..intervention.errors import SiteAmbiguityError
 from ..intervention.selectors import BaseSelector
@@ -95,8 +95,11 @@ def _getitem_during_pass(self: "Trace", ix: Any) -> Op | LiveOpView:
         ix in self._raw_graph_ws.raw_layer_dict
     ):
         return self._raw_graph_ws.raw_layer_dict[ix]
-    raise ValueError(
-        f"{ix!r} is not a known raw label during this forward pass; final labels are not yet built."
+    raise InvalidArgumentError(
+        f"{ix!r} is not a known raw label during this forward pass; final labels are not yet built",
+        code="op_lookup_not_found",
+        remedy="use a raw label seen this forward pass, or look up after trace() returns",
+        key=repr(ix),
     )
 
 

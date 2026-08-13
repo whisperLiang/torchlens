@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 else:
     _TraceMixinBase = object
 from .._deprecations import MISSING, MissingType, warn_deprecated_alias
+from .._errors import ArgumentConflictError, InvalidArgumentError, RecordBindingError
 from ..options import ReplayOptions, merge_replay_options
 from ..runnable import DivergencePolicy, RunProvider, RunResult
 from .cleanup import (
@@ -494,19 +495,37 @@ class TraceValidationMixin(_TraceMixinBase):
         if use_unified_provider:
             if inputs is not MISSING:
                 if model is not None or x is not None:
-                    raise TypeError("Pass inputs= without the legacy model/x arguments.")
+                    raise ArgumentConflictError(
+                        "Pass inputs= without the legacy model/x arguments",
+                        code="run_legacy_arguments_conflict",
+                        remedy="pass only inputs= on the unified run surface",
+                    )
                 run_inputs = inputs
             else:
                 if x is not None:
-                    raise TypeError("Loaded sparse run accepts one input tree.")
+                    raise ArgumentConflictError(
+                        "Loaded sparse run accepts one input tree",
+                        code="run_legacy_arguments_conflict",
+                        remedy="pass one input tree, preferably via inputs=",
+                    )
                 run_inputs = model
             if any(value is not MISSING for value in (append, chunk_size, strict)) or (
                 chunk_paths is not None or replay is not None
             ):
-                raise TypeError("Sparse/unified run does not accept legacy rerun options.")
+                raise ArgumentConflictError(
+                    "Sparse/unified run does not accept legacy rerun options",
+                    code="run_legacy_options_conflict",
+                    remedy=(
+                        "drop append/chunk_size/strict/chunk_paths/replay from the "
+                        "unified run call"
+                    ),
+                )
             if fast and DivergencePolicy(on_divergence) is not DivergencePolicy.RAISE:
-                raise ValueError(
-                    "fast=True always fails closed and requires on_divergence='raise'."
+                raise InvalidArgumentError(
+                    "fast=True always fails closed and requires on_divergence='raise'",
+                    code="run_fast_divergence_policy_invalid",
+                    remedy="use on_divergence='raise' with fast=True, or drop fast=",
+                    argument="on_divergence",
                 )
             from ..capture.outcome import require_capture_capability
 
@@ -556,7 +575,12 @@ class TraceValidationMixin(_TraceMixinBase):
             )
 
         if fast:
-            raise TypeError("fast=True is available only with the unified inputs= surface.")
+            raise ArgumentConflictError(
+                "fast=True is available only with the unified inputs= surface",
+                code="run_fast_requires_inputs",
+                remedy="call trace.run(inputs=..., fast=True) instead of the legacy surface",
+                argument="fast",
+            )
 
         # N3/N5 (legacy live rerun surface): same live-provider rule.
         from ..capture.outcome import require_capture_capability
@@ -571,13 +595,18 @@ class TraceValidationMixin(_TraceMixinBase):
             source_ref = getattr(self, "_source_model_ref", None)
             user_input = model
             if x is not None:
-                raise TypeError("Pass either run(model, x) or run(new_user_input), not both.")
+                raise ArgumentConflictError(
+                    "Pass either run(model, x) or run(new_user_input), not both",
+                    code="run_legacy_arguments_conflict",
+                    remedy="pass run(model, x) or run(new_user_input), never both forms",
+                )
             transformed_input = self._apply_rerun_transform(user_input, transform=transform)
             run_model = source_ref() if source_ref is not None else None
             if run_model is None:
-                raise RuntimeError(
-                    "This Trace does not retain a live model reference. Pass the model as "
-                    "`trace.run(model, input)`."
+                raise RecordBindingError(
+                    "This Trace does not retain a live model reference",
+                    code="run_source_model_collected",
+                    remedy="pass the model explicitly as trace.run(model, input)",
                 )
         replay_options = merge_replay_options(
             replay=replay,

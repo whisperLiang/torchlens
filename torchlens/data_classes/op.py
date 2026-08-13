@@ -65,7 +65,13 @@ from .._io import (
     default_fill_state,
     read_tlspec_version,
 )
-from .._errors import MutatedReferenceError, TorchLensPostfuncError
+from .._errors import (
+    ArgumentTypeError,
+    InvalidArgumentError,
+    MutatedReferenceError,
+    PayloadUnavailableError,
+    TorchLensPostfuncError,
+)
 from .._save_budget import SaveBudgetExceededError
 from .._trace_state import TraceState
 from .._training_validation import _NON_GRAD_DTYPES, TrainingModeConfigError
@@ -1010,9 +1016,12 @@ class GradientRecordAccessor(Accessor[GradientRecord]):
         if len(matches) == 1:
             return matches[0]
         if matches:
-            raise ValueError(
+            raise InvalidArgumentError(
                 f"Multiple gradient records participated in pass {pass_index}; "
-                "use positional indexing on .grads."
+                "use positional indexing on .grads",
+                code="gradient_pass_ambiguous",
+                remedy="use positional indexing on .grads to pick one record",
+                pass_index=pass_index,
             )
         available = [record.backward_pass_index for record in self._list]
         raise KeyError(
@@ -1312,7 +1321,13 @@ def _effective_activation_save_mode(
 
     save_mode = cast(SaveMode, getattr(trace, "save_mode", "copy"))
     if save_mode not in {"copy", "reference", "view", "cpu_async"}:
-        raise ValueError("save_mode must be one of 'copy', 'reference', 'view', or 'cpu_async'")
+        raise InvalidArgumentError(
+            "save_mode must be one of 'copy', 'reference', 'view', or 'cpu_async'; "
+            f"received {save_mode!r}",
+            code="save_mode_invalid",
+            remedy="set save_mode to 'copy', 'reference', 'view', or 'cpu_async'",
+            argument="save_mode",
+        )
     if save_mode == "reference":
         _warn_reference_save_mode_once()
         if is_inplace or (func_name is not None and func_name.endswith("_")):
@@ -1938,9 +1953,12 @@ class Op:
                 if len(saved) > 1:
                     label = slot("label") or slot("layer_label") or slot("_label_raw")
                     passes = [record.backward_pass_index for record in saved]
-                    raise ValueError(
+                    raise InvalidArgumentError(
                         f"op {label} has gradients saved from multiple backward passes {passes}; "
-                        "use op.grads[...] / op.grad_for(bwd=k)."
+                        "use op.grads[...] / op.grad_for(bwd=k)",
+                        code="gradient_pass_ambiguous",
+                        remedy="use op.grads[...] or op.grad_for(bwd=k) to pick one pass",
+                        label=str(label),
                     )
             grad = slot("grad")
             if grad is None and slot("grad_ref") is not None:
@@ -1963,9 +1981,11 @@ class Op:
                 and getattr(source_trace, "_predicate_save_options", None) is not None
             ):
                 label = slot("label") or slot("layer_label") or slot("_label_raw")
-                raise ValueError(
-                    f"op {label} was not saved; no saved payload is available. "
-                    "Re-run with save=... to retain this activation."
+                raise PayloadUnavailableError(
+                    f"op {label} was not saved; no saved payload is available",
+                    code="activation_not_saved",
+                    remedy="re-run with save=... to retain this activation",
+                    label=str(label),
                 )
             if not getattr(source_trace, "_postprocessing_active", False):
                 state = {
@@ -2429,8 +2449,12 @@ class Op:
 
         record = self.grads.for_pass(bwd)
         if record.grad is None:
-            raise ValueError(
-                f"op {self.label} has no saved gradient payload for backward pass {bwd}."
+            raise PayloadUnavailableError(
+                f"op {self.label} has no saved gradient payload for backward pass {bwd}",
+                code="gradient_not_saved",
+                remedy="capture with gradient saving enabled for this op and pass",
+                label=str(self.label),
+                backward_pass=bwd,
             )
         return record.grad
 
@@ -3559,8 +3583,11 @@ class Op:
         """Accept compatibility writes for the computed raw label."""
 
         if value not in {None, self.raw_label}:
-            raise ValueError(
-                f"raw_label is derived from _label_raw and cannot be set to {value!r}."
+            raise InvalidArgumentError(
+                f"raw_label is derived from _label_raw and cannot be set to {value!r}",
+                code="derived_field_assignment_invalid",
+                remedy="do not assign raw_label; it is derived from _label_raw",
+                field="raw_label",
             )
 
     @property
@@ -3621,9 +3648,12 @@ class Op:
         """Accept compatibility writes for the computed internal-source alias."""
 
         if value is not None and bool(value) != bool(self.is_internal_source):
-            raise ValueError(
+            raise InvalidArgumentError(
                 "is_internally_initialized is derived from is_internal_source and "
-                f"cannot be set to {value!r}."
+                f"cannot be set to {value!r}",
+                code="derived_field_assignment_invalid",
+                remedy="do not assign is_internally_initialized; it mirrors is_internal_source",
+                field="is_internally_initialized",
             )
 
     # ********************************************
@@ -4473,10 +4503,13 @@ class _RelationViewField(_OpField):
                 if value.__class__ is not self._view_type:
                     value = self._view_type(value)
             elif value is not None and not isinstance(value, _RELATION_CELL_ENCODINGS):
-                raise TypeError(
+                raise ArgumentTypeError(
                     f"cannot assign {type(value).__name__!r} to finished relation "
                     f"field {self._name!r}; expected list/set/tuple/frozenset "
-                    f"(normalized to {self._view_type.__name__}) or None"
+                    f"(normalized to {self._view_type.__name__}) or None",
+                    code="relation_assignment_type_invalid",
+                    remedy="assign a list/set/tuple/frozenset or None to relation fields",
+                    field=self._name,
                 )
         store.cell_set(_ROW_GET(op), self._fid, value)
 

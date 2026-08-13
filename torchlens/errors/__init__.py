@@ -174,6 +174,8 @@ _LAZY_EXCEPTION_PATHS = {
     "BackendUnsupportedError": ("torchlens.backends", "BackendUnsupportedError"),
     "CaptureContextError": ("torchlens._errors", "CaptureContextError"),
     "InvalidArgumentError": ("torchlens._errors", "InvalidArgumentError"),
+    "PayloadUnavailableError": ("torchlens._errors", "PayloadUnavailableError"),
+    "RecordBindingError": ("torchlens._errors", "RecordBindingError"),
     "UnknownBackendError": ("torchlens.backends", "UnknownBackendError"),
     "DistributedCaptureUnsupportedError": (
         "torchlens._distributed",

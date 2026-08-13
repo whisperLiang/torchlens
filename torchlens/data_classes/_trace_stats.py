@@ -23,6 +23,7 @@ else:
     _TraceMixinBase = object
 
 from .._deprecations import warn_deprecated_alias
+from .._errors import InvalidArgumentError
 from ..quantities import Duration, Flops, Macs, as_duration
 from ._accessor_base import Accessor
 from ._backend_capability_guards import raise_if_no_backward_capture
@@ -727,9 +728,20 @@ class TraceStatsMixin(_TraceMixinBase):
 
         if isinstance(mode, float):
             if not 0.0 <= mode <= 1.0:
-                raise ValueError("collapse float level must be in [0.0, 1.0].")
+                raise InvalidArgumentError(
+                    f"collapse float level must be in [0.0, 1.0]; received {mode!r}",
+                    code="collapse_level_invalid",
+                    remedy="pass a collapse level between 0.0 and 1.0",
+                    argument="mode",
+                )
         elif mode not in {"auto", "max"}:
-            raise ValueError("mode must be one of 'auto', 'max', or a float in [0.0, 1.0].")
+            raise InvalidArgumentError(
+                "mode must be one of 'auto', 'max', or a float in [0.0, 1.0]; "
+                f"received {mode!r}",
+                code="collapse_mode_invalid",
+                remedy="pass mode='auto', 'max', or an in-range float",
+                argument="mode",
+            )
 
         from ..visualization.collapse_optimizer import select_collapse_level, select_collapse_plan
         from ..visualization.collapse_plan import RenderContext
@@ -742,7 +754,12 @@ class TraceStatsMixin(_TraceMixinBase):
         )
         if result.declined:
             reason = result.reason or "unsupported render context"
-            raise ValueError(f"collapse plan unavailable: {reason}")
+            raise InvalidArgumentError(
+                f"collapse plan unavailable: {reason}",
+                code="collapse_plan_unavailable",
+                remedy="use a render context and mode the collapse optimizer supports",
+                reason=reason,
+            )
         return result.plan
 
     def collapse_schedule(
