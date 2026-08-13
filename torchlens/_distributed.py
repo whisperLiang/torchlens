@@ -148,12 +148,19 @@ class DistributedFinding:
     suggestion:
         Concrete next action for the user.
     sites:
-        Named model sites (parameter/buffer/module paths, or input positions)
-        where the condition was observed.
+        Named model sites (parameter/buffer/input positions, or input
+        positions) where the condition was observed.
     exact:
         Whether detection matched an exact probed torch type (``True``) or a
         structural fallback (``False``), so the compat row can be honest about
         the strength of the evidence.
+    geometry:
+        Per-site dual-geometry records aligned with ``sites`` (``None`` for a
+        site without one). For DTensor state each record declares BOTH the
+        logical shape and the locally held shard
+        (:func:`torchlens.distributed._dtensor.dtensor_dual_geometry`), so a
+        refused sharded model is refused with its parameters precisely
+        identified rather than silently mis-counted.
     """
 
     kind: str
@@ -161,6 +168,7 @@ class DistributedFinding:
     suggestion: str
     sites: tuple[str, ...] = ()
     exact: bool = True
+    geometry: tuple[dict | None, ...] = ()
 
     @property
     def refuses_capture(self) -> bool:
@@ -200,6 +208,7 @@ class _Evidence:
     """Mutable per-kind site collector used while walking a model and inputs."""
 
     dtensor_sites: list[str] = field(default_factory=list)
+    dtensor_geometry: dict[str, dict | None] = field(default_factory=dict)
     dtensor_exact: bool = True
     dtensor_sharded: bool = False
     shard_sites: list[str] = field(default_factory=list)
@@ -829,6 +838,12 @@ def _record_tensor(site: str, tensor: torch.Tensor, evidence: _Evidence) -> None
         return
     if kind == "dtensor":
         evidence.dtensor_sites.append(site)
+        try:
+            from .distributed._dtensor import dtensor_dual_geometry
+
+            evidence.dtensor_geometry[site] = dtensor_dual_geometry(tensor)
+        except Exception:
+            evidence.dtensor_geometry[site] = None
         if not exact:
             evidence.dtensor_exact = False
         if _dtensor_is_sharded(tensor):
@@ -924,6 +939,26 @@ def _build_findings(evidence: _Evidence) -> tuple[DistributedFinding, ...]:
             variants.append("DTensor")
         if evidence.shard_sites:
             variants.append("ShardedTensor")
+        geometry = tuple(
+            evidence.dtensor_geometry.get(site) for site in sharded_tensor_sites
+        )
+        identity_summary = ""
+        logical_total = sum(
+            record["logical_numel"]
+            for record in geometry
+            if record and record.get("logical_numel") is not None
+        )
+        local_total = sum(
+            record["local_numel"]
+            for record in geometry
+            if record and record.get("local_numel") is not None
+        )
+        if logical_total:
+            identity_summary = (
+                f" Identified logical state: {logical_total} logical element(s) "
+                f"across the DTensor site(s), of which this rank physically "
+                f"holds {local_total}."
+            )
         findings.append(
             DistributedFinding(
                 kind="dtensor",
@@ -933,7 +968,7 @@ def _build_findings(evidence: _Evidence) -> tuple[DistributedFinding, ...]:
                     "These are tensor subclasses whose real work happens under "
                     "__torch_dispatch__, below the __torch_function__ layer TorchLens "
                     "wraps, so capture records rank-local view/reshape shims instead of "
-                    "the real ops and reports zero parameters."
+                    f"the real ops and reports zero parameters.{identity_summary}"
                 ),
                 suggestion=(
                     "Capture a rank-local dense module instead: build the unsharded "
@@ -942,6 +977,7 @@ def _build_findings(evidence: _Evidence) -> tuple[DistributedFinding, ...]:
                 ),
                 sites=sharded_tensor_sites,
                 exact=evidence.dtensor_exact,
+                geometry=geometry,
             )
         )
 

@@ -429,8 +429,27 @@ def warn_parallel() -> None:
     ordered tensor counter are not safe for concurrent access.  This guard
     is called early in ``trace`` to fail fast rather than
     produce silently corrupted logs.
+
+    A DISTRIBUTED RANK process is the deliberate exception: each rank is its
+    own interpreter with its own torchlens state, capturing its own rank-local
+    forward (merge-ranks tier (b)). ``torchrun`` ranks are independent
+    ``MainProcess`` es and never hit this guard; ``multiprocessing.spawn``
+    ranks are recognized by having an initialized process group in a
+    non-daemonic process. Daemonic children (DataLoader workers) stay refused
+    even when a forked flag claims an initialized group.
     """
-    if mp.current_process().name != "MainProcess":
+    process = mp.current_process()
+    if process.name == "MainProcess":
+        return
+    try:
+        import torch.distributed as dist
+
+        is_rank_process = (
+            not process.daemon and dist.is_available() and dist.is_initialized()
+        )
+    except Exception:
+        is_rank_process = False
+    if not is_rank_process:
         raise RuntimeError(
             "WARNING: It looks like you are using parallel execution; only run "
             "torchlens in the main process, since certain operations "

@@ -257,7 +257,27 @@ that device is unbudgeted; use an absolute integer ceiling to enforce it.
 Capture refuses DTensor/ShardedTensor state, active TP hooks/styles, and pipeline stages. Dense
 parameters do not make an active ``PrepareModuleInput`` style safe because its redistribution and
 collectives execute below TorchLens' wrapped layer. A bare inert ``DeviceMesh`` remains
-informational. The shared compat/capture scan covers registered state, inspectable custom input
+informational. The ``dtensor`` finding now identifies the refused state precisely: per-site
+dual geometry (logical shape, placements, shard offset, locally held elements) rides
+``finding.geometry``.
+
+### Explicit collective capture (merge-ranks tier b)
+
+EXPLICIT ``torch.distributed`` python collectives issued inside a traced forward (hand-rolled
+TP/DP with dense parameters) are captured as first-class boundary nodes under the distributed
+opt-in -- ``torchlens.distributed.arm()`` at process start (required for MPMD and
+``multiprocessing.spawn`` ranks armed at different times), or lazy arming at capture entry for
+an already-initialized SPMD process. Each boundary node carries the portable
+``collective_boundary_v1`` payload in ``op.annotations["collective"]`` (correlation key,
+role-indexed entries, event/witness disclosures) and the trace serializes its group-lifecycle
+ledger under ``trace.annotations["distributed"]``. Honesty bounds: an ``async_op=True`` or
+``isend``/``irecv`` completion is not observed (``completion_binding="unobserved"`` +
+``read_of_inflight_destination``); wildcard (any-source) recv refuses typed during capture;
+nested collectives inside a public c10d call are attributed to the outer call only. A trace
+whose taken path crosses a collective boundary refuses runnable save and forward-replay
+validation typed (``collective_boundary_runnable_unsupported``); metadata invariants run in
+full. Implicit collectives issued below the python layer (DTensor/TP/FSDP2 dispatcher traffic)
+are NOT captured by this tier -- those topologies keep their refusals above. The shared compat/capture scan covers registered state, inspectable custom input
 containers, plain module tensor attributes, direct TP-namespace hook registries, and nested module
 attributes to 12 levels / 4096 objects. Descriptor-only or slots-only holders, user-wrapped/opaque
 TP hooks that hide their defining namespace, state beyond that bound, and distributed tensors

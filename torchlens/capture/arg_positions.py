@@ -572,6 +572,13 @@ VARIADIC_TENSOR_ARG_FUNCS: frozenset[str] = frozenset(
         "autogradhvp",
         "autogradvhp",
         "meshgrid",
+        # Collective boundary nodes pass their contribution tensors as
+        # positional call_args; the list-taking collectives (and root-only
+        # scatter, whose contribution arity differs by rank role) vary per
+        # call, so they must never lock in a first-observed ArgSpec arity.
+        "reducescatter",
+        "alltoall",
+        "scatter",
     }
 )
 

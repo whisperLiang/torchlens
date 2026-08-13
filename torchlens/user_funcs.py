@@ -815,6 +815,7 @@ def _run_model_and_save_specified_outs(
     module_filter: Callable[[Any], bool] | None = None,
     emit_nvtx: bool = False,
     measure_python_peak_memory: bool = False,
+    distributed_witness: str = "none",
     save_budget: SaveBudgetOption = "auto",
     raise_on_nan: bool = False,
     module_containment_engine: str = "hook_stack",
@@ -922,6 +923,11 @@ def _run_model_and_save_specified_outs(
             Python-allocation peak into the CPU/MPS ``forward_peak_memory``
             measurement. Off by default because the allocator hook taxes every
             traced operation.
+        distributed_witness: Session-time witness level for collective boundary
+            records captured under the distributed opt-in. ``"none"`` (default)
+            records structure and correlation only; ``"digest"`` adds byte-exact
+            SHA-256 contribution/destination digests (redundant merge evidence
+            that can only demote, never rescue). ``"payload"`` is reserved.
         save_budget: Per-device ceiling on retained activation bytes. ``"auto"``
             (default) allows half of each device's available memory, a float sets
             another fraction, an int an absolute byte cap, and ``None`` disables
@@ -1085,6 +1091,7 @@ def _run_model_and_save_specified_outs(
             module_filter=module_filter,
             emit_nvtx=emit_nvtx,
             measure_python_peak_memory=measure_python_peak_memory,
+            distributed_witness=distributed_witness,
             save_budget=save_budget,
             transform=transform,
             raw_input=raw_input,
@@ -2730,6 +2737,7 @@ def _trace_torch_model(
         module_filter=module_filter_value,
         emit_nvtx=capture_options.emit_nvtx,
         measure_python_peak_memory=capture_options.measure_python_peak_memory,
+        distributed_witness=capture_options.distributed_witness,
         save_budget=capture_options.save_budget,
         raise_on_nan=raise_on_nan_value,
         module_containment_engine=module_containment_engine,

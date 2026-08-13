@@ -218,6 +218,7 @@ _MODEL_LOG_DEFAULT_FILL: dict[str, Any] = {
     "module_filter": None,
     "emit_nvtx": False,
     "measure_python_peak_memory": False,
+    "distributed_witness": "none",
     "save_budget": "auto",
     "raise_on_nan": False,
     "keep_orphans": False,
@@ -1179,6 +1180,11 @@ class Trace(
         # restores the default ``False``, so it stays out of
         # ``MODEL_LOG_FIELD_ORDER`` and out of the portable schema.
         "measure_python_peak_memory": FieldPolicy.DROP,
+        # Session-time witness knob for collective boundary records: it selects
+        # what capture PAID FOR (digests or nothing), not what a trace means;
+        # the per-boundary witness.policy_resolved field is the portable
+        # evidence. Portable load restores the default "none".
+        "distributed_witness": FieldPolicy.DROP,
         # Session-time resource ceiling: it bounds what THIS process was willing
         # to retain and has no meaning for a loaded artifact, which retains
         # nothing. Portable load restores the default, so it stays out of
@@ -1443,6 +1449,7 @@ class Trace(
         module_filter: Callable[[Any], bool] | None = None,
         emit_nvtx: bool = False,
         measure_python_peak_memory: bool = False,
+        distributed_witness: str = "none",
         save_budget: SaveBudgetOption = "auto",
         facet_registry_snapshot: Any | None = None,
         transform: Callable[[Any], Any] | None = None,
@@ -1494,6 +1501,10 @@ class Trace(
                 ``tracemalloc`` Python-allocation probe. Off by default because the
                 allocator hook taxes every traced operation. Portable bundle load
                 restores the default ``False`` value.
+            distributed_witness: Session-time witness level for collective
+                boundary records ("none" or "digest"; "payload" reserved for
+                the merge artifact story). Portable bundle load restores the
+                default "none".
             save_budget: Session-time per-device ceiling on retained activation
                 bytes. ``"auto"`` allows half of each device's available memory;
                 a float sets another fraction, an int an absolute byte cap, and
@@ -1595,6 +1606,7 @@ class Trace(
         self.module_filter = module_filter
         self.emit_nvtx = emit_nvtx
         self.measure_python_peak_memory = measure_python_peak_memory
+        self.distributed_witness = distributed_witness
         self.save_budget = save_budget
         # Built once per capture; ``None`` when budgeting is disabled. Charged on
         # the hot path by the activation-save paths in the torch backend.
@@ -2706,6 +2718,8 @@ class Trace(
             state["backward_ready"] = False
         if state.get("measure_python_peak_memory") is None:
             state["measure_python_peak_memory"] = False
+        if state.get("distributed_witness") is None:
+            state["distributed_witness"] = "none"
         # ``save_budget`` is FieldPolicy.DROP, so a portable artifact never
         # carries a real value; it arrives absent or None and is restored to the
         # default. A loaded trace retains nothing, so there is no ceiling to honor.

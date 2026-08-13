@@ -230,7 +230,30 @@ print(tl.compat.report(model, x).to_markdown())
   over-bound state, and tensors created inside `forward` remain disclosed residuals.
   Detection lives in `torchlens/_distributed.py` and is shared verbatim by both surfaces; the
   `HAS_DTENSOR` / `HAS_DEVICE_MESH` / `HAS_PIPELINING` capability flags gate the exact-`isinstance`
-  path and fall back to structural namespace matching.
+  path and fall back to structural namespace matching. The `dtensor` finding carries per-site
+  dual geometry on `finding.geometry` (logical shape, placements, shard offset, local elements),
+  so refused sharded state is precisely identified rather than reported as zero parameters.
+- EXPLICIT `torch.distributed` python collectives in a traced forward are captured as first-class
+  boundary nodes (merge-ranks tier b). The opt-in is `tl.distributed.arm()` at process start
+  (REQUIRED for MPMD / spawn-rank programs; installs group-lifecycle wraps, verifies the
+  five-namespace collective recognizer fail-closed, stamps the install-epoch record) or lazy
+  arming at capture entry for already-initialized SPMD processes. Each boundary op's portable
+  `annotations["collective"]` carries the `collective_boundary_v1` payload -- correlation key
+  `(membership_digest, lifetime_ordinal, channel, seq)` with issue-ticked per-`(uid, channel)`
+  counters, role-indexed dual-geometry entries, event disclosures (async completions are
+  `completion_binding="unobserved"` + `read_of_inflight_destination`; never guessed), witness
+  fields, and `lifetime_evidence` -- and the trace serializes its group-lifecycle ledger under
+  `trace.annotations["distributed"]`. `CaptureOptions(distributed_witness="digest")` is the
+  session-time witness knob (`FieldPolicy.DROP`; `"payload"` reserved for C1). Typed refusals:
+  `ambiguous_group_lifetime` (unprovable pre-arming group lifetime),
+  `uncaptured_collective_op` (arm-time recognizer set-inequality or dispatcher schema-scan hit),
+  `wildcard_recv_unsupported`, and `collective_boundary_runnable_unsupported` (runnable save +
+  forward-replay validation refuse on collective-crossing traces; metadata invariants run in
+  full). The pre-join membership-lineage audit over per-rank ledgers lives in
+  `torchlens.distributed.audit_membership_lineages` for the C1 merge engine. Arming relaxes NO
+  tier-(a) refusal: DTensor/TP/FSDP2/PP capture stays refused until the C2/C3 census proves
+  fidelity. Distributed rank processes (initialized process group, non-daemonic) are the one
+  sanctioned exception to the no-child-process capture guard.
 - `CaptureOptions(save_budget=...)` bounds retained activation bytes per device, defaulting to
   `"auto"` (half of each device's available memory measured at its first save). Crossing it raises
   `tl.errors.SaveBudgetExceededError` naming the committed footprint, the tripping op, and the

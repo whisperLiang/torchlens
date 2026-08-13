@@ -336,6 +336,23 @@ def build_sparse_run_descriptor(trace: Any) -> SparseRunDescriptor:
             )
         )
 
+    from ..runnable import collective_boundaries_of
+
+    collective_boundaries = collective_boundaries_of(trace)
+    if collective_boundaries:
+        kinds = sorted({str(entry.get("kind")) for entry in collective_boundaries})
+        diagnostics.append(
+            _diagnostic(
+                RunnableErrorCode.COLLECTIVE_BOUNDARY_RUNNABLE_UNSUPPORTED,
+                "This rank-local trace's taken path crosses "
+                f"{len(collective_boundaries)} collective boundary node(s) "
+                f"({', '.join(kinds)}); a collective cannot be replayed "
+                "single-device, so the trace is not runnable. Cross-rank "
+                "merging (merge-ranks tier c) is the supported story.",
+                detection_stage="producer_collective_boundary",
+            )
+        )
+
     ops = list(getattr(trace, "layer_list", ()))
     op_by_alias = _op_alias_index(trace, ops)
     slot_drafts, slot_for_op = _build_op_slot_drafts(trace, ops, diagnostics)

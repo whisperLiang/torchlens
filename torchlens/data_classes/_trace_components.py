@@ -264,6 +264,7 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "_rf_target_solutions": "session",
     "_optimizer": "session",
     "measure_python_peak_memory": "capture_config",
+    "distributed_witness": "capture_config",
     "save_budget": "capture_config",
     "_warned_nonfinite_check_unavailable": "session",
     "_predicate_save_options": "session",

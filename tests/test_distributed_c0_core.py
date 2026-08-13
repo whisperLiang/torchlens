@@ -1,0 +1,376 @@
+"""C0 core pins: lifecycle ledger, pre-join lineage audit, recognizer, arming.
+
+These are the single-process pins for the merge-ranks C0 evidence layer
+(design-merge-ranks-c v5, sections 1.3 and 5.0/5.2). The multiprocess gloo
+sims for boundary capture live in ``test_distributed_boundary_gloo.py``.
+"""
+
+from __future__ import annotations
+
+import pytest
+import torch
+
+pytestmark = pytest.mark.skipif(
+    not torch.distributed.is_available(), reason="torch.distributed unavailable"
+)
+
+from torchlens.distributed import (  # noqa: E402
+    AmbiguousGroupLifetimeError,
+    GroupLifecycleEvent,
+    GroupLifecycleLedger,
+    UncapturedCollectiveOpError,
+    audit_membership_lineages,
+    derive_collective_recognizer,
+    membership_digest_for_ranks,
+)
+from torchlens.distributed import _lifecycle as lifecycle  # noqa: E402
+from torchlens.distributed import _recognizer as recognizer_mod  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# ledger helpers
+# ---------------------------------------------------------------------------
+
+
+def _event(index, kind, digest, ordinal, source, epoch, **kwargs):
+    return GroupLifecycleEvent(
+        event_index=index,
+        kind=kind,
+        membership_digest=digest,
+        ordinal=ordinal,
+        ordinal_source=source,
+        install_epoch=epoch,
+        **kwargs,
+    )
+
+
+def _ledger(entries):
+    """entries: list of (kind, digest, ordinal, source, epoch)."""
+
+    ledger = GroupLifecycleLedger()
+    for index, (kind, digest, ordinal, source, epoch) in enumerate(entries):
+        ledger.append(_event(index, kind, digest, ordinal, source, epoch))
+    return ledger
+
+
+M = membership_digest_for_ranks([0, 1])
+M2 = membership_digest_for_ranks([0, 1, 2, 3])
+
+
+class TestMembershipDigest:
+    def test_order_insensitive_and_deterministic(self):
+        assert membership_digest_for_ranks([1, 0]) == membership_digest_for_ranks([0, 1])
+        assert membership_digest_for_ranks([0, 1]) != membership_digest_for_ranks([0, 2])
+        assert len(M) == 64
+
+
+class TestGroupLifecycleLedger:
+    def test_ordinals_are_ever_created_never_reused(self):
+        ledger = _ledger(
+            [
+                ("create", M, 0, "wrapped", "armed_before_any_group"),
+                ("destroy", M, 0, "wrapped", "armed_before_any_group"),
+            ]
+        )
+        # A destroyed generation retires its ordinal; the next create advances.
+        assert ledger.next_ordinal(M) == 1
+
+    def test_lineage_vectors_carry_sources_and_destroy_marks(self):
+        ledger = _ledger(
+            [
+                ("seed", M, 0, "seeded", "seeded"),
+                ("destroy", M, 0, "seeded", "seeded"),
+                ("create", M, 1, "wrapped", "seeded"),
+                ("create", M2, 0, "wrapped", "seeded"),
+            ]
+        )
+        vectors = ledger.lineage_vectors()
+        vector = vectors[M]
+        assert [(e.ordinal, e.source, e.destroyed) for e in vector.entries] == [
+            (0, "seeded", True),
+            (1, "wrapped", False),
+        ]
+        assert vector.install_epoch == "seeded"
+        assert vectors[M2].generations_created == 1
+
+    def test_payload_round_trip(self):
+        ledger = _ledger(
+            [
+                ("create", M, 0, "wrapped", "armed_before_any_group"),
+                ("destroy", M, 0, "wrapped", "armed_before_any_group"),
+            ]
+        )
+        rebuilt = GroupLifecycleLedger.from_payload(ledger.to_payload())
+        assert rebuilt.events == ledger.events
+        assert rebuilt.lineage_vectors() == ledger.lineage_vectors()
+
+    def test_event_index_must_increase(self):
+        ledger = _ledger([("create", M, 0, "wrapped", "seeded")])
+        with pytest.raises(ValueError):
+            ledger.append(_event(0, "create", M2, 0, "wrapped", "seeded"))
+
+
+class TestPreJoinLineageAudit:
+    """The v5 1.3 audit matrix, including sol's round-4 repro shape."""
+
+    def test_asymmetric_arming_conflicts_structurally(self):
+        # Sol's repro: rank 0 armed early (epoch seeded) -- seeds g0, observes
+        # destroy, wraps g1. Rank 1 armed after g0's destruction -- registry
+        # shows one live group, restricted seeding legitimately fires at 0.
+        rank0 = _ledger(
+            [
+                ("seed", M, 0, "seeded", "seeded"),
+                ("destroy", M, 0, "seeded", "seeded"),
+                ("create", M, 1, "wrapped", "seeded"),
+            ]
+        )
+        rank1 = _ledger([("seed", M, 0, "seeded", "seeded")])
+        verdicts = audit_membership_lineages({0: rank0, 1: rank1})
+        verdict = verdicts[M]
+        assert verdict.is_conflict
+        assert verdict.kind == "group_lifetime_evidence_conflict"
+        assert verdict.complete_witness_ranks == ()
+        # Structural: the audit names the conflict; it never renders gaps.
+        assert "presence" not in verdict.detail.lower()
+
+    def test_seed_discharges_against_one_generation_complete_witness(self):
+        rank0 = _ledger([("create", M, 0, "wrapped", "armed_before_any_group")])
+        rank1 = _ledger([("seed", M, 0, "seeded", "seeded")])
+        verdicts = audit_membership_lineages({0: rank0, 1: rank1})
+        assert verdicts[M].status == "compatible"
+        assert verdicts[M].complete_witness_ranks == (0,)
+
+    def test_seed_refused_when_witness_shows_two_generations(self):
+        rank0 = _ledger(
+            [
+                ("create", M, 0, "wrapped", "armed_before_any_group"),
+                ("destroy", M, 0, "wrapped", "armed_before_any_group"),
+                ("create", M, 1, "wrapped", "armed_before_any_group"),
+            ]
+        )
+        rank1 = _ledger([("seed", M, 0, "seeded", "seeded")])
+        verdicts = audit_membership_lineages({0: rank0, 1: rank1})
+        assert verdicts[M].is_conflict
+        assert verdicts[M].kind == "group_lifetime_evidence_conflict"
+
+    def test_armed_churn_with_identical_vectors_joins(self):
+        entries = [
+            ("create", M, 0, "wrapped", "armed_before_any_group"),
+            ("destroy", M, 0, "wrapped", "armed_before_any_group"),
+            ("create", M, 1, "wrapped", "armed_before_any_group"),
+        ]
+        verdicts = audit_membership_lineages({0: _ledger(entries), 1: _ledger(entries)})
+        assert verdicts[M].status == "compatible"
+
+    def test_spmd_lazy_symmetric_seeding_joins(self):
+        entries = [("seed", M, 0, "seeded", "seeded")]
+        verdicts = audit_membership_lineages({0: _ledger(entries), 1: _ledger(entries)})
+        assert verdicts[M].status == "compatible"
+
+    def test_complete_witness_disagreement_is_evidence_corruption(self):
+        rank0 = _ledger([("create", M, 0, "wrapped", "armed_before_any_group")])
+        rank1 = _ledger(
+            [
+                ("create", M, 0, "wrapped", "armed_before_any_group"),
+                ("destroy", M, 0, "wrapped", "armed_before_any_group"),
+                ("create", M, 1, "wrapped", "armed_before_any_group"),
+            ]
+        )
+        verdicts = audit_membership_lineages({0: rank0, 1: rank1})
+        assert verdicts[M].is_conflict
+        assert "corruption" in verdicts[M].detail
+
+    def test_no_witness_asymmetric_vectors_conflict(self):
+        rank0 = _ledger(
+            [
+                ("seed", M, 0, "seeded", "seeded"),
+                ("create", M, 1, "wrapped", "seeded"),
+            ]
+        )
+        rank1 = _ledger([("seed", M, 0, "seeded", "seeded")])
+        verdicts = audit_membership_lineages({0: rank0, 1: rank1})
+        assert verdicts[M].is_conflict
+
+    def test_single_rank_membership_not_audited(self):
+        verdicts = audit_membership_lineages(
+            {0: _ledger([("create", M, 0, "wrapped", "armed_before_any_group")])}
+        )
+        assert M not in verdicts
+
+    def test_destroy_mark_disagreement_conflicts(self):
+        rank0 = _ledger(
+            [
+                ("create", M, 0, "wrapped", "armed_before_any_group"),
+                ("destroy", M, 0, "wrapped", "armed_before_any_group"),
+            ]
+        )
+        rank1 = _ledger([("seed", M, 0, "seeded", "seeded")])
+        verdicts = audit_membership_lineages({0: rank0, 1: rank1})
+        assert verdicts[M].is_conflict
+
+
+class TestCollectiveRecognizer:
+    def test_derivation_matches_vetted_snapshot_on_pinned_torch(self):
+        recognizer = derive_collective_recognizer()
+        assert recognizer.snapshot_name
+        assert recognizer.classify("c10d::allreduce_") == "collective"
+        assert recognizer.classify("_c10d_functional::wait_tensor") == "collective"
+        assert recognizer.classify("_dtensor::shard_dim_alltoall") == "collective"
+        assert recognizer.classify("c10d::not_a_real_op") == "unknown_collective"
+        assert recognizer.classify("aten::mm") is None
+
+    def test_layer1_set_inequality_refuses_typed(self, monkeypatch):
+        vetted = dict(recognizer_mod.VETTED_NAMESPACE_SNAPSHOTS[0][1])
+        vetted["c10d"] = vetted["c10d"] - {"allreduce_"}
+        monkeypatch.setattr(
+            recognizer_mod,
+            "VETTED_NAMESPACE_SNAPSHOTS",
+            (("tampered", vetted),),
+        )
+        with pytest.raises(UncapturedCollectiveOpError) as excinfo:
+            derive_collective_recognizer()
+        assert excinfo.value.fields["kind"] == "uncaptured_collective_op"
+        assert excinfo.value.fields["layer"] == 1
+        mismatches = excinfo.value.fields["mismatches"]["tampered"]
+        assert "allreduce_" in mismatches["c10d"]["added"]
+
+    def test_layer2_c10d_typed_schema_outside_five_refuses_typed(self, monkeypatch):
+        # SymmetricMemory is deliberately OUTSIDE the three-type rule; widening
+        # the marker list to include it proves the layer-2 scan fires on real
+        # dispatcher contents rather than on a synthetic fixture.
+        monkeypatch.setattr(
+            recognizer_mod,
+            "_LAYER2_TYPE_MARKERS",
+            (".c10d.SymmetricMemory",),
+        )
+        with pytest.raises(UncapturedCollectiveOpError) as excinfo:
+            derive_collective_recognizer()
+        assert excinfo.value.fields["kind"] == "uncaptured_collective_op"
+        assert excinfo.value.fields["layer"] == 2
+        assert any(
+            name.startswith("symm_mem::")
+            for name in excinfo.value.fields["offending_ops"]
+        )
+
+
+@pytest.fixture()
+def gloo_world(tmp_path):
+    """Single-process gloo world with guaranteed teardown."""
+
+    import torch.distributed as dist
+
+    if dist.is_initialized():
+        dist.destroy_process_group()
+    lifecycle.disarm()
+    store = dist.FileStore(str(tmp_path / "store"), 1)
+    dist.init_process_group("gloo", store=store, rank=0, world_size=1)
+    try:
+        yield dist
+    finally:
+        lifecycle.disarm()
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+@pytest.fixture()
+def unarmed(tmp_path):
+    """Guaranteed-unarmed, uninitialized state around a test."""
+
+    import torch.distributed as dist
+
+    lifecycle.disarm()
+    if dist.is_initialized():
+        dist.destroy_process_group()
+    try:
+        yield dist
+    finally:
+        lifecycle.disarm()
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+class TestArmingAndSeeding:
+    def test_arm_before_any_group_is_complete_witness(self, unarmed, tmp_path):
+        dist = unarmed
+        record = lifecycle.arm()
+        assert record.install_epoch == "armed_before_any_group"
+        assert lifecycle.is_armed()
+        # arm() is idempotent.
+        assert lifecycle.arm() == record
+        store = dist.FileStore(str(tmp_path / "store"), 1)
+        dist.init_process_group("gloo", store=store, rank=0, world_size=1)
+        state = lifecycle.armed_state()
+        vectors = state.ledger.lineage_vectors()
+        digest = membership_digest_for_ranks([0])
+        assert [(e.ordinal, e.source) for e in vectors[digest].entries] == [(0, "wrapped")]
+        identity = lifecycle.resolve_group_identity(None)
+        assert identity.group_uid == (digest, 0)
+        assert identity.ordinal_source == "wrapped"
+
+    def test_arm_after_init_seeds_world_at_ordinal_zero(self, gloo_world):
+        record = lifecycle.arm()
+        assert record.install_epoch == "seeded"
+        identity = lifecycle.resolve_group_identity(None)
+        digest = membership_digest_for_ranks([0])
+        assert identity.group_uid == (digest, 0)
+        assert identity.ordinal_source == "seeded"
+        state = lifecycle.armed_state()
+        events = [e for e in state.ledger.events if e.membership_digest == digest]
+        assert [e.kind for e in events] == ["seed"]
+
+    def test_two_alive_same_membership_groups_refuse_seeding(self, gloo_world):
+        dist = gloo_world
+        # A subgroup [0] has the same membership as the world in a 1-proc
+        # world; created BEFORE arming, so neither is wrap-observed.
+        dist.new_group(ranks=[0])
+        lifecycle.arm()
+        with pytest.raises(AmbiguousGroupLifetimeError) as excinfo:
+            lifecycle.resolve_group_identity(None)
+        assert excinfo.value.fields["kind"] == "ambiguous_group_lifetime"
+
+    def test_observed_churn_refuses_late_seeding(self, gloo_world):
+        dist = gloo_world
+        lifecycle.arm()
+        # Wrapped create + destroy of membership {0} (a subgroup), then a
+        # NEW pre-arm-style group of the same membership cannot seed. Emulate
+        # by resolving the WORLD group (same membership {0}) after churn.
+        subgroup = dist.new_group(ranks=[0])
+        dist.destroy_process_group(subgroup)
+        with pytest.raises(AmbiguousGroupLifetimeError):
+            lifecycle.resolve_group_identity(None)
+
+    def test_wrapped_recreation_advances_ordinal(self, gloo_world):
+        dist = gloo_world
+        lifecycle.arm()
+        digest = membership_digest_for_ranks([0])
+        first = dist.new_group(ranks=[0])
+        first_identity = lifecycle.resolve_group_identity(first)
+        dist.destroy_process_group(first)
+        second = dist.new_group(ranks=[0])
+        second_identity = lifecycle.resolve_group_identity(second)
+        assert first_identity.group_uid == (digest, 0)
+        assert second_identity.group_uid == (digest, 1)
+
+    def test_seq_counters_key_on_full_group_uid(self, gloo_world):
+        dist = gloo_world
+        lifecycle.arm()
+        first = dist.new_group(ranks=[0])
+        first_identity = lifecycle.resolve_group_identity(first)
+        assert lifecycle.next_seq(first_identity, "coll") == 0
+        assert lifecycle.next_seq(first_identity, "coll") == 1
+        dist.destroy_process_group(first)
+        second = dist.new_group(ranks=[0])
+        second_identity = lifecycle.resolve_group_identity(second)
+        # A recreated communicator is a new uid: counters start fresh.
+        assert lifecycle.next_seq(second_identity, "coll") == 0
+        # Channels are independent.
+        assert lifecycle.next_seq(second_identity, "p2p/0->0/0") == 0
+
+    def test_disarm_restores_lifecycle_functions(self, unarmed):
+        dist = unarmed
+        original = dist.new_group
+        lifecycle.arm()
+        assert dist.new_group is not original
+        lifecycle.disarm()
+        assert dist.new_group is original
+        assert not lifecycle.is_armed()

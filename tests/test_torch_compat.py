@@ -381,6 +381,11 @@ def test_torch_capability_snapshot_contract() -> None:
         # fp8 dtypes exist on every torch build we support, but the set grew across
         # 2.x, so mirror the live value rather than hardcoding True.
         "HAS_FP8_DTYPES": tc.HAS_FP8_DTYPES,
+        # c10d lifecycle/correlation surfaces read by collective boundary
+        # capture (merge-ranks tier (b)/C0).
+        "HAS_C10D_GROUP_REGISTRY": tc.HAS_C10D_GROUP_REGISTRY,
+        "HAS_C10D_GROUP_SEQ": tc.HAS_C10D_GROUP_SEQ,
+        "HAS_C10D_ABORT_PG": tc.HAS_C10D_ABORT_PG,
         "HAS_GENERATOR_CLONE_STATE": hasattr(torch.Generator, "clone_state"),
         "HAS_GENERATOR_GRAPHSAFE_GET_STATE": hasattr(torch.Generator, "graphsafe_get_state"),
         "HAS_GENERATOR_GRAPHSAFE_SET_STATE": hasattr(torch.Generator, "graphsafe_set_state"),

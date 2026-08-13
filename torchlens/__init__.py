@@ -61,6 +61,7 @@ _LAZY_ATTRS = {
     "decide_recording_of_batch": ("torchlens.user_funcs", "decide_recording_of_batch"),
     "debug": ("torchlens.debug", None),
     "data_classes": ("torchlens.data_classes", None),
+    "distributed": ("torchlens.distributed", None),
     "do": ("torchlens.intervention", "do"),
     "examples": ("torchlens.examples", None),
     "experimental": ("torchlens.experimental", None),
