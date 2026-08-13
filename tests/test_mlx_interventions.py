@@ -84,9 +84,7 @@ def test_mlx_zero_ablate_substitutes_downstream_and_validates() -> None:
     assert not np.allclose(final_ablated, final_baseline)
 
     non_intervened = [
-        op
-        for op in ablated.layer_list
-        if op.layer_type != "relu" and not op.is_input
+        op for op in ablated.layer_list if op.layer_type != "relu" and not op.is_input
     ]
     assert all(not op.intervention_replaced for op in non_intervened)
 
@@ -103,12 +101,8 @@ def test_mlx_scale_and_callable_transform_apply() -> None:
         next(op for op in baseline.layer_list if op.layer_type == "relu").out
     )
 
-    scaled = tl.trace(
-        model, x, backend="mlx", intervene=tl.when(tl.func("relu"), tl.scale(0.5))
-    )
-    relu_scaled = np.asarray(
-        next(op for op in scaled.layer_list if op.layer_type == "relu").out
-    )
+    scaled = tl.trace(model, x, backend="mlx", intervene=tl.when(tl.func("relu"), tl.scale(0.5)))
+    relu_scaled = np.asarray(next(op for op in scaled.layer_list if op.layer_type == "relu").out)
     assert np.allclose(relu_scaled, relu_baseline * 0.5, atol=1e-5)
     assert MLXBackend().validate_trace(scaled) is True
 
@@ -118,12 +112,8 @@ def test_mlx_scale_and_callable_transform_apply() -> None:
         del hook
         return out * -1.0
 
-    negated = tl.trace(
-        model, x, backend="mlx", intervene=tl.when(tl.func("relu"), _negate)
-    )
-    relu_negated = np.asarray(
-        next(op for op in negated.layer_list if op.layer_type == "relu").out
-    )
+    negated = tl.trace(model, x, backend="mlx", intervene=tl.when(tl.func("relu"), _negate))
+    relu_negated = np.asarray(next(op for op in negated.layer_list if op.layer_type == "relu").out)
     assert np.allclose(relu_negated, -relu_baseline, atol=1e-5)
     assert MLXBackend().validate_trace(negated) is True
 
@@ -156,9 +146,7 @@ def test_mlx_intervened_record_stripped_of_declaration_fails_validation() -> Non
     )
     captures = trace._mlx_op_captures
     index = next(i for i, capture in enumerate(captures) if capture.interventions)
-    captures[index] = dataclasses.replace(
-        captures[index], interventions=(), appliers=()
-    )
+    captures[index] = dataclasses.replace(captures[index], interventions=(), appliers=())
 
     assert MLXBackend().validate_trace(trace) is False
 
@@ -196,9 +184,7 @@ def test_mlx_value_dependent_intervene_refuses_typed() -> None:
             model,
             _input(),
             backend="mlx",
-            intervene=tl.when(
-                tl.where(lambda ctx: True), tl.zero_ablate()
-            ),
+            intervene=tl.when(tl.where(lambda ctx: True), tl.zero_ablate()),
         )
 
 
@@ -255,9 +241,7 @@ def test_mlx_halt_non_selector_refuses_typed() -> None:
     """Value-dependent halt predicates keep the typed refusal."""
 
     with pytest.raises(BackendUnsupportedError, match="static-label"):
-        tl.trace(
-            _TwoLayerMLP(), _input(), backend="mlx", halt=lambda ctx: True
-        )
+        tl.trace(_TwoLayerMLP(), _input(), backend="mlx", halt=lambda ctx: True)
 
 
 def test_mlx_grad_options_with_intervene_refuses_typed() -> None:

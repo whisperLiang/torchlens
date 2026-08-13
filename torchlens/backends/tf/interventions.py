@@ -184,9 +184,7 @@ def normalize_tf_interventions(intervene: Any, tf: Any) -> TFInterventionPlan:
     for index, predicate in enumerate(predicates):
         selector = getattr(predicate, "selector", None)
         decision = getattr(predicate, "decision", None)
-        if not isinstance(selector, BaseSelector) or not isinstance(
-            decision, InterventionDecision
-        ):
+        if not isinstance(selector, BaseSelector) or not isinstance(decision, InterventionDecision):
             raise BackendUnsupportedError(
                 "tf backend supports trace(intervene=...) built from "
                 "tl.when(selector, action) with static selectors such as tl.func, "
@@ -284,8 +282,7 @@ def _resolve_tf_hook(decision: InterventionDecision, tf: Any) -> Callable[[Any],
     if callable(hook):
         return _tf_callable_hook(hook)
     raise BackendUnsupportedError(
-        "tf backend interventions require a helper action or callable; got "
-        f"{type(hook).__name__}."
+        f"tf backend interventions require a helper action or callable; got {type(hook).__name__}."
     )
 
 

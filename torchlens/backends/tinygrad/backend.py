@@ -342,9 +342,7 @@ class TinygradBackend:
         random_seed = _default_if_missing(random_seed, None)
         recurrence_detection = _default_if_missing(recurrence_detection, True)
         # Torch-parity default: the depth flood runs unless explicitly disabled.
-        compute_input_output_distances = _default_if_missing(
-            compute_input_output_distances, True
-        )
+        compute_input_output_distances = _default_if_missing(compute_input_output_distances, True)
         verbose = _default_if_missing(verbose, False)
         backward_ready = _default_if_missing(backward_ready, False)
         name = _default_if_missing(name, None)

@@ -807,9 +807,7 @@ def _equivalent_ops_by_label(
             else _base_equivalence_class(event) or event.label_raw
         )
         groups[key].add(event.label_raw)
-    return dict(groups), {
-        label_raw: group for group in groups.values() for label_raw in group
-    }
+    return dict(groups), {label_raw: group for group in groups.values() for label_raw in group}
 
 
 def _base_equivalence_class(event: OpEvent) -> str | None:
@@ -1019,9 +1017,7 @@ def _buffer_alias_snapshots_by_address(
         Final snapshots for buffer addresses that were updated only through an alias.
     """
 
-    directly_written = {
-        getattr(event, "address", None) for event in buffer_write_events
-    }
+    directly_written = {getattr(event, "address", None) for event in buffer_write_events}
     model = None if source_model_ref is None else source_model_ref()
     if model is None or not hasattr(model, "named_buffers"):
         return {}
@@ -1232,7 +1228,9 @@ def _rebuild_module_side_channels(journal: JournalView) -> _ModuleSideChannel:
         list(journal.module_exit_events),
     )
     for enter_event in journal.module_enter_events:
-        _apply_module_enter_event(side_channel, enter_event, module_enter_addresses[id(enter_event)])
+        _apply_module_enter_event(
+            side_channel, enter_event, module_enter_addresses[id(enter_event)]
+        )
     for exit_event in journal.module_exit_events:
         _apply_module_exit_event(side_channel, exit_event)
     provenance = side_channel.module_build_data.setdefault("module_pre_hook_provenance", {})

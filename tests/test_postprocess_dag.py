@@ -50,10 +50,31 @@ class _TinyModel(nn.Module):
 #: The frozen rank (key 1 of the direction authority). Editing it is a
 #: reviewed semantic diff; this golden makes the edit loud.
 RANK_GOLDEN = {
-    "1": 10, "2": 20, "3": 30, "4": 40, "5": 50, "6": 60, "7": 70,
-    "8": 80, "9": 90, "10": 100, "11": 110, "11.5": 115, "11.75": 118,
-    "12": 120, "13": 130, "14": 140, "15": 150, "15.5": 155, "16": 160,
-    "16.5": 165, "17": 170, "17.5": 175, "18": 180, "19": 190, "20": 200,
+    "1": 10,
+    "2": 20,
+    "3": 30,
+    "4": 40,
+    "5": 50,
+    "6": 60,
+    "7": 70,
+    "8": 80,
+    "9": 90,
+    "10": 100,
+    "11": 110,
+    "11.5": 115,
+    "11.75": 118,
+    "12": 120,
+    "13": 130,
+    "14": 140,
+    "15": 150,
+    "15.5": 155,
+    "16": 160,
+    "16.5": 165,
+    "17": 170,
+    "17.5": 175,
+    "18": 180,
+    "19": 190,
+    "20": 200,
 }
 
 #: Multi-writer columns with their writers in rank order — the post-repair
@@ -127,17 +148,19 @@ MULTI_WRITER_GOLDEN = {
 #: probe — so the full set is a golden and growing it is a reviewed diff.
 PROBES_GOLDEN = {
     "1": frozenset(("label", "layer_label", "out_ref")),
-    "3": frozenset((
-        "conditional_arm_children",
-        "conditional_elif_children",
-        "conditional_else_children",
-        "conditional_entry_children",
-        "conditional_then_children",
-        "internal_source_parents",
-        "layer_label",
-        "out_ref",
-        "recurrent_ops",
-    )),
+    "3": frozenset(
+        (
+            "conditional_arm_children",
+            "conditional_elif_children",
+            "conditional_else_children",
+            "conditional_entry_children",
+            "conditional_then_children",
+            "internal_source_parents",
+            "layer_label",
+            "out_ref",
+            "recurrent_ops",
+        )
+    ),
     "6": frozenset(("internal_source_parents", "layer_label", "recurrent_ops")),
     "12": frozenset(("out_ref",)),
     # Step 16/18 grad-family rows (manifest-swap 2026-08-13): the provisional
@@ -247,29 +270,105 @@ _TEMPLATED_REASON = re.compile(
     r"^step [\d.]+ (consumes/refines .* after step [\d.]+ writes"
     r"|depends on token:.* produced by step [\d.]+)$"
 )
-LEGACY_TEMPLATED_PAIRS = frozenset((
-    ("1", "2"), ("1", "4"), ("1", "5"), ("1", "8"), ("1", "9"),
-    ("1", "10"), ("1", "11"), ("1", "11.5"), ("1", "11.75"), ("1", "12"),
-    ("1", "15"), ("1", "15.5"), ("1", "16"), ("1", "16.5"), ("1", "17.5"),
-    ("1", "18"), ("1", "19"), ("2", "3"), ("2", "4"), ("2", "5"),
-    ("2", "9"), ("2", "15.5"), ("2", "18"), ("3", "4"), ("3", "7"),
-    ("3", "8"), ("3", "9"), ("3", "10"), ("3", "11.5"), ("3", "11.75"),
-    ("3", "12"), ("3", "15.5"), ("3", "16"), ("3", "17.5"), ("3", "18"),
-    ("4", "5"), ("4", "6"), ("4", "9"), ("4", "15.5"), ("4", "18"),
-    ("5", "9"), ("5", "15.5"), ("5", "18"), ("6", "8"), ("6", "10"),
-    ("6", "11"), ("6", "11.5"), ("6", "17.5"), ("7", "9"), ("7", "11"),
-    ("7", "11.75"), ("7", "15.5"), ("7", "16.5"), ("7", "18"), ("8", "10"),
-    ("8", "11"), ("8", "11.75"), ("8", "12"), ("8", "15"), ("8", "15.5"),
-    ("8", "16"), ("8", "16.5"), ("8", "18"), ("9", "10"), ("9", "11.5"),
-    ("9", "11.75"), ("9", "15.5"), ("9", "16"), ("9", "16.5"),
-    ("9", "17.5"), ("9", "18"), ("10", "16.5"), ("11", "15.5"),
-    ("11", "16"), ("11", "16.5"), ("11", "18"), ("11.5", "18"),
-    ("11.75", "12"), ("11.75", "13"), ("11.75", "15.5"), ("11.75", "16"),
-    ("11.75", "18"), ("11.75", "19"), ("12", "13"), ("12", "18"),
-    ("15", "15.5"), ("15", "16"), ("15", "18"), ("15", "20"),
-    ("15.5", "18"), ("16", "18"), ("16", "20"), ("16.5", "18"),
-    ("17", "18"), ("18", "19"),
-))
+LEGACY_TEMPLATED_PAIRS = frozenset(
+    (
+        ("1", "2"),
+        ("1", "4"),
+        ("1", "5"),
+        ("1", "8"),
+        ("1", "9"),
+        ("1", "10"),
+        ("1", "11"),
+        ("1", "11.5"),
+        ("1", "11.75"),
+        ("1", "12"),
+        ("1", "15"),
+        ("1", "15.5"),
+        ("1", "16"),
+        ("1", "16.5"),
+        ("1", "17.5"),
+        ("1", "18"),
+        ("1", "19"),
+        ("2", "3"),
+        ("2", "4"),
+        ("2", "5"),
+        ("2", "9"),
+        ("2", "15.5"),
+        ("2", "18"),
+        ("3", "4"),
+        ("3", "7"),
+        ("3", "8"),
+        ("3", "9"),
+        ("3", "10"),
+        ("3", "11.5"),
+        ("3", "11.75"),
+        ("3", "12"),
+        ("3", "15.5"),
+        ("3", "16"),
+        ("3", "17.5"),
+        ("3", "18"),
+        ("4", "5"),
+        ("4", "6"),
+        ("4", "9"),
+        ("4", "15.5"),
+        ("4", "18"),
+        ("5", "9"),
+        ("5", "15.5"),
+        ("5", "18"),
+        ("6", "8"),
+        ("6", "10"),
+        ("6", "11"),
+        ("6", "11.5"),
+        ("6", "17.5"),
+        ("7", "9"),
+        ("7", "11"),
+        ("7", "11.75"),
+        ("7", "15.5"),
+        ("7", "16.5"),
+        ("7", "18"),
+        ("8", "10"),
+        ("8", "11"),
+        ("8", "11.75"),
+        ("8", "12"),
+        ("8", "15"),
+        ("8", "15.5"),
+        ("8", "16"),
+        ("8", "16.5"),
+        ("8", "18"),
+        ("9", "10"),
+        ("9", "11.5"),
+        ("9", "11.75"),
+        ("9", "15.5"),
+        ("9", "16"),
+        ("9", "16.5"),
+        ("9", "17.5"),
+        ("9", "18"),
+        ("10", "16.5"),
+        ("11", "15.5"),
+        ("11", "16"),
+        ("11", "16.5"),
+        ("11", "18"),
+        ("11.5", "18"),
+        ("11.75", "12"),
+        ("11.75", "13"),
+        ("11.75", "15.5"),
+        ("11.75", "16"),
+        ("11.75", "18"),
+        ("11.75", "19"),
+        ("12", "13"),
+        ("12", "18"),
+        ("15", "15.5"),
+        ("15", "16"),
+        ("15", "18"),
+        ("15", "20"),
+        ("15.5", "18"),
+        ("16", "18"),
+        ("16", "20"),
+        ("16.5", "18"),
+        ("17", "18"),
+        ("18", "19"),
+    )
+)
 
 
 # ---------------------------------------------------------------------------
@@ -347,9 +446,7 @@ def test_read_findings_pinned_by_name() -> None:
 
     findings = {
         key
-        for key, category in _executor.classify_declared_reads(
-            PINNED_NOOP_WRITERS
-        ).items()
+        for key, category in _executor.classify_declared_reads(PINNED_NOOP_WRITERS).items()
         if category == "finding"
     }
     assert findings == PINNED_FINDINGS
@@ -387,7 +484,8 @@ def test_noop_writer_cannot_discharge_reads() -> None:
     import unittest.mock as mock
 
     with mock.patch.object(
-        _executor, "_registry_contracts",
+        _executor,
+        "_registry_contracts",
         lambda: {s: c for s, c in contracts.items() if s != "0"},
     ):
         with_ledger = _executor.classify_declared_reads(PINNED_NOOP_WRITERS)
@@ -445,8 +543,7 @@ def test_guard2_ledger_static_mirror() -> None:
         assert step in POSTPROCESS_STEP_CONTRACTS, step
         undeclared = columns - POSTPROCESS_STEP_CONTRACTS[step].writes
         assert not undeclared, (
-            f"guard-2 ledger names step-{step} writes no longer declared: "
-            f"{sorted(undeclared)}"
+            f"guard-2 ledger names step-{step} writes no longer declared: {sorted(undeclared)}"
         )
     assert EXPECTED_PHANTOM_WRITES == set(PHANTOM_WRITE_EXEMPTIONS)
     assert EXPECTED_PHANTOM_READS == set(PHANTOM_READ_EXEMPTIONS)
@@ -571,9 +668,7 @@ def test_no_new_templated_corpus_reasons() -> None:
     """
 
     templated = {
-        pair
-        for pair, entry in PINNED_ORDER_PAIRS.items()
-        if _TEMPLATED_REASON.match(entry.reason)
+        pair for pair, entry in PINNED_ORDER_PAIRS.items() if _TEMPLATED_REASON.match(entry.reason)
     }
     new_templated = templated - LEGACY_TEMPLATED_PAIRS
     assert not new_templated, (
@@ -624,9 +719,7 @@ def test_independent_edge_rederivation() -> None:
     """A test-side reimplementation of the edge rules matches the module."""
 
     contracts = {
-        step: contract
-        for step, contract in POSTPROCESS_STEP_CONTRACTS.items()
-        if step != "0"
+        step: contract for step, contract in POSTPROCESS_STEP_CONTRACTS.items() if step != "0"
     }
     rank = LEGACY_STEP_RANK
     expected: set[tuple[str, str, str, str]] = set()
@@ -675,10 +768,7 @@ def test_independent_edge_rederivation() -> None:
 
     def op_touching(contract: object) -> bool:
         return bool(
-            contract.writes
-            or contract.reads
-            or contract.placeholder_probes
-            or contract.row_effects
+            contract.writes or contract.reads or contract.placeholder_probes or contract.row_effects
         )
 
     row_steps = [s for s, c in contracts.items() if c.row_effects]
@@ -696,10 +786,7 @@ def test_independent_edge_rederivation() -> None:
             low, high = sorted((barrier_step, other), key=rank.__getitem__)
             expected.add((low, high, "barrier", ""))
 
-    derived = {
-        (edge.src, edge.dst, edge.kind, edge.carrier)
-        for edge in _executor.derive_edges()
-    }
+    derived = {(edge.src, edge.dst, edge.kind, edge.carrier) for edge in _executor.derive_edges()}
     assert derived == expected
 
 
@@ -912,9 +999,7 @@ def test_executor_should_run_called_exactly_once(
 
         return ex.StepSpec(spec.step, spec.run, counted, spec.assert_when_skipped)
 
-    monkeypatch.setattr(
-        ex, "STEP_REGISTRY", tuple(counting(spec) for spec in original_registry)
-    )
+    monkeypatch.setattr(ex, "STEP_REGISTRY", tuple(counting(spec) for spec in original_registry))
     trace = tl.trace(_TinyModel().eval(), torch.randn(2, 3))
     try:
         assert counts == {spec.step: 1 for spec in original_registry}
@@ -978,11 +1063,7 @@ def test_phase_timing_bucket_names_default_capture() -> None:
 
     trace = tl.trace(_TinyModel().eval(), torch.randn(2, 3))
     try:
-        buckets = {
-            name
-            for name in trace._phase_timings
-            if name.startswith("postprocess:Step")
-        }
+        buckets = {name for name in trace._phase_timings if name.startswith("postprocess:Step")}
         assert buckets == {
             "postprocess:Step 0: Materialize capture events",
             "postprocess:Step 1: Add output layers",

@@ -444,9 +444,7 @@ def warn_parallel() -> None:
     try:
         import torch.distributed as dist
 
-        is_rank_process = (
-            not process.daemon and dist.is_available() and dist.is_initialized()
-        )
+        is_rank_process = not process.daemon and dist.is_available() and dist.is_initialized()
     except Exception:
         is_rank_process = False
     if not is_rank_process:

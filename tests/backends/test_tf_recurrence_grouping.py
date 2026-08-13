@@ -70,11 +70,7 @@ def _grouped_ops(trace: Any, func_name: str) -> list[Any]:
         Multi-pass ops with that function name.
     """
 
-    return [
-        op
-        for op in trace.layer_list
-        if op.func_name == func_name and op.num_passes > 1
-    ]
+    return [op for op in trace.layer_list if op.func_name == func_name and op.num_passes > 1]
 
 
 def test_tf_repeated_dense_groups_into_passes() -> None:
@@ -174,9 +170,7 @@ def test_tf_tamper_swapped_sidecar_labels_fail_validation() -> None:
     trace = _repeated_trace()
     captures = list(trace._tf_op_captures)
     relu_raw = {op._label_raw for op in _grouped_ops(trace, "Relu")[:2]}
-    indices = [
-        index for index, capture in enumerate(captures) if capture.label_raw in relu_raw
-    ]
+    indices = [index for index, capture in enumerate(captures) if capture.label_raw in relu_raw]
     assert len(indices) == 2
     first, second = indices
     label_first = captures[first].label_raw
@@ -195,9 +189,7 @@ def test_tf_tamper_dangling_sidecar_label_fails_validation() -> None:
     trace = _repeated_trace()
     captures = list(trace._tf_op_captures)
     target = next(
-        index
-        for index, capture in enumerate(captures)
-        if capture.op_type.lower() == "relu"
+        index for index, capture in enumerate(captures) if capture.op_type.lower() == "relu"
     )
     captures[target] = dataclasses.replace(captures[target], label_raw="relu_9_99_raw")
     trace._tf_op_captures = tuple(captures)
@@ -227,9 +219,7 @@ def test_tf_intermediate_derived_grads_survive_grouping() -> None:
         grad_options=grad_options,
     )
 
-    grouped_raw = {
-        grouped[label]._label_raw for label in grouped.intermediate_derived_grads.keys()
-    }
+    grouped_raw = {grouped[label]._label_raw for label in grouped.intermediate_derived_grads.keys()}
     ungrouped_raw = {
         ungrouped[label]._label_raw for label in ungrouped.intermediate_derived_grads.keys()
     }

@@ -334,9 +334,7 @@ class PaddleBackend:
         module_identity_mode = _default_if_missing(module_identity_mode, None)
         grad_options = _default_if_missing(grad_options, None)
         # Torch-parity default: the depth flood runs unless explicitly disabled.
-        compute_input_output_distances = _default_if_missing(
-            compute_input_output_distances, True
-        )
+        compute_input_output_distances = _default_if_missing(compute_input_output_distances, True)
         save_predicate = pop_static_label_save_predicate(extra_kwargs, backend_name="paddle")
         intervene = _default_if_missing(extra_kwargs.pop("intervene", None), None)
         halt = _default_if_missing(extra_kwargs.pop("halt", None), None)
@@ -430,8 +428,7 @@ class PaddleBackend:
                 recipe_tuple = tuple(facet_recipes)
             except TypeError as exc:
                 raise BackendUnsupportedError(
-                    "paddle backend trace(recipes=...) requires an iterable of "
-                    "recipe callables."
+                    "paddle backend trace(recipes=...) requires an iterable of recipe callables."
                 ) from exc
             if not all(callable(recipe) for recipe in recipe_tuple):
                 raise BackendUnsupportedError(
@@ -474,9 +471,7 @@ class PaddleBackend:
             elif intervention_runtime is not None:
                 intervention_runtime.warn_if_zero_matches()
             if halt_signal is None:
-                trace.raw_output = (
-                    output_transform(output) if callable(output_transform) else None
-                )
+                trace.raw_output = output_transform(output) if callable(output_transform) else None
             self._mark_outputs(trace, output)
             materialize_from_events(trace, trace.capture_events)
             delattr(trace, "capture_events")
@@ -936,9 +931,7 @@ class PaddleBackend:
                     replayed,
                     _first_output_path(capture),
                 )
-                if expected_output is None or not _payloads_close(
-                    replayed_output, expected_output
-                ):
+                if expected_output is None or not _payloads_close(replayed_output, expected_output):
                     failed_count += 1
                     continue
                 if not _parent_perturbations_change_output(
@@ -2528,8 +2521,7 @@ def _paddle_trace_intermediate_signatures(
             func_call_id=int(getattr(op, "func_call_id", 0)),
             op_name=str(getattr(op, "func_name", "")),
             parent_labels=tuple(
-                final_to_raw.get(str(parent), str(parent))
-                for parent in getattr(op, "parents", ())
+                final_to_raw.get(str(parent), str(parent)) for parent in getattr(op, "parents", ())
             ),
             module_stack=tuple(str(module) for module in getattr(op, "modules", ())),
         )

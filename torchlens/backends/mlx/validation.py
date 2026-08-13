@@ -267,9 +267,7 @@ def _perturbation_evidence(capture: MLXOpCapture, baseline: tuple[Any, ...]) -> 
         if found_key is None:
             return PERTURBATION_NO_PERTURBABLE_INPUT
         kwarg_key = found_key
-    original = (
-        capture.args[arg_position] if arg_position is not None else capture.kwargs[kwarg_key]
-    )
+    original = capture.args[arg_position] if arg_position is not None else capture.kwargs[kwarg_key]
     for candidate in _perturb_candidates(original):
         try:
             if arg_position is not None:
@@ -282,18 +280,13 @@ def _perturbation_evidence(capture: MLXOpCapture, baseline: tuple[Any, ...]) -> 
             else:
                 perturbed_args = capture.args
                 perturbed_kwargs = {**capture.kwargs, kwarg_key: candidate}
-            perturbed = _iter_output_arrays(
-                capture.func(*perturbed_args, **perturbed_kwargs)
-            )
+            perturbed = _iter_output_arrays(capture.func(*perturbed_args, **perturbed_kwargs))
             mx.eval(*perturbed)
         except Exception:
             continue
         if len(perturbed) != len(baseline):
             return PERTURBATION_PROVED
-        if any(
-            not _payloads_close(p_out, b_out)
-            for p_out, b_out in zip(perturbed, baseline)
-        ):
+        if any(not _payloads_close(p_out, b_out) for p_out, b_out in zip(perturbed, baseline)):
             return PERTURBATION_PROVED
     return PERTURBATION_UNPROVED
 
@@ -379,9 +372,7 @@ def _capture_parent_labels(capture: MLXOpCapture) -> set[str]:
         Non-``None`` per-leaf parent labels.
     """
 
-    labels = {
-        label for slot in capture.arg_leaf_labels for label in slot if label is not None
-    }
+    labels = {label for slot in capture.arg_leaf_labels for label in slot if label is not None}
     for slot in capture.kwarg_leaf_labels.values():
         labels.update(label for label in slot if label is not None)
     return labels
@@ -424,11 +415,7 @@ def _declared_parents_consistent(
         declared = getattr(op, "parents", None)
         if declared is None:
             return False
-        declared_ops = {
-            id(ops_by_label[parent])
-            for parent in declared
-            if parent in ops_by_label
-        }
+        declared_ops = {id(ops_by_label[parent]) for parent in declared if parent in ops_by_label}
         declared_ops.discard(id(op))
         implied_without_self = set(implied_ops)
         implied_without_self.discard(id(op))
@@ -477,9 +464,7 @@ def _reconstruct_value(
                 if isinstance(node, _ReplaySlot):
                     # A slot with no recorded label means the template and
                     # label fingerprint disagree; fail closed, never guess.
-                    raise ValueError(
-                        "MLX replay template slot has no recorded parent label."
-                    )
+                    raise ValueError("MLX replay template slot has no recorded parent label.")
                 return node
             return _saved_payload(trace, ops_by_label, label)
         if isinstance(node, tuple):
@@ -578,9 +563,7 @@ def _coverage_failure_count(trace: Any, captures: tuple[MLXOpCapture, ...]) -> i
             capture.op_name,
             tuple(capture.labels_raw),
             tuple(tuple(slot) for slot in capture.arg_leaf_labels),
-            tuple(
-                sorted((key, tuple(slot)) for key, slot in capture.kwarg_leaf_labels.items())
-            ),
+            tuple(sorted((key, tuple(slot)) for key, slot in capture.kwarg_leaf_labels.items())),
             tuple(capture.interventions),
         )
         for capture in captures
@@ -664,14 +647,10 @@ def validate_mlx_captures(trace: Any) -> tuple[int, int, tuple[str, ...]]:
                     final[index] = apply(final[index])
                 mx.eval(*final)
             expected = tuple(
-                _saved_payload(trace, ops_by_label, label)
-                for label in capture.labels_raw
+                _saved_payload(trace, ops_by_label, label) for label in capture.labels_raw
             )
             mx.eval(*expected)
-            if any(
-                not _payloads_close(f_out, e_out)
-                for f_out, e_out in zip(final, expected)
-            ):
+            if any(not _payloads_close(f_out, e_out) for f_out, e_out in zip(final, expected)):
                 failed_count += 1
                 continue
             perturb_capture = MLXOpCapture(

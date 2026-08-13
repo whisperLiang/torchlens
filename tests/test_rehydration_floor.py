@@ -151,7 +151,5 @@ def test_legacy_intervention_specs_stay_loadable() -> None:
     from torchlens.intervention.types import InterventionSpec
 
     fixture_path = Path(__file__).parent / "fixtures" / "tlspec_v2_16"
-    loaded = tl.load(
-        fixture_path / "F1_intervention_default.tlspec", trust_custom_callables=True
-    )
+    loaded = tl.load(fixture_path / "F1_intervention_default.tlspec", trust_custom_callables=True)
     assert isinstance(loaded, InterventionSpec)

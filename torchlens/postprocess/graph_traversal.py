@@ -149,9 +149,7 @@ def _resolve_output_parent_labels(
             event = capture_events.op_event_by_label_raw.get(parent_label)
             if event is not None:
                 capture_events.append_amendment(
-                    amend_late_buffer_output_parent(
-                        event.seq, parent_label, is_output_parent=True
-                    )
+                    amend_late_buffer_output_parent(event.seq, parent_label, is_output_parent=True)
                 )
         parent_labels.append(parent_label)
     return parent_labels
@@ -369,17 +367,12 @@ def _add_output_layers(
             # traces keep the graph-attached output — it is the very handle
             # log_backward() differentiates through.
             _parent_payload = (
-                output_node.out
-                if output_node.out is not None
-                else output_node.transformed_out
+                output_node.out if output_node.out is not None else output_node.transformed_out
             )
             _detach_payload = not (
-                torch.is_tensor(_parent_payload)
-                and _parent_payload.grad_fn is not None
+                torch.is_tensor(_parent_payload) and _parent_payload.grad_fn is not None
             )
-            actual_output_raw = safe_copy(
-                output_tensor, detach_tensor=_detach_payload
-            )
+            actual_output_raw = safe_copy(output_tensor, detach_tensor=_detach_payload)
             if output_node.output_device not in [str(actual_output_raw.device), "same"]:
                 actual_output_raw = safe_to(actual_output_raw, output_node.output_device)
             actual_output_transformed = None
@@ -396,9 +389,7 @@ def _add_output_layers(
                     streaming_active=getattr(self, "_out_writer", None) is not None,
                 )
             raw_retained = output_node.out is not None
-            new_output_node._internal_set(
-                "out", actual_output_raw if raw_retained else None
-            )
+            new_output_node._internal_set("out", actual_output_raw if raw_retained else None)
             new_output_node._internal_set("transformed_out", actual_output_transformed)
             new_output_node.transformed_out_shape = _shape_or_none(actual_output_transformed)
             new_output_node.transformed_out_dtype = _dtype_or_none(actual_output_transformed)
@@ -407,9 +398,7 @@ def _add_output_layers(
             )
 
             comparison_output = output_node.out if raw_retained else output_node.transformed_out
-            actual_comparison = (
-                actual_output_raw if raw_retained else actual_output_transformed
-            )
+            actual_comparison = actual_output_raw if raw_retained else actual_output_transformed
             if (
                 comparison_output is not None
                 and actual_comparison is not None
@@ -485,8 +474,12 @@ def _remove_orphan_nodes(self: "Trace") -> None:
 
     nodes_seen = _expand_seen_nodes_to_complete_func_call_groups(self, nodes_seen)
     orphan_nodes = orig_nodes - nodes_seen
-    self._orphan_labels = [label for label in self._raw_graph_ws.raw_layer_labels_list if label in orphan_nodes]
-    self._orphan_logs = tuple(self._raw_graph_ws.raw_layer_dict[label] for label in self._orphan_labels)
+    self._orphan_labels = [
+        label for label in self._raw_graph_ws.raw_layer_labels_list if label in orphan_nodes
+    ]
+    self._orphan_logs = tuple(
+        self._raw_graph_ws.raw_layer_dict[label] for label in self._orphan_labels
+    )
     self.orphan_records = [
         {
             "raw_label": orphan._label_raw,
@@ -524,7 +517,9 @@ def _remove_orphan_nodes(self: "Trace") -> None:
     self._orphan_pruned_func_call_ids = {
         func_call_id
         for label in orphan_nodes
-        for func_call_id in (getattr(self._raw_graph_ws.raw_layer_dict[label], "func_call_id", None),)
+        for func_call_id in (
+            getattr(self._raw_graph_ws.raw_layer_dict[label], "func_call_id", None),
+        )
         if isinstance(func_call_id, int)
     }
 

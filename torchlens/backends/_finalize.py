@@ -413,7 +413,9 @@ def compute_preview_input_output_distances(trace: Trace) -> None:
                 ops_by_label.setdefault(key, op_log)
 
     ordered_ops = [
-        ops_by_label[label] for label in trace._raw_graph_ws.raw_layer_labels_list if label in ops_by_label
+        ops_by_label[label]
+        for label in trace._raw_graph_ws.raw_layer_labels_list
+        if label in ops_by_label
     ]
     for mode, starting_labels, min_field, max_field, marker_field, lineage_field, edge_field in (
         (
@@ -581,9 +583,7 @@ def _apply_recurrence_relabel_epilogue(
     raw_dict = trace._raw_graph_ws.raw_layer_dict
     raw_to_final = {label: raw_dict[label].label for label in raw_dict}
     changed = {
-        label: final
-        for label, final in raw_to_final.items()
-        if raw_dict[label].num_passes != 1
+        label: final for label, final in raw_to_final.items() if raw_dict[label].num_passes != 1
     }
     if changed:
         for op_log in raw_dict.values():
@@ -607,10 +607,7 @@ def _apply_recurrence_relabel_epilogue(
                 setattr(
                     trace,
                     attr_name,
-                    [
-                        changed.get(item, item) if isinstance(item, str) else item
-                        for item in labels
-                    ],
+                    [changed.get(item, item) if isinstance(item, str) else item for item in labels],
                 )
 
     equivalent_labels_by_key: dict[str, set[str]] = {}

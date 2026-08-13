@@ -385,9 +385,7 @@ class JAXBackend:
         save_rng_states = _default_if_missing(save_rng_states, False)
         recurrence_detection = _default_if_missing(recurrence_detection, True)
         # Torch-parity default: the depth flood runs unless explicitly disabled.
-        compute_input_output_distances = _default_if_missing(
-            compute_input_output_distances, True
-        )
+        compute_input_output_distances = _default_if_missing(compute_input_output_distances, True)
         verbose = _default_if_missing(verbose, False)
         backward_ready = _default_if_missing(backward_ready, False)
         name = _default_if_missing(name, None)
@@ -2106,7 +2104,9 @@ class JAXBackend:
             trace.num_params_trainable = num_params_trainable
             trace.num_params_frozen = num_params - num_params_trainable
         trace.output_layers = [
-            trace._raw_graph_ws.raw_layer_dict[label].layer_label if label in trace._raw_graph_ws.raw_layer_dict else label
+            trace._raw_graph_ws.raw_layer_dict[label].layer_label
+            if label in trace._raw_graph_ws.raw_layer_dict
+            else label
             for label in trace.output_layers
         ]
         trace._layers_logged = True

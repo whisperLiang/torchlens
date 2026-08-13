@@ -164,9 +164,7 @@ _EXECUTOR_STEP_NAMESPACE: tuple[object, ...] = (
 )
 
 
-
 _POSTPROCESS_ASSERT_ENV = "TORCHLENS_POSTPROCESS_ASSERTIONS"
-
 
 
 def _postprocess_assertions_enabled() -> bool:
@@ -306,9 +304,7 @@ def _check_postprocess_contract(
             )
         read_mode = _read_audit_mode()
         if read_mode == "record":
-            RECORDED_STEP_READS.setdefault(step, set()).update(
-                audit_result.read_columns
-            )
+            RECORDED_STEP_READS.setdefault(step, set()).update(audit_result.read_columns)
             RECORDED_STEP_CLONE_READS.setdefault(step, set()).update(
                 audit_result.clone_read_columns
             )
@@ -325,10 +321,7 @@ def _check_postprocess_contract(
                 "derivation authority — root-cause the dependency and land it "
                 "as a reviewed contract diff, never a silent widen."
             )
-            assert (
-                not audit_result.clone_read_columns
-                or "creates" in contract.row_effects
-            ), (
+            assert not audit_result.clone_read_columns or "creates" in contract.row_effects, (
                 f"Step {step} ({contract.name}) performed row-clone reads "
                 "without a 'creates' row_effects sanction; cloning is only "
                 "legal as part of row creation (design-ppdag-v3 §2.4d)."
@@ -352,8 +345,7 @@ def _check_postprocess_contract(
             # model and unreachable outside the debug env flag.
             resolved = self.layer_dict_all_keys[op.layer_label]
             assert resolved.layer_label == op.layer_label, (
-                f"Step 11 mapped layer label {op.layer_label!r} to a foreign "
-                f"op {resolved.label!r}"
+                f"Step 11 mapped layer label {op.layer_label!r} to a foreign op {resolved.label!r}"
             )
     elif step == "15.5":
         assert self.layer_logs, "Step 15.5 must build aggregate layer logs"

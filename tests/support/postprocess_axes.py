@@ -209,9 +209,7 @@ def _axis_save_code_context() -> Any:
 def _axis_streaming(tmp_dir: str) -> Any:
     _seed_everything()
     model, model_input = _oracle_case("plain_cnn")
-    return tl.trace(
-        model, model_input, storage=tl.to_disk(Path(tmp_dir) / "axis.tlspec")
-    )
+    return tl.trace(model, model_input, storage=tl.to_disk(Path(tmp_dir) / "axis.tlspec"))
 
 
 def _axis_layer_depths() -> Any:
@@ -250,9 +248,7 @@ def _axis_orphan_remove() -> Any:
 def _axis_transform() -> Any:
     _seed_everything()
     model, model_input = _oracle_case("plain_cnn")
-    return tl.trace(
-        model, model_input, activation_transform=lambda t: t.detach().float() * 1.0
-    )
+    return tl.trace(model, model_input, activation_transform=lambda t: t.detach().float() * 1.0)
 
 
 def _axis_container_structure() -> Any:
@@ -278,9 +274,7 @@ def _axis_buffer_duplicate() -> Any:
 
 def _axis_buffer_from_input() -> Any:
     _seed_everything()
-    return tl.trace(
-        BufferFromInputModel(), torch.randn(2, 4), mark_layer_depths=False
-    )
+    return tl.trace(BufferFromInputModel(), torch.randn(2, 4), mark_layer_depths=False)
 
 
 def _axis_lookback(tmp_dir: str, *, streaming: bool, transform: bool) -> Any:
@@ -356,9 +350,7 @@ def _axis_conditional_elif_else() -> Any:
 
 def _axis_var_names() -> Any:
     _seed_everything()
-    return tl.trace(
-        AssigningVarNamesModel().eval(), torch.randn(2, 3), save_code_context=True
-    )
+    return tl.trace(AssigningVarNamesModel().eval(), torch.randn(2, 3), save_code_context=True)
 
 
 def _axis_refresh() -> Any:

@@ -891,11 +891,7 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         "Rename labels",
         "Consumes raw-to-final maps; mutates graph references to final labels.",
         writes=frozenset(),
-        reads=frozenset(
-            (
-                "layer_label",
-            )
-        ),
+        reads=frozenset(("layer_label",)),
         trace_state=tokens("r:label_maps", "r:raw_graph_ws", "w:lookup_containers"),
     ),
     "11": PostprocessStepContract(
@@ -1045,11 +1041,7 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         ),
         # Probe (reviewed): undecorate checks out_ref to decide whether
         # a payload lives behind a streamed ref.
-        placeholder_probes=frozenset(
-            (
-                "out_ref",
-            )
-        ),
+        placeholder_probes=frozenset(("out_ref",)),
         trace_state=tokens("w:payload_tensors"),
     ),
     "13": PostprocessStepContract(
@@ -1178,11 +1170,7 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         "16.5",
         "Graph shape hash",
         "Consumes final graph; mutates normalized addresses and graph hash.",
-        writes=frozenset(
-            (
-                "_address_normalized",
-            )
-        ),
+        writes=frozenset(("_address_normalized",)),
         reads=frozenset(
             (
                 "container_path",
@@ -1205,11 +1193,7 @@ POSTPROCESS_STEP_CONTRACTS: dict[str, PostprocessStepContract] = {
         "17",
         "Mark pass finished",
         "Consumes finalized containers; mutates Trace to user-facing finished state.",
-        writes=frozenset(
-            (
-                "_tracing_finished",
-            )
-        ),
+        writes=frozenset(("_tracing_finished",)),
         reads=frozenset(),
         trace_state=tokens("w:finished_flag"),
         barrier=True,
@@ -1658,13 +1642,10 @@ class PinnedPair:
 
         if self.carrier not in ("columns", "tokens", "structure"):
             raise ValueError(
-                f"PinnedPair carrier must be columns/tokens/structure, got "
-                f"{self.carrier!r}."
+                f"PinnedPair carrier must be columns/tokens/structure, got {self.carrier!r}."
             )
         if self.carrier != "structure" and not self.carriers:
-            raise ValueError(
-                "A columns/tokens PinnedPair must name its carriers."
-            )
+            raise ValueError("A columns/tokens PinnedPair must name its carriers.")
 
 
 #: Key 2 of the two-key direction authority: the semantic producer->consumer
@@ -1678,17 +1659,20 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
     {
         ("1", "2"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "children",
                     "has_output_descendant",
                     "output_descendants",
                     "token:raw_graph_ws",
-            )),
+                )
+            ),
             "step 2 consumes/refines children, has_output_descendant, output_descendants, token:raw_graph_ws after step 1 writes",
         ),
         ("1", "3"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_edge_uses",
                     "_label_raw",
                     "children",
@@ -1702,7 +1686,8 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "parents",
                     "recurrent_ops",
                     "token:raw_graph_ws",
-            )),
+                )
+            ),
             "orphan removal floods and scrubs the COMPLETE raw graph: step 1 "
             "must have added the output rows (else outputs read as orphans) "
             "and initialized the relation/equivalence/edge-use state the "
@@ -1712,18 +1697,21 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
         ),
         ("1", "4"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "children",
                     "has_output_descendant",
                     "output_descendants",
                     "parents",
                     "token:raw_graph_ws",
-            )),
+                )
+            ),
             "step 4 consumes/refines children, has_output_descendant, output_descendants, parents, ... after step 1 writes",
         ),
         ("1", "5"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_label_raw",
                     "children",
                     "code_context",
@@ -1731,12 +1719,14 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "parents",
                     "pass_index",
                     "token:raw_graph_ws",
-            )),
+                )
+            ),
             "step 5 consumes/refines _label_raw, children, code_context, has_output_descendant, ... after step 1 writes",
         ),
         ("1", "6"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_edge_uses",
                     "_label_raw",
                     "children",
@@ -1755,14 +1745,16 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "recurrent_ops",
                     "saved_args",
                     "token:raw_graph_ws",
-            )),
+                )
+            ),
             "buffer connect/merge rewires the raw graph only after step 1 has "
             "added the output rows, and the merge husking re-scrubs the "
             "step-1-seeded relation, template, and edge-use state",
         ),
         ("1", "7"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_label_raw",
                     "_layer_label_raw",
                     "_param_barcodes",
@@ -1780,24 +1772,28 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "raw_index",
                     "recurrent_ops",
                     "token:raw_graph_ws",
-            )),
+                )
+            ),
             "loop detection consumes the completed raw graph incl. output rows",
         ),
         ("1", "8"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_label_raw",
                     "num_passes",
                     "pass_index",
                     "recurrent_ops",
                     "token:raw_graph_ws",
                     "type",
-            )),
+                )
+            ),
             "step 8 consumes/refines _label_raw, num_passes, pass_index, recurrent_ops, ... after step 1 writes",
         ),
         ("1", "9"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_edge_uses",
                     "_param_barcodes",
                     "activation_memory",
@@ -1822,20 +1818,24 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "recurrent_ops",
                     "token:raw_graph_ws",
                     "type",
-            )),
+                )
+            ),
             "step 9 consumes/refines _edge_uses, _param_barcodes, activation_memory, atomic_module_call, ... after step 1 writes",
         ),
         ("1", "10"): PinnedPair(
             "tokens",
-            frozenset((
+            frozenset(
+                (
                     "token:lookup_containers",
                     "token:raw_graph_ws",
-            )),
+                )
+            ),
             "step 10 depends on token:lookup_containers, token:raw_graph_ws produced by step 1",
         ),
         ("1", "11"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_label_raw",
                     "activation_memory",
                     "input_to_module_calls",
@@ -1851,23 +1851,27 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "token:lookup_containers",
                     "type",
                     "unattributed_tensor_args",
-            )),
+                )
+            ),
             "step 11 consumes/refines _label_raw, activation_memory, input_to_module_calls, io_role, ... after step 1 writes",
         ),
         ("1", "11.5"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "code_context",
                     "func_name",
                     "token:raw_graph_ws",
                     "type",
                     "var_names",
-            )),
+                )
+            ),
             "step 11.5 consumes/refines code_context, func_name, token:raw_graph_ws, type, ... after step 1 writes",
         ),
         ("1", "11.75"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_layer_label_raw",
                     "activation_memory",
                     "dtype",
@@ -1883,30 +1887,36 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "transformed_out_dtype",
                     "transformed_out_shape",
                     "type",
-            )),
+                )
+            ),
             "step 11.75 consumes/refines _layer_label_raw, activation_memory, dtype, func_name, ... after step 1 writes",
         ),
         ("1", "12"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "out",
                     "saved_args",
                     "saved_kwargs",
                     "transformed_out",
-            )),
+                )
+            ),
             "step 12 consumes/refines out, saved_args, saved_kwargs, transformed_out after step 1 writes",
         ),
         ("1", "15"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_param_logs",
                     "parent_params",
-            )),
+                )
+            ),
             "step 15 consumes/refines _param_logs, parent_params after step 1 writes",
         ),
         ("1", "15.5"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_param_logs",
                     "activation_memory",
                     "autograd_memory",
@@ -1922,12 +1932,14 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "transformed_activation_memory",
                     "transformed_out_dtype",
                     "transformed_out_shape",
-            )),
+                )
+            ),
             "step 15.5 consumes/refines _param_logs, activation_memory, autograd_memory, dtype, ... after step 1 writes",
         ),
         ("1", "16"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_param_logs",
                     "container_spec",
                     "input_to_module_calls",
@@ -1936,12 +1948,14 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "module_call_stack",
                     "output_of_module_calls",
                     "raw_index",
-            )),
+                )
+            ),
             "step 16 consumes/refines _param_logs, container_spec, input_to_module_calls, is_buffer, ... after step 1 writes",
         ),
         ("1", "16.5"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "container_path",
                     "container_spec",
                     "func_name",
@@ -1953,19 +1967,19 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "parents",
                     "token:lookup_containers",
                     "type",
-            )),
+                )
+            ),
             "step 16.5 consumes/refines container_path, container_spec, func_name, is_buffer, ... after step 1 writes",
         ),
         ("1", "17.5"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:raw_graph_ws",
-            )),
+            frozenset(("token:raw_graph_ws",)),
             "step 17.5 depends on token:raw_graph_ws produced by step 1",
         ),
         ("1", "18"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_arg_expressions_cache",
                     "_edge_uses",
                     "_label_raw",
@@ -2051,71 +2065,69 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "type",
                     "unattributed_tensor_args",
                     "var_names",
-            )),
+                )
+            ),
             "step 18 consumes/refines _arg_expressions_cache, _edge_uses, _label_raw, _layer_label_raw, ... after step 1 writes",
         ),
         ("1", "19"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "out",
                     "transformed_out",
-            )),
+                )
+            ),
             "step 19 consumes/refines out, transformed_out after step 1 writes",
         ),
         ("2", "3"): PinnedPair(
             "columns",
-            frozenset((
-                    "output_descendants",
-            )),
+            frozenset(("output_descendants",)),
             "step 3 consumes/refines output_descendants after step 2 writes",
         ),
         ("2", "4"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "has_output_descendant",
                     "output_descendants",
-            )),
+                )
+            ),
             "step 4 consumes/refines has_output_descendant, output_descendants after step 2 writes",
         ),
         ("2", "5"): PinnedPair(
             "columns",
-            frozenset((
-                    "has_output_descendant",
-            )),
+            frozenset(("has_output_descendant",)),
             "step 5 consumes/refines has_output_descendant after step 2 writes",
         ),
         ("2", "9"): PinnedPair(
             "columns",
-            frozenset((
-                    "output_descendants",
-            )),
+            frozenset(("output_descendants",)),
             "step 9 consumes/refines output_descendants after step 2 writes",
         ),
         ("2", "15.5"): PinnedPair(
             "columns",
-            frozenset((
-                    "has_output_descendant",
-            )),
+            frozenset(("has_output_descendant",)),
             "step 15.5 consumes/refines has_output_descendant after step 2 writes",
         ),
         ("2", "18"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "has_output_descendant",
                     "output_descendants",
-            )),
+                )
+            ),
             "step 18 consumes/refines has_output_descendant, output_descendants after step 2 writes",
         ),
         ("3", "4"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:raw_graph_ws",
-            )),
+            frozenset(("token:raw_graph_ws",)),
             "step 4 depends on token:raw_graph_ws produced by step 3",
         ),
         ("3", "6"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_edge_uses",
                     "args_template",
                     "conditional_arm_children",
@@ -2127,7 +2139,8 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "interventions",
                     "kwargs_template",
                     "token:raw_graph_ws",
-            )),
+                )
+            ),
             "orphan removal settles the graph before buffer dedup re-walks "
             "it; both steps remove rows through the same husking scrub, so "
             "the shared reference state (edge uses, equivalence groups, "
@@ -2136,23 +2149,24 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
         ),
         ("3", "7"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "equivalent_ops",
                     "is_orphan",
                     "token:raw_graph_ws",
-            )),
+                )
+            ),
             "step 7 consumes/refines equivalent_ops, is_orphan, token:raw_graph_ws after step 3 writes",
         ),
         ("3", "8"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:raw_graph_ws",
-            )),
+            frozenset(("token:raw_graph_ws",)),
             "step 8 depends on token:raw_graph_ws produced by step 3",
         ),
         ("3", "9"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_edge_uses",
                     "args_template",
                     "conditional_arm_children",
@@ -2164,69 +2178,59 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "interventions",
                     "kwargs_template",
                     "token:raw_graph_ws",
-            )),
+                )
+            ),
             "step 9 consumes/refines _edge_uses, args_template, conditional_arm_children, conditional_elif_children, ... after step 3 writes",
         ),
         ("3", "10"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:raw_graph_ws",
-            )),
+            frozenset(("token:raw_graph_ws",)),
             "step 10 depends on token:raw_graph_ws produced by step 3",
         ),
         ("3", "11"): PinnedPair(
             "columns",
-            frozenset((
-                    "is_orphan",
-            )),
+            frozenset(("is_orphan",)),
             "retained-layer finalization consumes step 3's orphan verdicts",
         ),
         ("3", "11.5"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:raw_graph_ws",
-            )),
+            frozenset(("token:raw_graph_ws",)),
             "step 11.5 depends on token:raw_graph_ws produced by step 3",
         ),
         ("3", "11.75"): PinnedPair(
             "columns",
-            frozenset((
-                    "is_orphan",
-            )),
+            frozenset(("is_orphan",)),
             "step 11.75 consumes/refines is_orphan after step 3 writes",
         ),
         ("3", "12"): PinnedPair(
             "columns",
-            frozenset((
-                    "is_orphan",
-            )),
+            frozenset(("is_orphan",)),
             "step 12 consumes/refines is_orphan after step 3 writes",
         ),
         ("3", "15.5"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "conditional_arm_children",
                     "conditional_entry_children",
-            )),
+                )
+            ),
             "step 15.5 consumes/refines conditional_arm_children, conditional_entry_children after step 3 writes",
         ),
         ("3", "16"): PinnedPair(
             "columns",
-            frozenset((
-                    "is_orphan",
-            )),
+            frozenset(("is_orphan",)),
             "step 16 consumes/refines is_orphan after step 3 writes",
         ),
         ("3", "17.5"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:raw_graph_ws",
-            )),
+            frozenset(("token:raw_graph_ws",)),
             "step 17.5 depends on token:raw_graph_ws produced by step 3",
         ),
         ("3", "18"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_edge_uses",
                     "args_template",
                     "conditional_arm_children",
@@ -2240,42 +2244,44 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "is_orphan",
                     "is_terminal_bool",
                     "kwargs_template",
-            )),
+                )
+            ),
             "step 18 consumes/refines _edge_uses, args_template, conditional_arm_children, conditional_elif_children, ... after step 3 writes",
         ),
         ("4", "5"): PinnedPair(
             "columns",
-            frozenset((
-                    "has_output_descendant",
-            )),
+            frozenset(("has_output_descendant",)),
             "step 5 consumes/refines has_output_descendant after step 4 writes",
         ),
         ("4", "6"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "has_input_ancestor",
                     "input_ancestors",
-            )),
+                )
+            ),
             "step 6 consumes/refines has_input_ancestor, input_ancestors after step 4 writes",
         ),
         ("4", "9"): PinnedPair(
             "columns",
-            frozenset((
-                    "input_ancestors",
-            )),
+            frozenset(("input_ancestors",)),
             "step 9 consumes/refines input_ancestors after step 4 writes",
         ),
         ("4", "15.5"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "has_input_ancestor",
                     "has_output_descendant",
-            )),
+                )
+            ),
             "step 15.5 consumes/refines has_input_ancestor, has_output_descendant after step 4 writes",
         ),
         ("4", "18"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "has_input_ancestor",
                     "has_output_descendant",
                     "input_ancestors",
@@ -2283,35 +2289,41 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "max_distance_to_output",
                     "min_distance_from_input",
                     "min_distance_to_output",
-            )),
+                )
+            ),
             "step 18 consumes/refines has_input_ancestor, has_output_descendant, input_ancestors, max_distance_from_input, ... after step 4 writes",
         ),
         ("5", "9"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "conditional_arm_children",
                     "conditional_elif_children",
                     "conditional_else_children",
                     "conditional_entry_children",
                     "conditional_then_children",
-            )),
+                )
+            ),
             "step 9 consumes/refines conditional_arm_children, conditional_elif_children, conditional_else_children, conditional_entry_children, ... after step 5 writes",
         ),
         ("5", "15.5"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_is_in_conditional_body",
                     "conditional_arm_children",
                     "conditional_branch_stack",
                     "conditional_entry_children",
                     "terminal_conditional_id",
                     "token:conditional_records",
-            )),
+                )
+            ),
             "step 15.5 consumes/refines _is_in_conditional_body, conditional_arm_children, conditional_branch_stack, conditional_entry_children, ... after step 5 writes",
         ),
         ("5", "18"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_is_in_conditional_body",
                     "conditional_arm_children",
                     "conditional_branch_depth",
@@ -2325,18 +2337,21 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "is_terminal_bool",
                     "is_terminal_conditional_bool",
                     "terminal_conditional_id",
-            )),
+                )
+            ),
             "step 18 consumes/refines _is_in_conditional_body, conditional_arm_children, conditional_branch_depth, conditional_branch_stack, ... after step 5 writes",
         ),
         ("6", "7"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "children",
                     "equivalent_ops",
                     "func_name",
                     "parents",
                     "token:raw_graph_ws",
-            )),
+                )
+            ),
             "loop detection walks the MERGED buffer graph: step 6 settles "
             "children/parents rewires, equivalence-group membership after "
             "duplicate removal, and identity func names before recurrence "
@@ -2344,14 +2359,13 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
         ),
         ("6", "8"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:raw_graph_ws",
-            )),
+            frozenset(("token:raw_graph_ws",)),
             "step 8 depends on token:raw_graph_ws produced by step 6",
         ),
         ("6", "9"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_edge_uses",
                     "args_template",
                     "children",
@@ -2371,7 +2385,8 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "parents",
                     "root_ancestors",
                     "token:raw_graph_ws",
-            )),
+                )
+            ),
             "final-info logging rewrites step 6's merged relation state — "
             "children/parents/arg positions after duplicate-buffer rewiring, "
             "the scrubbed templates and conditional views, ancestry closures "
@@ -2379,76 +2394,81 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
         ),
         ("6", "10"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:raw_graph_ws",
-            )),
+            frozenset(("token:raw_graph_ws",)),
             "step 10 depends on token:raw_graph_ws produced by step 6",
         ),
         ("6", "11"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "address",
                     "buffer_pass",
-            )),
+                )
+            ),
             "step 11 consumes/refines address, buffer_pass after step 6 writes",
         ),
         ("6", "11.5"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "func_name",
                     "token:raw_graph_ws",
-            )),
+                )
+            ),
             "step 11.5 consumes/refines func_name, token:raw_graph_ws after step 6 writes",
         ),
         ("6", "11.75"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "func_name",
                     "parents",
-            )),
+                )
+            ),
             "deferred retention resolves saved-layer selectors against the "
             "merged graph: step 6's parents rewires and identity func names "
             "must be settled first",
         ),
         ("6", "15.5"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "conditional_arm_children",
                     "conditional_entry_children",
                     "has_input_ancestor",
                     "parents",
-            )),
+                )
+            ),
             "layer-log aggregation reads per-op ancestry, parents, and "
             "conditional child views as step 6's merge left them",
         ),
         ("6", "16"): PinnedPair(
             "columns",
-            frozenset((
-                    "address",
-            )),
+            frozenset(("address",)),
             "module-log construction reads per-op display addresses, which "
             "for buffer rows are final only after step 6's recovery / "
             "anonymous-fallback assignment",
         ),
         ("6", "16.5"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "func_name",
                     "parents",
-            )),
+                )
+            ),
             "the graph-shape hash digests topology (parents) and identity "
             "func names as the buffer merge finalized them",
         ),
         ("6", "17.5"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:raw_graph_ws",
-            )),
+            frozenset(("token:raw_graph_ws",)),
             "step 17.5 depends on token:raw_graph_ws produced by step 6",
         ),
         ("6", "18"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_edge_uses",
                     "address",
                     "args_template",
@@ -2474,7 +2494,8 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "parent_arg_positions",
                     "parents",
                     "root_ancestors",
-            )),
+                )
+            ),
             "the streamed bundle persists per-op metadata — buffer "
             "pass/source/validation state, merged relations, scrubbed "
             "templates and conditional views — exactly as step 6 finalized "
@@ -2482,217 +2503,228 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
         ),
         ("7", "8"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "num_passes",
                     "pass_index",
                     "recurrent_ops",
-            )),
+                )
+            ),
             "label generation consumes step 7's recurrence groups and pass indexes",
         ),
         ("7", "9"): PinnedPair(
             "columns",
-            frozenset((
-                    "recurrent_ops",
-            )),
+            frozenset(("recurrent_ops",)),
             "step 9 consumes/refines recurrent_ops after step 7 writes",
         ),
         ("7", "11"): PinnedPair(
             "columns",
-            frozenset((
-                    "num_passes",
-            )),
+            frozenset(("num_passes",)),
             "step 11 consumes/refines num_passes after step 7 writes",
         ),
         ("7", "11.75"): PinnedPair(
             "columns",
-            frozenset((
-                    "_layer_label_raw",
-            )),
+            frozenset(("_layer_label_raw",)),
             "step 11.75 consumes/refines _layer_label_raw after step 7 writes",
         ),
         ("7", "15.5"): PinnedPair(
             "columns",
-            frozenset((
-                    "pass_index",
-            )),
+            frozenset(("pass_index",)),
             "step 15.5 consumes/refines pass_index after step 7 writes",
         ),
         ("7", "16.5"): PinnedPair(
             "columns",
-            frozenset((
-                    "num_passes",
-            )),
+            frozenset(("num_passes",)),
             "step 16.5 consumes/refines num_passes after step 7 writes",
         ),
         ("7", "18"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_layer_label_raw",
                     "equivalence_class",
                     "num_passes",
                     "pass_index",
                     "recurrent_ops",
-            )),
+                )
+            ),
             "step 18 consumes/refines _layer_label_raw, equivalence_class, num_passes, pass_index, ... after step 7 writes",
         ),
         ("8", "9"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "label",
                     "layer_label",
                     "step_index",
                     "token:label_maps",
-            )),
+                )
+            ),
             "final-info logging consumes step 8's raw-to-final label maps",
         ),
         ("8", "10"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "layer_label",
                     "token:label_maps",
-            )),
+                )
+            ),
             "step 10 consumes/refines layer_label, token:label_maps after step 8 writes",
         ),
         ("8", "11"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "label",
                     "label_short",
                     "layer_label",
                     "layer_label_short",
                     "token:label_maps",
-            )),
+                )
+            ),
             "step 11 consumes/refines label, label_short, layer_label, layer_label_short, ... after step 8 writes",
         ),
         ("8", "11.75"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "label",
                     "layer_label",
-            )),
+                )
+            ),
             "step 11.75 consumes/refines label, layer_label after step 8 writes",
         ),
         ("8", "12"): PinnedPair(
             "columns",
-            frozenset((
-                    "layer_label",
-            )),
+            frozenset(("layer_label",)),
             "step 12 consumes/refines layer_label after step 8 writes",
         ),
         ("8", "15"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "label",
                     "layer_label",
-            )),
+                )
+            ),
             "step 15 consumes/refines label, layer_label after step 8 writes",
         ),
         ("8", "15.5"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "label",
                     "layer_label",
-            )),
+                )
+            ),
             "step 15.5 consumes/refines label, layer_label after step 8 writes",
         ),
         ("8", "16"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "label",
                     "layer_label",
-            )),
+                )
+            ),
             "step 16 consumes/refines label, layer_label after step 8 writes",
         ),
         ("8", "16.5"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "label",
                     "layer_label",
-            )),
+                )
+            ),
             "step 16.5 consumes/refines label, layer_label after step 8 writes",
         ),
         ("8", "18"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "label",
                     "label_short",
                     "layer_label",
                     "layer_label_short",
                     "step_index",
                     "type_index",
-            )),
+                )
+            ),
             "step 18 consumes/refines label, label_short, layer_label, layer_label_short, ... after step 8 writes",
         ),
         ("9", "10"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:raw_graph_ws",
-            )),
+            frozenset(("token:raw_graph_ws",)),
             "step 10 depends on token:raw_graph_ws produced by step 9",
         ),
         ("9", "11"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "fx_call_index",
                     "fx_qualpath",
                     "is_buffer",
                     "is_input",
                     "is_output",
                     "token:module_build",
-            )),
+                )
+            ),
             "lookup keys consume step 9's module hierarchy/build data",
         ),
         ("9", "11.5"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:raw_graph_ws",
-            )),
+            frozenset(("token:raw_graph_ws",)),
             "step 11.5 depends on token:raw_graph_ws produced by step 9",
         ),
         ("9", "11.75"): PinnedPair(
             "columns",
-            frozenset((
-                    "parents",
-            )),
+            frozenset(("parents",)),
             "step 11.75 consumes/refines parents after step 9 writes",
         ),
         ("9", "15.5"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "conditional_arm_children",
                     "conditional_entry_children",
                     "parents",
-            )),
+                )
+            ),
             "step 15.5 consumes/refines conditional_arm_children, conditional_entry_children, parents after step 9 writes",
         ),
         ("9", "16"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "is_buffer",
                     "token:module_build",
-            )),
+                )
+            ),
             "step 16 consumes/refines is_buffer, token:module_build after step 9 writes",
         ),
         ("9", "16.5"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "is_buffer",
                     "is_input",
                     "is_output",
                     "parents",
-            )),
+                )
+            ),
             "step 16.5 consumes/refines is_buffer, is_input, is_output, parents after step 9 writes",
         ),
         ("9", "17.5"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:raw_graph_ws",
-            )),
+            frozenset(("token:raw_graph_ws",)),
             "step 17.5 depends on token:raw_graph_ws produced by step 9",
         ),
         ("9", "18"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_edge_uses",
                     "args_template",
                     "atomic_module_call",
@@ -2718,107 +2750,107 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "recurrent_ops",
                     "root_ancestors",
                     "step_index",
-            )),
+                )
+            ),
             "step 18 consumes/refines _edge_uses, args_template, atomic_module_call, children, ... after step 9 writes",
         ),
         ("10", "11"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:lookup_containers",
-            )),
+            frozenset(("token:lookup_containers",)),
             "lookup keys are built over step 10's renamed references",
         ),
         ("10", "16.5"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:lookup_containers",
-            )),
+            frozenset(("token:lookup_containers",)),
             "step 16.5 depends on token:lookup_containers produced by step 10",
         ),
         ("11", "15.5"): PinnedPair(
             "columns",
-            frozenset((
-                    "modules",
-            )),
+            frozenset(("modules",)),
             "step 15.5 consumes/refines modules after step 11 writes",
         ),
         ("11", "16"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "input_to_module_calls",
                     "output_of_module_calls",
                     "token:saved_summary",
-            )),
+                )
+            ),
             "step 16 consumes/refines input_to_module_calls, output_of_module_calls, token:saved_summary after step 11 writes",
         ),
         ("11", "16.5"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "module",
                     "token:lookup_containers",
-            )),
+                )
+            ),
             "step 16.5 consumes/refines module, token:lookup_containers after step 11 writes",
         ),
         ("11", "18"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "input_to_module_calls",
                     "lookup_keys",
                     "module",
                     "modules",
                     "ordinal_index",
                     "output_of_module_calls",
-            )),
+                )
+            ),
             "step 18 consumes/refines input_to_module_calls, lookup_keys, module, modules, ... after step 11 writes",
         ),
         ("11.5", "18"): PinnedPair(
             "columns",
-            frozenset((
-                    "var_names",
-            )),
+            frozenset(("var_names",)),
             "step 18 consumes/refines var_names after step 11.5 writes",
         ),
         ("11.75", "12"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "has_saved_activation",
                     "out",
                     "saved_args",
                     "saved_kwargs",
                     "token:payload_tensors",
                     "transformed_out",
-            )),
+                )
+            ),
             "step 12 consumes/refines has_saved_activation, out, saved_args, saved_kwargs, ... after step 11.75 writes",
         ),
         ("11.75", "13"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:payload_tensors",
-            )),
+            frozenset(("token:payload_tensors",)),
             "step 13 depends on token:payload_tensors produced by step 11.75",
         ),
         ("11.75", "15.5"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "activation_memory",
                     "dtype",
                     "shape",
                     "transformed_activation_memory",
                     "transformed_out_dtype",
                     "transformed_out_shape",
-            )),
+                )
+            ),
             "step 15.5 consumes/refines activation_memory, dtype, shape, transformed_activation_memory, ... after step 11.75 writes",
         ),
         ("11.75", "16"): PinnedPair(
             "columns",
-            frozenset((
-                    "has_saved_activation",
-            )),
+            frozenset(("has_saved_activation",)),
             "step 16 consumes/refines has_saved_activation after step 11.75 writes",
         ),
         ("11.75", "18"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "activation_memory",
                     "annotations",
                     "dtype",
@@ -2832,132 +2864,119 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
                     "transformed_out",
                     "transformed_out_dtype",
                     "transformed_out_shape",
-            )),
+                )
+            ),
             "step 18 consumes/refines activation_memory, annotations, dtype, has_saved_activation, ... after step 11.75 writes",
         ),
         ("11.75", "19"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "out",
                     "transformed_out",
-            )),
+                )
+            ),
             "step 19 consumes/refines out, transformed_out after step 11.75 writes",
         ),
         ("12", "13"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:payload_tensors",
-            )),
+            frozenset(("token:payload_tensors",)),
             "step 13 depends on token:payload_tensors produced by step 12",
         ),
         ("12", "18"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:payload_tensors",
-            )),
+            frozenset(("token:payload_tensors",)),
             "step 18 depends on token:payload_tensors produced by step 12",
         ),
         ("15", "15.5"): PinnedPair(
             "columns",
-            frozenset((
-                    "_param_logs",
-            )),
+            frozenset(("_param_logs",)),
             "step 15.5 consumes/refines _param_logs after step 15 writes",
         ),
         ("15", "16"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_param_logs",
                     "token:param_logs_kind",
-            )),
+                )
+            ),
             "step 16 consumes/refines _param_logs, token:param_logs_kind after step 15 writes",
         ),
         ("15", "18"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "_param_logs",
                     "parent_params",
-            )),
+                )
+            ),
             "step 18 consumes/refines _param_logs, parent_params after step 15 writes",
         ),
         ("15", "20"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:param_logs_kind",
-            )),
+            frozenset(("token:param_logs_kind",)),
             "step 20 depends on token:param_logs_kind produced by step 15",
         ),
         ("15.5", "16"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:layer_logs",
-            )),
+            frozenset(("token:layer_logs",)),
             "Module.layers references the Layer keys step 15.5 builds",
         ),
         ("15.5", "18"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "in_conditionals",
                     "terminal_bool_for",
-            )),
+                )
+            ),
             "step 18 consumes/refines in_conditionals, terminal_bool_for after step 15.5 writes",
         ),
         ("16", "18"): PinnedPair(
             "columns",
-            frozenset((
-                    "_param_logs",
-            )),
+            frozenset(("_param_logs",)),
             "step 18 consumes/refines _param_logs after step 16 writes",
         ),
         ("16", "20"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:param_logs_kind",
-            )),
+            frozenset(("token:param_logs_kind",)),
             "step 20 depends on token:param_logs_kind produced by step 16",
         ),
         ("16.5", "18"): PinnedPair(
             "columns",
-            frozenset((
-                    "_address_normalized",
-            )),
+            frozenset(("_address_normalized",)),
             "step 18 consumes/refines _address_normalized after step 16.5 writes",
         ),
         ("17", "18"): PinnedPair(
             "columns",
-            frozenset((
-                    "_tracing_finished",
-            )),
+            frozenset(("_tracing_finished",)),
             "step 18 consumes/refines _tracing_finished after step 17 writes",
         ),
         ("17.5", "18"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:containers",
-            )),
+            frozenset(("token:containers",)),
             "the streamed bundle persists the containers step 17.5 adopts",
         ),
         ("18", "19"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "out_ref",
                     "token:stream_lifecycle",
                     "token:stream_writer",
-            )),
+                )
+            ),
             "step 19 consumes/refines out_ref, token:stream_lifecycle, token:stream_writer after step 18 writes",
         ),
         ("18", "20"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:stream_lifecycle",
-            )),
+            frozenset(("token:stream_lifecycle",)),
             "param-ref release must follow optional stream finalization",
         ),
         ("19", "20"): PinnedPair(
             "tokens",
-            frozenset((
-                    "token:stream_lifecycle",
-            )),
+            frozenset(("token:stream_lifecycle",)),
             "param-ref release must follow optional out eviction",
         ),
         ("3", "5"): PinnedPair(
@@ -2984,21 +3003,21 @@ PINNED_ORDER_PAIRS: Mapping[tuple[str, str], PinnedPair] = MappingProxyType(
         ),
         ("2", "6"): PinnedPair(
             "columns",
-            frozenset((
-                    "output_descendants",
-            )),
+            frozenset(("output_descendants",)),
             "the buffer-merge scrub filters removed labels out of the "
             "output-descendant closures step 2 marks",
         ),
         ("5", "6"): PinnedPair(
             "columns",
-            frozenset((
+            frozenset(
+                (
                     "conditional_arm_children",
                     "conditional_elif_children",
                     "conditional_else_children",
                     "conditional_entry_children",
                     "conditional_then_children",
-            )),
+                )
+            ),
             "the buffer-merge husking scrubs removed buffer labels out of "
             "the conditional child views step 5 attributes",
         ),

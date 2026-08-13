@@ -428,9 +428,7 @@ def _scrub_value(
             # The settled capture outcome persists as its STRING-ONLY payload
             # (tlspec v7): the safe-unpickle allowlist never needs the record
             # class, and loads parse the payload against closed vocabularies.
-            field_value = (
-                field_value.to_payload() if hasattr(field_value, "to_payload") else None
-            )
+            field_value = field_value.to_payload() if hasattr(field_value, "to_payload") else None
         policy = _effective_policy(value, field_name, spec[field_name], options)
         # The two overwhelmingly common policies are resolved here instead of
         # through :func:`_scrub_field`, which is one Python call per field on a walk

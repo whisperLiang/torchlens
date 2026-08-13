@@ -110,9 +110,7 @@ def test_nightly_legs_declare_meaningful_executed_floors() -> None:
 
     import re
 
-    workflow = (_REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = (_REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text(encoding="utf-8")
     backends = re.findall(r"- backend: (\w+)", workflow)
     floors = [int(value) for value in re.findall(r"executed_floor: (\d+)", workflow)]
     assert sorted(backends) == ["jax", "mlx", "paddle", "tf", "tinygrad"]

@@ -293,7 +293,9 @@ def _pre_hook_provenance_for_call(
         Before snapshot, after snapshot, and ordered effects.
     """
 
-    values = trace._module_capture_ws.module_build_data.get("module_pre_hook_provenance", {}).get(call_label)
+    values = trace._module_capture_ws.module_build_data.get("module_pre_hook_provenance", {}).get(
+        call_label
+    )
     if values is None:
         return None, None, ()
     before, after, effects = values

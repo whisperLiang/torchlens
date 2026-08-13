@@ -319,9 +319,7 @@ def compute_raw_event_shape_hash(capture_events: Any) -> str:
         if hasattr(capture_events, "amended_op_records")
         else capture_events.op_events
     )
-    order_by_raw_label = {
-        event.label_raw: index for index, event in enumerate(folded_events)
-    }
+    order_by_raw_label = {event.label_raw: index for index, event in enumerate(folded_events)}
     records = []
     for index, event in enumerate(folded_events):
         function = event.function

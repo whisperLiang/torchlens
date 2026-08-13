@@ -280,9 +280,7 @@ def _patch_class_call(
         try:
             result = original_call(self, *args, **kwargs)
             if module_exit_hook is not None:
-                result = module_exit_hook(
-                    frame, frame.module_type, result, tuple(module_stack)
-                )
+                result = module_exit_hook(frame, frame.module_type, result, tuple(module_stack))
             return result
         finally:
             if module_stack and module_stack[-1] == frame:

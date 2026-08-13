@@ -569,9 +569,7 @@ def _normalize_tf_input_grad_argnums(
     normalized = tuple(int(index) for index in input_grad_argnums)
     for index in normalized:
         if index < 0 or index >= len(args):
-            raise ValueError(
-                f"TensorFlow input_grad_argnums contains out-of-range argnum {index}."
-            )
+            raise ValueError(f"TensorFlow input_grad_argnums contains out-of-range argnum {index}.")
     return normalized
 
 
@@ -793,9 +791,7 @@ def _is_float_tf_tensor(value: Any, tf: Any) -> bool:
         True when ``value`` is a floating TensorFlow tensor or variable.
     """
 
-    return _is_tf_tensor_like(value, tf) and _is_float_dtype_text(
-        str(getattr(value, "dtype", ""))
-    )
+    return _is_tf_tensor_like(value, tf) and _is_float_dtype_text(str(getattr(value, "dtype", "")))
 
 
 def _is_float_dtype_text(dtype: str) -> bool:

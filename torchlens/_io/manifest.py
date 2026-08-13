@@ -695,9 +695,7 @@ def enforce_version_policy(manifest: Manifest) -> None:
     # A parseable torchlens_version below the floor refuses even when the
     # manifest claims a current tlspec_version: a real 2.33+ save can never
     # carry a pre-2.33 torchlens_version, so the pair is inconsistent.
-    if manifest_torchlens is not None and manifest_torchlens < Version(
-        MIN_TORCHLENS_VERSION_TEXT
-    ):
+    if manifest_torchlens is not None and manifest_torchlens < Version(MIN_TORCHLENS_VERSION_TEXT):
         raise ArtifactVersionBelowFloorError(
             "Bundle torchlens_version="
             f"{manifest.torchlens_version} is below the supported rehydration "

@@ -296,9 +296,7 @@ def relabel_edge_metadata(
     if parent_arg_positions:
         op_log.parent_arg_positions = {
             section: {
-                position: (
-                    raw_to_final.get(value, value) if isinstance(value, str) else value
-                )
+                position: (raw_to_final.get(value, value) if isinstance(value, str) else value)
                 for position, value in positions.items()
             }
             for section, positions in parent_arg_positions.items()

@@ -59,11 +59,7 @@ def _grouped_ops(trace: Any, func_name: str) -> list[Any]:
         Multi-pass ops with that function name, in pass order.
     """
 
-    return [
-        op
-        for op in trace.layer_list
-        if op.func_name == func_name and op.num_passes > 1
-    ]
+    return [op for op in trace.layer_list if op.func_name == func_name and op.num_passes > 1]
 
 
 def test_tinygrad_repeated_block_groups_into_passes() -> None:
@@ -147,9 +143,7 @@ def test_tinygrad_tamper_swapped_sidecar_labels_fail_validation() -> None:
     captures = list(trace.tinygrad_uop_captures)
     where_ops = _grouped_ops(trace, "where")
     raw_labels = {op._label_raw for op in where_ops}
-    indices = [
-        index for index, capture in enumerate(captures) if capture.label_raw in raw_labels
-    ]
+    indices = [index for index, capture in enumerate(captures) if capture.label_raw in raw_labels]
     assert len(indices) == 2
     first, second = indices
     label_first = captures[first].label_raw
@@ -170,13 +164,10 @@ def test_tinygrad_tamper_stale_parent_positions_fail_validation() -> None:
     target = next(
         index
         for index, capture in enumerate(captures)
-        if capture.label_raw == where_ops[1]._label_raw
-        and capture.parent_arg_positions
+        if capture.label_raw == where_ops[1]._label_raw and capture.parent_arg_positions
     )
     original = captures[target].parent_arg_positions
-    tampered = tuple(
-        (position, "cmplt_9_99_raw") for position, _label in original
-    )
+    tampered = tuple((position, "cmplt_9_99_raw") for position, _label in original)
     captures[target] = dataclasses.replace(captures[target], parent_arg_positions=tampered)
     trace.tinygrad_uop_captures = tuple(captures)
 
@@ -211,9 +202,7 @@ def test_tinygrad_derived_grads_survive_grouping() -> None:
     assert set(grouped.derived_grads.keys()) == set(ungrouped.derived_grads.keys())
     # Records key on final op labels, which differ across the two layouts;
     # compare in raw-label space (the per-op capture identity).
-    grouped_raw = {
-        grouped[label]._label_raw for label in grouped.intermediate_derived_grads.keys()
-    }
+    grouped_raw = {grouped[label]._label_raw for label in grouped.intermediate_derived_grads.keys()}
     ungrouped_raw = {
         ungrouped[label]._label_raw for label in ungrouped.intermediate_derived_grads.keys()
     }
