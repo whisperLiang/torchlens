@@ -59,6 +59,8 @@ add names to the top-level `torchlens` namespace:
 | `distributed_payload_witness_unsupported` | Payload witnesses are reserved | Use digest witnesses |
 | `distributed_witness_invalid` | Distributed witness mode is unknown | Choose `none` or `digest` |
 | `fold_repeats_invalid` | Repeat-fold policy is invalid | Choose `None`, `True`, or `False` |
+| `fsdp_capture_unsupported` | `record()` received an FSDP-wrapped model | Record the unsharded module |
+| `history_size_invalid` | Recorder history size is out of range | Pass an integer in `[0, 1024]` |
 | `gradient_not_saved` | Requested gradient payload was not retained | Capture with gradient saving enabled |
 | `gradient_pass_ambiguous` | Gradient query spans multiple backward passes | Pick one pass or record positionally |
 | `halt_predicate_type_invalid` | `halt` is not callable | Pass a predicate or `None` |
@@ -75,6 +77,7 @@ add names to the top-level `torchlens` namespace:
 | `lookback_invalid` | Lookback is not an integer in `[0, 1024]` | Pass an in-range integer |
 | `lookback_payload_policy_invalid` | Lookback payload policy is unknown | Choose a documented payload policy |
 | `model_type_unsupported` | Torch capture model is not an `nn.Module` | Pass a module or select its backend |
+| `max_predicate_failures_invalid` | Predicate failure budget is not a non-negative int | Pass a non-negative integer |
 | `metric_name_invalid` | Intervention metric name is unknown | Choose a registered metric or callable |
 | `metric_shape_mismatch` | Metric operands have different element counts | Pass equal-size operands |
 | `metric_tensor_type_invalid` | Metric operand is not a tensor | Pass tensor operands |
@@ -85,10 +88,18 @@ add names to the top-level `torchlens` namespace:
 | `op_lookup_not_found` | Lookup key matches no layer, op, or module | Use a valid label, index, or address |
 | `op_lookup_pass_out_of_range` | Pass qualifier exceeds the recorded pass count | Specify a lower pass number |
 | `op_lookup_pass_required` | Bare label names a multi-pass layer | Append a pass qualifier such as `:2` |
+| `on_forward_error_invalid` | Forward-error policy is unknown | Choose `raise`, `attach_partial`, or `return_partial` |
+| `on_predicate_error_invalid` | Predicate-error policy is unknown | Choose `auto`, `accumulate`, or `fail-fast` |
 | `option_group_conflict` | Grouped and flat options set the same field | Use one option style |
 | `option_group_type_invalid` | Grouped option has the wrong object type | Pass the documented options class |
 | `output_device_invalid` | Output device policy is unknown | Choose `same`, `cpu`, or `cuda` |
 | `record_not_bound` | Record's owning Trace reference is gone | Keep the owning Trace alive |
+| `recording_events_not_retained` | `to_trace()` on a disk-recovered Recording | Convert the in-session Recording |
+| `recording_failed_not_convertible` | `to_trace()` on a failed partial Recording | Fix the forward and re-record |
+| `recording_halt_frontier_missing` | Halted Recording retained no frontier payload | Save the halt frontier or use `trace(halt=...)` |
+| `recording_multipass_not_convertible` | `to_trace()` on a multi-pass Recording | Record one pass per Recording |
+| `recording_option_duplicate` | Recording option was specified twice | Pass each option exactly once |
+| `recording_option_type_invalid` | Recording option has an unsupported type | Pass the documented type for that option |
 | `relation_assignment_type_invalid` | Finished relation field assigned a non-container | Assign list/set/tuple/frozenset or None |
 | `run_fast_divergence_policy_invalid` | `fast=True` with a non-raise divergence policy | Use `on_divergence='raise'` or drop `fast=` |
 | `run_fast_requires_inputs` | `fast=True` on the legacy run surface | Call `trace.run(inputs=..., fast=True)` |

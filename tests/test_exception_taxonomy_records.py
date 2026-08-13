@@ -158,6 +158,38 @@ def test_new_record_classes_resolve_lazily_and_pickle() -> None:
     assert str(restored) == str(original)
 
 
+FASTLOG_DOOR_CASES: tuple[tuple[str, type[BaseException], dict[str, Any]], ...] = (
+    ("history_size_invalid", ValueError, {"history_size": -1}),
+    ("lookback_invalid", ValueError, {"lookback": 4096}),
+    ("lookback_payload_policy_invalid", ValueError, {"lookback_payload_policy": "bogus"}),
+    ("intervention_predicate_type_invalid", ValueError, {"intervene": "not-callable"}),
+    ("halt_predicate_type_invalid", ValueError, {"halt": "not-callable"}),
+    ("max_predicate_failures_invalid", ValueError, {"max_predicate_failures": -3}),
+    ("on_predicate_error_invalid", ValueError, {"on_predicate_error": "explode"}),
+    ("on_forward_error_invalid", ValueError, {"on_forward_error": "shrug"}),
+    ("recording_option_type_invalid", ValueError, {"activation_transform": "not-callable"}),
+    ("recording_option_type_invalid", ValueError, {"save_raw_activations": "yes"}),
+)
+
+
+@pytest.mark.parametrize(
+    ("expected_code", "builtin", "kwargs"),
+    FASTLOG_DOOR_CASES,
+    ids=[f"{case[0]}-{next(iter(case[2]))}" for case in FASTLOG_DOOR_CASES],
+)
+def test_recorder_option_refusals_carry_codes_and_remedies(
+    expected_code: str,
+    builtin: type[BaseException],
+    kwargs: dict[str, Any],
+) -> None:
+    """Converted fastlog recorder option doors expose codes and remedies."""
+
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
+    with pytest.raises(errors.TorchLensError) as exc_info:
+        tl.record(model, torch.randn(1, 4), save=tl.func("relu"), **kwargs)
+    _assert_contract(exc_info.value, expected_code, builtin)
+
+
 def test_trace_stack_shape_mismatch_is_typed(small_trace: Any) -> None:
     """Stacking differently-shaped saved outs refuses with the stack code."""
 

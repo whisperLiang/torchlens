@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, cast
 
 import torch
 
+from .._errors import CaptureContextError, InvalidArgumentError
 from ..captured_run import CapturedRun
 from ..ir.predicate import EventKind, ModuleStackFrame, RecordContext, RetroactiveCaptureDecision
 from ..utils.tensor_utils import SaveMode
@@ -91,7 +92,13 @@ class CaptureSpec:
         """Normalize and validate capture save-mode settings."""
 
         if self.save_mode not in {"copy", "reference", "view", "cpu_async"}:
-            raise ValueError("save_mode must be one of 'copy', 'reference', 'view', or 'cpu_async'")
+            raise InvalidArgumentError(
+                "save_mode must be one of 'copy', 'reference', 'view', or 'cpu_async'; "
+                f"received {self.save_mode!r}",
+                code="save_mode_invalid",
+                remedy="set save_mode to 'copy', 'reference', 'view', or 'cpu_async'",
+                argument="save_mode",
+            )
         if self.save_mode == "view" and not self.keep_grad:
             object.__setattr__(self, "keep_grad", True)
 
@@ -775,21 +782,27 @@ class Recording(CapturedRun):
         """
 
         if self.failed:
-            raise RuntimeError(
+            raise CaptureContextError(
                 "Recording.to_trace() cannot materialize a failed partial Recording because "
                 "the topology is incomplete; user-op failures exclude the failing call; "
-                "TL-side capture failures may include a skipped/partial current-call event."
+                "TL-side capture failures may include a skipped/partial current-call event",
+                code="recording_failed_not_convertible",
+                remedy="fix the failing forward and re-record before converting",
             )
         if not self._captured_run_cores:
-            raise RuntimeError(
+            raise CaptureContextError(
                 "Recording.to_trace() requires retained capture events; disk-recovered "
-                "recordings do not contain enough topology metadata."
+                "recordings do not contain enough topology metadata",
+                code="recording_events_not_retained",
+                remedy="convert the in-session Recording rather than a disk-recovered one",
             )
         if self.n_passes > 1:
-            raise RuntimeError(
+            raise CaptureContextError(
                 "Recording.to_trace() does not support multi-pass Recordings because "
                 "replaying multiple Recorder.log() passes into one Trace is not yet "
-                "structurally defined."
+                "structurally defined",
+                code="recording_multipass_not_convertible",
+                remedy="record one pass per Recording before converting",
             )
         from ..data_classes.trace import Trace
         from ..capture.projectors import RecordingProjector
@@ -917,12 +930,16 @@ class Recording(CapturedRun):
             if payload is not None:
                 return event.label_raw, payload
 
-        raise RuntimeError(
+        raise CaptureContextError(
             "Recording.to_trace() cannot materialize a halted Recording that retained no "
             "raw activation payload: there is no tensor frontier to bind the halted graph's "
-            "output node to. Re-run record(...) with a save= predicate that captures at least "
-            "the halt frontier layer, or use tl.trace(model, x, halt=...) for the exhaustive "
-            "halted-capture path."
+            "output node to",
+            code="recording_halt_frontier_missing",
+            remedy=(
+                "re-run record(...) with a save= predicate that captures at least the halt "
+                "frontier layer, or use tl.trace(model, x, halt=...) for the exhaustive "
+                "halted-capture path"
+            ),
         )
 
 

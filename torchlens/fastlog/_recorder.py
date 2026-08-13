@@ -13,6 +13,7 @@ import torch
 from torch import nn
 
 from .._deprecations import MISSING, MissingType
+from .._errors import ArgumentConflictError, CaptureContextError
 from .._training_validation import TrainingModeConfigError, reject_compiled_model
 from ..capture.projections import (
     RecordingState,
@@ -137,9 +138,11 @@ def _unwrap_ddp_for_fastlog(
     # The lazy probe never imports torch.distributed.fsdp on plain captures.
     fsdp_wrapper_type = get_fsdp_wrapper_type()
     if fsdp_wrapper_type is not None and isinstance(model, fsdp_wrapper_type):
-        raise RuntimeError(
+        raise CaptureContextError(
             "torchlens.fastlog does not support FullyShardedDataParallel (FSDP): "
-            "parameters are sharded across ranks and there is no unsharded module to log."
+            "parameters are sharded across ranks and there is no unsharded module to log",
+            code="fsdp_capture_unsupported",
+            remedy="record the unsharded module before FSDP wrapping",
         )
 
     try:
@@ -246,7 +249,11 @@ class Recorder:
         storage_supplied = storage is not MISSING and storage is not None
         streaming_supplied = streaming is not MISSING and streaming is not None
         if storage_supplied and streaming_supplied:
-            raise TypeError("Do not pass both `storage` and `streaming`.")
+            raise ArgumentConflictError(
+                "Do not pass both `storage` and `streaming`",
+                code="storage_argument_conflict",
+                remedy="prefer storage=, or remove one of the two arguments",
+            )
         resolved_streaming = storage if storage_supplied else streaming
         unwrapped_model, streaming = _unwrap_ddp_for_fastlog(model, resolved_streaming)
         default_op = _resolve_train_mode_default(
