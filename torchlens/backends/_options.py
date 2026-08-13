@@ -181,14 +181,11 @@ TINYGRAD_EXTRA_KWARG_POLICY = ExtraKwargPolicy(
 PADDLE_EXTRA_KWARG_POLICY = ExtraKwargPolicy(
     runtime_option_names=frozenset(),
     runtime_message=(
-        "paddle backend preview does not support runtime-mutation or stop-early "
-        "options: {names}. Static-label save= selectors are supported as "
-        "post-finalization payload filters, but trace(intervene=...) and "
-        "trace(halt=...) need predicate-time concrete values and a way to replace or "
-        "truncate Paddle dygraph descendants before execution completes, which Paddle "
-        "does not expose through a stable TorchLens surface. Use an unfiltered "
-        "tl.trace(..., backend='paddle') call, static-label save= selectors, or the "
-        "PyTorch backend for intervention, halt, streaming, and value-dependent predicates."
+        "paddle backend preview does not support these options: {names}. "
+        "Live trace(intervene=...), trace(halt=...), recipes=, and static-label "
+        "save= selectors are supported on the eager Paddle preview; streaming, "
+        "storage=, and the remaining torch-only runtime options are not. Use "
+        "the PyTorch backend for streaming and stop-early capture shaping."
     ),
     fallback_message="",
     always_runtime=True,
@@ -196,8 +193,6 @@ PADDLE_EXTRA_KWARG_POLICY = ExtraKwargPolicy(
         "lookback": 0,
         "lookback_payload_policy": "metadata_only",
         "capture": None,
-        "intervene": None,
-        "halt": None,
         "storage": None,
         "streaming": None,
         "inference_only": False,
@@ -205,14 +200,18 @@ PADDLE_EXTRA_KWARG_POLICY = ExtraKwargPolicy(
         "stop_after": None,
         "raise_on_nan": False,
         "profile": False,
-        "recipes": None,
         "payload_policy": None,
         "save_preview": None,
         "chunk_size": None,
         "chunk_paths": None,
     },
 )
-"""Extra public-kwarg rejection policy for the Paddle preview backend."""
+"""Extra public-kwarg rejection policy for the Paddle preview backend.
+
+``intervene``, ``halt``, and ``recipes`` are absent because the Paddle
+capture path pops and dispatches them before extra-kwarg rejection runs; the
+``interventions`` capability flag owns all three.
+"""
 
 
 MLX_EXTRA_KWARG_POLICY = ExtraKwargPolicy(

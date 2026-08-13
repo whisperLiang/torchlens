@@ -83,6 +83,30 @@ _OPTION_POLICY_DEFAULTS: dict[str, Any] = {
     "lookback_payload_policy": "metadata_only",
 }
 
+_ALL_GATED_FALSE: dict[str, bool] = {
+    "backward_capture": False,
+    "fastlog": False,
+    "interventions": False,
+    "rng_replay": False,
+    "streaming": False,
+}
+
+_EXPECTED_PREVIEW_GATED_FLAGS: dict[str, dict[str, bool]] = {
+    "mlx": dict(_ALL_GATED_FALSE),
+    "jax": dict(_ALL_GATED_FALSE),
+    "tinygrad": dict(_ALL_GATED_FALSE),
+    "paddle": {**_ALL_GATED_FALSE, "interventions": True},
+    "tf": dict(_ALL_GATED_FALSE),
+}
+"""Declared expected gated-capability matrix per preview backend.
+
+This is the single place a legitimate capability lift edits: a True entry
+requires the registered spec to bind a resolvable implementing surface AND
+the backend's capture path to genuinely dispatch every option the flag owns
+(``TRACE_OPTION_CAPABILITY_GATES``); everything else keeps the fail-closed
+biconditional refusals below.
+"""
+
 
 def test_every_capability_flag_has_a_production_consumer() -> None:
     """No decorative flags: every field is read by production code or a gate map."""
@@ -127,6 +151,14 @@ def test_extra_kwarg_gates_are_fail_closed_biconditional(name: str) -> None:
     sentinel = object()
     for option, flag in (("intervene", "interventions"), ("storage", "streaming"),
                          ("streaming", "streaming")):
+        if _EXPECTED_PREVIEW_GATED_FLAGS[name][flag]:
+            # Lifted capability: the flag is True with a real binding, and the
+            # capture path pops the option before extra-kwarg rejection, so
+            # the policy tables must no longer govern it.
+            assert getattr(spec.capabilities, flag)
+            assert require_capability_implementation(spec, flag) is not None
+            assert option not in (policy.inert_values or {})
+            continue
         assert not getattr(spec.capabilities, flag)
         with pytest.raises(BackendUnsupportedError):
             reject_extra_trace_kwargs({option: sentinel}, policy, spec=spec)
@@ -171,7 +203,10 @@ def test_registration_refuses_bare_capability_flips() -> None:
                 register_backend_spec(
                     _spec_with_flag(name, flag, implementation=False), replace=True
                 )
-            assert not getattr(get_backend_spec(name).capabilities, flag)
+            assert (
+                getattr(get_backend_spec(name).capabilities, flag)
+                is _EXPECTED_PREVIEW_GATED_FLAGS[name][flag]
+            )
 
 
 def test_in_place_capability_flip_refuses_end_to_end() -> None:
@@ -386,7 +421,12 @@ def test_torch_fastlog_flag_false_refuses_record() -> None:
 
 
 def test_registered_capability_tables_are_truthful_at_registration() -> None:
-    """Preview specs declare no capability their gates reject (spot invariants)."""
+    """Registered gated flags match the declared expected-capability matrix.
+
+    A legitimate lift edits ``_EXPECTED_PREVIEW_GATED_FLAGS`` (one-line matrix
+    diff) alongside real dispatch + conformance coverage; every True entry
+    must also resolve a real implementing surface.
+    """
 
     for spec in registered_backend_specs():
         capabilities = spec.capabilities
@@ -396,9 +436,11 @@ def test_registered_capability_tables_are_truthful_at_registration() -> None:
             assert capabilities.interventions
             assert "runnable" in capabilities.save_levels
             continue
-        assert not capabilities.backward_capture
-        assert not capabilities.fastlog
-        assert not capabilities.interventions
-        assert not capabilities.streaming
-        assert not capabilities.rng_replay
+        expected = _EXPECTED_PREVIEW_GATED_FLAGS[str(spec.name)]
+        for flag, expected_value in expected.items():
+            assert getattr(capabilities, flag) is expected_value, (
+                f"{spec.name}: {flag} != declared matrix value {expected_value}"
+            )
+            if expected_value:
+                assert require_capability_implementation(spec, flag) is not None
         assert "runnable" not in capabilities.save_levels
