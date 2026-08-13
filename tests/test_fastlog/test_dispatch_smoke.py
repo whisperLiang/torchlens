@@ -50,7 +50,6 @@ def _empty_recording(history_size: int) -> Recording:
         predicate_failures=[],
         predicate_failure_overflow_count=0,
         keep_op_repr=None,
-        keep_module_repr=None,
         history_size=history_size,
     )
 
@@ -89,27 +88,21 @@ def test_predicate_dispatchers_fire_and_store_ram_payloads() -> None:
         seen_kinds.append(ctx.kind)
         return ctx.kind == "op"
 
-    def keep_module(ctx) -> bool:
-        """Keep module events and record predicate invocation."""
-
-        seen_kinds.append(ctx.kind)
-        return True
-
     recording = _run_dispatcher_smoke(
         TinyMlp(),
         torch.ones(1, 3),
         RecordingOptions(
             keep_op=keep_op,
-            keep_module=keep_module,
             default_op=False,
-            default_module=False,
+            default_module=True,
             include_source_events=True,
         ),
     )
 
+    record_kinds = [record.ctx.kind for record in recording]
     assert "input" in seen_kinds
     assert "op" in seen_kinds
-    assert "module_enter" in seen_kinds
-    assert "module_exit" in seen_kinds
+    assert "module_enter" in record_kinds
+    assert "module_exit" in record_kinds
     assert len(recording.records) > 0
     assert any(record.ctx.kind == "op" and record.ram_payload is not None for record in recording)

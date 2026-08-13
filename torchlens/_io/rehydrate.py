@@ -92,8 +92,6 @@ def rehydrate_trace(
     # its class-definition fingerprint before this artifact's fields are assigned.
     invalidate_static_class_attr_cache()
     state_for_load = dict(scrubbed_state)
-    source_version = _source_io_format_version(state_for_load, manifest)
-    state_for_load = _normalize_legacy_trace_state(state_for_load, source_version)
     module_accessor_state = state_for_load.pop("_io_module_accessor_state", None)
     portable_key_order = tuple(state_for_load)
 
@@ -250,66 +248,6 @@ def _rehydrate_small_raw_images(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _rehydrate_small_raw_images(item) for key, item in value.items()}
     return value
-
-
-def _source_io_format_version(
-    state: dict[str, Any],
-    manifest: Manifest | dict[str, Any],
-) -> int:
-    """Return the serialized I/O version from manifest metadata.
-
-    Parameters
-    ----------
-    state:
-        Scrubbed metadata dict being loaded.
-    manifest:
-        Portable manifest describing the on-disk bundle.
-
-    Returns
-    -------
-    int
-        Source bundle ``tlspec_version``. Falls back to state metadata for
-        plain test fixtures.
-    """
-
-    if isinstance(manifest, Manifest):
-        return manifest.tlspec_version
-    version = manifest.get("tlspec_version", state.get("tlspec_version", 0))
-    return int(version) if isinstance(version, int) else 0
-
-
-def _normalize_legacy_trace_state(state: dict[str, Any], source_version: int) -> dict[str, Any]:
-    """Normalize a v3-and-earlier scrubbed Trace state dict into v4 shape.
-
-    v4 dropped these capture-only fields from ``Trace.__dict__``:
-    ``_raw_layer_dict``, ``_raw_layer_labels_list``, ``_layer_counter``,
-    ``_raw_layer_type_counter``, ``_current_func_barcode``, ``_mod_entered``,
-    ``_mod_exited``, ``_mod_call_index``, ``_mod_call_labels``,
-    ``_module_build_data``, ``_module_metadata``, ``_module_forward_args``,
-    ``_module_containment_engine``, ``_exhaustive_module_stack``,
-    ``_grad_fn_strong_refs``, ``_in_exhaustive_pass``, ``_input_tensor_addresses``,
-    ``_build_state``, and
-    ``_pending_live_fire_records``.
-
-    For v3 artifacts being loaded into v4, strip these keys if present. The
-    dropped state was capture-time-only; user-facing data is preserved.
-
-    Parameters
-    ----------
-    state:
-        Scrubbed ``Trace`` state loaded from ``metadata.pkl``.
-    source_version:
-        Source bundle ``tlspec_version``.
-
-    Returns
-    -------
-    dict[str, Any]
-        State suitable for ``Trace.__setstate__``.
-    """
-
-    if source_version >= 4:
-        return state
-    return {key: value for key, value in state.items() if key not in _LEGACY_CAPTURE_TRACE_KEYS}
 
 
 def _drop_capture_only_trace_fields(trace: Trace) -> None:

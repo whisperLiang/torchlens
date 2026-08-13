@@ -27,7 +27,16 @@ import torch
 from safetensors import SafetensorError
 from safetensors.torch import load_file, save_file
 
-from . import BlobRef, FieldPolicy, PayloadLoadHints, TLSPEC_VERSION, TorchLensIOError
+from . import (
+    MIN_TLSPEC_VERSION,
+    MIN_TORCHLENS_VERSION_TEXT,
+    TLSPEC_VERSION,
+    ArtifactVersionBelowFloorError,
+    BlobRef,
+    FieldPolicy,
+    PayloadLoadHints,
+    TorchLensIOError,
+)
 from . import _json
 from ._safe_unpickle import SafeBundleUnpickler
 from .lazy import LazyActivationRef
@@ -1648,6 +1657,11 @@ def _preflight_unified_trace_manifest(
 
     Raises
     ------
+    ArtifactVersionBelowFloorError
+        If the manifest predates the tlspec_version 6 / torchlens 2.33
+        rehydration floor. Checked before schema validation so a pre-floor
+        artifact (which also fails the current schema) refuses with the
+        floor named instead of a missing-field error.
     TorchLensIOError
         If the manifest schema version is unsupported or inconsistent.
     BackendPayloadUnsupportedError
@@ -1655,6 +1669,16 @@ def _preflight_unified_trace_manifest(
     """
 
     from ..validation import validate_tlspec
+
+    raw_version = manifest.get("tlspec_version")
+    if isinstance(raw_version, int) and raw_version < MIN_TLSPEC_VERSION:
+        raise ArtifactVersionBelowFloorError(
+            f"Bundle manifest has tlspec_version={raw_version}, below the "
+            f"supported rehydration floor tlspec_version={MIN_TLSPEC_VERSION} "
+            f"(torchlens {MIN_TORCHLENS_VERSION_TEXT}). Load and re-save the "
+            f"artifact with a torchlens release >= {MIN_TORCHLENS_VERSION_TEXT} "
+            "that still reads it."
+        )
 
     try:
         validate_tlspec(bundle_path, allow_unsupported_runnable_versions=True)

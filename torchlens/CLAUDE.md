@@ -115,7 +115,7 @@ exclusive with backward-related capture because it discards the autograd graph.
 
 | Path | Purpose |
 |------|---------|
-| `__init__.py` | Top-level API, 90-name `__all__`, deprecation shims, `peek`/`extract` helpers |
+| `__init__.py` | Top-level API, 94-name `__all__`, deprecation shims, `peek`/`extract` helpers |
 | `_state.py` | Global logging toggle, active log, decoration maps, prepared-model registry; no torchlens imports |
 | `_trace_state.py` | Small runtime state enum exposed through `torchlens.io` |
 | `_errors.py`, `errors/` | Public and legacy exception classes |

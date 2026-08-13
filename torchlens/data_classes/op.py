@@ -1872,8 +1872,6 @@ class Op:
             fields_dict["backend_address"] = fields_dict.get("address")
         if fields_dict.get("resolver_status") is None:
             fields_dict["resolver_status"] = "resolved"
-        if "save_gradients" in fields_dict and "save_grads" not in fields_dict:
-            fields_dict["save_grads"] = fields_dict.pop("save_gradients")
         for derived_field in (
             "input_ops",
             "input_activations",
@@ -3167,61 +3165,7 @@ class Op:
     def __setstate__(self, state: Dict[str, Any]) -> None:
         """Restore pickle state produced by ``__getstate__``."""
         _ensure_detached_store(self)
-        version = read_tlspec_version(state, cls_name=type(self).__name__)
-        legacy_thread_keys = (
-            "_module_boundary_thread_output",
-            "_module_boundary_threads_inputs",
-            "module_entry_exit_threads_inputs",
-        )
-        dropped = False
-        for key in legacy_thread_keys:
-            if key in state:
-                state.pop(key)
-                dropped = True
-        if dropped and version < 3:
-            from .._io import _warn_legacy_thread_fields_dropped
-
-            _warn_legacy_thread_fields_dropped()
-        old_key_map = {
-            "tensor_label_raw": "_label_raw",
-            "operation_num": "op_num",
-            "activation": "out",
-            "transformed_activation": "transformed_out",
-            "has_saved_activation": "has_saved_activation",
-            "activation_transform": "activation_transform",
-            "activation_shape": "shape",
-            "transformed_activation_shape": "transformed_out_shape",
-            "activation_dtype": "dtype",
-            "transformed_activation_dtype": "transformed_out_dtype",
-            "memory": "activation_memory",
-            "activation_memory": "activation_memory",
-            "transformed_activation_memory": "transformed_activation_memory",
-            "in_multi_output": "in_multi_output",
-            "iterable_output_index": "multi_output_index",
-            "grad_fn_object": "grad_fn_handle",
-            "corresponding_grad_fn": "grad_fn_handle",
-            "is_input_layer": "is_input",
-            "is_output_layer": "is_output",
-            "is_output_ancestor": "has_output_descendant",
-            "is_buffer_layer": "is_buffer",
-            "internally_initialized": "is_internal_source",
-            "internally_terminated": "is_internal_sink",
-            "parent_param_barcodes": "_param_barcodes",
-            "module_passes_entered": "input_to_module_calls",
-            "input_to_modules": "input_to_module_calls",
-            "modules_exited": "output_of_modules",
-            "module_passes_exited": "output_of_module_calls",
-            "is_leaf_module_output": "is_atomic_module",
-            "leaf_module_pass": "atomic_module_call",
-            "activation_ref": "out_ref",
-            "gradient_ref": "grad_ref",
-            "edge_uses": "_edge_uses",
-            "min_distance_from_output": "min_distance_to_output",
-            "max_distance_from_output": "max_distance_to_output",
-        }
-        for old_key, new_key in old_key_map.items():
-            if new_key not in state and old_key in state:
-                state[new_key] = state.pop(old_key)
+        read_tlspec_version(state, cls_name=type(self).__name__)
         default_fill_state(
             state,
             defaults=self.DEFAULT_FILL_STATE,
@@ -3238,8 +3182,6 @@ class Op:
             state["device_ref"] = _device_ref_from_metadata(
                 state.get("out"), state.get("output_device")
             )
-        if version < 5 and state.get("backend_address") is None:
-            state["backend_address"] = state.get("address")
         if state.get("resolver_status") is None:
             state["resolver_status"] = "resolved"
         for field_name in (

@@ -1,26 +1,15 @@
-"""Phase 4 regression tests: save/load schema migration."""
+"""Phase 4 regression tests: save/load schema versioning and the 2.33 floor."""
 
 from __future__ import annotations
 
 import pickle
-import warnings
-from collections.abc import Generator
 from pathlib import Path
 
 import pytest
 import torch
 import torchlens as tl
 
-from torchlens._io import TLSPEC_VERSION, reset_legacy_thread_warning
-
-
-@pytest.fixture(autouse=True)
-def _reset_warning_state() -> Generator[None, None, None]:
-    """Reset the legacy-warning once flag around each test."""
-
-    reset_legacy_thread_warning()
-    yield
-    reset_legacy_thread_warning()
+from torchlens._io import MIN_TLSPEC_VERSION, TLSPEC_VERSION, ArtifactVersionBelowFloorError
 
 
 def _simple_model_and_input() -> tuple[torch.nn.Module, torch.Tensor]:
@@ -39,31 +28,25 @@ def test_io_format_version_is_six() -> None:
     """Forward-pre-hook provenance bumps ``TLSPEC_VERSION`` to 6."""
 
     assert TLSPEC_VERSION == 6
+    assert MIN_TLSPEC_VERSION == 6
 
 
-def test_v5_module_call_state_gets_neutral_pre_hook_defaults() -> None:
-    """A v5 ModuleCall state loads with neutral pre-hook provenance fields."""
+def test_pre_floor_module_call_state_refuses_typed() -> None:
+    """A v5 ModuleCall state refuses at the 2.33 rehydration floor."""
 
     model, x = _simple_model_and_input()
     trace = tl.trace(model, x)
     call = trace.module_calls["0:1"]
     state = call.__getstate__()
     state["tlspec_version"] = 5
-    state.pop("inputs_before_pre_hooks", None)
-    state.pop("inputs_after_pre_hooks", None)
-    state.pop("forward_pre_hook_effects", None)
 
     restored = type(call).__new__(type(call))
-    restored.__setstate__(state)
-
-    assert restored.inputs_before_pre_hooks is None
-    assert restored.inputs_after_pre_hooks is None
-    assert restored.forward_pre_hook_effects == ()
-    assert restored.had_pre_hook_input_change is False
+    with pytest.raises(ArtifactVersionBelowFloorError, match="torchlens 2.33"):
+        restored.__setstate__(state)
 
 
 def test_round_trip_save_load_preserves_module_containment(tmp_path: Path) -> None:
-    """Save a v3 trace, load it, and confirm module containment survives."""
+    """Save a current trace, load it, and confirm module containment survives."""
 
     model, x = _simple_model_and_input()
     trace = tl.trace(model, x)
@@ -77,8 +60,13 @@ def test_round_trip_save_load_preserves_module_containment(tmp_path: Path) -> No
     assert isinstance(op_with_modules.modules, tuple)
 
 
-def test_legacy_pickle_load_drops_thread_fields() -> None:
-    """Load a v2 Op state and confirm legacy thread fields are dropped."""
+def test_legacy_thread_field_pickle_refuses_typed() -> None:
+    """A v2 Op state with thread-replay fields refuses instead of resurrecting.
+
+    Pre-floor behavior dropped the legacy thread fields with a one-per-process
+    ``DeprecationWarning``; the 2.33 floor replaces that resurrection path with
+    a typed refusal that names the floor.
+    """
 
     model, x = _simple_model_and_input()
     trace = tl.trace(model, x)
@@ -90,43 +78,5 @@ def test_legacy_pickle_load_drops_thread_fields() -> None:
     state["module_entry_exit_threads_inputs"] = {"old_alias": []}
 
     decoded = pickle.loads(pickle.dumps(state))
-    with pytest.warns(DeprecationWarning, match="legacy thread-replay fields"):
+    with pytest.raises(ArtifactVersionBelowFloorError, match="tlspec_version=2"):
         type(op).__setstate__(op, decoded)
-
-    for attr in (
-        "_module_boundary_thread_output",
-        "_module_boundary_threads_inputs",
-        "module_entry_exit_threads_inputs",
-    ):
-        assert not hasattr(op, attr), f"{attr} should be dropped on legacy-pickle load"
-
-
-def test_legacy_pickle_load_emits_one_deprecation_warning() -> None:
-    """Loading multiple legacy OpLogs emits one deprecation warning per process."""
-
-    model, x = _simple_model_and_input()
-    trace = tl.trace(model, x)
-    op = next(iter(trace.layer_list))
-    legacy_pickles = []
-    for _ in range(3):
-        state = op.__getstate__()
-        state["tlspec_version"] = 2
-        state["_module_boundary_thread_output"] = [("+", "x", 1)]
-        legacy_pickles.append((op, pickle.dumps(state)))
-
-    reset_legacy_thread_warning()
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", DeprecationWarning)
-        for op, pickled in legacy_pickles:
-            decoded = pickle.loads(pickled)
-            type(op).__setstate__(op, decoded)
-
-    ours = [
-        warning
-        for warning in caught
-        if issubclass(warning.category, DeprecationWarning)
-        and "legacy thread-replay fields" in str(warning.message)
-    ]
-    assert len(ours) == 1, (
-        f"expected exactly 1 legacy-thread DeprecationWarning per process, got {len(ours)}"
-    )

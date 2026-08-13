@@ -397,29 +397,6 @@ def _raise_missing_trace_attribute(trace: "Trace", name: str) -> Any:
     raise AttributeError(f"{type(trace).__name__!s} object has no attribute {name!r}")
 
 
-def _legacy_save_grads_from_state(state: dict[str, Any]) -> Any:
-    """Return the canonical ``save_grads`` value for legacy trace state.
-
-    Parameters
-    ----------
-    state:
-        Pickled or tlspec-restored trace state, possibly containing pre-P3
-        gradient-save aliases.
-
-    Returns
-    -------
-    Any
-        Canonical ``save_grads`` policy.
-    """
-
-    if "save_grads" in state:
-        return state["save_grads"]
-    if not state.get("save_gradients", False):
-        return None
-    gradients_to_save = state.get("gradients_to_save", "all")
-    return "all" if gradients_to_save is True else gradients_to_save
-
-
 @dataclass
 class ResolvedPreprocessing:
     """Structured provenance for automatic input preprocessing.
@@ -2630,7 +2607,7 @@ class Trace(
             "grad_transform": None,
             "grad_transform_repr": None,
             "save_raw_gradients": True,
-            "save_grads": _legacy_save_grads_from_state(state),
+            "save_grads": None,
             "capture_tensor_grad_hooks": True,
             "_grad_op_nums_to_save": [],
             "has_backward_pass": False,
@@ -2714,8 +2691,6 @@ class Trace(
             state["_grad_op_nums_to_save"] = state.pop("_grad_layer_nums_to_save")
         if "_saved_grads_set" in state and "_saved_grad_labels" not in state:
             state["_saved_grad_labels"] = state.pop("_saved_grads_set")
-        state.pop("save_gradients", None)
-        state.pop("gradients_to_save", None)
         state.pop("_keep_grads_in_memory", None)
         state.pop("_grad_stream_retain_in_memory", None)
         if state.get("_intervention_spec") is None:

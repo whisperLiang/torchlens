@@ -136,11 +136,11 @@ def test_conditional_body_cache_survives_pickle_and_tlspec_round_trips(tmp_path:
     assert tlspec_restored[label].is_in_conditional_body is True
 
 
-def test_old_style_pickle_without_io_format_version_warns_and_remains_usable(
+def test_old_style_pickle_without_io_format_version_refuses_typed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Forged pre-sprint pickles should warn on load and keep accessors working."""
+    """Forged pre-sprint pickles refuse at the 2.33 rehydration floor."""
 
     trace = _build_trace()
     pickle_path = tmp_path / "old_style_trace.pkl"
@@ -168,14 +168,11 @@ def test_old_style_pickle_without_io_format_version_warns_and_remains_usable(
     with pickle_path.open("wb") as handle:
         pickle.dump(trace, handle)
 
-    with pytest.warns(DeprecationWarning):
-        with pickle_path.open("rb") as handle:
-            restored = pickle.load(handle)
+    from torchlens._io import ArtifactVersionBelowFloorError
 
-    assert isinstance(restored, Trace)
-    assert restored[restored.output_layers[0]].layer_label == restored.output_layers[0]
-    assert restored.layer_list[0].source_trace is restored
-    assert isinstance(_first_saved_layer(restored).out, torch.Tensor)
+    with pytest.raises(ArtifactVersionBelowFloorError, match="torchlens 2.33"):
+        with pickle_path.open("rb") as handle:
+            pickle.load(handle)
 
 
 class _TrainableModel(nn.Module):
@@ -374,10 +371,16 @@ def test_op_setstate_absent_container_fields_restore_typed() -> None:
     assert list(restored.input_to_module_calls) == []
 
 
-def test_backend_address_repair_only_applies_before_v5() -> None:
-    """The v5 field migration must not overwrite a current explicit ``None``."""
+def test_backend_address_none_is_preserved_and_pre_floor_refuses() -> None:
+    """Explicit ``None`` survives restore; pre-floor states refuse typed.
 
-    from torchlens._io import TLSPEC_VERSION
+    The v5 ``backend_address`` repair ladder is deleted: the 2.33 floor
+    guarantees every loadable state already carries the field, so an explicit
+    ``None`` must never be overwritten from ``address``, and a v4 state must
+    refuse instead of triggering the migration.
+    """
+
+    from torchlens._io import TLSPEC_VERSION, ArtifactVersionBelowFloorError
     from torchlens.data_classes.layer import Layer
     from torchlens.data_classes.op import Op
 
@@ -397,8 +400,8 @@ def test_backend_address_repair_only_applies_before_v5() -> None:
 
         state["tlspec_version"] = 4
         legacy = factory()
-        legacy.__setstate__(dict(state))
-        assert legacy.backend_address == "plain.attribute"
+        with pytest.raises(ArtifactVersionBelowFloorError, match="tlspec_version=4"):
+            legacy.__setstate__(dict(state))
 
 
 def test_setstate_present_but_wrong_typed_container_is_coerced() -> None:

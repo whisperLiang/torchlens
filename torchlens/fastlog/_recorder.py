@@ -263,7 +263,6 @@ class Recorder:
         self.options = merge_recording_options(
             recording=None,
             keep_op=save,
-            keep_module=MISSING,
             default_op=default_op,
             default_module=default_module,
             history_size=history_size,

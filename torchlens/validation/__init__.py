@@ -37,8 +37,11 @@ def validate_tlspec(
 ) -> None:
     """Validate a unified ``.tlspec`` manifest against its manifest schema.
 
-    Legacy TorchLens 2.16 formats are intentionally accepted without schema
-    validation so old artifacts remain loadable.
+    Legacy TorchLens 2.16 intervention formats are intentionally accepted
+    without schema validation so old intervention specs remain loadable.
+    Legacy 2.16 model-log bundles are below the torchlens 2.33
+    (``tlspec_version=6``) rehydration floor and refuse here with the same
+    typed error the loader raises.
 
     Parameters
     ----------
@@ -55,6 +58,8 @@ def validate_tlspec(
         If a unified manifest violates the v1 schema.
     FileNotFoundError
         If a unified manifest file is missing.
+    torchlens.errors.ArtifactVersionBelowFloorError
+        If the artifact is a pre-floor (pre-2.33) model-log bundle.
     """
 
     from ..io import detect_tlspec_format, inspect_tlspec
@@ -79,9 +84,19 @@ def validate_tlspec(
     if tlspec_format in {
         "v2.16_intervention_with_kind",
         "v2.16_intervention",
-        "v2.16_modellog_portable",
     }:
         return
+    if tlspec_format == "v2.16_modellog_portable":
+        from .._io import MIN_TLSPEC_VERSION, MIN_TORCHLENS_VERSION_TEXT
+        from .._io import ArtifactVersionBelowFloorError as _BelowFloor
+
+        raise _BelowFloor(
+            f"Model-log bundle at {tlspec_path} uses the TorchLens 2.16 portable "
+            f"format, below the supported rehydration floor tlspec_version="
+            f"{MIN_TLSPEC_VERSION} (torchlens {MIN_TORCHLENS_VERSION_TEXT}). Load "
+            f"and re-save the artifact with a torchlens release >= "
+            f"{MIN_TORCHLENS_VERSION_TEXT} that still reads it."
+        )
     if tlspec_format != "v2.0_unified":
         raise ValueError(f"Unrecognized TorchLens .tlspec format at {tlspec_path}.")
 

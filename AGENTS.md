@@ -152,6 +152,10 @@ pytest tests/ -m "not slow" -x --tb=short
 8. `_tracing_finished` is set once at finalization and mirrored onto every retained op
    (`backends/_finalize.py`); nothing resets it per pass.
 9. Portable `.tlspec` public schema is manifest-only; executable callables are not portable.
+9a. Rehydration floor: artifacts older than torchlens 2.33 (`tlspec_version` 6) refuse to load
+    with the typed `tl.errors.ArtifactVersionBelowFloorError`; legacy field-alias resurrection
+    ladders are deleted. Legacy 2.16 intervention specs remain loadable (floor covers Trace
+    rehydration only).
 10. `backward_ready=True` rejects contradictory detaching/disk-save settings and preserves user
     `requires_grad` choices.
 10a. `inference_only=True` wraps forward capture in `torch.no_grad()` for forward-only analysis

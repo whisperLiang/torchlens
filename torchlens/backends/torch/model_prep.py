@@ -2185,8 +2185,8 @@ def module_forward_decorator(
         if trace.capture_mode == "predicate":
             from ...capture.predicates import (
                 _evaluate_halt,
-                _evaluate_keep_module,
                 _is_halt_only_capture,
+                _module_capture_spec,
             )
             from ...capture.projections import (
                 _build_record_context,
@@ -2226,7 +2226,7 @@ def module_forward_decorator(
                 if halt_only:
                     _evaluate_halt(enter_ctx, state.options)
                 else:
-                    enter_spec = _evaluate_keep_module(enter_ctx, state.options)
+                    enter_spec = _module_capture_spec(state.options)
                     if enter_spec.save_out or enter_spec.save_metadata:
                         if state.storage_intent.on_disk:
                             state.add_record(ActivationRecord(ctx=enter_ctx, spec=enter_spec))
@@ -2308,7 +2308,7 @@ def module_forward_decorator(
                     if halt_only:
                         _evaluate_halt(exit_ctx, state.options, frontier_output=out)
                     else:
-                        exit_spec = _evaluate_keep_module(exit_ctx, state.options)
+                        exit_spec = _module_capture_spec(state.options)
                         if exit_spec.save_out or exit_spec.save_metadata:
                             if state.storage_intent.on_disk:
                                 state.add_record(ActivationRecord(ctx=exit_ctx, spec=exit_spec))

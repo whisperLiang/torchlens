@@ -225,8 +225,8 @@ def _evaluate_halt(
 def _is_halt_only_capture(options: "RecordingOptions") -> bool:
     """Return whether capture can evaluate only the halt predicate per event.
 
-    The fast path is deliberately narrow: no save predicate, no module predicate,
-    no default retention, no intervention, and no gradient capture. That preserves
+    The fast path is deliberately narrow: no save predicate, no default
+    retention, no intervention, and no gradient capture. That preserves
     the save-then-halt ordering for every configuration that can retain payloads
     or metadata.
     """
@@ -234,7 +234,6 @@ def _is_halt_only_capture(options: "RecordingOptions") -> bool:
     return (
         options.halt is not None
         and options.keep_op is None
-        and options.keep_module is None
         and options.default_op is False
         and options.default_module is False
         and options.intervene is None
@@ -352,17 +351,14 @@ def _matching_recent_parent_labels(
     return tuple(matches)
 
 
-def _evaluate_keep_module(ctx: RecordContext, options: "RecordingOptions") -> CaptureSpec:
-    """Evaluate the module predicate slot for one event."""
+def _module_capture_spec(options: "RecordingOptions") -> CaptureSpec:
+    """Return the capture policy for one module boundary event.
 
-    if options.keep_module is None:
-        result = None
-    else:
-        result = options.keep_module(ctx)
-    decision = _normalize_capture_decision(result, ctx, options.default_module)
-    if isinstance(decision, RetroactiveCaptureDecision):
-        raise PredicateError("module predicates cannot return RetroactiveCaptureDecision")
-    return decision
+    Module events have no predicate slot (predicate-gated module-event
+    selection was removed); ``default_module`` is the whole policy.
+    """
+
+    return _coerce_default_capture_spec(options.default_module)
 
 
 def build_op_record_context(

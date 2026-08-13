@@ -551,8 +551,8 @@ def test_bundle_save_complex64_still_round_trips(tmp_path: Path) -> None:
         (
             "io_format_older",
             lambda manifest: manifest.__setitem__("tlspec_version", TLSPEC_VERSION - 1),
-            "deprecation_warning",
-            str(TLSPEC_VERSION - 1),
+            "raise",
+            "below the supported rehydration floor",
         ),
         (
             "io_format_equal",
@@ -579,10 +579,16 @@ def test_bundle_save_complex64_still_round_trips(tmp_path: Path) -> None:
             "999.0.0",
         ),
         (
-            "torchlens_older",
+            "torchlens_pre_floor",
             lambda manifest: manifest.__setitem__("torchlens_version", "0.0.1"),
+            "raise",
+            "below the supported rehydration floor",
+        ),
+        (
+            "torchlens_older_supported",
+            lambda manifest: manifest.__setitem__("torchlens_version", "2.33.0"),
             "info_log",
-            "0.0.1",
+            "2.33.0",
         ),
         (
             "python_major_mismatch",

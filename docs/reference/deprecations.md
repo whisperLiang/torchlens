@@ -127,12 +127,12 @@ unless a narrower policy is later set.
 module-event selection was REMOVED, not migrated: `save=` routes to the op
 predicate only, and `default_module=` records ALL module enter/exit boundary
 events uniformly — it is not a per-module predicate. A module predicate passed
-via `save=` selects zero module events. Two simulators still accept module
-predicates for a configuration capture can no longer produce
+via `save=` selects zero module events. The internal `keep_module` options
+slot and its two public simulators were deleted with it
 (`Trace.preview_fastlog(keep_module=...)` and
-`RecordingTrace.repredicate(other_keep_module=...)`); whether to re-expose a
-public module-predicate kwarg or delete the internal slot and simulators
-together is an open maintainer decision.
+`RecordingTrace.repredicate(other_keep_module=...)` no longer accept module
+predicates; both raise `TypeError`), so no surface simulates a configuration
+that capture cannot produce.
 
 `record(save=...)` and `dry_run(save=...)` now default to `None` (previously an
 internal `MISSING` sentinel that existed only to arbitrate against the removed

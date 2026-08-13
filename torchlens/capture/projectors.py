@@ -18,69 +18,6 @@ if TYPE_CHECKING:
 _REFRESH_SOURCES: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
 
 
-@dataclass(frozen=True, slots=True)
-class _DeprecatedTraceProjector:
-    """DEPRECATED delegating shim for the removed ledger-backed TraceProjector.
-
-    The kernel/ledger/projector layer was deleted (its ledgers re-derived
-    every fact from the events themselves), so this shim reads the sealed
-    event spine directly. ``events()`` preserves the old contract: producer
-    order, repeatedly readable, independent mutable dict fields per call.
-    """
-
-    core: CapturedRunCore
-
-    def events(self) -> tuple[OpEvent, ...]:
-        """Return operation events in producer order.
-
-        Returns
-        -------
-        tuple[OpEvent, ...]
-            Cloned operation facts with independent mutable dict fields.
-        """
-
-        return tuple(_clone_op_event_for_replay(event) for event in self.core.events)
-
-
-def __getattr__(name: str) -> object:
-    """Return the deprecated ``TraceProjector`` compatibility shim.
-
-    Parameters
-    ----------
-    name
-        Attribute name requested from :mod:`torchlens.capture.projectors`.
-
-    Returns
-    -------
-    object
-        Delegating compatibility class.
-
-    Raises
-    ------
-    AttributeError
-        If ``name`` is not a deprecated compatibility export.
-    """
-
-    if name == "TraceProjector":
-        if name not in _WARNED_DEPRECATED_NAMES:
-            _WARNED_DEPRECATED_NAMES.add(name)
-            warnings.warn(
-                "torchlens.capture.projectors.TraceProjector is deprecated: the "
-                "ledger-backed projector layer was removed. This delegating shim "
-                "reads the sealed CapturedRunCore event spine directly and will be "
-                "dropped in a future release.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        return _DeprecatedTraceProjector
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-# Deprecated names warn ONCE per process; repeated attribute access stays
-# silent even under an ``always`` warning filter.
-_WARNED_DEPRECATED_NAMES: set[str] = set()
-
-
 def _distinct_label_index_keys(label: str, raw_label: str | None) -> tuple[str, ...]:
     """Return the distinct label keys that should index one activation record.
 

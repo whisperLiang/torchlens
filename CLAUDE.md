@@ -245,6 +245,10 @@ print(tl.compat.report(model, x).to_markdown())
   Gated by `HAS_DYNAMO_IS_COMPILING` / `HAS_TRACING_TENSOR_TYPES`.
 - `torchlens._io` and `torchlens.io` own portable `.tlspec` save/load helpers. Manifest
   schema v2 is backend-aware; non-torch preview bundles may be audit-only or metadata-only.
+  Rehydration floor: artifacts older than torchlens 2.33 (`tlspec_version` 6) refuse to load
+  with the typed `tl.errors.ArtifactVersionBelowFloorError` (drop-not-resurrect; the legacy
+  field-alias ladders are deleted). Legacy 2.16 intervention specs remain loadable — the
+  floor covers Trace rehydration only.
 - `torchlens.debug` owns power-user diagnostics such as `bisect_nan` and `hot_path`;
   the submodule is imported as `tl.debug` and is deliberately not in `__all__`.
 - `tl.receptive_field` is a lazy power-user submodule. `Op`, `Layer`, `ModuleCall`, and

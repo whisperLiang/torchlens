@@ -380,7 +380,6 @@ def _recording_from_records(
             for pass_index, reason in dict(metadata.get("halts_by_pass", {})).items()
         },
         keep_op_repr=metadata.get("keep_op_repr"),
-        keep_module_repr=metadata.get("keep_module_repr"),
         history_size=int(metadata.get("history_size", 0)),
         _activation_transform_repr=metadata.get("_activation_transform_repr"),
         recovered=recovered,
