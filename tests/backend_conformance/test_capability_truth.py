@@ -58,6 +58,12 @@ _TORCHLENS_ROOT = Path(tl.__file__).resolve().parent
 
 _PREVIEW_NAMES = ("mlx", "jax", "tinygrad", "paddle", "tf")
 
+_EXPECTED_TRUE_PREVIEW_GATES = frozenset({("tf", "interventions")})
+"""Preview ``(name, gated-flag)`` pairs lifted with REAL dispatch plus
+conformance coverage (parity-C: tf static-label interventions through the
+writable wrap layer). Lifting a preview capability is a one-line diff here;
+every pair not listed stays fail-closed in both directions."""
+
 _EXTRA_POLICIES = {
     "mlx": MLX_EXTRA_KWARG_POLICY,
     "jax": JAX_EXTRA_KWARG_POLICY,
@@ -127,6 +133,12 @@ def test_extra_kwarg_gates_are_fail_closed_biconditional(name: str) -> None:
     sentinel = object()
     for option, flag in (("intervene", "interventions"), ("storage", "streaming"),
                          ("streaming", "streaming")):
+        if (name, flag) in _EXPECTED_TRUE_PREVIEW_GATES:
+            # Lifted gate: flag True with a real binding, option dispatched by
+            # the capture path (behavior covered by the backend's own suite).
+            assert getattr(spec.capabilities, flag)
+            require_capability_implementation(spec, flag)
+            continue
         assert not getattr(spec.capabilities, flag)
         with pytest.raises(BackendUnsupportedError):
             reject_extra_trace_kwargs({option: sentinel}, policy, spec=spec)
@@ -171,7 +183,8 @@ def test_registration_refuses_bare_capability_flips() -> None:
                 register_backend_spec(
                     _spec_with_flag(name, flag, implementation=False), replace=True
                 )
-            assert not getattr(get_backend_spec(name).capabilities, flag)
+            expected = (name, flag) in _EXPECTED_TRUE_PREVIEW_GATES
+            assert getattr(get_backend_spec(name).capabilities, flag) is expected
 
 
 def test_in_place_capability_flip_refuses_end_to_end() -> None:
@@ -270,7 +283,7 @@ class _StubTrace:
         self.backend = backend
 
 
-@pytest.mark.parametrize("name", ("jax", "mlx", "tinygrad", "paddle"))
+@pytest.mark.parametrize("name", ("jax", "mlx", "tinygrad", "paddle", "tf"))
 def test_backward_accessor_guard_redirects_to_derived_grads(name: str) -> None:
     """Derived-grads backends refuse with the derived-gradient redirect."""
 
@@ -278,9 +291,27 @@ def test_backward_accessor_guard_redirects_to_derived_grads(name: str) -> None:
         raise_if_no_backward_capture(_StubTrace(name), plural_subject="backward_passes")
 
 
-def test_backward_accessor_guard_tf_has_no_derived_redirect() -> None:
-    """tf declares no derived-gradient surface, so the redirect must not appear."""
+def test_backward_accessor_guard_without_derived_surface_has_no_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A backend declaring no derived-gradient surface must not get the redirect.
 
+    Every registered preview now declares ``intermediate_derived_grads=True``,
+    so the no-surface branch is exercised through a flag-flipped spec: the
+    guard must keep refusing typed without pointing at an accessor that does
+    not exist.
+    """
+
+    from torchlens.data_classes import _backend_capability_guards as guards
+
+    original = get_backend_spec("tf")
+    flipped = dataclasses.replace(
+        original,
+        capabilities=dataclasses.replace(
+            original.capabilities, intermediate_derived_grads=False
+        ),
+    )
+    monkeypatch.setattr(guards, "get_backend_spec", lambda _name: flipped)
     with pytest.raises(ValueError, match="declares no derived-gradient surface"):
         raise_if_no_backward_capture(_StubTrace("tf"), plural_subject="backward_passes")
 
@@ -398,7 +429,9 @@ def test_registered_capability_tables_are_truthful_at_registration() -> None:
             continue
         assert not capabilities.backward_capture
         assert not capabilities.fastlog
-        assert not capabilities.interventions
+        assert capabilities.interventions == (
+            (str(spec.name), "interventions") in _EXPECTED_TRUE_PREVIEW_GATES
+        )
         assert not capabilities.streaming
         assert not capabilities.rng_replay
         assert "runnable" not in capabilities.save_levels

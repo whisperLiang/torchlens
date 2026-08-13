@@ -265,9 +265,6 @@ MLX_EXTRA_KWARG_POLICY = ExtraKwargPolicy(
 TF_EXTRA_KWARG_POLICY = ExtraKwargPolicy(
     runtime_option_names=frozenset(
         {
-            "halt",
-            "intervene",
-            "recipes",
             "stop_after",
             "storage",
             "streaming",
@@ -282,7 +279,13 @@ TF_EXTRA_KWARG_POLICY = ExtraKwargPolicy(
         "lookback_payload_policy": "metadata_only",
     },
 )
-"""Extra public-kwarg rejection policy for the TensorFlow preview backend."""
+"""Extra public-kwarg rejection policy for the TensorFlow preview backend.
+
+``intervene``/``halt``/``recipes`` left this table when tf lifted the
+``interventions`` capability: ``intervene=`` dispatches for real, and the two
+unimplemented spellings refuse typed inside the tf capture path (a declarative
+rejection here would classify the True flag as a self-contradictory
+registration)."""
 
 
 JAX_PREVIEW_TRACE_OPTION_POLICY = PreviewTraceOptionPolicy(
