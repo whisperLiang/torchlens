@@ -356,21 +356,30 @@ if your log looks wrong in one of these scenarios, suspect the caveat:
   aliasing (for example, `torch.add(a, b, out=a)`) is not pre-snapshotted and
   may expose post-mutation inputs; TorchLens emits a warning when it detects
   that case at hook fire time.
-- **Detached torch references (scoped discovery and diagnostic boundary)**:
-  The release default remains the legacy broad module crawl. Real scoped
-  discovery is opt-in with `tl.wrap_torch(patch_policy="scoped")`; it exact-scans
-  direct module values, then limits class/default scanning to model-provenance,
-  prior-positive, and `patch_modules=` candidates. Scoped intentionally does not
-  recurse into closure cells, arbitrary containers, partials, or opaque C holders.
-  `escape_detector="shadow"` adds exact identity/code diagnostics for executed
-  misses, warns with the callable and callsite, and records the report in
-  `trace.escape_diagnostics`; it does not enforce completeness in this rollout.
+- **Detached torch references (rescue re-run and diagnostic boundary)**:
+  The historical sys.modules crawler is deleted. A stale pre-wrap torch
+  reference that produces an escape signal (the provenance warning, an
+  escape-detector diagnostic, or an output-attribution failure) triggers ONE
+  rescue re-run with a `TorchFunctionMode` net that redirects the stale call
+  to its exact wrapper; the returned trace is disclosed
+  (`capture_verified=False`, reason `"mode_rescue_rerun"`, session-time
+  `trace.rescue_rerun` record) because the forward ran twice and mode
+  presence can de-fuse fast paths. Escapes beyond any mode — worker-thread
+  stale refs (modes are thread-local) and stale refs inside third-party
+  `handle_torch_function` composite interiors — are disclosed as
+  `"escape_rescue_unrecovered"` instead of recovered. Streaming, sink, and
+  halt-predicate captures are not re-runnable and report the escape without
+  a rescue. The protocol-invisible constructors that no mode can ever see
+  (measured per build: `from_numpy`, `frombuffer`, `Tensor.as_subclass`)
+  keep targeted module-attribute stale-reference patching (the mechanical
+  belt). `escape_detector="shadow"` adds exact identity/code diagnostics for
+  executed misses, warns with the callable and callsite, and records the
+  report in `trace.escape_diagnostics`.
   In particular, a C `functools.partial` can remain invisible to Python profiling.
   A Python inventory original that recursively calls itself through a pre-wrap reference can
   self-convict after its one-shot wrapper-edge token is consumed; this is documented rather than
   broadly exempted because recursive callsites are arbitrary user/library code.
-  Scoped traces therefore carry `capture_verified=False` until the separate
-  dispatcher witness is enabled. Deferred `log_backward()` is also outside the
+  Deferred `log_backward()` is also outside the
   current detector lifetime and reports `escape_detector_backward_coverage ==
   "not_armed"`. See
   [scoped detached-reference migration](migration/scoped_detached_patching.md)

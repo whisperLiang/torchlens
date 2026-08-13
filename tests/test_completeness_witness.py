@@ -131,7 +131,6 @@ def _isolated_witness_epoch() -> Iterator[None]:
     yield
     unwrap_torch()
     wrap_torch(
-        patch_policy="legacy",
         escape_detector="off",
         completeness_witness=False,
     )
@@ -472,7 +471,7 @@ class _PreWrapVmapModel(nn.Module):
 def test_wrapped_ops_have_zero_unaccounted_dispatches() -> None:
     """Every ordinarily wrapped operation is owned by a captured leaf token."""
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     trace = tl.trace(_WrappedOpsModel(), torch.randn(4))
 
     assert trace.completeness_witness_mode == "shadow"
@@ -488,7 +487,7 @@ def test_wrapped_ops_have_zero_unaccounted_dispatches() -> None:
 def test_input_copy_preserves_alias_mutation_semantics_and_validation() -> None:
     """Caller protection preserves repeated tensor identity across model sites."""
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     plain_input = torch.tensor([1.0])
     plain_output = _AliasedInputMutationModel()(plain_input, plain_input)
     capture_input = torch.tensor([1.0])
@@ -515,7 +514,7 @@ def test_input_copy_preserves_alias_mutation_semantics_and_validation() -> None:
 def test_input_copy_preserves_nonzero_storage_offset_semantics() -> None:
     """A copied tensor view retains its physical storage offset."""
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     plain_input = torch.arange(6.0)[2:5]
     plain_output = _StorageOffsetBranchModel()(plain_input)
     capture_input = torch.arange(6.0)[2:5]
@@ -531,7 +530,7 @@ def test_input_copy_preserves_nonzero_storage_offset_semantics() -> None:
 def test_deep_input_tensor_is_captured_and_witnessed() -> None:
     """A seven-level tensor input remains a represented graph source."""
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     nested: object = torch.tensor([5.0])
     for _ in range(7):
         nested = [nested]
@@ -548,7 +547,7 @@ def test_deep_input_tensor_is_captured_and_witnessed() -> None:
 def test_input_depth_limit_fails_closed_with_unresolved_path() -> None:
     """The retained safety ceiling names its frontier and forbids verification."""
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     nested: object = torch.tensor([5.0])
     for _ in range(70):
         nested = [nested]
@@ -571,7 +570,7 @@ def test_input_depth_limit_fails_closed_with_unresolved_path() -> None:
 def test_direct_aten_call_trips_non_vacuous_witness() -> None:
     """A direct aten call is loudly and machine-readably unaccounted."""
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     with pytest.warns(TorchLensCaptureGapWarning, match="unaccounted aten dispatch"):
         trace = tl.trace(_DirectAtenGapModel(), torch.randn(4))
 
@@ -612,7 +611,7 @@ def test_genuine_replacement_hook_dispatch_is_tagged_in_replacement_hook() -> No
     def _replacement_hook(module, inputs, output):  # type: ignore[no-untyped-def]
         return torch.ops.aten.mul.Tensor(output, torch.tensor(0.5))
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     model = _Mlp().eval()
     model.relu.register_forward_hook(_replacement_hook)
     with warnings.catch_warnings(record=True) as caught:
@@ -642,7 +641,7 @@ def test_genuine_replacement_hook_dispatch_is_tagged_in_replacement_hook() -> No
 def test_direct_aten_submodule_output_is_owned_by_internal_source() -> None:
     """A child module's untraceable output is owned by its internal-source boundary."""
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         trace = tl.trace(_DirectAtenSubmoduleGapModel(), torch.randn(4))
@@ -668,7 +667,7 @@ def test_direct_aten_submodule_output_is_owned_by_internal_source() -> None:
 def test_direct_aten_child_intermediate_still_trips_witness() -> None:
     """A child raw dispatch not represented by its output boundary fails closed."""
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     with pytest.warns(TorchLensCaptureGapWarning, match="unaccounted aten dispatch"):
         trace = tl.trace(_DirectAtenIntermediateSubmoduleGapModel(), torch.randn(4))
 
@@ -689,7 +688,7 @@ def test_direct_aten_child_intermediate_still_trips_witness() -> None:
 def test_untraceable_child_output_does_not_mask_observable_mutation() -> None:
     """ATTACK4 mutation remains unaccounted beside an owned output boundary."""
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     with pytest.warns(TorchLensCaptureGapWarning, match="unaccounted aten dispatch"):
         trace = tl.trace(_MutatingDirectAtenOutputSubmoduleModel(), torch.randn(4))
 
@@ -722,7 +721,7 @@ def test_untraceable_child_output_does_not_mask_observable_mutation() -> None:
 def test_record_wrapped_ops_have_zero_unaccounted_dispatches() -> None:
     """Fastlog accounting uses capture emission rather than Trace-only events."""
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -740,7 +739,7 @@ def test_record_wrapped_ops_have_zero_unaccounted_dispatches() -> None:
 def test_record_direct_aten_call_trips_non_vacuous_witness() -> None:
     """A direct aten gap remains loud on the fastlog capture path."""
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     with pytest.warns(TorchLensCaptureGapWarning, match="unaccounted aten dispatch"):
         recording = tl.record(
             _DirectAtenGapModel(),
@@ -781,7 +780,7 @@ def test_logged_nested_wrapper_calls_are_accounted(
         Nested functional pooling pair under test.
     """
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     trace = tl.trace(_NestedPoolModel(pool), torch.randn(1, 2, 4, 4))
 
     assert trace.completeness_witness_unaccounted_count == 0
@@ -797,7 +796,7 @@ def test_logged_nested_wrapper_calls_are_accounted(
 def test_scalar_extraction_boundaries_are_narrowly_accounted() -> None:
     """Python scalar conversions remain intentional scalar-output boundaries."""
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     trace = tl.trace(_ScalarExtractionModel(), torch.ones(4))
 
     assert trace.completeness_witness_unaccounted_count == 0
@@ -821,7 +820,7 @@ def test_scalar_extraction_boundaries_are_narrowly_accounted() -> None:
 def test_linear_decomposition_is_owned_by_one_captured_call() -> None:
     """Multiple aten events owned by one linear call do not false-alarm."""
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     trace = tl.trace(_LinearCompositeModel(), torch.randn(2, 4))
 
     assert trace.completeness_diagnostics == []
@@ -840,7 +839,7 @@ def test_linear_decomposition_is_owned_by_one_captured_call() -> None:
 def test_vmap_interior_is_expected_opaque() -> None:
     """Documented vmap interiors remain outside the active dispatch census."""
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         trace = tl.trace(_VmapBoundaryModel(), torch.randn(3, 4))
@@ -866,7 +865,7 @@ def test_pre_wrap_vmap_is_witness_only_not_capture_verified() -> None:
 
     vectorized = torch.vmap(lambda row: row * 2.0)
     model = _PreWrapVmapModel(vectorized)
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     with pytest.warns(UserWarning, match="functorch"):
         trace = tl.trace(model, torch.randn(3, 4))
 
@@ -883,7 +882,6 @@ def test_escape_detector_and_witness_compose_on_shared_tokens() -> None:
     """Both diagnostics can run together and independently verify a clean call."""
 
     wrap_torch(
-        patch_policy="scoped",
         escape_detector="shadow",
         completeness_witness=True,
     )
@@ -1099,7 +1097,7 @@ def test_finalize_census_keeps_dispatch_reason_across_later_guard_passes() -> No
 def test_dynamic_parameter_initializers_are_captured_without_hiding_state_mutations() -> None:
     """Capture temporary Parameter initialization while registered-state writes fail closed."""
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     temporary_trace = tl.trace(_DynamicParameterInitializationModel(), torch.randn(2, 4))
 
     initializer_rows = [
@@ -1126,7 +1124,7 @@ def test_dynamic_parameter_initializers_are_captured_without_hiding_state_mutati
 def test_mid_forward_autograd_grad_is_an_exact_backward_boundary() -> None:
     """Exclude only engine dispatches represented by the captured backward pass."""
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     with pytest.warns(UserWarning, match="no graph/source provenance"):
         trace = tl.trace(_MidForwardAutogradGradModel(), torch.randn(2, 4))
 
@@ -1145,7 +1143,7 @@ def test_mid_forward_autograd_grad_is_an_exact_backward_boundary() -> None:
 def test_tensor_data_getter_dispatch_is_captured() -> None:
     """Represent the C-level data getter's detach dispatch as an ordinary op."""
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     trace = tl.trace(_DataPropertyModel(), torch.randn(4))
 
     detach_ops = [op for op in trace.ops if op.func_name == "detach"]
@@ -1195,7 +1193,7 @@ def test_observable_uncaptured_mutation_is_flagged_mutates() -> None:
     tags value-affecting drops it can actually see, distinct from a pure read.
     """
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     with pytest.warns(TorchLensCaptureGapWarning, match="unaccounted aten dispatch"):
         trace = tl.trace(_DirectMutatingAtenModel(), torch.randn(4))
 
@@ -1255,7 +1253,7 @@ def test_subclass_disabled_dispatch_mutation_is_outside_observational_reach() ->
     subclass that deliberately disables dispatch is a cooperative-model boundary.
     """
 
-    wrap_torch(patch_policy="scoped", completeness_witness=True)
+    wrap_torch(completeness_witness=True)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         trace = tl.trace(

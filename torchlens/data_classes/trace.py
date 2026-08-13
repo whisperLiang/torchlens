@@ -1125,8 +1125,6 @@ class Trace(
         "capture_mode": FieldPolicy.KEEP,
         "_runnable": FieldPolicy.DROP,
         "_fast_run_session": FieldPolicy.DROP,
-        "detached_patch_policy": FieldPolicy.DROP,
-        "detached_patch_epoch": FieldPolicy.DROP,
         "escape_detector_mode": FieldPolicy.DROP,
         "escape_detector_verified": FieldPolicy.DROP,
         "escape_diagnostics": FieldPolicy.DROP,

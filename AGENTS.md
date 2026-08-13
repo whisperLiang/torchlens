@@ -36,7 +36,7 @@ Key entry points:
   skipped/partial current-call event. Trace failed captures separately expose
   `exc.partial_log`, recoverable with `tl.partial.from_failed_capture(exc)`.
 - Lazy decoration: `torchlens/backends/torch/model_prep.py:_ensure_model_prepared()` calls
-  `wrap_torch()` and `patch_detached_references()`
+  `wrap_torch()` and the belt/rescue stale-reference machinery
 - Forward-pass orchestration: `torchlens/capture/trace.py`
 - Postprocess: `torchlens/postprocess/__init__.py` current 20-step pipeline
 - Portable I/O: `torchlens/_io/bundle.py`, `torchlens/_io/tlspec.py`, `torchlens/io/__init__.py`

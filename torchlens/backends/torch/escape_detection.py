@@ -263,7 +263,7 @@ def build_detector_tables() -> DetectorTables:
     """Return immutable exact detector tables for the current wrapper epoch."""
 
     global _TABLES
-    if _TABLES is not None and _TABLES.epoch == _state._detached_patch_epoch:
+    if _TABLES is not None and _TABLES.epoch == _state._wrap_epoch:
         return _TABLES
     raw_by_id: dict[int, Callable[..., Any]] = {}
     python_codes: dict[types.CodeType, list[int]] = {}
@@ -291,7 +291,7 @@ def build_detector_tables() -> DetectorTables:
         if bool(getattr(wrapper, "__tl_detector_excluded__", False)):
             excluded.add(raw_id)
     tables = DetectorTables(
-        epoch=_state._detached_patch_epoch,
+        epoch=_state._wrap_epoch,
         raw_by_id=types.MappingProxyType(raw_by_id),
         python_code_to_raw_ids=types.MappingProxyType(
             {code: tuple(raw_ids) for code, raw_ids in python_codes.items()}
@@ -553,7 +553,6 @@ def _report_escape(
     )
     detail = {
         "violation_id": len(guard.seen_violations),
-        "policy": _state._detached_patch_policy,
         "detector_backend": "sys.monitoring"
         if guard.monitoring_tool_id is not None
         else "setprofile",
@@ -581,8 +580,8 @@ def _report_escape(
         "TorchLens shadow detector observed a raw torch callable outside its registered "
         f"wrapper edge: {callable_name} at {detail['file']}:{detail['line']} in "
         f"{detail['function']} (storage hint: {detail['storage_hint']}). The Trace is marked "
-        "capture_verified=False. Rebind after tl.wrap_torch(), use a live torch namespace "
-        "lookup, add the owning module via patch_modules, or compare with patch_policy='full'.",
+        "capture_verified=False. Rebind after tl.wrap_torch() or use a live torch "
+        "namespace lookup; escapes with a signal are recovered by the rescue re-run.",
         TorchLensCaptureGapWarning,
         stacklevel=2,
     )
@@ -743,8 +742,6 @@ def _copy_recording_diagnostics(trace: Any) -> None:
     if recording is None:
         return
     for field_name in (
-        "detached_patch_policy",
-        "detached_patch_epoch",
         "escape_detector_mode",
         "escape_detector_verified",
         "completeness_witness_mode",
@@ -802,8 +799,6 @@ def capture_escape_guard(trace: Any) -> Iterator[None]:
         }
     )
     guard = _GuardState(trace, tables, owner_thread_id, mode, guard_pass_index)
-    trace.detached_patch_policy = _state._detached_patch_policy
-    trace.detached_patch_epoch = _state._detached_patch_epoch
     trace.escape_detector_mode = mode
     if not hasattr(trace, "escape_detector_verified"):
         trace.escape_detector_verified = True if mode == "shadow" else None
@@ -814,12 +809,8 @@ def capture_escape_guard(trace: Any) -> Iterator[None]:
     trace.escape_detector_backward_coverage = "not_armed"
     trace.__dict__.setdefault("escape_diagnostics", [])
     trace.__dict__.setdefault("rescue_rerun", None)
-    if _state._detached_patch_policy == "scoped":
-        trace.capture_verified = False
-        trace.capture_verification_reason = "scoped_dispatch_witness_not_enabled"
-    else:
-        trace.capture_verified = False if mode == "shadow" else None
-        trace.capture_verification_reason = "shadow_diagnostic_mode" if mode == "shadow" else None
+    trace.capture_verified = False if mode == "shadow" else None
+    trace.capture_verification_reason = "shadow_diagnostic_mode" if mode == "shadow" else None
     _THREAD_STATE.guard = guard
     try:
         if mode == "shadow":

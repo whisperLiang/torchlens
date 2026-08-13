@@ -43,8 +43,6 @@ TRACE_FIELD_OWNERSHIP: dict[str, str] = {
     "capture_mode": "header",
     "_runnable": "runnable",
     "_fast_run_session": "graph",
-    "detached_patch_policy": "graph",
-    "detached_patch_epoch": "graph",
     "escape_detector_mode": "witness",
     "escape_detector_verified": "witness",
     "escape_diagnostics": "witness",

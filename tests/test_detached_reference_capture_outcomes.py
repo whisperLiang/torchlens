@@ -3,10 +3,9 @@
 This module converts the detached-reference corpus from patch-MECHANICS
 assertions ("the crawler rewrote slot X to wrapper Y") to capture-OUTCOME
 assertions ("the op appears in the trace" / "the miss has exactly this
-signature"). Mechanics tests keep guarding the crawler while it exists
-(``test_patch_detached_references_coverage.py``); THIS module is the gate any
-replacement (the stage-2 rescue net + belt) must keep green, because it pins
-what users actually get.
+signature"). The crawler and its mechanics tests are DELETED (stage 2); this
+module is the gate that pinned the outcomes across that deletion, and it
+keeps pinning what users actually get.
 
 STAGE-2 STATE (rescue re-run live): the rows that previously pinned a SILENT
 mid-graph miss were flipped DELIBERATELY — the escape signal (provenance
@@ -19,10 +18,13 @@ escape is either recovered+disclosed or unrecovered+disclosed.
 
 Row inventory (safety-net verdict, tri-lab matrices):
 
-- Covered by wrappers/crawl (converted from mechanics): module-level refs,
-  class attrs and function defaults in torch-mentioning source, model
-  instance holders (direct / list / dict / ``partial.func`` /
-  ``partial.args`` / ``partial.keywords``).
+- Formerly crawler-covered holders (module-level refs, class attrs, function
+  defaults, model instance holders incl. partial internals): RESCUED since
+  the crawler deletion — recovered with wrapper fidelity and disclosure, and
+  the user's objects are never mutated.
+- Deletion direction: TorchLens no longer rewrites user objects (identity
+  pinned), and a stale WRAPPER reference held across ``unwrap_torch()``
+  computes correctly and logs nothing.
 - The 7 crawler-missed classes (RESCUED since stage 2): closure cells,
   staticmethods, module-level partials, plain-object attrs, pre-bound tensor
   methods, torch-free-source module class attrs, C-held refs (``lru_cache``
@@ -62,11 +64,7 @@ from torch import nn
 
 import torchlens as tl
 from torchlens.backends.torch._tl import is_decorated_function
-from torchlens.backends.torch.wrappers import (
-    clear_patch_detached_references_cache,
-    unwrap_torch,
-    wrap_torch,
-)
+from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +95,6 @@ class _CorpusEnv:
 def corpus_env() -> Any:
     """Unwrap torch, expose raw originals, rewrap and clean up afterwards."""
     unwrap_torch()
-    clear_patch_detached_references_cache()
     env = _CorpusEnv()
     assert not is_decorated_function(env.relu), "unwrap failed; refs are not pristine"
     try:
@@ -105,7 +102,6 @@ def corpus_env() -> Any:
     finally:
         for name in env.temp_modules:
             sys.modules.pop(name, None)
-        clear_patch_detached_references_cache()
         wrap_torch()
 
 
@@ -175,12 +171,16 @@ def _assert_unrecovered_disclosed(trace: tl.Trace, missing: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Covered today: crawler-reachable holders (converted from mechanics rows)
+# Formerly crawler-covered holders: RESCUED since the crawler deletion
 # ---------------------------------------------------------------------------
 
 
 def test_module_class_and_default_refs_are_captured(corpus_env: _CorpusEnv) -> None:
-    """Module-level, class-attr, and function-default stale refs are traced."""
+    """Module-level, class-attr, and function-default stale refs are traced.
+
+    DELIBERATE FLIP (crawler deletion): these holders are no longer patched
+    in place; the escape signal triggers the rescue re-run and the ops are
+    recovered with disclosure instead."""
     mod = types.ModuleType("_tl_outcome_covered_holders")
     corpus_env.register_module(mod)
     exec(
@@ -205,12 +205,17 @@ def uses_default(x: Any, op: Any = tanh) -> Any:
         def forward(self, v: torch.Tensor) -> torch.Tensor:
             return mod.uses_default(mod.Holder.class_ref(mod.module_ref(v)))
 
-    trace = _trace(Model())
-    _assert_captured(trace, "relu", "sigmoid", "tanh")
+    wrap_torch()
+    trace = tl.trace(Model(), torch.tensor([0.25, 0.5]))
+    _assert_rescued(trace, "relu", "sigmoid", "tanh")
 
 
 def test_model_instance_holders_are_captured(corpus_env: _CorpusEnv) -> None:
-    """Direct / list / dict / partial(.func/.args/.keywords) model holders."""
+    """Direct / list / dict / partial(.func/.args/.keywords) model holders.
+
+    DELIBERATE FLIP (crawler deletion): recovered via rescue with the exact
+    historical op counts, and — the deletion's point — the user's objects are
+    never rewritten (identity pinned below)."""
 
     def apply_op(op: Callable[..., Any], v: torch.Tensor) -> torch.Tensor:
         return op(v)
@@ -231,12 +236,32 @@ def test_model_instance_holders_are_captured(corpus_env: _CorpusEnv) -> None:
             y = self.partial_arg(v=y)
             return self.partial_kw(v=y)
 
-    trace = _trace(Model())
+    model = Model()
+    holder_identities = (
+        model.direct,
+        model.items[0],
+        model.mapping["op"],
+        model.partial_func,
+        model.partial_arg,
+        model.partial_kw,
+    )
+    wrap_torch()
+    trace = tl.trace(model, torch.tensor([0.25, 0.5]))
+    _assert_rescued(trace, "relu", "sigmoid", "tanh", "cos")
     names = _op_names(trace)
     assert names.count("relu") == 1
     assert names.count("sigmoid") == 2  # list holder + partial.args holder
     assert names.count("tanh") == 2  # dict holder + partial.keywords holder
     assert names.count("cos") == 1
+    # The deletion's point: TorchLens never rewrites the user's objects.
+    assert (
+        model.direct,
+        model.items[0],
+        model.mapping["op"],
+        model.partial_func,
+        model.partial_arg,
+        model.partial_kw,
+    ) == holder_identities
 
 
 # ---------------------------------------------------------------------------
@@ -430,14 +455,20 @@ def test_protocol_invisible_as_subclass_is_captured(corpus_env: _CorpusEnv) -> N
 # ---------------------------------------------------------------------------
 
 
-def test_demoded_composite_interior_ref_is_captured(corpus_env: _CorpusEnv) -> None:
-    """A crawler-reachable stale ref inside a protocol composite body.
+def test_demoded_composite_interior_ref_is_disclosed_unrecovered(
+    corpus_env: _CorpusEnv,
+) -> None:
+    """A stale ref inside a third-party protocol composite body.
 
     The composite has torch's own ``has_torch_function`` /
     ``handle_torch_function`` shape, so under ANY TorchFunctionMode its body
-    runs with the mode popped — a future net can never see ``interior``.
-    Today the crawler patches the module global and the op IS captured; this
-    row is the belt's coverage rationale for reachable composite interiors.
+    runs with the mode popped — the rescue net can never see ``interior``.
+
+    DELIBERATE FLIP (crawler deletion, verdict disposition D): the crawler
+    used to patch the module global; now the escape signal fires, the rescue
+    is attempted, recovers nothing, and the standing escape is DISCLOSED
+    (silence-vs-loud was the recorded tri-lab criterion; belt-extension only
+    if real-world hits appear).
     """
     mod = types.ModuleType("_tl_outcome_composite_interior")
     corpus_env.register_module(mod)
@@ -462,7 +493,32 @@ def protocol_composite(x):
         def forward(self, v: torch.Tensor) -> torch.Tensor:
             return torch.relu(mod.protocol_composite(v))
 
-    _assert_captured(_trace(Model()), "cos", "relu")
+    trace = _trace_with_provenance_warning(Model())
+    assert "relu" in _op_names(trace)
+    _assert_unrecovered_disclosed(trace, "cos")
+
+
+# ---------------------------------------------------------------------------
+# Deletion direction: no user-object mutation; stale WRAPPER refs stay safe
+# ---------------------------------------------------------------------------
+
+
+def test_stale_wrapper_ref_after_unwrap_passes_through(corpus_env: _CorpusEnv) -> None:
+    """A wrapper reference held across ``unwrap_torch()`` stays computable.
+
+    The historical reverse-direction class: user code grabs ``torch.relu``
+    while TorchLens is wrapped, then torch is unwrapped. The wrapper gates on
+    the logging toggle, so the stale wrapper computes normally and logs
+    nothing; with the crawler deleted TorchLens also no longer plants wrapper
+    references inside user objects in the first place.
+    """
+    wrap_torch()
+    stale_wrapper = torch.relu
+    assert is_decorated_function(stale_wrapper)
+    unwrap_torch()
+    x = torch.tensor([-1.0, 2.0])
+    assert torch.equal(stale_wrapper(x), torch.tensor([0.0, 2.0]))
+    wrap_torch()
 
 
 # ---------------------------------------------------------------------------

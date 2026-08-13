@@ -412,16 +412,11 @@ def _prepare_model_once(model: nn.Module) -> None:
     case: a model traced repeatedly in a fixed role, or independent models
     traced in any interleaving. Performs three tasks for each submodule:
 
-    1. **Patches instance-level torch function refs** — If the user stored
-       ``self.act = torch.relu`` in ``__init__``, that reference predates
-       decoration. We replace it here (same as ``patch_model_instance`` but
-       done during the DFS so children are caught too).
-
-    2. **Assigns permanent metadata** — ``_tl.address`` (dotted path
+    1. **Assigns permanent metadata** — ``_tl.address`` (dotted path
        like ``"encoder.layer.0.attention"``) and ``_tl.module_type`` (class
        name). These survive across sessions.
 
-    3. **Wraps ``forward``** — Replaces ``module.forward`` with
+    2. **Wraps ``forward``** — Replaces ``module.forward`` with
        ``module_forward_decorator(module.forward, module)``. The wrapper is
        toggle-gated: no-op when logging is off, full entry/exit tracking when on.
        The ``_tl.forward_call_is_decorated`` sentinel prevents double-wrapping.
@@ -2828,16 +2823,14 @@ def _ensure_model_prepared(model: nn.Module) -> None:
     1. ``wrap_torch()`` — Ensures torch functions are wrapped (no-op if already wrapped,
        re-wraps after ``unwrap_torch()``, first-time decoration on first call).
     2. ``_prepare_model_once(model)`` — Phase 1 model prep (cached per instance).
-    3. ``patch_detached_references(model=model)`` — Incremental identity crawl
-       plus model-provenance candidates under scoped policy.
-    4. ``patch_model_instance(model)`` — Per-capture Level 4 scan, including
-       callable attributes reassigned since a prior capture.
+    3. ``sweep_stale_belt_references()`` — Incremental module-attr patching for
+       the derived protocol-invisible belt set. All other stale-reference
+       classes are covered by the rescue re-run (stage 2); TorchLens no longer
+       crawls sys.modules broadly or mutates user model instances.
     """
     from .belt import sweep_stale_belt_references
-    from .wrappers import wrap_torch, patch_detached_references, patch_model_instance
+    from .wrappers import wrap_torch
 
     wrap_torch()  # idempotent — no-op if already wrapped; auto-rewraps after unwrap
     _prepare_model_once(model)  # idempotent — cached in _state._prepared_models
-    patch_detached_references(model=model)
-    patch_model_instance(model)
     sweep_stale_belt_references()

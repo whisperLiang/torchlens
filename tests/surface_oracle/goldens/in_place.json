@@ -3691,8 +3691,6 @@
    "decoded_output": null,
    "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
    "detach_saved_activations": false,
-   "detached_patch_epoch": 1,
-   "detached_patch_policy": "legacy",
    "emit_nvtx": false,
    "escape_detector_backward_coverage": "not_armed",
    "escape_detector_callback_ns": 0,
@@ -4189,6 +4187,7 @@
     "\"weights\"": "unknown"
    },
    "replay_frontier": {},
+   "rescue_rerun": null,
    "root_module": {
     "__ref__": "Module",
     "label": "self"
@@ -7939,8 +7938,6 @@
    "decoded_output": null,
    "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
    "detach_saved_activations": false,
-   "detached_patch_epoch": 1,
-   "detached_patch_policy": "legacy",
    "emit_nvtx": false,
    "escape_detector_backward_coverage": "not_armed",
    "escape_detector_callback_ns": 0,
@@ -8391,10 +8388,10 @@
     }
    },
    "op_events": [
-    "<torchlens.ir.events.OpEvent>",
-    "<torchlens.ir.events.OpEvent>",
-    "<torchlens.ir.events.OpEvent>",
-    "<torchlens.ir.events.OpEvent>"
+    "<torchlens.ir.op_record.OpRecord>",
+    "<torchlens.ir.op_record.OpRecord>",
+    "<torchlens.ir.op_record.OpRecord>",
+    "<torchlens.ir.op_record.OpRecord>"
    ],
    "op_labels": [
     "input_1:1",
@@ -8439,6 +8436,7 @@
     "\"weights\"": "unknown"
    },
    "replay_frontier": {},
+   "rescue_rerun": null,
    "root_module": {
     "__ref__": "Module",
     "label": "self"
@@ -11951,8 +11949,6 @@
    "decoded_output": null,
    "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
    "detach_saved_activations": false,
-   "detached_patch_epoch": 1,
-   "detached_patch_policy": "legacy",
    "emit_nvtx": false,
    "escape_detector_backward_coverage": "not_armed",
    "escape_detector_callback_ns": 0,
@@ -12441,6 +12437,7 @@
     "\"weights\"": "unknown"
    },
    "replay_frontier": {},
+   "rescue_rerun": null,
    "root_module": "<raises KeyError>",
    "root_trace": null,
    "runnable_descriptor": null,
@@ -16185,8 +16182,6 @@
    "decoded_output": null,
    "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
    "detach_saved_activations": false,
-   "detached_patch_epoch": 1,
-   "detached_patch_policy": "legacy",
    "emit_nvtx": false,
    "escape_detector_backward_coverage": "not_armed",
    "escape_detector_callback_ns": 0,
@@ -16683,6 +16678,7 @@
     "\"weights\"": "unknown"
    },
    "replay_frontier": {},
+   "rescue_rerun": null,
    "root_module": {
     "__ref__": "Module",
     "label": "self"

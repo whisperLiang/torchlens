@@ -28,8 +28,6 @@ STORAGE_BINDINGS: dict[str, dict[str, StorageBinding]] = {
         "capture_mode": StorageBinding(StorageKind.SCALAR),
         "_runnable": StorageBinding(StorageKind.RUNTIME, annotation="<class 'torchlens._runnable_seam.RunnableTraceState'>"),
         "_fast_run_session": StorageBinding(StorageKind.RUNTIME, annotation='typing.Optional[typing.Any]'),
-        "detached_patch_policy": StorageBinding(StorageKind.RUNTIME),
-        "detached_patch_epoch": StorageBinding(StorageKind.RUNTIME),
         "escape_detector_mode": StorageBinding(StorageKind.RUNTIME),
         "escape_detector_verified": StorageBinding(StorageKind.RUNTIME),
         "escape_diagnostics": StorageBinding(StorageKind.RUNTIME),

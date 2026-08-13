@@ -97,10 +97,11 @@ with `tl.partial.from_failed_capture(exc)`.
 | Recurrence detection | `capture=CaptureOptions(recurrence_detection=False)` | Measured 39-42% of capture time off models with thousands of repeated ops (hand-rolled top-level loops, unrolled decodes). Repeated ops stay separate layers instead of rolling into one multi-pass layer, so a 6-iteration loop yields `relu_1_2 ... relu_6_7` (each `num_passes=1`) instead of one `relu_1_2` with `num_passes=6`. `is_recurrent` and `max_layer_op_count` are still reported. It is a TIME knob only: retained activation bytes are unchanged. |
 | Visualization | Call `trace.draw()` after capture, not during hot loops | Rendering is separate from activation collection. |
 
-### Scoped detached-reference diagnostics
+### Escape diagnostics
 
-`tl.wrap_torch(patch_policy="scoped")` reduces the foreign modules that receive class/default
-introspection. The callable detector is a separate, opt-in diagnostic cost:
+The sys.modules crawler is deleted (replaced by the rescue re-run + the
+mechanical belt), so the default capture pays no crawl cost. The callable
+detector is a separate, opt-in diagnostic cost:
 
 ```python
 import torch
@@ -110,7 +111,7 @@ import torchlens as tl
 
 model = nn.ReLU()
 x = torch.randn(4)
-tl.wrap_torch(patch_policy="scoped", escape_detector="shadow")
+tl.wrap_torch(escape_detector="shadow")
 trace = tl.trace(model, x)
 print(trace.escape_detector_event_count, trace.escape_detector_callback_ns)
 tl.unwrap_torch()
@@ -128,7 +129,6 @@ import torchlens as tl
 model = nn.ReLU()
 x = torch.randn(4)
 tl.wrap_torch(
-    patch_policy="scoped",
     escape_detector="shadow",
     completeness_witness=True,
 )

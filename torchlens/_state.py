@@ -402,9 +402,9 @@ keyword-argument metadata for logged operations.
 """
 
 _orig_to_decorated: dict[int, Callable[..., Any]] = {}
-"""id(original_func) -> decorated wrapper.  Used by ``patch_detached_references``
-to replace bare references (e.g. ``from torch import cos``) in sys.modules with
-the decorated version.  Keyed by id() for O(1) lookup.
+"""id(original_func) -> decorated wrapper.  Used by the rescue net
+(``RescueTorchFunctionMode``) and the mechanical belt to redirect stale
+pre-wrap references to their exact wrappers.  Keyed by id() for O(1) lookup.
 """
 
 _decorated_to_orig: dict[int, Callable[..., Any]] = {}
@@ -423,55 +423,15 @@ works.  Used in model_funcs to determine whether a callable is already wrapped.
 """
 
 # ---------------------------------------------------------------------------
-# Crawl cache (grows monotonically, never cleared)
+# Introspection cache
 # ---------------------------------------------------------------------------
-# ``patch_detached_references`` walks sys.modules to find bare references to
-# original torch functions (e.g. ``from torch import cos``) and replaces them
-# with decorated versions.  These caches avoid re-scanning already-visited
-# modules on subsequent calls.
-
-_crawled_module_keys: set[str] = set()
-"""sys.modules keys already scanned by ``patch_detached_references``.
-
-Only new keys (modules imported after the last crawl) are scanned on each call,
-making repeated crawls cheap.
-"""
 
 _dir_cache: dict[type, list[str]] = {}
-"""Per-type cache of filtered ``dir()`` results for ``extend_search_stack_from_item``.
+"""Per-type cache of filtered ``dir()`` results for ``extend_search_stack_from_item``."""
 
-Avoids repeated introspection of the same type's attributes during the
-recursive sys.modules crawl.
-"""
 
-_detached_source_has_torch: dict[str, bool | None] = {}
-"""Module source-path cache for ``patch_detached_references``.
-
-Values are ``True`` when source contains the byte substring ``b"torch"``,
-``False`` when readable source does not, and ``None`` when source could not be
-classified and the conservative full scan should run.
-"""
-
-_detached_patch_policy: str = "legacy"
-"""Effective detached-reference policy for the current wrapper epoch."""
-
-_detached_patch_modules: tuple[str, ...] = ()
-"""Additive exact-module or package-prefix allowlist for scoped deep scanning."""
-
-_detached_patch_epoch: int = 0
-"""Monotonically increasing identity for wrapper/patch lifecycle epochs."""
-
-_detached_patch_ledger: list[Any] = []
-"""Identity-conditional foreign-slot mutations made in the current epoch."""
-
-_crawled_module_identities: dict[int, Callable[[], Any | None]] = {}
-"""Module identity resolvers shallow-scanned in the current patch epoch."""
-
-_detached_positive_module_ids: set[int] = set()
-"""Module identities with an exact raw-callable hit in the current epoch."""
-
-_detached_positive_modules: list[Callable[[], Any | None]] = []
-"""Owner resolvers for positive scoped candidates retained across captures."""
+_wrap_epoch: int = 0
+"""Monotonic wrapper lifecycle counter; bumps on every ``wrap_torch()`` install."""
 
 _escape_detector_mode: str = "off"
 """Callable escape detector mode: ``"off"`` or diagnostic ``"shadow"``."""

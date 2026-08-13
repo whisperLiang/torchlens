@@ -5545,8 +5545,6 @@
   "decoded_output": null,
   "derived_grads": "<torchlens.data_classes.derived_grad.DerivedGradAccessor>",
   "detach_saved_activations": false,
-  "detached_patch_epoch": null,
-  "detached_patch_policy": null,
   "emit_nvtx": false,
   "escape_detector_backward_coverage": null,
   "escape_detector_callback_ns": null,

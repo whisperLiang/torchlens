@@ -53,8 +53,6 @@ MODEL_LOG_FIELD_ORDER = [
     "capture_mode",
     "_runnable",
     "_fast_run_session",
-    "detached_patch_policy",
-    "detached_patch_epoch",
     "escape_detector_mode",
     "escape_detector_verified",
     "escape_diagnostics",

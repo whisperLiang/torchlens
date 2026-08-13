@@ -11,9 +11,7 @@ import inspect
 import os
 import signal
 import sys
-import types
 import weakref
-from functools import partial
 
 import pytest
 import torch
@@ -25,8 +23,6 @@ from torchlens import _state, trace as trace_fn
 from torchlens.backends.torch.wrappers import (
     decorate_all_once,
     get_arg_names,
-    patch_detached_references,
-    patch_model_instance,
     wrap_torch,
     unwrap_torch,
     wrapped,
@@ -536,200 +532,6 @@ class TestPassthroughWhenOff:
 
 # =========================================================================
 # 3. Detached Import Patching
-# =========================================================================
-
-
-class TestDetachedImports:
-    @pytest.fixture(autouse=True)
-    def _ensure_wrapped(self):
-        """Ensure torch functions are wrapped for these tests."""
-        wrap_torch()
-
-    def test_module_level_import_patched(self):
-        """A 'from torch import cos' at module level should be patched."""
-        # Create a synthetic module that simulates 'from torch import cos'
-        mod = types.ModuleType("_test_detached_cos")
-        mod.cos = torch.cos  # torch.cos is already decorated at this point
-        sys.modules["_test_detached_cos"] = mod
-        try:
-            # The function should be decorated
-            assert is_decorated_function(mod.cos)
-        finally:
-            del sys.modules["_test_detached_cos"]
-
-    def test_model_with_stored_torch_func(self):
-        """A model storing self.act = torch.relu should have it patched."""
-
-        class FuncAttrModel(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.act = torch.relu
-                self.linear = nn.Linear(5, 5)
-
-            def forward(self, x):
-                return self.act(self.linear(x))
-
-        model = FuncAttrModel()
-        # Before patching, self.act might be undecorated (if bound to original)
-        # patch_model_instance should fix it
-        patch_model_instance(model)
-        # After patching, the relu stored on the model should be decorated
-        result = trace_fn(model, torch.randn(5))
-        # The relu should appear in the graph
-        relu_layers = [label for label in result.layer_labels if "relu" in label.lower()]
-        assert len(relu_layers) > 0, "relu from self.act not logged in graph"
-
-    def test_patch_model_instance_patches_callable_attrs_only(self) -> None:
-        """Instance patching replaces stale callables and preserves non-callable attrs."""
-
-        original_relu = _state._decorated_to_orig[id(torch.relu)]
-
-        class FuncAttrModel(nn.Module):
-            """Model with one stale callable and one non-callable payload."""
-
-            def __init__(self) -> None:
-                """Initialize direct instance attributes used by the patcher."""
-
-                super().__init__()
-                self.act = original_relu
-                self.payload = list(range(1000))
-
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                """Run the stored callable attribute."""
-
-                return self.act(x)
-
-        model = FuncAttrModel()
-        payload = model.payload
-
-        patch_model_instance(model)
-
-        assert model.payload is payload
-        assert model.act is _state._orig_to_decorated[id(original_relu)]
-
-    def test_model_with_func_in_list(self) -> None:
-        """A model storing stale torch functions in a list should still trace."""
-
-        original_relu = _state._decorated_to_orig[id(torch.relu)]
-        original_sigmoid = _state._decorated_to_orig[id(torch.sigmoid)]
-
-        class ListFuncModel(nn.Module):
-            def __init__(self) -> None:
-                """Capture stale torch callables before trace-time patching."""
-
-                super().__init__()
-                self.funcs = [original_relu, original_sigmoid]
-                self.linear = nn.Linear(5, 5)
-
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                """Apply the stored function list in order."""
-
-                x = self.linear(x)
-                for f in self.funcs:
-                    x = f(x)
-                return x
-
-        model = ListFuncModel()
-        assert model.funcs == [original_relu, original_sigmoid]
-        result = trace_fn(model, torch.randn(5))
-        labels = " ".join(result.layer_labels).lower()
-        assert "relu" in labels, "relu from list not logged"
-        assert "sigmoid" in labels, "sigmoid from list not logged"
-
-    def test_model_with_func_in_dict(self) -> None:
-        """A model storing a stale torch function in a dict should still trace."""
-
-        original_relu = _state._decorated_to_orig[id(torch.relu)]
-
-        class DictFuncModel(nn.Module):
-            def __init__(self) -> None:
-                """Capture the stale function before trace-time patching."""
-
-                super().__init__()
-                self.ops = {"out": original_relu}
-                self.linear = nn.Linear(5, 5)
-
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                """Apply the stored dict-dispatched function."""
-
-                return self.ops["out"](self.linear(x))
-
-        model = DictFuncModel()
-        assert model.ops["out"] is original_relu
-        result = trace_fn(model, torch.randn(5))
-        relu_layers = [lbl for lbl in result.layer_labels if "relu" in lbl.lower()]
-        assert len(relu_layers) > 0
-
-    def test_model_with_partial_of_stale_torch_func(self) -> None:
-        """A model storing a stale torch function inside ``partial`` should trace."""
-
-        original_relu = _state._decorated_to_orig[id(torch.relu)]
-
-        class PartialFuncModel(nn.Module):
-            """Store a stale callable inside ``functools.partial``."""
-
-            def __init__(self) -> None:
-                """Capture the stale partial before trace-time patching."""
-
-                super().__init__()
-                self.act = partial(original_relu)
-
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                """Call the stored partial."""
-
-                return self.act(x)
-
-        model = PartialFuncModel()
-        assert model.act.func is original_relu
-        result = trace_fn(model, torch.randn(5))
-        relu_layers = [lbl for lbl in result.layer_labels if "relu" in lbl.lower()]
-        assert len(relu_layers) > 0
-
-    def test_nn_functional_import_patched(self):
-        """torch.nn.functional functions should be decorated."""
-        import torch.nn.functional as F
-
-        assert is_decorated_function(F.relu)
-        assert is_decorated_function(F.linear)
-
-    def test_late_import_patched_incrementally(self):
-        """Modules imported after torchlens should be patched on next crawl."""
-        mod_name = "_test_late_import_module"
-        # Remove if somehow already present
-        sys.modules.pop(mod_name, None)
-        _state._crawled_module_keys.discard(mod_name)
-
-        # Simulate a late import
-        mod = types.ModuleType(mod_name)
-        # Store the DECORATED cos (since torch.cos is already decorated)
-        mod.my_cos = torch.cos
-        sys.modules[mod_name] = mod
-        try:
-            # Trigger incremental crawl
-            patch_detached_references()
-            assert is_decorated_function(mod.my_cos)
-        finally:
-            sys.modules.pop(mod_name, None)
-
-    def test_crawl_skips_torchlens_modules(self):
-        """The crawl must not modify torchlens internal modules."""
-        # torchlens modules should be in _crawled_module_keys but NOT patched
-        tl_modules = [k for k in sys.modules if k.startswith("torchlens")]
-        assert len(tl_modules) > 0
-        # _state itself should not have been modified by the crawl
-        assert not is_decorated_function(_state)
-
-    def test_crawl_only_processes_new_modules(self):
-        """Calling patch_detached_references twice should not re-scan."""
-        keys_after_first = set(_state._crawled_module_keys)
-        patch_detached_references()
-        keys_after_second = set(_state._crawled_module_keys)
-        # If no new modules were imported, sets should be identical
-        assert keys_after_first == keys_after_second
-
-
-# =========================================================================
-# 4. Permanent Model Preparation
 # =========================================================================
 
 

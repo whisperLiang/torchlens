@@ -84,8 +84,16 @@ class RescueTorchFunctionMode(TorchFunctionMode):
 
 
 def _escape_signal(trace: "Trace") -> str | None:
-    """Return the escape-signal kind carried by a finished trace, if any."""
+    """Return the escape-signal kind carried by a finished trace, if any.
 
+    An authoritative POSITIVE verdict outranks the heuristic provenance
+    flag: when the armed dispatch witness accounted for every dispatch and
+    verified the capture (e.g. an ``autograd.grad`` boundary is a known
+    no-provenance source), the flag is a false alarm and no rescue runs.
+    """
+
+    if getattr(trace, "capture_verified", None) is True:
+        return None
     if getattr(trace, "escape_diagnostics", None):
         return "escape_detector_diagnostic"
     if getattr(trace, "_had_unattributed_tensor_args", False):
@@ -134,10 +142,19 @@ def _disclosure(
 
 
 def _mark(trace: "Trace", reason: str, info: dict[str, Any]) -> None:
-    """Stamp the rescue disclosure onto a trace (session-time facts)."""
+    """Stamp the rescue disclosure onto a trace (session-time facts).
+
+    An unrecovered escape must never SILENCE a more specific verdict: when
+    the primary already carries a verification reason (dispatch witness,
+    shadow detector, dynamo boundary), that reason stays authoritative and
+    the rescue attempt is disclosed only through ``rescue_rerun``. The
+    ``escape_rescue_unrecovered`` reason is reserved for the formerly-silent
+    class where the primary made no claim at all.
+    """
 
     trace.capture_verified = False
-    trace.capture_verification_reason = reason
+    if reason == "mode_rescue_rerun" or not getattr(trace, "capture_verification_reason", None):
+        trace.capture_verification_reason = reason
     trace.rescue_rerun = info
 
 
