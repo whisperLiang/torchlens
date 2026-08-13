@@ -35,6 +35,13 @@ Key entry points:
   user-op failures exclude the failing call; TL-side capture failures may include a
   skipped/partial current-call event. Trace failed captures separately expose
   `exc.partial_log`, recoverable with `tl.partial.from_failed_capture(exc)`.
+- Every capture product carries one settled typed outcome: `Trace.outcome` /
+  `Recording.outcome` / `PartialTrace.outcome` return a frozen `CaptureOutcome`
+  (COMPLETE / HALTED / ABORTED_NONFINITE / FAILED+phase / UNATTESTED / UNKNOWN),
+  persisted as `_capture_outcome` (tlspec v7) and validated fail-closed at load.
+  Capability gates N1-N5 branch on `tl.errors.CaptureOutcomeError.fields["code"]`;
+  swallowed halt/nonfinite signals raise `tl.errors.StopSignalSwallowedError`.
+  Doc of record: `docs/reference/capture_outcomes.md`.
 - Lazy decoration: `torchlens/backends/torch/model_prep.py:_ensure_model_prepared()` calls
   `wrap_torch()` and `patch_detached_references()`
 - Forward-pass orchestration: `torchlens/capture/trace.py`
