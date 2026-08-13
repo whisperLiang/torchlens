@@ -1408,7 +1408,9 @@ def run_and_log_inputs_through_model(
                     "data-free FakeTensors, while a warm-cache execution can bypass Python "
                     "wrappers entirely. The returned Trace contains only operations that ran "
                     "OUTSIDE the compiled region. Use the eager callable during capture if you "
-                    "need its interior logged.",
+                    "need its interior logged (on torch >= 2.6, TorchLens instead runs compiled "
+                    "callables eagerly via torch.compiler.set_stance and this gap does not "
+                    "arise).",
                     UserWarning,
                     stacklevel=2,
                 )
