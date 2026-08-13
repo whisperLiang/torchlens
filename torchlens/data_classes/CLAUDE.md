@@ -30,7 +30,7 @@ Accessors (`LayerAccessor`, `ModuleAccessor`, `ParamAccessor`, `BufferAccessor`,
 | `_trace_export.py` | Trace tabular export and decoded-output helpers |
 | `_trace_intervention.py` | Trace intervention surface; fork dispatch, replay, and rerun helpers |
 | `_trace_fork.py` | M11 copy-on-write fork builder (COW shells over `OpStoreView`s) |
-| `_compaction.py` | Freeze-seam Op metadata pooling (M11 fold of the standalone pass) |
+| `_compaction.py` | Freeze-seam Op metadata pooling (M11 fold) + M14 duplicate/empty container-cell pooling (`PooledCell`, hydrate-on-read) |
 | `_trace_profile.py` | Trace profiling and timing helpers |
 | `_trace_stats.py` | Trace aggregate stats and backward-pass projections |
 | `_trace_validation.py` | Trace validation and log-entry removal helpers |

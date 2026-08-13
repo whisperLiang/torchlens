@@ -37,6 +37,7 @@ import copy
 import hashlib
 import weakref
 import warnings
+from collections import defaultdict
 from typing import (
     Any,
     Callable,
@@ -90,7 +91,14 @@ from ..quantities import (
 from .._state import pause_logging
 from .._trace_core.groups import GroupRef
 from .._trace_core.fact_blocks import OP_FACT_FIELDS
-from .._trace_core.op_store import _CSR, _FACT, _MISSING, DetachedOpStore, OpStoreLayout
+from .._trace_core.op_store import (
+    _CSR,
+    _FACT,
+    _MISSING,
+    DetachedOpStore,
+    OpStoreLayout,
+    PooledCell,
+)
 from .._trace_core.relation_views import (
     OP_BITSET_VIEW_FIELDS,
     OP_DATAFLOW_FIELDS,
@@ -365,7 +373,12 @@ _FIDS_INIT_NONE = tuple(
 
 # Exact classes that are safe to share.  Exact-class (not isinstance) matching
 # keeps subclasses out, so a pooled value always has the original's type.
-_POOLED_CLASSES = frozenset({str, bytes, DtypeRef, DeviceRef, Bytes, Flops, Macs, Duration})
+# ``torch.dtype``/``torch.device`` are immutable value objects (process
+# singletons for dtypes), so sharing references is safe; they appear inside
+# per-op config dicts such as ``func_autocast_state``.
+_POOLED_CLASSES = frozenset(
+    {str, bytes, DtypeRef, DeviceRef, Bytes, Flops, Macs, Duration, torch.dtype, torch.device}
+)
 _NONE_POOL_KEY = (type(None), None)
 # Slots skipped by the pass: tensor payloads, replay/attestation raw values,
 # live handles, and lazily rebuilt caches.  Skipping is a cost/robustness
@@ -416,6 +429,226 @@ _POOLED_SLOTS = tuple(name for name in _OP_SLOT_NAMES if name not in _UNPOOLED_S
 # Depth of container nesting the pass descends into.  Every field that carries
 # real repetition (ancestor sets, label lists, config dicts) is at depth 0-1.
 _POOL_MAX_DEPTH = 2
+
+# ---------------------------------------------------------------------------
+# Mutable-container CELL pooling (the M14 memory slice).
+#
+# The freeze-seam compaction additionally replaces whole mutable-container
+# CELLS -- exact ``dict``/``list``/``set`` (and top-level ``defaultdict``)
+# values whose full content is provably immutable AND either empty or
+# repeated across cells -- with one shared ``PooledCell`` per distinct
+# content. The facade descriptors hydrate a fresh exact-type container per
+# row on first read and cache it back (``_FACT`` semantics), so per-row
+# identity/mutation contracts are unchanged while an uninspected row retains
+# no per-row container. Op-store cells pool only through the explicit field
+# allowlist below (fields whose post-freeze lifecycle is read-or-reassign);
+# kind-table cells (Module/ModuleCall/Param/...) pool generically -- their
+# repetition (empty hook lists, identical ``custom_attributes``...) is the
+# census-dominant tail. An in-store alias census guards every replacement:
+# a container object reachable from more than one swept cell never pools.
+# ---------------------------------------------------------------------------
+
+#: Op-store fields sanctioned for whole-cell container pooling.
+_POOLED_CONTAINER_FIELDS = frozenset(
+    {
+        "annotations",
+        "interventions",
+        "var_names",
+        "_grad_records",
+        "out_versions_by_child",
+        "func_rng_states",
+        "conditional_elif_children",
+        "conditional_arm_children",
+        "func_autocast_state",
+        "transform_config",
+        "module_entry_arg_keys",
+        "parent_param_ops",
+        "parent_arg_positions",
+    }
+)
+
+#: Exact cell classes the container pooling considers.
+_MUTABLE_CELL_CLASSES = (dict, list, set)
+
+#: ``defaultdict.default_factory`` values safe to share and rebuild.
+_POOLABLE_DEFAULT_FACTORIES = frozenset({list, set, dict, int, tuple})
+
+#: Nesting cap for container pool keys (cycles and pathological nesting
+#: simply refuse to pool).
+_CONTAINER_KEY_MAX_DEPTH = 4
+
+
+def _container_pool_key(value: Any, depth: int, visited_ids: List[int]) -> Any:
+    """Return an injective hashable content key for one mutable container.
+
+    ``None`` means "do not pool": unknown member types, subclassed
+    containers, non-builtin factories, or nesting past the cap. Immutable
+    members key through :func:`_pool_key` (class-tagged, float-bit exact),
+    so the key is injective exactly like the immutable pool's. Every
+    visited mutable container's ``id`` lands in ``visited_ids`` for the
+    alias guard.
+    """
+
+    if depth > _CONTAINER_KEY_MAX_DEPTH:
+        return None
+    cls = value.__class__
+    if cls is defaultdict:
+        if depth:
+            return None
+        factory = value.default_factory
+        if factory is not None and factory not in _POOLABLE_DEFAULT_FACTORIES:
+            return None
+        visited_ids.append(id(value))
+        items = _dict_member_keys(value, depth, visited_ids)
+        return None if items is None else ("dd", factory, items)
+    if cls is dict:
+        visited_ids.append(id(value))
+        items = _dict_member_keys(value, depth, visited_ids)
+        return None if items is None else ("d", items)
+    if cls is list:
+        visited_ids.append(id(value))
+        member_keys = []
+        for member in value:
+            member_key = _container_member_key(member, depth, visited_ids)
+            if member_key is None:
+                return None
+            member_keys.append(member_key)
+        return ("l", tuple(member_keys))
+    if cls is set:
+        visited_ids.append(id(value))
+        member_keys = []
+        for member in value:
+            member_key = _pool_key(member)
+            if member_key is None:
+                return None
+            member_keys.append(member_key)
+        return ("s", frozenset(member_keys))
+    return None
+
+
+def _dict_member_keys(value: Any, depth: int, visited_ids: List[int]) -> Any:
+    """Key the items of one dict-shaped container, or ``None`` to refuse."""
+
+    items = []
+    for key, member in value.items():
+        key_key = _pool_key(key)
+        if key_key is None:
+            return None
+        member_key = _container_member_key(member, depth, visited_ids)
+        if member_key is None:
+            return None
+        items.append((key_key, member_key))
+    return tuple(items)
+
+
+def _container_member_key(member: Any, depth: int, visited_ids: List[int]) -> Any:
+    """Key one container member: immutable leaf or nested exact container."""
+
+    immutable_key = _pool_key(member)
+    if immutable_key is not None:
+        return ("i", immutable_key)
+    if member.__class__ in _MUTABLE_CELL_CLASSES:
+        nested = _container_pool_key(member, depth + 1, visited_ids)
+        return None if nested is None else ("m", nested)
+    return None
+
+
+def _count_container_ids(value: Any, id_counts: Dict[int, int], depth: int) -> None:
+    """Count every exact builtin MUTABLE container id reachable from one cell.
+
+    The alias census behind the pooling guard: a container whose id is seen
+    more than once across ALL swept cells is aliased in-store, and replacing
+    any of its cell appearances would break the alias for later in-place
+    mutation, so such cells never pool.
+
+    Only ``dict``/``defaultdict``/``list``/``set`` ids matter (the pool key
+    visits exactly those). Hashability bounds the walk: dict KEYS and
+    ``set``/``frozenset`` members must be hashable, so no exact builtin
+    mutable container can hide below them — dict values, list members, and
+    tuple members are the only recursion edges.
+    """
+
+    cls = value.__class__
+    if cls is dict or cls is defaultdict:
+        oid = id(value)
+        id_counts[oid] = id_counts.get(oid, 0) + 1
+        if depth < 6:
+            for member in value.values():
+                _count_container_ids(member, id_counts, depth + 1)
+    elif cls is list:
+        oid = id(value)
+        id_counts[oid] = id_counts.get(oid, 0) + 1
+        if depth < 6:
+            for member in value:
+                _count_container_ids(member, id_counts, depth + 1)
+    elif cls is set:
+        oid = id(value)
+        id_counts[oid] = id_counts.get(oid, 0) + 1
+    elif cls is tuple and depth < 6:
+        for member in value:
+            _count_container_ids(member, id_counts, depth + 1)
+
+
+def _pool_container_cells(
+    stores: List[Tuple[Any, Any]], container_pool: Dict[Any, PooledCell]
+) -> None:
+    """Pool duplicate/empty immutable-content container cells across stores.
+
+    Parameters
+    ----------
+    stores:
+        ``(store, fids)`` pairs; ``fids`` is an iterable of sanctioned field
+        ids or ``None`` for every field (kind tables). Only building-phase
+        row stores participate (``rows_building()`` returning ``None`` skips
+        the store) -- pooling always precedes the physical freeze.
+    container_pool:
+        Pass-local ``content key -> PooledCell`` table shared across stores,
+        so equal content pools trace-wide.
+    """
+
+    swept: List[Tuple[Any, Any, Any]] = []
+    id_counts: Dict[int, int] = {}
+    for store, fids in stores:
+        rows = store.rows_building()
+        if rows is None:
+            continue
+        swept.append((store, rows, fids))
+        for row_cells in rows:
+            for value in row_cells:
+                _count_container_ids(value, id_counts, 0)
+    if not swept:
+        return
+    candidates: List[Tuple[Any, int, Any, Any]] = []
+    key_counts: Dict[Any, int] = {}
+    for store, rows, fids in swept:
+        fid_list = tuple(range(store.layout.n_fields)) if fids is None else tuple(fids)
+        for row_cells in rows:
+            for fid in fid_list:
+                value = row_cells[fid]
+                cls = value.__class__
+                if not (
+                    cls is dict or cls is list or cls is set or cls is defaultdict
+                ):
+                    continue
+                visited_ids: List[int] = []
+                key = _container_pool_key(value, 0, visited_ids)
+                if key is None:
+                    continue
+                if any(id_counts[oid] > 1 for oid in visited_ids):
+                    continue
+                candidates.append((row_cells, fid, value, key))
+                key_counts[key] = key_counts.get(key, 0) + 1
+    for row_cells, fid, value, key in candidates:
+        # Empty containers always pool (all empties of a class share ONE
+        # cell+prototype). Non-empty content needs >= 3 occurrences: a pooled
+        # key retains 2 objects (cell + detached prototype), so pooling a
+        # pair is object-neutral before any read and negative after.
+        if value and key_counts[key] < 3:
+            continue
+        cell = container_pool.get(key)
+        if cell is None:
+            cell = container_pool[key] = PooledCell.from_value(value)
+        row_cells[fid] = cell
 
 
 def _pool_key(value: Any) -> Any:
@@ -4125,11 +4358,19 @@ class _OpField:
         return f"<Op field descriptor {self._name!r}>"
 
     def __get__(self, op: Any, owner: Any = None) -> Any:
-        """Read the backing cell; unset cells raise like an unset slot."""
+        """Read the backing cell; unset cells raise like an unset slot.
+
+        A ``PooledCell`` (the M14 duplicate/empty-container pooling) hydrates
+        a fresh exact-type container on first read and caches it back, so
+        identity is stable across reads and per-row in-place mutation stays
+        isolated — the ``_FACT`` semantics.
+        """
 
         if op is None:
             return self
-        value = _CORE_GET(op).cell_get(_ROW_GET(op), self._fid)
+        store = _CORE_GET(op)
+        row = _ROW_GET(op)
+        value = store.cell_get(row, self._fid)
         if value is _MISSING:
             name = self._name
             raise AttributeError(
@@ -4137,6 +4378,9 @@ class _OpField:
                 name=name,
                 obj=op,
             )
+        if value.__class__ is PooledCell:
+            value = value.hydrate()
+            store.cell_set(row, self._fid, value)
         return value
 
     def __set__(self, op: Any, value: Any) -> None:

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
-from .op_store import _MISSING, DetachedOpStore, OpRowStore, OpStoreLayout
+from .op_store import _MISSING, DetachedOpStore, OpRowStore, OpStoreLayout, PooledCell
 
 #: Instance-dict key holding the backing store (kept out of state streams).
 CORE_KEY = "_tl_core"
@@ -52,7 +52,13 @@ class RecordCellField:
         return f"<record field descriptor {self._name!r}>"
 
     def __get__(self, record: Any, objtype: Any = None) -> Any:
-        """Return the row cell value; unset cells raise ``AttributeError``."""
+        """Return the row cell value; unset cells raise ``AttributeError``.
+
+        A ``PooledCell`` (M14 duplicate/empty-container pooling) hydrates a
+        fresh exact-type container on first read and caches it back, so
+        identity is stable across reads and per-row in-place mutation stays
+        isolated.
+        """
 
         if record is None:
             return self
@@ -60,9 +66,13 @@ class RecordCellField:
         store = instance_dict.get(CORE_KEY)
         if store is None:
             raise AttributeError(self._name)
-        value = store.cell_get(instance_dict[ROW_KEY], self._fid)
+        row = instance_dict[ROW_KEY]
+        value = store.cell_get(row, self._fid)
         if value is _MISSING:
             raise AttributeError(self._name)
+        if value.__class__ is PooledCell:
+            value = value.hydrate()
+            store.cell_set(row, self._fid, value)
         return value
 
     def __set__(self, record: Any, value: Any) -> None:

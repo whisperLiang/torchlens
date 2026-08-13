@@ -330,6 +330,18 @@ unlanded slices above (on-demand facades + typed column packing + event
 droppability policy), not reachable by spot fixes; no current number should
 be read as that metric being met.
 
+Container-cell pooling (grind r1 M14 slice, 2026-08-13): the freeze-seam
+compaction now also replaces exact builtin mutable-container CELLS whose
+full content is provably immutable AND either empty or repeated 3+ times
+with one shared `PooledCell` per distinct content (`op_store.PooledCell`;
+allowlisted op fields + every kind-table field; in-store alias census
+guard; facade descriptors hydrate a fresh exact-type container on first
+read and cache it back — the `_FACT` semantics). Measured on the same
+marginal census (model tail included): 602-op Linear/ReLU stack
+118.5 → 102.4 obj/op (15.4 → 14.1 KB/op); 244-op CNN 111.7 → 99.4 obj/op.
+The remaining core-store tail is eager facades/accessors and per-record
+instance dicts — still owned by the on-demand facade slice.
+
 ### 3.7 Trace decomposition (THE deliverable) and TraceBuildState
 
 M10 as-landed disposition (2026-08-12): `TraceBuildState` is dissolved — its
