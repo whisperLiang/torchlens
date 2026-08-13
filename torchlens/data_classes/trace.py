@@ -1311,7 +1311,7 @@ class Trace(
         "orphan_records": FieldPolicy.BLOB_RECURSIVE,
         "_saved_grad_labels": FieldPolicy.DROP,
         "layers_with_params": FieldPolicy.KEEP,
-        "ops_with_params": FieldPolicy.KEEP,
+        "ops_with_params": FieldPolicy.DROP,
         "op_equivalence_classes": FieldPolicy.KEEP,
         "total_activation_memory": FieldPolicy.KEEP,
         "total_gradient_memory": FieldPolicy.KEEP,

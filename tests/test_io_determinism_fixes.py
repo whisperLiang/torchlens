@@ -542,3 +542,26 @@ def test_codec_metadata_round_trip_preserves_tuples() -> None:
     assert entry.codec_metadata == {"tuple": (1, [2, (3,)]), "list": [1, 2]}
     reparsed = TensorEntry.from_dict(entry.to_dict())
     assert reparsed.codec_metadata == entry.codec_metadata
+
+
+def test_computed_record_fields_are_not_portable() -> None:
+    """Reported computed facade fields must not claim portable storage."""
+
+    from torchlens._io import FieldPolicy
+    from torchlens.data_classes.layer import Layer
+    from torchlens.data_classes.op import Op
+    from torchlens.data_classes.trace import Trace
+
+    expected_drops = {
+        Trace: ("ops_with_params",),
+        Op: ("is_in_conditional_body",),
+        Layer: (
+            "source_trace",
+            "transformed_out",
+            "transformed_grad",
+            "is_in_conditional_body",
+        ),
+    }
+    for record_type, field_names in expected_drops.items():
+        for field_name in field_names:
+            assert record_type.FIELD_POLICY[field_name].portable_policy is FieldPolicy.DROP

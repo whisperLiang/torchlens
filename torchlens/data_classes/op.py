@@ -1864,7 +1864,7 @@ class Op:
         "bool_value": FieldPolicy.KEEP,
         "in_conditionals": FieldPolicy.KEEP,
         "terminal_bool_for": FieldPolicy.KEEP,
-        "is_in_conditional_body": FieldPolicy.KEEP,
+        "is_in_conditional_body": FieldPolicy.DROP,
         "conditional_branch_stack": FieldPolicy.KEEP,
         "conditional_branch_depth": FieldPolicy.KEEP,
         "conditional_entry_children": FieldPolicy.KEEP,
