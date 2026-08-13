@@ -775,6 +775,36 @@ def test_actionable_refusal_pickle_round_trip(
     assert restored.severity == original.severity
 
 
+def test_predicate_type_doors_are_multiclass_by_surface() -> None:
+    """The predicate-type codes carry a per-surface builtin, per site history.
+
+    ``intervention_predicate_type_invalid`` / ``halt_predicate_type_invalid``
+    are ``ArgumentTypeError`` (historically raw ``TypeError``) on the
+    ``tl.trace`` surface but ``InvalidArgumentError`` (historically raw
+    ``ValueError``) on the ``tl.record`` surface. The contract doc documents
+    the multiclass explicitly; this pin makes any silent unification loud.
+    """
+
+    import torch
+    from torch import nn
+
+    import torchlens as tl
+    from torchlens.fastlog.options import RecordingOptions
+
+    for kwarg in ("intervene", "halt"):
+        with pytest.raises(errors.ArgumentTypeError) as trace_info:
+            tl.trace(nn.Identity(), torch.randn(2), **{kwarg: 123})
+        assert trace_info.value.fields["code"] == f"{'intervention' if kwarg == 'intervene' else 'halt'}_predicate_type_invalid"
+        assert isinstance(trace_info.value, TypeError)
+        assert not isinstance(trace_info.value, ValueError)
+
+        with pytest.raises(errors.InvalidArgumentError) as record_info:
+            RecordingOptions(**{kwarg: 123})
+        assert record_info.value.fields["code"] == f"{'intervention' if kwarg == 'intervene' else 'halt'}_predicate_type_invalid"
+        assert isinstance(record_info.value, ValueError)
+        assert not isinstance(record_info.value, TypeError)
+
+
 def test_option_group_conflict_doors_split_by_site_history() -> None:
     """Each grouped/flat conflict door keeps its historical builtin, per code.
 
