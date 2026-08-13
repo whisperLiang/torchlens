@@ -157,7 +157,7 @@
  ],
  "construct/cross_direction_and": "ERROR:SelectorCompositionError",
  "construct/double_followed_by": "ERROR:SelectorCompositionError",
- "construct/func_non_string": "ERROR:TypeError",
+ "construct/func_non_string": "ERROR:ArgumentTypeError",
  "construct/not_followed_by": "ERROR:SelectorCompositionError",
  "construct/or_with_followed_by": "ERROR:SelectorCompositionError",
  "facet_spec/facet_head": {
