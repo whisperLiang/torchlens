@@ -120,7 +120,9 @@ def test_tinygrad_depth_parity() -> None:
         backend="tinygrad",
         compute_input_output_distances=True,
     )
-    _assert_depths(trace, expect_recurrence=False, expected_max_depth=5)
+    # tinygrad runs the neutral recurrence grouper by default (parity wave 2);
+    # this model has no recurrence and all layers stay single-pass.
+    _assert_depths(trace, expect_recurrence=True, expected_max_depth=5)
     # relu decomposes through where; mul merges the where branch (depth 3)
     # with the broadcast constant path, so its min/max split is exact.
     assert _depth_by_prefix(trace, "mul_1") == (3, 4)
