@@ -6,6 +6,7 @@ import collections.abc
 from collections.abc import Iterable
 from typing import Any, cast
 
+from ._errors import ArgumentTypeError
 from .backends.registry import PUBLIC_OPTION_SPINE_TRACE_OPTIONS
 from .capture.arg_positions import _normalize_func_name
 from .fastlog.options import PredicateFn
@@ -38,7 +39,17 @@ def _split_save_options_and_predicate(
         return None, cast(PredicateFn, save_value)
     if callable(save_value):
         return None, cast(PredicateFn, save_value)
-    raise TypeError("save must be a SaveOptions instance, predicate callable, selector, or None")
+    raise ArgumentTypeError(
+        f"save must be a SaveOptions instance, predicate callable, selector, or None; "
+        f"received {type(save_value).__name__}",
+        code="save_predicate_type_invalid",
+        remedy=(
+            "pass a SaveOptions instance, a predicate such as tl.func(...), or None; "
+            "to save every layer use layers_to_save='all', not save='all'"
+        ),
+        argument="save",
+        received_type=type(save_value).__name__,
+    )
 
 
 def _is_selective_label_save(value: object) -> bool:

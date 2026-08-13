@@ -308,7 +308,7 @@ print(tl.compat.report(model, x).to_markdown())
   alias-aware, but this is not a general OOM guarantee: the forward, transform-only deltas, and
   cross-device temporaries can allocate first. A float sets another fraction, an int an absolute
   cap, and `None` disables it. Predicate-selected disk-only saves are exempt; exhaustive
-  `save="all"` plus `to_disk(...)` remains budgeted until postprocess eviction. Unmeasurable auto
+  `layers_to_save="all"` plus `to_disk(...)` remains budgeted until postprocess eviction. Unmeasurable auto
   devices warn on first charge and require an absolute budget for enforcement. The reported figure
   is an explicitly-labelled lower bound.
   Like `measure_python_peak_memory` it is a session-time knob (`FieldPolicy.DROP`, not in

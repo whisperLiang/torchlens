@@ -295,7 +295,252 @@ OLD_EXCEPTION_MAPPING: tuple[tuple[str, str, type[BaseException], str], ...] = (
         errors.ValidationError,
         "subclass",
     ),
+    ("torchlens._errors", "BackwardStreamUnavailableError", errors.CaptureError, "subclass"),
+    (
+        "torchlens.intervention.errors",
+        "NonExecutableSpecError",
+        errors.ConfigurationError,
+        "subclass",
+    ),
+    (
+        "torchlens.intervention.errors",
+        "UnserializableDictKeyError",
+        errors.ConfigurationError,
+        "subclass",
+    ),
+    (
+        "torchlens.intervention.errors",
+        "BatchChunkInputAmbiguityError",
+        errors.ConfigurationError,
+        "subclass",
+    ),
+    (
+        "torchlens.intervention.errors",
+        "ChunkedForwardConfigError",
+        errors.ConfigurationError,
+        "subclass",
+    ),
+    (
+        "torchlens.intervention.errors",
+        "SelectorCompositionError",
+        errors.ConfigurationError,
+        "subclass",
+    ),
+    (
+        "torchlens.intervention.errors",
+        "SelectorCapabilityError",
+        errors.ConfigurationError,
+        "subclass",
+    ),
+    (
+        "torchlens.intervention.errors",
+        "UnclassifiedSelectorError",
+        errors.ConfigurationError,
+        "subclass",
+    ),
+    (
+        "torchlens.intervention.errors",
+        "HelperMountError",
+        errors.ConfigurationError,
+        "subclass",
+    ),
 )
+
+
+# Builtin-lineage golden: the EXACT builtin-exception memberships of every
+# public ``torchlens.errors`` class. The error-refusal contract promises that
+# typed refusals "retain their historical built-in exception compatibility";
+# the 2026-08 ArgumentConflictError incident (17 historically-TypeError doors
+# silently reparented onto ValueError) happened because nothing pinned that
+# promise. Any reparenting of a public exception class must consciously edit
+# this table in the same change as the code, glossary, and contract doc.
+_LINEAGE_PROBE_BUILTINS: tuple[type[BaseException], ...] = (
+    ValueError,
+    TypeError,
+    RuntimeError,
+    Warning,
+)
+
+BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
+    "AmbiguousOpLookupError": ("ValueError",),
+    "AppendBatchDependenceError": ("ValueError",),
+    "AppendMismatchError": ("ValueError",),
+    "AppendStateValidationWarning": ("Warning",),
+    "AppendStreamingNotSupportedError": ("ValueError",),
+    "ArgumentConflictError": ("ValueError",),
+    "ArgumentTypeError": ("TypeError",),
+    "ArtifactSchemaAgeWarning": ("Warning",),
+    "ArtifactVersionBelowFloorError": ("RuntimeError",),
+    "AxisAmbiguityError": ("ValueError",),
+    "BackendAmbiguityError": ("ValueError",),
+    "BackendCapabilityConformanceError": ("ValueError", "RuntimeError"),
+    "BackendMismatchError": ("ValueError",),
+    "BackendPayloadUnsupportedError": ("ValueError", "RuntimeError"),
+    "BackendRegistryError": ("ValueError",),
+    "BackendRuntimeCompatibilityError": ("ValueError",),
+    "BackendUnsupportedError": ("ValueError", "RuntimeError"),
+    "BackwardStreamUnavailableError": ("RuntimeError",),
+    "BaselineUndeterminedError": ("ValueError",),
+    "BatchChunkInputAmbiguityError": ("ValueError",),
+    "BatchNormTrainModeWarning": ("Warning",),
+    "BundleMemberError": ("ValueError",),
+    "BundleNotFinalizedError": ("RuntimeError",),
+    "BundleRelationshipError": ("ValueError",),
+    "CaptureContextError": ("RuntimeError",),
+    "CaptureError": (),
+    "ChunkedForwardConfigError": ("ValueError",),
+    "CaptureOutcomeError": (),
+    "CollectiveBoundaryReplayError": ("RuntimeError",),
+    "CompatibilityError": (),
+    "ConfigurationError": (),
+    "ControlFlowDivergenceError": ("RuntimeError",),
+    "ControlFlowDivergenceWarning": ("Warning",),
+    "DeadParentError": ("ValueError",),
+    "DiagnosticSeverityError": ("ValueError",),
+    "DirectActivationWriteWarning": ("Warning",),
+    "DirectWriteIgnoredWarning": ("Warning",),
+    "DirectWriteInExecutableSaveError": ("ValueError",),
+    "DistributedCaptureUnsupportedError": ("RuntimeError",),
+    "EngineDispatchError": ("ValueError",),
+    "GraphShapeMismatchError": ("ValueError",),
+    "GraphvizRenderError": ("RuntimeError",),
+    "HelperMountError": ("ValueError",),
+    "HookSignatureError": ("TypeError",),
+    "HookSiteCoverageError": ("ValueError",),
+    "HookValueError": ("ValueError",),
+    "InterventionAuditWarning": ("Warning",),
+    "InterventionError": (),
+    "InterventionReadyConflictError": ("ValueError",),
+    "InvalidArgumentError": ("ValueError",),
+    "InvalidStorageError": ("ValueError",),
+    "KeywordConflictError": ("TypeError",),
+    "LiveModeLabelError": ("ValueError",),
+    "MetadataInvariantError": ("ValueError",),
+    "ModelMismatchError": ("RuntimeError",),
+    "MultiMatchWarning": ("Warning",),
+    "MultiOutputModuleError": ("ValueError",),
+    "MutateInPlaceWarning": ("Warning",),
+    "MutatedReferenceError": ("RuntimeError",),
+    "NoParentError": ("ValueError",),
+    "NonExecutableSpecError": ("RuntimeError",),
+    "NumericAttestationError": ("RuntimeError",),
+    "OpaqueCallableInExecutableSaveError": ("ValueError",),
+    "OutputAttributionError": ("RuntimeError",),
+    "PartialCaptureLookupError": ("ValueError",),
+    "PathDivergenceError": ("RuntimeError",),
+    "PayloadUnavailableError": ("ValueError",),
+    "PoisonedRunError": ("RuntimeError",),
+    "PostTraceParamUnavailable": ("RuntimeError",),
+    "PredicateError": ("RuntimeError",),
+    "ReattachError": ("RuntimeError",),
+    "RecordBindingError": ("RuntimeError",),
+    "RecordContextFieldError": (),
+    "RecorderStateError": ("RuntimeError",),
+    "RecordingConfigError": ("ValueError",),
+    "RecoveryError": ("RuntimeError",),
+    "RecursiveTracingError": ("RuntimeError",),
+    "ReplayPreconditionError": ("RuntimeError",),
+    "RunCapabilityUnavailableError": ("RuntimeError",),
+    "RunPreconditionError": ("ValueError",),
+    "RunnablePreflightError": ("ValueError",),
+    "RunnableTLSPECError": (),
+    "RuntimeSignatureDriftError": ("RuntimeError",),
+    "SaveBudgetExceededError": ("RuntimeError",),
+    "ScalarEscapeWarning": ("Warning",),
+    "SelectorCapabilityError": ("ValueError",),
+    "SelectorCompositionError": ("ValueError",),
+    "ShapeInferenceError": ("RuntimeError",),
+    "SiteAmbiguityError": ("ValueError",),
+    "SiteResolutionError": ("ValueError",),
+    "SpecMutationError": ("ValueError",),
+    "SpecPortabilityError": ("ValueError",),
+    "SpliceModuleDeviceError": ("RuntimeError",),
+    "SpliceModuleDtypeError": ("RuntimeError",),
+    "StateBindingError": ("ValueError",),
+    "StopSignalSwallowedError": (),
+    "TorchLensCaptureGapError": ("RuntimeError",),
+    "TorchLensCaptureGapWarning": ("Warning",),
+    "TorchLensError": (),
+    "TorchLensIOError": ("RuntimeError",),
+    "TorchLensInterventionError": ("RuntimeError",),
+    "TorchLensInterventionWarning": ("Warning",),
+    "TorchLensPostfuncError": ("RuntimeError",),
+    "TorchLensWarning": ("Warning",),
+    "TraceNotReproducibleWarning": ("Warning",),
+    "TrainingModeConfigError": ("ValueError",),
+    "UnclassifiedSelectorError": ("ValueError",),
+    "UnknownBackendError": ("ValueError",),
+    "UnserializableDictKeyError": ("TypeError",),
+    "UnsupportedRendererCapabilityError": ("RuntimeError",),
+    "UnsupportedTensorVariantError": ("RuntimeError",),
+    "UntrustedCallableError": ("RuntimeError",),
+    "ValidationError": (),
+}
+
+
+def _public_error_classes() -> dict[str, type[BaseException]]:
+    """Return every public ``torchlens.errors`` exception or warning class.
+
+    Returns
+    -------
+    dict[str, type[BaseException]]
+        Mapping from public name to the resolved class object.
+    """
+
+    discovered: dict[str, type[BaseException]] = {}
+    for name in dir(errors):
+        obj = getattr(errors, name)
+        if isinstance(obj, type) and issubclass(obj, BaseException):
+            discovered[name] = obj
+    return discovered
+
+
+def test_builtin_lineage_golden_is_closed() -> None:
+    """The lineage golden covers exactly the public error surface.
+
+    A new public exception class cannot ship without a conscious lineage row,
+    and a removed class cannot leave a stale row behind.
+    """
+
+    discovered = set(_public_error_classes())
+    golden = set(BUILTIN_LINEAGE_GOLDEN)
+
+    assert discovered - golden == set(), (
+        "public error classes missing a builtin-lineage golden row: "
+        f"{sorted(discovered - golden)}"
+    )
+    assert golden - discovered == set(), (
+        f"stale builtin-lineage golden rows: {sorted(golden - discovered)}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("class_name", "expected_builtins"),
+    sorted(BUILTIN_LINEAGE_GOLDEN.items()),
+)
+def test_builtin_lineage_matches_golden(
+    class_name: str,
+    expected_builtins: tuple[str, ...],
+) -> None:
+    """Every public error class keeps its exact builtin-exception bases.
+
+    This is the regression guard for the r2/r3 reparenting incident class: a
+    lineage flip (e.g. a historically-``TypeError`` door becoming
+    ``ValueError``-based) shows up here as an exact-tuple mismatch.
+    """
+
+    cls = getattr(errors, class_name)
+    actual = tuple(
+        builtin.__name__
+        for builtin in _LINEAGE_PROBE_BUILTINS
+        if issubclass(cls, builtin)
+    )
+
+    assert actual == expected_builtins, (
+        f"{class_name} builtin lineage changed: expected {expected_builtins}, "
+        f"got {actual}. If this reparenting is intentional, update the golden, "
+        "the error-refusal contract doc, and the glossary in the same change."
+    )
 
 
 def _import_exception(class_module: str, class_name: str) -> Any:
@@ -508,7 +753,7 @@ TOP_REFUSAL_CASES: tuple[tuple[str, Callable[[], object]], ...] = (
         lambda: merge_capture_options(capture=CaptureOptions(name="one"), name="two"),
     ),
     (
-        "option_group_conflict",
+        "option_group_keyword_conflict",
         lambda: merge_visualization_options(
             function_default_mode="none",
             visualization=VisualizationOptions(layout="dot"),
@@ -588,6 +833,157 @@ def test_actionable_refusal_pickle_round_trip(
     assert str(restored) == str(original)
     assert restored.fields == original.fields
     assert restored.severity == original.severity
+
+
+def test_save_argument_door_is_typed_and_redirects_save_all() -> None:
+    """The ``save=`` type door refuses typed and names the `'all'` remedy.
+
+    ``save='all'`` was documented as a valid spelling while the door raised a
+    raw ``TypeError`` with no code or remedy; only ``layers_to_save`` accepts
+    ``'all'``. Historical ``TypeError`` lineage is preserved.
+    """
+
+    import torch
+    from torch import nn
+
+    import torchlens as tl
+
+    with pytest.raises(errors.ArgumentTypeError) as exc_info:
+        tl.trace(nn.Identity(), torch.randn(2), save="all")
+
+    assert exc_info.value.fields["code"] == "save_predicate_type_invalid"
+    assert isinstance(exc_info.value, TypeError)
+    assert "layers_to_save='all'" in exc_info.value.fields["remedy"]
+    assert "Remedy:" in str(exc_info.value)
+
+
+def test_collapse_order_mode_door_names_its_narrower_domain() -> None:
+    """The collapse_order refusal remedy never sends the caller back in circles.
+
+    ``collapse_order(mode=)`` accepts only the two landmark policies. It shares
+    ``collapse_mode_invalid`` with the wider render surfaces (the contract row
+    documents the per-surface domains), so the raised remedy itself must name
+    exactly the accepted set — never ``'none'`` or floats, which refuse here.
+    """
+
+    from torchlens.visualization.auto_collapse import collapse_order
+
+    with pytest.raises(errors.InvalidArgumentError) as exc_info:
+        collapse_order(object(), mode="none")  # type: ignore[arg-type]
+
+    assert exc_info.value.fields["code"] == "collapse_mode_invalid"
+    remedy = exc_info.value.fields["remedy"]
+    assert "auto" in remedy and "max" in remedy
+    assert "none" not in remedy
+    assert "float" not in remedy
+
+
+def test_code_panel_doors_split_render_from_config_refusals() -> None:
+    """The two code-panel refusals carry distinct codes and builtins.
+
+    A callable that returns a non-string at render time
+    (``code_panel_callable_return_invalid``, ``TypeError``) is a different
+    caller problem from an unknown mode literal at configuration time
+    (``code_panel_option_invalid``, ``ValueError``); one code no longer
+    covers both.
+    """
+
+    import weakref
+
+    from torch import nn
+
+    from torchlens.visualization.code_panel import resolve_code_panel_source
+
+    model = nn.Identity()
+    with pytest.raises(errors.ArgumentTypeError) as return_info:
+        resolve_code_panel_source(lambda live_model: 123, {}, weakref.ref(model))
+    assert return_info.value.fields["code"] == "code_panel_callable_return_invalid"
+    assert isinstance(return_info.value, TypeError)
+    assert not isinstance(return_info.value, ValueError)
+
+    with pytest.raises(errors.InvalidArgumentError) as mode_info:
+        resolve_code_panel_source("sideways", {}, None)  # type: ignore[arg-type]
+    assert mode_info.value.fields["code"] == "code_panel_option_invalid"
+    assert isinstance(mode_info.value, ValueError)
+    assert not isinstance(mode_info.value, TypeError)
+
+
+def test_predicate_type_doors_are_multiclass_by_surface() -> None:
+    """The predicate-type codes carry a per-surface builtin, per site history.
+
+    ``intervention_predicate_type_invalid`` / ``halt_predicate_type_invalid``
+    are ``ArgumentTypeError`` (historically raw ``TypeError``) on the
+    ``tl.trace`` surface but ``InvalidArgumentError`` (historically raw
+    ``ValueError``) on the ``tl.record`` surface. The contract doc documents
+    the multiclass explicitly; this pin makes any silent unification loud.
+    """
+
+    import torch
+    from torch import nn
+
+    import torchlens as tl
+    from torchlens.fastlog.options import RecordingOptions
+
+    for kwarg in ("intervene", "halt"):
+        with pytest.raises(errors.ArgumentTypeError) as trace_info:
+            tl.trace(nn.Identity(), torch.randn(2), **{kwarg: 123})
+        assert trace_info.value.fields["code"] == f"{'intervention' if kwarg == 'intervene' else 'halt'}_predicate_type_invalid"
+        assert isinstance(trace_info.value, TypeError)
+        assert not isinstance(trace_info.value, ValueError)
+
+        with pytest.raises(errors.InvalidArgumentError) as record_info:
+            RecordingOptions(**{kwarg: 123})
+        assert record_info.value.fields["code"] == f"{'intervention' if kwarg == 'intervene' else 'halt'}_predicate_type_invalid"
+        assert isinstance(record_info.value, ValueError)
+        assert not isinstance(record_info.value, TypeError)
+
+
+def test_option_group_conflict_doors_split_by_site_history() -> None:
+    """Each grouped/flat conflict door keeps its historical builtin, per code.
+
+    The five merge entrypoints historically raised ``raise
+    ValueError(conflict_message)`` and now raise ``ArgumentConflictError``
+    under ``option_group_conflict``; the visualization merge historically
+    raised a raw ``TypeError`` and now raises ``KeywordConflictError`` under
+    ``option_group_keyword_conflict``. One code maps to one catchable builtin.
+    """
+
+    with pytest.raises(errors.ArgumentConflictError) as value_info:
+        merge_capture_options(capture=CaptureOptions(name="one"), name="two")
+    assert value_info.value.fields["code"] == "option_group_conflict"
+    assert isinstance(value_info.value, ValueError)
+    assert not isinstance(value_info.value, TypeError)
+
+    with pytest.raises(errors.KeywordConflictError) as keyword_info:
+        merge_visualization_options(
+            function_default_mode="none",
+            visualization=VisualizationOptions(layout="dot"),
+            layout="rank",
+        )
+    assert keyword_info.value.fields["code"] == "option_group_keyword_conflict"
+    assert isinstance(keyword_info.value, TypeError)
+    assert not isinstance(keyword_info.value, ValueError)
+
+
+def test_intervention_direction_doors_split_by_site_history() -> None:
+    """Predicate-side direction refusal keeps its historical TypeError lineage.
+
+    The door raised a raw ``TypeError`` since the 2.16 intervention era, and
+    the live capture-path callers catch ``TypeError`` to convert a bad
+    predicate result into ``PredicateError``. Its code is distinct from the
+    ValueError-lineage trace-side ``intervention_direction_invalid`` doors so
+    ``fields["code"]`` determines the catchable builtin.
+    """
+
+    from torchlens.intervention.predicates import as_intervention_decision
+
+    with pytest.raises(errors.ArgumentTypeError) as exc_info:
+        as_intervention_decision(lambda out: out, direction="sideways")  # type: ignore[arg-type]
+
+    assert exc_info.value.fields["code"] == "intervention_action_direction_invalid"
+    assert isinstance(exc_info.value, TypeError)
+    assert not isinstance(exc_info.value, ValueError)
+    assert "Remedy:" in str(exc_info.value)
 
 
 def test_selector_direction_refusal_is_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:

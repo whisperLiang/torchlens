@@ -59,13 +59,14 @@ add names to the top-level `torchlens` namespace:
 | `bundle_diff_layout_invalid` | Bundle diff layout is unsupported | Pass `layout='paired'` |
 | `bundle_diff_members_invalid` | Bundle diff sides are missing or identical | Name two distinct members |
 | `bundle_statistic_invalid` | Bundle statistic is unknown | Choose `mean`, `std`, `var`, or `norm` |
+| `code_panel_callable_return_invalid` | Callable code panel returned a non-string at render time (`ArgumentTypeError`) | Return the panel text as a string |
 | `code_panel_model_collected` | Callable code panel needs the live model | Use a built-in code_panel mode |
-| `code_panel_option_invalid` | Code panel option value or return type is invalid | Pass a documented mode or a string-returning callable |
+| `code_panel_option_invalid` | Code panel mode literal is unknown (`InvalidArgumentError`) | Pass a documented mode or a callable |
 | `code_panel_side_invalid` | Code panel side is unknown | Pass `side='right'` or `'left'` |
 | `dagua_renderer_not_opted_in` | Experimental dagua renderer used without opt-in | Import `torchlens.experimental.dagua` first |
 | `capture_context_required` | Capture-only helper called outside `trace()` | Call it from the captured forward |
 | `collapse_level_invalid` | Float collapse level is outside `[0, 1]` | Choose an in-range level |
-| `collapse_mode_invalid` | Collapse mode is unsupported | Choose `none`, `auto`, `max`, or a float |
+| `collapse_mode_invalid` | Collapse mode is unsupported — PER-SURFACE DOMAINS: rendering `collapse=` accepts `none`/`auto`/`max`/float, `collapse_plan(mode=)` accepts `auto`/`max`/float, `collapse_order(mode=)` accepts only `auto`/`max` | Choose a mode documented for that surface; the raised remedy names the exact set |
 | `collapse_plan_unavailable` | Collapse optimizer declined the render context | Use a supported render context and mode |
 | `container_leaf_not_saved` | Container leaf value was not retained | Re-run with `save=` covering the leaves |
 | `container_not_reconstructable` | Container spec or backend support is absent | Capture with `capture_container_structure=True` |
@@ -89,11 +90,13 @@ add names to the top-level `torchlens` namespace:
 | `layers_not_logged` | Rendering requires a fully-logged trace | Capture with full layer logging |
 | `history_size_invalid` | Recorder history size is out of range | Pass an integer in `[0, 1024]` |
 | `gradient_not_saved` | Requested gradient payload was not retained | Capture with gradient saving enabled |
+| `graphviz_render_failed` | Graphviz did not produce a usable rendered artifact (`GraphvizRenderError`, `RuntimeError` lineage) | Lower dpi, render direct SVG, or cap the graph size |
 | `gradient_pass_ambiguous` | Gradient query spans multiple backward passes | Pick one pass or record positionally |
-| `halt_predicate_type_invalid` | `halt` is not callable | Pass a predicate or `None` |
-| `intervention_predicate_type_invalid` | `intervene` is not callable | Pass `tl.when(...)`, another predicate, or `None` |
+| `halt_predicate_type_invalid` | `halt` is not callable — MULTICLASS BY SURFACE: `ArgumentTypeError` (`TypeError`) on `tl.trace`, `InvalidArgumentError` (`ValueError`) on `tl.record`, each faithful to its site history | Pass a predicate or `None` |
+| `intervention_predicate_type_invalid` | `intervene` is not callable — MULTICLASS BY SURFACE: `ArgumentTypeError` (`TypeError`) on `tl.trace`, `InvalidArgumentError` (`ValueError`) on `tl.record`, each faithful to its site history | Pass `tl.when(...)`, another predicate, or `None` |
+| `intervention_action_direction_invalid` | Predicate-side intervention action names an unknown direction (`ArgumentTypeError`; historically `TypeError`, so the live capture path converts it to `PredicateError`) | Choose `forward`, `backward`, or `both` |
 | `intervention_action_type_invalid` | Intervention action has an unsupported type | Pass a decision, helper, callable, or `None` |
-| `intervention_direction_invalid` | Intervention direction is unknown | Choose `forward`, `backward`, or `both` |
+| `intervention_direction_invalid` | Trace-side intervention direction is unknown (`InvalidArgumentError`; historically `ValueError`) | Choose `forward`, `backward`, or `both` |
 | `intervention_engine_invalid` | `do(..., engine=...)` value is unknown | Choose `auto`, `replay`, `rerun`, or `set_only` |
 | `intervention_helper_unknown` | Built-in helper name is unknown | Choose a registered helper |
 | `jax_control_flow_invalid` | JAX control-flow mode is unknown | Choose `reject`, `unroll`, or `region` |
@@ -123,7 +126,8 @@ add names to the top-level `torchlens` namespace:
 | `op_lookup_pass_required` | Bare label names a multi-pass layer | Append a pass qualifier such as `:2` |
 | `on_forward_error_invalid` | Forward-error policy is unknown | Choose `raise`, `attach_partial`, or `return_partial` |
 | `on_predicate_error_invalid` | Predicate-error policy is unknown | Choose `auto`, `accumulate`, or `fail-fast` |
-| `option_group_conflict` | Grouped and flat options set the same field | Use one option style |
+| `option_group_conflict` | Grouped and flat options set the same field on a merge entrypoint (`ArgumentConflictError`; historically `ValueError`) | Use one option style |
+| `option_group_keyword_conflict` | Flat draw kwarg and `VisualizationOptions` field set the same option (`KeywordConflictError`; historically `TypeError`) | Use one option style |
 | `option_group_type_invalid` | Grouped option has the wrong object type | Pass the documented options class |
 | `output_device_invalid` | Output device policy is unknown | Choose `same`, `cpu`, or `cuda` |
 | `record_not_bound` | Record's owning Trace reference is gone | Keep the owning Trace alive |
@@ -134,6 +138,7 @@ add names to the top-level `torchlens` namespace:
 | `recording_option_duplicate` | Recording option was specified twice | Pass each option exactly once |
 | `recording_option_type_invalid` | Recording option has an unsupported type | Pass the documented type for that option |
 | `relation_assignment_type_invalid` | Finished relation field assigned a non-container | Assign list/set/tuple/frozenset or None |
+| `renderer_capability_unsupported` | RenderIR requires a capability its renderer lacks (`UnsupportedRendererCapabilityError`, `RuntimeError` lineage) | Use the graphviz renderer or drop the option needing the capability |
 | `run_fast_divergence_policy_invalid` | `fast=True` with a non-raise divergence policy | Use `on_divergence='raise'` or drop `fast=` |
 | `run_input_missing` | Legacy rerun received no forward input | Pass the input as `log.run(model, x)` |
 | `run_fast_requires_inputs` | `fast=True` on the legacy run surface | Call `trace.run(inputs=..., fast=True)` |
@@ -142,6 +147,7 @@ add names to the top-level `torchlens` namespace:
 | `run_source_model_collected` | Live model reference is no longer retained | Pass the model to `trace.run(model, input)` |
 | `output_sink_conflict` | Disk storage and callback sink were both configured | Choose one sink |
 | `save_mode_invalid` | Activation save mode is unknown | Choose a documented save mode |
+| `save_predicate_type_invalid` | `save=` is neither SaveOptions, predicate, selector, nor `None` (`save='all'` lands here) | Pass a predicate or SaveOptions; use `layers_to_save='all'` for exhaustive saves |
 | `save_payload_level_conflict` | Optional payload family requires runnable level | Use runnable level or omit that family |
 | `selector_function_pattern_type_invalid` | `func()` pattern is not a string | Pass a function-name string |
 | `skip_fn_boundary_invalid` | `skip_fn` tried to skip an input or output layer | Return False for boundary layers |

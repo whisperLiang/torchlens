@@ -36,6 +36,7 @@ import torch
 from graphviz.quoting import quote as quote_dot_id
 from PIL import Image
 
+from .._errors import _actionable_message, _ActionableErrorMixin
 from .._literals import (
     BufferVisibilityLiteral,
     CollapseLiteral,
@@ -50,6 +51,7 @@ from .._literals import (
 from ..data_classes.internal_types import VisualizationOverrides
 from ..data_classes.layer import Layer
 from ..data_classes.op import Op
+from ..errors._base import CompatibilityError
 from ..ir.container import (
     ContainerSpec,
     DataclassField,
@@ -297,8 +299,46 @@ SIBLING_ORDER_COST_NOTICE = (
 _SIBLING_ORDER_WARNING_EMITTED = False
 
 
-class GraphvizRenderError(RuntimeError):
-    """Raised when Graphviz fails to produce a usable rendered artifact."""
+class GraphvizRenderError(_ActionableErrorMixin, CompatibilityError, RuntimeError):
+    """Raised when Graphviz fails to produce a usable rendered artifact.
+
+    Keeps its historical ``RuntimeError`` base while joining the taxonomy
+    with a stable code and a default remedy, so single-message raise sites
+    stay valid.
+    """
+
+    code: str = "graphviz_render_failed"
+    default_remedy: str = (
+        "lower dpi, render direct SVG with vis_fileformat='svg', or reduce the "
+        "graph with a node cap such as vis_call_depth"
+    )
+
+    def __init__(
+        self,
+        problem: str,
+        *,
+        remedy: str | None = None,
+        **context: object,
+    ) -> None:
+        """Initialize an actionable Graphviz render failure.
+
+        Parameters
+        ----------
+        problem:
+            Description of the failed render and any saved DOT source path.
+        remedy:
+            Concrete caller action. The class default is used when omitted.
+        **context:
+            Structured, non-authoritative diagnostic context.
+        """
+
+        resolved_remedy = remedy or type(self).default_remedy
+        super().__init__(
+            _actionable_message(problem, resolved_remedy),
+            code=type(self).code,
+            remedy=resolved_remedy,
+            **cast(dict[str, Any], context),
+        )
 
 
 _GRAPHVIZ_ESCAPE_HINT = (

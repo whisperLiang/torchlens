@@ -204,10 +204,14 @@ def resolve_code_panel_source(
             )
         source_text = code_panel(model)
         if not isinstance(source_text, str):
+            # Distinct code from the ValueError-lineage bad-mode-literal door
+            # below: a caller branching on the code must be able to tell "my
+            # callable is broken" (render-time) from "my option string is
+            # wrong" (config-time).
             raise ArgumentTypeError(
                 f"Callable code_panel options must return a string; "
                 f"returned {type(source_text).__name__}",
-                code="code_panel_option_invalid",
+                code="code_panel_callable_return_invalid",
                 remedy="return the panel text as a string from the code_panel callable",
                 argument="code_panel",
             )

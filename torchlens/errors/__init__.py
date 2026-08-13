@@ -97,6 +97,20 @@ _LEGACY_EXCEPTION_PATHS = {
         "torchlens.intervention.errors",
         "DirectWriteInExecutableSaveError",
     ),
+    "NonExecutableSpecError": ("torchlens.intervention.errors", "NonExecutableSpecError"),
+    "UnserializableDictKeyError": (
+        "torchlens.intervention.errors",
+        "UnserializableDictKeyError",
+    ),
+    "BatchChunkInputAmbiguityError": (
+        "torchlens.intervention.errors",
+        "BatchChunkInputAmbiguityError",
+    ),
+    "ChunkedForwardConfigError": (
+        "torchlens.intervention.errors",
+        "ChunkedForwardConfigError",
+    ),
+    "HelperMountError": ("torchlens.intervention.errors", "HelperMountError"),
     "GraphShapeMismatchError": ("torchlens.intervention.errors", "GraphShapeMismatchError"),
     "ControlFlowDivergenceWarning": (
         "torchlens.intervention.errors",
@@ -128,6 +142,18 @@ _LEGACY_EXCEPTION_PATHS = {
     ),
     "SpecMutationError": ("torchlens.intervention.errors", "SpecMutationError"),
     "SiteResolutionError": ("torchlens.intervention.errors", "SiteResolutionError"),
+    "SelectorCompositionError": (
+        "torchlens.intervention.errors",
+        "SelectorCompositionError",
+    ),
+    "SelectorCapabilityError": (
+        "torchlens.intervention.errors",
+        "SelectorCapabilityError",
+    ),
+    "UnclassifiedSelectorError": (
+        "torchlens.intervention.errors",
+        "UnclassifiedSelectorError",
+    ),
     "SiteAmbiguityError": ("torchlens.intervention.errors", "SiteAmbiguityError"),
     "RecursiveTracingError": ("torchlens.intervention.errors", "RecursiveTracingError"),
     "AxisAmbiguityError": ("torchlens.intervention.errors", "AxisAmbiguityError"),
@@ -158,6 +184,10 @@ _LAZY_EXCEPTION_PATHS = {
     "ArgumentConflictError": ("torchlens._errors", "ArgumentConflictError"),
     "KeywordConflictError": ("torchlens._errors", "KeywordConflictError"),
     "ArgumentTypeError": ("torchlens._errors", "ArgumentTypeError"),
+    "BackwardStreamUnavailableError": (
+        "torchlens._errors",
+        "BackwardStreamUnavailableError",
+    ),
     "BackendAmbiguityError": ("torchlens.backends", "BackendAmbiguityError"),
     "BackendCapabilityConformanceError": (
         "torchlens.backends",
@@ -185,6 +215,14 @@ _LAZY_EXCEPTION_PATHS = {
     ),
     "SaveBudgetExceededError": ("torchlens._save_budget", "SaveBudgetExceededError"),
     "CaptureOutcomeError": ("torchlens.capture.outcome", "CaptureOutcomeError"),
+    "GraphvizRenderError": (
+        "torchlens.visualization._render_common",
+        "GraphvizRenderError",
+    ),
+    "UnsupportedRendererCapabilityError": (
+        "torchlens.visualization.renderers.base",
+        "UnsupportedRendererCapabilityError",
+    ),
     "StopSignalSwallowedError": ("torchlens.capture.outcome", "StopSignalSwallowedError"),
     "PartialCaptureLookupError": ("torchlens.partial", "PartialCaptureLookupError"),
 }

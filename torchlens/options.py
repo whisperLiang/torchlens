@@ -11,7 +11,12 @@ from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
 import torch
 
 from ._deprecations import MISSING, MissingType, warn_deprecated_alias
-from ._errors import KeywordConflictError, ArgumentTypeError, InvalidArgumentError
+from ._errors import (
+    ArgumentConflictError,
+    ArgumentTypeError,
+    InvalidArgumentError,
+    KeywordConflictError,
+)
 from ._literals import (
     BufferVisibilityLiteral,
     CollapseLiteral,
@@ -702,7 +707,7 @@ def _merge_grouped_options(
     flat_to_group: Mapping[str, str],
     flat_values: Mapping[str, Any],
     group_name: str,
-    conflict_message: str | None,
+    conflict_message: str,
     deprecated_flat_names: set[str] | None = None,
     warn_individual_kwargs: bool = True,
 ) -> Any:
@@ -721,7 +726,7 @@ def _merge_grouped_options(
     group_name:
         Public grouped option parameter name.
     conflict_message:
-        Optional message for same-field grouped/flat conflicts.
+        Message for same-field grouped/flat conflicts.
     deprecated_flat_names:
         Flat names that should warn as renamed aliases. If ``None``, every flat
         name warns when supplied.
@@ -763,17 +768,14 @@ def _merge_grouped_options(
         if flat_value is MISSING:
             continue
         if option is not None and group_field in specified_fields:
-            if conflict_message is not None:
-                raise InvalidArgumentError(
-                    conflict_message,
-                    code="option_group_conflict",
-                    remedy=f"pass either {group_name} or its individual keyword arguments",
-                    arguments=(flat_name, f"{group_name}.{group_field}"),
-                )
-            raise KeywordConflictError(
-                f"Do not pass both `{flat_name}` and `{group_name}.{group_field}`",
+            # ValueError lineage: these five merge doors historically raised
+            # `raise ValueError(conflict_message)`. The TypeError-lineage
+            # grouped/flat door is merge_visualization_options
+            # (`option_group_keyword_conflict`), split per site history.
+            raise ArgumentConflictError(
+                conflict_message,
                 code="option_group_conflict",
-                remedy=f"remove either {flat_name!r} or {group_name}.{group_field!r}",
+                remedy=f"pass either {group_name} or its individual keyword arguments",
                 arguments=(flat_name, f"{group_name}.{group_field}"),
             )
         should_warn = warn_individual_kwargs
@@ -2091,8 +2093,8 @@ def merge_visualization_options(
         if visualization is not None and group_name in specified_fields:
             raise KeywordConflictError(
                 f"Do not pass both `{flat_name}` and `visualization.{group_name}`",
-                code="option_group_conflict",
-                remedy=f"remove either {flat_name!r} or visualization.{group_name!r}",
+                code="option_group_keyword_conflict",
+                remedy=f"remove either {flat_name!r} or {f'visualization.{group_name}'!r}",
                 arguments=(flat_name, f"visualization.{group_name}"),
             )
         if flat_name in _VISUALIZATION_DEPRECATED_FLAT:
