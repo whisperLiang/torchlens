@@ -95,12 +95,11 @@ def test_r35_no_float_torch_equal_in_runnable_modules() -> None:
 
     package_root = Path(torchlens.__file__).parent
     runnable_modules = (
-        "_io/runnable.py",
-        "_runnable_execution.py",
-        "_runnable_state.py",
-        "backends/torch/completeness_witness.py",
-        "backends/torch/backend.py",
-        "backends/torch/ops.py",
+        *sorted(path.relative_to(package_root) for path in package_root.glob("_runnable_*.py")),
+        Path("_io/runnable.py"),
+        Path("backends/torch/completeness_witness.py"),
+        Path("backends/torch/backend.py"),
+        Path("backends/torch/ops.py"),
     )
     offenders: list[str] = []
     for relative in runnable_modules:
