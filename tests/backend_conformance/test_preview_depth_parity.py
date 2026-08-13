@@ -236,8 +236,10 @@ def test_tf_depth_parity() -> None:
     trace = tl.trace(
         model, inputs, backend="tf", compute_input_output_distances=True
     )
+    # TF eager runs the neutral recurrence grouper by default (parity wave
+    # 2); this model has no recurrence and all layers stay single-pass.
     # matmul(1) -> biasadd(2) -> relu(3) -> matmul(4) -> biasadd(5)
-    _assert_depths(trace, expect_recurrence=False, expected_max_depth=5)
+    _assert_depths(trace, expect_recurrence=True, expected_max_depth=5)
     assert _depth_by_prefix(trace, "relu_1") == (3, 3)
     _assert_alias_matches(
         lambda: tl.trace(model, inputs, backend="tf", mark_layer_depths=True)
