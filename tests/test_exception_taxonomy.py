@@ -298,6 +298,191 @@ OLD_EXCEPTION_MAPPING: tuple[tuple[str, str, type[BaseException], str], ...] = (
 )
 
 
+# Builtin-lineage golden: the EXACT builtin-exception memberships of every
+# public ``torchlens.errors`` class. The error-refusal contract promises that
+# typed refusals "retain their historical built-in exception compatibility";
+# the 2026-08 ArgumentConflictError incident (17 historically-TypeError doors
+# silently reparented onto ValueError) happened because nothing pinned that
+# promise. Any reparenting of a public exception class must consciously edit
+# this table in the same change as the code, glossary, and contract doc.
+_LINEAGE_PROBE_BUILTINS: tuple[type[BaseException], ...] = (
+    ValueError,
+    TypeError,
+    RuntimeError,
+    Warning,
+)
+
+BUILTIN_LINEAGE_GOLDEN: dict[str, tuple[str, ...]] = {
+    "AmbiguousOpLookupError": ("ValueError",),
+    "AppendBatchDependenceError": ("ValueError",),
+    "AppendMismatchError": ("ValueError",),
+    "AppendStateValidationWarning": ("Warning",),
+    "AppendStreamingNotSupportedError": ("ValueError",),
+    "ArgumentConflictError": ("ValueError",),
+    "ArgumentTypeError": ("TypeError",),
+    "ArtifactSchemaAgeWarning": ("Warning",),
+    "ArtifactVersionBelowFloorError": ("RuntimeError",),
+    "AxisAmbiguityError": ("ValueError",),
+    "BackendAmbiguityError": ("ValueError",),
+    "BackendCapabilityConformanceError": ("ValueError", "RuntimeError"),
+    "BackendMismatchError": ("ValueError",),
+    "BackendPayloadUnsupportedError": ("ValueError", "RuntimeError"),
+    "BackendRegistryError": ("ValueError",),
+    "BackendRuntimeCompatibilityError": ("ValueError",),
+    "BackendUnsupportedError": ("ValueError", "RuntimeError"),
+    "BaselineUndeterminedError": ("ValueError",),
+    "BatchNormTrainModeWarning": ("Warning",),
+    "BundleMemberError": ("ValueError",),
+    "BundleNotFinalizedError": ("RuntimeError",),
+    "BundleRelationshipError": ("ValueError",),
+    "CaptureContextError": ("RuntimeError",),
+    "CaptureError": (),
+    "CaptureOutcomeError": (),
+    "CollectiveBoundaryReplayError": ("RuntimeError",),
+    "CompatibilityError": (),
+    "ConfigurationError": (),
+    "ControlFlowDivergenceError": ("RuntimeError",),
+    "ControlFlowDivergenceWarning": ("Warning",),
+    "DeadParentError": ("ValueError",),
+    "DiagnosticSeverityError": ("ValueError",),
+    "DirectActivationWriteWarning": ("Warning",),
+    "DirectWriteIgnoredWarning": ("Warning",),
+    "DirectWriteInExecutableSaveError": ("ValueError",),
+    "DistributedCaptureUnsupportedError": ("RuntimeError",),
+    "EngineDispatchError": ("ValueError",),
+    "GraphShapeMismatchError": ("ValueError",),
+    "HookSignatureError": ("TypeError",),
+    "HookSiteCoverageError": ("ValueError",),
+    "HookValueError": ("ValueError",),
+    "InterventionAuditWarning": ("Warning",),
+    "InterventionError": (),
+    "InterventionReadyConflictError": ("ValueError",),
+    "InvalidArgumentError": ("ValueError",),
+    "InvalidStorageError": ("ValueError",),
+    "KeywordConflictError": ("TypeError",),
+    "LiveModeLabelError": ("ValueError",),
+    "MetadataInvariantError": ("ValueError",),
+    "ModelMismatchError": ("RuntimeError",),
+    "MultiMatchWarning": ("Warning",),
+    "MultiOutputModuleError": ("ValueError",),
+    "MutateInPlaceWarning": ("Warning",),
+    "MutatedReferenceError": ("RuntimeError",),
+    "NoParentError": ("ValueError",),
+    "NumericAttestationError": ("RuntimeError",),
+    "OpaqueCallableInExecutableSaveError": ("ValueError",),
+    "OutputAttributionError": ("RuntimeError",),
+    "PartialCaptureLookupError": ("ValueError",),
+    "PathDivergenceError": ("RuntimeError",),
+    "PayloadUnavailableError": ("ValueError",),
+    "PoisonedRunError": ("RuntimeError",),
+    "PostTraceParamUnavailable": ("RuntimeError",),
+    "PredicateError": ("RuntimeError",),
+    "ReattachError": ("RuntimeError",),
+    "RecordBindingError": ("RuntimeError",),
+    "RecordContextFieldError": (),
+    "RecorderStateError": ("RuntimeError",),
+    "RecordingConfigError": ("ValueError",),
+    "RecoveryError": ("RuntimeError",),
+    "RecursiveTracingError": ("RuntimeError",),
+    "ReplayPreconditionError": ("RuntimeError",),
+    "RunCapabilityUnavailableError": ("RuntimeError",),
+    "RunPreconditionError": ("ValueError",),
+    "RunnablePreflightError": ("ValueError",),
+    "RunnableTLSPECError": (),
+    "RuntimeSignatureDriftError": ("RuntimeError",),
+    "SaveBudgetExceededError": ("RuntimeError",),
+    "ScalarEscapeWarning": ("Warning",),
+    "ShapeInferenceError": ("RuntimeError",),
+    "SiteAmbiguityError": ("ValueError",),
+    "SiteResolutionError": ("ValueError",),
+    "SpecMutationError": ("ValueError",),
+    "SpecPortabilityError": ("ValueError",),
+    "SpliceModuleDeviceError": ("RuntimeError",),
+    "SpliceModuleDtypeError": ("RuntimeError",),
+    "StateBindingError": ("ValueError",),
+    "StopSignalSwallowedError": (),
+    "TorchLensCaptureGapError": ("RuntimeError",),
+    "TorchLensCaptureGapWarning": ("Warning",),
+    "TorchLensError": (),
+    "TorchLensIOError": ("RuntimeError",),
+    "TorchLensInterventionError": ("RuntimeError",),
+    "TorchLensInterventionWarning": ("Warning",),
+    "TorchLensPostfuncError": ("RuntimeError",),
+    "TorchLensWarning": ("Warning",),
+    "TraceNotReproducibleWarning": ("Warning",),
+    "TrainingModeConfigError": ("ValueError",),
+    "UnknownBackendError": ("ValueError",),
+    "UnsupportedTensorVariantError": ("RuntimeError",),
+    "UntrustedCallableError": ("RuntimeError",),
+    "ValidationError": (),
+}
+
+
+def _public_error_classes() -> dict[str, type[BaseException]]:
+    """Return every public ``torchlens.errors`` exception or warning class.
+
+    Returns
+    -------
+    dict[str, type[BaseException]]
+        Mapping from public name to the resolved class object.
+    """
+
+    discovered: dict[str, type[BaseException]] = {}
+    for name in dir(errors):
+        obj = getattr(errors, name)
+        if isinstance(obj, type) and issubclass(obj, BaseException):
+            discovered[name] = obj
+    return discovered
+
+
+def test_builtin_lineage_golden_is_closed() -> None:
+    """The lineage golden covers exactly the public error surface.
+
+    A new public exception class cannot ship without a conscious lineage row,
+    and a removed class cannot leave a stale row behind.
+    """
+
+    discovered = set(_public_error_classes())
+    golden = set(BUILTIN_LINEAGE_GOLDEN)
+
+    assert discovered - golden == set(), (
+        "public error classes missing a builtin-lineage golden row: "
+        f"{sorted(discovered - golden)}"
+    )
+    assert golden - discovered == set(), (
+        f"stale builtin-lineage golden rows: {sorted(golden - discovered)}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("class_name", "expected_builtins"),
+    sorted(BUILTIN_LINEAGE_GOLDEN.items()),
+)
+def test_builtin_lineage_matches_golden(
+    class_name: str,
+    expected_builtins: tuple[str, ...],
+) -> None:
+    """Every public error class keeps its exact builtin-exception bases.
+
+    This is the regression guard for the r2/r3 reparenting incident class: a
+    lineage flip (e.g. a historically-``TypeError`` door becoming
+    ``ValueError``-based) shows up here as an exact-tuple mismatch.
+    """
+
+    cls = getattr(errors, class_name)
+    actual = tuple(
+        builtin.__name__
+        for builtin in _LINEAGE_PROBE_BUILTINS
+        if issubclass(cls, builtin)
+    )
+
+    assert actual == expected_builtins, (
+        f"{class_name} builtin lineage changed: expected {expected_builtins}, "
+        f"got {actual}. If this reparenting is intentional, update the golden, "
+        "the error-refusal contract doc, and the glossary in the same change."
+    )
+
+
 def _import_exception(class_module: str, class_name: str) -> Any:
     """Import an exception or warning class from a module path.
 
