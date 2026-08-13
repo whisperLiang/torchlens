@@ -50,8 +50,11 @@ from ...utils.introspection import _get_code_qualname, _get_col_offset
 from ._tl import detached_saved_activation_label, get_tensor_label
 from .escape_detection import expected_original_call
 from .tensor_tracking import (
+    _copy_grad_payload,
     _ensure_backward_event_stream,
     _forward_op_count_at_backward_trigger,
+    _should_save_grad_payload,
+    _trace_grad_save_mode,
 )
 
 _BACKWARD_GRAD_FN_REGISTRY: dict[int, weakref.ReferenceType[Any]] = {}
@@ -1962,16 +1965,34 @@ def _make_grad_fn_hook(
                 # Event-only emission: the projection fold is the single writer
                 # of Param._grad_records, so a forced scratch rebuild from the
                 # event spine reconstructs the exact same records.
+                observed_grad = picked[2]
+                memory = int(observed_grad.nelement() * observed_grad.element_size())
+                saved_grad = None
                 with pause_logging():
-                    saved_grad = picked[2].detach().clone()
+                    if _should_save_grad_payload(live_trace, param_address):
+                        save_mode = _trace_grad_save_mode(live_trace)
+                        target_device = (
+                            torch.device("cpu")
+                            if save_mode == "cpu_async"
+                            else observed_grad.device
+                        )
+                        budget = getattr(live_trace, "_save_budget_accountant", None)
+                        reservation = (
+                            None
+                            if budget is None
+                            else budget.admit(param_address, target_device, memory)
+                        )
+                        saved_grad = _copy_grad_payload(observed_grad, save_mode=save_mode)
+                        if budget is not None:
+                            budget.commit(reservation, (saved_grad,))
                 events.append_backward(
                     ParamGradObserved(
                         param_address=param_address,
                         pass_index=pass_index,
                         payload_ref=saved_grad,
-                        shape=tuple(saved_grad.shape),
-                        dtype=str(saved_grad.dtype),
-                        memory=int(saved_grad.nelement() * saved_grad.element_size()),
+                        shape=tuple(observed_grad.shape),
+                        dtype=str(observed_grad.dtype),
+                        memory=memory,
                         timestamp=event_timestamp,
                     )
                 )

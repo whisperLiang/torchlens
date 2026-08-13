@@ -512,6 +512,33 @@ def test_param_gradients_enter_the_backward_event_stream() -> None:
         assert event.seq > 0
 
 
+def test_param_gradient_payloads_honor_per_call_retention_policy() -> None:
+    """Per-call ``save_grads=False`` keeps param-grad facts but drops payloads."""
+    from torchlens.ir.events import ParamGradObserved
+
+    _model, _x, trace = _logged_model()
+    trace.log_backward(_output_loss(trace), save_grads=False)
+
+    param_events = [
+        event for event in trace.backward_events if isinstance(event, ParamGradObserved)
+    ]
+    assert param_events
+    assert all(event.payload_ref is None for event in param_events)
+    assert all(record.grad is None for param in trace.param_logs.values() for record in param.grads)
+
+
+def test_param_gradient_payloads_use_trace_save_mode() -> None:
+    """Parameter gradients route through the shared save-mode copy chokepoint."""
+    _model, _x, trace = _logged_model()
+    trace.save_mode = "reference"
+    trace.log_backward(_output_loss(trace))
+
+    payloads = [record.grad for param in trace.param_logs.values() for record in param.grads]
+    assert payloads
+    assert all(payload is not None for payload in payloads)
+    assert all(payload.grad_fn is None for payload in payloads)
+
+
 @pytest.mark.smoke
 def test_replay_fork_does_not_inherit_gradient_state() -> None:
     """A replay fork starts with no captured gradient state; the source keeps its own."""
