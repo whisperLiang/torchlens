@@ -179,6 +179,22 @@ class StopDirective:
             "TorchLens capture stopped at first non-finite tensor: "
             f"op={func_name!r}, layer={raw_label!r}, shape={shape}, dtype={dtype}."
         )
+        # Structural marker for settle-time classification (and the F6 latch):
+        # the settlement authority reads it to settle ABORTED_NONFINITE instead
+        # of generic FAILED, and the boundary checkpoint uses it to detect a
+        # swallowed abort. Set via the process-level active-trace slot because
+        # this frozen directive has no back-reference by design.
+        from .. import _state
+        from .outcome import StopRequest
+
+        active_trace = _state._active_trace
+        if active_trace is not None:
+            active_trace.__dict__["_stop_requested"] = StopRequest(
+                kind="nonfinite",
+                reason=message,
+                boundary_kind="op",
+                boundary_label=raw_label,
+            )
         file_path, line_no = _live_user_location()
         raise CaptureError(
             message,

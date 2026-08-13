@@ -225,22 +225,18 @@ def test_halted_trace_basic_shape() -> None:
     assert trace.halt_frontier == trace.halt_reason
 
 
-def test_halted_trace_analysis_save_currently_refuses() -> None:
-    """CURRENT BEHAVIOR: halted traces cannot be saved as analysis bundles.
+def test_halted_trace_has_no_transient_attribution_leak() -> None:
+    """FLIPPED (P2): the halted finalizer pops the transient attribution list.
 
-    The halted finalizer never pops the transient
-    ``_output_attribution_input_tensors``, so ``tl.save`` refuses with the
-    PORTABLE_STATE_SPEC completeness error. The settlement phase (P2) fixes
-    the transient leak; the capability table then allows HALTED analysis
-    saves, flipping this pin.
+    The P0 characterization pinned the leak (an unpopped
+    ``_output_attribution_input_tensors`` refused every halted ``tl.save``
+    via PORTABLE_STATE_SPEC); the settlement phase fixed it so the halted
+    finalizer mirrors the completed paths. The positive save round-trip
+    lives in test_capture_settlement.py.
     """
 
-    from torchlens.errors import TorchLensIOError
-
     trace = tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=_halt_on_relu)
-    assert "_output_attribution_input_tensors" in trace.__dict__
-    with pytest.raises(TorchLensIOError, match="_output_attribution_input_tensors"):
-        tl.save(trace, "/tmp/tl_p0_halted_analysis.tlspec", overwrite=True)
+    assert "_output_attribution_input_tensors" not in trace.__dict__
 
 
 def test_halted_trace_refresh_currently_raises_graph_changed() -> None:

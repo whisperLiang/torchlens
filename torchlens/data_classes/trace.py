@@ -1102,6 +1102,14 @@ class Trace(
         # diagnostics never mistake a cooked projection for a live exhaustive
         # capture. Session-only; not a portable fact.
         "_cooked_from": FieldPolicy.DROP,
+        # Settlement-authority sidecars (torchlens/capture/outcome.py). The
+        # outcome record becomes a KEEP schema field in the persistence phase
+        # of the early-stopping unification; the phase marker and stop-request
+        # latch are strictly session-transient.
+        "_capture_outcome": FieldPolicy.DROP,
+        "_capture_phase": FieldPolicy.DROP,
+        "_settlement_ops_committed": FieldPolicy.DROP,
+        "_stop_requested": FieldPolicy.DROP,
         "_paddle_capture_depth": FieldPolicy.DROP,
         "_paddle_op_captures": FieldPolicy.DROP,
         "_paddle_alias_annotations": FieldPolicy.DROP,
@@ -2204,6 +2212,24 @@ class Trace(
         called = set(getattr(self._module_logs, "_dict", {}).keys())
         called.update(getattr(self._module_logs, "_alias_dict", {}).keys())
         return _CallableList(sorted(registered - called))
+
+    @property
+    def outcome(self) -> Any | None:
+        """Return the settled capture outcome for this trace, when one exists.
+
+        Returns
+        -------
+        CaptureOutcome | None
+            The settlement authority's typed record: an attested settle stamp
+            for live products, an adopted or lattice-derived record for loaded
+            artifacts (load derivation writes the sidecar), or ``None`` on a
+            live trace that has not settled yet (the documented pre-settlement
+            state; capability gates independently treat it as UNKNOWN).
+        """
+
+        from ..capture.outcome import outcome_for
+
+        return outcome_for(self)
 
     @property
     def model_cls(self) -> type[Any] | None:

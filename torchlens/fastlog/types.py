@@ -806,6 +806,23 @@ class Recording(CapturedRun):
             halt_output_addresses,
         )
 
+        # Settle at the cook seam (settlement authority path 9): the cooked
+        # Trace is a real product and must carry an attested outcome; a halted
+        # cooked trace is HALTED (so the runnable/live-replay gates see it),
+        # never a silently-blessed complete. The frontier label is read back
+        # post-postprocess so it is the FINAL remapped label.
+        from ..capture.outcome import stamp_cooked
+
+        cooked_frontier = None
+        if self.halted:
+            output_labels = list(getattr(trace, "output_layers", ()))
+            cooked_frontier = str(output_labels[0]) if output_labels else None
+        stamp_cooked(
+            trace,
+            halted=self.halted,
+            reason=self.halt_reason,
+            frontier_label=cooked_frontier,
+        )
         return trace
 
     def _recover_halt_frontier(self) -> "tuple[str, torch.Tensor]":

@@ -639,6 +639,303 @@ def classify_failure_origin(exc: BaseException) -> FailureOrigin:
     return FailureOrigin.UNKNOWN
 
 
+# ---------------------------------------------------------------------------
+# Settlement: the ONE exception-safe termination protocol
+# ---------------------------------------------------------------------------
+
+_TERMINAL_STATE_FOR_STATUS: dict[CaptureStatus, str] = {
+    CaptureStatus.COMPLETE: "complete",
+    CaptureStatus.HALTED: "halted",
+    CaptureStatus.ABORTED_NONFINITE: "failed",
+    CaptureStatus.FAILED: "failed",
+    CaptureStatus.UNATTESTED: "failed",
+    CaptureStatus.UNKNOWN: "failed",
+}
+
+
+def set_capture_phase(trace: object, phase: CapturePhase) -> None:
+    """Advance the transient settlement phase marker for one capture run.
+
+    Leaving FORWARD also caches the committed-op count: postprocess later pops
+    and releases the event stream, so a tail failure's settlement stamp would
+    otherwise read an empty working projection instead of the real count.
+    """
+
+    trace.__dict__["_capture_phase"] = phase
+    if phase in (CapturePhase.FINALIZE, CapturePhase.POSTPROCESS):
+        live_count = _count_live_committed_ops(trace)
+        if live_count is not None:
+            trace.__dict__["_settlement_ops_committed"] = live_count
+
+
+def current_capture_phase(trace: object) -> CapturePhase:
+    """Return the current settlement phase marker (FORWARD before any update)."""
+
+    phase = trace.__dict__.get("_capture_phase")
+    return phase if isinstance(phase, CapturePhase) else CapturePhase.FORWARD
+
+
+def _count_live_committed_ops(trace: object) -> int | None:
+    """Count op-kind lane entries on the live event stream, fail-soft."""
+
+    events = trace.__dict__.get("capture_events") or trace.__dict__.get("_capture_events")
+    if events is None:
+        return None
+    try:
+        count = 0
+        for event in getattr(events, "op_events", ()):
+            record_context = getattr(event, "record_context", None)
+            if record_context is None or getattr(record_context, "kind", None) == "op":
+                count += 1
+        return count
+    except Exception:
+        return None
+
+
+def count_committed_ops(trace: object) -> int | None:
+    """Return the committed op-kind entry count for settlement stamps.
+
+    Exhaustive op records carry no ``record_context`` (all op-kind by
+    construction); fastlog-projected events are filtered on
+    ``record_context.kind == "op"``. A live nonzero count wins; a released or
+    already-popped stream falls back to the phase-transition cache.
+    """
+
+    live = _count_live_committed_ops(trace)
+    if live:
+        return live
+    cached = trace.__dict__.get("_settlement_ops_committed")
+    if isinstance(cached, int):
+        return cached
+    return live
+
+
+def _stamp(trace: object, session: object, outcome: CaptureOutcome) -> CaptureOutcome:
+    """Write one settled outcome to both homes and perform the one transition.
+
+    The trace sidecar is rebound unconditionally (settle and demotion are the
+    only writers); the session transition runs only when the session has not
+    already reached its first terminal state (``TerminalState`` is the
+    first-transition log and stays monotonic).
+    """
+
+    trace.__dict__["_capture_outcome"] = outcome
+    trace.__dict__.pop("_capture_phase", None)
+    trace.__dict__.pop("_settlement_ops_committed", None)
+    if session is not None and getattr(session, "outcome", None) is None:
+        session.transition(
+            _TERMINAL_STATE_FOR_STATUS[outcome.status],
+            capture_outcome=outcome,
+        )
+    return outcome
+
+
+def settle_completed(trace: object, session: object) -> CaptureOutcome:
+    """Settle one successfully completed capture (paths 1-2)."""
+
+    return _stamp(
+        trace,
+        session,
+        CaptureOutcome(
+            status=CaptureStatus.COMPLETE,
+            n_ops_committed=count_committed_ops(trace),
+            inference_only=bool(getattr(trace, "inference_only", False)),
+        ),
+    )
+
+
+def settle_halted(
+    trace: object,
+    session: object,
+    halt_exc: BaseException,
+    *,
+    finalize_partial: bool,
+    postprocess_ran: bool,
+) -> CaptureOutcome:
+    """Settle one halted capture (paths 3-4), attested.
+
+    Frontier labels come from the post-postprocess ``output_layers`` when the
+    halted postprocess ran (final labels); otherwise the raw boundary label is
+    the only honest frontier fact and ``frontier_labels`` stays ``None``.
+    """
+
+    frontier: tuple[str, ...] | None = None
+    reason = getattr(halt_exc, "reason", None)
+    if finalize_partial and postprocess_ran:
+        try:
+            frontier = tuple(str(label) for label in getattr(trace, "output_layers", ()))
+        except Exception:
+            frontier = None
+        # The labeling remap rewrote the persisted halt fields to FINAL labels
+        # during the halted postprocess; the settled record mirrors them so
+        # the boundary resolves through ``trace[...]`` on the finished product.
+        remapped = getattr(trace, "halt_reason", None)
+        if isinstance(remapped, str):
+            reason = remapped
+    return _stamp(
+        trace,
+        session,
+        CaptureOutcome(
+            status=CaptureStatus.HALTED,
+            reason=reason if isinstance(reason, str) else None,
+            boundary_kind=getattr(halt_exc, "boundary_kind", None),
+            boundary_label=getattr(halt_exc, "boundary_label", None)
+            or (reason if isinstance(reason, str) else None),
+            frontier_labels=frontier,
+            n_ops_committed=count_committed_ops(trace),
+            inference_only=bool(getattr(trace, "inference_only", False)),
+        ),
+    )
+
+
+def settle_failed(
+    trace: object,
+    session: object,
+    exc: BaseException,
+    *,
+    interrupted: bool = False,
+    settlement_note: str | None = None,
+    n_ops_committed: int | None = None,
+) -> CaptureOutcome:
+    """Settle one failed capture (paths 5-6, 8; halted-secondary via note).
+
+    A latched nonfinite stop request (the ``raise_nonfinite`` structural
+    marker) classifies ABORTED_NONFINITE when the terminal exception is the
+    nonfinite ``CaptureError`` itself; everything else is FAILED with phase
+    and diagnostic origin attribution.
+    """
+
+    if n_ops_committed is None:
+        n_ops_committed = count_committed_ops(trace)
+    stop_request = trace.__dict__.get("_stop_requested")
+    if (
+        isinstance(stop_request, StopRequest)
+        and stop_request.kind == "nonfinite"
+        and isinstance(exc, CaptureError)
+        and not interrupted
+    ):
+        return _stamp(
+            trace,
+            session,
+            CaptureOutcome(
+                status=CaptureStatus.ABORTED_NONFINITE,
+                reason=stop_request.reason,
+                boundary_kind=stop_request.boundary_kind,
+                boundary_label=stop_request.boundary_label,
+                n_ops_committed=n_ops_committed,
+                inference_only=bool(getattr(trace, "inference_only", False)),
+                settlement_note=settlement_note,
+            ),
+        )
+    origin = (
+        FailureOrigin.INTERRUPT if interrupted else classify_failure_origin(exc)
+    )
+    return _stamp(
+        trace,
+        session,
+        CaptureOutcome(
+            status=CaptureStatus.FAILED,
+            phase=current_capture_phase(trace),
+            origin=origin,
+            reason=str(exc) or type(exc).__name__,
+            error_type=type(exc).__name__,
+            n_ops_committed=n_ops_committed,
+            inference_only=bool(getattr(trace, "inference_only", False)),
+            settlement_note=settlement_note,
+        ),
+    )
+
+
+def demote_outcome(trace: object, session: object, *, note: str) -> CaptureOutcome | None:
+    """Demote an already-settled outcome after a post-settlement teardown failure.
+
+    The sole sanctioned post-settlement writer: permitted transitions are
+    downgrades only (COMPLETE/HALTED -> FAILED/TEARDOWN). Atomically REPLACES
+    the frozen record in both homes (trace sidecar and the session outcome's
+    record slot); the session's ``TerminalState`` first-transition log is
+    never revised. Anything already FAILED/ABORTED stays as settled.
+    """
+
+    settled = outcome_for(trace)
+    if settled is None or settled.status not in (
+        CaptureStatus.COMPLETE,
+        CaptureStatus.HALTED,
+    ):
+        return None
+    demoted = CaptureOutcome(
+        status=CaptureStatus.FAILED,
+        phase=CapturePhase.TEARDOWN,
+        origin=FailureOrigin.TORCHLENS,
+        reason=note,
+        error_type=settled.error_type,
+        boundary_kind=settled.boundary_kind,
+        boundary_label=settled.boundary_label,
+        frontier_labels=settled.frontier_labels,
+        n_ops_committed=settled.n_ops_committed,
+        inference_only=settled.inference_only,
+        recovered=settled.recovered,
+        settlement_note=f"demoted_from={settled.status.value}: {note}",
+    )
+    trace.__dict__["_capture_outcome"] = demoted
+    run_outcome = getattr(session, "outcome", None)
+    if run_outcome is not None and getattr(run_outcome, "capture_outcome", None) is not None:
+        from dataclasses import replace as dataclass_replace
+
+        session.outcome = dataclass_replace(run_outcome, capture_outcome=demoted)
+    return demoted
+
+
+def stamp_cooked(
+    trace: object,
+    *,
+    halted: bool,
+    reason: str | None = None,
+    frontier_label: str | None = None,
+) -> CaptureOutcome:
+    """Settle one Trace cooked from a Recording (path 9), attested."""
+
+    if halted:
+        outcome = CaptureOutcome(
+            status=CaptureStatus.HALTED,
+            reason=reason,
+            boundary_label=reason,
+            frontier_labels=None if frontier_label is None else (frontier_label,),
+            n_ops_committed=count_committed_ops(trace),
+            settlement_note="cooked_from=recording",
+        )
+    else:
+        outcome = CaptureOutcome(
+            status=CaptureStatus.COMPLETE,
+            n_ops_committed=count_committed_ops(trace),
+            settlement_note="cooked_from=recording",
+        )
+    return _stamp(trace, None, outcome)
+
+
+def stamp_backend_finalized(trace: object) -> CaptureOutcome:
+    """Settle one preview-backend capture at its true product boundary (path 20).
+
+    Called as the LAST act of each preview backend's capture entry, after ALL
+    tail work (module attachment, compaction, relation freeze, derived grads,
+    cleanup, depth flood). A failure anywhere between the structural
+    ``_tracing_finished`` write and this stamp is productless: the exception
+    propagates, no stamp exists, and a hypothetical pickle of the escaped
+    object derives UNATTESTED -- never COMPLETE. A backend that ever needs an
+    early stamp must demote through :func:`demote_outcome` on post-stamp
+    teardown failure; premature stamping is closed by rule.
+    """
+
+    return _stamp(
+        trace,
+        None,
+        CaptureOutcome(
+            status=CaptureStatus.COMPLETE,
+            n_ops_committed=count_committed_ops(trace),
+            inference_only=bool(getattr(trace, "inference_only", False)),
+        ),
+    )
+
+
 __all__ = [
     "CAPTURE_OUTCOME_CAPABILITIES",
     "CaptureOutcome",
@@ -650,9 +947,18 @@ __all__ = [
     "StopSignalSwallowedError",
     "attestation_coherent",
     "classify_failure_origin",
+    "count_committed_ops",
+    "current_capture_phase",
+    "demote_outcome",
     "derive_outcome_from_structural_state",
     "outcome_for",
     "parse_outcome_payload",
     "require_capture_capability",
     "resolve_loaded_outcome",
+    "set_capture_phase",
+    "settle_completed",
+    "settle_failed",
+    "settle_halted",
+    "stamp_backend_finalized",
+    "stamp_cooked",
 ]
