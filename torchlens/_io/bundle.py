@@ -517,7 +517,12 @@ def save(
 
         tmp_path.rename(bundle_path)
         if backup_path is not None:
-            _remove_path(backup_path)
+            try:
+                _remove_path(backup_path)
+            except OSError:
+                # The replacement is already installed atomically. A stale backup
+                # is recoverable cleanup debris, not a failed save.
+                pass
     except TorchLensIOError:
         _mark_partial(tmp_path)
         if backup_path is not None and not bundle_path.exists() and backup_path.exists():

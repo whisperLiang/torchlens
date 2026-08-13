@@ -8,6 +8,7 @@ import pickle
 from collections import defaultdict
 from pathlib import Path
 
+import pytest
 import torch
 
 import torchlens as tl
@@ -269,3 +270,26 @@ def test_rehydrated_trace_retains_source_tlspec_version() -> None:
     restored.__setstate__(state)
 
     assert restored.tlspec_version == 6
+
+
+def test_backup_cleanup_failure_does_not_fail_completed_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-swap backup cleanup error cannot turn a successful save into failure."""
+
+    path = tmp_path / "overwrite.tlspec"
+    first = tl.trace(_LinearModel(), torch.ones(1, 2))
+    tl.save(first, path)
+    second = tl.trace(_LinearModel(), torch.full((1, 2), 2.0))
+
+    def fail_cleanup(_path: Path) -> None:
+        """Simulate a filesystem refusal while deleting the stale backup."""
+
+        raise OSError("simulated backup cleanup refusal")
+
+    monkeypatch.setattr("torchlens._io.bundle._remove_path", fail_cleanup)
+    tl.save(second, path, overwrite=True)
+
+    loaded = tl.load(path)
+    assert torch.equal(loaded.output_ops[0].out, second.output_ops[0].out)
