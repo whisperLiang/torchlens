@@ -94,6 +94,7 @@ from .loop_grouping_adapter import (
 )
 from .saved_summary import refresh_saved_module_call_count
 from ._materialize import materialize_from_events
+from . import ast_branches
 from .ast_branches import resolve_var_names
 
 # Historical import surface: the contract artifacts live in _contracts.py
@@ -651,3 +652,9 @@ def postprocess(
         # release already stripped payloads, native handles, and the
         # source_trace backrefs, so this strong edge closes no new cycle.
         self.__dict__["_capture_events"] = capture_events
+    # H2 retention seal: steps 5/11.5 are done with the parsed ASTs; drop the
+    # file cache's hot tier so no capture leaves whole torch-library ASTs
+    # pinned process-wide. Span data and projected calls survive, so lazy
+    # post-capture queries (Op.arg_expressions) stay re-parse-free in the
+    # common case and re-parse from retained source otherwise.
+    ast_branches.release_parsed_asts()

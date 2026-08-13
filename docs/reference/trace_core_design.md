@@ -342,6 +342,24 @@ marginal census (model tail included): 602-op Linear/ReLU stack
 The remaining core-store tail is eager facades/accessors and per-record
 instance dicts — still owned by the on-demand facade slice.
 
+Singleton-label compaction (grind r2 M14 slice, 2026-08-13): per-record
+one-element label lists in the kind tables (param
+`all_addresses`/`all_module_addresses`/`co_parent_params`, module
+`all_addresses`/`call_labels`, module_call `all_addresses`) have distinct
+content per row, so the >=3 pooling threshold never reaches them. The same
+freeze-seam pass now stores the bare str element and registers it in the
+store's `_compacted_singletons` registry; decode is gated on OBJECT
+IDENTITY (`registry[key] is cell_value`), so any later user write
+self-invalidates the entry with no write-path hooks. Reads hydrate a fresh
+one-element list with cache-back (`_FACT` semantics), `items()`/pickle,
+fork views, `detach_record`, and the detached fork fallback all decode, and
+the same in-store alias census guards aliased lists. Disclosed sliver: an
+out-of-contract user write of the EXACT registered str object back into its
+own compacted cell reads as the hydrated list rather than the raw str.
+Census: linear602 102.5 → 99.1 obj/op (core store 45.5 → 42.1). The grind
+r2 AST-cache seal also removed the transformer census elephant
+(`postprocess/ast_branches.py` hot/cold split: 563.9 → 131.9 obj/op).
+
 ### 3.7 Trace decomposition (THE deliverable) and TraceBuildState
 
 M10 as-landed disposition (2026-08-12): `TraceBuildState` is dissolved — its

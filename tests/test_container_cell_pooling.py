@@ -194,3 +194,97 @@ def test_container_pool_key_injectivity() -> None:
     cyclic: list = []
     cyclic.append(cyclic)
     assert key(cyclic) is None
+
+
+def _compacted_counts(trace: tl.Trace) -> dict[str, int]:
+    core = trace.__dict__["_trace_core"]
+    return {kind: len(store._compacted_singletons or {}) for kind, store in core.kind_rows.items()}
+
+
+def test_capture_compacts_singleton_label_lists(stack_trace: tl.Trace) -> None:
+    """A real capture stores singleton label lists as bare registered strs."""
+
+    counts = _compacted_counts(stack_trace)
+    assert counts.get("param", 0) >= 6, counts
+    assert counts.get("module", 0) >= 6, counts
+
+
+def test_singleton_decode_identity_isolation_and_pickle(stack_trace: tl.Trace) -> None:
+    """Reads hydrate one list per row (stable identity, isolated mutation);
+    pickle streams never carry the bare-str encoding."""
+
+    first = stack_trace.params[0]
+    second = stack_trace.params[1]
+    first_list = first.all_addresses
+    assert type(first_list) is list and len(first_list) == 1
+    assert first.all_addresses is first_list
+    first_list.append("mutated")
+    assert "mutated" not in second.all_addresses
+
+    restored = pickle.loads(pickle.dumps(second))
+    assert restored.all_addresses == second.all_addresses
+    assert type(restored.all_addresses) is list
+
+
+def test_singleton_decode_is_identity_gated() -> None:
+    """A user write of a DIFFERENT str object never decodes as a list."""
+
+    torch.manual_seed(0)
+    trace = tl.trace(_Stack(), torch.zeros(1, 4))
+    param = trace.params[2]
+    core = trace.__dict__["_trace_core"]
+    store = core.kind_rows["param"]
+    row = param.__dict__["_tl_row"]
+    fid = store.layout.fid_by_name["all_addresses"]
+    assert store.cell_get(row, fid).__class__ is str
+    plain = "not_the_registered_object"
+    param.all_addresses = plain
+    assert param.all_addresses is plain
+
+    other = trace.params[3]
+    other_row = other.__dict__["_tl_row"]
+    assert store.compacted_singleton(other_row, fid, store.cell_get(other_row, fid)), (
+        "unrelated rows stay compacted"
+    )
+
+
+def test_singleton_fork_isolation_and_detach(stack_trace: tl.Trace) -> None:
+    """Fork decodes into its own overlay; detached records leave with a
+    real list, never the encoding."""
+
+    fork = stack_trace.fork()
+    fork_list = fork.params[4].all_addresses
+    assert type(fork_list) is list
+    fork_list.append("fork_only")
+    assert "fork_only" not in stack_trace.params[4].all_addresses
+
+    from torchlens._trace_core.record_rows import detach_record
+
+    param = stack_trace.params[5]
+    expected = list(param.all_addresses)
+    detach_record(param)
+    detached_store = param.__dict__["_tl_core"]
+    fid = detached_store.layout.fid_by_name["all_addresses"]
+    assert type(detached_store.cell_get(0, fid)) is list
+    assert param.all_addresses == expected
+
+
+def test_singleton_alias_census_refuses_shared_lists() -> None:
+    """A singleton list aliased across two swept cells never compacts."""
+
+    from torchlens._trace_core.op_store import OpRowStore, OpStoreLayout
+
+    layout = OpStoreLayout(("alpha", "beta"))
+    store = OpRowStore(layout)
+    shared = ["one_label"]
+    row = store.new_row()
+    store.cell_set(row, 0, shared)
+    store.cell_set(row, 1, shared)
+    lone = ["other_label"]
+    row_two = store.new_row()
+    store.cell_set(row_two, 0, lone)
+    _pool_container_cells([(store, None)], {})
+    rows = store.rows_building()
+    assert rows[0][0] is shared and rows[0][1] is shared
+    assert rows[1][0] == "other_label"
+    assert store.compacted_singleton(row_two, 0, rows[1][0])

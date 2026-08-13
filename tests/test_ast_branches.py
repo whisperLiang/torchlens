@@ -775,18 +775,42 @@ def helper(y):
 """
 
 
+def _reference_scope_node(path: Path, qualname: str) -> ast.AST:
+    """Re-parse a fixture file and return the named scope's function node.
+
+    Parameters
+    ----------
+    path:
+        Fixture source file.
+    qualname:
+        Scope qualname to look up.
+
+    Returns
+    -------
+    ast.AST
+        The scope's function node from an independent reference parse.
+    """
+
+    module = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    scopes, scope_nodes = ast_branches._collect_scopes(module)
+    for scope, node in zip(scopes, scope_nodes, strict=True):
+        if scope.qualname == qualname:
+            return node
+    raise AssertionError(f"scope {qualname!r} not found in {path}")
+
+
 def test_scope_call_index_matches_a_full_walk_in_order(tmp_path: Path) -> None:
-    """Index every scope call in ``ast.walk`` order with correct span metadata."""
+    """Project every scope call in ``ast.walk`` order with correct span metadata."""
 
     path = _write_source(tmp_path, "call_index_order.py", _CALL_INDEX_SOURCE)
     index = get_file_index(str(path))
     assert index is not None
     scope = next(scope for scope in index.scopes if scope.qualname == "forward")
 
-    entries = index.scope_calls(scope.node)
-    expected = [node for node in ast.walk(scope.node) if isinstance(node, ast.Call)]
+    entries = index.scope_calls(scope)
+    reference_node = _reference_scope_node(path, "forward")
+    expected = [node for node in ast.walk(reference_node) if isinstance(node, ast.Call)]
 
-    assert [id(entry.node) for entry in entries] == [id(node) for node in expected]
     assert [entry.span for entry in entries] == [ast_branches._node_span(node) for node in expected]
     assert [entry.visible_name for entry in entries] == [
         ast_branches._call_visible_name(node) for node in expected
@@ -803,7 +827,8 @@ def test_scope_call_index_is_reused_across_queries(tmp_path: Path) -> None:
     forward_scope = next(scope for scope in index.scopes if scope.qualname == "forward")
     helper_scope = next(scope for scope in index.scopes if scope.qualname == "helper")
 
-    forward_calls = [node for node in ast.walk(forward_scope.node) if isinstance(node, ast.Call)]
+    reference_forward = _reference_scope_node(path, "forward")
+    forward_calls = [node for node in ast.walk(reference_forward) if isinstance(node, ast.Call)]
     assert len(forward_calls) > 3, "Need several call sites to prove reuse."
 
     walks: list[ast.AST] = []
@@ -813,40 +838,49 @@ def test_scope_call_index_is_reused_across_queries(tmp_path: Path) -> None:
         walks.append(node)
         return iter(list(real_walk(node)))
 
-    first_entries = index.scope_calls(forward_scope.node)
-    for call_node in forward_calls:
-        ast_branches._find_candidate_calls(
-            index,
-            forward_scope.node,
-            call_node.lineno,
-            call_node.col_offset,
-            ast_branches._call_visible_name(call_node),
-        )
-    assert walks == [], "The warm index must not re-walk on the first query round."
+    first_entries = index.scope_calls(forward_scope)
+    try:
+        ast.walk = _counting_walk  # type: ignore[assignment]
+        for call_node in forward_calls:
+            ast_branches._find_candidate_calls(
+                index,
+                forward_scope,
+                call_node.lineno,
+                call_node.col_offset,
+                ast_branches._call_visible_name(call_node),
+            )
+        assert walks == [], "The warm index must not re-walk on the first query round."
+    finally:
+        ast.walk = real_walk  # type: ignore[assignment]
 
     invalidate_cache()
     cold_index = get_file_index(str(path))
     assert cold_index is not None
     cold_forward = next(scope for scope in cold_index.scopes if scope.qualname == "forward")
     cold_helper = next(scope for scope in cold_index.scopes if scope.qualname == "helper")
+    cold_heavy = cold_index._heavy
+    assert cold_heavy is not None
 
     try:
         ast.walk = _counting_walk  # type: ignore[assignment]
         for call_node in forward_calls:
             ast_branches._find_candidate_calls(
                 cold_index,
-                cold_forward.node,
+                cold_forward,
                 call_node.lineno,
                 call_node.col_offset,
                 ast_branches._call_visible_name(call_node),
             )
-        assert walks == [cold_forward.node]
-        ast_branches._find_candidate_calls(cold_index, cold_helper.node, 1, 0, None)
-        assert walks == [cold_forward.node, cold_helper.node]
+        assert walks == [cold_heavy.scope_nodes[cold_forward.index]]
+        ast_branches._find_candidate_calls(cold_index, cold_helper, 1, 0, None)
+        assert walks == [
+            cold_heavy.scope_nodes[cold_forward.index],
+            cold_heavy.scope_nodes[cold_helper.index],
+        ]
     finally:
         ast.walk = real_walk  # type: ignore[assignment]
 
-    assert index.scope_calls(forward_scope.node) is first_entries
+    assert index.scope_calls(forward_scope) is first_entries
     assert helper_scope is not None
 
 
@@ -859,7 +893,8 @@ def test_scope_call_index_matches_naive_rewalk_at_every_call_site(tmp_path: Path
 
     checked = 0
     for scope in index.scopes:
-        call_nodes = [node for node in ast.walk(scope.node) if isinstance(node, ast.Call)]
+        reference_node = _reference_scope_node(path, scope.qualname)
+        call_nodes = [node for node in ast.walk(reference_node) if isinstance(node, ast.Call)]
         queries: list[Tuple[int, Optional[int], Optional[str]]] = []
         for call_node in call_nodes:
             visible_name = ast_branches._call_visible_name(call_node)
@@ -870,9 +905,14 @@ def test_scope_call_index_matches_naive_rewalk_at_every_call_site(tmp_path: Path
             queries.append((call_node.lineno, call_node.col_offset, "not_a_real_callee"))
             queries.append((call_node.end_lineno or call_node.lineno, 0, visible_name))
         for line, col, func_name in queries:
-            indexed = ast_branches._find_candidate_calls(index, scope.node, line, col, func_name)
-            naive = _naive_candidate_calls(scope.node, line, col, func_name)
-            assert [id(node) for node in indexed] == [id(node) for node in naive]
+            indexed = ast_branches._find_candidate_calls(index, scope, line, col, func_name)
+            naive = _naive_candidate_calls(reference_node, line, col, func_name)
+            assert [entry.span for entry in indexed] == [
+                ast_branches._node_span(node) for node in naive
+            ]
+            assert [entry.visible_name for entry in indexed] == [
+                ast_branches._call_visible_name(node) for node in naive
+            ]
             checked += 1
 
     assert checked > 50, "Equivalence sweep must cover every fixture call site."
@@ -893,7 +933,7 @@ def test_scope_call_index_is_rebuilt_after_source_changes(tmp_path: Path) -> Non
     first_index = get_file_index(str(path))
     assert first_index is not None
     first_scope = next(scope for scope in first_index.scopes if scope.qualname == "forward")
-    assert [entry.visible_name for entry in first_index.scope_calls(first_scope.node)] == ["relu"]
+    assert [entry.visible_name for entry in first_index.scope_calls(first_scope)] == ["relu"]
 
     path.write_text(
         dedent(
@@ -912,7 +952,7 @@ def test_scope_call_index_is_rebuilt_after_source_changes(tmp_path: Path) -> Non
     assert second_index is not None
     assert second_index is not first_index
     second_scope = next(scope for scope in second_index.scopes if scope.qualname == "forward")
-    assert [entry.visible_name for entry in second_index.scope_calls(second_scope.node)] == [
+    assert [entry.visible_name for entry in second_index.scope_calls(second_scope)] == [
         "sigmoid",
         "abs",
     ]
@@ -952,3 +992,187 @@ def test_resolved_var_names_survive_repeated_scope_queries(tmp_path: Path) -> No
     assert ast_branches.resolve_arg_expressions([hidden_frame], "relu") == ["self.fc1(x)"]
     assert ast_branches.resolve_arg_expressions([hidden_frame], "relu") == ["self.fc1(x)"]
     assert ast_branches.resolve_var_names([tie_frame], "add") == []
+
+
+def _cached_index_retains_ast_nodes(index: ast_branches.FileIndex) -> bool:
+    """Return whether any ``ast.AST`` object is reachable from a cached index.
+
+    Parameters
+    ----------
+    index:
+        Cached file index to sweep.
+
+    Returns
+    -------
+    bool
+        ``True`` when the index's object graph still holds any ast node.
+    """
+
+    seen: set[int] = set()
+    stack: list[object] = [index]
+    while stack:
+        obj = stack.pop()
+        if id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        if isinstance(obj, ast.AST):
+            return True
+        if isinstance(obj, dict):
+            stack.extend(obj.keys())
+            stack.extend(obj.values())
+        elif isinstance(obj, (list, tuple, set, frozenset)):
+            stack.extend(obj)
+        else:
+            for klass in type(obj).__mro__:
+                for slot in getattr(klass, "__slots__", ()):
+                    try:
+                        stack.append(getattr(obj, slot))
+                    except AttributeError:
+                        continue
+            attrs = getattr(obj, "__dict__", None)
+            if isinstance(attrs, dict):
+                stack.append(attrs)
+    return False
+
+
+def _forward_source_frame(path: Path, index: ast_branches.FileIndex, col: bool) -> FuncCallLocation:
+    """Build a source-loading frame at the fixture's ``torch.relu`` call.
+
+    Parameters
+    ----------
+    path:
+        Fixture source file.
+    index:
+        Cached index for the file (supplies the ``forward`` scope identity).
+    col:
+        Whether to carry the column offset (point matching) or drop it.
+
+    Returns
+    -------
+    FuncCallLocation
+        Frame resolving to the ``hidden = torch.relu(...)`` call site.
+    """
+
+    scope = next(scope for scope in index.scopes if scope.qualname == "forward")
+    line, col_offset = _find_token(path.read_text(encoding="utf-8"), "torch.relu")
+    return FuncCallLocation(
+        file=str(path),
+        line_number=line,
+        func_name="forward",
+        code_firstlineno=scope.code_firstlineno,
+        func_qualname=scope.qualname,
+        col_offset=col_offset if col else None,
+        source_loading_enabled=True,
+    )
+
+
+def test_release_parsed_asts_drops_every_ast_node_but_keeps_resolution(tmp_path: Path) -> None:
+    """Release the hot tier; projected resolution answers stay identical."""
+
+    path = _write_source(tmp_path, "release_lifecycle.py", _CALL_INDEX_SOURCE)
+    index = get_file_index(str(path))
+    assert index is not None
+    frame = _forward_source_frame(path, index, col=True)
+
+    before_names = ast_branches.resolve_var_names([frame], "relu")
+    before_args = ast_branches.resolve_arg_expressions([frame], "relu")
+    assert before_names == ["hidden"]
+    assert before_args == ["self.fc1(x)"]
+
+    ast_branches.release_parsed_asts()
+    assert index._heavy is None
+    assert index._source_lines is None
+    assert not _cached_index_retains_ast_nodes(index)
+
+    # Projected scope: identical answers with NO hot tier rebuild needed for
+    # the var-name path; the arg path only re-derives the line split.
+    assert ast_branches.resolve_var_names([frame], "relu") == before_names
+    assert index._heavy is None
+    assert ast_branches.resolve_arg_expressions([frame], "relu") == before_args
+
+
+def test_released_index_reprojects_new_scope_from_retained_source_not_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-parse an unprojected scope from retained source, never the file."""
+
+    path = _write_source(tmp_path, "release_reparse.py", _CALL_INDEX_SOURCE)
+    index = get_file_index(str(path))
+    assert index is not None
+    frame = _forward_source_frame(path, index, col=True)
+    ast_branches.release_parsed_asts()
+    assert index._heavy is None
+
+    def _no_disk_read(filename: str) -> Optional[str]:
+        raise AssertionError("hot-tier rebuild must not read the file from disk")
+
+    monkeypatch.setattr(ast_branches, "_read_source_file", _no_disk_read)
+    assert ast_branches.resolve_var_names([frame], "relu") == ["hidden"]
+    assert index._heavy is not None, "The unprojected scope must rebuild the hot tier."
+
+    # And the rebuilt tier releases again cleanly.
+    ast_branches.release_parsed_asts()
+    assert index._heavy is None
+    assert not _cached_index_retains_ast_nodes(index)
+
+
+def test_released_index_fails_closed_when_retained_source_is_corrupt(tmp_path: Path) -> None:
+    """Refuse resolution (empty, no raise) when the re-parse cannot align."""
+
+    path = _write_source(tmp_path, "release_corrupt.py", _CALL_INDEX_SOURCE)
+    index = get_file_index(str(path))
+    assert index is not None
+    frame = _forward_source_frame(path, index, col=True)
+    ast_branches.release_parsed_asts()
+
+    index.source = "def broken(:"
+    assert ast_branches.resolve_var_names([frame], "relu") == []
+    assert ast_branches.resolve_arg_expressions([frame], "relu") == []
+    assert index._heavy is None
+
+    # Structurally valid but misaligned source also fails closed.
+    index.source = "def other():\n    return 1\n"
+    assert ast_branches.resolve_var_names([frame], "relu") == []
+    assert index._heavy is None
+
+
+def test_classification_and_attribution_never_need_the_hot_tier(tmp_path: Path) -> None:
+    """Answer classify/attribute queries on a released index without re-parsing."""
+
+    path = _write_source(
+        tmp_path,
+        "release_classify.py",
+        """
+        def forward(x):
+            gate = bool(x.sum() > 0)
+            if gate:
+                y = torch.relu(x)
+            else:
+                y = torch.sigmoid(x)
+            return y
+        """,
+    )
+    index = get_file_index(str(path))
+    assert index is not None
+    source = path.read_text(encoding="utf-8")
+    gate_line, gate_col = _find_token(source, "x.sum() > 0")
+    relu_line, relu_col = _find_token(source, "torch.relu")
+    scope = next(scope for scope in index.scopes if scope.qualname == "forward")
+
+    before = classify_bool(str(path), gate_line, gate_col)
+    frame = FuncCallLocation(
+        file=str(path),
+        line_number=relu_line,
+        func_name="forward",
+        code_firstlineno=scope.code_firstlineno,
+        func_qualname=scope.qualname,
+        col_offset=relu_col,
+        source_loading_enabled=True,
+    )
+    before_arms = attribute_op([frame])
+    assert before_arms, "The fixture op must attribute to the taken arm."
+
+    ast_branches.release_parsed_asts()
+    assert classify_bool(str(path), gate_line, gate_col) == before
+    assert attribute_op([frame]) == before_arms
+    assert index._heavy is None, "Span-only queries must not rebuild the hot tier."

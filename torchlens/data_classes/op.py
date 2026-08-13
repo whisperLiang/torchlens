@@ -626,9 +626,7 @@ def _pool_container_cells(
             for fid in fid_list:
                 value = row_cells[fid]
                 cls = value.__class__
-                if not (
-                    cls is dict or cls is list or cls is set or cls is defaultdict
-                ):
+                if not (cls is dict or cls is list or cls is set or cls is defaultdict):
                     continue
                 visited_ids: List[int] = []
                 key = _container_pool_key(value, 0, visited_ids)
@@ -649,6 +647,29 @@ def _pool_container_cells(
         if cell is None:
             cell = container_pool[key] = PooledCell.from_value(value)
         row_cells[fid] = cell
+    # Singleton-label compaction (M14 slice 2, kind tables only): a
+    # one-element list holding exactly one str (per-record label/address
+    # lists — distinct content per row, so PooledCell's >= 3 threshold never
+    # reaches them) stores the bare element, registered on the store so
+    # decode fires only for the exact registered object. Same alias census
+    # as pooling: a list reachable from more than one swept cell never
+    # compacts (breaking its mutation coupling is not sanctioned).
+    for store, rows, fids in swept:
+        if fids is not None:
+            continue
+        n_fields = store.layout.n_fields
+        for row_idx, row_cells in enumerate(rows):
+            for fid in range(n_fields):
+                value = row_cells[fid]
+                if (
+                    value.__class__ is list
+                    and len(value) == 1
+                    and value[0].__class__ is str
+                    and id_counts[id(value)] == 1
+                ):
+                    element = value[0]
+                    row_cells[fid] = element
+                    store.register_compacted_singleton(row_idx, fid, element)
 
 
 def _pool_key(value: Any) -> Any:
@@ -4447,11 +4468,7 @@ class _RelationViewField(_OpField):
         """
 
         store = _CORE_GET(op)
-        if (
-            store.frozen
-            or store.dataflow_edges is not None
-            or store.__class__ is DetachedOpStore
-        ):
+        if store.frozen or store.dataflow_edges is not None or store.__class__ is DetachedOpStore:
             if isinstance(value, (list, set, frozenset, tuple)):
                 if value.__class__ is not self._view_type:
                     value = self._view_type(value)
@@ -4577,16 +4594,12 @@ def _install_op_field_descriptors() -> None:
     """
 
     tuple_view_names = frozenset(OP_TUPLE_VIEW_FIELDS)
-    frozenset_view_names = frozenset(
-        OP_FROZENSET_VIEW_FIELDS + OP_BITSET_VIEW_FIELDS
-    )
+    frozenset_view_names = frozenset(OP_FROZENSET_VIEW_FIELDS + OP_BITSET_VIEW_FIELDS)
     dataflow_names = frozenset(OP_DATAFLOW_FIELDS)
     existing = vars(Op)
     for fid, name in enumerate(_OP_SLOT_NAMES):
         if name in existing:
-            raise RuntimeError(
-                f"Op facade collision: {name!r} is already defined on Op"
-            )
+            raise RuntimeError(f"Op facade collision: {name!r} is already defined on Op")
         if name in dataflow_names:
             descriptor: _OpField = _DataflowField(name, fid, tuple)
         elif name in OP_GROUP_VIEW_FIELDS:

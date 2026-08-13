@@ -136,6 +136,7 @@ class OpRowStore:
 
     __slots__ = (
         "_columns",
+        "_compacted_singletons",
         "_cow_shared",
         "_mutable_keys",
         "_n_rows",
@@ -195,6 +196,15 @@ class OpRowStore:
         # The M7 shared-fact blocks (FunctionCall / ParamAlias group
         # tables), bound by the same freeze-time conversion.
         self.fact_blocks: Any = None
+        # M14 singleton-label compaction registry (kind tables only):
+        # ``row * n_fields + fid -> the exact str object`` the freeze-seam
+        # compaction stored in place of a one-element label list. Decode is
+        # gated on OBJECT IDENTITY (``registry[key] is cell_value``), so a
+        # later user write of any OTHER object to the cell self-invalidates
+        # the entry without write-path hooks; entries are never popped
+        # (identity-guarded stale entries are harmless, and the str is
+        # already retained by the cell/hydrated list, so no extra pinning).
+        self._compacted_singletons: dict[int, str] | None = None
 
     def __len__(self) -> int:
         """Return the number of rows ever appended (removed rows included)."""
@@ -286,11 +296,30 @@ class OpRowStore:
             column.clear(row)
         return True
 
+    def register_compacted_singleton(self, row: int, fid: int, element: str) -> None:
+        """Record one singleton-label compaction (freeze-seam pass only)."""
+
+        registry = self._compacted_singletons
+        if registry is None:
+            registry = self._compacted_singletons = {}
+        registry[row * self.layout.n_fields + fid] = element
+
+    def compacted_singleton(self, row: int, fid: int, value: Any) -> bool:
+        """Return whether ``value`` is the compacted singleton for this cell.
+
+        True only when ``value`` is the EXACT object the compaction pass
+        stored (object identity), so any later cell write self-invalidates.
+        """
+
+        registry = self._compacted_singletons
+        return registry is not None and registry.get(row * self.layout.n_fields + fid) is value
+
     def items(self, row: int) -> Iterator[tuple[str, Any]]:
         """Yield ``(field_name, value)`` for every set cell in layout order.
 
-        ``PooledCell`` cells hydrate to a fresh equal container (state
-        streams must never carry the internal pooled encoding); the cell
+        ``PooledCell`` cells hydrate to a fresh equal container, and
+        compacted singleton-label cells decode to a fresh one-element list
+        (state streams must never carry either internal encoding); the cell
         itself is left untouched — pickling a record must not materialize
         its containers.
         """
@@ -301,6 +330,8 @@ class OpRowStore:
             if value is not _MISSING:
                 if value.__class__ is PooledCell:
                     value = value.hydrate()
+                elif value.__class__ is str and self.compacted_singleton(row, fid, value):
+                    value = [value]
                 yield name, value
 
     def retained_bytes(self) -> int:
@@ -389,9 +420,7 @@ def _freeze_column(column_values: list[Any]) -> _FrozenColumn:
             any_missing = True
             break
     if any_missing:
-        present = bytearray(
-            0 if value is _MISSING else 1 for value in column_values
-        )
+        present = bytearray(0 if value is _MISSING else 1 for value in column_values)
 
     value_cls: type | None = None
     uniform = True
@@ -560,9 +589,7 @@ def _build_sweep_plan(store: "OpRowStore") -> tuple[Any, ...]:
                     alloc_keys.append(row * n_fields + fid)
                     alloc_classes.append(cls)
                     alloc_values.append(value)
-            elif (cls is tuple or cls is frozenset) and _contains_mutable_container(
-                value
-            ):
+            elif (cls is tuple or cls is frozenset) and _contains_mutable_container(value):
                 copy_keys.append(row * n_fields + fid)
                 copy_values.append(value)
                 copy_deep.append(1)
@@ -901,9 +928,7 @@ class _AuditedOpRowStore(OpRowStore):
         """
 
         collector = _AUDIT_COLLECTORS.get(id(self))
-        if collector is not None and row not in _AUDIT_ROW_RELEASES.get(
-            id(self), _NO_RELEASES
-        ):
+        if collector is not None and row not in _AUDIT_ROW_RELEASES.get(id(self), _NO_RELEASES):
             collector.add(fid)
         return OpRowStore.cell_del(self, row, fid)
 
@@ -976,9 +1001,7 @@ class _CombinedAuditOpRowStore(OpRowStore):
             collector = _AUDIT_CLONE_READS.get(store_id)
         else:
             collector = _AUDIT_READS.get(store_id)
-        if collector is not None and row not in _AUDIT_ROW_RELEASES.get(
-            store_id, _NO_RELEASES
-        ):
+        if collector is not None and row not in _AUDIT_ROW_RELEASES.get(store_id, _NO_RELEASES):
             collector.add(fid)
         return OpRowStore.cell_get(self, row, fid)
 
@@ -1006,9 +1029,7 @@ class _CombinedAuditOpRowStore(OpRowStore):
 
         store_id = id(self)
         collector = _AUDIT_COLLECTORS.get(store_id)
-        if collector is not None and row not in _AUDIT_ROW_RELEASES.get(
-            store_id, _NO_RELEASES
-        ):
+        if collector is not None and row not in _AUDIT_ROW_RELEASES.get(store_id, _NO_RELEASES):
             collector.add(fid)
             result = OpRowStore.cell_del(self, row, fid)
             if result:
@@ -1085,9 +1106,7 @@ def begin_cell_write_audit(store: OpRowStore, *, record_reads: bool = False) -> 
         _AUDIT_CLONE_READS.setdefault(id(store), set())
         _AUDIT_WRITE_EFFECTS.setdefault(id(store), set())
     if store.__class__ is OpRowStore:
-        store.__class__ = (
-            _CombinedAuditOpRowStore if record_reads else _AuditedOpRowStore
-        )
+        store.__class__ = _CombinedAuditOpRowStore if record_reads else _AuditedOpRowStore
 
 
 def end_cell_write_audit(store: OpRowStore) -> StepAuditResult:
@@ -1133,9 +1152,7 @@ def end_cell_write_audit(store: OpRowStore) -> StepAuditResult:
                 # columns; effects tracking additionally diffs intercepted-
                 # but-not-yet-effective columns so an in-place mutation
                 # behind a no-op rebind still reads as content-effective.
-                if fid in observed and (
-                    tracked_effects is None or fid in effects
-                ):
+                if fid in observed and (tracked_effects is None or fid in effects):
                     continue
                 if _cell_content_fingerprint(value) != baseline.get(base + fid):
                     observed.add(fid)
@@ -1221,6 +1238,15 @@ class DetachedOpStore:
             if value is not _MISSING:
                 yield name, value
 
+    def compacted_singleton(self, row: int, fid: int, value: Any) -> bool:
+        """Return ``False``: detached rows carry no compaction registry.
+
+        ``detach_record`` decodes compacted singleton-label cells while
+        copying, so a detached row never holds the internal encoding.
+        """
+
+        return False
+
     def retained_bytes(self) -> int:
         """Return shallow structural bytes retained by this store."""
 
@@ -1230,9 +1256,7 @@ class DetachedOpStore:
 
 
 #: Exact types returned uncopied (and untranslated) by the COW copier.
-_COW_ATOMIC = frozenset(
-    {str, int, float, bool, bytes, complex, type(None)}
-)
+_COW_ATOMIC = frozenset({str, int, float, bool, bytes, complex, type(None)})
 
 
 def cow_copy_value(value: Any, translate: Callable[[Any], Any] | None) -> Any:
@@ -1286,9 +1310,7 @@ class _ViewFactBlocks:
     def hydrate(self, row: int, name: str) -> Any:
         """Hydrate one shared fact, translating record members for the fork."""
 
-        return cow_copy_value(
-            self._base.hydrate(row, name), self._view.record_translator
-        )
+        return cow_copy_value(self._base.hydrate(row, name), self._view.record_translator)
 
 
 class OpStoreView:
@@ -1497,11 +1519,23 @@ class OpStoreView:
         self._overlay[row * self.base.layout.n_fields + fid] = _MISSING
         return True
 
+    def compacted_singleton(self, row: int, fid: int, value: Any) -> bool:
+        """Delegate to the base registry (identity keeps view writes exact).
+
+        A fork write lands in the view overlay as a DIFFERENT object, so the
+        base's identity check already refuses it; a fork-side decode caches
+        its hydrated list into the view overlay, leaving the parent's
+        compacted cell untouched.
+        """
+
+        return self.base.compacted_singleton(row, fid, value)
+
     def items(self, row: int) -> Iterator[tuple[str, Any]]:
         """Yield ``(field_name, value)`` for every set cell in layout order.
 
-        ``PooledCell`` cells hydrate fresh (never the internal encoding),
-        matching the base-store ``items`` contract.
+        ``PooledCell`` cells hydrate fresh and compacted singleton-label
+        cells decode fresh (never the internal encoding), matching the
+        base-store ``items`` contract.
         """
 
         names = self.base.layout.names
@@ -1510,6 +1544,8 @@ class OpStoreView:
             if value is not _MISSING:
                 if value.__class__ is PooledCell:
                     value = value.hydrate()
+                elif value.__class__ is str and self.compacted_singleton(row, fid, value):
+                    value = [value]
                 yield name, value
 
     def isolate_mutable_cells(self) -> None:
@@ -1569,9 +1605,7 @@ class OpStoreView:
             if key in overlay or key in base_overlay:
                 continue
             overlay[key] = (
-                cow_copy_value(value, translate)
-                if deep
-                else _eager_copy(value, translate)
+                cow_copy_value(value, translate) if deep else _eager_copy(value, translate)
             )
 
     def retained_bytes(self) -> int:
