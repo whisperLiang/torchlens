@@ -512,6 +512,189 @@ def test_param_gradients_enter_the_backward_event_stream() -> None:
         assert event.seq > 0
 
 
+def test_param_gradient_payloads_honor_per_call_retention_policy() -> None:
+    """Per-call ``save_grads=False`` keeps param-grad facts but drops payloads."""
+    from torchlens.ir.events import ParamGradObserved
+
+    _model, _x, trace = _logged_model()
+    trace.log_backward(_output_loss(trace), save_grads=False)
+
+    param_events = [
+        event for event in trace.backward_events if isinstance(event, ParamGradObserved)
+    ]
+    assert param_events
+    assert all(event.payload_ref is None for event in param_events)
+    assert all(record.grad is None for param in trace.param_logs.values() for record in param.grads)
+
+
+def test_param_gradient_payloads_use_trace_save_mode() -> None:
+    """Parameter gradients route through the shared save-mode copy chokepoint."""
+    _model, _x, trace = _logged_model()
+    trace.save_mode = "reference"
+    trace.log_backward(_output_loss(trace))
+
+    payloads = [record.grad for param in trace.param_logs.values() for record in param.grads]
+    assert payloads
+    assert all(payload is not None for payload in payloads)
+    assert all(payload.grad_fn is None for payload in payloads)
+
+
+def test_grad_fn_event_payloads_are_detached_snapshots() -> None:
+    """Projection rebuild never exposes graph-connected autograd hook buffers."""
+    _model, _x, trace = _logged_model()
+    trace.log_backward(_output_loss(trace), create_graph=True)
+
+    tensors = [
+        tensor
+        for grad_fn in trace.grad_fns
+        for call in grad_fn.calls.values()
+        for payload in (call.grad_inputs, call.grad_outputs)
+        for tensor in (payload or ())
+        if isinstance(tensor, torch.Tensor)
+    ]
+    assert tensors
+    assert all(tensor.grad_fn is None for tensor in tensors)
+
+
+def test_per_call_grad_policy_does_not_mutate_trace_selection() -> None:
+    """A backward call keeps the capture-time gradient selection unchanged."""
+    _model, _x, trace = _logged_model(save_grads=None)
+    selection_before = trace._grad_op_nums_to_save
+
+    trace.log_backward(_output_loss(trace), save_grads=False)
+
+    assert trace._grad_op_nums_to_save == selection_before
+    assert all(
+        call.grad_inputs is None and call.grad_outputs is None
+        for grad_fn in trace.grad_fns
+        for call in grad_fn.calls.values()
+    )
+
+
+@pytest.mark.parametrize(
+    "failure_site",
+    ["_clear_forward_grad_fn_refs", "_rewalk_higher_order_grad_fns"],
+)
+def test_backward_tail_failure_restores_globals_and_closes_journal(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_site: str,
+) -> None:
+    """Tail finalizer failures cannot strand globals or a start-only pass."""
+    from torchlens import _state
+    from torchlens.backends.torch import backward
+    from torchlens.ir.events import BackwardPassEnd
+
+    _model, _x, trace = _logged_model()
+
+    def fail_tail(_trace: tl.Trace) -> None:
+        """Inject one backward-tail failure."""
+        raise RuntimeError(f"injected {failure_site}")
+
+    monkeypatch.setattr(backward, failure_site, fail_tail)
+    with pytest.raises(RuntimeError, match=failure_site):
+        trace.log_backward(_output_loss(trace))
+
+    assert _state._active_trace is None
+    assert _state._active_hook_plan is None
+    assert _state._active_intervention_spec is None
+    assert "_tl_active_backward_bracket" not in trace.__dict__
+    assert "_active_backward_pass_index" not in trace.__dict__
+    assert "_active_save_grads_policy" not in trace.__dict__
+    assert any(isinstance(event, BackwardPassEnd) for event in trace.backward_events)
+
+
+def test_backward_walk_failure_removes_partial_hooks_and_disarms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A BaseException during graph-hook arming removes its registered prefix."""
+    from torchlens import _state
+    from torchlens.backends.torch import backward
+
+    _model, _x, trace = _logged_model()
+
+    class _Handle:
+        """Minimal removable hook-handle probe."""
+
+        removed = False
+
+        def remove(self) -> None:
+            """Record that cleanup reached this partial handle."""
+            self.removed = True
+
+    handle = _Handle()
+
+    def fail_walk(_trace: tl.Trace, _loss: torch.Tensor, handles: list[object]) -> list[object]:
+        """Register one synthetic handle and interrupt graph walking."""
+        handles.append(handle)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(backward, "_walk_and_hook_backward_graph", fail_walk)
+    with pytest.raises(KeyboardInterrupt):
+        trace.log_backward(_output_loss(trace))
+
+    assert handle.removed is True
+    assert trace._tl_backward_triggers_disarmed is True
+    assert _state._active_trace is None
+
+
+@pytest.mark.parametrize("entrypoint", ["log_backward", "recording_backward"])
+def test_backward_entrypoints_finalize_streaming_on_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    """Both backward APIs run the deferred streaming finalizer on failure."""
+    from torchlens.backends.torch import backward
+
+    _model, _x, trace = _logged_model()
+    finalized: list[tl.Trace] = []
+
+    def record_finalize(finalized_trace: tl.Trace) -> None:
+        """Record one streaming-finalizer invocation."""
+        finalized.append(finalized_trace)
+
+    monkeypatch.setattr(backward, "_finalize_grad_streaming", record_finalize)
+    if entrypoint == "log_backward":
+
+        def fail_capture(*_args: object, **_kwargs: object) -> None:
+            """Inject a backward-capture failure."""
+            raise RuntimeError("injected backward failure")
+
+        monkeypatch.setattr(backward, "_run_backward_with_capture", fail_capture)
+        with pytest.raises(RuntimeError, match="injected backward failure"):
+            trace.log_backward(_output_loss(trace))
+    else:
+        with pytest.raises(RuntimeError, match="injected block failure"):
+            with trace.recording_backward():
+                raise RuntimeError("injected block failure")
+
+    assert finalized == [trace]
+
+
+@pytest.mark.slow
+def test_separate_unmanaged_engine_calls_get_separate_implicit_passes() -> None:
+    """Graph-task identity prevents adjacent unmanaged backwards from merging."""
+    from torchlens.backends.torch import backward
+    from torchlens.ir.events import BackwardPassStart
+
+    if not hasattr(torch._C, "_current_graph_task_id"):
+        pytest.skip("torch build does not expose autograd graph-task identity")
+    _model, _x, trace = _logged_model()
+    output = trace[trace.output_layers[0]].out
+    original_backward = backward._ORIGINAL_AUTOGRAD_BACKWARD
+    assert original_backward is not None
+
+    original_backward((output.sum(),), retain_graph=True)
+    original_backward(((output * 2).sum(),))
+    backward._close_implicit_backward_pass_if_open(trace)
+
+    starts = [
+        event
+        for event in trace.backward_events
+        if isinstance(event, BackwardPassStart) and event.implicit
+    ]
+    assert [event.pass_index for event in starts] == [1, 2]
+
+
 @pytest.mark.smoke
 def test_replay_fork_does_not_inherit_gradient_state() -> None:
     """A replay fork starts with no captured gradient state; the source keeps its own."""

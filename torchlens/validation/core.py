@@ -1349,6 +1349,15 @@ def _is_intentional_intervention_replacement(layer: "Op") -> bool:
         and not getattr(layer, "is_internal_source", False)
     ):
         return False
+    has_own_live_replacement = any(
+        getattr(record, "replaced", False)
+        for record in (getattr(layer, "interventions", None) or ())
+    ) or any(
+        getattr(result, "replaced", False)
+        for result in (getattr(layer, "fire_results", None) or ())
+    )
+    if getattr(layer, "func", None) is not None and not has_own_live_replacement:
+        return False
     from .invariants import op_has_genuine_replacement_evidence
 
     return op_has_genuine_replacement_evidence(layer)

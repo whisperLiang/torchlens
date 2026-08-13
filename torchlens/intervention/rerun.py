@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import warnings
+from collections import Counter
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -127,6 +128,7 @@ def run(
             output_transform=output_transform,
         )
     new_log.facet_registry_snapshot = getattr(log, "facet_registry_snapshot", None)
+    hook_fire_count, unfired_hook_ids = _reconcile_rerun_hook_fires(new_log, hook_plan)
 
     divergence_count = _validate_rerun_result(new_log, log, strict=replay_options.strict)
     fast_refresh = False
@@ -149,6 +151,8 @@ def run(
         strict=replay_options.strict,
         divergence_count=divergence_count,
         fast_refresh=fast_refresh,
+        hook_fire_count=hook_fire_count,
+        unfired_hook_count=len(unfired_hook_ids),
     )
     log.state = TraceState.RERUN_PROPAGATED
     log.last_run = {
@@ -160,6 +164,8 @@ def run(
         "strict": replay_options.strict,
         "append": False,
         "hooks": len(hook_plan),
+        "hooks_fired": hook_fire_count,
+        "hooks_unfired": len(unfired_hook_ids),
         "divergence_count": divergence_count,
         "fast_refresh": fast_refresh,
         "old_graph_shape_hash": old_hash,
@@ -323,6 +329,7 @@ def _append_rerun(
             output_transform=getattr(log, "_output_transform", None),
         )
     new_log.facet_registry_snapshot = getattr(log, "facet_registry_snapshot", None)
+    hook_fire_count, unfired_hook_ids = _reconcile_rerun_hook_fires(new_log, hook_plan)
 
     _validate_append_candidate(log, new_log, hook_plan=hook_plan)
     log.append_state_from(new_log)
@@ -344,6 +351,8 @@ def _append_rerun(
         "append": True,
         "strict": False,
         "hooks": len(hook_plan),
+        "hooks_fired": hook_fire_count,
+        "hooks_unfired": len(unfired_hook_ids),
         "chunk_size": chunk_size,
         "total_batch_size": total_batch_size,
         "append_sequence_id": log._append_sequence_id,
@@ -357,6 +366,8 @@ def _append_rerun(
         started_at=started_at,
         duration_s=duration_s,
         hook_count=len(hook_plan),
+        hook_fire_count=hook_fire_count,
+        unfired_hook_count=len(unfired_hook_ids),
         chunk_size=chunk_size,
         total_batch_size=total_batch_size,
         append_sequence_id=log._append_sequence_id,
@@ -1033,6 +1044,8 @@ def _build_ledger_record(
     strict: bool,
     divergence_count: int,
     fast_refresh: bool,
+    hook_fire_count: int,
+    unfired_hook_count: int,
 ) -> dict[str, Any]:
     """Create the append-only operation history record for a rerun.
 
@@ -1058,6 +1071,10 @@ def _build_ledger_record(
         Number of divergence events detected.
     fast_refresh:
         Whether the rerun refreshed existing graph containers in place.
+    hook_fire_count:
+        Number of live hook firings observed on the candidate capture.
+    unfired_hook_count:
+        Number of planned hook entries that fired nowhere.
 
     Returns
     -------
@@ -1072,6 +1089,8 @@ def _build_ledger_record(
         "strict": strict,
         "append": False,
         "hook_count": len(hook_plan),
+        "hook_fire_count": hook_fire_count,
+        "unfired_hook_count": unfired_hook_count,
         "divergence_count": divergence_count,
         "fast_refresh": fast_refresh,
         "old_graph_shape_hash": old_hash,
@@ -1079,6 +1098,75 @@ def _build_ledger_record(
         "old_raw_event_shape_hash": old_raw_hash,
         "new_raw_event_shape_hash": new_raw_hash,
     }
+
+
+def _hook_plan_identifier(entry: NormalizedHookEntry) -> str:
+    """Return the identifier written into a live ``FireResult``.
+
+    Parameters
+    ----------
+    entry:
+        Planned normalized hook entry.
+
+    Returns
+    -------
+    str
+        Plan id using the same fallback order as live execution.
+    """
+
+    if "plan_id" in entry.metadata:
+        return str(entry.metadata["plan_id"])
+    if "hook_id" in entry.metadata:
+        return str(entry.metadata["hook_id"])
+    if entry.helper_spec is not None:
+        return str(entry.helper_spec.name)
+    return str(getattr(entry.normalized_callable, "__qualname__", "user_hook"))
+
+
+def _reconcile_rerun_hook_fires(
+    new_log: Trace,
+    hook_plan: list[NormalizedHookEntry],
+) -> tuple[int, tuple[str, ...]]:
+    """Warn when sticky rerun hook entries fire nowhere on new inputs.
+
+    Parameters
+    ----------
+    new_log:
+        Candidate rerun trace carrying live ``FireResult`` records.
+    hook_plan:
+        Hook entries planned for the rerun.
+
+    Returns
+    -------
+    tuple[int, tuple[str, ...]]
+        Total observed hook fires and the plan identifiers of entries with no
+        corresponding fire, retaining multiplicity for duplicate plans.
+    """
+
+    planned = Counter(_hook_plan_identifier(entry) for entry in hook_plan)
+    fired: Counter[str] = Counter()
+    for op in getattr(new_log, "layer_list", ()):
+        fire_results = tuple(getattr(op, "fire_results", None) or ())
+        if fire_results:
+            fired.update(str(result.plan_id) for result in fire_results)
+            continue
+        fired.update(
+            str(record.helper_name)
+            for record in (getattr(op, "interventions", None) or ())
+            if getattr(record, "direction", None) == "forward"
+            and getattr(record, "helper_name", None) is not None
+        )
+    unfired: list[str] = []
+    for plan_id, planned_count in planned.items():
+        unfired.extend([plan_id] * max(0, planned_count - fired[plan_id]))
+    if unfired:
+        warnings.warn(
+            "Rerun hook plan entries fired at zero sites on the new inputs: "
+            f"{unfired!r}. The rerun completed, but those interventions were no-ops.",
+            UserWarning,
+            stacklevel=3,
+        )
+    return sum(fired.values()), tuple(unfired)
 
 
 def rerun(

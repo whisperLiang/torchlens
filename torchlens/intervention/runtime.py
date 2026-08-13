@@ -1174,6 +1174,7 @@ def _apply_live_backward_hooks(
                 current=current,
             )
         )
+        _record_backward_selector_fire(normalized_entry)
     _append_active_spec_records(fire_records)
     return (current if mutated else None), tuple(fire_records)
 
@@ -1243,8 +1244,28 @@ def _apply_live_backward_prehooks(
                 current=current,
             )
         )
+        _record_backward_selector_fire(normalized_entry)
     _append_active_spec_records(fire_records)
     return (current if mutated else None), tuple(fire_records)
+
+
+def _record_backward_selector_fire(entry: NormalizedHookEntry) -> None:
+    """Increment the deferred zero-match ledger for one backward selector fire.
+
+    Parameters
+    ----------
+    entry:
+        Normalized backward hook entry that matched the live GradFn site.
+    """
+
+    if entry.metadata.get("created_by") != "intervene_backward_selector":
+        return
+    trace = _state._active_trace
+    if trace is None:
+        return
+    trace._tl_intervene_selector_fire_count = int(
+        getattr(trace, "_tl_intervene_selector_fire_count", 0)
+    ) + 1
 
 
 def _validate_grad_tuple(

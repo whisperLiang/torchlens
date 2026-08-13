@@ -50,8 +50,11 @@ from ...utils.introspection import _get_code_qualname, _get_col_offset
 from ._tl import detached_saved_activation_label, get_tensor_label
 from .escape_detection import expected_original_call
 from .tensor_tracking import (
+    _copy_grad_payload,
     _ensure_backward_event_stream,
     _forward_op_count_at_backward_trigger,
+    _should_save_grad_payload,
+    _trace_grad_save_mode,
 )
 
 _BACKWARD_GRAD_FN_REGISTRY: dict[int, weakref.ReferenceType[Any]] = {}
@@ -687,14 +690,7 @@ def _selected_for_grad_save(trace: Any, layer_label: str | None) -> bool:
     bool
         True if this layer is selected by the trace's gradient-retention policy.
     """
-    if layer_label is None:
-        return False
-    selection = getattr(trace, "_grad_op_nums_to_save", "all")
-    if selection == "all":
-        return True
-    if selection in [None, "none", []]:
-        return False
-    return trace.layer_dict_all_keys[layer_label].raw_index in selection
+    return layer_label is not None and _should_save_grad_payload(trace, layer_label)
 
 
 def _sync_grad_fn_graph_relations(trace: Any) -> None:
@@ -1917,6 +1913,9 @@ def _make_grad_fn_hook(
         with pause_logging():
             grad_fn_handle._log_call(stored_grad_inputs, stored_grad_outputs, time.time())
         call_index = len(grad_fn_handle.calls)
+        logged_call = grad_fn_handle.calls[-1]
+        stored_grad_inputs = logged_call.grad_inputs
+        stored_grad_outputs = logged_call.grad_outputs
         events = _ensure_backward_event_stream(live_trace)
         event_timestamp = time.time()
         pass_index = int(
@@ -1962,16 +1961,34 @@ def _make_grad_fn_hook(
                 # Event-only emission: the projection fold is the single writer
                 # of Param._grad_records, so a forced scratch rebuild from the
                 # event spine reconstructs the exact same records.
+                observed_grad = picked[2]
+                memory = int(observed_grad.nelement() * observed_grad.element_size())
+                saved_grad = None
                 with pause_logging():
-                    saved_grad = picked[2].detach().clone()
+                    if _should_save_grad_payload(live_trace, param_address):
+                        save_mode = _trace_grad_save_mode(live_trace)
+                        target_device = (
+                            torch.device("cpu")
+                            if save_mode == "cpu_async"
+                            else observed_grad.device
+                        )
+                        budget = getattr(live_trace, "_save_budget_accountant", None)
+                        reservation = (
+                            None
+                            if budget is None
+                            else budget.admit(param_address, target_device, memory)
+                        )
+                        saved_grad = _copy_grad_payload(observed_grad, save_mode=save_mode)
+                        if budget is not None:
+                            budget.commit(reservation, (saved_grad,))
                 events.append_backward(
                     ParamGradObserved(
                         param_address=param_address,
                         pass_index=pass_index,
                         payload_ref=saved_grad,
-                        shape=tuple(saved_grad.shape),
-                        dtype=str(saved_grad.dtype),
-                        memory=int(saved_grad.nelement() * saved_grad.element_size()),
+                        shape=tuple(observed_grad.shape),
+                        dtype=str(observed_grad.dtype),
+                        memory=memory,
                         timestamp=event_timestamp,
                     )
                 )
@@ -2359,7 +2376,11 @@ def _layer_by_grad_fn_id(trace: Any) -> dict[int, str]:
     return mapping
 
 
-def _walk_and_hook_backward_graph(trace: Any, loss: torch.Tensor) -> list[Any]:
+def _walk_and_hook_backward_graph(
+    trace: Any,
+    loss: torch.Tensor,
+    handles: list[Any] | None = None,
+) -> list[Any]:
     """Walk ``loss.grad_fn`` and register hooks on every reachable grad_fn_handle.
 
     Parameters
@@ -2368,6 +2389,9 @@ def _walk_and_hook_backward_graph(trace: Any, loss: torch.Tensor) -> list[Any]:
         Trace that owns the flat backward fields.
     loss:
         Scalar or tensor loss whose backward graph should be captured.
+    handles:
+        Caller-owned hook-handle list. Passing this list lets the caller
+        remove partially registered hooks when graph walking is interrupted.
 
     Returns
     -------
@@ -2380,7 +2404,8 @@ def _walk_and_hook_backward_graph(trace: Any, loss: torch.Tensor) -> list[Any]:
     layer_lookup = _layer_by_grad_fn_id(trace)
     queue: deque[Any] = deque([loss.grad_fn])
     seen: set[int] = set()
-    handles: list[Any] = []
+    if handles is None:
+        handles = []
     type_counter: dict[str, int] = {}
     source_metadata_by_class: dict[type[Any], dict[str, Any]] = {}
     # Keep strong refs to every discovered grad_fn_handle for the trace's lifetime so
@@ -2827,6 +2852,38 @@ def _clear_forward_grad_fn_refs(trace: Any) -> None:
         layer_log.grad_fn_handle = None
 
 
+def _warn_zero_match_backward_interventions(trace: Any) -> None:
+    """Warn when an armed capture-time backward selector fired nowhere.
+
+    Parameters
+    ----------
+    trace:
+        Trace whose intervention spec and deferred fire counter should be
+        reconciled after a completed backward pass.
+    """
+
+    spec = getattr(trace, "_intervention_spec", None)
+    hook_specs = getattr(spec, "hook_specs", ())
+    selector_hooks = [
+        hook_spec
+        for hook_spec in hook_specs
+        if hook_spec.metadata.get("created_by") == "intervene_backward_selector"
+    ]
+    if not selector_hooks:
+        return
+    try:
+        if int(getattr(trace, "_tl_intervene_selector_fire_count", 0)) == 0:
+            targets = [hook_spec.site_target for hook_spec in selector_hooks]
+            warnings.warn(
+                f"Capture-time backward intervention selector {targets[0]!r} matched zero "
+                "sites; no intervention fired.",
+                UserWarning,
+                stacklevel=3,
+            )
+    finally:
+        trace.__dict__.pop("_tl_intervene_selector_fire_count", None)
+
+
 def _run_backward_with_capture(
     trace: Any,
     loss: torch.Tensor,
@@ -2912,8 +2969,9 @@ def _run_backward_with_capture(
         timestamp=time.time(),
     )
     events.append_backward(start_event)
+    handles: list[Any] = []
     try:
-        handles = _walk_and_hook_backward_graph(trace, loss)
+        _walk_and_hook_backward_graph(trace, loss, handles)
     except BaseException:
         # The graph walk can fail after the start event and global capture
         # state have been installed. Restore the global state so a failed
@@ -2921,6 +2979,18 @@ def _run_backward_with_capture(
         # record: a failed attempted pass is evidence, and it closes with a
         # terminal failed End so the bracket invariant holds exactly (the
         # same convention the engine-failure path below already follows).
+        # Restore process-global and per-pass scratch state before any fallible
+        # cleanup. The graph walk can be interrupted after registering only a
+        # prefix of hooks, so unwind those handles and disarm fail-closed.
+        _state._active_trace = previous_trace
+        _state._active_hook_plan = previous_plan
+        _state._active_intervention_spec = previous_spec
+        trace.__dict__.pop("_tl_active_backward_bracket", None)
+        trace.__dict__.pop("_active_backward_pass_index", None)
+        if previous_had_save_grads_policy:
+            trace.__dict__["_active_save_grads_policy"] = previous_save_grads_policy
+        else:
+            trace.__dict__.pop("_active_save_grads_policy", None)
         events.append_backward(
             BackwardPassEnd(
                 pass_index=pass_index,
@@ -2931,15 +3001,15 @@ def _run_backward_with_capture(
             )
         )
         trace.num_backward_passes = max(int(getattr(trace, "num_backward_passes", 0)), pass_index)
-        _state._active_trace = previous_trace
-        _state._active_hook_plan = previous_plan
-        _state._active_intervention_spec = previous_spec
-        trace.__dict__.pop("_active_backward_pass_index", None)
-        if previous_had_save_grads_policy:
-            trace._active_save_grads_policy = previous_save_grads_policy
-        else:
-            trace.__dict__.pop("_active_save_grads_policy", None)
-        _materialize_backward_projections(trace)
+        for handle in handles:
+            with contextlib.suppress(BaseException):
+                handle.remove()
+        with contextlib.suppress(BaseException):
+            _clear_forward_grad_fn_refs(trace)
+        with contextlib.suppress(BaseException):
+            disarm_triggers(trace)
+        with contextlib.suppress(BaseException):
+            _materialize_backward_projections(trace)
         raise
     backend, before = _reset_peak_memory(loss.device)
     backward_start_time = time.time()
@@ -2956,25 +3026,29 @@ def _run_backward_with_capture(
         status = "error"
         raise
     finally:
-        for handle in handles:
-            with contextlib.suppress(Exception):
-                handle.remove()
-        _clear_forward_grad_fn_refs(trace)
+        # Restore globals and per-pass scratch FIRST. Every operation below is
+        # user/framework code or non-trivial bookkeeping and may raise.
         _state._active_trace = previous_trace
         _state._active_hook_plan = previous_plan
         _state._active_intervention_spec = previous_spec
         trace.__dict__.pop("_tl_active_backward_bracket", None)
-        _backend, after = _memory_snapshot(loss.device)
-        peak_delta = max(0, after - before)
+        trace.__dict__.pop("_active_backward_pass_index", None)
+        if previous_had_save_grads_policy:
+            trace.__dict__["_active_save_grads_policy"] = previous_save_grads_policy
+        else:
+            trace.__dict__.pop("_active_save_grads_policy", None)
+
+        # Close the journal bracket before fallible projection/accounting
+        # finalizers. A later failure can leave derived fields stale, but never
+        # leaves a start-only pass that violates the event-stream invariant.
         duration = time.time() - backward_start_time
-        trace.backward_memory_backend = backend
-        trace.backward_peak_memory += Bytes(peak_delta)
-        trace.backward_durations.append(Duration(duration))
-        trace.total_param_gradient_memory = Bytes(
-            sum(int(param_log.gradient_memory) for param_log in getattr(trace, "param_logs", []))
-        )
-        trace.num_backward_passes = max(int(getattr(trace, "num_backward_passes", 0)), pass_index)
-        _rewalk_higher_order_grad_fns(trace)
+        memory_error: BaseException | None = None
+        try:
+            _backend, after = _memory_snapshot(loss.device)
+        except BaseException as exc:
+            memory_error = exc
+            after = before
+        peak_delta = max(0, after - before)
         events.append_backward(
             BackwardPassEnd(
                 pass_index=pass_index,
@@ -2984,13 +3058,24 @@ def _run_backward_with_capture(
                 order_attribution_coverage=None,
             )
         )
-        trace.__dict__.pop("_active_backward_pass_index", None)
+        trace.num_backward_passes = max(int(getattr(trace, "num_backward_passes", 0)), pass_index)
         _clear_pending_accumulate_grad_records(trace)
-        if previous_had_save_grads_policy:
-            trace._active_save_grads_policy = previous_save_grads_policy
-        else:
-            trace.__dict__.pop("_active_save_grads_policy", None)
+        for handle in handles:
+            with contextlib.suppress(BaseException):
+                handle.remove()
+        _clear_forward_grad_fn_refs(trace)
+        trace.backward_memory_backend = backend
+        trace.backward_peak_memory += Bytes(peak_delta)
+        trace.backward_durations.append(Duration(duration))
+        trace.total_param_gradient_memory = Bytes(
+            sum(int(param_log.gradient_memory) for param_log in getattr(trace, "param_logs", []))
+        )
+        _rewalk_higher_order_grad_fns(trace)
         _materialize_backward_projections(trace)
+        if status == "ok":
+            _warn_zero_match_backward_interventions(trace)
+        if memory_error is not None:
+            raise memory_error
     return result
 
 
@@ -3306,18 +3391,6 @@ def uninstall_autograd_wrappers() -> None:
     _AUTOGRAD_WRAPPERS_INSTALLED = False
 
 
-def _ensure_layer_grad_hooks(trace: Any) -> None:
-    """Enable gradient retention when saved-out hook installation was deferred.
-
-    Parameters
-    ----------
-    trace:
-        Trace whose saved outs should receive grad hooks.
-    """
-    if getattr(trace, "_grad_op_nums_to_save", None) in [None, [], "none"]:
-        trace._grad_op_nums_to_save = "all"
-
-
 def _finalize_grad_streaming(trace: Any) -> None:
     """Finalize a deferred grad-streaming bundle after backward capture."""
 
@@ -3374,22 +3447,23 @@ def log_backward(
     _ensure_not_inference_only_backward(self)
     _ensure_not_chunked_forward_backward(self)
     backward_call_context = _capture_backward_call_context(self)
-    _ensure_layer_grad_hooks(self)
 
     def run() -> Any:
         """Run the user's requested backward call."""
         return loss.backward(**backward_kwargs)  # type: ignore[no-untyped-call]
 
-    _run_backward_with_capture(
-        self,
-        loss,
-        run,
-        trigger="backward",
-        engine_flags=dict(backward_kwargs),
-        save_grads=save_grads,
-        backward_call_context=backward_call_context,
-    )
-    _finalize_grad_streaming(self)
+    try:
+        _run_backward_with_capture(
+            self,
+            loss,
+            run,
+            trigger="backward",
+            engine_flags=dict(backward_kwargs),
+            save_grads=save_grads,
+            backward_call_context=backward_call_context,
+        )
+    finally:
+        _finalize_grad_streaming(self)
     return self
 
 
@@ -3411,7 +3485,6 @@ class RecordingBackward:
 
     def __enter__(self) -> RecordingBackward:
         """Patch ``torch.Tensor.backward`` and return this context object."""
-        _ensure_layer_grad_hooks(self.trace)
         self._original_backward = torch.Tensor.backward
         trace = self.trace
         original_backward = self._original_backward
@@ -3463,18 +3536,19 @@ class RecordingBackward:
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         """Restore ``torch.Tensor.backward`` unless someone patched over us."""
-        if self._original_backward is not None:
-            if torch.Tensor.backward is self._wrapped_backward:
-                torch.Tensor.backward = self._original_backward  # type: ignore[method-assign]
-            else:
-                warnings.warn(
-                    "recording_backward() exited while torch.Tensor.backward was "
-                    "patched by another party inside the block; leaving the "
-                    "interleaved patch in place instead of clobbering it.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-        if exc_type is None:
+        try:
+            if self._original_backward is not None:
+                if torch.Tensor.backward is self._wrapped_backward:
+                    torch.Tensor.backward = self._original_backward  # type: ignore[method-assign]
+                else:
+                    warnings.warn(
+                        "recording_backward() exited while torch.Tensor.backward was "
+                        "patched by another party inside the block; leaving the "
+                        "interleaved patch in place instead of clobbering it.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+        finally:
             _finalize_grad_streaming(self.trace)
 
 

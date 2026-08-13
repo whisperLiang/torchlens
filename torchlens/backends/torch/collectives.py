@@ -262,6 +262,7 @@ class _BoundaryScope:
 def _digest_tensor(tensor: torch.Tensor) -> str:
     """Byte-exact SHA-256 of a tensor's values (dtype-agnostic)."""
 
+    # detach-ok: read-only digest snapshot; no retained gradient payload crosses this boundary.
     flat = tensor.detach().cpu().contiguous().reshape(-1)
     if flat.numel() == 0:
         return hashlib.sha256(b"").hexdigest()

@@ -45,6 +45,21 @@ _TAINTED_STATUSES = {
 _MAX_LISTED_VIOLATIONS = 32
 
 
+def _refuse_poisoned_rf_verification(trace: Trace) -> None:
+    """Refuse a poison-marked trace at an RF verdict-producing surface.
+
+    Parameters
+    ----------
+    trace:
+        Trace whose geometry/gradient agreement would otherwise be reported as
+        a receptive-field validation verdict.
+    """
+
+    from ..runnable import refuse_poisoned_trace
+
+    refuse_poisoned_trace(trace, "receptive field verification")
+
+
 def _normalize_complete_unit(target: Op, unit: Sequence[int]) -> tuple[int, ...]:
     """Validate and normalize a complete target output-element index.
 
@@ -771,6 +786,9 @@ def check_for_unit(
         Tri-state exact-containment result.
     """
 
+    trace = owner.source_trace
+    if trace is not None:
+        _refuse_poisoned_rf_verification(trace)
     return _check_for_unit(
         owner,
         unit,
@@ -1183,6 +1201,7 @@ def cross_validate(
         One tri-state result per operation, unit, and explicit input selector.
     """
 
+    _refuse_poisoned_rf_verification(trace)
     return validate_receptive_field_trace(
         trace,
         ops=ops,

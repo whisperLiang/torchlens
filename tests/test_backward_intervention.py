@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -899,6 +900,42 @@ def test_forward_helper_on_backward_selector_warns() -> None:
             capture=tl.options.CaptureOptions(backward_ready=True, save_grads=True),
             intervene=tl.when(tl.grad_fn(type="relu"), tl.zero_ablate()),
         )
+
+
+@pytest.mark.parametrize("direction", ["backward", "both"])
+def test_backward_zero_match_selector_warns_after_backward(direction: str) -> None:
+    """Unmatched backward selectors report instead of silently no-oping."""
+    x = torch.ones(1, 3, requires_grad=True)
+    trace = tl.trace(
+        _IdentityReluModel(),
+        x,
+        capture=tl.options.CaptureOptions(backward_ready=True, save_grads=True),
+        intervene=tl.when(
+            tl.grad_fn(type="NoSuchGradFnClassZZZ"),
+            tl.grad_zero(),
+            direction=direction,
+        ),
+    )
+
+    with pytest.warns(UserWarning, match="matched zero sites; no intervention fired"):
+        trace.log_backward(trace[trace.output_layers[0]].out)
+
+
+def test_matching_backward_selector_does_not_warn_zero_match() -> None:
+    """The deferred selector ledger records a real GradFn intervention fire."""
+    x = torch.ones(1, 3, requires_grad=True)
+    trace = tl.trace(
+        _IdentityReluModel(),
+        x,
+        capture=tl.options.CaptureOptions(backward_ready=True, save_grads=True),
+        intervene=tl.when(tl.grad_fn(type="relu"), tl.grad_zero()),
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        trace.log_backward(trace[trace.output_layers[0]].out)
+
+    assert not any("matched zero sites" in str(item.message) for item in caught)
 
 
 @pytest.mark.parametrize("selector", [tl.func("relu"), tl.grad_fn(type="relu")])
