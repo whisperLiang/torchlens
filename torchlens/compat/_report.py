@@ -881,6 +881,7 @@ def _torch_compile_row(model: nn.Module) -> CompatRow:
     """
 
     from .._capture_state_helpers import compiled_plain_callable_sites
+    from ..utils import _torch_compat
 
     optimized_module_type = get_dynamo_optimized_module_type()
     optimized_detected = optimized_module_type is not None and isinstance(
@@ -888,7 +889,57 @@ def _torch_compile_row(model: nn.Module) -> CompatRow:
     )
     plain_callable_sites = compiled_plain_callable_sites(model)
     detected = optimized_detected or bool(plain_callable_sites)
-    status: Status = "scope" if detected else "pass"
+    # The coexistence contract shipped by the rung-2 stance integration (torch
+    # >= 2.6): compiled callables run their original eager Python during
+    # capture with zero graph breaks, compiled caches stay intact with at most
+    # one bounded recompile on the next compiled call afterward, and
+    # unwrap_torch() reverts torch for free.
+    stance_available = bool(_torch_compat.HAS_SET_STANCE)
+    contract = (
+        "Coexistence contract: zero graph breaks during capture, at most one bounded "
+        "recompile on the next compiled call afterward, and unwrap_torch() reverts "
+        "torch for free. Captured values are eager-path values, not compiled-path "
+        "numerics."
+    )
+    if stance_available:
+        status: Status = "pass"
+        if optimized_detected:
+            details = (
+                "torch.compile OptimizedModule detected; capture traces the eager source "
+                "module and runs compiled callables under "
+                "torch.compiler.set_stance('force_eager'), so interiors are fully logged "
+                f"with ordinary verified semantics. {contract}"
+            )
+        elif plain_callable_sites:
+            details = (
+                "torch.compile callable detected on a plain module attribute at "
+                f"{', '.join(plain_callable_sites)}. Capture runs it through its original "
+                f"eager Python under set_stance, so its interior IS logged. {contract}"
+            )
+        else:
+            details = (
+                "No OptimizedModule or direct plain-attribute compiled callable detected. "
+                "On this torch (set_stance available), compiled callables reached during "
+                "capture -- including globals/free-function references outside this "
+                "structural preflight -- run their original eager Python and are logged."
+            )
+        suggestion = (
+            "Verify the contract with tl.debug.count_compiles(); correlate Dynamo graph "
+            "breaks with tl.debug.graph_breaks(). For compiled-artifact introspection "
+            "use the ecosystem tools (torch DebugMode, tlparse, the profiler, depyf)."
+            if detected
+            else ""
+        )
+        return CompatRow(
+            "torch_compile",
+            "torch.compile",
+            status,
+            "ok",
+            detected,
+            details,
+            suggestion,
+        )
+    status = "scope" if detected else "pass"
     if optimized_detected:
         details = (
             "torch.compile OptimizedModule detected; compiled graph capture is outside "
@@ -913,7 +964,9 @@ def _torch_compile_row(model: nn.Module) -> CompatRow:
         "warning" if detected else "ok",
         detected,
         details,
-        "Log the original eager model, or use torchlens.bridge.depyf for compiled-code context."
+        "Log the original eager model (torch >= 2.6 captures compiled callables eagerly "
+        "via set_stance). Correlate Dynamo graph breaks with tl.debug.graph_breaks(); "
+        "for compiled-code context use torch DebugMode, tlparse, or torchlens.bridge.depyf."
         if detected
         else "",
     )

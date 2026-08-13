@@ -52,6 +52,48 @@ Output:
 (2, 8) 2
 ```
 
+## `count_compiles`
+
+`tl.debug.count_compiles()` measures Dynamo compilation events (including recompiles) across a
+block, through the feature-detected `HAS_DYNAMO_COMPILE_COUNTERS` capability. Use it to verify the
+torch.compile coexistence contract on your own model: zero compiles while a capture holds the
+`force_eager` stance (torch >= 2.6), and at most one bounded recompile on the next compiled call
+after capture. It raises `CompileCountsUnavailableError` when the runtime exposes no Dynamo
+counters.
+
+```python
+import torch
+from torch import nn
+import torchlens as tl
+
+
+class Compiled(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc = nn.Linear(4, 4)
+        self.act = torch.compile(lambda t: torch.relu(t))
+
+    def forward(self, x):
+        return self.act(self.fc(x))
+
+
+model = Compiled()
+x = torch.randn(2, 4)
+model(x)  # warm the compile cache
+
+with tl.debug.count_compiles() as during:
+    tl.trace(model, x)
+with tl.debug.count_compiles() as after:
+    model(x)
+print(during.frames_compiled, after.frames_compiled <= 1)
+```
+
+Output:
+
+```text
+0 True
+```
+
 ## `dead_neurons`
 
 `tl.debug.dead_neurons(trace, *, dim=1, threshold=0.0)` reports units whose maximum

@@ -229,20 +229,29 @@ print(tl.compat.report(model, x).to_markdown())
   is an explicitly-labelled lower bound.
   Like `measure_python_peak_memory` it is a session-time knob (`FieldPolicy.DROP`, not in
   `MODEL_LOG_FIELD_ORDER`) and load restores the default.
-- `torch.compile` regions and tracing tensors are a graceful boundary, not a crash. A Dynamo-traced
-  region reached mid-capture is bypassed with a one-per-forward warning and the returned `Trace`
-  honestly contains only what ran outside it, marked `capture_verified=False` /
+- `torch.compile` coexists with capture as a boundary UPGRADE on torch >= 2.6 and a graceful
+  boundary below. Behind the feature-detected `HAS_SET_STANCE` flag, every capture holds the public
+  `torch.compiler.set_stance("force_eager")` scoped to the forward (skipped when Dynamo was never
+  imported), so compiled plain attributes and free functions run their ORIGINAL eager Python: the
+  interior is fully logged with FULL verified semantics (no ceiling), interior interventions work,
+  zero graph breaks / zero new compiles happen during capture (fresh shapes included), compiled
+  caches stay intact with the warm artifact bitwise-reproduced afterward, and TorchLens wrapper
+  install/uninstall costs at most ONE bounded recompile on the next compiled call (verify with
+  `tl.debug.count_compiles()`; correlate breaks with `tl.debug.graph_breaks()`). Compiled child
+  `nn.Module`s are still unwrapped to their eager source in both regimes. On torch < 2.6 (or a
+  stance that fails to engage) the exact historical fallback holds: a Dynamo-traced region reached
+  mid-capture is bypassed with a one-per-forward warning and the returned `Trace` honestly contains
+  only what ran outside it, marked `capture_verified=False` /
   `capture_verification_reason="dynamo_region_not_logged"` (top precedence, since Dynamo's compile
-  threads and unaccounted aten dispatches are symptoms of that same region); compiled child
-  `nn.Module`s are still unwrapped to their eager source, so their interiors ARE logged. Compiled
-  plain attributes are inventoried before forward and invoked with logging paused so cold/warm
-  honesty does not depend on `is_compiling()` timing (conservatively ceilings even an unused
-  attribute; hot global/free callables remain a disclosed residual). `FakeTensor` /
+  threads and unaccounted aten dispatches are symptoms of that same region), and compiled plain
+  attributes are inventoried before forward and invoked with logging paused so cold/warm honesty
+  does not depend on `is_compiling()` timing (conservatively ceilings even an unused attribute; hot
+  global/free callables remain a disclosed residual there). `FakeTensor` /
   `FunctionalTensor` on inspectable inputs or
   parameters refuse at capture entry with `UnsupportedTensorVariantError`, alongside meta and sparse;
   exact-type `_to_functional_tensor` values are covered, while slots-only holders and values created
   inside `forward` remain disclosed by the compat row.
-  Gated by `HAS_DYNAMO_IS_COMPILING` / `HAS_TRACING_TENSOR_TYPES`.
+  Gated by `HAS_SET_STANCE` / `HAS_DYNAMO_IS_COMPILING` / `HAS_TRACING_TENSOR_TYPES`.
 - `torchlens._io` and `torchlens.io` own portable `.tlspec` save/load helpers. Manifest
   schema v2 is backend-aware; non-torch preview bundles may be audit-only or metadata-only.
   Rehydration floor: artifacts older than torchlens 2.33 (`tlspec_version` 6) refuse to load

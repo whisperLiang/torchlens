@@ -45,7 +45,7 @@ from ..fastlog._halt import HaltSignal
 from ..ir.container_registry import ModelSite, Phase, Role, walk_container
 from ..quantities import Bytes, Duration
 from .. import _state
-from .._capture_state_helpers import prepare_compiled_capture
+from .._capture_state_helpers import CompiledCapturePrep, prepare_compiled_capture
 from .._runnable_seam import runnable_trace_state
 from .config import InternalCaptureConfig
 from .session import (
@@ -1271,7 +1271,10 @@ def run_and_log_inputs_through_model(
         if isinstance(model, nn.Module)
         else contextlib.nullcontext()
     )
-    compiled_callable_sites = compiled_capture_context.__enter__() or ()
+    compiled_capture_prep = compiled_capture_context.__enter__()
+    if not isinstance(compiled_capture_prep, CompiledCapturePrep):
+        compiled_capture_prep = CompiledCapturePrep(sites=(), force_eager_stance=False)
+    compiled_callable_sites = compiled_capture_prep.sites
 
     try:
         global _ACTIVE_CAPTURE_BACKEND
@@ -1390,7 +1393,11 @@ def run_and_log_inputs_through_model(
         # automatically by the decorated wrappers.
         _vprint(self, f"Running {self.capture_mode} forward pass...")
         with backend.active_logging(self):
-            if compiled_callable_sites:
+            # Under an active ``force_eager`` stance (torch >= 2.6) the
+            # inventoried compiled callables run their original eager Python and
+            # their interiors ARE logged, so the capture keeps full verified
+            # semantics; the ceiling below is the honest pre-2.6 fallback.
+            if compiled_callable_sites and not compiled_capture_prep.force_eager_stance:
                 self._raw_dynamo_region_detected = True
                 self._raw_transform_escape_detected = True
                 _state._dynamo_warning_emitted = True
@@ -1401,7 +1408,9 @@ def run_and_log_inputs_through_model(
                     "data-free FakeTensors, while a warm-cache execution can bypass Python "
                     "wrappers entirely. The returned Trace contains only operations that ran "
                     "OUTSIDE the compiled region. Use the eager callable during capture if you "
-                    "need its interior logged.",
+                    "need its interior logged (on torch >= 2.6, TorchLens instead runs compiled "
+                    "callables eagerly via torch.compiler.set_stance and this gap does not "
+                    "arise).",
                     UserWarning,
                     stacklevel=2,
                 )

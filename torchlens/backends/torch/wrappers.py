@@ -287,12 +287,15 @@ def _warn_dynamo_region_not_logged() -> None:
 
     warnings.warn(
         "TorchLens detected a torch.compile (Dynamo) region during this forward pass. "
-        "Operations that run inside the compiled region are not logged: the tensors "
-        "there are data-free FakeTensors, so TorchLens cannot record real activations. "
-        "The returned Trace contains only operations that ran OUTSIDE the compiled "
-        "region. Compiled child nn.Modules are unwrapped to their eager source "
-        "automatically; a compiled plain-attribute callable or free function cannot be, "
-        "so call the eager function during capture if you need its interior logged.",
+        "Operations that run inside the compiled region are not logged: while Dynamo "
+        "traces the region (cold compile), the tensors it passes through the wrappers "
+        "are data-free FakeTensors, and a warm-cache execution bypasses the Python "
+        "wrappers entirely. The returned Trace contains only operations that ran "
+        "OUTSIDE the compiled region. Compiled child nn.Modules are unwrapped to their "
+        "eager source automatically; a compiled plain-attribute callable or free "
+        "function cannot be, so call the eager function during capture if you need its "
+        "interior logged (on torch >= 2.6, TorchLens instead runs compiled callables "
+        "eagerly via torch.compiler.set_stance and this gap does not arise).",
         UserWarning,
         stacklevel=2,
     )

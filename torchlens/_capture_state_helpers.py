@@ -22,6 +22,7 @@ from torch import nn
 from . import _state
 from .data_classes.trace import Trace
 from .utils._torch_compat import (
+    force_eager_stance_scope,
     get_dynamo_optimized_module_type,
     get_fsdp_wrapper_type,
     is_dynamo_compiled_callable,
@@ -57,6 +58,28 @@ _PLAIN_ATTR_IGNORED_NAMES = frozenset({"_parameters", "_buffers", "_modules"})
 _PLAIN_ATTR_MAX_CONTAINER_ITEMS = 128
 _PLAIN_ATTR_MAX_TENSOR_NUMEL = 4096
 _COMPILED_MODEL_UNWRAP_WARNED = False
+_COMPILED_FORCED_EAGER_WARNED = False
+
+
+@dataclasses.dataclass(frozen=True)
+class CompiledCapturePrep:
+    """What compiled-capture preparation did for one capture.
+
+    Parameters
+    ----------
+    sites:
+        Stable module-attribute paths of Dynamo-compiled plain callables
+        inventoried on the model before the forward.
+    force_eager_stance:
+        Whether a ``torch.compiler.set_stance("force_eager")`` stance is active
+        for the capture scope. When ``True``, compiled callables run their
+        original eager Python and their interiors are logged with full verified
+        semantics; when ``False`` (torch < 2.6, or the stance failed to
+        engage), inventoried sites keep the honest bypass-and-disclose path.
+    """
+
+    sites: tuple[str, ...]
+    force_eager_stance: bool
 
 
 @dataclasses.dataclass(frozen=True)
@@ -176,6 +199,52 @@ def reset_compiled_model_unwrap_warning_state() -> None:
     global _COMPILED_MODEL_UNWRAP_WARNED
 
     _COMPILED_MODEL_UNWRAP_WARNED = False
+
+
+def reset_compiled_forced_eager_warning_state() -> None:
+    """Reset the process-local forced-eager compiled-callable note flag.
+
+    Returns
+    -------
+    None
+        The next stance-covered compiled-callable capture emits the note again.
+    """
+
+    global _COMPILED_FORCED_EAGER_WARNED
+
+    _COMPILED_FORCED_EAGER_WARNED = False
+
+
+def _warn_compiled_plain_callables_forced_eager_once(sites: tuple[str, ...]) -> None:
+    """Emit the forced-eager compiled-callable note at most once per process.
+
+    Parameters
+    ----------
+    sites:
+        Module-attribute paths of the compiled plain callables covered by the
+        active ``force_eager`` stance.
+
+    Returns
+    -------
+    None
+        Emits a ``UserWarning`` only on the first call in the process.
+    """
+
+    global _COMPILED_FORCED_EAGER_WARNED
+
+    if _COMPILED_FORCED_EAGER_WARNED:
+        return
+    _COMPILED_FORCED_EAGER_WARNED = True
+    warnings.warn(
+        "TorchLens: compiled callables detected at "
+        f"{', '.join(sites)}; this capture runs their original eager Python under "
+        "torch.compiler.set_stance('force_eager'), so their interiors ARE logged. "
+        "Compiled caches are untouched; captured values are eager-path values, and "
+        "TorchLens wrapper install/uninstall can cost one bounded recompile on the "
+        "next compiled call after capture.",
+        UserWarning,
+        stacklevel=4,
+    )
 
 
 def _warn_compiled_model_unwrapped_once() -> None:
@@ -378,7 +447,7 @@ def bypass_compiled_plain_callables(model: nn.Module) -> Iterator[None]:
 
 
 @contextmanager
-def prepare_compiled_capture(model: nn.Module) -> Iterator[tuple[str, ...]]:
+def prepare_compiled_capture(model: nn.Module) -> Iterator[CompiledCapturePrep]:
     """Prepare compiled submodules and plain callables for honest eager capture.
 
     Parameters
@@ -388,14 +457,33 @@ def prepare_compiled_capture(model: nn.Module) -> Iterator[tuple[str, ...]]:
 
     Yields
     ------
-    tuple[str, ...]
-        Direct compiled-callable sites whose interiors remain unlogged.
+    CompiledCapturePrep
+        Inventoried compiled plain-callable sites plus whether a
+        ``force_eager`` Dynamo stance covers the capture scope.
+
+    Notes
+    -----
+    Compiled child ``nn.Module`` slots are unwrapped to their eager sources in
+    both regimes (the conservative design confirmed by the 2026-08-12 tri-lab
+    compile reconcile). On torch >= 2.6 the capture then runs under
+    ``torch.compiler.set_stance("force_eager")``: every compiled callable
+    (plain attribute or free function) executes its original eager Python, so
+    interiors are logged with full verified semantics and no bypass wrapper is
+    installed. Without the stance, inventoried plain-attribute callables keep
+    the historical logging-paused bypass and the caller applies the honest
+    ``dynamo_region_not_logged`` ceiling.
     """
 
     with unwrap_compiled_submodules(model):
         sites = compiled_plain_callable_sites(model)
-        with bypass_compiled_plain_callables(model):
-            yield sites
+        with force_eager_stance_scope() as stance_active:
+            if stance_active:
+                if sites:
+                    _warn_compiled_plain_callables_forced_eager_once(sites)
+                yield CompiledCapturePrep(sites=sites, force_eager_stance=True)
+            else:
+                with bypass_compiled_plain_callables(model):
+                    yield CompiledCapturePrep(sites=sites, force_eager_stance=False)
 
 
 @contextmanager

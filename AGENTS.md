@@ -292,6 +292,15 @@ pytest tests/ -m "not slow" -x --tb=short
   deltas and cross-device temporaries cannot always be known pre-allocation, so this is not a general
   OOM guarantee. Predicate disk-only saves are exempt; exhaustive `save="all"` plus `to_disk(...)`
   stays budgeted until postprocess eviction. Unmeasurable auto devices warn on first charge.
+- On torch >= 2.6 (`HAS_SET_STANCE`), every capture holds
+  `torch.compiler.set_stance("force_eager")` scoped to the forward (entered inside
+  `prepare_compiled_capture`; skipped when `torch._dynamo` was never imported), so compiled plain
+  attributes and free functions run their ORIGINAL eager Python: interiors are fully logged with
+  ordinary verified semantics, zero compiles happen during capture, compiled caches survive with at
+  most ONE bounded recompile on the next compiled call afterward (wrapper install/uninstall guard
+  invalidation), and the plain-attribute pause-logging bypass is NOT installed. The paragraph below
+  is the torch < 2.6 / no-stance fallback, pinned byte-for-byte by the `_no_stance` tamper tests in
+  `test_dynamo_fake_guard.py`.
 - A Dynamo-traced region reached during capture is bypassed in the wrapper (see
   `_is_inside_dynamo_compilation`), warning once per forward and setting
   `trace._raw_transform_escape_detected` (which licenses the unattributable-output tolerance,

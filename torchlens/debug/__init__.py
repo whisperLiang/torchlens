@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from ._cost import hot_path
 from ._audit import AuditFinding, TraceAudit, audit_trace
+from ._compile_counter import (
+    CompileCounts,
+    CompileCountsUnavailableError,
+    count_compiles,
+)
 from ._dtype_range import DTypeRangeAudit, dtype_range_audit
 from ._graph import LineageResult, compare, dead_neurons, lineage
 from ._gradients import gradient_flow_audit
@@ -21,6 +26,8 @@ from ._recompute import recompute_candidates
 __all__ = [
     "BisectNanResult",
     "AuditFinding",
+    "CompileCounts",
+    "CompileCountsUnavailableError",
     "DTypeRangeAudit",
     "FindNanResult",
     "GraphBreak",
@@ -34,6 +41,7 @@ __all__ = [
     "bisect_nan",
     "find_nan",
     "compare",
+    "count_compiles",
     "dead_neurons",
     "dtype_range_audit",
     "gradient_flow_audit",
