@@ -472,6 +472,14 @@ def _drop_transient_capture_state(self: "Trace") -> None:
         "_output_head",
         "_output_tokenizer",
         "_semantic_output_metadata",
+        # B1-17 companion (INTERVENED axis): capture-time dedup caches for the
+        # predicate-intervention spec/target mirrors. `..._target_keys` holds a
+        # STRONG reference to the live intervention spec plus a frozen-target
+        # set, so leaving it on the finished product retains capture-time
+        # objects for no reason. Cleaned centrally here rather than in
+        # `backends/torch/_ops_interventions.py` (another lane's file).
+        "_tl_predicate_intervention_spec_keys",
+        "_tl_predicate_intervention_target_keys",
     ]
     if not keep_deferred_streaming and not keep_selective_sink:
         field_names.extend(

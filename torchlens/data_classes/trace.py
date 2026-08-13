@@ -1416,6 +1416,25 @@ class Trace(
         "backward_peak_memory": FieldPolicy.KEEP,
         "backward_memory_backend": FieldPolicy.KEEP,
         "_backward_gradfn_refs": FieldPolicy.DROP,
+        # B1-17: the remaining undeclared runtime Trace attrs the widened
+        # lockstep gate finds across the 30-axis postprocess matrix. All are
+        # session-time by construction; declaring them makes the gate's
+        # authority the policy table rather than the pre-spec allowance in
+        # `_io/scrub.py`.
+        #
+        # Predicate-intervention dedup caches (INTERVENED axis).
+        # `..._target_keys` pins the live intervention spec, so it is also
+        # dropped at the postprocess seam.
+        "_tl_predicate_intervention_spec_keys": FieldPolicy.DROP,
+        "_tl_predicate_intervention_target_keys": FieldPolicy.DROP,
+        # Streaming-bundle provenance (STREAMING axes). Already popped and
+        # restored around the scrub by `_io/bundle.py` and cleared by
+        # `data_classes/cleanup.py`; a load rebinds them fresh, so DROP is the
+        # existing behavior made declarative.
+        "_source_bundle_path": FieldPolicy.DROP,
+        "_source_bundle_manifest_sha256": FieldPolicy.DROP,
+        # Two-pass selective-save retention flag (DEFERRED_RETENTION axis).
+        "_retain_layers_to_save_output_parents": FieldPolicy.DROP,
         # Validation side-channel state (B1-04). `validate_forward_pass` /
         # `validate_saved_outs` are public methods on a user-held Trace, and
         # validation ENTRY unconditionally sets `_last_validation_failure`

@@ -721,7 +721,6 @@ def _is_runtime_only_trace_field(field_name: str) -> bool:
         "_capture_producer_policy",
         "_capture_config",
         "_stop_directive",
-        "_retain_layers_to_save_output_parents",
         "_keep_outs_in_memory",
         "_capture_container_structure",
         "_capture_output_structure",
@@ -732,8 +731,12 @@ def _is_runtime_only_trace_field(field_name: str) -> bool:
         "_validation_replay_status",
         "_capture_parent_edge_truth",
         "_orphan_pruned_func_call_ids",
-        "_tl_predicate_intervention_spec_keys",
-        "_tl_predicate_intervention_target_keys",
+        # B1-17: `_tl_predicate_intervention_{spec,target}_keys`,
+        # `_source_bundle_{path,manifest_sha256}` and
+        # `_retain_layers_to_save_output_parents` moved out of this allowance
+        # into declared `Trace.PORTABLE_STATE_SPEC` DROP rows. This allowance is
+        # consulted BEFORE the spec, so an entry here makes the declared policy
+        # dead code.
         "jax_closed_jaxpr",
         "jax_equation_captures",
         "jax_ordered_captures",
