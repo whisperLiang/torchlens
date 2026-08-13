@@ -22,6 +22,19 @@ executed and source-text heuristics (name matching) can lie under aliasing
 un-attributed, never mis-attributed. Conditional events still materialize;
 only the per-op arm attribution is withheld. Pinned by
 ``test_ternary_py310_fail_closed_model_drops_same_line_arm_attribution``.
+
+**Hot/cold retention lifecycle.** A ``FileIndex`` has two tiers. The COLD
+tier -- span-based scopes, conditionals, bool consumers, projected per-scope
+call entries, and the source text -- answers every classification,
+attribution, and already-projected call query without any live AST. The HOT
+tier (``_HeavyAst``: the parsed module, its parent map, and the per-scope
+function nodes) exists only to PROJECT call entries and is released by
+``release_parsed_asts()`` at the postprocess epilogue, so the process-wide
+cache never retains parsed ASTs between captures (H2: a torch-library-heavy
+capture used to pin ~3.5 MB of ast nodes indefinitely). A query that needs
+an unprojected scope after release re-parses from the RETAINED source text
+(never the file on disk, so spans stay consistent even if the file changed),
+and any re-parse anomaly fails closed to empty resolution.
 """
 
 from __future__ import annotations
@@ -45,7 +58,7 @@ _FILE_CACHE_MAX_SIZE = 256
 _file_cache: OrderedDict[str, "FileIndex"] = OrderedDict()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BoolClassification:
     """Classification result for a terminal boolean operation.
 
@@ -71,7 +84,7 @@ class BoolClassification:
     branch_test_kind: Optional[str]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ConditionalRecord:
     """Structural representation of a conditional found in source code.
 
@@ -124,7 +137,7 @@ class ConditionalRecord:
     parent_branch_kind: Optional[str]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BoolConsumer:
     """AST node that consumes a truthy/falsy value.
 
@@ -150,7 +163,7 @@ class BoolConsumer:
     branch_test_kind: Optional[str]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BranchInterval:
     """Branch-arm interval used by point queries inside a function scope.
 
@@ -172,7 +185,7 @@ class BranchInterval:
     span: SourceRange
 
 
-@dataclass
+@dataclass(slots=True)
 class ScopeEntry:
     """Single function scope indexed within a source file.
 
@@ -184,8 +197,10 @@ class ScopeEntry:
         Simple function name.
     qualname:
         Qualified name matching ``code.co_qualname`` semantics where possible.
-    node:
-        Owning AST function node.
+    index:
+        Position of this scope in the owning ``FileIndex.scopes`` list. The
+        stable key into the hot tier's ``scope_nodes`` and the projected
+        per-scope call cache (the scope deliberately holds NO ast node).
     span:
         Inclusive line span for the function body.
     decorated_firstlineno:
@@ -208,7 +223,7 @@ class ScopeEntry:
     code_firstlineno: int
     func_name: str
     qualname: str
-    node: FunctionNode
+    index: int
     span: LineSpan
     decorated_firstlineno: Optional[int] = None
     conditionals: List[ConditionalRecord] = field(default_factory=list)
@@ -275,26 +290,78 @@ class ScopeEntry:
         ]
 
 
-class _ScopeCall(NamedTuple):
-    """One ``ast.Call`` in a function scope with its precomputed source span.
+class _ArgSpec(NamedTuple):
+    """Span-based recipe for rendering one call-argument source expression.
 
     Attributes
     ----------
-    node:
-        The call node itself.
+    keyword:
+        Keyword name for ``k=v`` arguments, ``None`` for positional and
+        double-star arguments.
+    star:
+        ``True`` for ``**expr`` arguments (``keyword`` is ``None`` there).
+    span:
+        Source range of the argument's value expression.
+    """
+
+    keyword: Optional[str]
+    star: bool
+    span: SourceRange
+
+
+class _ScopeCall(NamedTuple):
+    """One ``ast.Call`` in a function scope, projected to node-free form.
+
+    The projection is computed once per touched scope while the hot AST tier
+    is alive and retains NO ast nodes, so it survives ``release_parsed_asts()``
+    and keeps repeated captures re-parse-free.
+
+    Attributes
+    ----------
     span:
         ``_node_span(node)``, precomputed once instead of per query.
     visible_name:
         The call's visible callee name (``ast.Name.id`` or ``ast.Attribute.attr``),
         or ``None`` for any other callee form.
+    assignment_targets:
+        Precomputed ``_assignment_target_names(...)`` result for the call:
+        target names when the call is the direct value of a supported
+        assignment form, else empty (inline, ambiguous, comprehension, or
+        augmented-assignment contexts fail closed to empty exactly as before).
+    arg_specs:
+        Span recipes for each positional then keyword argument, or ``None``
+        when any argument lacks end positions (argument resolution then fails
+        closed, mirroring the historical ``None``-segment behavior).
     """
 
-    node: ast.Call
     span: SourceRange
     visible_name: Optional[str]
+    assignment_targets: Tuple[str, ...]
+    arg_specs: Optional[Tuple[_ArgSpec, ...]]
 
 
-@dataclass
+class _HeavyAst(NamedTuple):
+    """Hot-tier parse artifacts for one ``FileIndex``.
+
+    Dropped wholesale by ``release_parsed_asts()``; rebuilt on demand from the
+    index's retained source text.
+
+    Attributes
+    ----------
+    module:
+        Parsed AST module.
+    parent_map:
+        Parent links for every node in ``module``.
+    scope_nodes:
+        Function nodes aligned index-for-index with ``FileIndex.scopes``.
+    """
+
+    module: ast.Module
+    parent_map: Dict[ast.AST, ast.AST]
+    scope_nodes: List[FunctionNode]
+
+
+@dataclass(slots=True)
 class FileIndex:
     """Parsed AST index for one source file.
 
@@ -305,45 +372,41 @@ class FileIndex:
     mtime_ns:
         File modification timestamp used for cache invalidation.
     source:
-        Source text the module was parsed from.
-    module:
-        Parsed AST module.
+        Source text the module was parsed from. Retained: it is the re-parse
+        authority for the hot tier after ``release_parsed_asts()``.
     scopes:
         All function scopes discovered in the file.
     conditionals:
         Flattened list of conditionals found across all scopes.
     bool_consumers:
         Flattened list of all boolean consumers found across all scopes.
-    parent_map:
-        Parent links for every node in ``module``.
     """
 
     filename: str
     mtime_ns: int
     source: str
-    module: ast.Module
     scopes: List[ScopeEntry]
     conditionals: List[ConditionalRecord]
     bool_consumers: List[BoolConsumer]
-    parent_map: Dict[ast.AST, ast.AST]
+    _heavy: Optional[_HeavyAst] = field(default=None, repr=False, compare=False)
     _source_lines: Optional[List[str]] = field(default=None, repr=False, compare=False)
-    _scope_calls: Optional[Dict[ast.AST, List[_ScopeCall]]] = field(
+    _scope_calls: Optional[Dict[int, List[_ScopeCall]]] = field(
         default=None, repr=False, compare=False
     )
 
-    def scope_calls(self, scope_node: ast.AST) -> List[_ScopeCall]:
-        """Return every ``ast.Call`` under ``scope_node``, computed once per scope.
+    def scope_calls(self, scope: ScopeEntry) -> List[_ScopeCall]:
+        """Return every call under ``scope``, projected once per scope.
 
         Parameters
         ----------
-        scope_node:
-            Function scope node owned by this index's ``module``.
+        scope:
+            Function scope owned by this index.
 
         Returns
         -------
         List[_ScopeCall]
-            Call nodes in ``ast.walk`` order, each with its precomputed span and
-            visible callee name.
+            Node-free call projections in ``ast.walk`` order, or an empty list
+            when the hot tier cannot be (re)built (fail closed).
 
         Notes
         -----
@@ -351,24 +414,73 @@ class FileIndex:
         per capture, so the ``ast.walk`` is done once per touched scope instead of
         once per query. ``ast.walk`` order is preserved because the downstream
         width sort is stable and callers depend on the pre-sort order for ties.
-        Entries stay valid for the index's lifetime: the AST is never mutated, and
-        the existing ``mtime_ns`` check plus the file-cache LRU already govern
-        invalidation, so this adds no new invalidation surface.
+        Projections stay valid for the index's lifetime: they are span-based (no
+        ast nodes), so ``release_parsed_asts()`` keeps them, and the existing
+        ``mtime_ns`` check plus the file-cache LRU already govern invalidation.
         """
 
         cache = self._scope_calls
         if cache is None:
             cache = {}
             self._scope_calls = cache
-        entries = cache.get(scope_node)
+        entries = cache.get(scope.index)
         if entries is None:
+            heavy = self._ensure_heavy()
+            if heavy is None:
+                return []
+            scope_node = heavy.scope_nodes[scope.index]
             entries = [
-                _ScopeCall(node, _node_span(node), _call_visible_name(node))
+                _project_scope_call(node, heavy.parent_map)
                 for node in ast.walk(scope_node)
                 if isinstance(node, ast.Call)
             ]
-            cache[scope_node] = entries
+            cache[scope.index] = entries
         return entries
+
+    def _ensure_heavy(self) -> Optional[_HeavyAst]:
+        """Return the hot AST tier, re-parsing the retained source if released.
+
+        Returns
+        -------
+        Optional[_HeavyAst]
+            Live hot tier, or ``None`` when re-parsing or scope re-alignment
+            fails (resolution then fails closed; never mis-attributes).
+
+        Notes
+        -----
+        The re-parse reads ``self.source``, never the file on disk: stored
+        spans keep matching even when the file changed after capture (the
+        ``get_file_index`` mtime check governs disk-level invalidation). A
+        re-parse of the identical string is deterministic, so the alignment
+        check against ``self.scopes`` is defensive only.
+        """
+
+        heavy = self._heavy
+        if heavy is not None:
+            return heavy
+        try:
+            module = ast.parse(self.source, filename=self.filename)
+        except (SyntaxError, ValueError):
+            return None
+        scope_nodes = _collect_scopes(module)[1]
+        if len(scope_nodes) != len(self.scopes):
+            return None
+        for entry, node in zip(self.scopes, scope_nodes, strict=True):
+            if entry.func_name != node.name or entry.code_firstlineno != node.lineno:
+                return None
+        heavy = _HeavyAst(
+            module=module,
+            parent_map=_build_parent_map(module),
+            scope_nodes=scope_nodes,
+        )
+        self._heavy = heavy
+        return heavy
+
+    def release_heavy(self) -> None:
+        """Drop the hot AST tier and derived line split, keeping projections."""
+
+        self._heavy = None
+        self._source_lines = None
 
     def source_lines(self) -> List[str]:
         """Return ``source`` split into parser-style lines, computed once.
@@ -493,14 +605,15 @@ def get_file_index(filename: str) -> Optional[FileIndex]:
         return None
 
     parent_map = _build_parent_map(module)
-    scopes = _collect_scopes(module)
+    scopes, scope_nodes = _collect_scopes(module)
     conditionals: List[ConditionalRecord] = []
     bool_consumers: List[BoolConsumer] = []
 
-    for scope in scopes:
+    for scope, scope_node in zip(scopes, scope_nodes, strict=True):
         indexer = _ScopeIndexer(
             filename=filename,
             scope=scope,
+            scope_node=scope_node,
             parent_map=parent_map,
             all_conditionals=conditionals,
             all_bool_consumers=bool_consumers,
@@ -511,11 +624,10 @@ def get_file_index(filename: str) -> Optional[FileIndex]:
         filename=filename,
         mtime_ns=mtime_ns,
         source=source,
-        module=module,
         scopes=scopes,
         conditionals=conditionals,
         bool_consumers=bool_consumers,
-        parent_map=parent_map,
+        _heavy=_HeavyAst(module=module, parent_map=parent_map, scope_nodes=scope_nodes),
     )
     _set_cached_file_index(filename, file_index)
     return file_index
@@ -741,6 +853,20 @@ def invalidate_cache(filename: Optional[str] = None) -> None:
         _file_cache.pop(filename, None)
 
 
+def release_parsed_asts() -> None:
+    """Release every cached index's hot AST tier (H2 retention seal).
+
+    Called at the postprocess epilogue so the process-wide file cache never
+    retains parsed ASTs, parent maps, or line splits between captures. All
+    span-based cold-tier data and already-projected per-scope calls survive,
+    so repeated captures of the same code stay re-parse-free; a later query
+    that needs an unprojected scope re-parses from the retained source text.
+    """
+
+    for file_index in _file_cache.values():
+        file_index.release_heavy()
+
+
 def _resolve_frame_var_names(frame: FuncCallLocation, func_name: Optional[str]) -> list[str]:
     """Resolve assignment target names for one captured frame.
 
@@ -775,15 +901,11 @@ def _resolve_frame_var_names(frame: FuncCallLocation, func_name: Optional[str]) 
         return []
 
     candidates = _find_candidate_calls(
-        file_index, scope.node, frame.line_number, frame.col_offset, func_name
+        file_index, scope, frame.line_number, frame.col_offset, func_name
     )
-    resolved = [
-        target_names
-        for call_node in candidates
-        if (target_names := _assignment_target_names(call_node, file_index.parent_map))
-    ]
+    resolved = [entry.assignment_targets for entry in candidates if entry.assignment_targets]
     if len(resolved) == 1:
-        return resolved[0]
+        return list(resolved[0])
     return []
 
 
@@ -819,22 +941,26 @@ def _resolve_frame_arg_expressions(frame: FuncCallLocation, func_name: Optional[
         return []
 
     candidates = _find_candidate_calls(
-        file_index, scope.node, frame.line_number, frame.col_offset, func_name
+        file_index, scope, frame.line_number, frame.col_offset, func_name
     )
     if len(candidates) != 1:
         return []
-    return _call_arg_expressions(candidates[0], file_index.source_lines())
+    return _call_arg_expressions(candidates[0].arg_specs, file_index.source_lines())
 
 
-def _call_arg_expressions(call_node: ast.Call, source_lines: List[str]) -> list[str]:
-    """Return source expressions for a matched call's arguments.
+def _call_arg_expressions(
+    arg_specs: Optional[Tuple[_ArgSpec, ...]], source_lines: List[str]
+) -> list[str]:
+    """Return source expressions for a matched call's projected arguments.
 
     Parameters
     ----------
-    call_node:
-        AST call matched to the captured operation.
+    arg_specs:
+        Span recipes from the call's projection, or ``None`` when projection
+        found an argument without end positions (fail closed, exactly like the
+        historical per-node ``None``-segment behavior).
     source_lines:
-        Parser-style split lines of the source containing ``call_node``
+        Parser-style split lines of the owning source
         (``FileIndex.source_lines()``).
 
     Returns
@@ -843,20 +969,19 @@ def _call_arg_expressions(call_node: ast.Call, source_lines: List[str]) -> list[
         Positional argument expressions followed by keyword expressions.
     """
 
+    if arg_specs is None:
+        return []
     expressions: list[str] = []
-    for arg_node in call_node.args:
-        segment = _node_source_segment(source_lines, arg_node)
+    for spec in arg_specs:
+        segment = _span_source_segment(source_lines, spec.span)
         if segment is None:
             return []
-        expressions.append(segment.strip())
-    for keyword in call_node.keywords:
-        value_segment = _node_source_segment(source_lines, keyword.value)
-        if value_segment is None:
-            return []
-        if keyword.arg is None:
-            expressions.append(f"**{value_segment.strip()}")
+        if spec.star:
+            expressions.append(f"**{segment.strip()}")
+        elif spec.keyword is not None:
+            expressions.append(f"{spec.keyword}={segment.strip()}")
         else:
-            expressions.append(f"{keyword.arg}={value_segment.strip()}")
+            expressions.append(segment.strip())
     return expressions
 
 
@@ -889,40 +1014,37 @@ def _split_source_lines(source: str) -> List[str]:
     return lines
 
 
-def _node_source_segment(source_lines: List[str], node: ast.AST) -> Optional[str]:
-    """Return a node's source segment from pre-split lines.
+def _span_source_segment(source_lines: List[str], span: SourceRange) -> Optional[str]:
+    """Return the source segment for a span from pre-split lines.
 
     Byte-identical replica of ``ast.get_source_segment(source, node)``
-    (``padded=False``) that reuses the per-file line split instead of
-    re-splitting the whole source character by character on every call --
-    the line split dominates ``to_pandas()``/``arg_expressions`` cost when
-    resolved per argument (S1).
+    (``padded=False``) over the node's recorded span, reusing the per-file
+    line split instead of re-splitting the whole source character by
+    character on every call -- the line split dominates
+    ``to_pandas()``/``arg_expressions`` cost when resolved per argument (S1).
 
     Parameters
     ----------
     source_lines:
-        Parser-style split lines of the node's source
+        Parser-style split lines of the owning source
         (``FileIndex.source_lines()``).
-    node:
-        AST node to extract.
+    span:
+        Source range ``(lineno, col_offset, end_lineno, end_col_offset)``.
 
     Returns
     -------
     Optional[str]
-        Source segment, or ``None`` when end positions are missing. Column
+        Source segment, or ``None`` when the span exceeds the line split (a
+        defensive bound; projected spans come from the same source). Column
         offsets are byte offsets into the UTF-8 encoding of each line, hence
         the encode/decode round-trips.
     """
 
-    try:
-        end_lineno = node.end_lineno  # type: ignore[attr-defined]
-        end_col_offset = node.end_col_offset  # type: ignore[attr-defined]
-        if end_lineno is None or end_col_offset is None:
-            return None
-        lineno = node.lineno - 1  # type: ignore[attr-defined]
-        end_lineno -= 1
-        col_offset = node.col_offset  # type: ignore[attr-defined]
-    except AttributeError:
+    lineno = span[0] - 1
+    col_offset = span[1]
+    end_lineno = span[2] - 1
+    end_col_offset = span[3]
+    if lineno < 0 or end_lineno >= len(source_lines):
         return None
 
     if end_lineno == lineno:
@@ -935,18 +1057,18 @@ def _node_source_segment(source_lines: List[str], node: ast.AST) -> Optional[str
 
 def _find_candidate_calls(
     file_index: FileIndex,
-    scope_node: FunctionNode,
+    scope: ScopeEntry,
     line: int,
     col: Optional[int],
     func_name: Optional[str],
-) -> list[ast.Call]:
+) -> list[_ScopeCall]:
     """Find candidate calls matching a runtime source location.
 
     Parameters
     ----------
     file_index:
-        Index owning ``scope_node``, which supplies the cached per-scope call list.
-    scope_node:
+        Index owning ``scope``, which supplies the projected per-scope calls.
+    scope:
         Function scope containing the runtime frame.
     line:
         Source line number for the operation.
@@ -958,13 +1080,13 @@ def _find_candidate_calls(
 
     Returns
     -------
-    list[ast.Call]
-        Candidate call nodes, sorted innermost first for point matches.
+    list[_ScopeCall]
+        Candidate call projections, sorted innermost first for point matches.
     """
 
     matches = [
         entry
-        for entry in file_index.scope_calls(scope_node)
+        for entry in file_index.scope_calls(scope)
         if (func_name is None or entry.visible_name == func_name)
         and (
             _range_contains_line(entry.span, line)
@@ -978,7 +1100,7 @@ def _find_candidate_calls(
     matches.sort(key=lambda entry: _source_range_width(entry.span))
     if len(matches) > 1 and matches[0].span == matches[1].span:
         return []
-    return [entry.node for entry in matches]
+    return matches
 
 
 def _call_visible_name(call_node: ast.Call) -> Optional[str]:
@@ -1001,6 +1123,83 @@ def _call_visible_name(call_node: ast.Call) -> Optional[str]:
     if isinstance(call_node.func, ast.Attribute):
         return call_node.func.attr
     return None
+
+
+def _project_scope_call(call_node: ast.Call, parent_map: Dict[ast.AST, ast.AST]) -> _ScopeCall:
+    """Project one call node into its node-free ``_ScopeCall`` form.
+
+    Parameters
+    ----------
+    call_node:
+        Call node from a live hot-tier walk.
+    parent_map:
+        Parent links for the containing module (hot tier).
+
+    Returns
+    -------
+    _ScopeCall
+        Span/name/targets/arg-spec projection retaining no ast nodes.
+    """
+
+    return _ScopeCall(
+        span=_node_span(call_node),
+        visible_name=_call_visible_name(call_node),
+        assignment_targets=tuple(_assignment_target_names(call_node, parent_map)),
+        arg_specs=_project_arg_specs(call_node),
+    )
+
+
+def _project_arg_specs(call_node: ast.Call) -> Optional[Tuple[_ArgSpec, ...]]:
+    """Project a call's arguments into span recipes.
+
+    Parameters
+    ----------
+    call_node:
+        Call node from a live hot-tier walk.
+
+    Returns
+    -------
+    Optional[Tuple[_ArgSpec, ...]]
+        One recipe per positional then keyword argument, or ``None`` when any
+        argument lacks end positions (argument resolution must fail closed).
+    """
+
+    specs: list[_ArgSpec] = []
+    for arg_node in call_node.args:
+        span = _maybe_node_span(arg_node)
+        if span is None:
+            return None
+        specs.append(_ArgSpec(keyword=None, star=False, span=span))
+    for keyword in call_node.keywords:
+        span = _maybe_node_span(keyword.value)
+        if span is None:
+            return None
+        specs.append(_ArgSpec(keyword=keyword.arg, star=keyword.arg is None, span=span))
+    return tuple(specs)
+
+
+def _maybe_node_span(node: ast.AST) -> Optional[SourceRange]:
+    """Return a node's span, or ``None`` when any position is missing.
+
+    Parameters
+    ----------
+    node:
+        AST node to span (argument expressions may lack end positions on
+        synthetic or degenerate nodes; those must fail closed).
+
+    Returns
+    -------
+    Optional[SourceRange]
+        Full source range, or ``None`` when incomplete.
+    """
+
+    lineno = getattr(node, "lineno", None)
+    col_offset = getattr(node, "col_offset", None)
+    end_lineno = getattr(node, "end_lineno", None)
+    end_col_offset = getattr(node, "end_col_offset", None)
+    if lineno is None or col_offset is None or end_lineno is None or end_col_offset is None:
+        return None
+    return (lineno, col_offset, end_lineno, end_col_offset)
 
 
 def _source_range_width(span: SourceRange) -> tuple[int, int]:
@@ -1175,7 +1374,7 @@ def _build_parent_map(module: ast.Module) -> Dict[ast.AST, ast.AST]:
     return parent_map
 
 
-def _collect_scopes(module: ast.Module) -> List[ScopeEntry]:
+def _collect_scopes(module: ast.Module) -> Tuple[List[ScopeEntry], List[FunctionNode]]:
     """Collect all function scopes in a module with runtime-style qualnames.
 
     Parameters
@@ -1185,13 +1384,15 @@ def _collect_scopes(module: ast.Module) -> List[ScopeEntry]:
 
     Returns
     -------
-    List[ScopeEntry]
-        Collected function scopes in source order.
+    Tuple[List[ScopeEntry], List[FunctionNode]]
+        Collected function scopes in source order, plus their function nodes
+        aligned index-for-index (the nodes live only in the hot tier).
     """
 
     scopes: List[ScopeEntry] = []
-    _collect_scopes_from_node(module, None, "module", scopes)
-    return scopes
+    scope_nodes: List[FunctionNode] = []
+    _collect_scopes_from_node(module, None, "module", scopes, scope_nodes)
+    return scopes, scope_nodes
 
 
 def _collect_scopes_from_node(
@@ -1199,6 +1400,7 @@ def _collect_scopes_from_node(
     qualname_prefix: Optional[str],
     container_kind: Literal["module", "class", "function"],
     scopes: List[ScopeEntry],
+    scope_nodes: List[FunctionNode],
 ) -> None:
     """Recursively collect function scopes from a node.
 
@@ -1212,6 +1414,8 @@ def _collect_scopes_from_node(
         Container type for qualname composition.
     scopes:
         Output list to populate.
+    scope_nodes:
+        Parallel output list receiving each scope's function node.
     """
 
     for child in ast.iter_child_nodes(node):
@@ -1221,7 +1425,7 @@ def _collect_scopes_from_node(
                 container_kind=container_kind,
                 child_name=child.name,
             )
-            _collect_scopes_from_node(child, child_prefix, "class", scopes)
+            _collect_scopes_from_node(child, child_prefix, "class", scopes, scope_nodes)
             continue
 
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -1235,17 +1439,18 @@ def _collect_scopes_from_node(
                     code_firstlineno=child.lineno,
                     func_name=child.name,
                     qualname=qualname,
-                    node=child,
+                    index=len(scopes),
                     span=(child.lineno, _end_lineno(child)),
                     decorated_firstlineno=(
                         child.decorator_list[0].lineno if child.decorator_list else None
                     ),
                 )
             )
-            _collect_scopes_from_node(child, qualname, "function", scopes)
+            scope_nodes.append(child)
+            _collect_scopes_from_node(child, qualname, "function", scopes, scope_nodes)
             continue
 
-        _collect_scopes_from_node(child, qualname_prefix, container_kind, scopes)
+        _collect_scopes_from_node(child, qualname_prefix, container_kind, scopes, scope_nodes)
 
 
 def _compose_child_qualname(
@@ -1527,6 +1732,7 @@ class _ScopeIndexer:
         self,
         filename: str,
         scope: ScopeEntry,
+        scope_node: FunctionNode,
         parent_map: Dict[ast.AST, ast.AST],
         all_conditionals: List[ConditionalRecord],
         all_bool_consumers: List[BoolConsumer],
@@ -1539,6 +1745,8 @@ class _ScopeIndexer:
             Source filename for the owning module.
         scope:
             Function scope being indexed.
+        scope_node:
+            The scope's function node (build-time only; the entry holds none).
         parent_map:
             Parent map for the whole parsed module.
         all_conditionals:
@@ -1549,6 +1757,7 @@ class _ScopeIndexer:
 
         self.filename = filename
         self.scope = scope
+        self.scope_node = scope_node
         self.parent_map = parent_map
         self.all_conditionals = all_conditionals
         self.all_bool_consumers = all_bool_consumers
@@ -1556,7 +1765,7 @@ class _ScopeIndexer:
     def index_scope(self) -> None:
         """Index all conditionals and bool consumers for the scope."""
 
-        self._walk_nodes(self.scope.node.body, None, None, 0)
+        self._walk_nodes(self.scope_node.body, None, None, 0)
 
     def _walk_nodes(
         self,
@@ -1924,5 +2133,6 @@ __all__ = [
     "classify_bool",
     "get_file_index",
     "invalidate_cache",
+    "release_parsed_asts",
     "resolve_arg_expressions",
 ]
