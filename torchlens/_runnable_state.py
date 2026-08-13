@@ -1573,11 +1573,19 @@ def _initialize_state_slots(
     """Allocate every state slot using the frozen role initializer table."""
 
     state_slots = _persistent_state_slots(descriptor)
-    groups: dict[str, list[TensorSlotDescriptor]] = defaultdict(list)
+    # Tuple-tagged keys keep declared alias groups and per-name fallbacks in
+    # DISJOINT namespaces: no string an artifact can carry in ``alias_group``
+    # (parse additionally refuses the reserved ``name:`` prefix) can collide an
+    # aliased slot with an unrelated named slot into one shared allocation.
+    groups: dict[tuple[str, str], list[TensorSlotDescriptor]] = defaultdict(list)
     for slot in state_slots:
         binding = slot.state_binding
         assert binding is not None
-        group = binding.alias_group or f"name:{binding.state_dict_name}"
+        group = (
+            ("alias", binding.alias_group)
+            if binding.alias_group is not None
+            else ("name", binding.state_dict_name)
+        )
         groups[group].append(slot)
 
     ordered_groups = [
