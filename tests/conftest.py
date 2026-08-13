@@ -167,6 +167,28 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 # Fixtures
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _isolated_torchlens_cache(tmp_path_factory: pytest.TempPathFactory):
+    """Point ``TORCHLENS_CACHE_DIR`` at a fresh per-session directory.
+
+    ``tl.trace(..., cache=True)`` without an explicit ``cache_dir=`` falls back to
+    ``~/.cache/torchlens`` (read lazily from ``TORCHLENS_CACHE_DIR`` on every call).
+    A shared on-disk cache makes cache-hit assertions order- and history-dependent:
+    a stale entry left by an earlier session or another worktree turns a
+    first-capture cache-miss assertion into a phantom failure. Every test session
+    gets its own empty cache root instead; the prior environment is restored on
+    teardown so the suite never leaks state into the invoking shell.
+    """
+
+    prior = os.environ.get("TORCHLENS_CACHE_DIR")
+    os.environ["TORCHLENS_CACHE_DIR"] = str(tmp_path_factory.mktemp("torchlens_cache"))
+    yield
+    if prior is None:
+        os.environ.pop("TORCHLENS_CACHE_DIR", None)
+    else:
+        os.environ["TORCHLENS_CACHE_DIR"] = prior
+
+
 @pytest.fixture(autouse=True)
 def _reset_deprecation_dedup():
     """Give every test a fresh deprecation-warning dedup set.
