@@ -381,6 +381,43 @@ class TestTraceGC:
             "the registry pinned the dead exception's traceback frame locals"
         )
 
+    def test_type_keyed_caches_do_not_pin_model_classes(self):
+        """Per-type caches keyed on a model class must not outlive that class.
+
+        ``_state._dir_cache`` and the validation deepcopy warn-once set are both
+        keyed by ``type``. Strong keys made every captured model class immortal
+        for the process, which matters exactly for the generated / notebook /
+        function-local classes users actually feed a tracer.
+        """
+
+        from torchlens import _capture_state_helpers, _state
+
+        def build_class():
+            """Return a fresh model class defined in this call's scope."""
+
+            class _TypeKeyed(nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.fc = nn.Linear(4, 3)
+
+                def forward(self, x):
+                    return self.fc(x)
+
+            return _TypeKeyed
+
+        generated = build_class()
+        class_ref = weakref.ref(generated)
+        _capture_state_helpers._VALIDATION_DEEPCOPY_WARNING_TYPES.add(generated)
+        _state._dir_cache[generated] = ["fc"]
+        trace = tl.trace(generated(), torch.randn(2, 4))
+
+        del trace, generated
+        gc.collect()
+
+        assert class_ref() is None, (
+            "a type-keyed cache still pins the model class after it was dropped"
+        )
+
     def test_backward_trigger_registry_evicts_with_its_trace(self):
         """Dropping a backward-armed trace clears its grad-fn registry keys.
 
