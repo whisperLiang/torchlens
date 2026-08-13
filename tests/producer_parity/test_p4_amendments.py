@@ -322,6 +322,72 @@ def test_multi_domain_resolves_by_label_last_occurrence(
 
 
 @pytest.mark.parametrize("leg", _LEGS)
+def test_merged_multi_pass_journal_binds_amendments_by_seq(
+    leg: str, leg_templates: dict[str, list[Any]]
+) -> None:
+    """Colliding raw labels on a MERGED single-domain journal bind by seq.
+
+    The recorder accumulator concats per-pass journals whose raw labels
+    repeat (each pass re-emits the same ``label_raw``); after restamping the
+    result is one seq domain where a label's LIVE (last) occurrence is not
+    necessarily an amendment's target. Resolution must be seq-exact there:
+    by-label last-occurrence binding folds a pass-1 amendment onto the
+    pass-2 op, and re-concat of the merged journal (the failed-partial
+    recovery copy in ``Recorder._mark_recording_failed``) replays all ops
+    before all amendments and refused fail-closed (the P5 fastlog-partial
+    regression).
+    """
+
+    pass_one = _fresh_journal(leg_templates[leg], count=2)
+    target_one = _target(pass_one)
+    pass_one.append_amendment(
+        amend_raw_hook_intervention(
+            target_one.seq, target_one.label_raw, intervention_replaced=True
+        )
+    )
+    pass_two = _fresh_journal(leg_templates[leg], count=2)
+    target_two = _target(pass_two)
+    pass_two.append_amendment(
+        amend_raw_hook_intervention(
+            target_two.seq, target_two.label_raw, intervention_replaced=False
+        )
+    )
+
+    accumulator = CaptureEvents()
+    accumulator.concat(pass_one)
+    accumulator.concat(pass_two)
+    # Restamped into ONE domain: seqs unique, labels collide across passes.
+    assert accumulator.single_seq_domain is True
+    assert len({a.target_seq for a in accumulator.op_amendments}) == 2
+
+    view = accumulator.amended_op_records()
+    positions = [
+        index
+        for index, event in enumerate(view)
+        if event.label_raw == target_one.label_raw
+    ]
+    assert len(positions) == 2
+    first_occurrence, last_occurrence = positions
+    # Each pass's amendment folds onto ITS OWN occurrence (seq-exact).
+    assert view[first_occurrence].intervention_replaced is True
+    assert view[last_occurrence].intervention_replaced is False
+
+    # Re-concat of the merged journal: every amendment re-binds through the
+    # merge seq map and appends cleanly (previously AmendmentTargetError).
+    combined = CaptureEvents()
+    combined.concat(accumulator)
+    combined_view = combined.amended_op_records()
+    combined_positions = [
+        index
+        for index, event in enumerate(combined_view)
+        if event.label_raw == target_one.label_raw
+    ]
+    assert len(combined_positions) == 2
+    assert combined_view[combined_positions[0]].intervention_replaced is True
+    assert combined_view[combined_positions[1]].intervention_replaced is False
+
+
+@pytest.mark.parametrize("leg", _LEGS)
 def test_concat_rebinds_target_seq_and_refolds(
     leg: str, leg_templates: dict[str, list[Any]]
 ) -> None:

@@ -151,11 +151,14 @@ def _clone_op_event_for_replay(event: Any) -> Any:
     cheap and never copies activations.
 
     Polymorphic from P3 (reviewer note O-N5): a decomposed ``OpRecord`` clones
-    only the facets that carry live dicts (``graph.parent_arg_positions``,
+    the facets that carry live dicts (``graph.parent_arg_positions``,
     ``transform.transform_config``, ``annotations.annotations``) — the same
     shared-mutable-state guarantee, NOT a blanket identity return, because the
-    record's facets are frozen but those three payloads are not. A record with
-    no such facet present returns itself (genuinely immutable).
+    record's facets are frozen but those three payloads are not. The clone
+    ALWAYS owns a fresh ``core``: the journal ``append`` path stamps ``seq``
+    on the record's core (the one slot append mutates), so a shared core
+    would let re-stamping a merged clone silently rewrite the sealed source
+    stream's seq facts.
 
     Parameters
     ----------
@@ -169,7 +172,7 @@ def _clone_op_event_for_replay(event: Any) -> Any:
     """
 
     if isinstance(event, OpRecord):
-        record_changes: dict[str, Any] = {}
+        record_changes: dict[str, Any] = {"core": replace(event.core)}
         graph = event.graph
         if graph is not None:
             record_changes["graph"] = replace(
@@ -189,7 +192,7 @@ def _clone_op_event_for_replay(event: Any) -> Any:
             record_changes["annotations_facet"] = replace(
                 annotations_facet, annotations=dict(annotations_facet.annotations)
             )
-        return replace(event, **record_changes) if record_changes else event
+        return replace(event, **record_changes)
     return replace(
         event,
         parent_arg_positions={
@@ -620,9 +623,13 @@ class CaptureEvents:
     def _amended_fold(self) -> tuple[list[JournalOp], dict[str, JournalOp]]:
         """Compute (and cache) the amendment fold over the op lane.
 
-        Amendments resolve by ``target_label_raw`` (multi-pass projections
-        have no single seq domain — O-N6); when the SAME label names several
-        events in a multi-domain journal, the fold lands on the LAST
+        On a single-seq-domain journal the (concat-rebound) ``target_seq`` is
+        the exact binding key: raw labels repeat across recorder passes once
+        journals merge, so when the SAME label names several events each
+        amendment folds onto the occurrence carrying its ``target_seq``
+        (refusing fail-closed when no occurrence of that label carries it).
+        Multi-domain projections have no single seq domain (O-N6): there
+        resolution is by ``target_label_raw`` and the fold lands on the LAST
         occurrence, matching the live index's last-wins label semantics.
         Every amendment re-validates against the closed registry at fold
         (Sol 2.4). The cache keys on both lane lengths: each lane is
@@ -633,25 +640,42 @@ class CaptureEvents:
         key = (len(self.op_events), len(self.op_amendments))
         if cache is not None and cache[0] == key:
             return cache[1], cache[2]
-        pending: dict[str, list[OpAmendment]] = {}
-        for amendment in self.op_amendments:
-            validate_amendment(amendment)
-            pending.setdefault(amendment.target_label_raw, []).append(amendment)
         last_position: dict[str, int] = {
             event.label_raw: index for index, event in enumerate(self.op_events)
         }
+        position_by_seq: dict[int, int] | None = None
+        if self.single_seq_domain:
+            position_by_seq = {
+                event.seq: index for index, event in enumerate(self.op_events)
+            }
         folded_list: list[JournalOp] = list(self.op_events)
-        for label_raw, amendments in pending.items():
+        for amendment in self.op_amendments:
+            validate_amendment(amendment)
+            label_raw = amendment.target_label_raw
             position = last_position.get(label_raw)
             if position is None:
                 raise AmendmentTargetError(
                     f"amendment target {label_raw!r} names no committed op in "
                     "this journal"
                 )
-            folded = folded_list[position]
-            for amendment in amendments:
-                folded = apply_patch_items(folded, amendment.patch)
-            folded_list[position] = folded
+            if (
+                position_by_seq is not None
+                and folded_list[position].seq != amendment.target_seq
+            ):
+                seq_position = position_by_seq.get(amendment.target_seq)
+                if (
+                    seq_position is None
+                    or folded_list[seq_position].label_raw != label_raw
+                ):
+                    raise AmendmentTargetError(
+                        f"amendment {amendment.family!r} target_seq "
+                        f"{amendment.target_seq} names no committed occurrence "
+                        f"of {label_raw!r} (single-seq-domain cross-check)"
+                    )
+                position = seq_position
+            folded_list[position] = apply_patch_items(
+                folded_list[position], amendment.patch
+            )
         folded_by_label = {event.label_raw: event for event in folded_list}
         self._amended_fold_cache = (key, folded_list, folded_by_label)
         return folded_list, folded_by_label
@@ -680,26 +704,51 @@ class CaptureEvents:
                 "projection (copy_for_replay), never the sealed source"
             )
         validate_amendment(amendment)
-        target = self.live_index.by_raw_label.get(amendment.target_label_raw)
-        if target is None:
+        live_target = self.live_index.by_raw_label.get(amendment.target_label_raw)
+        if live_target is None:
             raise AmendmentTargetError(
                 f"amendment {amendment.family!r} targets unknown op "
                 f"{amendment.target_label_raw!r}"
             )
-        if self.single_seq_domain and target.seq != amendment.target_seq:
-            raise AmendmentTargetError(
-                f"amendment {amendment.family!r} target_seq "
-                f"{amendment.target_seq} disagrees with the committed op's seq "
-                f"{target.seq} for {amendment.target_label_raw!r} "
-                "(single-seq-domain cross-check)"
+        target = live_target
+        update_live_index = True
+        if self.single_seq_domain and live_target.seq != amendment.target_seq:
+            # Raw labels repeat across recorder passes once journals merge
+            # (each pass re-emits the same label_raw), so the label's LIVE
+            # (last) occurrence is not necessarily the bound target. In a
+            # single seq domain the (concat-rebound) target_seq is the exact
+            # key: bind to the earlier committed occurrence of the SAME label
+            # carrying that seq; anything else stays refused fail-closed.
+            target = next(
+                (
+                    event
+                    for event in reversed(self.op_events)
+                    if event.seq == amendment.target_seq
+                    and event.label_raw == amendment.target_label_raw
+                ),
+                None,
             )
+            if target is None:
+                raise AmendmentTargetError(
+                    f"amendment {amendment.family!r} target_seq "
+                    f"{amendment.target_seq} names no committed occurrence of "
+                    f"{amendment.target_label_raw!r} (live occurrence has seq "
+                    f"{live_target.seq}; single-seq-domain cross-check)"
+                )
+            # The live index tracks only the label's LAST occurrence, and its
+            # incrementally-folded state belongs to that op: folding an
+            # earlier occurrence must not clobber it. The returned fold below
+            # is best-effort for this path (raw op + this patch); the reducer
+            # (``amended_op_records``) stays the canonical folded read.
+            update_live_index = False
         self.amendment_seq += 1
         object.__setattr__(amendment, "seq", self.amendment_seq)
         object.__setattr__(amendment, "run_nonce", self.run_nonce)
         self.op_amendments.append(amendment)
         self._amended_fold_cache = None
         folded = apply_patch_items(target, amendment.patch)
-        self.live_index.replace(folded)
+        if update_live_index:
+            self.live_index.replace(folded)
         return folded
 
     def next_seq(self) -> int:
