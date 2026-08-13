@@ -60,7 +60,7 @@ def canonical_json_bytes(obj: Any) -> bytes:
 def tree_hash(root: Path) -> str:
     """Canonical tree hash of a rank-core directory (4.1).
 
-    Sorted POSIX-relative paths; per entry ``path \\0 size \\0 sha256(bytes)``;
+    Sorted POSIX-relative paths; per entry ``path_len path size sha256(bytes)``;
     the tree hash is the SHA-256 of the concatenated entries. Symlinks are
     REJECTED at hash time, matching the loader guards.
     """
@@ -86,15 +86,40 @@ def tree_hash(root: Path) -> str:
                     break
                 size += len(chunk)
                 digest.update(chunk)
-        entry = (
-            candidate.relative_to(root).as_posix().encode("utf-8")
-            + b"\0"
-            + str(size).encode("ascii")
-            + b"\0"
-            + digest.hexdigest().encode("ascii")
+        entry = _tree_hash_entry(
+            candidate.relative_to(root).as_posix(),
+            size,
+            digest.hexdigest(),
         )
         entries.append(entry)
     return hashlib.sha256(b"\n".join(entries)).hexdigest()
+
+
+def _tree_hash_entry(relative_path: str, size: int, digest: str) -> bytes:
+    """Frame one merged tree-hash entry without delimiter ambiguity.
+
+    Parameters
+    ----------
+    relative_path:
+        POSIX-relative member path.
+    size:
+        File size in bytes.
+    digest:
+        Hexadecimal SHA-256 of the file body.
+
+    Returns
+    -------
+    bytes
+        Length-prefixed canonical entry bytes.
+    """
+
+    path_bytes = relative_path.encode("utf-8")
+    return (
+        len(path_bytes).to_bytes(8, "big")
+        + path_bytes
+        + size.to_bytes(8, "big")
+        + bytes.fromhex(digest)
+    )
 
 
 def _member_dirname(rank: int) -> str:

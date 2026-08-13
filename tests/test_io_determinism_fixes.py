@@ -383,3 +383,16 @@ def test_loop_signature_sorts_sets_by_emitted_tokens() -> None:
 
     assert "_TiedReprKeyA" in tokens[1]
     assert "_TiedReprKeyB" in tokens[2]
+
+
+def test_merged_tree_hash_frames_paths_by_length() -> None:
+    """Newlines and NUL-like boundaries in member paths cannot forge entries."""
+
+    from torchlens.merged._artifact import _tree_hash_entry
+
+    path = "nested/name\nwith-newline"
+    framed = _tree_hash_entry(path, 3, "00" * 32)
+    path_size = int.from_bytes(framed[:8], "big")
+
+    assert path_size == len(path.encode("utf-8"))
+    assert framed[8 : 8 + path_size].decode("utf-8") == path
