@@ -30,8 +30,10 @@ Honesty contract:
 from __future__ import annotations
 
 import threading
+import warnings
 from collections import Counter
-from typing import TYPE_CHECKING, Any, Callable
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Callable, Iterator
 
 from torch.overrides import TorchFunctionMode
 
@@ -81,6 +83,46 @@ class RescueTorchFunctionMode(TorchFunctionMode):
             return decorated(*args, **kwargs)
         finally:
             _thread_local.busy = False
+
+
+@contextmanager
+def _record_emitted_warnings(seen: set[tuple[type, str]]) -> Iterator[None]:
+    """Record every warning shown during the block, still forwarding it.
+
+    One user ``tl.trace()`` call may run the forward twice (primary + rescue
+    re-run); per-session advisory warnings (functorch boundary, provenance)
+    must reach the user ONCE per trace call, not once per forward.
+    """
+
+    forward = warnings.showwarning
+
+    def recorder(message: Any, category: Any, *args: Any, **kwargs: Any) -> None:
+        seen.add((category, str(message)))
+        forward(message, category, *args, **kwargs)
+
+    warnings.showwarning = recorder
+    try:
+        yield
+    finally:
+        warnings.showwarning = forward
+
+
+@contextmanager
+def _suppress_repeated_warnings(seen: set[tuple[type, str]]) -> Iterator[None]:
+    """Drop warnings already emitted by the primary run; forward novel ones."""
+
+    forward = warnings.showwarning
+
+    def dedup(message: Any, category: Any, *args: Any, **kwargs: Any) -> None:
+        if (category, str(message)) in seen:
+            return
+        forward(message, category, *args, **kwargs)
+
+    warnings.showwarning = dedup
+    try:
+        yield
+    finally:
+        warnings.showwarning = forward
 
 
 def _escape_signal(trace: "Trace") -> str | None:
@@ -191,8 +233,10 @@ def capture_with_rescue(
     rng_snapshot = log_current_rng_states()
     primary: "Trace | None" = None
     primary_error: OutputAttributionError | None = None
+    emitted_warnings: set[tuple[type, str]] = set()
     try:
-        primary = run_capture()
+        with _record_emitted_warnings(emitted_warnings):
+            primary = run_capture()
     except OutputAttributionError as exc:
         primary_error = exc
 
@@ -208,7 +252,7 @@ def capture_with_rescue(
     _rescue_active = True
     try:
         set_rng_from_saved_states(rng_snapshot)
-        with RescueTorchFunctionMode():
+        with _suppress_repeated_warnings(emitted_warnings), RescueTorchFunctionMode():
             rescued = run_capture()
     except Exception as exc:
         if primary_error is not None:

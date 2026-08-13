@@ -605,16 +605,27 @@ def test_grad_over_module_boundary_does_not_crash() -> None:
 
 @pytest.mark.skipif(not _HAS_TORCH_FUNC, reason="torch.func not available")
 def test_raw_grad_over_module_wrapper_tensor_leak_does_not_crash() -> None:
-    """Hardening guards tolerate wrapper tensors from uninstrumented transforms."""
+    """Hardening guards tolerate wrapper tensors from uninstrumented transforms.
+
+    The detached-reference crawler used to rewrite ``self.raw_grad`` to the
+    wrapped ``torch.func.grad``, so the transform was captured as a boundary
+    op and the output attributed. Stage-2 safety net deleted the crawler and
+    model attributes keep their identity: the raw transform interior is
+    honestly not logged, the transform boundary warning/marker stays
+    authoritative (docs/migration/scoped_detached_patching.md), and the
+    unattributable output is tolerated rather than crashing the capture.
+    """
 
     x = torch.randn(4)
-    log = tl.trace(
-        RawGradOverModuleModel().eval(),
-        x,
-        capture=CaptureOptions(layers_to_save="all"),
-    )
+    with pytest.warns(UserWarning, match="functorch"):
+        log = tl.trace(
+            RawGradOverModuleModel().eval(),
+            x,
+            capture=CaptureOptions(layers_to_save="all"),
+        )
 
-    assert log.output_layers
+    assert log._raw_transform_escape_detected is True
+    assert log.output_layers == []
 
 
 @pytest.mark.skipif(not _HAS_TORCH_FUNC, reason="torch.func not available")

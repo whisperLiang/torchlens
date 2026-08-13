@@ -423,7 +423,13 @@ def test_trace_validate_saved_outs_warns_once(
 ) -> None:
     """The deprecated ``Trace`` method alias should warn once and delegate."""
 
+    from torchlens.capture.outcome import CaptureOutcome, CaptureStatus
+
     trace = tl.Trace("tiny")
+    # A hand-built Trace has no settled capture outcome, and the N2
+    # validation-entry gate correctly refuses UNKNOWN fail-closed. This test's
+    # subject is the deprecation alias, so settle COMPLETE to pass the gate.
+    trace._capture_outcome = CaptureOutcome(status=CaptureStatus.COMPLETE)
 
     def fake_validate_saved_outs(*args: Any, **kwargs: Any) -> bool:
         """Return success without running the real validation path."""

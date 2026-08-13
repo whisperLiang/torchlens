@@ -43,6 +43,7 @@ EXPECTED_APPEND_AMENDMENT_CALLER_FILES = {
     "torchlens/backends/torch/backend.py",  # output_parent_promotion
     "torchlens/postprocess/graph_traversal.py",  # late_buffer_output_parent (pre-0)
     "torchlens/backends/tf/backend.py",  # preview_output_parent_mark x2
+    "torchlens/backends/tf/interventions.py",  # module_exit_intervention (site fire)
     "torchlens/backends/mlx/backend.py",  # preview_output_parent_mark
     "torchlens/backends/paddle/backend.py",  # preview_output_parent_mark
     "torchlens/backends/jax/backend.py",  # preview_output_parent_rebind

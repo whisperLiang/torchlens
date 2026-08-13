@@ -308,6 +308,11 @@ def test_interior_intervention_in_formerly_opaque_region() -> None:
     """An ablation inside a compiled attribute fires and changes the output."""
 
     torch.compiler.reset()
+    # Seeded: with unseeded weights/input, sin(fc(x)) is all-non-positive for
+    # ~0.7% of draws, making the CLEAN relu output exactly zero and the final
+    # assert vacuously equal (observed once on the cluster's full-suite RNG
+    # stream). Seed 0 gives a non-degenerate relu input.
+    torch.manual_seed(0)
     model = _CompiledAttrModel()
     x = torch.randn(2, 4)
     model(x)
