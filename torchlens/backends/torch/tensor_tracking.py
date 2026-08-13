@@ -27,6 +27,9 @@ if TYPE_CHECKING:
     from ...data_classes.trace import Trace
 
 
+_IMPLICIT_BACKWARD_TASK_IDS: weakref.WeakKeyDictionary[Any, int] = weakref.WeakKeyDictionary()
+
+
 def _is_fork_relative(trace: "Trace", other: "Trace") -> bool:
     """Return whether two traces are related through the fork parent chain.
 
@@ -258,12 +261,27 @@ def _forward_op_count_at_backward_trigger(trace: "Trace") -> int | None:
 def _ensure_backward_pass_for_tensor_hook(trace: "Trace") -> int:
     """Return an active backward pass index, opening an implicit pass if needed."""
 
+    current_task_id = _current_backward_graph_task_id()
     pass_index = getattr(trace, "_active_backward_pass_index", None)
     if pass_index is not None:
-        return int(pass_index)
+        prior_task_id = _IMPLICIT_BACKWARD_TASK_IDS.get(trace)
+        if (
+            getattr(trace, "_implicit_backward_pass_open", False)
+            and current_task_id is not None
+            and prior_task_id is not None
+            and current_task_id != prior_task_id
+        ):
+            from .backward import _close_implicit_backward_pass_if_open
+
+            _IMPLICIT_BACKWARD_TASK_IDS.pop(trace, None)
+            _close_implicit_backward_pass_if_open(trace)
+        else:
+            return int(pass_index)
     pass_index = int(getattr(trace, "num_backward_passes", 0)) + 1
     trace._active_backward_pass_index = pass_index
     trace._implicit_backward_pass_open = True
+    if current_task_id is not None:
+        _IMPLICIT_BACKWARD_TASK_IDS[trace] = current_task_id
     if not getattr(trace, "_warned_implicit_backward_pass", False):
         warnings.warn(
             "TorchLens observed gradients outside a managed backward trigger; recording an "
@@ -293,6 +311,26 @@ def _ensure_backward_pass_for_tensor_hook(trace: "Trace") -> int:
         )
     )
     return pass_index
+
+
+def _current_backward_graph_task_id() -> int | None:
+    """Return PyTorch's current autograd-engine invocation id when available.
+
+    Returns
+    -------
+    int | None
+        Engine graph-task id inside a backward hook, or ``None`` when the
+        installed torch build exposes no such capability.
+    """
+
+    resolver = getattr(torch._C, "_current_graph_task_id", None)
+    if resolver is None:
+        return None
+    try:
+        task_id = resolver()
+    except (AttributeError, RuntimeError):
+        return None
+    return int(task_id) if isinstance(task_id, int) and task_id >= 0 else None
 
 
 def _emit_tensor_grad_event(trace: "Trace", grad: torch.Tensor, tensor_label: str) -> None:

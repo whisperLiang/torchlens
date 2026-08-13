@@ -670,6 +670,30 @@ def test_backward_entrypoints_finalize_streaming_on_exception(
     assert finalized == [trace]
 
 
+def test_separate_unmanaged_engine_calls_get_separate_implicit_passes() -> None:
+    """Graph-task identity prevents adjacent unmanaged backwards from merging."""
+    from torchlens.backends.torch import backward
+    from torchlens.ir.events import BackwardPassStart
+
+    if not hasattr(torch._C, "_current_graph_task_id"):
+        pytest.skip("torch build does not expose autograd graph-task identity")
+    _model, _x, trace = _logged_model()
+    output = trace[trace.output_layers[0]].out
+    original_backward = backward._ORIGINAL_AUTOGRAD_BACKWARD
+    assert original_backward is not None
+
+    original_backward((output.sum(),), retain_graph=True)
+    original_backward(((output * 2).sum(),))
+    backward._close_implicit_backward_pass_if_open(trace)
+
+    starts = [
+        event
+        for event in trace.backward_events
+        if isinstance(event, BackwardPassStart) and event.implicit
+    ]
+    assert [event.pass_index for event in starts] == [1, 2]
+
+
 @pytest.mark.smoke
 def test_replay_fork_does_not_inherit_gradient_state() -> None:
     """A replay fork starts with no captured gradient state; the source keeps its own."""
