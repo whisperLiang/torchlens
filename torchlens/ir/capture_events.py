@@ -87,7 +87,19 @@ _LANE_APPENDERS: dict[str, str] = {
 }
 
 
-class SealedJournalAmendmentError(RuntimeError):
+class SealedJournalWriteError(RuntimeError):
+    """Base for every refused write to a sealed source journal.
+
+    ``CaptureSession.seal()`` freezes a journal into its ``CapturedRunCore``:
+    the op spine is snapshotted (folded through the amendment reducer) and the
+    forward sibling lanes are snapshotted onto the pre-seal projection clone.
+    A write to any of those lanes AFTER the seal silently diverges the live
+    journal from the artifact every consumer projects from, so the whole class
+    fails closed here rather than at the far end of a projection.
+    """
+
+
+class SealedJournalAmendmentError(SealedJournalWriteError):
     """A typed amendment was appended to a sealed source journal.
 
     After ``CaptureSession.seal()`` folds a journal into its
@@ -95,6 +107,27 @@ class SealedJournalAmendmentError(RuntimeError):
     fail-closed (DoR 4.5.5): post-seal knowledge must route through a working
     projection (``copy_for_replay``), whose carried amendment lane the
     watermark filter keeps double-application-free.
+    """
+
+
+class SealedJournalAppendError(SealedJournalWriteError):
+    """A forward-lane event was appended to a sealed source journal.
+
+    Finding B1-15: sealed-journal enforcement was HALF-HEIGHT -- only the
+    amendment lane checked ``amendments_sealed``, while the op lane's
+    :meth:`CaptureEvents.append` and every forward sibling appender wrote
+    unconditionally. Code holding a sealed journal could therefore diverge the
+    live stream from its sealed ``CapturedRunCore`` snapshot with no signal at
+    all. The op lane and the forward sibling lanes are now the same fence the
+    amendment lane always had; post-seal work belongs on a working projection
+    (``copy_for_replay``).
+
+    The backward lane is deliberately NOT fenced: backward capture runs after
+    the forward seal by design (``Trace.log_backward`` /
+    ``Recording.log_backward`` both append to the sealed journal), and
+    ``backward_events`` is not part of the sealed core. Measured: across the
+    smoke tier plus the fastlog/producer suites, ``append_backward`` is the ONLY
+    appender that ever fires on a sealed journal.
     """
 
 
@@ -742,13 +775,42 @@ class CaptureEvents:
         self.event_seq += 1
         return self.event_seq
 
+    def _refuse_sealed_append(self, lane_name: str) -> None:
+        """Refuse a forward-lane append on a sealed source journal (B1-15).
+
+        Parameters
+        ----------
+        lane_name
+            Lane the caller is trying to write.
+
+        Raises
+        ------
+        SealedJournalAppendError
+            When this journal was sealed into a ``CapturedRunCore``. Every
+            forward lane the seal snapshotted is fenced; the backward lane is
+            legitimately still open (see :class:`SealedJournalAppendError`).
+        """
+
+        if self.amendments_sealed:
+            raise SealedJournalAppendError(
+                f"journal sealed at watermark {self.core_seal_watermark}: "
+                f"appending to {lane_name!r} would diverge the live stream from "
+                "its sealed CapturedRunCore snapshot; route post-seal work "
+                "through a working projection (copy_for_replay), never the "
+                "sealed source"
+            )
+
     def append(self, event: JournalOp) -> None:
         """Append a single operation event/record, stamping the global seq.
 
         The seq slot lives on the flat event for compat ``OpEvent``s and on
         ``core`` for decomposed ``OpRecord``s; both are frozen dataclasses and
         this append path is their single sequencing authority.
+
+        Refuses on a sealed journal (B1-15): the op spine IS the sealed core's
+        ``events`` tuple.
         """
+        self._refuse_sealed_append("op_events")
         seq = self.next_seq()
         if isinstance(event, OpRecord):
             object.__setattr__(event.core, "seq", seq)
@@ -759,31 +821,37 @@ class CaptureEvents:
 
     def append_module_prep(self, event: ModulePrepEvent) -> None:
         """Append a module-prep sibling event, stamping the global seq."""
+        self._refuse_sealed_append("module_prep_events")
         object.__setattr__(event, "seq", self.next_seq())
         self.module_prep_events.append(event)
 
     def append_module_enter(self, event: ModuleEnterEvent) -> None:
         """Append a module-entry sibling event, stamping the global seq."""
+        self._refuse_sealed_append("module_enter_events")
         object.__setattr__(event, "seq", self.next_seq())
         self.module_enter_events.append(event)
 
     def append_module_exit(self, event: ModuleExitEvent) -> None:
         """Append a module-exit sibling event, stamping the global seq."""
+        self._refuse_sealed_append("module_exit_events")
         object.__setattr__(event, "seq", self.next_seq())
         self.module_exit_events.append(event)
 
     def append_pre_hook(self, event: PreHookProvenanceEvent) -> None:
         """Append a pre-hook provenance sibling event, stamping the global seq."""
+        self._refuse_sealed_append("pre_hook_events")
         object.__setattr__(event, "seq", self.next_seq())
         self.pre_hook_events.append(event)
 
     def append_buffer_write(self, event: BufferWriteEvent) -> None:
         """Append a registered-buffer write event, stamping the global seq."""
+        self._refuse_sealed_append("buffer_write_events")
         object.__setattr__(event, "seq", self.next_seq())
         self.buffer_write_events.append(event)
 
     def append_intervention(self, event: InterventionAppliedEvent) -> None:
         """Append an intervention edit record, stamping the global seq."""
+        self._refuse_sealed_append("intervention_events")
         object.__setattr__(event, "seq", self.next_seq())
         self.intervention_events.append(event)
 
@@ -827,6 +895,18 @@ class CaptureEvents:
         if other is self:
             return
         lane_names = tuple(lanes) if lanes is not None else tuple(LANE_MERGE_POLICIES)
+        # Target-rebinding precondition (B1-15 companion): every amendment's
+        # ``target_seq`` is rebound through the merge seq map built from the OP
+        # lane. Merging the amendment lane WITHOUT the op lane leaves that map
+        # empty, so each rebind silently falls back to the source-domain value
+        # and binds against this journal's unrelated seq domain. Refuse the lane
+        # selection instead.
+        if "op_amendments" in lane_names and "op_events" not in lane_names and other.op_amendments:
+            raise LaneMergePolicyError(
+                "concat cannot merge lane 'op_amendments' without 'op_events': "
+                "amendment target_seq values rebind through the op lane's merge "
+                "seq map, which would be empty"
+            )
         for lane_name in lane_names:
             if LANE_MERGE_POLICIES[lane_name] != "run_local" and lane_name not in _LANE_APPENDERS:
                 raise LaneMergePolicyError(
@@ -946,6 +1026,16 @@ class CaptureEvents:
         if "op_amendments" in lane_names and LANE_MERGE_POLICIES["op_amendments"] != "run_local":
             for amendment in other.op_amendments:
                 clone = replace(amendment)
+                source_target_seq = int(getattr(amendment, "target_seq", 0) or 0)
+                if source_target_seq >= 1 and source_target_seq not in seq_map:
+                    # The target op did not merge, so no rebinding is possible.
+                    # Keeping the source-domain value would point the amendment
+                    # at whatever this journal happens to hold at that seq.
+                    raise LaneMergePolicyError(
+                        f"concat cannot rebind amendment {amendment.family!r}: its "
+                        f"target_seq {source_target_seq} has no merged op in this "
+                        "journal's seq domain"
+                    )
                 object.__setattr__(
                     clone,
                     "target_seq",
@@ -1014,6 +1104,7 @@ class CaptureEvents:
 
     def append_output_version(self, event: OutputVersionEvent) -> None:
         """Append a parent output-version sibling event, stamping the global seq."""
+        self._refuse_sealed_append("output_version_events")
         object.__setattr__(event, "seq", self.next_seq())
         self.output_version_events.append(event)
 
