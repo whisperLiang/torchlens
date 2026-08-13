@@ -593,6 +593,10 @@ def save_new_outs(
         verbose=getattr(self, "verbose", False),
         backward_ready=getattr(self, "backward_ready", False),
         inference_only=getattr(self, "inference_only", False),
+        # F2: a refresh re-arms the nonfinite tripwire. The historical refresh
+        # forwarded only inference_only, so a raise_on_nan capture silently
+        # lost its abort policy on every refreshed forward.
+        raise_on_nan=bool(getattr(self, "raise_on_nan", False)),
         output_transform=getattr(self, "_output_transform", None),
         save_raw_output=getattr(self, "save_raw_output", "small"),
         retain_output_parents_for_layers_to_save=True,
@@ -1142,7 +1146,9 @@ def _finalize_halted_trace(
     # recovery and output extraction is the FINALIZE failure class; the halted
     # postprocess below is POSTPROCESS. The two classes are never conflated.
     set_capture_phase(self, CapturePhase.FINALIZE)
-    backend.cleanup_model_session(self, (model, input_tensors))
+    # F3a: recover the frontier BEFORE model-session cleanup. The cleanup
+    # strips TorchLens metadata from model-owned tensors, so the reverse scan
+    # must read the raw entries while their capture-time state is intact.
     frontier_output = halt_exc.frontier_output
     if frontier_output is None:
         raw_layer_dict = self._raw_graph_ws.raw_layer_dict
@@ -1151,6 +1157,7 @@ def _finalize_halted_trace(
             if entry is not None and getattr(entry, "out", None) is not None:
                 frontier_output = entry.out
                 break
+    backend.cleanup_model_session(self, (model, input_tensors))
     if frontier_output is None:
         raise RuntimeError(
             "trace(halt=...) could not identify a tensor frontier for the halted partial graph."

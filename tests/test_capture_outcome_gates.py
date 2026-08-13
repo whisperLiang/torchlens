@@ -364,3 +364,56 @@ def test_fork_inherits_outcome_sidecar() -> None:
     trace = tl.trace(ThreeStageModel(), torch.ones(1, 3))
     fork = trace.fork()
     assert fork.outcome is trace.outcome
+
+
+# ---------------------------------------------------------------------------
+# P4 behavior fixes
+# ---------------------------------------------------------------------------
+
+
+def test_f2_refresh_rearms_raise_on_nan() -> None:
+    """F2: a refreshed forward keeps the nonfinite abort tripwire armed."""
+
+    class DivideByInput(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = nn.Linear(3, 3)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.linear(torch.ones(1, 3) / x)
+
+    from torchlens.errors import CaptureError
+
+    model = DivideByInput()
+    trace = tl.trace(
+        model,
+        torch.ones(1, 3),
+        capture=tl.options.CaptureOptions(raise_on_nan=True),
+    )
+    assert trace.outcome.status is CaptureStatus.COMPLETE
+    with pytest.raises(CaptureError, match="non-finite"):
+        trace.save_new_outs(model, torch.zeros(1, 3))
+
+
+def test_f3a_halted_frontier_recovery_precedes_cleanup(monkeypatch) -> None:
+    """F3a: the frontier scan reads raw entries before session cleanup runs."""
+
+    from torchlens.backends.torch.backend import TorchBackend
+
+    order: list[str] = []
+    original = TorchBackend.cleanup_model_session
+
+    def _tracking_cleanup(self: object, session: object, prepared: object) -> None:
+        order.append("cleanup")
+        original(self, session, prepared)
+
+    monkeypatch.setattr(TorchBackend, "cleanup_model_session", _tracking_cleanup)
+
+    def _halt_without_frontier(ctx: object) -> bool:
+        # A module-exit halt carries no frontier_output, forcing the
+        # reverse-scan recovery path.
+        return ctx.kind == "op" and ctx.func_name == "relu"
+
+    trace = tl.trace(ThreeStageModel(), torch.ones(1, 3), halt=_halt_without_frontier)
+    assert trace.halted is True
+    assert order  # cleanup ran (after the scan; a broken order crashes above)
