@@ -141,7 +141,7 @@ def loads_bounded(
     the stdlib decoder as a ``json.JSONDecodeError`` belt.
     """
 
-    if len(text) > max_bytes:
+    if len(text.encode("utf-8")) > max_bytes:
         raise _refuse(f"manifest JSON exceeds the maximum size of {max_bytes} bytes", text)
     _prescan_depth(text, max_depth=max_depth)
     try:
@@ -164,7 +164,15 @@ def load_bounded(
     being fully loaded into memory, then delegates to :func:`loads_bounded`.
     """
 
-    text = handle.read(max_bytes + 1)
+    raw_handle = getattr(handle, "buffer", None)
+    if raw_handle is not None:
+        raw = raw_handle.read(max_bytes + 1)
+        if len(raw) > max_bytes:
+            raise _refuse(f"manifest JSON exceeds the maximum size of {max_bytes} bytes", "")
+        encoding = getattr(handle, "encoding", None) or "utf-8"
+        text = raw.decode(encoding)
+    else:
+        text = handle.read(max_bytes + 1)
     return loads_bounded(text, max_depth=max_depth, max_bytes=max_bytes)
 
 
@@ -206,8 +214,11 @@ def read_bounded(
         handlers at each call site catch it unchanged.
     """
 
-    with path.open("r", encoding=encoding) as handle:
-        return load_bounded(handle, max_depth=max_depth, max_bytes=max_bytes)
+    with path.open("rb") as handle:
+        data = handle.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise _refuse(f"manifest JSON exceeds the maximum size of {max_bytes} bytes", "")
+    return loads_bounded(data.decode(encoding), max_depth=max_depth, max_bytes=max_bytes)
 
 
 def read_bytes_bounded(path: Path, *, max_bytes: int = _MAX_JSON_BYTES) -> bytes:

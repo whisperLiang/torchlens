@@ -448,3 +448,12 @@ def test_current_manifest_refuses_unparseable_torchlens_version(tmp_path: Path) 
 
     with pytest.raises(TorchLensIOError, match="could not be parsed"):
         tl.load(path)
+
+
+def test_bounded_json_ceiling_counts_utf8_bytes() -> None:
+    """Multibyte JSON text cannot exceed a byte ceiling via character counting."""
+
+    from torchlens._io._json import loads_bounded
+
+    with pytest.raises(json.JSONDecodeError, match="maximum size"):
+        loads_bounded('"éé"', max_bytes=5)
