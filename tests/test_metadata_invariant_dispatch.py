@@ -23,6 +23,11 @@ PRE_REFACTOR_TORCH_SEQUENCE = (
     "backend_neutral_accessor_refs",
     "receptive_field_metadata",
     "special_layer_lists",
+    # loop_detection_invariants must precede graph_topology: recurrence
+    # metadata is a precondition for pass-sensitive Layer accessors, so the
+    # owning invariant has to report before topology walks Layer labels
+    # (grind r1 trust, SF-31 corruption_loop root cause).
+    "loop_detection_invariants",
     "graph_topology",
     "edge_use_parent_arg_consistency",
     "capture_edge_survival",
@@ -38,7 +43,6 @@ PRE_REFACTOR_TORCH_SEQUENCE = (
     "buffer_xrefs",
     "equivalence_symmetry",
     "graph_ordering",
-    "loop_detection_invariants",
     "pass_count_consistency",
     "distance_invariants",
     "graph_connectivity",
