@@ -850,7 +850,9 @@ class TorchBackend:
             if _label_raw is None:
                 if getattr(self_trace, "_raw_transform_escape_detected", False):
                     continue
-                raise RuntimeError(
+                from ..._errors import OutputAttributionError
+
+                raise OutputAttributionError(
                     "TorchLens could not attribute a model output tensor to any traced op "
                     f"(output address {output_address!r}, "
                     f"shape={tuple(t.shape)}, dtype={t.dtype}). This may indicate an opaque "

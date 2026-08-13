@@ -700,6 +700,9 @@ def _warn_unattributed_tensor_args(self: "Trace") -> None:
         offenders.append(f"{label} ({', '.join(positions)})")
     if not offenders:
         return
+    # Session-time escape signal: the capture entry reads this flag to decide
+    # whether a rescue re-run (TorchFunctionMode net) should be attempted.
+    self._had_unattributed_tensor_args = True
     warnings.warn(
         "TorchLens found tensor arguments with no graph/source provenance. "
         "These are usually tensors captured from outside the traced model; "
