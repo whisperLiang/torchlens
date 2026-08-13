@@ -637,6 +637,39 @@ def test_backward_walk_failure_removes_partial_hooks_and_disarms(
     assert _state._active_trace is None
 
 
+@pytest.mark.parametrize("entrypoint", ["log_backward", "recording_backward"])
+def test_backward_entrypoints_finalize_streaming_on_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    """Both backward APIs run the deferred streaming finalizer on failure."""
+    from torchlens.backends.torch import backward
+
+    _model, _x, trace = _logged_model()
+    finalized: list[tl.Trace] = []
+
+    def record_finalize(finalized_trace: tl.Trace) -> None:
+        """Record one streaming-finalizer invocation."""
+        finalized.append(finalized_trace)
+
+    monkeypatch.setattr(backward, "_finalize_grad_streaming", record_finalize)
+    if entrypoint == "log_backward":
+
+        def fail_capture(*_args: object, **_kwargs: object) -> None:
+            """Inject a backward-capture failure."""
+            raise RuntimeError("injected backward failure")
+
+        monkeypatch.setattr(backward, "_run_backward_with_capture", fail_capture)
+        with pytest.raises(RuntimeError, match="injected backward failure"):
+            trace.log_backward(_output_loss(trace))
+    else:
+        with pytest.raises(RuntimeError, match="injected block failure"):
+            with trace.recording_backward():
+                raise RuntimeError("injected block failure")
+
+    assert finalized == [trace]
+
+
 @pytest.mark.smoke
 def test_replay_fork_does_not_inherit_gradient_state() -> None:
     """A replay fork starts with no captured gradient state; the source keeps its own."""

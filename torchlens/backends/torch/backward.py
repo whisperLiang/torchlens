@@ -3418,16 +3418,18 @@ def log_backward(
         """Run the user's requested backward call."""
         return loss.backward(**backward_kwargs)  # type: ignore[no-untyped-call]
 
-    _run_backward_with_capture(
-        self,
-        loss,
-        run,
-        trigger="backward",
-        engine_flags=dict(backward_kwargs),
-        save_grads=save_grads,
-        backward_call_context=backward_call_context,
-    )
-    _finalize_grad_streaming(self)
+    try:
+        _run_backward_with_capture(
+            self,
+            loss,
+            run,
+            trigger="backward",
+            engine_flags=dict(backward_kwargs),
+            save_grads=save_grads,
+            backward_call_context=backward_call_context,
+        )
+    finally:
+        _finalize_grad_streaming(self)
     return self
 
 
@@ -3500,18 +3502,19 @@ class RecordingBackward:
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         """Restore ``torch.Tensor.backward`` unless someone patched over us."""
-        if self._original_backward is not None:
-            if torch.Tensor.backward is self._wrapped_backward:
-                torch.Tensor.backward = self._original_backward  # type: ignore[method-assign]
-            else:
-                warnings.warn(
-                    "recording_backward() exited while torch.Tensor.backward was "
-                    "patched by another party inside the block; leaving the "
-                    "interleaved patch in place instead of clobbering it.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-        if exc_type is None:
+        try:
+            if self._original_backward is not None:
+                if torch.Tensor.backward is self._wrapped_backward:
+                    torch.Tensor.backward = self._original_backward  # type: ignore[method-assign]
+                else:
+                    warnings.warn(
+                        "recording_backward() exited while torch.Tensor.backward was "
+                        "patched by another party inside the block; leaving the "
+                        "interleaved patch in place instead of clobbering it.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+        finally:
             _finalize_grad_streaming(self.trace)
 
 
