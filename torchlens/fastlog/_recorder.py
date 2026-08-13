@@ -13,7 +13,7 @@ import torch
 from torch import nn
 
 from .._deprecations import MISSING, MissingType
-from .._errors import ArgumentConflictError, CaptureContextError
+from .._errors import KeywordConflictError, CaptureContextError
 from .._training_validation import TrainingModeConfigError, reject_compiled_model
 from ..capture.config import InternalCaptureConfig
 from ..capture.predicates import validate_followed_by_capability
@@ -249,7 +249,7 @@ class Recorder:
         storage_supplied = storage is not MISSING and storage is not None
         streaming_supplied = streaming is not MISSING and streaming is not None
         if storage_supplied and streaming_supplied:
-            raise ArgumentConflictError(
+            raise KeywordConflictError(
                 "Do not pass both `storage` and `streaming`",
                 code="storage_argument_conflict",
                 remedy="prefer storage=, or remove one of the two arguments",

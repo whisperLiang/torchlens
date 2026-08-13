@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 else:
     _TraceMixinBase = object
 from .._deprecations import MISSING, MissingType, warn_deprecated_alias
-from .._errors import ArgumentConflictError, InvalidArgumentError, RecordBindingError
+from .._errors import KeywordConflictError, InvalidArgumentError, RecordBindingError
 from ..options import ReplayOptions, merge_replay_options
 from ..runnable import DivergencePolicy, RunProvider, RunResult
 from .cleanup import (
@@ -497,7 +497,7 @@ class TraceValidationMixin(_TraceMixinBase):
         if use_unified_provider:
             if inputs is not MISSING:
                 if model is not None or x is not None:
-                    raise ArgumentConflictError(
+                    raise KeywordConflictError(
                         "Pass inputs= without the legacy model/x arguments",
                         code="run_legacy_arguments_conflict",
                         remedy="pass only inputs= on the unified run surface",
@@ -505,7 +505,7 @@ class TraceValidationMixin(_TraceMixinBase):
                 run_inputs = inputs
             else:
                 if x is not None:
-                    raise ArgumentConflictError(
+                    raise KeywordConflictError(
                         "Loaded sparse run accepts one input tree",
                         code="run_legacy_arguments_conflict",
                         remedy="pass one input tree, preferably via inputs=",
@@ -514,7 +514,7 @@ class TraceValidationMixin(_TraceMixinBase):
             if any(value is not MISSING for value in (append, chunk_size, strict)) or (
                 chunk_paths is not None or replay is not None
             ):
-                raise ArgumentConflictError(
+                raise KeywordConflictError(
                     "Sparse/unified run does not accept legacy rerun options",
                     code="run_legacy_options_conflict",
                     remedy=(
@@ -576,7 +576,7 @@ class TraceValidationMixin(_TraceMixinBase):
             )
 
         if fast:
-            raise ArgumentConflictError(
+            raise KeywordConflictError(
                 "fast=True is available only with the unified inputs= surface",
                 code="run_fast_requires_inputs",
                 remedy="call trace.run(inputs=..., fast=True) instead of the legacy surface",
@@ -596,7 +596,7 @@ class TraceValidationMixin(_TraceMixinBase):
             source_ref = getattr(self, "_source_model_ref", None)
             user_input = model
             if x is not None:
-                raise ArgumentConflictError(
+                raise KeywordConflictError(
                     "Pass either run(model, x) or run(new_user_input), not both",
                     code="run_legacy_arguments_conflict",
                     remedy="pass run(model, x) or run(new_user_input), never both forms",

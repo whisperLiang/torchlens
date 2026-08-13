@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
 import torch
 
 from ._deprecations import MISSING, MissingType, warn_deprecated_alias
-from ._errors import ArgumentConflictError, ArgumentTypeError, InvalidArgumentError
+from ._errors import KeywordConflictError, ArgumentTypeError, InvalidArgumentError
 from ._literals import (
     BufferVisibilityLiteral,
     CollapseLiteral,
@@ -380,7 +380,7 @@ def _resolve_option_value(
 def _deprecated_argument_conflict(
     old_name: str,
     replacement_name: str,
-) -> ArgumentConflictError:
+) -> KeywordConflictError:
     """Build a typed refusal for old and replacement arguments supplied together.
 
     Parameters
@@ -392,11 +392,11 @@ def _deprecated_argument_conflict(
 
     Returns
     -------
-    ArgumentConflictError
+    KeywordConflictError
         Actionable conflict with the shared stable code.
     """
 
-    return ArgumentConflictError(
+    return KeywordConflictError(
         f"kwarg {old_name} deprecated, use {replacement_name}; do not pass both",
         code="deprecated_argument_conflict",
         remedy=f"remove {old_name!r} and pass only {replacement_name!r}",
@@ -770,7 +770,7 @@ def _merge_grouped_options(
                     remedy=f"pass either {group_name} or its individual keyword arguments",
                     arguments=(flat_name, f"{group_name}.{group_field}"),
                 )
-            raise ArgumentConflictError(
+            raise KeywordConflictError(
                 f"Do not pass both `{flat_name}` and `{group_name}.{group_field}`",
                 code="option_group_conflict",
                 remedy=f"remove either {flat_name!r} or {group_name}.{group_field!r}",
@@ -2089,7 +2089,7 @@ def merge_visualization_options(
         if flat_value is MISSING:
             continue
         if visualization is not None and group_name in specified_fields:
-            raise ArgumentConflictError(
+            raise KeywordConflictError(
                 f"Do not pass both `{flat_name}` and `visualization.{group_name}`",
                 code="option_group_conflict",
                 remedy=f"remove either {flat_name!r} or visualization.{group_name!r}",

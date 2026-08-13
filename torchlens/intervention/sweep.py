@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from .._deprecations import MISSING, MissingType, warn_deprecated_alias
-from .._errors import ArgumentConflictError, ArgumentTypeError, InvalidArgumentError
+from .._errors import KeywordConflictError, ArgumentTypeError, InvalidArgumentError
 from ..bundle import Bundle
 from .hooks import HookContext
 from .predicates import when
@@ -69,7 +69,7 @@ def sweep(
 
     # Resolve deprecated `param=` kwarg alias
     if param is not MISSING and at is not MISSING:
-        raise ArgumentConflictError(
+        raise KeywordConflictError(
             "sweep() received deprecated param and replacement at together",
             code="deprecated_argument_conflict",
             remedy="remove param and pass only at",

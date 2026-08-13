@@ -43,6 +43,7 @@ OLD_EXCEPTION_MAPPING: tuple[tuple[str, str, type[BaseException], str], ...] = (
     ("torchlens._errors", "InvalidArgumentError", errors.ConfigurationError, "subclass"),
     ("torchlens._errors", "ArgumentTypeError", errors.ConfigurationError, "subclass"),
     ("torchlens._errors", "ArgumentConflictError", errors.ConfigurationError, "subclass"),
+    ("torchlens._errors", "KeywordConflictError", errors.ConfigurationError, "subclass"),
     ("torchlens._errors", "CaptureContextError", errors.CaptureError, "subclass"),
     ("torchlens._errors", "TorchLensPostfuncError", errors.CaptureError, "subclass"),
     ("torchlens._errors", "PostTraceParamUnavailable", errors.CaptureError, "subclass"),

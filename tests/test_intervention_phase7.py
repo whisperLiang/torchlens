@@ -485,7 +485,7 @@ def test_rerun_x_none_requires_explicit_input() -> None:
 
     log = _capture(ReluAdd(), torch.randn(2, 3))
 
-    with pytest.raises(ValueError, match="Pass the forward input explicitly"):
+    with pytest.raises(ValueError, match="forward input explicitly"):
         log.run(ReluAdd())
 
 

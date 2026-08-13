@@ -8,7 +8,7 @@ from torch import nn
 
 from .._capture_state_helpers import unwrap_compiled_model
 from .._deprecations import MISSING, MissingType
-from .._errors import ArgumentConflictError
+from .._errors import KeywordConflictError
 from .._input_coerce import _coerce_input_args
 from .._robustness import check_model_and_input_variants
 from ..backends import (
@@ -142,7 +142,7 @@ def record(
         )
     model = unwrap_compiled_model(model)
     if storage is not None and streaming is not None:
-        raise ArgumentConflictError(
+        raise KeywordConflictError(
             "Do not pass both `storage` and `streaming`",
             code="storage_argument_conflict",
             remedy="prefer storage=, or remove one of the two arguments",

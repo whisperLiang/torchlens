@@ -60,6 +60,7 @@ from ._chunking import iter_chunked_inputs, normalize_chunk_paths, normalize_chu
 from ._deprecations import MISSING, MissingType, warn_deprecated_alias
 from ._errors import (
     ArgumentConflictError,
+    KeywordConflictError,
     ArgumentTypeError,
     CaptureContextError,
     InvalidArgumentError,
@@ -1889,7 +1890,7 @@ def trace(
         )
     if capture_output_structure is not MISSING:
         if capture_container_structure is not MISSING:
-            raise ArgumentConflictError(
+            raise KeywordConflictError(
                 "Deprecated capture_output_structure and replacement "
                 "capture_container_structure were both supplied",
                 code="deprecated_argument_conflict",
@@ -2232,7 +2233,7 @@ def _trace_torch_model(
         save_raw_gradients=save_raw_gradients,
     )
     if storage is not None and streaming is not None:
-        raise ArgumentConflictError(
+        raise KeywordConflictError(
             "Both storage and streaming options were supplied",
             code="storage_argument_conflict",
             remedy="remove streaming and pass only storage, or remove storage",

@@ -10,9 +10,15 @@ add names to the top-level `torchlens` namespace:
 
 - `InvalidArgumentError(ConfigurationError, ValueError)`
 - `ArgumentTypeError(ConfigurationError, TypeError)`
-- `ArgumentConflictError(ConfigurationError, ValueError)` — conflicts between
-  well-typed arguments were historically raw `ValueError`s; the typed refusal
-  preserves that catchability.
+- `ArgumentConflictError(ConfigurationError, ValueError)` — VALUE-combination
+  conflicts (well-typed options whose values are mutually exclusive, e.g.
+  `save_outs_to` + `out_sink`) were historically raw `ValueError`s; the typed
+  refusal preserves that catchability.
+- `KeywordConflictError(ConfigurationError, TypeError)` — KEYWORD/call-surface
+  conflicts (deprecated kwarg + replacement, grouped option + flat field, two
+  exclusive call surfaces) were historically raw `TypeError`s (Python's
+  duplicate-keyword convention); the typed refusal preserves that catchability.
+  The split is site-by-site per git history, never a blanket base.
 - `CaptureContextError(CaptureError, RuntimeError)`
 - `DiagnosticSeverityError(ConfigurationError, ValueError)`
 - `PayloadUnavailableError(CaptureError, ValueError)`

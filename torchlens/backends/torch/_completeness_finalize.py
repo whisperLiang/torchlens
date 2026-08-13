@@ -433,7 +433,16 @@ def capture_completeness_witness(trace: Any) -> Iterator[None]:
 
 
 def _collect_authorized_internal_caller_modules() -> None:
-    """Register the witness and buffer-write modules' own code objects."""
+    """Register the witness-family and buffer-write modules' own code objects.
+
+    The witness was one module until the r3 split; every ``_completeness_*``
+    sibling (plus the ``completeness_witness`` facade) holds internal callers
+    that must stay on the authorized roster, or the detector self-trips on the
+    witness's own no-observe storage reads (the r3 cluster regression).
+    """
+
+    import importlib
+    import pkgutil
 
     from . import buffer_writes as _buffer_writes_module
 
@@ -441,3 +450,13 @@ def _collect_authorized_internal_caller_modules() -> None:
     buffer_writes_file = _buffer_writes_module.__file__
     assert buffer_writes_file is not None, "a real source module always has a file"
     _register_authorized_caller_namespace(vars(_buffer_writes_module), buffer_writes_file)
+    package = importlib.import_module(__package__)
+    package_path = package.__path__
+    for module_info in pkgutil.iter_modules(package_path):
+        name = module_info.name
+        if not (name.startswith("_completeness_") or name == "completeness_witness"):
+            continue
+        module = importlib.import_module(f"{__package__}.{name}")
+        module_file = module.__file__
+        assert module_file is not None, "a real source module always has a file"
+        _register_authorized_caller_namespace(vars(module), module_file)

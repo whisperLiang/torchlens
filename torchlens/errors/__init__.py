@@ -156,6 +156,7 @@ _LAZY_EXCEPTION_PATHS = {
     "ArtifactSchemaAgeWarning": ("torchlens._io", "ArtifactSchemaAgeWarning"),
     "ArtifactVersionBelowFloorError": ("torchlens._io", "ArtifactVersionBelowFloorError"),
     "ArgumentConflictError": ("torchlens._errors", "ArgumentConflictError"),
+    "KeywordConflictError": ("torchlens._errors", "KeywordConflictError"),
     "ArgumentTypeError": ("torchlens._errors", "ArgumentTypeError"),
     "BackendAmbiguityError": ("torchlens.backends", "BackendAmbiguityError"),
     "BackendCapabilityConformanceError": (

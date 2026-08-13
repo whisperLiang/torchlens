@@ -181,6 +181,47 @@ class ArgumentConflictError(_ActionableErrorMixin, ConfigurationError, ValueErro
         )
 
 
+class KeywordConflictError(_ActionableErrorMixin, ConfigurationError, TypeError):
+    """Raised when conflicting keyword/call-surface spellings are supplied together.
+
+    Subclasses ``TypeError``, not ``ValueError``: mixing a deprecated kwarg with
+    its replacement, a grouped option with its flat field, or two exclusive call
+    surfaces is the moral equivalent of Python's duplicate-keyword ``TypeError``,
+    and every historical refusal at these sites raised a raw ``TypeError``.
+    Value-combination conflicts (well-typed options whose values are mutually
+    exclusive) use :class:`ArgumentConflictError` (``ValueError``) instead.
+    """
+
+    def __init__(
+        self,
+        problem: str,
+        *,
+        code: str,
+        remedy: str,
+        **context: object,
+    ) -> None:
+        """Initialize an actionable keyword-conflict refusal.
+
+        Parameters
+        ----------
+        problem:
+            Description of the conflicting keyword or call-surface spellings.
+        code:
+            Stable machine-readable refusal code.
+        remedy:
+            Concrete caller action that resolves the refusal.
+        **context:
+            Structured, non-authoritative diagnostic context.
+        """
+
+        super().__init__(
+            _actionable_message(problem, remedy),
+            code=code,
+            remedy=remedy,
+            **cast(dict[str, Any], context),
+        )
+
+
 class CaptureContextError(_ActionableErrorMixin, CaptureError, RuntimeError):
     """Raised when a capture-only operation is called outside an active capture."""
 

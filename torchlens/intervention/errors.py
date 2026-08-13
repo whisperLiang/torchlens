@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from .._errors import ArgumentConflictError
+from .._errors import KeywordConflictError
 from ..errors._base import (
     CaptureError,
     CompatibilityError,
@@ -53,7 +53,7 @@ class TorchLensInterventionError(InterventionError, RuntimeError):
         """
 
         if args and fields:
-            raise ArgumentConflictError(
+            raise KeywordConflictError(
                 "Use either positional message args or named error fields, not both",
                 code="error_constructor_args_conflict",
                 remedy="pass a message OR named fields when constructing this error",
@@ -86,7 +86,7 @@ class TorchLensInterventionWarning(TorchLensWarning):
         """
 
         if args and fields:
-            raise ArgumentConflictError(
+            raise KeywordConflictError(
                 "Use either positional message args or named warning fields, not both",
                 code="error_constructor_args_conflict",
                 remedy="pass a message OR named fields when constructing this warning",
