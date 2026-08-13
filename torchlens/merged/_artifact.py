@@ -41,6 +41,8 @@ from ._presenter import MergedTrace, _RankHandle
 
 __all__ = ["canonical_json_bytes", "load_merged", "save_merged", "tree_hash"]
 
+_TREE_HASH_CHUNK_BYTES = 1 << 20
+
 CANONICAL_ENCODING = "torchlens-canonical-json-v1"
 """UTF-8, sorted keys, no NaN/Infinity, LF, no insignificant whitespace."""
 
@@ -72,13 +74,23 @@ def tree_hash(root: Path) -> str:
             )
         if not candidate.is_file():
             continue
-        data = candidate.read_bytes()
+        # Chunked: a rank core's safetensors blobs are legitimately multi-GiB, so
+        # ``read_bytes()`` materialized the whole file just to hash it.
+        size = 0
+        digest = hashlib.sha256()
+        with candidate.open("rb") as handle:
+            while True:
+                chunk = handle.read(_TREE_HASH_CHUNK_BYTES)
+                if not chunk:
+                    break
+                size += len(chunk)
+                digest.update(chunk)
         entry = (
             candidate.relative_to(root).as_posix().encode("utf-8")
             + b"\0"
-            + str(len(data)).encode("ascii")
+            + str(size).encode("ascii")
             + b"\0"
-            + hashlib.sha256(data).hexdigest().encode("ascii")
+            + digest.hexdigest().encode("ascii")
         )
         entries.append(entry)
     return hashlib.sha256(b"\n".join(entries)).hexdigest()
