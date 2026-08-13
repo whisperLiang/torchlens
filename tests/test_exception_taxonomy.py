@@ -775,6 +775,36 @@ def test_actionable_refusal_pickle_round_trip(
     assert restored.severity == original.severity
 
 
+def test_code_panel_doors_split_render_from_config_refusals() -> None:
+    """The two code-panel refusals carry distinct codes and builtins.
+
+    A callable that returns a non-string at render time
+    (``code_panel_callable_return_invalid``, ``TypeError``) is a different
+    caller problem from an unknown mode literal at configuration time
+    (``code_panel_option_invalid``, ``ValueError``); one code no longer
+    covers both.
+    """
+
+    import weakref
+
+    from torch import nn
+
+    from torchlens.visualization.code_panel import resolve_code_panel_source
+
+    model = nn.Identity()
+    with pytest.raises(errors.ArgumentTypeError) as return_info:
+        resolve_code_panel_source(lambda live_model: 123, {}, weakref.ref(model))
+    assert return_info.value.fields["code"] == "code_panel_callable_return_invalid"
+    assert isinstance(return_info.value, TypeError)
+    assert not isinstance(return_info.value, ValueError)
+
+    with pytest.raises(errors.InvalidArgumentError) as mode_info:
+        resolve_code_panel_source("sideways", {}, None)  # type: ignore[arg-type]
+    assert mode_info.value.fields["code"] == "code_panel_option_invalid"
+    assert isinstance(mode_info.value, ValueError)
+    assert not isinstance(mode_info.value, TypeError)
+
+
 def test_predicate_type_doors_are_multiclass_by_surface() -> None:
     """The predicate-type codes carry a per-surface builtin, per site history.
 

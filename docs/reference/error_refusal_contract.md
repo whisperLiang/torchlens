@@ -59,8 +59,9 @@ add names to the top-level `torchlens` namespace:
 | `bundle_diff_layout_invalid` | Bundle diff layout is unsupported | Pass `layout='paired'` |
 | `bundle_diff_members_invalid` | Bundle diff sides are missing or identical | Name two distinct members |
 | `bundle_statistic_invalid` | Bundle statistic is unknown | Choose `mean`, `std`, `var`, or `norm` |
+| `code_panel_callable_return_invalid` | Callable code panel returned a non-string at render time (`ArgumentTypeError`) | Return the panel text as a string |
 | `code_panel_model_collected` | Callable code panel needs the live model | Use a built-in code_panel mode |
-| `code_panel_option_invalid` | Code panel option value or return type is invalid | Pass a documented mode or a string-returning callable |
+| `code_panel_option_invalid` | Code panel mode literal is unknown (`InvalidArgumentError`) | Pass a documented mode or a callable |
 | `code_panel_side_invalid` | Code panel side is unknown | Pass `side='right'` or `'left'` |
 | `dagua_renderer_not_opted_in` | Experimental dagua renderer used without opt-in | Import `torchlens.experimental.dagua` first |
 | `capture_context_required` | Capture-only helper called outside `trace()` | Call it from the captured forward |
