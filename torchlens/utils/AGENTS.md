@@ -15,7 +15,7 @@ this package mostly stateless and free of high-level TorchLens business logic.
 | `introspection.py` | Recursive object search and nested getattr/assign |
 | `rng.py` | Python, NumPy, torch, CUDA, and autocast state capture/restore |
 | `tensor_utils.py` | `safe_copy`, `safe_to`, `tensor_nanequal`, tensor memory helpers |
-| `source_links.py` | Source link helpers for reports/rendering |
+| `_source_links.py` | Source link helpers for reports/rendering |
 | `__init__.py` | Package marker |
 
 ## Tensor Operations

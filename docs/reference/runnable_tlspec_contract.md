@@ -677,6 +677,14 @@ input-conditional at run time, not a static descriptor flag.
 
 ## 5. Producer preflight and no-payload invariant
 
+The producer can emit a runnable descriptor only when the source capture recorded replay-template
+metadata. Users must capture with
+`capture=tl.options.CaptureOptions(intervention_ready=True)` (or flat
+`intervention_ready=True`) before `tl.save(..., level="runnable")`. This capture flag is required
+even when the user intends replay without an intervention. Omitting it produces a typed
+`RunnablePreflightError` with the `MISSING_CALLABLE_REF` finding; analysis saves remain available,
+but save-time code never guesses or reconstructs missing call templates.
+
 ### Load-side structural integer anchoring (r53 free_1)
 
 The load-side parser anchors every persisted descriptor integer that can scale an allocation to the

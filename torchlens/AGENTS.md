@@ -24,7 +24,7 @@
 - `_raw_` prefix for pre-postprocessing state; `_final_` for post-processed state.
 
 ## Public Surface
-`torchlens.__all__` is intentionally small and currently has 93 names. New user-facing
+`torchlens.__all__` is intentionally small and currently has 96 names. New user-facing
 objects should usually live under submodules (`torchlens.io`, `torchlens.options`,
 `torchlens.bridge`, `torchlens.errors`, etc.) with moved-name shims only when compatibility
 requires them.
@@ -132,8 +132,9 @@ annotation payloads and compatibility review.
 Sprint C RDM, feature-map, and scree node visuals are PIL-only render-time images composed
 from `tl.viz.render_*` primitives and are provisional until review-day signoff.
 
-`record(keep_op=...)` and `record(keep_module=...)` are deprecated compatibility aliases for
-`record(save=...)`. `layers_to_save=[...]` still exists as the final-label two-pass path; an
+`record(keep_op=...)` and `record(keep_module=...)` are removed and raise `TypeError`.
+`record(save=...)` is the only selective-capture spelling. `layers_to_save=[...]` still exists
+as the final-label two-pass path; an
 unqualified recurrent layer label saves all passes, while `"label:2"` saves only pass 2.
 
 Current 2.x backend surface: torch eager is the stable default; MLX, JAX, tinygrad, Paddle, and

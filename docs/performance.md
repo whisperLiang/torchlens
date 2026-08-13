@@ -57,6 +57,7 @@ metadata remains available, but unsaved payloads are intentionally absent.
 import torch
 from torch import nn
 import torchlens as tl
+from torchlens.backends.torch.wrappers import unwrap_torch
 
 
 model = nn.Sequential(nn.Linear(4, 4), nn.GELU(), nn.Linear(4, 2)).eval()
@@ -114,7 +115,7 @@ x = torch.randn(4)
 tl.wrap_torch(escape_detector="shadow")
 trace = tl.trace(model, x)
 print(trace.escape_detector_event_count, trace.escape_detector_callback_ns)
-tl.unwrap_torch()
+unwrap_torch()
 ```
 
 The independent aten-level completeness witness is also opt-in and can run alone or alongside the
@@ -124,6 +125,7 @@ callable detector:
 import torch
 from torch import nn
 import torchlens as tl
+from torchlens.backends.torch.wrappers import unwrap_torch
 
 
 model = nn.ReLU()
@@ -135,7 +137,7 @@ tl.wrap_torch(
 trace = tl.trace(model, x)
 print(trace.completeness_witness_verified)
 print(trace.completeness_witness_unaccounted_count)
-tl.unwrap_torch()
+unwrap_torch()
 ```
 
 The witness attaches each aten dispatch to the live wrapper token, `func_call_id`, and leaf barcode;

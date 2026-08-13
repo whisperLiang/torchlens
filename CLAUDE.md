@@ -4,7 +4,8 @@ TorchLens logs backend-resolved execution into a `Trace`. The stable default is 
 eager capture: run a normal forward pass, record operation metadata and activations, then
 inspect the result. Torch function wrapping is lazy in 2.x: `import torchlens` keeps torch
 clean, and the first torch capture calls `wrap_torch()` through model preparation. The
-wrappers then stay installed until an explicit `torchlens.backends.torch.unwrap_torch()`.
+wrappers then stay installed until an explicit
+`torchlens.backends.torch.wrappers.unwrap_torch()`.
 
 ## Install
 
@@ -83,9 +84,7 @@ op = log["relu_1_2"]
 rf = op.receptive_field
 box = rf.at((10, 10))
 unit = rf.center_unit(batch_index=0)
-gradient = rf.gradient(unit)
 check = rf.check(unit)
-overlay = rf.show(unit, gradient=True)
 projective = op.projective_field.at((10, 10))
 layer_to_layer = op.receptive_field.at((10, 10), source=log.input_ops[0])
 table = log.receptive_fields(level="layer")
@@ -95,6 +94,10 @@ outgoing = log.projective_fields(level="layer")
 armed = tl.trace(model, x.requires_grad_(True),
                  capture=tl.options.CaptureOptions(backward_ready=True),
                  save_mode="reference")
+armed_op = armed["relu_1_2"]
+armed_unit = armed_op.receptive_field.center_unit(batch_index=0)
+gradient = armed_op.receptive_field.gradient(armed_unit)
+overlay = armed_op.receptive_field.show(armed_unit, gradient=True)
 validated = tl.receptive_field.verify(armed, units="center")
 # tl.validate(model, x, scope="receptive_field") captures an armed trace itself.
 ```
@@ -569,7 +572,7 @@ mypy torchlens/
 pytest tests/<files for the code you touched> -x --tb=short     # per-step gate: targeted suites (seconds-minutes)
 pytest tests/ -m smoke -x --tb=short                            # commit-level gate (~20 min; measured 2026-08-13)
 pytest tests/ -m "not rare and not slow and not heavy" -x --tb=short  # mid backstop (heavy = 5-20s tests)
-pytest tests/ -m "not slow" -x --tb=short  # phase-boundary backstop; for public API or boundary changes
+pytest tests/ -m "not rare and not slow" -x --tb=short  # phase-boundary backstop; public API/boundaries
 ```
 
 Tiers by cost (measured 2026-08-13, instrumented `--durations=0` smoke run, 4-core devbox
@@ -581,9 +584,10 @@ the mid backstop, and `not slow` the phase-boundary backstop. Partition: `smoke`
 must each run <5s measured, `heavy` carries the 5-20s tests, `slow` the >20s ones.
 `tests/test_marker_lint.py` enforces it: combining `smoke` with `heavy`/`slow` fails
 (markers are additive — the test would still run under `-m smoke`), and any smoke test
-exceeding a 15s runtime budget fails the session it ran in. NOTE: `pytest -n auto`
-(xdist) is NOT faster here — torch's intra-op threads oversubscribe the 20 workers and the
-fast tier rises to ~13min; the per-test bottleneck is torch import/fixture setup, not CPU.
+exceeding a 15s runtime budget fails the session it ran in. `pytest -n auto` requires the
+optional `pytest-xdist` plugin, which is not installed by TorchLens's declared test extra.
+When xdist is installed separately, measure before relying on it: torch intra-op threads can
+oversubscribe workers, and fixture/import setup may dominate.
 
 Use `pytest.importorskip()` for optional migration dependencies. Keep tests
 deterministic and run documentation examples when they are meant to be executable.

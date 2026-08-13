@@ -9,7 +9,7 @@ metadata invariants, intervention readiness, and unified `.tlspec` manifest sche
 | File | Purpose |
 |------|---------|
 | `core.py` | Saved-out replay, perturbation checks, arg reconstruction |
-| `backward.py` | Backward capture validation against stock autograd |
+| `backends/torch/backward.py` | Backward capture implementation used by validation |
 | `consolidated.py` | Public `validate(..., scope=...)` dispatcher and intervention report |
 | `invariants.py` | Metadata invariant categories and `MetadataInvariantError` |
 | `exemptions.py` | Replay/perturbation exemption registries and dynamic checks |
@@ -40,7 +40,9 @@ module hierarchy, params, buffers, equivalence, ordering, distances, connectivit
 keys. Invariants are part of the postprocess regression net.
 
 ## .tlspec Validation
-`validate_tlspec(path)` validates unified manifests against `schemas/tlspec_manifest_v1.json`.
+`validate_tlspec(path)` validates unified manifests against
+`schemas/tlspec_manifest_v{schema_version}.json`, selecting the schema version declared by the
+artifact.
 Older 2.16 intervention/model-log formats are accepted without schema validation so legacy
 artifacts remain loadable.
 
