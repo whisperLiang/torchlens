@@ -481,3 +481,24 @@ def test_jax_codec_refuses_unknown_logical_dtype() -> None:
     entry = {"logical_dtype": "not_a_real_jax_dtype", "codec_metadata": {}}
     with pytest.raises(BackendRuntimeCompatibilityError, match="logical_dtype"):
         JaxPayloadCodec().from_numpy(np.ones(1, dtype=np.float32), entry, map_location=None)
+
+
+def test_jax_codec_restores_weak_type() -> None:
+    """JAX weak scalar semantics survive codec encode/decode when JAX is available."""
+
+    jax = pytest.importorskip("jax")
+    jnp = pytest.importorskip("jax.numpy")
+    from torchlens._io.payload_codec import JaxPayloadCodec
+
+    codec = JaxPayloadCodec()
+    value = jnp.asarray(1)
+    encoded = codec.to_numpy(value)
+    entry = {
+        "logical_dtype": encoded.logical_dtype,
+        "codec_metadata": encoded.codec_metadata,
+    }
+    restored = codec.from_numpy(encoded.array, entry, map_location=None)
+
+    assert value.weak_type is True
+    assert restored.weak_type is True
+    assert jax.device_get(restored) == jax.device_get(value)

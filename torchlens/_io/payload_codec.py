@@ -294,6 +294,7 @@ class JaxPayloadCodec:
                 f"Portable JAX payload declares unsupported logical_dtype={logical_dtype!r}."
             ) from exc
         value = jnp.asarray(array, dtype=dtype)
+        value = _restore_jax_scalar_semantics(jax, value, entry)
         hint_result = _apply_jax_payload_hints(
             jax,
             value,
@@ -1088,6 +1089,60 @@ def _entry_field(entry: Any, field_name: str) -> Any:
     if isinstance(entry, Mapping):
         return entry.get(field_name)
     return getattr(entry, field_name, None)
+
+
+def _restore_jax_scalar_semantics(jax_module: Any, value: Any, entry: Any) -> Any:
+    """Restore captured JAX weak-type and commitment semantics.
+
+    Parameters
+    ----------
+    jax_module:
+        Imported JAX module.
+    value:
+        Decoded JAX array.
+    entry:
+        Manifest entry carrying codec metadata.
+
+    Returns
+    -------
+    Any
+        JAX array with captured scalar semantics restored.
+
+    Raises
+    ------
+    BackendRuntimeCompatibilityError
+        If the installed JAX runtime cannot restore a declared semantic flag.
+    """
+
+    from ..backends.registry import BackendRuntimeCompatibilityError
+
+    metadata = _entry_field(entry, "codec_metadata")
+    if not isinstance(metadata, Mapping):
+        return value
+    if metadata.get("weak_type") is True and getattr(value, "weak_type", False) is not True:
+        try:
+            value = jax_module.lax.convert_element_type(
+                value,
+                value.dtype,
+                weak_type=True,
+            )
+        except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+            raise BackendRuntimeCompatibilityError(
+                "Portable JAX payload could not restore weak_type=True."
+            ) from exc
+    if metadata.get("committed") is True and getattr(value, "committed", False) is not True:
+        devices = list(jax_module.devices())
+        if not devices:
+            raise BackendRuntimeCompatibilityError(
+                "Portable JAX payload declared committed=True but no JAX device is available."
+            )
+        try:
+            value = jax_module.device_put(value, devices[0])
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise BackendRuntimeCompatibilityError(
+                "Portable JAX payload could not restore committed=True."
+            ) from exc
+    return value
 
 
 def _transport_tensor_to_numpy(tensor: torch.Tensor, entry: Any) -> np.ndarray:
