@@ -85,8 +85,8 @@ earlier saved activation. Use `"copy"` unless that aliasing tradeoff is explicit
 | Context | What TorchLens does today | Workaround |
 |---|---|---|
 | **Nested `trace`** (hook/postfunc calls log again) | `RuntimeError` at inner entry | Use `pause_logging()` before the inner call, or run the inner log afterwards on the outer's sub-model |
-| **`torch.compile(model)`** | Unwraps to the eager source module and emits one note per process | Use a profiler/compiler tool to inspect fused compiled execution |
-| **Compiled callable reached mid-capture** (plain attribute or free function) | Plain attributes are conservatively inventoried and invoked with logging paused; wrapper entry handles free-function regions when Python is entered. The Trace reports `capture_verification_reason="dynamo_region_not_logged"` | Call the eager function during capture, or compile an `nn.Module` child so it can be unwrapped |
+| **`torch.compile(model)`** | Unwraps to the eager source module and emits one note per process; the capture also runs under `torch.compiler.set_stance("force_eager")` on torch >= 2.6 | Use a profiler/compiler tool to inspect fused compiled execution |
+| **Compiled callable reached mid-capture** (plain attribute or free function) | torch >= 2.6: runs its original eager Python under `set_stance("force_eager")` — interior fully logged with ordinary verified semantics, compiled caches untouched. torch < 2.6: plain attributes are conservatively inventoried and invoked with logging paused; wrapper entry handles free-function regions when Python is entered. The Trace reports `capture_verification_reason="dynamo_region_not_logged"` | torch < 2.6 only: call the eager function during capture, or compile an `nn.Module` child so it can be unwrapped |
 | **`FakeTensor` / `FunctionalTensor` input or parameter** | `UnsupportedTensorVariantError` at entry | Build the model and inputs outside any fake/functional tracing mode |
 | **`torch.jit.script` / `torch.jit.trace`** | `RuntimeError` at entry | Log the un-scripted / un-traced Python module |
 | **`torch.export.ExportedProgram`** | `RuntimeError` at entry | Log the source `nn.Module` before exporting |
@@ -168,14 +168,51 @@ graph display, forward/backward validation, and ``Trace.run``. ``record`` keeps
 an intentional hard rejection for compiled models because it is the torch-only
 fast capture lane.
 
-A compiled **callable** -- held as a plain attribute or called as a free function --
-cannot be unwrapped to an eager source module in the same way. Reaching one during capture used to
-die with a raw
+#### Compiled callables on torch >= 2.6: eager capture under ``set_stance``
+
+On torch >= 2.6 a capture additionally enters the public
+``torch.compiler.set_stance("force_eager")`` for the duration of the forward
+(feature-detected as ``HAS_SET_STANCE``; skipped entirely when Dynamo was never
+imported in the process). Under the stance every compiled callable reached
+during the capture -- a compiled plain module attribute or a compiled free
+function, the two cases module unwrapping cannot reach -- runs its ORIGINAL
+eager Python, so its interior is fully logged with ordinary verified semantics:
+no ``dynamo_region_not_logged`` ceiling, interventions work inside the formerly
+opaque region, and forward validation applies unchanged. Captured values are
+eager-path values, which can differ from compiled-path numerics by ordinary
+float reassociation noise (~1e-7 relative).
+
+The coexistence contract, verified experimentally:
+
+- **Zero graph breaks and zero new compiles during capture**, including when
+  the capture input has a shape the compiled callable has never seen.
+- **Compiled caches are untouched.** After the capture exits, the next plain
+  call reuses the warm compiled artifact and reproduces its output bitwise.
+- **At most one bounded recompile afterward.** The stance itself invalidates
+  nothing, but TorchLens's wrapper install/uninstall can invalidate a Dynamo
+  guard (e.g. on a wrapped global's identity), costing ONE recompile on the
+  next compiled call after capture -- "one bounded recompile", not "zero cost".
+- **``torchlens.backends.torch.unwrap_torch()`` reverts torch for free.**
+
+Verify the contract on your own model with ``tl.debug.count_compiles()`` and
+correlate real graph breaks with ``tl.debug.graph_breaks()``. The first capture
+that covers inventoried compiled attributes emits a one-time note naming them.
+For introspecting the compiled execution itself (fusion, generated kernels,
+guards), use the first-party ecosystem tools -- torch's ``DebugMode``,
+``tlparse``, the profiler, or ``depyf`` -- TorchLens deliberately hands that
+off rather than owning it.
+
+#### Compiled callables on torch < 2.6: honest bypass and ceiling
+
+Without ``set_stance``, a compiled **callable** -- held as a plain attribute or called as a free
+function -- cannot be unwrapped to an eager source module the way a child module can. Reaching one
+during capture used to die with a raw
 ``torch._dynamo.exc.InternalTorchDynamoError: AttributeError: 'FakeTensor' object has
-no attribute 'fake_mode'``, because the tensors inside a Dynamo-traced region are
-data-free ``FakeTensor``s and every TorchLens step that reads a value (``safe_copy``,
-``torch.equal``, ``.item()``, ``data_ptr()``, memory accounting) is meaningless or fatal
-on them. It is now a graceful boundary: operations inside the region are not logged, a
+no attribute 'fake_mode'``, because while Dynamo traces a region (cold compile) the tensors it
+passes through the wrappers are data-free ``FakeTensor``s and every TorchLens step that reads a
+value (``safe_copy``, ``torch.equal``, ``.item()``, ``data_ptr()``, memory accounting) is
+meaningless or fatal on them; a warm-cache execution instead bypasses the Python wrappers
+entirely. It is now a graceful boundary: operations inside the region are not logged, a
 one-per-forward ``UserWarning`` names the gap and the remedy, and the Trace reports
 ``capture_verified=False`` with
 ``capture_verification_reason="dynamo_region_not_logged"``. Call the eager function
@@ -388,7 +425,9 @@ if your log looks wrong in one of these scenarios, suspect the caveat:
   because Dynamo also spawns compile threads (tripping the owner-thread tripwire) and leaves
   unaccounted aten dispatches -- symptoms of the same unlogged region. That verdict does not
   depend on compilation happening during this capture, so a warm compile cache still reads
-  `capture_verified=False`.
+  `capture_verified=False`. This ceiling is the torch < 2.6 fallback path: on torch >= 2.6 a
+  capture holds `torch.compiler.set_stance("force_eager")`, compiled callables run their original
+  eager Python fully logged, and the ceiling does not arise.
 - **bfloat16 / fp16 + non-deterministic GPU reductions**: validation
   replay compares activations to within ``3e-6`` absolute tolerance; on
   bf16/fp16 GPU atomics, small reordering differences can cross that

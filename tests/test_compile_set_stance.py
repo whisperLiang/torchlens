@@ -391,6 +391,11 @@ def test_count_compiles_verifies_the_coexistence_contract() -> None:
     with tl.debug.count_compiles() as after:
         model(x)
     assert after.frames_compiled <= 1
+    # The count freezes at block exit: later compile events (a fresh shape
+    # compiling normally) must not leak into an already-measured block.
+    frozen = during.frames_compiled
+    model(torch.randn(9, 4))
+    assert during.frames_compiled == frozen
 
 
 def test_compat_row_states_the_coexistence_contract_under_stance() -> None:

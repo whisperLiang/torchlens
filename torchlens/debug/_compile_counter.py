@@ -21,10 +21,11 @@ class CompileCountsUnavailableError(RuntimeError):
 
 
 class CompileCounts:
-    """Live view of Dynamo frame compilations observed since a start point.
+    """Count of Dynamo frame compilations observed in a measured block.
 
-    Attributes are computed on read, so the same object can be inspected both
-    inside and after the measured block.
+    Reads are live while the block is running and FREEZE when it exits, so a
+    count captured around one region never silently absorbs compilation events
+    that happen after the block (e.g. the bounded post-capture recompile).
     """
 
     def __init__(self, counters: object) -> None:
@@ -38,6 +39,7 @@ class CompileCounts:
 
         self._counters = counters
         self._start = self._total()
+        self._frozen: int | None = None
 
     def _total(self) -> int:
         """Return Dynamo's cumulative frame-compilation count.
@@ -53,17 +55,30 @@ class CompileCounts:
         frames = self._counters["frames"]  # type: ignore[index]
         return int(frames["total"])
 
+    def _freeze(self) -> None:
+        """Pin the count to the events observed up to now.
+
+        Returns
+        -------
+        None
+            Subsequent ``frames_compiled`` reads return the pinned value.
+        """
+
+        self._frozen = self._total() - self._start
+
     @property
     def frames_compiled(self) -> int:
-        """Return the number of frame compilations since the baseline.
+        """Return the number of frame compilations in the measured block.
 
         Returns
         -------
         int
-            Compilation events (including recompiles) observed so far in the
-            measured block. ``0`` means Dynamo compiled nothing.
+            Compilation events (including recompiles) observed in the block.
+            ``0`` means Dynamo compiled nothing.
         """
 
+        if self._frozen is not None:
+            return self._frozen
         return self._total() - self._start
 
 
@@ -74,8 +89,9 @@ def count_compiles() -> Iterator[CompileCounts]:
     Yields
     ------
     CompileCounts
-        Live counter whose ``frames_compiled`` reads the number of Dynamo
-        frame compilations (including recompiles) since the block started.
+        Counter whose ``frames_compiled`` reads the number of Dynamo frame
+        compilations (including recompiles) since the block started; the
+        value freezes when the block exits.
 
     Raises
     ------
@@ -100,7 +116,11 @@ def count_compiles() -> Iterator[CompileCounts]:
         raise CompileCountsUnavailableError(
             "torch._dynamo.utils.counters is unavailable in this torch runtime"
         )
-    yield CompileCounts(counters)
+    counts = CompileCounts(counters)
+    try:
+        yield counts
+    finally:
+        counts._freeze()
 
 
 __all__ = [
