@@ -148,7 +148,11 @@ def test_bundle_save_load_roundtrip_with_backward(tmp_path: Path) -> None:
     assert restored.num_backward_passes == trace.num_backward_passes
     assert restored.backward_memory_backend == trace.backward_memory_backend
     assert len(restored.grad_fn_logs) == len(trace.grad_fn_logs)
-    assert restored.grad_fn_order == trace.grad_fn_order
+    # Portable grad-fn identities are remapped to deterministic sequential ids
+    # at save time (order-preserving over grad_fn_order); the live trace keeps
+    # raw id() values, so the roundtrip contract is the remap image, not raw
+    # equality.
+    assert restored.grad_fn_order == list(range(1, len(trace.grad_fn_order) + 1))
     assert grad_fn_handle.op.grad_fn_handle is grad_fn_handle
     assert torch.equal(restored[label].grad, expected[label])
 
