@@ -1111,7 +1111,15 @@ execution_context_unavailable
 context_field_invalid
 numeric_attestation_failed
 poisoned_run_refused
+collective_boundary_runnable_unsupported
 ```
+
+`collective_boundary_runnable_unsupported` (merge-ranks tier b) is both a SAVE-time producer
+refusal (stage `producer_collective_boundary`) and the forward-replay validation refusal
+(`CollectiveBoundaryReplayError`) for a rank-local trace whose taken path crosses a collective
+boundary node: a collective cannot be replayed single-device -- re-issuing it outside its
+communicator hangs or fabricates peer-dependent values. Metadata invariants remain available on
+such traces; cross-rank merging (merge-ranks tier c) is the supported replay story.
 
 `input_arity_extra` (r43, corr1_1) is raised when a loaded sparse `.run()` call carries MORE
 top-level positional/keyword input sites than the capture recorded: the descriptor encodes a

@@ -280,7 +280,21 @@ pytest tests/ -m "not slow" -x --tb=short
   capability-probed (`HAS_DTENSOR`, `HAS_DEVICE_MESH`, `HAS_PIPELINING`), never version-parsed, and
   bounded to inspectable instance state (12 levels / 4096 objects). Slots/descriptor-only holders,
   opaque user-wrapped TP hooks, over-bound state, and tensors created inside `forward` remain
-  disclosed residuals.
+  disclosed residuals. The `dtensor` finding identifies refused state precisely via per-site
+  dual geometry on `finding.geometry`.
+- Explicit `torch.distributed` python collectives in a traced forward become first-class boundary
+  nodes under the distributed opt-in (`tl.distributed.arm()` at process start, REQUIRED for
+  MPMD/spawn ranks; lazy arming covers initialized SPMD first-captures). The portable payload is
+  `op.annotations["collective"]` (`collective_boundary_v1`: correlation key, role entries, event
+  and witness disclosures) plus the trace-level group-lifecycle ledger in
+  `trace.annotations["distributed"]`. `CaptureOptions(distributed_witness="digest")` opts into
+  byte-exact contribution/destination digests. Async completions record
+  `completion_binding="unobserved"`; wildcard recv refuses typed; collective-crossing traces
+  refuse runnable save and forward-replay validation
+  (`collective_boundary_runnable_unsupported`) while metadata invariants run in full. Arming
+  relaxes no tier-(a) refusal (DTensor/TP/FSDP2/PP still refuse). Distributed rank processes
+  (initialized process group, non-daemonic) are the sanctioned exception to the
+  main-process-only capture guard.
 - `CaptureOptions(save_budget=...)` is a per-device ceiling on retained activation bytes, default
   `"auto"` = half of measurable available memory. Exhaustive, predicate, and deferred
   `Op.save_activation()` paths pre-admit the primary source-sized RAM copy before allocation, then

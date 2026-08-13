@@ -45,7 +45,12 @@ class PoisonedRunError(RunnableTLSPECError, ValidationError, RuntimeError):
     """A downstream faithful-result consumer refused a poisoned run."""
 
 
+class CollectiveBoundaryReplayError(RunnableTLSPECError, ValidationError, RuntimeError):
+    """Runnable save or forward replay refused a collective-crossing trace."""
+
+
 __all__ = [
+    "CollectiveBoundaryReplayError",
     "NumericAttestationError",
     "PathDivergenceError",
     "PoisonedRunError",

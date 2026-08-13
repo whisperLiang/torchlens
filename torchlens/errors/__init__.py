@@ -20,6 +20,7 @@ from ._base import (
 from .runnable import (
     NumericAttestationError,
     PathDivergenceError,
+    CollectiveBoundaryReplayError,
     PoisonedRunError,
     ReattachError,
     RunCapabilityUnavailableError,
@@ -202,6 +203,7 @@ __all__ = [
     "InterventionError",
     "NumericAttestationError",
     "PathDivergenceError",
+    "CollectiveBoundaryReplayError",
     "PoisonedRunError",
     "ReattachError",
     "RunCapabilityUnavailableError",

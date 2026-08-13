@@ -274,6 +274,7 @@ class RunnableErrorCode(str, Enum):
     CONTEXT_FIELD_INVALID = "context_field_invalid"
     NUMERIC_ATTESTATION_FAILED = "numeric_attestation_failed"
     POISONED_RUN_REFUSED = "poisoned_run_refused"
+    COLLECTIVE_BOUNDARY_RUNNABLE_UNSUPPORTED = "collective_boundary_runnable_unsupported"
 
 
 class LiteralAtomKind(str, Enum):
@@ -1555,6 +1556,60 @@ def refuse_poisoned_trace(trace: Any, operation: str) -> None:
     )
 
 
+def collective_boundaries_of(trace: Any) -> list:
+    """Return the trace's recorded collective boundary journal entries."""
+
+    annotations = getattr(trace, "annotations", None)
+    if not isinstance(annotations, dict):
+        return []
+    distributed = annotations.get("distributed")
+    if not isinstance(distributed, dict):
+        return []
+    boundaries = distributed.get("boundaries")
+    return list(boundaries) if isinstance(boundaries, list) else []
+
+
+def refuse_collective_boundary_trace(trace: Any, operation: str) -> None:
+    """Refuse a downstream operation that would replay across a collective.
+
+    A rank core whose taken path crosses a collective boundary cannot be
+    single-device replayed: re-issuing the collective outside its
+    communicator either hangs or computes garbage, and the recorded values
+    depend on peers the artifact does not contain. Runnable save and
+    forward-replay validation refuse typed; metadata invariants run in full
+    (design-merge-ranks-c v5, 3.4).
+
+    Parameters
+    ----------
+    trace:
+        Trace being consumed.
+    operation:
+        Human-readable faithful consumer name.
+
+    Raises
+    ------
+    CollectiveBoundaryReplayError
+        If the trace records one or more collective boundaries.
+    """
+
+    boundaries = collective_boundaries_of(trace)
+    if not boundaries:
+        return
+    from .errors import CollectiveBoundaryReplayError
+
+    kinds = sorted({str(entry.get("kind")) for entry in boundaries})
+    raise CollectiveBoundaryReplayError(
+        f"{operation} refused: this rank-local trace's taken path crosses "
+        f"{len(boundaries)} collective boundary node(s) ({', '.join(kinds)}). "
+        "A collective cannot be replayed single-device; merge-ranks (tier c) "
+        "is the cross-rank story. Metadata invariants remain available.",
+        code=RunnableErrorCode.COLLECTIVE_BOUNDARY_RUNNABLE_UNSUPPORTED.value,
+        operation=operation,
+        boundary_count=len(boundaries),
+        boundary_kinds=kinds,
+    )
+
+
 __all__ = [
     "ActivationPayloadLayerDescriptor",
     "ActivationPayloadMember",
@@ -1633,5 +1688,6 @@ __all__ = [
     "SlotByteDigest",
     "WitnessCompleteness",
     "mark_trace_path_status",
+    "refuse_collective_boundary_trace",
     "refuse_poisoned_trace",
 ]

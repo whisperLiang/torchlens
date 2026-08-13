@@ -287,6 +287,61 @@ class TestWitnessPolicy:
             tl.options.CaptureOptions(distributed_witness="everything")
 
 
+class TestReplayRefusals:
+    """A collective-crossing rank core refuses runnable save + forward replay.
+
+    Design v5 3.4: re-issuing a collective outside its communicator hangs or
+    fabricates peer-dependent values, so both surfaces refuse typed; metadata
+    invariants run in full.
+    """
+
+    def test_forward_replay_validation_refuses_typed(self, gloo_world):
+        from torchlens.errors import CollectiveBoundaryReplayError
+
+        lifecycle.arm()
+        log = tl.trace(HandRolledTP(), torch.randn(2, 4))
+        with pytest.raises(CollectiveBoundaryReplayError) as excinfo:
+            log.validate_forward_pass([torch.zeros(2, 4)])
+        assert (
+            excinfo.value.fields["code"]
+            == "collective_boundary_runnable_unsupported"
+        )
+
+    def test_runnable_save_refuses_typed(self, gloo_world, tmp_path):
+        from torchlens.errors import RunnablePreflightError
+
+        lifecycle.arm()
+        model = HandRolledTP()  # held alive: the refusal under test is the
+        log = tl.trace(model, torch.randn(2, 4))  # boundary one, not GC state
+        with pytest.raises(RunnablePreflightError) as excinfo:
+            tl.save(log, str(tmp_path / "boundary.tlspec"), level="runnable")
+        codes = {d.code for d in excinfo.value.fields["diagnostics"]}
+        assert "collective_boundary_runnable_unsupported" in codes
+
+    def test_metadata_invariants_still_run_in_full(self, gloo_world):
+        from torchlens.validation import check_metadata_invariants
+
+        lifecycle.arm()
+        log = tl.trace(HandRolledTP(), torch.randn(2, 4))
+        # Raises MetadataInvariantError on any violation; a boundary-crossing
+        # trace must still pass the full invariant sweep.
+        check_metadata_invariants(log)
+
+    def test_boundary_free_capture_keeps_both_surfaces(self, gloo_world, tmp_path):
+        lifecycle.arm()
+        model = nn.Sequential(nn.Linear(4, 4), nn.ReLU())
+        x = torch.randn(2, 4)
+        expected = model(x)
+        log = tl.trace(model, x, intervention_ready=True)
+        # The control: no typed collective refusal fires on either surface.
+        # (Save before validate: replay validation leaves a runtime
+        # _last_validation_failure attr that the save scrub audit rejects --
+        # a pre-existing interaction unrelated to collective boundaries.)
+        tl.save(log, str(tmp_path / "plain.tlspec"), level="runnable")
+        status = log.validate_forward_pass([expected])
+        assert status is not None
+
+
 # ---------------------------------------------------------------------------
 # 2-rank spawn sims
 # ---------------------------------------------------------------------------
