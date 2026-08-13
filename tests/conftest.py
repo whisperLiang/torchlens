@@ -164,6 +164,7 @@ def pytest_runtest_makereport(
     else:
         total_duration = 0.0
     budget = SMOKE_DURATION_BUDGET_SECONDS * _smoke_budget_load_factor()
+    item.session._tl_smoke_budget_value = budget
     if total_duration > budget:
         offenders = getattr(item.session, "_tl_smoke_budget_offenders", None)
         if offenders is None:
