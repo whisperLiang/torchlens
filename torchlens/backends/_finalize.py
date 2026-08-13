@@ -119,7 +119,7 @@ def finalize_single_pass_trace(
             _attach_param_usage(trace, op_log)
         layer_log = trace.layer_logs.get(op_log.layer_label)
         layer_created = layer_log is None
-        if layer_created:
+        if layer_log is None:
             layer_log = Layer(op_log)
         layer_log.ops[op_log.pass_index] = op_log
         layer_log.call_labels.append(op_log.label)
