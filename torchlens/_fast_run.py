@@ -79,6 +79,7 @@ from .runnable import (
     TensorSlotDescriptor,
     TensorSlotRole,
     is_mode_sensitive_qualname,
+    mark_trace_path_status,
 )
 from .utils._torch_compat import tensor_has_named_dims
 from .utils.rng import restore_host_rng, set_random_seed, snapshot_host_rng
@@ -932,6 +933,19 @@ class _FastLiveSession:
                 code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
                 detection_stage="fast_live_function_plan",
             )
+        modules = dict(model.named_modules())
+        plan_addresses = tuple(
+            dict.fromkeys(plan.address_or_name for plan in self.module_plans)
+        )
+        # Every typed refusal must fire BEFORE the unsupported-activation wipe
+        # below: a refused session must never destroy the user's saved payloads.
+        for address in plan_addresses:
+            if modules.get("" if address == "self" else address) is None:
+                raise RunCapabilityUnavailableError(
+                    f"Captured module address {address!r} is absent from the live model.",
+                    code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
+                    detection_stage="fast_live_module_plan",
+                )
         for op in trace.layer_list:
             if (
                 bool(getattr(op, "has_saved_activation", False))
@@ -943,17 +957,10 @@ class _FastLiveSession:
         self.function_names = frozenset(plan.address_or_name for plan in self.function_plans)
         self.handles: list[Any] = []
         self._hook_finalizer = weakref.finalize(self, _remove_fast_live_hooks, self.handles)
-        modules = dict(model.named_modules())
         session_ref = weakref.ref(self)
         try:
-            for address in dict.fromkeys(plan.address_or_name for plan in self.module_plans):
-                module = modules.get("" if address == "self" else address)
-                if module is None:
-                    raise RunCapabilityUnavailableError(
-                        f"Captured module address {address!r} is absent from the live model.",
-                        code=RunnableErrorCode.RUN_CAPABILITY_UNAVAILABLE.value,
-                        detection_stage="fast_live_module_plan",
-                    )
+            for address in plan_addresses:
+                module = modules["" if address == "self" else address]
 
                 def hook(
                     _module: nn.Module,
@@ -1064,6 +1071,21 @@ class _FastLiveSession:
         """Remove persistent module hooks owned by this session."""
 
         self._hook_finalizer()
+
+    def _poison_and_raise(self, failed: ContractCheck) -> None:
+        """Poison the half-refreshed user Trace, then raise the typed divergence.
+
+        Boundary payloads are overwritten in place as the native forward passes
+        each site, so a divergence detected at site N leaves sites 1..N-1 holding
+        new-input activations while later sites keep capture-time ones. The
+        mixed-activation Trace must never pass downstream faithful consumers
+        (validation, export, faithful comparison, chaining), so it is
+        monotonically poisoned before the raise -- the documented "always raises
+        on divergence" posture plus an honest mark on the user-owned object.
+        """
+
+        mark_trace_path_status(self.trace, PathFaithfulness.DIVERGED, failed.diagnostic)
+        _raise_failed_contract_as_divergence(failed, fork=None)
 
     def wants_function(self, func_name: str) -> bool:
         """Return whether the active scoped collector needs this function type."""
@@ -1240,7 +1262,7 @@ class _FastLiveSession:
             else:
                 output = model(input_args, **dict(input_kwargs))
         if self.failure is not None:
-            _raise_failed_contract_as_divergence(self.failure, fork=None)
+            self._poison_and_raise(self.failure)
         if self.module_index != len(self.module_plans):
             failed = _contract_check(
                 "fast_live_module_missing",
@@ -1249,7 +1271,7 @@ class _FastLiveSession:
                 f"Live module path ended after {self.module_index} of "
                 f"{len(self.module_plans)} captured atomic calls.",
             )
-            _raise_failed_contract_as_divergence(failed, fork=None)
+            self._poison_and_raise(failed)
         if self.function_index != len(self.function_plans):
             failed = _contract_check(
                 "fast_live_function_missing",
@@ -1258,7 +1280,7 @@ class _FastLiveSession:
                 f"Live functional path ended after {self.function_index} of "
                 f"{len(self.function_plans)} requested calls.",
             )
-            _raise_failed_contract_as_divergence(failed, fork=None)
+            self._poison_and_raise(failed)
         self._refresh_boundary_payloads(input_args, input_kwargs, output)
         readiness = ReadinessReport(
             status=ReadinessStatus.READY,
@@ -1324,7 +1346,7 @@ class _FastLiveSession:
                 "Native model output tensor structure changed from the captured boundary.",
                 affected_op_labels=output_labels,
             )
-            _raise_failed_contract_as_divergence(failed, fork=None)
+            self._poison_and_raise(failed)
         for label, path in zip(output_labels, output_paths):
             value = _value_at_path(output, path)
             op = self.trace.layer_dict_all_keys[label]
@@ -1338,7 +1360,7 @@ class _FastLiveSession:
                     f"Native model output {label!r} is no longer a tensor.",
                     affected_op_labels=(label,),
                 )
-                _raise_failed_contract_as_divergence(failed, fork=None)
+                self._poison_and_raise(failed)
             if expected_shape is not None and tuple(value.shape) != expected_shape:
                 failed = _contract_check(
                     f"fast_live_model_output_shape:{label}",
@@ -1348,7 +1370,7 @@ class _FastLiveSession:
                     f"{tuple(value.shape)}.",
                     affected_op_labels=(label,),
                 )
-                _raise_failed_contract_as_divergence(failed, fork=None)
+                self._poison_and_raise(failed)
             if expected_dtype is not None and str(value.dtype) != expected_dtype:
                 failed = _contract_check(
                     f"fast_live_model_output_dtype:{label}",
@@ -1358,7 +1380,7 @@ class _FastLiveSession:
                     f"{value.dtype}.",
                     affected_op_labels=(label,),
                 )
-                _raise_failed_contract_as_divergence(failed, fork=None)
+                self._poison_and_raise(failed)
             if isinstance(value, torch.Tensor) and bool(getattr(op, "has_saved_activation", False)):
                 op.save_activation(value, (), {}, False)
 

@@ -158,3 +158,74 @@ def test_fast_sparse_run_consumes_alias_unresolved_flag() -> None:
     assert "_, _unresolved" not in source
     run_source = inspect.getsource(_fast_run._FastSparseSession.run)
     assert "provisional_path_faithfulness=PathFaithfulness.VERIFIED" not in run_source
+
+
+class BufferGainModel(nn.Module):
+    """Two linears plus a directly consumed buffer (a non-collectable save)."""
+
+    def __init__(self) -> None:
+        """Register the layers and the directly read gain buffer."""
+
+        super().__init__()
+        self.first = nn.Linear(3, 3)
+        self.second = nn.Linear(3, 3)
+        self.register_buffer("gain", torch.tensor([2.0, 1.0, 0.5]))
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        """Scale the stacked linear output by the buffer."""
+
+        return self.second(self.first(value)) * self.gain
+
+
+def test_fast_live_module_refusal_fires_before_activation_wipe() -> None:
+    """A typed module-plan refusal must not destroy the user's saved payloads.
+
+    The buffer read is saved but not fast-collectable, so it is exactly the
+    payload the unsupported-activation wipe targets; the module-address
+    refusal must fire BEFORE that wipe runs (grind b3-l1, F-R07).
+    """
+
+    model = BufferGainModel().eval()
+    captured = tl.trace(model, torch.ones(2, 3), save=lambda op: True)
+    saved_before = {
+        op.label for op in captured.layer_list if op.has_saved_activation
+    }
+    assert "buffer_1:1" in saved_before
+    del model.second
+
+    with pytest.raises(Exception) as excinfo:
+        captured.run(inputs=torch.ones(2, 3), fast=True)
+    assert excinfo.value.fields["detection_stage"] == "fast_live_module_plan"
+
+    saved_after = {op.label for op in captured.layer_list if op.has_saved_activation}
+    assert saved_after == saved_before
+    assert captured.layer_dict_all_keys["buffer_1:1"].out is not None
+
+
+def test_fast_live_divergence_poisons_half_refreshed_trace() -> None:
+    """A diverged fast-live run marks the mixed-activation user Trace poisoned."""
+
+    class BranchingFunctionModel(nn.Module):
+        """Choose between two same-shape activation functions from tensor data."""
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            """Apply the branch selected by the runtime sum."""
+
+            if bool((value.sum() > 0).item()):
+                return torch.relu(value)
+            return torch.sigmoid(value)
+
+    model = BranchingFunctionModel().eval()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        captured = tl.trace(model, torch.ones(2), save=tl.func("relu"))
+
+    from torchlens.errors import PathDivergenceError
+
+    with pytest.raises(PathDivergenceError):
+        captured.run(inputs=-torch.ones(2), fast=True)
+
+    # Boundary/site payloads were overwritten in place up to the divergence
+    # point, so the user-owned Trace must carry the monotonic poison mark and
+    # refuse downstream faithful consumers.
+    assert captured._runnable.path_faithfulness is PathFaithfulness.DIVERGED
