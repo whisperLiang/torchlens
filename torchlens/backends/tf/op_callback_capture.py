@@ -184,6 +184,7 @@ class TFEagerCaptureSession:
         module_tree: TFModuleTree | None,
         save_payloads: bool = True,
         save_predicate: Callable[[Any], Any] | None = None,
+        output_tap: Callable[["TFOpCapture", tuple[str, ...]], None] | None = None,
     ) -> None:
         """Initialize a TensorFlow eager capture session.
 
@@ -203,6 +204,10 @@ class TFEagerCaptureSession:
             Whether op output values should be snapshotted.
         save_predicate
             Optional static selector used to decide which op payloads are saved.
+        output_tap
+            Optional per-output observer invoked with each ``TFOpCapture`` and
+            the live module stack as ``"address:call_index"`` labels. The tap
+            must not issue TensorFlow ops (the callback would recurse).
         """
 
         self.tf = tf
@@ -212,6 +217,7 @@ class TFEagerCaptureSession:
         self.module_tree = module_tree
         self.save_payloads = save_payloads
         self.save_predicate = save_predicate
+        self.output_tap = output_tap
         self.events = CaptureEvents()
         self.module_stack: list[ModuleFrame] = []
         self.producer_by_ref: dict[object, str] = {}
@@ -343,16 +349,20 @@ class TFEagerCaptureSession:
                 record_context=record_context,
             )
             self.events.append(event)
-            self.op_captures.append(
-                TFOpCapture(
-                    label_raw=label.label_raw,
-                    op_type=op_type_text,
-                    attrs=_attrs_to_raw_dict(attrs),
-                    output_index=output_index,
-                    inputs=input_captures,
-                    output_tensor=output,
-                )
+            op_capture = TFOpCapture(
+                label_raw=label.label_raw,
+                op_type=op_type_text,
+                attrs=_attrs_to_raw_dict(attrs),
+                output_index=output_index,
+                inputs=input_captures,
+                output_tensor=output,
             )
+            self.op_captures.append(op_capture)
+            if self.output_tap is not None:
+                self.output_tap(
+                    op_capture,
+                    tuple(f"{frame.address}:{frame.call_index}" for frame in self.module_stack),
+                )
             ref_key = _tensor_ref_key(output)
             if ref_key is not None:
                 self.producer_by_ref[ref_key] = label.label_raw

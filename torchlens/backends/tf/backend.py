@@ -99,6 +99,7 @@ class TFBackend:
         layer_visualizers: dict[Any, Any] | None = None,
         save_visualizations: bool = False,
         module_identity_mode: str | None = None,
+        grad_options: Any | None = None,
         **extra_kwargs: Any,
     ) -> Trace:
         """Capture one TensorFlow eager forward into a ``Trace``.
@@ -151,6 +152,7 @@ class TFBackend:
         layer_visualizers = default_if_missing(layer_visualizers, None)
         save_visualizations = default_if_missing(save_visualizations, False)
         module_identity_mode = default_if_missing(module_identity_mode, None)
+        grad_options = default_if_missing(grad_options, None)
         save_predicate = _pop_tf_save_predicate(extra_kwargs)
         _reject_extra_kwargs(extra_kwargs)
         if random_seed is not None:
@@ -178,6 +180,12 @@ class TFBackend:
         plan = self.normalize_call(model=model, input_args=input_args, input_kwargs=input_kwargs)
         tf = self._import_tensorflow()
         if plan.mode == "graph_only":
+            if grad_options is not None:
+                raise BackendUnsupportedError(
+                    "tf grad_options requires eager live capture; static FuncGraph "
+                    f"capture ({plan.reason}) cannot run the GradientTape derived-"
+                    "gradient replay. Trace an eager-executable callable instead."
+                )
             trace = self._new_trace(
                 model=model,
                 output_device=output_device,
@@ -304,6 +312,24 @@ class TFBackend:
         delattr(trace, "capture_events")
         self._attach_param_logs(trace, module_tree)
         self._finish_trace(trace, module_tree)
+        if grad_options is not None:
+            from .derived_grads import GradOptions, attach_tf_derived_grads
+
+            if not isinstance(grad_options, GradOptions):
+                raise BackendUnsupportedError(
+                    "tf grad_options must be a torchlens.backends.tf.GradOptions "
+                    f"instance; got {type(grad_options).__name__}."
+                )
+            attach_tf_derived_grads(
+                tf=tf,
+                trace=trace,
+                callable_obj=plan.callable_obj,
+                args=plan.args,
+                kwargs=plan.call_kwargs,
+                captured_output=result.output,
+                grad_options=grad_options,
+                module_tree=module_tree,
+            )
         freeze_trace_relation_views(trace)
         return trace
 

@@ -180,7 +180,7 @@ def tf_param_logs(tree: TFModuleTree, trace: Any) -> dict[str, Param]:
             has_optimizer=None,
         )
         param.dtype_ref = DtypeRef(backend="tf", name=dtype)
-        param.device_ref = DeviceRef(backend="tf", name=str(getattr(variable, "device", "")))
+        param.device_ref = DeviceRef(backend="tf", name=_variable_device(variable))
         param.backend_address = f"object:{address}"
         param.resolver_status = "resolved"
         param._param_ref = variable
@@ -190,6 +190,34 @@ def tf_param_logs(tree: TFModuleTree, trace: Any) -> dict[str, Param]:
         )
         logs[address] = param
     return logs
+
+
+def _variable_device(variable: Any) -> str:
+    """Return the placement device for a TensorFlow or Keras variable.
+
+    Keras 3 ``Variable`` wrappers expose ``device`` as ``None``; the live
+    ``tf.Variable`` behind their ``value`` property carries the real placement.
+
+    Parameters
+    ----------
+    variable
+        Keras 3 variable or raw ``tf.Variable``.
+
+    Returns
+    -------
+    str
+        Device string, empty when genuinely unavailable.
+    """
+
+    device = getattr(variable, "device", None)
+    if device:
+        return str(device)
+    inner = getattr(variable, "value", None)
+    if inner is not None and not callable(inner):
+        inner_device = getattr(inner, "device", None)
+        if inner_device:
+            return str(inner_device)
+    return ""
 
 
 def _patch_class_call(
