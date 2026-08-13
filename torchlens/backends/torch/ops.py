@@ -560,7 +560,9 @@ RecordProducer = Literal["legacy", "decomposed"]
 
 # Internal dual-path switch (producer unification 6.1). Read ONCE per capture
 # at session setup (`set_capture_producer_policy`); never consulted on the
-# hot path — the resolved value rides the policy object.
+# hot path — the resolved value rides the policy object. The decomposed
+# producer is the default since P6; ``legacy`` is the escape hatch until the
+# P7 deletion retires it.
 _RECORD_PRODUCER_ENV = "TORCHLENS_CAPTURE_PRODUCER"
 _RECORD_PRODUCERS: tuple[str, ...] = ("legacy", "decomposed")
 
@@ -568,7 +570,7 @@ _RECORD_PRODUCERS: tuple[str, ...] = ("legacy", "decomposed")
 def _resolve_record_producer() -> RecordProducer:
     """Resolve the journal record producer from the internal environment switch."""
 
-    value = os.environ.get(_RECORD_PRODUCER_ENV, "legacy")
+    value = os.environ.get(_RECORD_PRODUCER_ENV, "decomposed")
     if value not in _RECORD_PRODUCERS:
         raise ValueError(
             f"{_RECORD_PRODUCER_ENV}={value!r} is not a known capture producer; "

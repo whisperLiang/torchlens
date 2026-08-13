@@ -82,21 +82,26 @@ def test_a1_within_leg_sibling_swap_red_via_check_b(tmp_path: Path) -> None:
     swapped_labels: list[str] = []
 
     def swap_two_siblings(events: Any) -> None:
+        from torchlens.ir.op_record import OpRecord
+
         tanh_events = [e for e in events.op_events if e.layer_type == "tanh"]
         assert len(tanh_events) >= 2, "plant needs two structurally identical siblings"
         first, second = tanh_events[0], tanh_events[1]
-        handle_first, handle_second = first.grad_fn_handle, second.grad_fn_handle
+        handle_first = events.grad_fn_handles_by_label_raw.get(first.label_raw)
+        handle_second = events.grad_fn_handles_by_label_raw.get(second.label_raw)
         assert handle_first is not None and handle_second is not None
         # A TRUE singleton swap moves the binding at EVERY within-leg site
-        # coherently (journal field AND the handle index the store reads), so
-        # the leg stays structurally self-consistent and only ground truth
-        # can convict it.
+        # coherently, so the leg stays structurally self-consistent and only
+        # ground truth can convict it. On the decomposed leg the handle index
+        # is the ONE within-leg site (records never carry a handle — single
+        # ownership); the legacy leg additionally mirrors the journal field.
         for event, handle in ((first, handle_second), (second, handle_first)):
-            updated = dataclasses.replace(event, grad_fn_handle=handle)
-            object.__setattr__(updated, "seq", event.seq)
-            position = _event_position(events, event)
-            events.op_events[position] = updated
-            events.live_index.replace(updated)
+            if not isinstance(event, OpRecord):
+                updated = dataclasses.replace(event, grad_fn_handle=handle)
+                object.__setattr__(updated, "seq", event.seq)
+                position = _event_position(events, event)
+                events.op_events[position] = updated
+                events.live_index.replace(updated)
             events.grad_fn_handles_by_label_raw[event.label_raw] = handle
         swapped_labels.extend([first.label_raw, second.label_raw])
 
@@ -221,6 +226,8 @@ def test_barcode_binding_red_capable(tmp_path: Path) -> None:
     planted_rows: list[str] = []
 
     def swap_param_barcodes(events: Any) -> None:
+        from torchlens.ir.op_record import OpRecord
+
         rows = [e for e in events.op_events if len(e.params) >= 1]
         if len(rows) < 2:
             return
@@ -229,8 +236,17 @@ def test_barcode_binding_red_capable(tmp_path: Path) -> None:
         pairs = ((first, param_first, param_second), (second, param_second, param_first))
         for event, own, donor in pairs:
             swapped = dataclasses.replace(own, barcode=donor.barcode)
-            updated = dataclasses.replace(event, params=(swapped, *event.params[1:]))
-            object.__setattr__(updated, "seq", event.seq)
+            swapped_params = (swapped, *event.params[1:])
+            if isinstance(event, OpRecord):
+                updated = dataclasses.replace(
+                    event,
+                    params_facet=dataclasses.replace(
+                        event.params_facet, params=swapped_params
+                    ),
+                )
+            else:
+                updated = dataclasses.replace(event, params=swapped_params)
+                object.__setattr__(updated, "seq", event.seq)
             events.op_events[_event_position(events, event)] = updated
             events.live_index.replace(updated)
         planted_rows.extend([first.label_raw, second.label_raw])
@@ -251,6 +267,8 @@ def test_handle_binding_red_capable(tmp_path: Path) -> None:
     planted_labels: list[str] = []
 
     def retarget_handle(events: Any) -> None:
+        from torchlens.ir.op_record import OpRecord
+
         rows = [
             e
             for e in events.op_events
@@ -261,10 +279,14 @@ def test_handle_binding_red_capable(tmp_path: Path) -> None:
         tensor_ref = dataclasses.replace(
             event.output.tensor, backend_handle_id=str(id(object()))
         )
-        updated = dataclasses.replace(
-            event, output=dataclasses.replace(event.output, tensor=tensor_ref)
-        )
-        object.__setattr__(updated, "seq", event.seq)
+        retargeted_output = dataclasses.replace(event.output, tensor=tensor_ref)
+        if isinstance(event, OpRecord):
+            updated = dataclasses.replace(
+                event, core=dataclasses.replace(event.core, output=retargeted_output)
+            )
+        else:
+            updated = dataclasses.replace(event, output=retargeted_output)
+            object.__setattr__(updated, "seq", event.seq)
         events.op_events[_event_position(events, event)] = updated
         events.live_index.replace(updated)
         planted_labels.append(event.label_raw)
