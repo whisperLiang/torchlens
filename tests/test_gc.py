@@ -283,6 +283,42 @@ class TestTraceGC:
         gc.collect()
         assert ref() is None
 
+    def test_last_captures_model_class_is_not_pinned_after_the_epilogue(self):
+        """A dynamically created module class dies with its last capture.
+
+        ``_module_class_metadata_cache`` is a plain dict keyed by the module
+        CLASS (and stores the class again in its value), and it was only ever
+        cleared at the START of the next capture. A process whose final capture
+        used a generated / function-local class therefore kept that class, its
+        code objects and its closure alive for the whole process lifetime.
+        """
+
+        def build_class():
+            """Return a fresh module class defined in this call's scope."""
+
+            class _Generated(nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.fc = nn.Linear(4, 3)
+
+                def forward(self, x):
+                    return torch.relu(self.fc(x))
+
+            return _Generated
+
+        generated = build_class()
+        class_ref = weakref.ref(generated)
+        model = generated()
+        trace = tl.trace(model, torch.randn(2, 4))
+
+        del trace, model, generated
+        gc.collect()
+
+        assert class_ref() is None, (
+            "the last capture's module class is still pinned after the capture "
+            "epilogue (class-metadata cache not released)"
+        )
+
     def test_transient_write_after_finish_does_not_recreate_build_state(self) -> None:
         """Finished traces reject writes after the build-state owner is dropped."""
 
