@@ -417,11 +417,12 @@ _SCRUB_BLOBREF = 2
 _SCRUB_LIST = 3
 _SCRUB_TUPLE = 4
 _SCRUB_SET = 5
-_SCRUB_OBJECT = 6
+_SCRUB_FROZENSET = 6
+_SCRUB_OBJECT = 7
 # The two mapping kinds sort ABOVE _SCRUB_OBJECT so one ``>=`` test selects "is a
 # mapping" (which shares the key-payload refusal) before splitting on flavour.
-_SCRUB_ORDERED_DICT = 7
-_SCRUB_MAPPING = 8
+_SCRUB_ORDERED_DICT = 8
+_SCRUB_MAPPING = 9
 
 _SCRUB_VALUE_KINDS: dict[type, int] = {}
 
@@ -447,6 +448,8 @@ def _scrub_value_kind(value_type: type) -> int:
         kind = _SCRUB_TUPLE
     elif issubclass(value_type, set):
         kind = _SCRUB_SET
+    elif issubclass(value_type, frozenset):
+        kind = _SCRUB_FROZENSET
     elif issubclass(value_type, OrderedDict):
         kind = _SCRUB_ORDERED_DICT
     elif issubclass(value_type, dict):
@@ -509,6 +512,11 @@ def _scrub_value(
             _scrub_value(item, options, memo, blob_specs, blob_counter, stringify_unknown)
             for item in value
         }
+    if kind == _SCRUB_FROZENSET:
+        return frozenset(
+            _scrub_value(item, options, memo, blob_specs, blob_counter, stringify_unknown)
+            for item in value
+        )
     if kind >= _SCRUB_ORDERED_DICT:
         # Every mapping kind: refuse tensor-payload keys before the type-specific
         # branches rebuild the mapping so a payload cannot slip into
@@ -1376,6 +1384,19 @@ def _blobify_recursive_value(
             )
             for item in value
         }
+    if isinstance(value, frozenset):
+        return frozenset(
+            _blobify_recursive_value(
+                owner=owner,
+                field_name=field_name,
+                value=item,
+                options=options,
+                memo=memo,
+                blob_specs=blob_specs,
+                blob_counter=blob_counter,
+            )
+            for item in value
+        )
 
     spec = getattr(type(value), "PORTABLE_STATE_SPEC", None)
     if spec is not None:

@@ -194,3 +194,19 @@ def test_deepcopy_uses_supported_detached_pickle_semantics() -> None:
 
     assert torch.equal(cloned.output_ops[0].out, trace.output_ops[0].out)
     assert cloned.output_ops[0].out.grad_fn is None
+
+
+def test_frozenset_round_trips_recursive_blob_payloads(tmp_path: Path) -> None:
+    """Frozenset containers preserve type and materialize nested tensor blobs."""
+
+    trace = tl.trace(_LinearModel(), torch.ones(1, 2))
+    target = trace.output_ops[0]
+    target.func_config = {"frozen": frozenset({torch.tensor(3)})}
+    path = tmp_path / "frozenset.tlspec"
+    tl.save(trace, path)
+
+    loaded = tl.load(path)
+    frozen = loaded.output_ops[0].func_config["frozen"]
+    assert isinstance(frozen, frozenset)
+    assert len(frozen) == 1
+    assert torch.equal(next(iter(frozen)), torch.tensor(3))

@@ -246,6 +246,8 @@ def _rehydrate_small_raw_images(value: Any) -> Any:
         return [_rehydrate_small_raw_images(item) for item in value]
     if isinstance(value, tuple):
         return tuple(_rehydrate_small_raw_images(item) for item in value)
+    if isinstance(value, frozenset):
+        return frozenset(_rehydrate_small_raw_images(item) for item in value)
     if isinstance(value, dict):
         return {key: _rehydrate_small_raw_images(item) for key, item in value.items()}
     return value
@@ -326,7 +328,8 @@ _REHYDRATE_TUPLE = 1
 _REHYDRATE_LIST = 2
 _REHYDRATE_MAPPING = 3
 _REHYDRATE_SET = 4
-_REHYDRATE_OBJECT = 5
+_REHYDRATE_FROZENSET = 5
+_REHYDRATE_OBJECT = 6
 
 _REHYDRATE_LEAF_TYPES = (str, int, float, bool, type(None), torch.dtype, torch.device, BlobRef)
 _REHYDRATE_KINDS: dict[type, int] = {}
@@ -350,6 +353,8 @@ def _rehydrate_node_kind(value_type: type) -> int:
         kind = _REHYDRATE_MAPPING
     elif issubclass(value_type, set):
         kind = _REHYDRATE_SET
+    elif issubclass(value_type, frozenset):
+        kind = _REHYDRATE_FROZENSET
     else:
         kind = _REHYDRATE_OBJECT
     _REHYDRATE_KINDS[value_type] = kind
@@ -374,8 +379,8 @@ def _rehydrate_object(
     # One cached type lookup replaces the eight-way ``isinstance`` chain this branch
     # table re-ran for every one of the ~226k nodes a ResNet load walks. The three
     # former mapping branches (``OrderedDict`` / ``defaultdict`` / ``dict``) had
-    # byte-identical in-place bodies and are one branch; ``frozenset`` still falls
-    # through to the portable-state path exactly as before.
+    # byte-identical in-place bodies and are one branch; immutable frozensets use
+    # their own rebuilding branch so nested blob references are not skipped.
     value_type = type(value)
     kind = _REHYDRATE_KINDS.get(value_type)
     if kind is None:
@@ -448,6 +453,23 @@ def _rehydrate_object(
             )
             for item in value
         }
+    if kind == _REHYDRATE_FROZENSET:
+        return frozenset(
+            _rehydrate_object(
+                item,
+                manifest_index,
+                bundle_path,
+                resolved_blobs_dir,
+                lazy,
+                map_location,
+                materialize_nested,
+                payload_hints,
+                audit_only_payloads,
+                payload_statuses,
+                seen,
+            )
+            for item in value
+        )
 
     spec = getattr(value_type, "PORTABLE_STATE_SPEC", None)
     if spec is None:
@@ -690,6 +712,19 @@ def _materialize_recursive_blob_refs(
             )
             for item in value
         }
+    if isinstance(value, frozenset):
+        return frozenset(
+            _materialize_recursive_blob_refs(
+                item,
+                manifest_index=manifest_index,
+                bundle_path=bundle_path,
+                resolved_blobs_dir=resolved_blobs_dir,
+                map_location=map_location,
+                payload_hints=payload_hints,
+                payload_statuses=payload_statuses,
+            )
+            for item in value
+        )
     spec = getattr(type(value), "PORTABLE_STATE_SPEC", None)
     if spec is not None and type(value).__name__ == "GradientRecord":
         for field_name, field_value in list(state_items(value)):
@@ -1275,6 +1310,20 @@ def _rehydrate_nested_object(
             )
             for item in value
         }
+    if isinstance(value, frozenset):
+        return frozenset(
+            _rehydrate_nested_object(
+                item,
+                manifest_index=manifest_index,
+                bundle_path=bundle_path,
+                resolved_blobs_dir=resolved_blobs_dir,
+                map_location=map_location,
+                payload_hints=payload_hints,
+                payload_statuses=payload_statuses,
+                seen=seen,
+            )
+            for item in value
+        )
 
     spec = getattr(type(value), "PORTABLE_STATE_SPEC", None)
     if spec is None:
