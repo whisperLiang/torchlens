@@ -16,8 +16,9 @@ repair stale bindings. Coverage is now:
    3 ops -> 27 ops), so ordinary captures are byte-identical to earlier releases. The rescue also
    covers holder classes the crawler never reached: closure cells, staticmethods, module-level
    partials, plain object attributes, pre-bound tensor methods, torch-free-source modules, and
-   C-held references. The most reliable pattern is still to wrap early: import TorchLens or call
-   `tl.wrap_torch()` before creating aliases, closures, partials, or object-held torch callables.
+   C-held references. The most reliable pattern is still to wrap early: call
+   `torchlens.backends.torch.wrappers.wrap_torch()` before creating aliases, closures, partials,
+   or object-held torch callables.
    Then those bindings capture the wrappers directly and no rescue is needed.
 2. **Mechanical belt.** A small, per-build DERIVED set of wrapped functions is invisible to every
    `TorchFunctionMode` (zero protocol callbacks, measured at wrap time): on current builds

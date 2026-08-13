@@ -10,9 +10,9 @@ new or surprising case, include that report and a minimal reproducer in a bug re
 The strongest detached-reference remedy is prevention:
 
 ```python
-import torchlens as tl
+from torchlens.backends.torch.wrappers import wrap_torch
 
-tl.wrap_torch()  # do this before `from torch import ...`, closures, partials, or callable holders
+wrap_torch()  # do this before `from torch import ...`, closures, partials, or callable holders
 
 from torch import relu
 ```

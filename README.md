@@ -504,8 +504,8 @@ works, and the recommended workaround for each context.
 TorchLens recovers most detached `from torch import ...` references with a disclosed rescue
 re-run and a small mechanical belt. The historical broad `sys.modules` crawl and
 `patch_policy=` rollout are deleted; those arguments are deprecated no-ops. For the strongest
-and simplest guarantee, import TorchLens or call `tl.wrap_torch()` before creating detached
-references. The optional `escape_detector="shadow"` diagnoses raw callable escapes. See
+and simplest guarantee, call `torchlens.backends.torch.wrappers.wrap_torch()` before creating
+detached references. The optional `escape_detector="shadow"` diagnoses raw callable escapes. See
 [detached-reference handling](docs/migration/scoped_detached_patching.md) and the
 [limitations catalog](docs/reference/limitations.md).
 

@@ -96,7 +96,7 @@ armed = tl.trace(model, x.requires_grad_(True),
                  save_mode="reference")
 armed_op = armed["relu_1_2"]
 armed_unit = armed_op.receptive_field.center_unit(batch_index=0)
-gradient = armed_op.receptive_field.gradient(armed_unit)
+gradient = armed_op.receptive_field.gradient(armed_unit, retain_graph=True)
 overlay = armed_op.receptive_field.show(armed_unit, gradient=True)
 validated = tl.receptive_field.verify(armed, units="center")
 # tl.validate(model, x, scope="receptive_field") captures an armed trace itself.

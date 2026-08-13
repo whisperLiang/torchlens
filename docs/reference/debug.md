@@ -62,6 +62,8 @@ after capture. It raises `CompileCountsUnavailableError` when the runtime expose
 counters.
 
 ```python
+import warnings
+
 import torch
 from torch import nn
 import torchlens as tl
@@ -81,8 +83,11 @@ model = Compiled()
 x = torch.randn(2, 4)
 model(x)  # warm the compile cache
 
-with tl.debug.count_compiles() as during:
-    tl.trace(model, x)
+with warnings.catch_warnings(record=True) as capture_notes:
+    warnings.simplefilter("always")
+    with tl.debug.count_compiles() as during:
+        tl.trace(model, x)
+assert any("force_eager" in str(note.message) for note in capture_notes)
 with tl.debug.count_compiles() as after:
     model(x)
 print(during.frames_compiled, after.frames_compiled <= 1)

@@ -57,7 +57,6 @@ metadata remains available, but unsaved payloads are intentionally absent.
 import torch
 from torch import nn
 import torchlens as tl
-from torchlens.backends.torch.wrappers import unwrap_torch
 
 
 model = nn.Sequential(nn.Linear(4, 4), nn.GELU(), nn.Linear(4, 2)).eval()
@@ -108,11 +107,12 @@ detector is a separate, opt-in diagnostic cost:
 import torch
 from torch import nn
 import torchlens as tl
+from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
 
 
 model = nn.ReLU()
 x = torch.randn(4)
-tl.wrap_torch(escape_detector="shadow")
+wrap_torch(escape_detector="shadow")
 trace = tl.trace(model, x)
 print(trace.escape_detector_event_count, trace.escape_detector_callback_ns)
 unwrap_torch()
@@ -125,12 +125,12 @@ callable detector:
 import torch
 from torch import nn
 import torchlens as tl
-from torchlens.backends.torch.wrappers import unwrap_torch
+from torchlens.backends.torch.wrappers import unwrap_torch, wrap_torch
 
 
 model = nn.ReLU()
 x = torch.randn(4)
-tl.wrap_torch(
+wrap_torch(
     escape_detector="shadow",
     completeness_witness=True,
 )
