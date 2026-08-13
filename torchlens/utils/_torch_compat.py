@@ -37,7 +37,8 @@ keeps the modern signature but changes its version string.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+import contextlib
 import ctypes
 from dataclasses import dataclass
 import importlib
@@ -72,9 +73,11 @@ __all__ = [
     "HAS_DEVICE_CONSTRUCTORS",
     "HAS_DEVICE_MESH",
     "HAS_DTENSOR",
+    "HAS_DYNAMO_COMPILE_COUNTERS",
     "HAS_DYNAMO_IS_COMPILING",
     "HAS_FP8_DTYPES",
     "HAS_PIPELINING",
+    "HAS_SET_STANCE",
     "HAS_TRACING_TENSOR_TYPES",
     "HAS_FUNCTORCH_APIS",
     "HAS_FUNCTORCH_LEVEL_API",
@@ -115,6 +118,8 @@ __all__ = [
     "get_fp8_dtypes",
     "get_tracing_tensor_types",
     "dynamo_is_compiling",
+    "force_eager_stance_scope",
+    "get_dynamo_compile_counters",
     "get_dynamo_optimized_module_type",
     "get_dynamo_explain",
     "get_functorch_maybe_current_level",
@@ -1076,6 +1081,21 @@ def _probe_saved_tensors_hooks_patchable() -> bool:
     return init_params == ["self", "pack_hook", "unpack_hook"] and enter_params == ["self"]
 
 
+def _probe_set_stance() -> bool:
+    """Return whether this torch exposes ``torch.compiler.set_stance``.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``torch.compiler.set_stance`` exists and is callable
+        (public since torch 2.6). The probe reads the attribute only; it never
+        imports ``torch._dynamo`` (calling ``set_stance`` does).
+    """
+
+    compiler_module = getattr(torch, "compiler", None)
+    return callable(getattr(compiler_module, "set_stance", None))
+
+
 HAS_VARIABLE_FUNCTIONS: bool = _probe_variable_functions()
 HAS_TORCH_VF: bool = _probe_torch_vf()
 HAS_TORCH_FUNC: bool = _probe_torch_func()
@@ -1121,6 +1141,10 @@ _PIPELINING_PROBED: bool = False
 HAS_DYNAMO_IS_COMPILING: bool = False
 _DYNAMO_IS_COMPILING_FN: Callable[[], bool] | None = None
 _DYNAMO_IS_COMPILING_PROBED: bool = False
+HAS_SET_STANCE: bool = _probe_set_stance()
+HAS_DYNAMO_COMPILE_COUNTERS: bool = False
+_DYNAMO_COMPILE_COUNTERS: Any | None = None
+_DYNAMO_COMPILE_COUNTERS_PROBED: bool = False
 HAS_TRACING_TENSOR_TYPES: bool = False
 _TRACING_TENSOR_TYPES: tuple[type[Any], ...] = ()
 _TRACING_TENSOR_TYPES_PROBED: bool = False
@@ -1151,6 +1175,8 @@ _CAPABILITY_ATTRS: tuple[str, ...] = (
     "HAS_DEVICE_MESH",
     "HAS_PIPELINING",
     "HAS_DYNAMO_IS_COMPILING",
+    "HAS_SET_STANCE",
+    "HAS_DYNAMO_COMPILE_COUNTERS",
     "HAS_TRACING_TENSOR_TYPES",
     "HAS_FP8_DTYPES",
     "HAS_GENERATOR_CLONE_STATE",
@@ -1229,6 +1255,7 @@ def get_torch_capability_snapshot() -> TorchCapabilitySnapshot:
     get_pipelining_module_types(force_probe=True)
     get_tracing_tensor_types(force_probe=True)
     get_fp8_dtypes(force_probe=True)
+    get_dynamo_compile_counters(force_probe=True)
     dynamo_is_compiling()
     _ensure_dynamo_orig_callable_marker_probed()
     get_dynamo_explain()
@@ -1760,6 +1787,94 @@ def dynamo_is_compiling() -> bool:
         return bool(probe())
     except Exception:
         return False
+
+
+@contextlib.contextmanager
+def force_eager_stance_scope() -> Iterator[bool]:
+    """Force compiled callables to run their original eager Python for a scope.
+
+    Yields
+    ------
+    bool
+        ``True`` while a ``torch.compiler.set_stance("force_eager")`` stance is
+        active for the scope; ``False`` when the capability is structurally
+        unavailable (torch < 2.6), when Dynamo has never been imported in this
+        process (so the stance would be a semantic no-op bought at Dynamo's
+        import cost), or when entering the stance failed.
+
+    Notes
+    -----
+    The stance (public API, torch >= 2.6; verified experimentally in the
+    2026-08-12 tri-lab compile reconcile) runs the ORIGINAL Python inside every
+    compiled callable reached in the scope, triggers zero new compiles during
+    the scope (including on never-seen input shapes), and leaves every warm
+    compiled artifact reproduced bitwise after exit. Reading the probe never
+    imports ``torch._dynamo``; a process that never imported Dynamo cannot hold
+    a compiled callable, so skipping the stance there is exact, not heuristic.
+    """
+
+    if not HAS_SET_STANCE or "torch._dynamo" not in sys.modules:
+        yield False
+        return
+    try:
+        stance = torch.compiler.set_stance("force_eager")
+    except Exception:
+        mark_torch_capability_missing(
+            "HAS_SET_STANCE",
+            "torch.compiler.set_stance failed to engage; compiled callables keep the "
+            "pre-2.6 bypass-and-disclose capture path",
+        )
+        yield False
+        return
+    try:
+        # Constructing ``set_stance`` already applied the stance (its
+        # function-call form); ``__enter__`` is a no-op today and keeps this
+        # robust if a future torch moves application into the context protocol.
+        stance.__enter__()
+        yield True
+    finally:
+        stance.__exit__(None, None, None)
+
+
+def get_dynamo_compile_counters(*, force_probe: bool = False) -> Any | None:
+    """Return Dynamo's live compilation-event counters mapping, if available.
+
+    Parameters
+    ----------
+    force_probe:
+        Import ``torch._dynamo.utils`` even when Dynamo has never been imported
+        in this process.
+
+    Returns
+    -------
+    Any | None
+        The live ``torch._dynamo.utils.counters`` mapping (``counters["frames"]
+        ["total"]`` counts frame compilations, including recompiles), or
+        ``None`` when unavailable or when the lazy default defers the probe.
+
+    Notes
+    -----
+    Same never-import-on-the-hot-path contract as
+    :func:`get_tracing_tensor_types`: without ``force_probe`` the probe waits
+    until ``torch._dynamo`` is already loaded, because a process that never
+    imported Dynamo has no compilation events to count.
+    """
+
+    global HAS_DYNAMO_COMPILE_COUNTERS, _DYNAMO_COMPILE_COUNTERS
+    global _DYNAMO_COMPILE_COUNTERS_PROBED
+
+    if not _DYNAMO_COMPILE_COUNTERS_PROBED:
+        if not force_probe and "torch._dynamo" not in sys.modules:
+            return None
+        try:
+            candidate = _import_module_attr_or_none("torch._dynamo.utils", "counters")
+        except RuntimeError:
+            candidate = None
+        if candidate is not None and hasattr(candidate, "__getitem__"):
+            _DYNAMO_COMPILE_COUNTERS = candidate
+        HAS_DYNAMO_COMPILE_COUNTERS = _DYNAMO_COMPILE_COUNTERS is not None
+        _DYNAMO_COMPILE_COUNTERS_PROBED = True
+    return _DYNAMO_COMPILE_COUNTERS
 
 
 def get_tracing_tensor_types(*, force_probe: bool = False) -> tuple[type[Any], ...]:

@@ -17,6 +17,14 @@ this guard:
 TorchLens already unwraps compiled child ``nn.Module``s to their eager source
 before capture, so these tests cover the two cases that unwrap cannot reach: a
 compiled callable held as a plain attribute, and a compiled free function.
+
+On torch >= 2.6 the rung-2 stance integration
+(``torch.compiler.set_stance("force_eager")``, see
+``test_compile_set_stance.py``) supersedes this bypass-and-ceiling behavior:
+compiled interiors run their original eager Python and ARE logged. The
+compiled-region tests below therefore pin the torch < 2.6 / no-stance FALLBACK
+path through the ``_no_stance`` fixture -- the compile verdict's tamper
+contract that the fallback stays unchanged.
 """
 
 from __future__ import annotations
@@ -30,11 +38,25 @@ from torch import nn
 import torchlens as tl
 from torchlens._robustness import UnsupportedTensorVariantError, _tracing_tensor_kind
 from torchlens.backends.torch import wrappers as torch_wrappers
+from torchlens.utils import _torch_compat
 from torchlens.utils._torch_compat import (
     dynamo_is_compiling,
     get_torch_capability_snapshot,
     get_tracing_tensor_types,
 )
+
+
+@pytest.fixture()
+def _no_stance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the pre-2.6 fallback: simulate a torch without ``set_stance``.
+
+    Parameters
+    ----------
+    monkeypatch:
+        Pytest monkeypatch fixture.
+    """
+
+    monkeypatch.setattr(_torch_compat, "HAS_SET_STANCE", False)
 
 
 def _fake_mode() -> object:
@@ -269,7 +291,7 @@ class _CompiledAttributeModel(nn.Module):
 
 
 @pytest.mark.heavy
-def test_compiled_attribute_callable_degrades_instead_of_crashing() -> None:
+def test_compiled_attribute_callable_degrades_instead_of_crashing(_no_stance: None) -> None:
     """Capture completes with an explanatory warning instead of a Dynamo crash."""
 
     torch.compiler.reset()
@@ -287,7 +309,7 @@ def test_compiled_attribute_callable_degrades_instead_of_crashing() -> None:
 
 
 @pytest.mark.heavy
-def test_compiled_region_warning_names_the_gap_and_the_remedy() -> None:
+def test_compiled_region_warning_names_the_gap_and_the_remedy(_no_stance: None) -> None:
     """The warning must explain what is missing and what to do about it."""
 
     torch.compiler.reset()
@@ -309,7 +331,7 @@ def test_compiled_region_warning_names_the_gap_and_the_remedy() -> None:
 
 
 @pytest.mark.heavy
-def test_compiled_region_marks_the_trace_as_having_an_unlogged_escape() -> None:
+def test_compiled_region_marks_the_trace_as_having_an_unlogged_escape(_no_stance: None) -> None:
     """The gap is recorded on the Trace, not only shouted in a warning."""
 
     torch.compiler.reset()
@@ -321,7 +343,7 @@ def test_compiled_region_marks_the_trace_as_having_an_unlogged_escape() -> None:
 
 
 @pytest.mark.heavy
-def test_compiled_region_verdict_names_dynamo_not_an_incidental_symptom() -> None:
+def test_compiled_region_verdict_names_dynamo_not_an_incidental_symptom(_no_stance: None) -> None:
     """``capture_verified`` must be False for the RIGHT reason.
 
     Dynamo spawns compile threads and leaves unaccounted aten dispatches, so before
@@ -338,7 +360,7 @@ def test_compiled_region_verdict_names_dynamo_not_an_incidental_symptom() -> Non
 
 
 @pytest.mark.heavy
-def test_compiled_region_verdict_survives_a_warm_compile_cache() -> None:
+def test_compiled_region_verdict_survives_a_warm_compile_cache(_no_stance: None) -> None:
     """The verdict must not depend on compilation happening during this capture.
 
     A second capture of an already-compiled callable spawns no new threads, so a
@@ -365,6 +387,7 @@ def test_compiled_region_verdict_survives_a_warm_compile_cache() -> None:
 @pytest.mark.heavy
 def test_compiled_attribute_boundary_does_not_depend_on_is_compiling_timing(
     monkeypatch: pytest.MonkeyPatch,
+    _no_stance: None,
 ) -> None:
     """Plain-attribute inventory arms the gap even when Dynamo's timing probe stays false."""
 
@@ -384,7 +407,7 @@ def test_compiled_attribute_boundary_does_not_depend_on_is_compiling_timing(
 
 
 @pytest.mark.heavy
-def test_compile_compat_row_reports_direct_attribute_and_free_function_residual() -> None:
+def test_compile_compat_row_reports_direct_attribute_and_free_function_residual(_no_stance: None) -> None:
     """Compatibility reporting matches the preflight inventory and its residual."""
 
     compiled_row = tl.compat.report(_CompiledAttributeModel(), torch.randn(2, 4)).row(
@@ -409,7 +432,7 @@ def test_ordinary_capture_verdict_is_unchanged_by_the_dynamo_branch() -> None:
 
 
 @pytest.mark.heavy
-def test_compiled_region_warns_at_most_once_per_forward() -> None:
+def test_compiled_region_warns_at_most_once_per_forward(_no_stance: None) -> None:
     """A compiled region hit many times must not spam one warning per op."""
 
     torch.compiler.reset()
@@ -454,7 +477,7 @@ def test_compiled_region_warns_at_most_once_per_forward() -> None:
 
 
 @pytest.mark.heavy
-def test_model_is_reusable_after_a_compiled_region_capture() -> None:
+def test_model_is_reusable_after_a_compiled_region_capture(_no_stance: None) -> None:
     """Degrading must not leak capture state onto the model or torch."""
 
     torch.compiler.reset()
