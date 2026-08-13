@@ -2602,22 +2602,6 @@ def _role_components_for_children(
     return components
 
 
-def _declined_result(context: RenderContext, reason: str) -> OptimizerResult:
-    """Return a declined optimizer result."""
-
-    return OptimizerResult(
-        selected=frozenset(),
-        repeat_folds={},
-        plan=CollapsePlan(nodes=(), context=context),
-        visible_count=0,
-        analyze_ms=0.0,
-        select_ms=0.0,
-        g_star=None,
-        declined=True,
-        reason=reason,
-    )
-
-
 def _floor_fallback_selection(
     trace: "Trace",
     context: RenderContext,
@@ -3600,37 +3584,6 @@ def _instantiate_component_folded(
         folds=tuple(folds),
         box_costs=tuple(box_costs),
     )
-
-
-def _merge_frontiers(
-    left_points: Sequence[_FrontierPoint],
-    right_points: Sequence[_FrontierPoint],
-) -> tuple[_FrontierPoint, ...]:
-    """Merge two frontier sequences by per-count best, beam-capped.
-
-    Keeps one cheapest-sum point per merged node count and at most
-    ``FRONTIER_CAP`` counts; see the module docstring for why this is an
-    approximation of the non-additive global objective.
-    """
-
-    best_by_count: dict[
-        int, tuple[_FrontierPoint, tuple[float, int, tuple[Any, ...], tuple[Any, ...]]]
-    ] = {}
-    for left in left_points:
-        for right in right_points:
-            k = left.k + right.k
-            if k > K_CAP:
-                continue
-            point = _FrontierPoint(
-                k=k,
-                cost=round(left.cost + right.cost, 6),
-                nodes=(*left.nodes, *right.nodes),
-                selected=frozenset((*left.selected, *right.selected)),
-                folds=(*left.folds, *right.folds),
-                box_costs=(*left.box_costs, *right.box_costs),
-            )
-            _retain_best_frontier_point(best_by_count, point)
-    return _frontier_from_best_by_count(best_by_count)
 
 
 def _retain_best_frontier_point(

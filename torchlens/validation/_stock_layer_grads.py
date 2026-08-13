@@ -236,31 +236,6 @@ def _tensor_leaves(obj: Any) -> list[torch.Tensor]:
     return []
 
 
-def _innermost_module_address(layer: Any) -> str | None:
-    """Return the innermost module address from a layer's module stack.
-
-    Parameters
-    ----------
-    layer:
-        Layer-like object with a ``modules`` field.
-
-    Returns
-    -------
-    str | None
-        Innermost module address, or None for module-less layers.
-    """
-
-    modules = getattr(layer, "modules", None) or []
-    if not modules:
-        return None
-    last = modules[-1]
-    if isinstance(last, tuple):
-        return str(last[0])
-    if isinstance(last, str):
-        return last.rsplit(":", 1)[0]
-    return None
-
-
 def _pass_index_from_layer_modules(layer: Any) -> int | None:
     """Return the innermost module pass index from a layer's module stack.
 

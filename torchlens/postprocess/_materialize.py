@@ -1949,25 +1949,3 @@ def _resolve_dtype(dtype: object | None) -> object | None:
         # fall back to the original string when the name is not a real top-level torch symbol.
         return torch_attr(dtype_name) or dtype
     return dtype
-
-
-def _register_raw_log(trace: "Trace", event: OpEvent, op_log: "Op") -> None:
-    """Register one live log in transient raw lookup structures.
-
-    Parameters
-    ----------
-    trace
-        Trace receiving the raw log.
-    event
-        Operation event corresponding to ``op_log``.
-    op_log
-        Live operation log to register.
-
-    Returns
-    -------
-    None
-        Mutates ``trace._raw_graph_ws.raw_layer_dict`` and ``trace._raw_graph_ws.raw_layer_labels_list``.
-    """
-
-    trace._raw_graph_ws.raw_layer_dict[event.label_raw] = op_log
-    trace._raw_graph_ws.raw_layer_labels_list.append(event.label_raw)

@@ -14,7 +14,6 @@ from .registry import (
     BackendCapabilities,
     BackendMismatchError,
     BackendSpec,
-    BackendUnsupportedError,
     JAX_TRACE_OPTIONS,
     MLX_TRACE_OPTIONS,
     PADDLE_TRACE_OPTIONS,
@@ -795,24 +794,6 @@ def _torch_validate_entry(*args: Any, **kwargs: Any) -> bool:
     return _validate_forward_pass_torch(*args, **kwargs)
 
 
-def _unsupported_validate_entry(*args: Any, **kwargs: Any) -> bool:
-    """Raise a canonical unsupported validation error.
-
-    Parameters
-    ----------
-    *args, **kwargs:
-        Public validation arguments, unused.
-
-    Returns
-    -------
-    bool
-        Never returns.
-    """
-
-    del args, kwargs
-    raise BackendUnsupportedError("This backend does not support replay validation yet.")
-
-
 def _jax_validate_entry(*args: Any, **kwargs: Any) -> bool:
     """Dispatch to JAX model/input validation.
 
@@ -906,24 +887,6 @@ def _torch_validate_trace(*args: Any, **kwargs: Any) -> Any:
     from ..validation.core import validate_saved_outs
 
     return validate_saved_outs(*args, **kwargs)
-
-
-def _unsupported_validate_trace(*args: Any, **kwargs: Any) -> bool:
-    """Raise a canonical unsupported trace-validation error.
-
-    Parameters
-    ----------
-    *args, **kwargs:
-        Trace validation arguments, unused.
-
-    Returns
-    -------
-    bool
-        Never returns.
-    """
-
-    del args, kwargs
-    raise BackendUnsupportedError("This backend does not support trace replay validation yet.")
 
 
 def _jax_validate_trace(*args: Any, **kwargs: Any) -> Any:

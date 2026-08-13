@@ -1242,9 +1242,6 @@ _TRANSFORMERLENS_ALIAS_TO_NATIVE = {
     "hook_resid_mid": "resid_mid",
     "hook_resid_post": "resid_post",
 }
-_NATIVE_TO_TRANSFORMERLENS_ALIAS = {
-    native: alias for alias, native in _TRANSFORMERLENS_ALIAS_TO_NATIVE.items()
-}
 
 
 def enable_transformerlens_aliases(enabled: bool = True) -> None:
@@ -1852,31 +1849,6 @@ def _class_filter_matches(class_names: tuple[str, ...], class_name: str | None) 
     if not class_names:
         return False
     return builtins.any(fnmatch(name, class_name) for name in class_names)
-
-
-def _tl_alias_for_native(name: FacetKey) -> str | None:
-    """Return the TransformerLens alias for a declared native facet key.
-
-    Parameters
-    ----------
-    name:
-        Native facet key.
-
-    Returns
-    -------
-    str | None
-        Alias key when enabled and known.
-    """
-
-    if not _TRANSFORMERLENS_ALIASES_ENABLED or not isinstance(name, str):
-        return None
-    return _NATIVE_TO_TRANSFORMERLENS_ALIAS.get(name)
-
-
-def _clear_registry_for_tests() -> None:
-    """Clear all registered recipes for isolated tests."""
-
-    _REGISTRY.clear()
 
 
 __all__ = [

@@ -726,25 +726,6 @@ def _build_lookup_keys_and_finalize_retained_layers(self: "Trace") -> None:
         self._layers_saved = False
 
 
-def _replay_dependency_labels(layer_entry: Op) -> set[str]:
-    """Return final labels this entry's replay metadata depends on.
-
-    Args:
-        layer_entry: Layer entry to inspect.
-
-    Returns:
-        Parent labels referenced by templates, edge provenance, or graph edges.
-    """
-
-    dependency_labels = set(layer_entry.parents)
-    for edge in getattr(layer_entry, "_edge_uses", []):
-        dependency_labels.add(edge.parent_label)
-    for template in (layer_entry.args_template, layer_entry.kwargs_template):
-        for parent_ref in _collect_parent_refs(template):
-            dependency_labels.add(parent_ref.parent_label)
-    return dependency_labels
-
-
 def _collect_parent_refs(value: Any) -> list[ParentRef]:
     """Collect ``ParentRef`` leaves from a nested replay template.
 

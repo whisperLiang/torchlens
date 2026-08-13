@@ -839,38 +839,6 @@ def module_collapse_score(module: "Module") -> float:
     return dict(collapse_order(trace)).get(module.address, 0.0)
 
 
-def _normalized_internal_topology(
-    trace: "Trace",
-    subtree_ops: tuple[str, ...],
-) -> tuple[tuple[int, int], ...]:
-    """Return dimension-free internal op-edge topology for ``subtree_ops``.
-
-    Parameters
-    ----------
-    trace:
-        Trace owning the operation graph.
-    subtree_ops:
-        Pass-qualified operation labels in module scope.
-
-    Returns
-    -------
-    tuple[tuple[int, int], ...]
-        Internal edges expressed as subtree-order indices.
-    """
-
-    index_by_label = {label: index for index, label in enumerate(subtree_ops)}
-    subtree = set(subtree_ops)
-    edges: set[tuple[int, int]] = set()
-    for parent_label in subtree_ops:
-        parent = cast("Op", trace.ops[parent_label])
-        parent_index = index_by_label[parent.label]
-        for child_label in getattr(parent, "children", ()) or ():
-            if child_label not in subtree:
-                continue
-            edges.add((parent_index, index_by_label[child_label]))
-    return tuple(sorted(edges))
-
-
 def _module_structural_signature(module: "Module") -> tuple[int, int, int, int]:
     """Return a per-module structural fingerprint for fold-honesty checks.
 
@@ -1591,43 +1559,6 @@ def _run_shape_summary(trace: "Trace", addresses: tuple[str, ...]) -> str | None
     if first is None or last is None or first == last:
         return None
     return f"{first}->{last}"
-
-
-def _run_span_allows_fold(trace: "Trace", addresses: tuple[str, ...]) -> bool:
-    """Return whether first-to-last tensor shape span is safe to fold.
-
-    Parameters
-    ----------
-    trace:
-        Trace owning the modules.
-    addresses:
-        Consecutive sibling addresses in the candidate run.
-
-    Returns
-    -------
-    bool
-        True when the run does not cross a spatial-resolution boundary and
-        does not span more than a 2x channel-width change. Unknown shapes are
-        treated as foldable because the structural key is the primary guard.
-    """
-
-    first = _module_output_shape_tuple(trace, addresses[0])
-    last = _module_output_shape_tuple(trace, addresses[-1])
-    if first is None or last is None:
-        return True
-    if len(first) != len(last):
-        return False
-    first_spatial = _shape_spatial_dims(first)
-    last_spatial = _shape_spatial_dims(last)
-    if first_spatial is not None and last_spatial is not None and first_spatial != last_spatial:
-        return False
-    first_channels = _shape_channel_dim(first)
-    last_channels = _shape_channel_dim(last)
-    if first_channels is None or last_channels is None:
-        return True
-    smaller = min(first_channels, last_channels)
-    larger = max(first_channels, last_channels)
-    return smaller > 0 and larger <= smaller * 2
 
 
 def _module_output_shape_tuple(trace: "Trace", address: str) -> tuple[int, ...] | None:
