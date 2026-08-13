@@ -2727,11 +2727,11 @@ class Trace(
             "_trace_core",
         ):
             state.pop(field_name, None)
-        read_tlspec_version(state, cls_name=type(self).__name__)
+        serialized_tlspec_version = read_tlspec_version(state, cls_name=type(self).__name__)
         containers_were_serialized = "_containers" in state and state["_containers"] is not None
         setstate_defaults = {
             **_MODEL_LOG_DEFAULT_FILL,
-            "tlspec_version": TLSPEC_VERSION,
+            "tlspec_version": serialized_tlspec_version,
             "transform_repr": None,
             "decoded_output": None,
             "output_postprocessor": None,

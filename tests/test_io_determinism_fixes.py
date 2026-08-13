@@ -257,3 +257,15 @@ def test_explicit_unknown_resolver_status_is_not_upgraded() -> None:
     restored_layer = pickle.loads(pickle.dumps(layer))
     assert restored_op.resolver_status is None
     assert restored_layer.resolver_status is None
+
+
+def test_rehydrated_trace_retains_source_tlspec_version() -> None:
+    """Trace pickle state preserves its validated source artifact version."""
+
+    trace = tl.trace(_LinearModel(), torch.ones(1, 2))
+    state = trace.__getstate__()
+    state["tlspec_version"] = 6
+    restored = tl.Trace.__new__(tl.Trace)
+    restored.__setstate__(state)
+
+    assert restored.tlspec_version == 6

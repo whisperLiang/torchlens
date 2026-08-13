@@ -162,6 +162,16 @@ def rehydrate_trace(
             module_accessor_state._pass_dict,
         )
 
+    serialized_tlspec_version = (
+        manifest.tlspec_version
+        if isinstance(manifest, Manifest)
+        else manifest.get("tlspec_version")
+    )
+    if isinstance(serialized_tlspec_version, int) and not isinstance(
+        serialized_tlspec_version, bool
+    ):
+        trace.tlspec_version = serialized_tlspec_version
+
     _bind_conditional_arms(trace)
     _set_payload_load_status(trace, manifest_index, payload_statuses)
     _restore_trace_state_order(trace, portable_key_order)
