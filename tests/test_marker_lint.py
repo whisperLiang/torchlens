@@ -24,7 +24,6 @@ smoke/full-tier run and pass vacuously when this file is run alone.
 """
 
 import pytest
-from conftest import SMOKE_DURATION_BUDGET_SECONDS
 
 pytestmark = pytest.mark.smoke
 
@@ -47,12 +46,17 @@ def test_no_smoke_test_carries_a_heavier_tier_marker(request: pytest.FixtureRequ
 
 
 def test_smoke_tests_stay_within_duration_budget(request: pytest.FixtureRequest) -> None:
-    """Every smoke-marked test must finish within the tier's duration budget."""
+    """Every smoke-marked test must finish within the tier's duration budget.
+
+    The budget value lives in ``tests/conftest.py`` (``SMOKE_DURATION_BUDGET_SECONDS``)
+    and rides along on each recorded offender -- a bare ``conftest`` import here would
+    be ambiguous during full-suite collection (nested conftests share the module name).
+    """
 
     offenders = getattr(request.session, "_tl_smoke_budget_offenders", [])
-    lines = [f"{nodeid}: {duration:.1f}s" for nodeid, duration in offenders]
+    lines = [f"{nodeid}: {duration:.1f}s (budget {budget:.0f}s)" for nodeid, duration, budget in offenders]
     assert not offenders, (
-        f"Smoke-marked tests exceeded the {SMOKE_DURATION_BUDGET_SECONDS:.0f}s "
-        "smoke-tier budget this session. Re-tier them (move to `heavy` for 5-20s, "
-        "`slow` for >20s) or make them faster:\n  " + "\n  ".join(lines)
+        "Smoke-marked tests exceeded the smoke-tier duration budget this session. "
+        "Re-tier them (move to `heavy` for 5-20s, `slow` for >20s) or make them "
+        "faster:\n  " + "\n  ".join(lines)
     )

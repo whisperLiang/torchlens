@@ -110,7 +110,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
         if offenders is None:
             offenders = []
             item.session._tl_smoke_budget_offenders = offenders
-        offenders.append((item.nodeid, report.duration))
+        offenders.append((item.nodeid, report.duration, SMOKE_DURATION_BUDGET_SECONDS))
     return report
 
 
