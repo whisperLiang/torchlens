@@ -105,6 +105,7 @@ def patched_tf_module_stack(
     tree: TFModuleTree | None,
     tf: Any,
     module_stack: list[ModuleFrame],
+    module_exit_hook: Any | None = None,
 ) -> Iterator[None]:
     """Temporarily patch TensorFlow module ``__call__`` methods to maintain a stack.
 
@@ -116,6 +117,10 @@ def patched_tf_module_stack(
         Imported TensorFlow module.
     module_stack
         Mutable stack receiving active module frames.
+    module_exit_hook
+        Optional callable ``(frame, module_type, output, module_stack) -> output``
+        consulted at every tracked module exit while the frame is still on the
+        stack; its return value replaces the module output.
 
     Yields
     ------
@@ -129,13 +134,13 @@ def patched_tf_module_stack(
     originals: dict[type[Any], Any] = {}
     keras_layer_class = _keras_layer_class(tf)
     if keras_layer_class is not None:
-        _patch_class_call(keras_layer_class, tree, module_stack, originals)
+        _patch_class_call(keras_layer_class, tree, module_stack, originals, module_exit_hook)
     for module_class in tree.modules_by_class:
         if module_class is keras_layer_class:
             continue
         if "__call__" not in vars(module_class):
             continue
-        _patch_class_call(module_class, tree, module_stack, originals)
+        _patch_class_call(module_class, tree, module_stack, originals, module_exit_hook)
     try:
         yield
     finally:
@@ -225,6 +230,7 @@ def _patch_class_call(
     tree: TFModuleTree,
     module_stack: list[ModuleFrame],
     originals: dict[type[Any], Any],
+    module_exit_hook: Any | None = None,
 ) -> None:
     """Patch one concrete module class ``__call__`` method.
 
@@ -238,6 +244,8 @@ def _patch_class_call(
         Active capture stack.
     originals
         Original methods keyed by patched class.
+    module_exit_hook
+        Optional module-exit output substitution hook.
 
     Returns
     -------
@@ -270,7 +278,12 @@ def _patch_class_call(
         )
         module_stack.append(frame)
         try:
-            return original_call(self, *args, **kwargs)
+            result = original_call(self, *args, **kwargs)
+            if module_exit_hook is not None:
+                result = module_exit_hook(
+                    frame, frame.module_type, result, tuple(module_stack)
+                )
+            return result
         finally:
             if module_stack and module_stack[-1] == frame:
                 module_stack.pop()

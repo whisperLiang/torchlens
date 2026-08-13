@@ -185,6 +185,7 @@ class TFEagerCaptureSession:
         save_payloads: bool = True,
         save_predicate: Callable[[Any], Any] | None = None,
         output_tap: Callable[["TFOpCapture", tuple[str, ...]], None] | None = None,
+        module_exit_hook: Any | None = None,
     ) -> None:
         """Initialize a TensorFlow eager capture session.
 
@@ -208,6 +209,9 @@ class TFEagerCaptureSession:
             Optional per-output observer invoked with each ``TFOpCapture`` and
             the live module stack as ``"address:call_index"`` labels. The tap
             must not issue TensorFlow ops (the callback would recurse).
+        module_exit_hook
+            Optional module-exit output substitution hook forwarded to the
+            module-stack patch.
         """
 
         self.tf = tf
@@ -218,6 +222,7 @@ class TFEagerCaptureSession:
         self.save_payloads = save_payloads
         self.save_predicate = save_predicate
         self.output_tap = output_tap
+        self.module_exit_hook = module_exit_hook
         self.events = CaptureEvents()
         self.module_stack: list[ModuleFrame] = []
         self.producer_by_ref: dict[object, str] = {}
@@ -262,7 +267,9 @@ class TFEagerCaptureSession:
 
         callback_module.add_op_callback(callback)
         try:
-            with patched_tf_module_stack(self.module_tree, self.tf, self.module_stack):
+            with patched_tf_module_stack(
+                self.module_tree, self.tf, self.module_stack, self.module_exit_hook
+            ):
                 output = self.callable_obj(*self.args, **self.kwargs)
         finally:
             callback_module.remove_op_callback(callback)
