@@ -1112,7 +1112,14 @@ context_field_invalid
 numeric_attestation_failed
 poisoned_run_refused
 collective_boundary_runnable_unsupported
+halted_capture_not_runnable
 ```
+
+`halted_capture_not_runnable` (early-stopping unification, N4) is the SAVE-time runnable
+preflight refusal for a HALTED capture: the taken-path DAG ends at the halt frontier, so a
+runnable descriptor would replay a truncated program while claiming faithfulness to the full
+forward. Analysis-level saves of halted captures remain allowed; the refusal surfaces as
+`RunnablePreflightError` at `tl.save(level="runnable")` entry.
 
 `collective_boundary_runnable_unsupported` (merge-ranks tier b) is both a SAVE-time producer
 refusal (stage `producer_collective_boundary`) and the forward-replay validation refusal

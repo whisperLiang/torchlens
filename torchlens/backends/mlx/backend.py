@@ -14,6 +14,7 @@ from typing import Any, Callable, cast
 import numpy as np
 
 from ..._trace_core.relation_views import freeze_trace_relation_views
+from ...capture.outcome import stamp_backend_finalized
 from ... import _state
 from ...backends import (
     BackendName,
@@ -1262,6 +1263,7 @@ class MLXBackend:
             if hasattr(trace, "_mlx_module_stack"):
                 delattr(trace, "_mlx_module_stack")
             freeze_trace_relation_views(trace)
+            stamp_backend_finalized(trace)
             return trace
         finally:
             self.cleanup_model_session(trace, model)

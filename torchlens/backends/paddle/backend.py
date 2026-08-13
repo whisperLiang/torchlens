@@ -40,6 +40,8 @@ from ...ir.refs import DeviceRef, DtypeRef, ReservedLabel, TensorRef
 from ...ir.semantics import BackendSemantics, CapturePolicy
 from ...postprocess._materialize import materialize_from_events
 from ...quantities import Duration
+from ..._trace_core.relation_views import freeze_trace_relation_views
+from ...capture.outcome import stamp_backend_finalized
 from ...validation.status import ValidationReplaySource, ValidationReplayStatus
 from .._finalize import (
     attach_function_root_module,
@@ -512,6 +514,7 @@ class PaddleBackend:
             if hasattr(trace, "_paddle_intervention_runtime"):
                 delattr(trace, "_paddle_intervention_runtime")
             freeze_trace_relation_views(trace)
+            stamp_backend_finalized(trace)
             return trace
         finally:
             cleanup_model_session(trace, prepared_model, module_tree if use_object_module else None)

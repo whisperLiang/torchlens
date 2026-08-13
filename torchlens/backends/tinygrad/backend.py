@@ -48,6 +48,7 @@ from .._options import default_if_missing as _default_if_missing
 from .._options import is_missing as _is_missing
 from .._options import reject_extra_trace_kwargs, reject_unsupported_trace_options
 from ..._trace_core.relation_views import freeze_trace_relation_views
+from ...capture.outcome import stamp_backend_finalized
 from .._selective_save import apply_static_label_save_policy
 from .._selective_save import pop_static_label_save_predicate
 
@@ -476,6 +477,7 @@ class TinygradBackend:
                 grad_options=cast(GradOptions, grad_options),
             )
         freeze_trace_relation_views(trace)
+        stamp_backend_finalized(trace)
         return trace
 
     def validate_trace(

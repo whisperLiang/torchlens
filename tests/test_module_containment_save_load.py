@@ -24,10 +24,10 @@ def _simple_model_and_input() -> tuple[torch.nn.Module, torch.Tensor]:
     return model, torch.randn(2, 8)
 
 
-def test_io_format_version_is_six() -> None:
-    """Forward-pre-hook provenance bumps ``TLSPEC_VERSION`` to 6."""
+def test_io_format_version_is_seven() -> None:
+    """The persisted capture-outcome attestation bumps ``TLSPEC_VERSION`` to 7."""
 
-    assert TLSPEC_VERSION == 6
+    assert TLSPEC_VERSION == 7
     assert MIN_TLSPEC_VERSION == 6
 
 

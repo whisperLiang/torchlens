@@ -23,7 +23,8 @@ import torch
 from ..errors._base import CompatibilityError
 
 # v6 adds persisted ModuleCall forward-pre-hook provenance value objects.
-TLSPEC_VERSION = 6
+TLSPEC_VERSION = 7
+_LEGACY_THREAD_WARNING_EMITTED: dict[str, bool] = {"flag": False}
 
 # Rehydration floor: artifacts older than tlspec_version 6 (first shipped in
 # torchlens 2.33) refuse to load instead of being resurrected through legacy

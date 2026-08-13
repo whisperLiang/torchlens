@@ -365,6 +365,55 @@ class Recording(CapturedRun):
     _captured_run_cores: tuple["CapturedRunCore", ...] = field(
         default=(), repr=False, compare=False
     )
+    # Settled capture outcome stamped by the recorder settlement adapter
+    # (torchlens/capture/outcome.py); ``outcome`` below derives conservatively
+    # for unstamped legacy/recovered recordings.
+    _outcome: Any | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def outcome(self) -> Any:
+        """Return the settled (or conservatively derived) capture outcome.
+
+        Stamped recordings return the settlement authority's record. Legacy
+        pickles (whose ``_outcome`` slot may be unset) and recovered/unstamped
+        recordings derive from the construction status: finalized ``complete``
+        / ``halted`` are construction-time proofs, ``partial_error`` is
+        FAILED, and ``recovered`` is UNKNOWN (or reconstructed HALTED where
+        the halt markers survived) with ``recovered=True`` -- all
+        ``derived=True``, never a settle-stamp upgrade.
+        """
+
+        from ..capture.outcome import CaptureOutcome, CaptureStatus, FailureOrigin
+
+        stamped = getattr(self, "_outcome", None)
+        if isinstance(stamped, CaptureOutcome):
+            return stamped
+        status = self.status
+        if status == "partial_error":
+            return CaptureOutcome(
+                status=CaptureStatus.FAILED,
+                origin=FailureOrigin.UNKNOWN,
+                reason=self.error_repr,
+                n_ops_committed=self.n_ops_completed,
+                derived=True,
+            )
+        if status == "halted" or (status == "recovered" and self.halted):
+            return CaptureOutcome(
+                status=CaptureStatus.HALTED,
+                reason=self.halt_reason,
+                boundary_label=self.halt_reason,
+                recovered=status == "recovered",
+                derived=True,
+            )
+        if status == "recovered":
+            return CaptureOutcome(
+                status=CaptureStatus.UNKNOWN,
+                recovered=True,
+                derived=True,
+            )
+        if status == "complete":
+            return CaptureOutcome(status=CaptureStatus.COMPLETE, derived=True)
+        return CaptureOutcome(status=CaptureStatus.UNKNOWN, derived=True)
 
     @property
     def n_passes(self) -> int:
@@ -803,6 +852,23 @@ class Recording(CapturedRun):
             halt_output_addresses,
         )
 
+        # Settle at the cook seam (settlement authority path 9): the cooked
+        # Trace is a real product and must carry an attested outcome; a halted
+        # cooked trace is HALTED (so the runnable/live-replay gates see it),
+        # never a silently-blessed complete. The frontier label is read back
+        # post-postprocess so it is the FINAL remapped label.
+        from ..capture.outcome import stamp_cooked
+
+        cooked_frontier = None
+        if self.halted:
+            output_labels = list(getattr(trace, "output_layers", ()))
+            cooked_frontier = str(output_labels[0]) if output_labels else None
+        stamp_cooked(
+            trace,
+            halted=self.halted,
+            reason=self.halt_reason,
+            frontier_label=cooked_frontier,
+        )
         return trace
 
     def _recover_halt_frontier(self) -> "tuple[str, torch.Tensor]":

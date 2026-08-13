@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 from ..._trace_core.relation_views import freeze_trace_relation_views
+from ...capture.outcome import stamp_backend_finalized
 from ... import _state
 from ...backends import BackendName
 from ...data_classes.param import ParamAccessor
@@ -265,6 +266,7 @@ class TFBackend:
             self._attach_param_logs(trace, None)
             self._finish_trace(trace, None)
             freeze_trace_relation_views(trace)
+            stamp_backend_finalized(trace)
             return trace
         module_tree = discover_tf_module_tree(model, tf)
         use_object_module = _resolve_tf_module_identity_mode(module_identity_mode, module_tree)
@@ -389,6 +391,7 @@ class TFBackend:
                 module_tree=module_tree,
             )
         freeze_trace_relation_views(trace)
+        stamp_backend_finalized(trace)
         return trace
 
     def validate_entry(self, *args: Any, **kwargs: Any) -> Any:

@@ -1058,7 +1058,14 @@ class TorchBackend:
     def cleanup_halted_forward_session(self, session: object, prepared_model: object) -> None:
         """Clean up torch metadata after a halted forward capture."""
         self.cleanup_model_session(session, prepared_model)
-        raw_layer_dict = cast("Trace", session)._raw_graph_ws.raw_layer_dict
+        # F5: the raw-graph workspace may already be gone when the halt fired
+        # around a postprocess-tail boundary; a missing workspace must degrade
+        # gracefully instead of masking the in-flight signal with
+        # AttributeError.
+        raw_graph_ws = getattr(session, "__dict__", {}).get("_raw_graph_ws")
+        if raw_graph_ws is None:
+            return
+        raw_layer_dict = raw_graph_ws.raw_layer_dict
         for label in list(raw_layer_dict.keys()):
             entry = raw_layer_dict.get(label)
             if entry is not None and hasattr(entry, "out") and entry.out is not None:
@@ -1125,11 +1132,19 @@ class TorchBackend:
                         "torchlens.partial.from_failed_capture(exception)."
                     )
         self.cleanup_model_session(session, prepared_model)
-        raw_layer_dict = cast("Trace", session)._raw_graph_ws.raw_layer_dict
-        for label in list(raw_layer_dict.keys()):
-            entry = raw_layer_dict.get(label)
-            if entry is not None and hasattr(entry, "out") and entry.out is not None:
-                _tl.clear_meta(entry.out)
+        # F5: a postprocess-tail failure (step 18-20 or the relation freeze)
+        # arrives here AFTER the transient-state seam popped the raw-graph
+        # workspace. The unguarded read used to double-fault with
+        # AttributeError, MASKING the original exception (it survived only as
+        # __context__) and losing partial diagnostics; degrade gracefully so
+        # the original failure propagates.
+        raw_graph_ws = getattr(session, "__dict__", {}).get("_raw_graph_ws")
+        if raw_graph_ws is not None:
+            raw_layer_dict = raw_graph_ws.raw_layer_dict
+            for label in list(raw_layer_dict.keys()):
+                entry = raw_layer_dict.get(label)
+                if entry is not None and hasattr(entry, "out") and entry.out is not None:
+                    _tl.clear_meta(entry.out)
         print(
             "************\nFeature extraction failed; returning model and environment to normal\n*************"
         )

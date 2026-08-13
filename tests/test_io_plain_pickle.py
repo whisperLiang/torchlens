@@ -449,6 +449,13 @@ def test_all_field_order_container_defaults_are_typed() -> None:
         for field_name in field_order:
             if field_name not in base_state:
                 continue
+            if field_name == "_capture_outcome":
+                # Persisted as a string-only CODEC dict but deliberately
+                # restored as the typed CaptureOutcome record (parsed against
+                # closed vocabularies); an absent key restores a DERIVED
+                # record, never None, so the typed-default invariant this
+                # guard exists for is satisfied by a non-container type.
+                continue
             live_value = base_state[field_name]
             if not isinstance(live_value, (list, dict, tuple, set)):
                 continue

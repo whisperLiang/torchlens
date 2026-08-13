@@ -143,7 +143,28 @@ class StopDirective:
         if not isinstance(result, bool):
             raise PredicateError("halt predicate must return bool", ctx=ctx, result=result)
         if result:
-            raise HaltSignal(ctx.label, frontier_output=frontier_output)
+            # F6 stop-request latch + settlement boundary facts. The boundary
+            # label prefers ``raw_label`` so the recorded label resolves
+            # through ``trace[...]`` even on the prefix-alias compatibility
+            # retry, where ``ctx.label`` is a bare prefix.
+            boundary_label = getattr(ctx, "raw_label", None) or ctx.label
+            from .. import _state
+            from .outcome import StopRequest
+
+            active_trace = _state._active_trace
+            if active_trace is not None:
+                active_trace.__dict__["_stop_requested"] = StopRequest(
+                    kind="halt",
+                    reason=ctx.label,
+                    boundary_kind=getattr(ctx, "kind", None),
+                    boundary_label=boundary_label,
+                )
+            raise HaltSignal(
+                ctx.label,
+                frontier_output=frontier_output,
+                boundary_kind=getattr(ctx, "kind", None),
+                boundary_label=boundary_label,
+            )
 
     def raise_nonfinite(
         self,
@@ -179,6 +200,22 @@ class StopDirective:
             "TorchLens capture stopped at first non-finite tensor: "
             f"op={func_name!r}, layer={raw_label!r}, shape={shape}, dtype={dtype}."
         )
+        # Structural marker for settle-time classification (and the F6 latch):
+        # the settlement authority reads it to settle ABORTED_NONFINITE instead
+        # of generic FAILED, and the boundary checkpoint uses it to detect a
+        # swallowed abort. Set via the process-level active-trace slot because
+        # this frozen directive has no back-reference by design.
+        from .. import _state
+        from .outcome import StopRequest
+
+        active_trace = _state._active_trace
+        if active_trace is not None:
+            active_trace.__dict__["_stop_requested"] = StopRequest(
+                kind="nonfinite",
+                reason=message,
+                boundary_kind="op",
+                boundary_label=raw_label,
+            )
         file_path, line_no = _live_user_location()
         raise CaptureError(
             message,

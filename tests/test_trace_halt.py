@@ -91,8 +91,13 @@ def test_trace_halt_supports_selective_layers_to_save() -> None:
 def test_halted_trace_validation_skips_full_model_output_only() -> None:
     """Halted validation still checks replay and metadata through the frontier."""
 
+    # Hold the model: validation's saved-arg parameter matching reads live
+    # params through the source-model weakref, and a temporary model survives
+    # only until the next cyclic gc pass (a latent order-dependent flake --
+    # reproduced at base 01be3c89 with a forced gc.collect()).
+    model = _ThreeStageModel()
     trace = tl.trace(
-        _ThreeStageModel(),
+        model,
         torch.ones(1, 3),
         halt=_halt_on_relu,
         capture=CaptureOptions(save_arg_values=True),

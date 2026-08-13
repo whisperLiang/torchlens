@@ -81,6 +81,7 @@ MODEL_LOG_FIELD_ORDER = [
     "halted",
     "halt_reason",
     "halt_frontier",
+    "_capture_outcome",
     "_layers_logged",
     "_layers_saved",
     "keep_orphans",

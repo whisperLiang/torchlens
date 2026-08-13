@@ -739,6 +739,10 @@ def _build_trace_fork_policy() -> dict[str, ForkFieldPolicy]:
             "_source_code_blob",
             "_source_model_ref",
             "_optimizer",
+            # The settled capture outcome is a frozen string-only record;
+            # forks inherit the SAME record by identity (design: fork row =
+            # COW, sidecar inherited).
+            "_capture_outcome",
         },
         reconstruct={"parent_run"},
     )

@@ -170,6 +170,27 @@ print(tl.compat.report(model, x).to_markdown())
   converted with `Recording.to_trace()` or used with `Recording.log_backward()`.
   Trace-side failed captures expose `exc.partial_log`, recoverable with
   `tl.partial.from_failed_capture(exc)`.
+- **Every capture product carries ONE settled typed outcome** (early-stopping
+  unification; doc of record `docs/reference/capture_outcomes.md`).
+  `Trace.outcome` / `Recording.outcome` / `PartialTrace.outcome` return a frozen
+  `CaptureOutcome` (`tl.types.{CaptureOutcome, CaptureStatus, CapturePhase,
+  FailureOrigin}`): status one of COMPLETE / HALTED / ABORTED_NONFINITE / FAILED
+  (with FORWARD/FINALIZE/POSTPROCESS/TEARDOWN phase) / UNATTESTED (legacy
+  finished artifacts without attestation — never blessed COMPLETE) / UNKNOWN
+  (unprovable, most restrictive). The outcome PERSISTS (`_capture_outcome`,
+  tlspec v7) as a string-only payload validated at load against closed
+  vocabularies and a status coherence matrix; incoherent/forged attestations
+  degrade to UNKNOWN with a warning. Capability gates run through one
+  chokepoint with stable codes on `tl.errors.CaptureOutcomeError.fields["code"]`:
+  N1 (failed/aborted/unknown exports refuse), N2 (validation ENTRY refusal only
+  — tripwire bodies untouched, UNATTESTED enters), N3 (replay/backward), N4
+  (halted runnable save, `RunnableErrorCode.HALTED_CAPTURE_NOT_RUNNABLE`), N5
+  (halted LIVE-provider replay refuses — loaded-sparse `run()` stays allowed).
+  A swallowed halt/nonfinite signal (broad `except:` in user code) raises
+  `tl.errors.StopSignalSwallowedError` at the capture boundary and settles
+  FAILED, never COMPLETE. Refresh re-arms `raise_on_nan`. Halted analysis
+  `tl.save` works (the transient-leak refusal is fixed); halted `log_backward`
+  and loaded-sparse `run()` remain allowed.
 - `tl.trace(..., backend=None)` routes through `BackendSpec`; explicit backend mismatches,
   unknown names, unsupported capabilities, and audit-only payload reads raise typed backend
   errors. Public backend-neutral metadata lives on `Trace.backend`, `Trace.module_identity_mode`,

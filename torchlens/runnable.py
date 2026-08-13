@@ -275,6 +275,7 @@ class RunnableErrorCode(str, Enum):
     NUMERIC_ATTESTATION_FAILED = "numeric_attestation_failed"
     POISONED_RUN_REFUSED = "poisoned_run_refused"
     COLLECTIVE_BOUNDARY_RUNNABLE_UNSUPPORTED = "collective_boundary_runnable_unsupported"
+    HALTED_CAPTURE_NOT_RUNNABLE = "halted_capture_not_runnable"
 
 
 class LiteralAtomKind(str, Enum):

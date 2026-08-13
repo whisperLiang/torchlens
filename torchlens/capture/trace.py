@@ -48,6 +48,15 @@ from .. import _state
 from .._capture_state_helpers import CompiledCapturePrep, prepare_compiled_capture
 from .._runnable_seam import runnable_trace_state
 from .config import InternalCaptureConfig
+from .outcome import (
+    CapturePhase,
+    count_committed_ops,
+    demote_outcome,
+    set_capture_phase,
+    settle_completed,
+    settle_failed,
+    settle_halted,
+)
 from .session import (
     CaptureSession,
     attach_capture_events_session,
@@ -584,6 +593,10 @@ def save_new_outs(
         verbose=getattr(self, "verbose", False),
         backward_ready=getattr(self, "backward_ready", False),
         inference_only=getattr(self, "inference_only", False),
+        # F2: a refresh re-arms the nonfinite tripwire. The historical refresh
+        # forwarded only inference_only, so a raise_on_nan capture silently
+        # lost its abort policy on every refreshed forward.
+        raise_on_nan=bool(getattr(self, "raise_on_nan", False)),
         output_transform=getattr(self, "_output_transform", None),
         save_raw_output=getattr(self, "save_raw_output", "small"),
         retain_output_parents_for_layers_to_save=True,
@@ -1129,7 +1142,13 @@ def _finalize_halted_trace(
         Halt-frontier output object when available.
     """
 
-    backend.cleanup_model_session(self, (model, input_tensors))
+    # Settlement phase marker: everything from halted cleanup through frontier
+    # recovery and output extraction is the FINALIZE failure class; the halted
+    # postprocess below is POSTPROCESS. The two classes are never conflated.
+    set_capture_phase(self, CapturePhase.FINALIZE)
+    # F3a: recover the frontier BEFORE model-session cleanup. The cleanup
+    # strips TorchLens metadata from model-owned tensors, so the reverse scan
+    # must read the raw entries while their capture-time state is intact.
     frontier_output = halt_exc.frontier_output
     if frontier_output is None:
         raw_layer_dict = self._raw_graph_ws.raw_layer_dict
@@ -1138,6 +1157,7 @@ def _finalize_halted_trace(
             if entry is not None and getattr(entry, "out", None) is not None:
                 frontier_output = entry.out
                 break
+    backend.cleanup_model_session(self, (model, input_tensors))
     if frontier_output is None:
         raise RuntimeError(
             "trace(halt=...) could not identify a tensor frontier for the halted partial graph."
@@ -1148,6 +1168,7 @@ def _finalize_halted_trace(
     self.halt_frontier = halt_exc.reason
     self.raw_output = None
     if not postprocess:
+        self.__dict__.pop("_output_attribution_input_tensors", None)
         self.capture_end_time = time.time()
         return frontier_output
 
@@ -1156,7 +1177,12 @@ def _finalize_halted_trace(
         frontier_output,
         backend,
     )
+    # Mirror the completed paths: the transient attribution inputs are consumed
+    # by output extraction and must never survive onto the finished product
+    # (an unpopped copy blocked halted analysis saves via PORTABLE_STATE_SPEC).
+    self.__dict__.pop("_output_attribution_input_tensors", None)
     _vprint(self, f"Postprocessing halted graph at {self.halt_frontier!r}...")
+    set_capture_phase(self, CapturePhase.POSTPROCESS)
     self._postprocess(output_tensors, output_tensor_addresses)
     return frontier_output
 
@@ -1260,6 +1286,11 @@ def run_and_log_inputs_through_model(
     )
 
     self.capture_start_time = time.time()
+    # Settlement state for this pass: the phase marker attributes failures to
+    # FORWARD/FINALIZE/POSTPROCESS, and any stale stop-request latch from a
+    # prior pass on a carried-over Trace must never classify this one.
+    set_capture_phase(self, CapturePhase.FORWARD)
+    self.__dict__.pop("_stop_requested", None)
     input_tensors: list[Any] = []
     capture_session: CaptureSession | None = None
     capture_events: object | None = None
@@ -1518,6 +1549,27 @@ def run_and_log_inputs_through_model(
                                 self._runnable.rng_monitor_uncertain = True
                                 self._runnable.rng_monitor_uncertain_detail = ("monitor_not_armed",)
 
+        # F6 boundary checkpoint: a "normal" forward return with the
+        # stop-request latch set means user code swallowed the control signal
+        # (halt or nonfinite abort) in a broad except. The capture must never
+        # be blessed COMPLETE; the typed error settles FAILED through the
+        # normal failure arm. Covers tl.trace and every Recorder pass.
+        swallowed_stop = self.__dict__.get("_stop_requested")
+        if swallowed_stop is not None:
+            from .outcome import StopSignalSwallowedError
+
+            raise StopSignalSwallowedError(
+                "TorchLens raised a "
+                f"{'halt' if swallowed_stop.kind == 'halt' else 'non-finite abort'} "
+                "stop signal during this forward, but the forward returned "
+                "normally: user code swallowed the control signal (typically a "
+                "broad `except:` or `except BaseException:` around the model "
+                "body). The capture cannot be trusted as complete. Stop "
+                f"boundary: {swallowed_stop.boundary_label or swallowed_stop.reason!r}.",
+                kind=swallowed_stop.kind,
+                boundary_label=swallowed_stop.boundary_label,
+            )
+        set_capture_phase(self, CapturePhase.FINALIZE)
         backend.finalize_forward_session(self, self._raw_graph_ws)
 
         output_transform = getattr(self, "_output_transform", None)
@@ -1570,7 +1622,7 @@ def run_and_log_inputs_through_model(
             backend.cleanup_model_session(self, (model, input_tensors, (input_args, input_kwargs)))
             self.capture_end_time = time.time()
             self.__dict__.pop("_capture_producer_policy", None)
-            capture_session.transition("complete")
+            settle_completed(self, capture_session)
             return outputs
 
         output_tensors_any, output_tensor_addresses = backend.extract_and_mark_outputs(
@@ -1581,9 +1633,10 @@ def run_and_log_inputs_through_model(
 
         backend.cleanup_model_session(self, (model, input_tensors, (input_args, input_kwargs)))
         _vprint(self, f"Postprocessing {len(self.capture_events.op_events)} operations...")
+        set_capture_phase(self, CapturePhase.POSTPROCESS)
         self._postprocess(output_tensors, output_tensor_addresses)
         self.__dict__.pop("_capture_producer_policy", None)
-        capture_session.transition("complete")
+        settle_completed(self, capture_session)
         return outputs
 
     except HaltSignal as halt_exc:
@@ -1594,67 +1647,133 @@ def run_and_log_inputs_through_model(
             and getattr(options, "halt", None) is not None
             and getattr(self, "_halt_returns_partial_trace", False)
         ):
-            halted_output = _finalize_halted_trace(
-                self,
-                backend,
-                halt_exc,
-                model,
-                input_tensors,
-                postprocess,
-            )
-            self.__dict__.pop("_capture_producer_policy", None)
-            if capture_session is not None:
-                capture_session.transition(
-                    "halted",
+            try:
+                halted_output = _finalize_halted_trace(
+                    self,
+                    backend,
+                    halt_exc,
+                    model,
+                    input_tensors,
+                    postprocess,
                 )
+            except Exception as secondary_exc:
+                # Halted-finalization secondary failure: the capture settles
+                # FAILED (FINALIZE or POSTPROCESS per the finalizer's phase
+                # markers) with a mandatory disclosure note; the secondary
+                # exception propagates with the HaltSignal chained, exactly
+                # as before settlement existed.
+                self.__dict__.pop("_capture_producer_policy", None)
+                settle_failed(
+                    self,
+                    capture_session,
+                    secondary_exc,
+                    settlement_note=(
+                        "halted finalization failed after halt at "
+                        f"{getattr(halt_exc, 'reason', '')!r}"
+                    ),
+                )
+                raise
+            self.__dict__.pop("_capture_producer_policy", None)
+            settle_halted(
+                self,
+                capture_session,
+                halt_exc,
+                finalize_partial=True,
+                postprocess_ran=postprocess,
+            )
             return halted_output
-        if capture_session is not None and not postprocess:
-            capture_session.snapshot_recording_projection(self)
-            self._fastlog_captured_run_core = capture_session.seal()
-        backend.cleanup_halted_forward_session(
-            self, (model, input_tensors, (input_args, input_kwargs))
-        )
+        try:
+            if capture_session is not None and not postprocess:
+                capture_session.snapshot_recording_projection(self)
+                self._fastlog_captured_run_core = capture_session.seal()
+            backend.cleanup_halted_forward_session(
+                self, (model, input_tensors, (input_args, input_kwargs))
+            )
+        except Exception as secondary_exc:
+            self.__dict__.pop("_capture_producer_policy", None)
+            settle_failed(
+                self,
+                capture_session,
+                secondary_exc,
+                settlement_note=(
+                    "halted cleanup failed after halt at "
+                    f"{getattr(halt_exc, 'reason', '')!r}"
+                ),
+            )
+            raise
         self.__dict__.pop("_capture_producer_policy", None)
-        if capture_session is not None:
-            capture_session.transition("halted")
+        settle_halted(
+            self,
+            capture_session,
+            halt_exc,
+            finalize_partial=False,
+            postprocess_ran=False,
+        )
         raise
 
     except Exception as e:
         compiled_unwrap_exception = sys.exc_info()
-        if capture_session is not None and not postprocess:
-            capture_session.snapshot_recording_projection(self)
-            self._fastlog_captured_run_core = capture_session.seal()
-        backend.cleanup_failed_forward_session(
-            self, (model, input_tensors, (input_args, input_kwargs)), e
-        )
-        self.__dict__.pop("_capture_producer_policy", None)
-        if capture_session is not None:
-            capture_session.transition(
-                "failed",
+        # Boundary facts snapshot eagerly at cause time: cleanup below may pop
+        # the event stream (or double-fault on already-popped workspaces), and
+        # the stamp in ``finally`` must still carry the committed-op count.
+        committed_ops = count_committed_ops(self)
+        try:
+            if capture_session is not None and not postprocess:
+                capture_session.snapshot_recording_projection(self)
+                self._fastlog_captured_run_core = capture_session.seal()
+            backend.cleanup_failed_forward_session(
+                self, (model, input_tensors, (input_args, input_kwargs)), e
             )
+            self.__dict__.pop("_capture_producer_policy", None)
+        finally:
+            # Guaranteed settlement: a cleanup double-fault still stamps the
+            # terminal outcome before the (original or secondary) exception
+            # escapes; exception identity/chaining is byte-identical to the
+            # pre-settlement arms.
+            settle_failed(self, capture_session, e, n_ops_committed=committed_ops)
         raise e
 
-    except BaseException:
+    except BaseException as interrupt_exc:
         # ``except Exception`` above handles ordinary failed-forward diagnostics,
         # but user code may raise e.g. KeyboardInterrupt or a custom BaseException.
         # The torch session forces gradient-capable parameters to require grads, so
         # its teardown must run before re-raising any such escape.
         compiled_unwrap_exception = sys.exc_info()
-        backend.cleanup_model_session(self, (model, input_tensors, (input_args, input_kwargs)))
-        self.__dict__.pop("_capture_producer_policy", None)
-        if capture_session is not None:
-            capture_session.transition("failed")
+        committed_ops = count_committed_ops(self)
+        try:
+            backend.cleanup_model_session(self, (model, input_tensors, (input_args, input_kwargs)))
+            self.__dict__.pop("_capture_producer_policy", None)
+        finally:
+            settle_failed(
+                self,
+                capture_session,
+                interrupt_exc,
+                interrupted=True,
+                n_ops_committed=committed_ops,
+            )
         raise
 
     finally:
         try:
-            _clear_saved_activation_dedup_caches(self)
-            # Release input tensor references so GC can reclaim backend memory.
-            input_tensors = None  # type: ignore[assignment]
             try:
-                _cleanup_forward_memory_once(self, backend, capture_session)
+                _clear_saved_activation_dedup_caches(self)
+                # Release input tensor references so GC can reclaim backend memory.
+                input_tensors = None  # type: ignore[assignment]
+                try:
+                    _cleanup_forward_memory_once(self, backend, capture_session)
+                finally:
+                    if capture_session is not None and capture_events is not None:
+                        detach_capture_session(self, capture_events, capture_session)
             finally:
-                if capture_session is not None and capture_events is not None:
-                    detach_capture_session(self, capture_events, capture_session)
-        finally:
-            compiled_capture_context.__exit__(*compiled_unwrap_exception)
+                compiled_capture_context.__exit__(*compiled_unwrap_exception)
+        except BaseException as teardown_exc:
+            # Post-settlement teardown failure (path 7): the already-settled
+            # COMPLETE/HALTED outcome demotes to FAILED/TEARDOWN in both homes
+            # and the teardown exception propagates -- the raise preempts the
+            # return, so no product escapes carrying an undemoted claim.
+            demote_outcome(
+                self,
+                capture_session,
+                note=f"teardown failed: {type(teardown_exc).__name__}: {teardown_exc}",
+            )
+            raise

@@ -13,9 +13,13 @@ from weakref import ref
 from .. import _state
 from ..ir.events import OpEvent
 from ..utils.tensor_utils import safe_copy
+from .outcome import CaptureOutcome
 from .plan import CapturePlan, EnrichmentLevel, RetentionKind, RetentionProfile
 
 TerminalState = Literal["complete", "halted", "failed"]
+"""First-transition log vocabulary. The settlement authority passes
+``CaptureStatus``-derived values that collapse onto these three states; the
+full six-status truth rides ``RunOutcome.capture_outcome``."""
 CleanupCallback = Callable[[], None]
 
 
@@ -79,6 +83,9 @@ class RunOutcome:
         Partial product attached by an existing compatibility path.
     exception
         Terminal failure or halt exception when one exists.
+    capture_outcome
+        Typed settled outcome record written by the settlement authority
+        (``torchlens.capture.outcome``); the authority is its only writer.
     """
 
     state: TerminalState
@@ -86,6 +93,7 @@ class RunOutcome:
     product: Any = None
     partial_product: Any = None
     exception: BaseException | None = None
+    capture_outcome: CaptureOutcome | None = None
 
 
 @dataclass(slots=True)
@@ -223,7 +231,10 @@ class CaptureSession:
         self._gradient_warning_emitted = False
         self.backend_token = None
         if self.outcome is not None:
-            self.outcome = RunOutcome(state=self.outcome.state)
+            self.outcome = RunOutcome(
+                state=self.outcome.state,
+                capture_outcome=self.outcome.capture_outcome,
+            )
 
     def escrow_candidate(
         self,
@@ -601,6 +612,7 @@ class CaptureSession:
         product: Any = None,
         partial_product: Any = None,
         exception: BaseException | None = None,
+        capture_outcome: CaptureOutcome | None = None,
     ) -> RunOutcome:
         """Perform the single terminal transition for this session.
 
@@ -610,6 +622,8 @@ class CaptureSession:
             Terminal state to record.
         output, product, partial_product, exception
             Existing compatibility outcome fields to mirror.
+        capture_outcome
+            Typed settled outcome from the settlement authority.
 
         Returns
         -------
@@ -628,6 +642,7 @@ class CaptureSession:
             product=product,
             partial_product=partial_product,
             exception=exception,
+            capture_outcome=capture_outcome,
         )
         if self.outcome is None:
             self.outcome = candidate
