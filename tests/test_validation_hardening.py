@@ -277,6 +277,36 @@ def test_w32_stale_fire_leak_in_plain_capture_stays_refused() -> None:
     assert op_has_genuine_replacement_evidence(relu_op, trace) is False
 
 
+def test_raw_hook_recontainer_does_not_mint_replacement_evidence() -> None:
+    """Returning an already-traced tensor only rewires the module boundary."""
+    from torchlens.validation.core import _is_intentional_intervention_replacement
+
+    model = nn.Linear(4, 4)
+    handle = model.register_forward_hook(lambda _module, _args, out: (out,))
+    try:
+        trace = tl.trace(model, torch.randn(3, 4), layers_to_save="all", save_arg_values=True)
+    finally:
+        handle.remove()
+
+    linear_op = next(op for op in trace.layer_list if op.func_name == "linear")
+    assert linear_op.intervention_replaced is False
+    assert _is_intentional_intervention_replacement(linear_op) is False
+
+
+def test_callable_op_needs_own_live_fire_to_use_replacement_exemption() -> None:
+    """A raw-hook ledger stamp alone cannot exempt a replayable callable op."""
+    from torchlens.backends.torch.model_prep import _note_replacement_event
+    from torchlens.validation.core import _is_intentional_intervention_replacement
+
+    trace, _ground_truth = _capture(_Tiny(), torch.randn(3, 4))
+    relu_op = next(op for op in trace.layer_list if op.func_name == "relu")
+    relu_op.intervention_replaced = True
+    _note_replacement_event(trace, relu_op._label_raw)
+
+    assert relu_op.func is not None
+    assert _is_intentional_intervention_replacement(relu_op) is False
+
+
 # ---------------------------------------------------------------------------
 # W3-3: graph_topology checks must be real (no security theater)
 # ---------------------------------------------------------------------------

@@ -39,7 +39,6 @@ from ...ir.container_registry import ModuleSite, Phase, Role, walk_container
 from ...ir.op_record import (
     amend_module_boundary_retention,
     amend_module_exit_intervention,
-    amend_raw_hook_intervention,
 )
 from ...utils.hashing import make_random_barcode
 from ...utils.introspection import (
@@ -1838,19 +1837,11 @@ def _make_user_forward_hook_wrapper(
                 replacement, trace.capture_events.live_index.by_raw_label
             )
             if replacement_label is not None:
-                replaced_event = trace.capture_events.op_event_by_label_raw.get(replacement_label)
-                if replaced_event is not None:
-                    trace.capture_events.append_amendment(
-                        amend_raw_hook_intervention(
-                            replaced_event.seq,
-                            replacement_label,
-                            intervention_replaced=True,
-                        )
-                    )
-                # This frame directly observed the genuine replacement (the raw
-                # user hook returned a new object), so it is the authority that
-                # mints trace-level replacement-event evidence for validation.
-                _note_replacement_event(trace, replacement_label)
+                # The hook returned a tensor already produced by this capture.
+                # That rewires the module boundary but does not replace the
+                # producing op's value, so it must not mint replacement evidence
+                # that would exempt the native op from replay validation.
+                continue
             else:
                 boundary_label = _ensure_module_output_tensor_logged(
                     trace, replacement, module, parent_labels
