@@ -58,5 +58,5 @@ def test_option_class_is_frozen(option_cls: type[Any]) -> None:
 def test_streaming_option_rejects_bool_with_clear_type_error() -> None:
     """The grouped streaming option should not leak raw bool attribute errors."""
 
-    with pytest.raises(TypeError, match="streaming must be a StreamingOptions instance"):
+    with pytest.raises(TypeError, match="received bool, not StreamingOptions"):
         merge_streaming_options(streaming=True)  # type: ignore[arg-type]

@@ -142,8 +142,14 @@ class ArgumentTypeError(_ActionableErrorMixin, ConfigurationError, TypeError):
         )
 
 
-class ArgumentConflictError(_ActionableErrorMixin, ConfigurationError, TypeError):
-    """Raised when mutually exclusive public arguments are supplied together."""
+class ArgumentConflictError(_ActionableErrorMixin, ConfigurationError, ValueError):
+    """Raised when mutually exclusive public arguments are supplied together.
+
+    Subclasses ``ValueError``, not ``TypeError``: every historical conflict
+    refusal raised a raw ``ValueError`` (the arguments are well-typed; the
+    combination is the problem), so existing ``except ValueError`` handlers
+    keep catching it.
+    """
 
     def __init__(
         self,

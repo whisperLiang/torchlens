@@ -378,7 +378,7 @@ def test_include_weights_requires_runnable_save_level(tmp_path: Path) -> None:
 
     trace = _capture(WeightPayloadModel().eval())
 
-    with pytest.raises(ValueError, match="requires level='runnable'"):
+    with pytest.raises(ValueError, match="set level='runnable' or set include_weights=False"):
         trace.save(tmp_path / "portable.tlspec", include_weights=True)
 
 

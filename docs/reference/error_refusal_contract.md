@@ -10,7 +10,9 @@ add names to the top-level `torchlens` namespace:
 
 - `InvalidArgumentError(ConfigurationError, ValueError)`
 - `ArgumentTypeError(ConfigurationError, TypeError)`
-- `ArgumentConflictError(ConfigurationError, TypeError)`
+- `ArgumentConflictError(ConfigurationError, ValueError)` — conflicts between
+  well-typed arguments were historically raw `ValueError`s; the typed refusal
+  preserves that catchability.
 - `CaptureContextError(CaptureError, RuntimeError)`
 - `DiagnosticSeverityError(ConfigurationError, ValueError)`
 

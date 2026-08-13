@@ -278,7 +278,7 @@ def test_include_activations_default_is_absent_and_requires_runnable_level(
     }
     assert not any(entry["kind"] == "runnable_activation" for entry in manifest["tensors"])
     assert tl.load(path).archived_activations == {}
-    with pytest.raises(ValueError, match="requires level='runnable'"):
+    with pytest.raises(ValueError, match="set level='runnable' or set include_activations=False"):
         trace.save(tmp_path / "portable.tlspec", include_activations=True)
 
 
