@@ -7,7 +7,7 @@ from typing import Any, TypeAlias, cast
 
 import torch
 
-from .._errors import ArgumentTypeError, InvalidArgumentError
+from .._errors import ArgumentTypeError
 from .types import HelperDirection, HelperSpec, InterventionDecision
 
 InterventionPredicateDecision: TypeAlias = (
@@ -55,9 +55,14 @@ def as_intervention_decision(
     if callable(action):
         callable_direction = direction or getattr(action, "direction", "forward")
         if callable_direction not in {"forward", "backward", "both"}:
-            raise InvalidArgumentError(
+            # TypeError lineage since the 2.16 intervention era: the live
+            # capture-path callers catch TypeError to convert a bad predicate
+            # result into PredicateError with op context. Distinct code from
+            # the ValueError-lineage trace-side `intervention_direction_invalid`
+            # doors so the code determines the catchable builtin.
+            raise ArgumentTypeError(
                 f"Intervention direction={callable_direction!r} is not supported",
-                code="intervention_direction_invalid",
+                code="intervention_action_direction_invalid",
                 remedy="set direction to 'forward', 'backward', or 'both'",
                 argument="direction",
             )

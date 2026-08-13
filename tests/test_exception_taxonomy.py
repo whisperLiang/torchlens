@@ -775,6 +775,27 @@ def test_actionable_refusal_pickle_round_trip(
     assert restored.severity == original.severity
 
 
+def test_intervention_direction_doors_split_by_site_history() -> None:
+    """Predicate-side direction refusal keeps its historical TypeError lineage.
+
+    The door raised a raw ``TypeError`` since the 2.16 intervention era, and
+    the live capture-path callers catch ``TypeError`` to convert a bad
+    predicate result into ``PredicateError``. Its code is distinct from the
+    ValueError-lineage trace-side ``intervention_direction_invalid`` doors so
+    ``fields["code"]`` determines the catchable builtin.
+    """
+
+    from torchlens.intervention.predicates import as_intervention_decision
+
+    with pytest.raises(errors.ArgumentTypeError) as exc_info:
+        as_intervention_decision(lambda out: out, direction="sideways")  # type: ignore[arg-type]
+
+    assert exc_info.value.fields["code"] == "intervention_action_direction_invalid"
+    assert isinstance(exc_info.value, TypeError)
+    assert not isinstance(exc_info.value, ValueError)
+    assert "Remedy:" in str(exc_info.value)
+
+
 def test_selector_direction_refusal_is_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
     """Backward intervention normalization propagates typed selector refusals."""
 

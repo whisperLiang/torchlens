@@ -92,8 +92,9 @@ add names to the top-level `torchlens` namespace:
 | `gradient_pass_ambiguous` | Gradient query spans multiple backward passes | Pick one pass or record positionally |
 | `halt_predicate_type_invalid` | `halt` is not callable | Pass a predicate or `None` |
 | `intervention_predicate_type_invalid` | `intervene` is not callable | Pass `tl.when(...)`, another predicate, or `None` |
+| `intervention_action_direction_invalid` | Predicate-side intervention action names an unknown direction (`ArgumentTypeError`; historically `TypeError`, so the live capture path converts it to `PredicateError`) | Choose `forward`, `backward`, or `both` |
 | `intervention_action_type_invalid` | Intervention action has an unsupported type | Pass a decision, helper, callable, or `None` |
-| `intervention_direction_invalid` | Intervention direction is unknown | Choose `forward`, `backward`, or `both` |
+| `intervention_direction_invalid` | Trace-side intervention direction is unknown (`InvalidArgumentError`; historically `ValueError`) | Choose `forward`, `backward`, or `both` |
 | `intervention_engine_invalid` | `do(..., engine=...)` value is unknown | Choose `auto`, `replay`, `rerun`, or `set_only` |
 | `intervention_helper_unknown` | Built-in helper name is unknown | Choose a registered helper |
 | `jax_control_flow_invalid` | JAX control-flow mode is unknown | Choose `reject`, `unroll`, or `region` |
