@@ -15,7 +15,7 @@ eviction plus parameter-reference release. Step order is load-bearing.
 | `_executor.py` | derivation + executor | Edge derivation, rank-keyed Kahn, import checks, StepSpec registry, run_pipeline |
 | `_materialize.py` | 0 | Project capture events into raw `Op` state |
 | `graph_traversal.py` | 1-4 | Output nodes, output ancestors, orphan removal, distances |
-| `ast_branches.py` | 5 support, 11.5 | Conditional AST indexing and source variable names |
+| `ast_branches.py` | 5 support, 11.5 | Conditional AST indexing and source variable names. Hot/cold FileIndex split: parsed ASTs (`_HeavyAst`) are released at the postprocess epilogue (`release_parsed_asts()`); span data + node-free projected calls persist, and unprojected-scope queries re-parse from RETAINED source (never disk), failing closed on anomaly |
 | `control_flow.py` | 5-6 | Conditional attribution and buffer dedup |
 | `loop_detection.py` | 7 adapter | Adapt Trace state and apply recurrence assignments |
 | `loop_grouping_adapter.py` | 7 implementation | Backend-neutral recurrence grouping |
