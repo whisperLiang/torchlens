@@ -384,12 +384,13 @@ class CaptureEvents:
     ) -> CaptureEvents:
         """Return a structural working projection for postprocess mutation.
 
-        Later postprocess steps replace entries in ``op_events`` and
-        ``op_event_by_label_raw`` in place. A projector must therefore mutate
-        an independent container projection instead of the sealed capture
-        lanes. This is also used when a long-lived, frozen ``Recording`` cooks
-        itself into a ``Trace`` so repeated projections cannot alter its event
-        stream.
+        Postprocess consumes the journal through an independent projection so no
+        step can mutate the sealed capture lanes: the op lane is append-only
+        (P4 deleted in-place entry replacement -- post-commit knowledge rides
+        the typed amendment lane), and a projection is where a step may still
+        append, drop, or clear its own working containers. This is also used
+        when a long-lived, frozen ``Recording`` cooks itself into a ``Trace`` so
+        repeated projections cannot alter its event stream.
 
         Every mutable container is duplicated into a fresh object (nested list
         values included where they are rebuilt in place). The ``OpEvent`` objects
