@@ -2938,6 +2938,16 @@ def _run_backward_with_capture(
         # record: a failed attempted pass is evidence, and it closes with a
         # terminal failed End so the bracket invariant holds exactly (the
         # same convention the engine-failure path below already follows).
+        # Restore process-global and per-pass scratch state before any fallible cleanup.
+        _state._active_trace = previous_trace
+        _state._active_hook_plan = previous_plan
+        _state._active_intervention_spec = previous_spec
+        trace.__dict__.pop("_tl_active_backward_bracket", None)
+        trace.__dict__.pop("_active_backward_pass_index", None)
+        if previous_had_save_grads_policy:
+            trace.__dict__["_active_save_grads_policy"] = previous_save_grads_policy
+        else:
+            trace.__dict__.pop("_active_save_grads_policy", None)
         events.append_backward(
             BackwardPassEnd(
                 pass_index=pass_index,
@@ -2948,15 +2958,10 @@ def _run_backward_with_capture(
             )
         )
         trace.num_backward_passes = max(int(getattr(trace, "num_backward_passes", 0)), pass_index)
-        _state._active_trace = previous_trace
-        _state._active_hook_plan = previous_plan
-        _state._active_intervention_spec = previous_spec
-        trace.__dict__.pop("_active_backward_pass_index", None)
-        if previous_had_save_grads_policy:
-            trace._active_save_grads_policy = previous_save_grads_policy
-        else:
-            trace.__dict__.pop("_active_save_grads_policy", None)
-        _materialize_backward_projections(trace)
+        with contextlib.suppress(BaseException):
+            _clear_forward_grad_fn_refs(trace)
+        with contextlib.suppress(BaseException):
+            _materialize_backward_projections(trace)
         raise
     backend, before = _reset_peak_memory(loss.device)
     backward_start_time = time.time()
@@ -2973,25 +2978,29 @@ def _run_backward_with_capture(
         status = "error"
         raise
     finally:
-        for handle in handles:
-            with contextlib.suppress(Exception):
-                handle.remove()
-        _clear_forward_grad_fn_refs(trace)
+        # Restore globals and per-pass scratch FIRST. Every operation below is
+        # user/framework code or non-trivial bookkeeping and may raise.
         _state._active_trace = previous_trace
         _state._active_hook_plan = previous_plan
         _state._active_intervention_spec = previous_spec
         trace.__dict__.pop("_tl_active_backward_bracket", None)
-        _backend, after = _memory_snapshot(loss.device)
-        peak_delta = max(0, after - before)
+        trace.__dict__.pop("_active_backward_pass_index", None)
+        if previous_had_save_grads_policy:
+            trace.__dict__["_active_save_grads_policy"] = previous_save_grads_policy
+        else:
+            trace.__dict__.pop("_active_save_grads_policy", None)
+
+        # Close the journal bracket before fallible projection/accounting
+        # finalizers. A later failure can leave derived fields stale, but never
+        # leaves a start-only pass that violates the event-stream invariant.
         duration = time.time() - backward_start_time
-        trace.backward_memory_backend = backend
-        trace.backward_peak_memory += Bytes(peak_delta)
-        trace.backward_durations.append(Duration(duration))
-        trace.total_param_gradient_memory = Bytes(
-            sum(int(param_log.gradient_memory) for param_log in getattr(trace, "param_logs", []))
-        )
-        trace.num_backward_passes = max(int(getattr(trace, "num_backward_passes", 0)), pass_index)
-        _rewalk_higher_order_grad_fns(trace)
+        memory_error: BaseException | None = None
+        try:
+            _backend, after = _memory_snapshot(loss.device)
+        except BaseException as exc:
+            memory_error = exc
+            after = before
+        peak_delta = max(0, after - before)
         events.append_backward(
             BackwardPassEnd(
                 pass_index=pass_index,
@@ -3001,13 +3010,22 @@ def _run_backward_with_capture(
                 order_attribution_coverage=None,
             )
         )
-        trace.__dict__.pop("_active_backward_pass_index", None)
+        trace.num_backward_passes = max(int(getattr(trace, "num_backward_passes", 0)), pass_index)
         _clear_pending_accumulate_grad_records(trace)
-        if previous_had_save_grads_policy:
-            trace._active_save_grads_policy = previous_save_grads_policy
-        else:
-            trace.__dict__.pop("_active_save_grads_policy", None)
+        for handle in handles:
+            with contextlib.suppress(BaseException):
+                handle.remove()
+        _clear_forward_grad_fn_refs(trace)
+        trace.backward_memory_backend = backend
+        trace.backward_peak_memory += Bytes(peak_delta)
+        trace.backward_durations.append(Duration(duration))
+        trace.total_param_gradient_memory = Bytes(
+            sum(int(param_log.gradient_memory) for param_log in getattr(trace, "param_logs", []))
+        )
+        _rewalk_higher_order_grad_fns(trace)
         _materialize_backward_projections(trace)
+        if memory_error is not None:
+            raise memory_error
     return result
 
 

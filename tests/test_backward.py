@@ -571,6 +571,38 @@ def test_per_call_grad_policy_does_not_mutate_trace_selection() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "failure_site",
+    ["_clear_forward_grad_fn_refs", "_rewalk_higher_order_grad_fns"],
+)
+def test_backward_tail_failure_restores_globals_and_closes_journal(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_site: str,
+) -> None:
+    """Tail finalizer failures cannot strand globals or a start-only pass."""
+    from torchlens import _state
+    from torchlens.backends.torch import backward
+    from torchlens.ir.events import BackwardPassEnd
+
+    _model, _x, trace = _logged_model()
+
+    def fail_tail(_trace: tl.Trace) -> None:
+        """Inject one backward-tail failure."""
+        raise RuntimeError(f"injected {failure_site}")
+
+    monkeypatch.setattr(backward, failure_site, fail_tail)
+    with pytest.raises(RuntimeError, match=failure_site):
+        trace.log_backward(_output_loss(trace))
+
+    assert _state._active_trace is None
+    assert _state._active_hook_plan is None
+    assert _state._active_intervention_spec is None
+    assert "_tl_active_backward_bracket" not in trace.__dict__
+    assert "_active_backward_pass_index" not in trace.__dict__
+    assert "_active_save_grads_policy" not in trace.__dict__
+    assert any(isinstance(event, BackwardPassEnd) for event in trace.backward_events)
+
+
 @pytest.mark.smoke
 def test_replay_fork_does_not_inherit_gradient_state() -> None:
     """A replay fork starts with no captured gradient state; the source keeps its own."""
