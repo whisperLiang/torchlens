@@ -533,10 +533,19 @@ def _refresh_fast_saved_summary(self: "Trace") -> None:
 def postprocess(
     self: "Trace", output_tensors: list[torch.Tensor], output_tensor_addresses: list[str]
 ) -> None:
-    """Run the full postprocessing pipeline in exhaustive mode.
+    """Run the full postprocessing pipeline, with a TOTAL retention epilogue.
 
     Transforms the raw Trace captured during the forward pass into its
     final user-facing form.
+
+    B1-18: the H2 hot-AST release used to be a success-path epilogue
+    statement, so a postprocess failure -- and the zero-layer early return --
+    left the process-wide file cache holding parsed ASTs, parent maps, and line
+    splits for whole torch-library files. Distinct failing files accumulate up
+    to the 256-file cache bound, which resurrects exactly the multi-megabyte
+    retention class the seal exists to close. The release is a pure
+    process-wide cache drop (spans and retained source survive; an unprojected
+    scope re-parses), so it is safe on every exit and belongs in ``finally``.
 
     Parameters
     ----------
@@ -546,6 +555,26 @@ def postprocess(
         Hierarchical address strings for each output, for example ``"0.1"``
         for nested tuple outputs.
     """
+
+    try:
+        _postprocess_body(self, output_tensors, output_tensor_addresses)
+    finally:
+        ast_branches.release_parsed_asts()
+
+
+def _postprocess_body(
+    self: "Trace", output_tensors: list[torch.Tensor], output_tensor_addresses: list[str]
+) -> None:
+    """Run steps 0-20 and the core freeze (see :func:`postprocess`).
+
+    Parameters
+    ----------
+    output_tensors:
+        Actual output tensors returned by the model's forward call.
+    output_tensor_addresses:
+        Hierarchical address strings for each output.
+    """
+
     capture_events = getattr(self, "capture_events", None)
     capture_session = None
     # Resolve each output tensor's graph parent BEFORE materializing events:
@@ -667,9 +696,9 @@ def postprocess(
         # release already stripped payloads, native handles, and the
         # source_trace backrefs, so this strong edge closes no new cycle.
         self.__dict__["_capture_events"] = capture_events
-    # H2 retention seal: steps 5/11.5 are done with the parsed ASTs; drop the
-    # file cache's hot tier so no capture leaves whole torch-library ASTs
-    # pinned process-wide. Span data and projected calls survive, so lazy
-    # post-capture queries (Op.arg_expressions) stay re-parse-free in the
-    # common case and re-parse from retained source otherwise.
-    ast_branches.release_parsed_asts()
+    # H2 retention seal: steps 5/11.5 are done with the parsed ASTs. The drop
+    # itself now lives in `postprocess`'s `finally` (B1-18) so a failing
+    # pipeline and the zero-layer early return release it too; span data and
+    # projected calls survive, so lazy post-capture queries
+    # (Op.arg_expressions) stay re-parse-free in the common case and re-parse
+    # from retained source otherwise.
